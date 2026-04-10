@@ -111,6 +111,18 @@ Sessions are stored in Redis via Popoto and survive bridge restarts. The dashboa
 - **Active sessions always shown**: Sessions with active status bypass the retention cutoff entirely
 - **Inactive session limit**: Up to 50 inactive sessions are returned per query (up from the original 16) to support reviewing past work
 
+## Link Capture
+
+The Links column shows GitHub issue and PR URLs for each session. Links are populated through two mechanisms:
+
+### PostToolUse Hook (Real-Time)
+
+The `.claude/hooks/post_tool_use.py` hook scans Bash tool outputs for GitHub URLs whenever the command involves `gh issue` or `gh pr`. When a URL is detected, it calls `AgentSession.set_link()` to persist the URL on the session model in Redis. This captures links at creation time for all new sessions.
+
+### Render-Time Fallback (Historical)
+
+For sessions that predate the hook-based capture, `_extract_github_links()` in `ui/data/sdlc.py` scans the session's event history for GitHub URLs at render time. This backfills `issue_url` and `pr_url` without requiring a data migration. The fallback only runs when the model fields are None, so it never overrides hook-captured values.
+
 ## Pydantic Models
 
 ### `PipelineProgress`
@@ -122,7 +134,7 @@ The central data model for dashboard display, containing:
 - Timestamps: `created_at`, `started_at`, `completed_at`, `updated_at`
 - SDLC state: `stages` (list of `StageState`), `current_stage`, `events`
 - Links: `issue_url`, `plan_url`, `pr_url`
-- Computed properties: `duration`, `is_active`, `is_complete`, `display_name`
+- Computed properties: `duration`, `is_active`, `is_complete`, `display_name` (prefers `slug` over `context_summary`)
 
 ### `StageState`
 

@@ -167,8 +167,14 @@ class TestStageStateModel:
 class TestPipelineProgress:
     """Tests for the PipelineProgress Pydantic model."""
 
-    def test_display_name_prefers_context_summary(self):
-        """context_summary takes priority over slug and message_text."""
+    def test_display_name_prefers_slug(self):
+        """slug takes priority over context_summary and message_text.
+
+        Slug is the durable, stable identifier tying together branch,
+        worktree, plan doc, and GitHub issue — it's the canonical name
+        operators use to refer to planned work. It should win even when
+        an AI-generated context_summary is also present.
+        """
         from ui.data.sdlc import PipelineProgress
 
         p = PipelineProgress(
@@ -177,7 +183,18 @@ class TestPipelineProgress:
             slug="auth-flow",
             message_text="Build the auth",
         )
-        assert p.display_name == "Implementing auth flow"
+        assert p.display_name == "auth-flow"
+
+    def test_display_name_falls_back_to_context_summary(self):
+        """context_summary is used when no slug is set (ad-hoc sessions)."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(
+            agent_session_id="123",
+            context_summary="Investigating logging",
+            message_text="Tell me about our logging",
+        )
+        assert p.display_name == "Investigating logging"
 
     def test_display_name_with_slug(self):
         from ui.data.sdlc import PipelineProgress
@@ -199,6 +216,76 @@ class TestPipelineProgress:
         p = PipelineProgress(agent_session_id="123", message_text="A" * 100)
         assert len(p.display_name) < 100
         assert "..." in p.display_name
+
+
+class TestExtractGithubLinks:
+    """Tests for the history-based GitHub link fallback."""
+
+    def test_extract_from_empty_list(self):
+        from ui.data.sdlc import _extract_github_links
+
+        assert _extract_github_links([]) == (None, None)
+        assert _extract_github_links(None) == (None, None)
+
+    def test_extract_issue_from_pipeline_event(self):
+        from ui.data.sdlc import PipelineEvent, _extract_github_links
+
+        events = [
+            PipelineEvent(
+                role="lifecycle", text="Created issue https://github.com/org/repo/issues/42"
+            ),
+        ]
+        issue_url, pr_url = _extract_github_links(events)
+        assert issue_url == "https://github.com/org/repo/issues/42"
+        assert pr_url is None
+
+    def test_extract_pr_from_pipeline_event(self):
+        from ui.data.sdlc import PipelineEvent, _extract_github_links
+
+        events = [
+            PipelineEvent(role="lifecycle", text="Opened PR https://github.com/org/repo/pull/99"),
+        ]
+        issue_url, pr_url = _extract_github_links(events)
+        assert issue_url is None
+        assert pr_url == "https://github.com/org/repo/pull/99"
+
+    def test_extract_both_from_separate_events(self):
+        from ui.data.sdlc import PipelineEvent, _extract_github_links
+
+        events = [
+            PipelineEvent(role="lifecycle", text="issue https://github.com/org/repo/issues/1"),
+            PipelineEvent(role="lifecycle", text="pr https://github.com/org/repo/pull/2"),
+        ]
+        issue_url, pr_url = _extract_github_links(events)
+        assert issue_url == "https://github.com/org/repo/issues/1"
+        assert pr_url == "https://github.com/org/repo/pull/2"
+
+    def test_newest_event_wins(self):
+        """Iteration is newest→oldest so fresher URLs override older ones."""
+        from ui.data.sdlc import PipelineEvent, _extract_github_links
+
+        events = [
+            PipelineEvent(role="lifecycle", text="first pr https://github.com/org/repo/pull/1"),
+            PipelineEvent(role="lifecycle", text="second pr https://github.com/org/repo/pull/2"),
+        ]
+        _, pr_url = _extract_github_links(events)
+        assert pr_url == "https://github.com/org/repo/pull/2"
+
+    def test_ignores_non_github_urls(self):
+        from ui.data.sdlc import PipelineEvent, _extract_github_links
+
+        events = [
+            PipelineEvent(role="lifecycle", text="See https://gitlab.com/org/repo/-/issues/42"),
+        ]
+        assert _extract_github_links(events) == (None, None)
+
+    def test_accepts_plain_strings(self):
+        """Tolerates raw string entries as well as PipelineEvent objects."""
+        from ui.data.sdlc import _extract_github_links
+
+        events = ["Done. https://github.com/org/repo/pull/7 is merged"]
+        _, pr_url = _extract_github_links(events)
+        assert pr_url == "https://github.com/org/repo/pull/7"
 
     def test_is_active_states(self):
         from ui.data.sdlc import PipelineProgress
@@ -397,6 +484,55 @@ class TestSessionToPipeline:
         )
         pipeline = _session_to_pipeline(mock_session)
         assert pipeline.parent_agent_session_id == "parent-abc"
+
+    def test_github_links_from_model_fields(self):
+        """When AgentSession.issue_url/pr_url are set, they flow through directly."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            issue_url="https://github.com/org/repo/issues/42",
+            pr_url="https://github.com/org/repo/pull/99",
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.issue_url == "https://github.com/org/repo/issues/42"
+        assert pipeline.pr_url == "https://github.com/org/repo/pull/99"
+
+    def test_github_links_fallback_from_history(self):
+        """When model fields are None, URLs are extracted from history events."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            issue_url=None,
+            pr_url=None,
+            history=[
+                {"role": "lifecycle", "text": "Created issue https://github.com/org/repo/issues/7"},
+                {"role": "lifecycle", "text": "Opened PR https://github.com/org/repo/pull/8"},
+            ],
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.issue_url == "https://github.com/org/repo/issues/7"
+        assert pipeline.pr_url == "https://github.com/org/repo/pull/8"
+
+    def test_github_links_model_field_wins_over_history(self):
+        """Real model data is authoritative; history fallback only fills gaps."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            issue_url="https://github.com/org/repo/issues/1",
+            pr_url=None,
+            history=[
+                {
+                    "role": "lifecycle",
+                    "text": "Created issue https://github.com/org/repo/issues/999",
+                },
+                {"role": "lifecycle", "text": "Opened PR https://github.com/org/repo/pull/2"},
+            ],
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        # Model field wins for issue_url (authoritative)
+        assert pipeline.issue_url == "https://github.com/org/repo/issues/1"
+        # History fills in pr_url (gap-filling)
+        assert pipeline.pr_url == "https://github.com/org/repo/pull/2"
 
     def test_missing_new_fields_handled_gracefully(self):
         """Sessions without new fields (e.g., old records) should not raise."""

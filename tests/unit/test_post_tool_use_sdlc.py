@@ -13,6 +13,7 @@ if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
 from post_tool_use import (  # noqa: E402, I001
+    _extract_github_links,
     get_sdlc_state_path,
     is_code_file,
     load_sdlc_state,
@@ -592,3 +593,81 @@ class TestMergeCleanupModifiedOnBranch:
         state = load_sdlc_state(session_id)
         assert state["code_modified"] is False
         assert "modified_on_branch" not in state
+
+
+# ---------------------------------------------------------------------------
+# _extract_github_links
+# ---------------------------------------------------------------------------
+
+
+class TestExtractGithubLinks:
+    """Unit tests for GitHub URL scraping from gh Bash outputs.
+
+    Guards the production wire-up for AgentSession.set_link() — the helper
+    existed on the model but was only called from tests until this fix.
+    See `.claude/hooks/post_tool_use.py::_update_agent_session`.
+    """
+
+    def test_empty_inputs(self):
+        assert _extract_github_links("", "") == {}
+        assert _extract_github_links("gh pr create", "") == {}
+        assert _extract_github_links("", "https://github.com/org/repo/pull/1") == {}
+
+    def test_non_gh_command_ignored(self):
+        """URLs from non-gh commands are ignored to avoid false positives."""
+        out = "https://github.com/org/repo/pull/1"
+        assert _extract_github_links("curl https://github.com/org/repo/pull/1", out) == {}
+
+    def test_gh_pr_create_captures_pr(self):
+        command = "gh pr create --title foo --body bar"
+        output = (
+            "Creating pull request for session/foo into main in org/repo\n"
+            "https://github.com/org/repo/pull/42\n"
+        )
+        links = _extract_github_links(command, output)
+        assert links == {"pr": "https://github.com/org/repo/pull/42"}
+
+    def test_gh_issue_create_captures_issue(self):
+        command = "gh issue create --title foo"
+        output = "https://github.com/org/repo/issues/177\n"
+        links = _extract_github_links(command, output)
+        assert links == {"issue": "https://github.com/org/repo/issues/177"}
+
+    def test_gh_pr_view_captures_pr(self):
+        """gh pr view also emits URLs that should be captured."""
+        command = "gh pr view 99 --json url"
+        output = '{"url":"https://github.com/org/repo/pull/99"}'
+        links = _extract_github_links(command, output)
+        assert links == {"pr": "https://github.com/org/repo/pull/99"}
+
+    def test_gh_issue_subcommand_only_captures_issue_url(self):
+        """gh issue commands don't accidentally capture PR URLs in output."""
+        command = "gh issue view 42"
+        # Body mentions related PR — that URL should NOT be captured as issue.
+        output = (
+            "title: Fix bug\n"
+            "body: Related to https://github.com/org/repo/pull/7\n"
+            "url: https://github.com/org/repo/issues/42\n"
+        )
+        links = _extract_github_links(command, output)
+        assert "issue" in links
+        assert links["issue"] == "https://github.com/org/repo/issues/42"
+        assert "pr" not in links  # gh issue command doesn't scan for PR
+
+    def test_ignores_non_github_domains(self):
+        command = "gh pr create"
+        output = "https://gitlab.com/org/repo/-/merge_requests/1"
+        assert _extract_github_links(command, output) == {}
+
+    def test_first_url_wins(self):
+        """When multiple URLs appear in output, the first one is captured."""
+        command = "gh pr list"
+        output = "https://github.com/org/repo/pull/1\nhttps://github.com/org/repo/pull/2\n"
+        links = _extract_github_links(command, output)
+        assert links == {"pr": "https://github.com/org/repo/pull/1"}
+
+    def test_org_repo_names_with_hyphens_and_numbers(self):
+        command = "gh pr create"
+        output = "https://github.com/valor-engels/ai-system-v2/pull/123"
+        links = _extract_github_links(command, output)
+        assert links == {"pr": "https://github.com/valor-engels/ai-system-v2/pull/123"}
