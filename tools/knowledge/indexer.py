@@ -15,7 +15,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 from pathlib import Path
 
 from config.models import HAIKU
@@ -60,36 +59,11 @@ def _make_reference(file_path: str) -> str:
 def _split_by_headings(content: str) -> list[tuple[str, str]]:
     """Split content by top-level (h1/h2) headings.
 
-    Returns list of (heading, section_content) tuples.
-    If no headings found, returns single entry with empty heading.
+    Delegates to the canonical implementation in tools.knowledge.chunking.
     """
-    # Split on lines starting with # or ##
-    sections = []
-    current_heading = ""
-    current_lines = []
+    from tools.knowledge.chunking import _split_by_headings as _chunking_split_by_headings
 
-    for line in content.split("\n"):
-        if re.match(r"^#{1,2}\s+", line):
-            # Save previous section if it has content
-            if current_lines:
-                section_text = "\n".join(current_lines).strip()
-                if section_text:
-                    sections.append((current_heading, section_text))
-            current_heading = line.strip()
-            current_lines = []
-        else:
-            current_lines.append(line)
-
-    # Save last section
-    if current_lines:
-        section_text = "\n".join(current_lines).strip()
-        if section_text:
-            sections.append((current_heading, section_text))
-
-    if not sections:
-        return [("", content.strip())]
-
-    return sections
+    return _chunking_split_by_headings(content)
 
 
 def _summarize_content(content: str, file_path: str) -> str:
