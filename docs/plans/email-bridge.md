@@ -145,7 +145,7 @@ No existing tests affected — this is a greenfield feature with no prior test c
 - **Full email parsing library** (e.g., `flanker`, `mailparser`): stdlib `email` module is sufficient for plain text and basic HTML-to-text. Do not add third-party email parsing.
 - **Attachment handling**: Tempting to support file attachments in v1. Defer entirely — text-only emails for the first iteration.
 - **HTML email rendering**: Agent output is plain text. Do not build an HTML email template system. Send plain text replies.
-- **Email forwarding/routing rules**: Do not build a rules engine for email routing. One email address per project, simple exact-match.
+- **Email forwarding/routing rules**: Do not build a rules engine for email routing. Single inbox `valor@yuda.me`, sender-based exact-match to project.
 - **Field rename (`initial_telegram_message` → `initial_message`)**: The issue mentions this as concurrent work. It is a separate migration with its own risk profile. Do not bundle it into this feature.
 - **Cross-transport routing** (email in, Telegram out): Explicitly out of scope per the issue.
 - **OAuth/Gmail API**: IMAP with app passwords is simpler and sufficient. Do not build OAuth flows for Gmail.
@@ -190,7 +190,7 @@ No existing tests affected — this is a greenfield feature with no prior test c
 - Field rename (`initial_telegram_message` → `initial_message`)
 - OAuth-based email auth (use IMAP/SMTP with app passwords)
 - Email forwarding rules or routing engine
-- Multiple email addresses per project (one address per project in v1)
+- Multiple inbound email addresses (single address `valor@yuda.me` in v1)
 
 ## Update System
 
@@ -395,8 +395,14 @@ Using: builder, test-engineer, validator, documentarian
 
 ## Open Questions
 
-1. **IMAP vs webhook for inbound email**: The plan uses IMAP polling for simplicity (stdlib only, no third-party deps, works with any email provider). Should we consider webhook-based ingest (e.g., SendGrid Inbound Parse) for lower latency in a future iteration?
+*All resolved — see decisions below.*
 
-2. **Email address allocation**: How many email addresses should be provisioned initially? One per project, or a single catch-all address with sender-based routing? The plan assumes one address per project for simplicity.
+### Resolved
 
-3. **SMTP credentials strategy**: Should we use a single SMTP account for all outbound email, or per-project SMTP credentials? The plan assumes a single global SMTP account with per-project `From:` address.
+1. **IMAP vs webhook for inbound email**: **IMAP polling.** Stdlib only, no third-party deps, works with any Gmail account. App Password auth (Gmail → Security → 2FA → App Passwords). Webhook-based ingest can be a future optimization if latency matters.
+
+2. **Email address allocation**: **Single address `valor@yuda.me`** with sender-based routing. The `From:` address on outbound replies determines which project/context Valor is operating in. Different products (cuttlefish, etc.) will have different email requirements but all route through the same inbox.
+
+3. **SMTP/IMAP credentials**: **Single global account** via `.env` variables: `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_PORT`, `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_PORT`. Gmail with App Password.
+
+4. **Gmail API vs IMAP/SMTP**: **IMAP/SMTP.** The bridge is a long-running daemon — static App Password credentials are simpler than OAuth token refresh. Gmail MCP tools remain available to the agent during sessions for email search/context, but the bridge transport layer uses IMAP/SMTP.
