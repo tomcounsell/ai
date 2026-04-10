@@ -5,8 +5,9 @@ appetite: Medium
 owner: Valor
 created: 2026-04-09
 tracking: https://github.com/tomcounsell/ai/issues/861
-last_comment_id:
+last_comment_id: 4217188844
 plan_link: https://github.com/tomcounsell/ai/blob/main/docs/plans/chunked_document_retrieval.md
+revision_applied: true
 ---
 
 # Chunked Document Retrieval
@@ -50,7 +51,7 @@ Long documents (legal contracts, research papers, project briefs) cannot be mean
 
 ## Architectural Impact
 
-- **New dependencies**: None. `tiktoken` is already available as a transitive dependency of `openai`. Popoto ORM already in use.
+- **New dependencies**: `tiktoken` must be added as an explicit pip dependency. It is NOT a transitive dependency of `openai` -- importing it fails without explicit installation. Popoto ORM already in use.
 - **Interface changes**: New `DocumentChunk` model. New `search_chunks()` function. Existing `KnowledgeDocument` interface unchanged.
 - **Coupling**: `DocumentChunk` depends on `KnowledgeDocument` (parent FK). The indexer orchestrates both.
 - **Data ownership**: Chunk records are owned by the indexer pipeline, same as `KnowledgeDocument`.
@@ -161,7 +162,7 @@ No race conditions identified -- the indexer is invoked serially from `Knowledge
 
 ## Update System
 
-No update system changes required -- no new dependencies, no new config files. The `DocumentChunk` model will be created automatically by Popoto when first accessed. Existing installations will start creating chunks on the next `full_scan()` or file change event.
+The update script must install `tiktoken` as a new dependency. Add `tiktoken` to `requirements.txt`. The `DocumentChunk` model will be created automatically by Popoto when first accessed. Existing installations will start creating chunks on the next `full_scan()` or file change event.
 
 ## Agent Integration
 
@@ -249,9 +250,10 @@ A follow-up could expose `search_chunks()` via an MCP server tool for direct chu
 - **Parallel**: false
 - Add `_sync_chunks(doc: KnowledgeDocument, content: str)` to `tools/knowledge/indexer.py`
 - `_sync_chunks` calls `DocumentChunk.delete_by_parent(doc.doc_id)`, then `chunk_document(content)`, then creates a `DocumentChunk` for each chunk
-- Call `_sync_chunks()` from `index_file()` after successful `safe_upsert()` (only when content actually changed -- check return value)
+- Call `_sync_chunks()` from `index_file()` after successful `safe_upsert()`. Detect content changes by computing the content hash BEFORE calling `safe_upsert()` and comparing it against the existing `KnowledgeDocument.content_hash` (if one exists). `safe_upsert()` returns the doc instance in all cases (new, updated, or unchanged) -- its return value does NOT indicate whether content changed. The content-hash comparison must happen in `index_file()` before calling `safe_upsert()`.
 - Add chunk cleanup to `delete_file()`: call `DocumentChunk.delete_by_parent(doc.doc_id)` before deleting the parent
 - Wrap all chunk operations in try/except to maintain crash isolation (chunk failures must not break document indexing)
+- **Orphan chunk protection**: If chunk creation fails partway through (e.g., 3 of 5 chunks saved before an error), the partial chunks become orphans. To prevent this: delete ALL existing chunks for the parent doc first (already planned), then create new chunks. If creation fails mid-way, the next re-index will delete the partial set and retry. Add a `_cleanup_orphan_chunks()` helper that `full_scan()` calls at the end: query all `DocumentChunk` records, group by `document_doc_id`, and delete any whose parent `KnowledgeDocument` no longer exists.
 
 ### 4. Implement chunk search
 - **Task ID**: build-chunk-search
@@ -300,9 +302,12 @@ A follow-up could expose `search_chunks()` via an MCP server tool for direct chu
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Operator | `tiktoken` is not installed -- plan falsely claims it is a transitive dependency of `openai` | Revised: Architectural Impact and Update System sections corrected. `tiktoken` added as explicit dependency in Prerequisites. | Add `tiktoken` to `requirements.txt` before build. |
+| BLOCKER | Archaeologist | `safe_upsert()` cannot signal content changes -- returns doc instance regardless of whether content changed or was unchanged | Revised: Task 3 now specifies computing content hash BEFORE `safe_upsert()` and comparing against existing doc's `content_hash` to detect changes. | Pre-compute hash in `index_file()`, query existing doc, compare hashes, only sync chunks if changed. |
+| CONCERN | Operator | PR #863 prerequisite is not merged, creating guaranteed merge conflict on `models/__init__.py` | Acknowledged in Prerequisites table. Builder must rebase after #863 merges. | Check `git log main` for #863 merge before starting build. If not merged, wait or rebase after. |
+| CONCERN | Adversary | No mechanism to detect orphaned chunks from partial indexing failures | Revised: Task 3 now includes `_cleanup_orphan_chunks()` helper called by `full_scan()`. | Delete-then-create order + orphan cleanup at end of full_scan provides two layers of protection. |
 
 ---
 
