@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -147,8 +146,6 @@ class TestDeliveryExecution:
 
 def _make_summarized_response(**kwargs):
     """Create a SummarizedResponse-like object."""
-    from pathlib import Path
-
     defaults = {
         "text": "",
         "full_output_file": None,
