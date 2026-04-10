@@ -544,6 +544,90 @@ async def send_response_with_files(
             if summarized.was_summarized:
                 logger.info(f"Summarized response: {len(response)} -> {len(text)} chars")
 
+            # ── Self-summary fallback via session steering ──
+            # When all summarizer backends fail, inject a steering message
+            # asking the agent to self-summarize. Send any files immediately
+            # (they would be lost if deferred), then return the STEERING_DEFERRED
+            # sentinel so the bridge callback knows this is intentional.
+            if summarized.needs_self_summary:
+                _session_id = getattr(session, "session_id", None) if session else None
+                _should_steer = bool(_session_id)
+
+                # Loop prevention: check if a self-summary steering message was
+                # already pushed for this session (avoids infinite loops if the
+                # agent's self-summary also fails summarization).
+                if _should_steer:
+                    try:
+                        from agent.steering import peek_steering_sender
+
+                        if peek_steering_sender(_session_id) == "summarizer-fallback":
+                            logger.warning(
+                                "Self-summary steering already pending, "
+                                "falling through to narration gate"
+                            )
+                            _should_steer = False
+                    except Exception:
+                        pass  # peek failed, proceed with steering attempt
+
+                if _should_steer:
+                    # Send files before returning (critique: don't lose full_output_file)
+                    for f in files:
+                        try:
+                            await client.send_file(_chat_id, f, reply_to=_reply_to)
+                        except Exception as fe:
+                            logger.error(f"Failed to send file during steering deferral: {fe}")
+
+                    # Push the self-summary instruction to the session steering queue
+                    try:
+                        from agent.steering import push_steering_message
+                        from bridge.summarizer import SELF_SUMMARY_INSTRUCTION
+
+                        push_steering_message(
+                            _session_id,
+                            SELF_SUMMARY_INSTRUCTION,
+                            sender="summarizer-fallback",
+                        )
+                        logger.info(
+                            f"Injected self-summary steering for session {_session_id}"
+                        )
+                        from bridge.summarizer import STEERING_DEFERRED
+
+                        return STEERING_DEFERRED  # type: ignore[return-value]
+                    except Exception as steer_err:
+                        logger.warning(
+                            f"Steering push failed (non-fatal), falling through: {steer_err}"
+                        )
+                        # Fall through to narration gate below
+
+                # No session available or steering failed — apply narration gate
+                # on the original (pre-summarization) text as last resort
+                try:
+                    from bridge.message_quality import (
+                        NARRATION_FALLBACK_MESSAGE,
+                        is_narration_only,
+                    )
+
+                    _fallback_text = response  # original filtered text
+                    if is_narration_only(_fallback_text[:500]):
+                        text = NARRATION_FALLBACK_MESSAGE
+                        logger.info("Narration gate triggered on fallback path")
+                    else:
+                        # Not narration — truncate as last resort
+                        from bridge.summarizer import SAFETY_TRUNCATE
+
+                        if len(_fallback_text) > SAFETY_TRUNCATE:
+                            text = _fallback_text[: SAFETY_TRUNCATE - 3] + "..."
+                        else:
+                            text = _fallback_text
+                except Exception:
+                    # is_narration_only raised — deliver as-is (non-fatal)
+                    from bridge.summarizer import SAFETY_TRUNCATE
+
+                    if len(response) > SAFETY_TRUNCATE:
+                        text = response[: SAFETY_TRUNCATE - 3] + "..."
+                    else:
+                        text = response
+
             # Persist semantic routing fields to session for future routing
             if session and summarized.was_summarized:
                 try:

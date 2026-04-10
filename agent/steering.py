@@ -142,3 +142,21 @@ def has_steering_messages(session_id: str) -> bool:
     r = _get_redis()
     key = _queue_key(session_id)
     return r.llen(key) > 0
+
+
+def peek_steering_sender(session_id: str) -> str | None:
+    """Peek at the sender of the most recent steering message without consuming it.
+
+    Uses LINDEX -1 to read the tail (most recently pushed) message.
+    Returns the sender string, or None if the queue is empty or unreadable.
+    """
+    r = _get_redis()
+    key = _queue_key(session_id)
+    raw = r.lindex(key, -1)
+    if raw is None:
+        return None
+    try:
+        msg = json.loads(raw)
+        return msg.get("sender")
+    except (json.JSONDecodeError, AttributeError):
+        return None
