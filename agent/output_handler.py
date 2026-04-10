@@ -3,7 +3,8 @@ Output handler protocol and implementations for agent session output routing.
 
 Defines the OutputHandler protocol that all output destinations must implement,
 plus built-in implementations for file logging and stderr logging. The bridge
-registers its Telegram-specific handler; standalone workers use FileOutputHandler.
+registers its Telegram-specific handler; standalone workers use
+TelegramRelayOutputHandler (with FileOutputHandler dual-write).
 """
 
 from __future__ import annotations

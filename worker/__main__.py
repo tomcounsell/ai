@@ -120,7 +120,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
     Startup sequence (deterministic):
-    1. Registers FileOutputHandler for each project
+    1. Registers TelegramRelayOutputHandler for each project
     2. Rebuilds AgentSession indexes (idempotent SCAN-based, production-safe)
     3. Cleans up corrupted sessions
     4. Recovers interrupted sessions
