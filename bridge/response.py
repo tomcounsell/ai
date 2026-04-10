@@ -587,9 +587,7 @@ async def send_response_with_files(
                             SELF_SUMMARY_INSTRUCTION,
                             sender="summarizer-fallback",
                         )
-                        logger.info(
-                            f"Injected self-summary steering for session {_session_id}"
-                        )
+                        logger.info(f"Injected self-summary steering for session {_session_id}")
                         from bridge.summarizer import STEERING_DEFERRED
 
                         return STEERING_DEFERRED  # type: ignore[return-value]
