@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -225,9 +225,10 @@ No agent integration required — `_cleanup_stale_worktree` is called only by `c
 
 ## Documentation
 
-- [ ] Update `docs/features/session-isolation.md` with a brief note on the worktree cleanup path-containment invariant. The file already documents the `session/{slug}` → `.worktrees/{slug}/` mapping; add one paragraph under the worktree-management section explaining that `_cleanup_stale_worktree` now enforces path containment and fails loudly, and cross-reference the incident (issue #880).
-- [ ] Inline docstring update on `_cleanup_stale_worktree` to document the raise behavior: add a `Raises:` section mentioning `RuntimeError` on bogus paths.
-- [ ] Inline comment above the `shutil.rmtree(wt)` call noting explicitly that `ignore_errors` is intentionally absent and why (correlates with the #880 incident).
+- [x] Update `docs/features/session-isolation.md` with a brief note on the worktree cleanup path-containment invariant. The file already documents the `session/{slug}` → `.worktrees/{slug}/` mapping; add one paragraph under the worktree-management section explaining that `_cleanup_stale_worktree` now enforces path containment and fails loudly, and cross-reference the incident (issue #880).
+- [x] Inline docstring update on `_cleanup_stale_worktree` to document the raise behavior: add a `Raises:` section mentioning `RuntimeError` on bogus paths.
+- [x] Inline comment above the `shutil.rmtree(wt)` call noting explicitly that `ignore_errors` is intentionally absent and why (correlates with the #880 incident).
+- [x] Cross-reference the new delete-time guard from `docs/features/workspace-safety-invariants.md` as a sibling to `validate_workspace()`, establishing the general "destructive filesystem operations must validate their target" pattern.
 
 No changes to `docs/features/README.md` index (the feature page already exists). No external docs site. No MkDocs/Sphinx.
 
