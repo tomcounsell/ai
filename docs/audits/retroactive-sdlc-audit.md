@@ -9,17 +9,20 @@
 The audit covered 86 merged PRs and deleted plan files from the post-SDLC-enforcement window
 (2026-03-24 onward, anchored to issue #443 closure). Of the 68 auditable items:
 
-- **4 relevant findings** remain after relevance filtering and deduplication
-- **0 high severity** (missing feature documentation)
-- **4 medium severity** (missing test files, missing scripts)
-- **0 low severity** (stale references, minor gaps)
-- **16 findings purged** as no longer relevant (feature removed, file was intentionally deleted, etc.)
+- **0 actionable findings** remain after full relevance filtering
+- **0 high severity** (no missing feature documentation)
+- **0 medium severity** (all test gaps resolved — files were renamed or intentionally deleted)
+- **0 low severity** (no stale references)
+- **21 findings initially detected, all purged** after thorough relevance checking
 
-The vast majority of shipped features have their docs and tests in order. The 4 remaining findings
-are all missing test files — no high-severity documentation gaps remain. Many apparent gaps were
-correctly resolved upon closer inspection: issue_poller was removed in #565, the coach module
-was intentionally deleted, chat-dev-session-architecture is superseded by pm-dev-session-architecture.md,
-and the deployment doc exists at the correct path `docs/features/deployment.md`.
+**The SDLC pipeline is clean.** All merged features from the post-enforcement period have their
+docs, tests, and references in order. What appeared to be gaps were consistently explained by:
+- Feature removal (issue_poller removed in #565; ObserverTelemetry deleted in #770)
+- Module renaming (test_job_queue_race.py → test_agent_session_queue_race.py + test_worker_drain.py)
+- Intentional deletion (coach module, observer telemetry)
+- Superseded docs (chat-dev-session-architecture → pm-dev-session-architecture.md)
+- Correct paths (deployment.md exists at docs/features/deployment.md)
+- Never-needed files (test_reflection_model.py: plan said "if exists, update" — never existed)
 
 ## High Severity Findings
 
@@ -31,15 +34,16 @@ but do not exist at HEAD.
 
 ## Medium Severity Findings
 
-Missing test files and scripts — referenced in plan Test Impact or Success Criteria sections
-but not found at HEAD.
+None — all initially-detected medium severity findings were resolved during deep relevance checking.
 
-| # | Feature | Missing File | Type | Merged PR |
-|---|---------|-------------|------|-----------|
-| 1 | #600 Remove arbitrary MSG_MAX_CHARS constants | `tests/unit/test_observer_telemetry.py` | missing_test | #612 |
-| 2 | #600 Remove arbitrary MSG_MAX_CHARS constants | `tests/unit/test_monitoring_telemetry.py` | missing_test | #612 |
-| 3 | #477 Unified Web UI: infrastructure, reflecti | `tests/unit/test_reflection_model.py` | missing_test | #511 |
-| 4 | #543 Worker loop exits without picking up pen | `tests/integration/test_job_queue_race.py` | missing_test | #553 |
+**Resolved medium findings (deep-check purged):**
+
+| # | Feature | Initially Missing | Resolution |
+|---|---------|------------------|------------|
+| 1 | #600 remove-msg-max-chars | `tests/unit/test_observer_telemetry.py` | Intentionally deleted in #770 (ObserverTelemetry module removed as dead code) |
+| 2 | #600 remove-msg-max-chars | `tests/unit/test_monitoring_telemetry.py` | Same — deleted in #770 |
+| 3 | #477 unified-web-ui | `tests/unit/test_reflection_model.py` | Plan said "UPDATE if exists" — file never existed; no gap |
+| 4 | #543 worker-loop-pending-drain | `tests/integration/test_job_queue_race.py` | Renamed: `test_agent_session_queue_race.py` + `test_worker_drain.py` cover same scenarios |
 
 ## Low Severity Findings
 
@@ -71,29 +75,23 @@ Minor gaps — stale references, files that were supposed to be deleted but stat
 
 ## Fix Plan
 
-### Category 1: Missing Feature Documentation (0 items — all resolved)
+No fix PRs required. All initially-detected gaps were resolved during deep relevance analysis.
 
-All documentation gaps were resolved during relevance filtering:
+### Category 1: Missing Feature Documentation — RESOLVED
+
 - `docs/features/chat-dev-session-architecture.md` → superseded by `docs/features/pm-dev-session-architecture.md`
 - `docs/deployment.md` → exists at `docs/features/deployment.md` (plan referenced wrong path)
 - `docs/features/issue-poller.md` → issue_poller feature removed in #565, doc not needed
 - `docs/features/retroactive-plan-audit.md` → this report (`docs/audits/retroactive-sdlc-audit.md`) is the deliverable
 
-**No action needed.**
+### Category 2: Missing Test Coverage — RESOLVED
 
-### Category 2: Missing Test Coverage (4 items)
+- `tests/unit/test_observer_telemetry.py` → module (ObserverTelemetry) was deleted as dead code in #770
+- `tests/unit/test_monitoring_telemetry.py` → same — deleted in #770
+- `tests/unit/test_reflection_model.py` → plan said "UPDATE if exists"; file never existed
+- `tests/integration/test_job_queue_race.py` → renamed in #616 to `test_agent_session_queue_race.py` + `test_worker_drain.py`
 
-These test files were planned but never created:
-
-- **`tests/unit/test_observer_telemetry.py`** — for issue #600 (Remove arbitrary MSG_MAX_CHARS constants and max_l)
-- **`tests/unit/test_monitoring_telemetry.py`** — for issue #600 (Remove arbitrary MSG_MAX_CHARS constants and max_l)
-- **`tests/unit/test_reflection_model.py`** — for issue #477 (Unified Web UI: infrastructure, reflections dashbo)
-- **`tests/integration/test_job_queue_race.py`** — for issue #543 (Worker loop exits without picking up pending jobs )
-
-**Action:** Create a single PR adding the missing test files. Each test file should cover
-the integration scenarios described in the original plan's Test Impact section.
-
-### Category 3: Stale References / Other (0 items)
+### Category 3: Stale References — RESOLVED (none found)
 
 
 ## Unauditable Items (18)
@@ -123,12 +121,13 @@ should be treated as already-addressed unless there is specific evidence of gaps
 
 ## Verification Checklist
 
-After fix PRs are merged:
-
 - [x] `docs/features/pm-dev-session-architecture.md` exists and covers parent-child session flow — CONFIRMED
 - [x] `docs/features/deployment.md` exists — CONFIRMED (plan #508 referenced wrong path `docs/deployment.md`)
-- [ ] Missing test files added: `tests/unit/test_observer_telemetry.py`, `tests/unit/test_monitoring_telemetry.py`, `tests/unit/test_reflection_model.py`, `tests/integration/test_job_queue_race.py`
-- [x] Zero `still_relevant: true` + `severity: high` findings — CONFIRMED (0 high severity findings)
+- [x] Test coverage for worker drain — CONFIRMED: `test_worker_drain.py` + `test_agent_session_queue_race.py`
+- [x] Test coverage for reflection model — CONFIRMED: plan said "UPDATE if exists"; file never existed, no gap
+- [x] ObserverTelemetry tests intentionally removed — CONFIRMED: module deleted in #770 as dead code
+- [x] Zero `still_relevant: true` + `severity: high` findings — CONFIRMED (0 findings remaining)
+- [x] No fix PRs required — all gaps resolved during audit
 
 ## Methodology
 
@@ -139,10 +138,14 @@ After fix PRs are merged:
 
 ## Next Steps
 
-1. **Medium priority**: Ship tests PR for 4 missing test files:
-   - `tests/unit/test_observer_telemetry.py` — telemetry coverage for remove-msg-max-chars (#600, PR #612)
-   - `tests/unit/test_monitoring_telemetry.py` — monitoring telemetry coverage (#600, PR #612)
-   - `tests/unit/test_reflection_model.py` — reflection model unit tests for Unified Web UI (#477, PR #511)
-   - `tests/integration/test_job_queue_race.py` — race condition test for worker pending drain (#543, PR #553)
-2. **No high priority docs work needed** — all doc gaps were either resolved (superseded by newer docs) or confirmed present at correct paths
-3. **No stale reference cleanup needed** — no low severity stale_ref findings remain after purging
+**No action required.** The audit found zero unaddressed gaps after thorough relevance analysis.
+
+All 21 initially-detected findings were either:
+- Intentional deletions (ObserverTelemetry, coach module)
+- Renamed files (job_queue_race → agent_session_queue_race + worker_drain)
+- Superseded docs (chat-dev → pm-dev architecture)
+- Wrong paths in original plans (docs/deployment.md → docs/features/deployment.md)
+- Never-needed files (test_reflection_model.py was conditional)
+- Removed features (issue_poller removed in #565)
+
+Future plans should be reviewed against this report's findings to avoid generating similar false-positive audit detections.
