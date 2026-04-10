@@ -178,25 +178,39 @@ class TestEnqueueContinuationAsyncWrapping:
         mock_rj.project_key = "test"
         session = mock_rj
 
-        # Return a session from filter
+        # Return a session from filter -- used by get_authoritative_session
         existing_session = MagicMock()
-        # _enqueue_nudge now uses direct mutation + async_save (status is IndexedField)
-        existing_session.async_save = AsyncMock()
-        mock_agent_session.query.filter.return_value = [existing_session]
+        existing_session.status = "running"
+        existing_session.session_id = "sess-1"
+        existing_session.project_key = "test"
+        existing_session.save = MagicMock()
+        existing_session.log_lifecycle_transition = MagicMock()
 
+        # Patch get_authoritative_session and update_session at the source module
+        # (_enqueue_nudge does a local import from models.session_lifecycle)
         with patch(
-            "agent.agent_session_queue.asyncio.to_thread", wraps=asyncio.to_thread
-        ) as mock_to_thread:
-            with patch("agent.agent_session_queue._ensure_worker"):
-                asyncio.run(
-                    _enqueue_nudge(
-                        session=session,
-                        branch_name="test-branch",
-                        task_list_id="tl-1",
-                        auto_continue_count=1,
-                        output_msg="test output",
-                        nudge_feedback="continue",
-                    )
-                )
-                # to_thread should be called for the filter
-                assert mock_to_thread.called
+            "models.session_lifecycle.get_authoritative_session",
+            return_value=existing_session,
+        ):
+            with patch(
+                "models.session_lifecycle.update_session",
+            ) as mock_update:
+                with patch(
+                    "agent.agent_session_queue.asyncio.to_thread",
+                    wraps=asyncio.to_thread,
+                ) as mock_to_thread:
+                    with patch("agent.agent_session_queue._ensure_worker"):
+                        asyncio.run(
+                            _enqueue_nudge(
+                                session=session,
+                                branch_name="test-branch",
+                                task_list_id="tl-1",
+                                auto_continue_count=1,
+                                output_msg="test output",
+                                nudge_feedback="continue",
+                            )
+                        )
+                        # to_thread should be called for the re-read
+                        assert mock_to_thread.called
+                        # update_session should be called for the transition
+                        mock_update.assert_called_once()
