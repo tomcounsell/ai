@@ -540,6 +540,71 @@ def _release_pop_lock(worker_key: str) -> None:
         logger.warning(f"[worker:{worker_key}] Pop lock release failed (non-fatal): {e}")
 
 
+async def _maybe_inject_resume_hydration(chosen, worker_key: str) -> None:
+    """Prepend resume context to a PM session's message_text if this is a resume.
+
+    Detects resume by checking for 2+ *_resume.json files in the session's log
+    directory (1 file = first start only). If resume detected and the session is
+    a PM session with a valid working_dir, prepends a <resumed-session-context>
+    block containing recent branch commits so the agent can skip completed work.
+
+    Silent on any failure -- session start must never crash due to hydration.
+    """
+    try:
+        # Gate: only PM sessions benefit from resume hydration
+        if getattr(chosen, "session_type", None) != "pm":
+            return
+
+        # Gate: working_dir must be set to avoid wrong-directory git summary
+        if not getattr(chosen, "working_dir", None):
+            logger.debug(
+                f"[worker:{worker_key}] Skipping resume hydration for session "
+                f"{chosen.id}: no working_dir set"
+            )
+            return
+
+        # Check for prior resume snapshots
+        from agent.session_logs import (
+            SESSION_LOGS_DIR,  # noqa: N811
+            _get_git_summary,
+        )
+
+        session_log_dir = SESSION_LOGS_DIR / chosen.session_id
+        if not session_log_dir.exists():
+            return
+
+        resume_files = list(session_log_dir.glob("*_resume.json"))
+        if len(resume_files) < 2:
+            return
+
+        # This is a genuine resume -- inject context
+        git_summary = _get_git_summary(working_dir=chosen.working_dir, log_depth=10)
+
+        hydration_block = (
+            "<resumed-session-context>\n"
+            "This session is resuming. The following commits already exist on the branch:\n"
+            f"{git_summary}\n"
+            "If any of these commits satisfy a stage in your current plan, skip that stage\n"
+            "and proceed to the next uncompleted stage. Do not re-dispatch work that is\n"
+            "already committed.\n"
+            "</resumed-session-context>"
+        )
+
+        original = chosen.message_text or ""
+        chosen.message_text = f"{hydration_block}\n\n{original}" if original else hydration_block
+        await chosen.async_save()
+        logger.info(
+            f"[worker:{worker_key}] Injected resume hydration into session {chosen.id} "
+            f"({len(resume_files)} prior resume files found)"
+        )
+
+    except Exception as e:
+        logger.warning(
+            f"[worker:{worker_key}] Failed to inject resume hydration for session "
+            f"{chosen.id} (non-fatal): {e}"
+        )
+
+
 async def _pop_agent_session(
     worker_key: str, is_project_keyed: bool = False
 ) -> AgentSession | None:
@@ -694,6 +759,10 @@ async def _pop_agent_session(
     finally:
         _release_pop_lock(worker_key)
 
+    # Inject resume hydration context BEFORE steering messages so the agent
+    # orients itself on prior work before processing new instructions (#874).
+    await _maybe_inject_resume_hydration(chosen, worker_key)
+
     # Drain any steering messages queued during the pending window (#619).
     # Follow-up messages arriving while the session was pending get pushed to
     # the steering queue by the bridge. We drain them here and prepend to
@@ -824,6 +893,9 @@ async def _pop_agent_session_with_fallback(
 
         chosen.started_at = datetime.now(tz=UTC)
         transition_status(chosen, "running", reason="worker picked up session (sync fallback)")
+
+        # Inject resume hydration context BEFORE steering messages (#874)
+        await _maybe_inject_resume_hydration(chosen, worker_key)
 
         # Drain steering messages (same logic as _pop_agent_session) (#619)
         try:

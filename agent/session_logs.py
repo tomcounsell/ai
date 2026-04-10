@@ -22,11 +22,16 @@ SESSION_LOGS_DIR = Path(__file__).parent.parent / "logs" / "sessions"
 SESSION_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _get_git_summary(working_dir: str | None = None) -> str:
+def _get_git_summary(working_dir: str | None = None, log_depth: int = 3) -> str:
     """Get brief git status for snapshot context.
 
-    Runs `git status --short` and `git log --oneline -3` to capture
+    Runs `git status --short` and `git log --oneline -N` to capture
     the current working tree state and recent commit history.
+
+    Args:
+        working_dir: Directory to run git commands in. Falls back to repo root.
+        log_depth: Number of recent commits to include (default 3).
+
     Returns a combined string, or an error message on failure.
     """
     parts = []
@@ -50,7 +55,7 @@ def _get_git_summary(working_dir: str | None = None) -> str:
 
     try:
         log_result = subprocess.run(
-            ["git", "log", "--oneline", "-3"],
+            ["git", "log", "--oneline", f"-{log_depth}"],
             cwd=cwd,
             capture_output=True,
             text=True,
