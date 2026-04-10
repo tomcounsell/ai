@@ -52,6 +52,34 @@ Each tier 2 work item gets its own git worktree for filesystem isolation:
 
 The worktree manager provides six operations: `get_or_create_worktree()`, `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `prune_worktrees()`, and `cleanup_after_merge()`.
 
+### Worktree Enforcement for Dev Sessions (Issue #887)
+
+Dev sessions with a slug are **required** to run inside a worktree. Three enforcement layers prevent contamination of the main checkout:
+
+1. **Worktree provisioning failure escalation** (`agent/agent_session_queue.py`): When `get_or_create_worktree()` fails for a dev session, the error is escalated to a `RuntimeError` instead of falling back to the main checkout. Non-dev sessions (PM, teammate) retain the original fallback-to-main-checkout behavior.
+
+2. **Main-checkout protection guard** (`agent/agent_session_queue.py`): A secondary guard runs after worktree resolution. If a dev session with a slug resolves to a `working_dir` that does not contain `.worktrees`, the session is rejected with a `RuntimeError`. This catches cases where worktree provisioning was silently skipped or the path was overridden.
+
+3. **PM prompt instruction** (`config/personas/project-manager.md`): The PM persona prompt explicitly instructs the PM to set the worktree path (`.worktrees/{slug}/`) as the working directory when spawning dev sessions via the Agent tool. This is the first line of defense -- the infrastructure guards are the safety net.
+
+**Why this was added:** The 2026-04-10 incident (issue [#887](https://github.com/tomcounsell/ai/issues/887)) demonstrated that `valor-session create` without a prior `/do-plan` step bypassed worktree provisioning entirely, causing dev sub-sessions to run git operations in the main checkout. This contaminated concurrent human and agent work.
+
+### Early Worktree Provisioning via `--slug`
+
+The `valor-session create` CLI command accepts a `--slug` flag that provisions a worktree at session creation time, before the session is enqueued:
+
+```bash
+python -m tools.valor_session create --role dev --slug my-feature --message "Build the feature"
+```
+
+When `--slug` is provided:
+- The slug is validated via `_validate_slug()` (rejects empty strings, path traversal, unsafe characters)
+- `get_or_create_worktree()` provisions the worktree at `.worktrees/{slug}/`
+- The session's `working_dir` is set to the worktree path
+- The slug is stored on the `AgentSession` model
+
+This ensures worktree isolation is established at the earliest possible point, closing the gap where sessions created outside of `/do-plan` would skip isolation.
+
 ### Stale Worktree Recovery
 
 When a session crashes or times out, it may leave a stale worktree that blocks future builds for the same slug. The `create_worktree()` function handles this automatically by detecting and cleaning up stale worktrees before creation. Three recovery cases are handled:
@@ -104,7 +132,9 @@ Experiments validated the approach before implementation:
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
 | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |
-| `agent/agent_session_queue.py` | Computes task list ID in `_execute_agent_session()` and passes to SDK |
+| `agent/agent_session_queue.py` | Computes task list ID in `_execute_agent_session()` and passes to SDK; worktree enforcement guards for dev sessions |
+| `tools/valor_session.py` | CLI for session management; `--slug` flag provisions worktree at creation time |
+| `config/personas/project-manager.md` | PM prompt with worktree CWD instruction for dev-session Agent calls |
 | `models/agent_session.py` | `AgentSession` model with `slug` field |
 | `docs/features/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
 | `docs/features/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |

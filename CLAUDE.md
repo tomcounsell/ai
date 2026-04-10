@@ -140,6 +140,7 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.valor_session kill --id <ID>` | Kill a session |
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
 | `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session |
+| `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
