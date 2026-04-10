@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -106,22 +106,22 @@ The new model is straightforward (follows `KnowledgeDocument` patterns exactly),
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `DocumentChunk` save failures must not crash the parent `KnowledgeDocument` indexing -- wrap chunk creation in try/except with logging, consistent with `safe_upsert()` pattern
-- [ ] If `tiktoken` encoding fails for a chunk, log warning and skip that chunk rather than failing the entire document
+- [x] `DocumentChunk` save failures must not crash the parent `KnowledgeDocument` indexing -- wrap chunk creation in try/except with logging, consistent with `safe_upsert()` pattern
+- [x] If `tiktoken` encoding fails for a chunk, log warning and skip that chunk rather than failing the entire document
 
 ### Empty/Invalid Input Handling
-- [ ] Empty document content produces zero chunks (no empty `DocumentChunk` records)
-- [ ] Document with only whitespace produces zero chunks
-- [ ] Very short documents (under chunk size) produce exactly one chunk
-- [ ] Documents with no headings fall back to token-count splitting correctly
+- [x] Empty document content produces zero chunks (no empty `DocumentChunk` records)
+- [x] Document with only whitespace produces zero chunks
+- [x] Very short documents (under chunk size) produce exactly one chunk
+- [x] Documents with no headings fall back to token-count splitting correctly
 
 ### Error State Rendering
-- [ ] No user-visible output -- chunk search results are consumed programmatically by the agent. Errors are logged.
+- [x] No user-visible output -- chunk search results are consumed programmatically by the agent. Errors are logged.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_knowledge_document.py::test_model_has_required_fields` -- UPDATE: add `DocumentChunk` import and field checks in a new test class
-- [ ] `tests/unit/test_knowledge_document.py::TestKnowledgeDocumentModel` -- No change needed (existing tests for `KnowledgeDocument` are unaffected since its interface is unchanged)
+- [x] `tests/unit/test_knowledge_document.py::test_model_has_required_fields` -- UPDATE: add `DocumentChunk` import and field checks in a new test class
+- [x] `tests/unit/test_knowledge_document.py::TestKnowledgeDocumentModel` -- No change needed (existing tests for `KnowledgeDocument` are unaffected since its interface is unchanged)
 
 No other existing tests are affected -- the indexer tests (`tests/unit/test_knowledge_indexer.py`) test companion memory creation but not chunk creation (which does not exist yet). The new chunking logic will have its own test file.
 
@@ -172,22 +172,22 @@ A follow-up could expose `search_chunks()` via an MCP server tool for direct chu
 
 ## Documentation
 
-- [ ] Update `docs/features/knowledge-document-integration.md` to document the chunking system, `DocumentChunk` model, and chunk search
-- [ ] Add entry to `docs/features/README.md` index table if not already present
-- [ ] Code comments on chunking algorithm (heading-aware splitting, overlap logic)
-- [ ] Docstrings for `DocumentChunk` model, `_sync_chunks()`, `search_chunks()`, and chunking utility functions
+- [x] Update `docs/features/knowledge-document-integration.md` to document the chunking system, `DocumentChunk` model, and chunk search
+- [x] Add entry to `docs/features/README.md` index table if not already present
+- [x] Code comments on chunking algorithm (heading-aware splitting, overlap logic)
+- [x] Docstrings for `DocumentChunk` model, `_sync_chunks()`, `search_chunks()`, and chunking utility functions
 
 ## Success Criteria
 
-- [ ] Long documents (>8,192 tokens) are fully embedded with no content loss
-- [ ] Semantic search for a specific passage returns the chunk containing that passage
-- [ ] Search results include: matching chunk text, parent document file path, chunk index, and similarity score
-- [ ] Chunk overlap ensures concepts at chunk boundaries are discoverable
-- [ ] Existing `KnowledgeDocument` records continue to work (backward compatible)
-- [ ] Re-indexing a changed document regenerates its chunks (no stale chunks left behind)
-- [ ] Short documents (under chunk size threshold) produce a single chunk
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Long documents (>8,192 tokens) are fully embedded with no content loss
+- [x] Semantic search for a specific passage returns the chunk containing that passage
+- [x] Search results include: matching chunk text, parent document file path, chunk index, and similarity score
+- [x] Chunk overlap ensures concepts at chunk boundaries are discoverable
+- [x] Existing `KnowledgeDocument` records continue to work (backward compatible)
+- [x] Re-indexing a changed document regenerates its chunks (no stale chunks left behind)
+- [x] Short documents (under chunk size threshold) produce a single chunk
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

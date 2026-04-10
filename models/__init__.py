@@ -14,6 +14,7 @@ Provides fast, queryable Redis models for all persistent data:
 - Memory: subconscious memory records (human instructions, agent observations)
 - TeammateMetrics: teammate mode classification counters and response times
 - KnowledgeDocument: knowledge base indexed documents with embeddings
+- DocumentChunk: per-chunk embeddings for fine-grained document search
 - PRReviewAudit: deduplication tracker for PR review audit findings
 """
 
@@ -22,6 +23,7 @@ from models.bridge_event import BridgeEvent
 from models.chat import Chat
 from models.dead_letter import DeadLetter
 from models.dedup import DedupRecord
+from models.document_chunk import DocumentChunk
 from models.knowledge_document import KnowledgeDocument
 from models.link import Link
 from models.memory import Memory
@@ -39,6 +41,7 @@ __all__ = [
     "DedupRecord",
     "DeadLetter",
     "BridgeEvent",
+    "DocumentChunk",
     "KnowledgeDocument",
     "PRReviewAudit",
     "Reflection",

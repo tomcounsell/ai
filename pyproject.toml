@@ -26,6 +26,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "rich>=13.0.0", # Required by pydantic logfire plugin
     "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
+    "tiktoken>=0.7.0", # Token counting for document chunk boundaries
     "watchdog>=4.0.0", # Filesystem watcher for knowledge document indexing
     "fastapi>=0.115.0", # Web UI framework
     "uvicorn[standard]>=0.34.0", # ASGI server for web UI

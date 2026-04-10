@@ -89,7 +89,72 @@ A Popoto Redis model storing indexed documents:
 
 Embeddings are generated automatically by Popoto's `EmbeddingField` using the globally configured `OpenAIProvider`. The provider is set via `popoto.configure(embedding_provider=OpenAIProvider())` at bridge startup.
 
-### 5. Companion Memories
+### 5. Document Chunking
+
+Long documents are split into overlapping chunks, each with its own embedding, enabling fine-grained semantic search. This eliminates the two failure modes of single-vector document embedding: content truncation (documents over 8,192 tokens had content silently dropped) and signal dilution (a single embedding averages the semantic signal across the entire document).
+
+#### DocumentChunk Model
+
+A Popoto Redis model storing individual chunks:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `chunk_id` | AutoKeyField | Unique identifier |
+| `document_doc_id` | KeyField | FK to parent KnowledgeDocument |
+| `chunk_index` | IntField | Ordering index within parent (0-based) |
+| `content` | ContentField | Chunk text (stored on filesystem) |
+| `embedding` | EmbeddingField | Auto-generated via OpenAI `text-embedding-3-small` |
+| `file_path` | KeyField | Denormalized parent document path |
+| `project_key` | KeyField | Denormalized project key for filtering |
+
+#### Chunking Strategy
+
+The chunking engine (`tools/knowledge/chunking.py`) splits documents using a heading-aware strategy:
+
+1. **Short documents** (under `CHUNK_SIZE_TOKENS`): Produce a single chunk -- no unnecessary splitting.
+2. **Documents with headings**: Split at h1/h2 boundaries. If a heading section exceeds `CHUNK_SIZE_TOKENS`, it is sub-split by token count with overlap.
+3. **Documents without headings**: Split entirely by token count with overlap.
+
+Token counting uses `tiktoken` with the `cl100k_base` encoding (same encoding as `text-embedding-3-small`). Default constants:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `CHUNK_SIZE_TOKENS` | 1500 | Target tokens per chunk |
+| `CHUNK_OVERLAP_TOKENS` | 200 | Overlap between adjacent chunks (~800 characters) |
+
+The 200-token overlap ensures concepts at chunk boundaries appear in at least one chunk's embedding.
+
+#### Chunk Lifecycle
+
+Chunks are managed entirely by the indexer pipeline:
+
+- **On index**: After `KnowledgeDocument.safe_upsert()`, the indexer computes the content hash and compares it to the existing document's hash. If content changed, `_sync_chunks()` deletes all old chunks and creates new ones.
+- **On delete**: `delete_file()` deletes all chunks for the document before deleting the parent.
+- **Orphan cleanup**: `_cleanup_orphan_chunks()` runs at the end of `full_scan()`, deleting any chunks whose parent `KnowledgeDocument` no longer exists.
+
+#### Chunk Search
+
+`DocumentChunk.search(query_text, project_key=None, top_k=5)` provides chunk-level semantic search:
+
+1. Embeds the query via `OpenAIProvider`
+2. Loads all chunk embeddings via `EmbeddingField.load_embeddings(DocumentChunk)`
+3. Computes cosine similarity
+4. Filters by `project_key` if provided
+5. Returns top-K results as:
+
+```python
+[{
+    "chunk_text": str,      # The matching chunk content
+    "file_path": str,       # Parent document file path
+    "chunk_index": int,     # Position within parent document
+    "score": float,         # Cosine similarity score
+    "project_key": str      # Project key for isolation
+}]
+```
+
+The parent document's own `EmbeddingField` is retained for document-level similarity (e.g., "find documents like this one").
+
+### 6. Companion Memories
 
 Each indexed document gets one or more companion Memory records that integrate with the existing subconscious memory system:
 
@@ -101,7 +166,7 @@ Each indexed document gets one or more companion Memory records that integrate w
 
 Companion memories enter the bloom filter like any other memory. When the agent works on a related project, the bloom fires, the thought is injected, and the agent can read the full file on demand.
 
-### 6. Memory `reference` Field
+### 7. Memory `reference` Field
 
 The Memory model has a new `reference` StringField (default empty string). This is a generic JSON pointer for actionable next steps -- not limited to knowledge documents. The field is backwards-compatible; existing memories are unaffected.
 
@@ -143,6 +208,8 @@ The existing `tools/knowledge_search/` is a standalone SQLite-based knowledge se
 | Large doc threshold | 2000 words | `tools/knowledge/indexer.py` |
 | Knowledge importance | 3.0 | `tools/knowledge/indexer.py` |
 | Summary fallback length | 500 chars | `tools/knowledge/indexer.py` |
+| Chunk size | 1500 tokens | `tools/knowledge/chunking.py` |
+| Chunk overlap | 200 tokens | `tools/knowledge/chunking.py` |
 | Supported extensions | `.md`, `.txt`, `.markdown`, `.text` | `tools/knowledge/indexer.py` |
 | Health check interval | 60 seconds | `bridge/telegram_bridge.py` heartbeat |
 
@@ -151,8 +218,10 @@ The existing `tools/knowledge_search/` is a standalone SQLite-based knowledge se
 | File | Purpose |
 |------|---------|
 | `models/knowledge_document.py` | KnowledgeDocument Popoto model with `safe_upsert()` and `delete_by_path()` |
+| `models/document_chunk.py` | DocumentChunk Popoto model with `delete_by_parent()` and `search()` |
 | `models/memory.py` | Memory model with `reference` field and `SOURCE_KNOWLEDGE` constant |
-| `tools/knowledge/indexer.py` | Indexer pipeline: `index_file()`, `delete_file()`, `full_scan()`, companion memory creation |
+| `tools/knowledge/indexer.py` | Indexer pipeline: `index_file()`, `delete_file()`, `full_scan()`, chunk sync, companion memory creation |
+| `tools/knowledge/chunking.py` | Chunking engine: heading-aware + token-count splitting with overlap |
 | `tools/knowledge/scope_resolver.py` | Scope resolution from file paths to `(project_key, scope)` via projects.json |
 | `bridge/knowledge_watcher.py` | `KnowledgeWatcher` class wrapping watchdog Observer with debouncing and health checks |
 | `bridge/telegram_bridge.py` | Bridge integration: watcher startup, shutdown, and 60s health check |
@@ -164,10 +233,10 @@ High reversibility -- to remove this feature:
 1. Remove watcher startup/shutdown/health-check code from `bridge/telegram_bridge.py`
 2. Delete `bridge/knowledge_watcher.py`
 3. Delete `tools/knowledge/` directory
-4. Delete `models/knowledge_document.py`
+4. Delete `models/knowledge_document.py` and `models/document_chunk.py`
 5. Remove `reference` field and `SOURCE_KNOWLEDGE` from `models/memory.py`
-6. Remove `watchdog` from `pyproject.toml`
-7. Flush Redis keys: `redis-cli KEYS "*KnowledgeDocument*" | xargs redis-cli DEL`
+6. Remove `watchdog` and `tiktoken` from `pyproject.toml`
+7. Flush Redis keys: `redis-cli KEYS "*KnowledgeDocument*" | xargs redis-cli DEL` and `redis-cli KEYS "*DocumentChunk*" | xargs redis-cli DEL`
 
 No existing behavior changes. No schema migrations involved.
 
