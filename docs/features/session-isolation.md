@@ -66,6 +66,12 @@ This makes the SDLC pipeline resilient to stale worktree state -- no manual `git
 
 See GitHub issue [#237](https://github.com/tomcounsell/ai/issues/237) for the original bug report.
 
+### Path-Containment Invariant
+
+`_cleanup_stale_worktree()` enforces a strict path-containment invariant: it will only operate on paths strictly under `repo_root / .worktrees/`. Any other input -- including `repo_root` itself -- raises `RuntimeError` before any filesystem operation runs. The `shutil.rmtree` fallback does not pass `ignore_errors=True`, so partial-destruction failures surface as real exceptions instead of being silently swallowed. Both the guard and the fallback fire `logger.critical` before acting, giving the crash tracker and log audits a correlation point.
+
+This guard was added in response to the 2026-04-10 incident (issue [#880](https://github.com/tomcounsell/ai/issues/880)), where a session branch got checked out in the main working tree and the cleanup helper was handed the main repo path; the `shutil.rmtree(..., ignore_errors=True)` fallback then recursively deleted the main repository. The guard now refuses bogus paths loudly and the fallback no longer hides errors.
+
 ### Post-Merge Worktree Cleanup
 
 When a PR is merged via `gh pr merge --squash --delete-branch`, the remote branch is deleted but local branch deletion fails if a git worktree still references it. The `cleanup_after_merge()` function handles this:

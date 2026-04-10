@@ -292,6 +292,110 @@ class TestCleanupStaleWorktree:
         # prune called twice (fallback path)
         assert mock_prune.call_count == 2
         mock_rmtree.assert_called_once()
+        # Tightened assertion for #880: ignore_errors must NOT be True.
+        # Silent partial destruction was the primary bug class; fail loud.
+        assert mock_rmtree.call_args.kwargs.get("ignore_errors") is not True
+
+    def test_guard_rejects_repo_root_path(self):
+        """Guard raises RuntimeError when worktree_path resolves to repo_root itself.
+
+        This is the exact path from the 2026-04-10 incident (issue #880):
+        a session branch got checked out in the main working tree, and the
+        helper was called with ``worktree_path == repo_root``. The guard
+        must refuse and raise loudly.
+
+        Uses ``match=r"not under"`` instead of a literal path substring
+        because ``.resolve()`` may follow platform symlinks (C3).
+        """
+        with pytest.raises(RuntimeError, match=r"not under"):
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo")
+
+    def test_guard_rejects_path_outside_worktrees(self):
+        """Guard raises RuntimeError when worktree_path is outside the repo.
+
+        C3: MUST use ``match=r"not under"`` -- on macOS ``/tmp`` is a
+        symlink to ``/private/tmp``, so ``Path("/tmp/foo").resolve()``
+        returns ``/private/tmp/foo``. Any test asserting a literal
+        ``"/tmp/foo"`` substring fails on macOS but passes on Linux.
+        The ``"not under"`` phrase is platform-stable.
+        """
+        with pytest.raises(RuntimeError, match=r"not under"):
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/tmp/foo")
+
+    def test_guard_rejects_sibling_dir_under_repo(self):
+        """Guard rejects paths inside repo_root but outside ``.worktrees/``.
+
+        A path that is under the repo but not under ``.worktrees/`` is
+        just as dangerous as a path outside the repo entirely -- the
+        helper should never recurse into arbitrary repo subdirs.
+        """
+        with pytest.raises(RuntimeError, match=r"not under"):
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo/some-other-dir")
+
+    @patch("agent.worktree_manager.shutil.rmtree")
+    @patch("agent.worktree_manager.prune_worktrees")
+    @patch("agent.worktree_manager.subprocess.run")
+    @patch("agent.worktree_manager.logger")
+    def test_fallback_does_not_pass_ignore_errors(
+        self, mock_logger, mock_run, mock_prune, mock_rmtree
+    ):
+        """Fallback branch fires logger.critical before rmtree and does not
+        swallow errors via ``ignore_errors=True``.
+
+        Asserts C4 ordering: ``logger.error`` -> ``logger.critical`` ->
+        ``prune_worktrees`` -> ``rmtree``. The critical log MUST precede
+        ``prune_worktrees`` so a prune exception cannot swallow the
+        crash-tracker signal.
+        """
+        from subprocess import CalledProcessError
+
+        mock_run.side_effect = CalledProcessError(1, "git", stderr="lock error")
+        with patch.object(Path, "exists", return_value=True):
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo/.worktrees/stuck")
+
+        # ignore_errors must NOT be passed as True (C1 / #880).
+        assert mock_rmtree.call_args.kwargs.get("ignore_errors") is not True
+
+        # logger.critical must have been called in the fallback branch.
+        assert mock_logger.critical.called, (
+            "logger.critical must fire in fallback branch for crash-tracker "
+            "correlation (see issue #880)"
+        )
+
+        # C4: call order must be logger.error -> logger.critical ->
+        # prune_worktrees -> rmtree. We verify this by inspecting
+        # mock_logger.mock_calls and the relative call ordering of the
+        # separately-patched mocks.
+        method_names = [
+            call[0] for call in mock_logger.mock_calls if call[0] in ("error", "critical")
+        ]
+        assert method_names[:2] == ["error", "critical"], (
+            f"Expected logger.error then logger.critical, got {method_names}"
+        )
+
+        # logger.critical must fire BEFORE prune_worktrees (C4). Compare
+        # mock_calls list positions using an ordering-sensitive Mock parent.
+        parent = MagicMock()
+        parent.attach_mock(mock_logger.critical, "critical")
+        parent.attach_mock(mock_prune, "prune")
+        parent.attach_mock(mock_rmtree, "rmtree")
+        # Re-run under the ordering mock to validate sequencing.
+        mock_run.side_effect = CalledProcessError(1, "git", stderr="lock error")
+        parent.reset_mock()
+        mock_logger.reset_mock()
+        mock_prune.reset_mock()
+        mock_rmtree.reset_mock()
+        with patch.object(Path, "exists", return_value=True):
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo/.worktrees/stuck")
+        ordered = [c[0] for c in parent.mock_calls]
+        # critical must appear before prune; prune must appear before rmtree.
+        assert "critical" in ordered and "prune" in ordered and "rmtree" in ordered
+        assert ordered.index("critical") < ordered.index("prune"), (
+            f"logger.critical must precede prune_worktrees (C4). Order: {ordered}"
+        )
+        assert ordered.index("prune") < ordered.index("rmtree"), (
+            f"prune_worktrees must precede rmtree fallback. Order: {ordered}"
+        )
 
 
 class TestCreateWorktreeStaleRecovery:

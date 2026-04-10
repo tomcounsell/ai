@@ -205,12 +205,46 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
     2. Worktree directory exists but is stale (leftover from a crashed session)
        -- ``git worktree remove --force`` removes it.
 
+    Path-containment invariant: this helper refuses to operate on any path
+    that is not strictly under ``repo_root / WORKTREES_DIR``. The precondition
+    follows the same shape as :func:`validate_workspace` (compute → check →
+    log-and-raise). The 2026-04-10 incident (issue #880) showed that trusting
+    the caller's path and falling back to a silent recursive delete can
+    recursively destroy the main repository when a session branch gets
+    checked out in the main working tree. The guard is the primary defense;
+    the fail-loud fallback is the secondary defense.
+
     Args:
         repo_root: Path to the main repository.
         branch_name: The branch name locked by the stale worktree.
         worktree_path: Path string from ``git worktree list``.
+
+    Raises:
+        RuntimeError: If ``worktree_path`` resolves to ``repo_root`` itself
+            or any path outside ``repo_root / WORKTREES_DIR``. This is a
+            loud failure by design -- see issue #880 for the incident that
+            motivated the guard.
     """
-    wt = Path(worktree_path)
+    wt = Path(worktree_path).resolve()
+    worktrees_root = (repo_root / WORKTREES_DIR).resolve()
+
+    # Path-containment guard. The ``wt == repo_root.resolve()`` clause is
+    # kept explicit for grep discoverability of the 2026-04-10 incident
+    # case (the bug was exactly ``wt == repo_root``); logically the
+    # ``is_relative_to(worktrees_root)`` clause alone would reject it.
+    # The ``logger.critical`` call MUST fire BEFORE the ``raise`` so
+    # crash-tracker correlation and log audits see the event even if a
+    # caller catches ``RuntimeError`` upstream.
+    if wt == repo_root.resolve() or not wt.is_relative_to(worktrees_root):
+        logger.critical(
+            f"Refusing to clean up worktree at {wt}: path is not under "
+            f"{worktrees_root}. branch={branch_name} repo_root={repo_root}. "
+            f"See issue #880 for the incident that motivated this guard."
+        )
+        raise RuntimeError(
+            f"Refusing to clean up worktree at {wt}: path is not under "
+            f"{worktrees_root}. Branch={branch_name}, repo_root={repo_root}."
+        )
 
     if not wt.exists():
         # Directory is gone but git still references it -- prune fixes this.
@@ -238,10 +272,23 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
         logger.info(f"Removed stale worktree: {worktree_path}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to remove stale worktree {worktree_path}: {e.stderr}")
+        # Fire logger.critical BEFORE prune_worktrees so a prune exception
+        # cannot swallow the critical log (C4). Order MUST be:
+        # logger.error -> logger.critical -> prune_worktrees -> rmtree.
+        logger.critical(
+            f"Fallback rmtree for stale worktree {wt} after git worktree "
+            f"remove failed. branch={branch_name} repo_root={repo_root}. "
+            f"See issue #880."
+        )
         # As a last resort, prune and manually remove the directory.
         prune_worktrees(repo_root)
         if wt.exists():
-            shutil.rmtree(wt, ignore_errors=True)
+            # Error suppression is intentionally absent here (see #880):
+            # silent partial destruction was the primary bug class. If this
+            # rmtree fails, we want the exception to propagate so the
+            # failure is surfaced, logged, and crash-tracked instead of
+            # leaving the repository in a half-destroyed state.
+            shutil.rmtree(wt)
             logger.info(f"Manually removed stale worktree directory: {worktree_path}")
             # Prune again to clean up the now-missing reference.
             prune_worktrees(repo_root)
