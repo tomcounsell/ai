@@ -33,6 +33,8 @@ from .sdk_client import (
     get_active_client,
     get_agent_response_sdk,
     get_all_active_sessions,
+    get_response_via_harness,
+    verify_harness_health,
 )
 from .steering import (
     clear_steering_queue,
@@ -47,6 +49,8 @@ __all__ = [
     "get_agent_response_sdk",
     "get_active_client",
     "get_all_active_sessions",
+    "get_response_via_harness",
+    "verify_harness_health",
     "BossMessenger",
     "BackgroundTask",
     "verify_completion",

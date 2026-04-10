@@ -22,8 +22,10 @@ Authentication strategy (subscription-first):
 """
 
 import asyncio
+import json
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -1348,6 +1350,211 @@ def _resolve_persona(
                             return persona
 
     return PersonaType.DEVELOPER
+
+
+# === CLI Harness Streaming ===
+
+_HARNESS_FLUSH_INTERVAL = 3.0  # seconds between flushes
+_HARNESS_FLUSH_CHAR_THRESHOLD = 2000  # chars before forced flush
+
+# Map harness names to CLI command templates
+_HARNESS_COMMANDS: dict[str, list[str]] = {
+    "claude-cli": [
+        "claude",
+        "-p",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--permission-mode",
+        "bypassPermissions",
+    ],
+    "opencode": ["opencode", "--non-interactive"],
+}
+
+
+async def get_response_via_harness(
+    message: str,
+    send_cb,
+    working_dir: str,
+    harness_cmd: list[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Run a CLI harness (e.g. claude -p) and stream text to send_cb.
+
+    Parses stdout as stream-json line-by-line. Extracts text from
+    content_block_delta events and flushes to send_cb based on time/size
+    thresholds. Returns the final result text.
+
+    Args:
+        message: The prompt to send to the CLI.
+        send_cb: Async callback to deliver text chunks.
+        working_dir: Working directory for the subprocess.
+        harness_cmd: Override CLI command (default: claude -p stream-json).
+        env: Extra environment variables for the subprocess.
+    """
+    if harness_cmd is None:
+        harness_cmd = list(_HARNESS_COMMANDS["claude-cli"])
+
+    # Build subprocess env: inherit current env, merge extras, strip API key
+    proc_env = dict(os.environ)
+    proc_env.pop("ANTHROPIC_API_KEY", None)
+    if env:
+        proc_env.update(env)
+        proc_env.pop("ANTHROPIC_API_KEY", None)
+
+    cmd = harness_cmd + [message]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=working_dir,
+            env=proc_env,
+        )
+    except FileNotFoundError as e:
+        logger.error(f"Harness binary not found: {e}")
+        return f"Error: CLI harness not found — {e}"
+
+    buffer = ""
+    full_text = ""
+    last_flush = time.monotonic()
+    result_text = None
+    session_id_from_harness = None
+
+    async for raw_line in proc.stdout:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            logger.debug(f"Harness: skipping malformed JSON line: {line[:120]}")
+            continue
+
+        event_type = data.get("type")
+
+        if event_type == "result":
+            result_text = data.get("result", "")
+            session_id_from_harness = data.get("session_id")
+            if session_id_from_harness:
+                logger.debug(f"Harness session_id for resume: {session_id_from_harness}")
+            break
+
+        if event_type == "stream_event":
+            event = data.get("event", {})
+            if (
+                event.get("type") == "content_block_delta"
+                and event.get("delta", {}).get("type") == "text_delta"
+            ):
+                chunk = event["delta"].get("text", "")
+                if chunk:
+                    buffer += chunk
+                    full_text += chunk
+
+                    now = time.monotonic()
+                    if (
+                        len(buffer) >= _HARNESS_FLUSH_CHAR_THRESHOLD
+                        or (now - last_flush) >= _HARNESS_FLUSH_INTERVAL
+                    ):
+                        await send_cb(buffer)
+                        buffer = ""
+                        last_flush = now
+
+    # Final flush of remaining buffer
+    if buffer:
+        await send_cb(buffer)
+
+    # Wait for process to finish and capture stderr
+    _, stderr_data = await proc.communicate()
+    if proc.returncode and proc.returncode != 0:
+        stderr_text = stderr_data.decode("utf-8", errors="replace") if stderr_data else ""
+        logger.warning(f"Harness exited with code {proc.returncode}: {stderr_text[:500]}")
+
+    # Prefer result event text, fall back to accumulated text
+    final = result_text if result_text is not None else full_text
+    if not final:
+        return "Error: harness produced no output."
+    return final
+
+
+async def verify_harness_health(harness_name: str) -> bool:
+    """Check if a CLI harness is available and working.
+
+    For claude-cli: verifies the binary exists on PATH and can produce
+    a system init event. Checks apiKeySource for billing warnings.
+
+    Returns True if healthy, False otherwise.
+    """
+    if harness_name not in _HARNESS_COMMANDS:
+        logger.warning(f"Unknown harness: {harness_name}")
+        return False
+
+    cmd_template = _HARNESS_COMMANDS[harness_name]
+    binary = cmd_template[0]
+
+    if not shutil.which(binary):
+        logger.warning(f"Harness binary not found on PATH: {binary}")
+        return False
+
+    try:
+        # Run a minimal test command — we only need the system init event
+        # (emitted before any API call), so kill the process immediately
+        # after receiving it to avoid a full API round-trip.
+        test_cmd = cmd_template + ["test"]
+        proc = await asyncio.create_subprocess_exec(
+            *test_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        # Read stdout line-by-line, kill as soon as we see the system event
+        healthy = False
+        assert proc.stdout is not None
+        while True:
+            try:
+                raw_line = await asyncio.wait_for(proc.stdout.readline(), timeout=10.0)
+            except TimeoutError:
+                logger.warning(f"Harness {harness_name} timed out waiting for system init event")
+                break
+            if not raw_line:
+                break  # EOF
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if data.get("type") == "system":
+                api_source = data.get("apiKeySource", "unknown")
+                if api_source not in ("none", ""):
+                    logger.warning(
+                        f"Harness {harness_name} using API key billing (apiKeySource={api_source})"
+                    )
+                logger.info(
+                    f"Harness {harness_name} health check passed (apiKeySource={api_source})"
+                )
+                healthy = True
+                break
+
+        # Terminate immediately — no need to wait for the full API response
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass  # Already exited
+        await proc.wait()
+
+        if not healthy:
+            logger.warning(f"Harness {harness_name} did not produce system init event")
+        return healthy
+
+    except Exception as e:
+        logger.error(f"Harness health check failed for {harness_name}: {e}")
+        return False
 
 
 async def get_agent_response_sdk(

@@ -161,6 +161,28 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.error(f"Redis connection failed: {e}")
         sys.exit(1)
 
+    # Harness health check: if DEV_SESSION_HARNESS is set to a CLI harness,
+    # verify the binary is available and working at startup
+    _harness_mode = os.environ.get("DEV_SESSION_HARNESS", "sdk")
+    if _harness_mode != "sdk":
+        try:
+            from agent.sdk_client import verify_harness_health
+
+            _healthy = await verify_harness_health(_harness_mode)
+            if _healthy:
+                logger.info(f"CLI harness '{_harness_mode}' health check passed")
+            else:
+                logger.warning(
+                    f"CLI harness '{_harness_mode}' health check failed — "
+                    f"falling back to sdk for dev sessions"
+                )
+                os.environ["DEV_SESSION_HARNESS"] = "sdk"
+        except Exception as e:
+            logger.warning(
+                f"CLI harness health check error: {e} — falling back to sdk for dev sessions"
+            )
+            os.environ["DEV_SESSION_HARNESS"] = "sdk"
+
     if dry_run:
         logger.info(
             f"Dry run: config loaded with {len(projects)} project(s): "
