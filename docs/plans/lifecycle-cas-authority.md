@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Critiqued
 type: feature
 appetite: Medium
 owner: Valor
