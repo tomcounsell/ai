@@ -28,6 +28,44 @@ Session type derivation from resolved persona:
 
 There are exactly three session types: `pm`, `teammate`, and `dev`. The previous `chat` session type has been renamed to `pm` and `teammate` has been promoted from a secondary `session_mode` flag to a first-class session type. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
 
+## Enforcement — PM Session Tool Restrictions
+
+PM sessions are **read-only by design**. Enforcement lives in the SDK-level hook
+at [`agent/hooks/pre_tool_use.py`](../../agent/hooks/pre_tool_use.py) (registered
+via `claude_agent_sdk.HookMatcher` in `agent/hooks/__init__.py`). The hook runs
+before every tool call and returns `{"decision": "block", "reason": ...}` when a
+PM session attempts a mutating operation. Three layers of enforcement apply:
+
+1. **Write/Edit blocklist.** The hook blocks any `Write` or `Edit` tool call to
+   a path outside `docs/` when `SESSION_TYPE=pm`. This means the PM can edit
+   plan documents, design docs, and feature docs but cannot touch source code,
+   tests, configs, or the worktree. See `_is_pm_allowed_write` in the hook.
+
+2. **Bash read-only allowlist.** The `Bash` branch of the hook restricts PM
+   commands to an explicit prefix allowlist (`git status`, `git log`, `git
+   diff`, `gh issue view`, `gh pr view`, `gh pr list`, `tail logs/`,
+   `cat docs/`, `python -m tools.valor_session status`, etc.). Any command not
+   on the list -- or any command containing shell metacharacters (`|`, `>`,
+   `&&`, `;`, `` ` ``, `$(`, `&`) that could smuggle a mutation past the
+   prefix check -- is rejected. `git -C <path>` is normalized to bare `git`
+   before matching so cross-repo forms like `git -C "$REPO" status` work.
+   See `_is_pm_allowed_bash` and `PM_BASH_ALLOWED_PREFIXES` in the hook.
+   `gh api` is deliberately excluded because `--method POST/PATCH/DELETE`
+   would pass a naive prefix check.
+
+3. **Anomaly-response rule (persona-level).** Even with the hook in place, the
+   PM persona prompt at [`config/personas/project-manager.md`](../../config/personas/project-manager.md)
+   includes an "Anomaly Response — Hibernate, Do Not Self-Heal" rule instructing
+   the PM to surface broken-workspace errors to the human rather than attempting
+   recovery. This is belt-and-suspenders alongside the tool-layer enforcement:
+   the hook prevents destructive commands from running; the persona rule keeps
+   the PM from trying in the first place.
+
+Any mutation (building, testing, committing, installing, recovering) must be
+dispatched to a Dev session via `Agent(subagent_type="dev-session", ...)`. The
+Dev session's hook check does not apply the PM allowlist (it inspects
+`SESSION_TYPE=pm` specifically), so Dev sessions retain full tool access.
+
 ## Architecture
 
 ```

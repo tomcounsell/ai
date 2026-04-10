@@ -113,15 +113,19 @@ class TestTransitionStatusLazyLoadBackfill:
         assert session._saved_field_values["status"] == "pending"
         session.save.assert_called_once()
 
-    def test_idempotent_noop_when_already_in_target_status(self):
-        """transition_status() is a no-op when already in the target state."""
+    def test_idempotent_saves_companion_fields_when_already_in_target_status(self):
+        """transition_status() saves companion fields even when already in the target state.
+
+        Changed in #875: the idempotent path now calls save() to persist any
+        companion fields the caller may have set before calling transition_status().
+        """
         from models.session_lifecycle import transition_status
 
         session = _make_lazy_session(status="running")
 
         transition_status(session, "running")
 
-        session.save.assert_not_called()
+        session.save.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -153,8 +153,10 @@ class TestEnqueueNudgeTerminalGuard:
         session = _mock_agent_session(status="running")
         completed_session = _mock_agent_session(status="completed")
 
-        with patch("agent.agent_session_queue.AgentSession") as mock_as:
-            mock_as.query.filter.return_value = [completed_session]
+        with patch(
+            "models.session_lifecycle.get_authoritative_session",
+            return_value=completed_session,
+        ):
             await _enqueue_nudge(
                 session=session,
                 branch_name="session/test",

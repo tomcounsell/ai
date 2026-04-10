@@ -207,14 +207,7 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: slug, then context_summary, then truncated message.
-
-        Slug wins when present because it's a durable, stable identifier that
-        ties together the branch, worktree, plan doc, and GitHub issue — it's
-        the one name by which every touchpoint refers to the work. Falling
-        back to context_summary only when there is no slug keeps ad-hoc
-        sessions readable without drowning planned work in paraphrased text.
-        """
+        """Human-friendly name: slug, then context_summary, then truncated message."""
         if self.slug:
             return self.slug
         if self.context_summary:

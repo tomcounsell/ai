@@ -21,6 +21,24 @@
         {% include "_partials/sessions_table.html" %}
     </div>
 </section>
+<script>
+document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target && e.detail.target.id === 'sessions-table' && window._expandedSessions && window._expandedSessions.size > 0) {
+        window._expandedSessions.forEach(function(sid) {
+            var toggle = document.querySelector('.child-toggle[data-session="' + sid + '"]');
+            if (toggle && toggle.classList.contains('collapsed')) {
+                var rows = document.querySelectorAll('tr[data-parent="' + sid + '"]');
+                var countEl = toggle.querySelector('.child-count');
+                var countHtml = countEl ? ' <span class="child-count">' + countEl.textContent + '</span>' : '';
+                toggle.classList.remove('collapsed');
+                toggle.innerHTML = '&#9660;' + countHtml;
+                toggle.title = 'Hide child sessions';
+                rows.forEach(function(row) { row.style.display = ''; });
+            }
+        });
+    }
+});
+</script>
 
 {# ── Reflections ── #}
 <section id="reflections" class="mt-8">

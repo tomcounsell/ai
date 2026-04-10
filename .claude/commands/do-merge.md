@@ -17,7 +17,7 @@ from bridge.pipeline_graph import DISPLAY_STAGES
 try:
     from bridge.pipeline_state import PipelineStateMachine
     from models.agent_session import AgentSession
-    session = AgentSession.get_by_slug('$SLUG')
+    session = next((s for s in AgentSession.query.all() if s.slug == '$SLUG'), None)
     if session:
         sm = PipelineStateMachine(session)
         states = sm.get_display_progress()
@@ -81,7 +81,14 @@ python -c "
 from bridge.pipeline_state import PipelineStateMachine
 from models.agent_session import AgentSession
 
-session = AgentSession.get_by_slug('$SLUG')
+try:
+    session = next((s for s in AgentSession.query.all() if s.slug == '$SLUG'), None)
+except Exception as e:
+    print(f'ERROR: Failed to query sessions: {e}')
+    print('Fall back to manual checks if needed.')
+    print('GATES_FAILED')
+    exit()
+
 if not session:
     print('ERROR: No session found for slug $SLUG')
     print('GATES_FAILED')
@@ -138,16 +145,16 @@ Before merging, scan the plan document for unchecked items that indicate unfinis
 SLUG=$(echo "$BRANCH" | sed 's|^session/||')
 PLAN_PATH="docs/plans/${SLUG}.md"
 
-python3 -c "
+# Read plan from origin/main (authoritative copy), not from cwd (which may be a stale worktree)
+PLAN_TEXT=$(git show origin/main:${PLAN_PATH} 2>/dev/null) || { echo "WARN: No plan found at origin/main:${PLAN_PATH} -- skipping completion gate"; exit 0; }
+
+echo "$PLAN_TEXT" | python3 -c "
 import re, sys, yaml
-from pathlib import Path
 
-plan_path = Path('$PLAN_PATH')
-if not plan_path.exists():
-    print('WARN: No plan found at $PLAN_PATH -- skipping completion gate')
+plan_text = sys.stdin.read()
+if not plan_text.strip():
+    print('WARN: Empty plan at origin/main:$PLAN_PATH -- skipping completion gate')
     sys.exit(0)
-
-plan_text = plan_path.read_text()
 
 # Parse frontmatter for allow_unchecked override
 frontmatter_match = re.match(r'^---\n(.*?)\n---', plan_text, re.DOTALL)
@@ -247,10 +254,18 @@ BRANCH=$(gh pr view $ARGUMENTS --json headRefName -q .headRefName 2>/dev/null ||
 SLUG=$(echo "$BRANCH" | sed 's|^session/||')
 PLAN_PATH="docs/plans/${SLUG}.md"
 
-if [ -f "$PLAN_PATH" ]; then
-  python scripts/migrate_completed_plan.py "$PLAN_PATH" && echo "Plan deleted: $PLAN_PATH" || echo "WARN: Plan migration failed for $PLAN_PATH — delete manually if needed"
+# Read the authoritative plan from origin/main (plans are always committed on main, not session branches)
+if git show origin/main:${PLAN_PATH} > /tmp/plan_${SLUG}.md 2>/dev/null; then
+  python scripts/migrate_completed_plan.py "/tmp/plan_${SLUG}.md" && echo "Plan migrated: $PLAN_PATH" || echo "WARN: Plan migration failed for $PLAN_PATH — delete manually if needed"
+  # Delete the plan from the working tree if it exists
+  if [ -f "$PLAN_PATH" ]; then
+    rm -f "$PLAN_PATH"
+    git add "$PLAN_PATH" 2>/dev/null || true
+    echo "Plan file removed: $PLAN_PATH"
+  fi
+  rm -f "/tmp/plan_${SLUG}.md"
 else
-  echo "No plan at $PLAN_PATH — skipping cleanup"
+  echo "No plan at origin/main:$PLAN_PATH — skipping cleanup"
 fi
 ```
 
