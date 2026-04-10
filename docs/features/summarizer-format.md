@@ -173,9 +173,35 @@ The `expectations` field description explicitly states it should only be set whe
 
 Basic `md` parse mode (not MarkdownV2). Supports bold, inline code, and `[text](url)` links. Falls back to plain text on parse errors.
 
+## Self-Summary Fallback via Session Steering
+
+When both summarizer backends (Haiku and OpenRouter) fail, the system avoids delivering raw truncated text to Telegram. Instead, it uses session steering to ask the agent to self-summarize.
+
+**Flow:**
+
+1. `summarize_response()` returns `SummarizedResponse(needs_self_summary=True, text="")` instead of truncating
+2. `send_response_with_files()` detects `needs_self_summary=True`
+3. If a session is available: pushes `SELF_SUMMARY_INSTRUCTION` to the session's steering queue via `push_steering_message(sender="summarizer-fallback")`
+4. Files (including `full_output_file`) are sent immediately -- only text delivery is deferred
+5. Returns `STEERING_DEFERRED` sentinel so the bridge callback knows this is intentional (not a send failure)
+6. The agent self-summarizes on its next turn, and the output flows through the normal delivery path
+
+**Loop prevention:** Before pushing a steering message, `peek_steering_sender()` checks if a `"summarizer-fallback"` message is already pending. If so, it skips steering and falls through to the narration gate.
+
+**Last-resort narration gate:** When no session is available, or steering fails, or loop prevention triggers:
+- `is_narration_only()` from `bridge/message_quality.py` checks the first 500 chars of the original text
+- If True: delivers `NARRATION_FALLBACK_MESSAGE` instead of raw narration
+- If False: delivers truncated text (existing behavior)
+
+**Key constants:**
+- `SELF_SUMMARY_INSTRUCTION` in `bridge/summarizer.py` -- compact prompt derived from `SUMMARIZER_SYSTEM_PROMPT` quality rules
+- `STEERING_DEFERRED` in `bridge/summarizer.py` -- sentinel return value for deferred delivery
+- `NARRATION_FALLBACK_MESSAGE` in `bridge/message_quality.py` -- user-friendly fallback text
+
 ## Related
 
 - [AgentSession Model](agent-session-model.md) - Unified lifecycle model with stage progress helpers
 - [Bridge Response Improvements](bridge-response-improvements.md) - Response pipeline
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) - Output classification and auto-continue
 - [PM Voice Refinement](pm-voice-refinement.md) - Naturalized SDLC language, crash pool, sentence truncation, milestone-selective emoji
+- [Session Steering](session-steering.md) - Steering infrastructure used by the self-summary fallback

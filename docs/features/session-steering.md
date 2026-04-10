@@ -105,6 +105,18 @@ All symbols that previously lived only in `agent/agent_session_queue.py` are re-
 
 Existing callers (tests, integrations) that import from `agent.agent_session_queue` continue to work unchanged. The canonical location is now `agent.output_router`.
 
+## Summarizer Fallback Steering
+
+When both summarizer backends (Haiku and OpenRouter) fail, `send_response_with_files()` uses the steering infrastructure to request agent self-summary rather than delivering raw truncated text to Telegram.
+
+**Mechanism:** `push_steering_message(session_id, SELF_SUMMARY_INSTRUCTION, sender="summarizer-fallback")` injects a compact self-summary instruction. The agent produces a clean summary on its next turn.
+
+**Loop prevention:** `peek_steering_sender(session_id)` checks if a `"summarizer-fallback"` message is already queued before pushing another. This prevents infinite steering loops if the self-summary output also fails summarization.
+
+**Fallback chain:** If steering cannot be used (no session, Redis down, loop prevention), the system falls through to `is_narration_only()` as a last-resort gate before delivering text.
+
+See [Summarizer Format: Self-Summary Fallback](summarizer-format.md#self-summary-fallback-via-session-steering) for the full data flow.
+
 ## No-Gos
 
 - `bridge/summarizer.py` `nudge_feedback` is untouched — separate concept
