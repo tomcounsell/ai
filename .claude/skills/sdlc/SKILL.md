@@ -46,22 +46,15 @@ Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local oper
 
 Query the PM session's `stage_states` for authoritative stage completion data. This is the **exclusive signal** for routing decisions. Stage completion is determined ONLY by stored state — never by artifact inference.
 
+Run the stage query tool directly and read its output from the tool result -- no shell substitution, no pipes, no environment-variable capture. The tool resolves the active session from `VALOR_SESSION_ID` or `AGENT_SESSION_ID` internally, so the skill does not need to branch on shell variables.
+
 ```bash
-# Query stage_states from the PM session via CLI tool
-STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
-
-# If VALOR_SESSION_ID is not set, try AGENT_SESSION_ID
-if [ -z "$STAGE_STATES" ] || [ "$STAGE_STATES" = "{}" ]; then
-    STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$AGENT_SESSION_ID" 2>/dev/null)
-fi
-
-# Parse the result — if non-empty JSON, use it as primary signal
-# Example output: {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress", ...}
+python -m tools.sdlc_stage_query
 ```
 
-**Decision logic:**
-- If `STAGE_STATES` is non-empty JSON with stage data: use it as the **exclusive signal** for the dispatch table. A stage is considered complete ONLY if its value is `"completed"` in stage_states. Skip steps 2a-2e.
-- If `STAGE_STATES` is empty `{}` or unavailable (no PM session, local Claude Code): use conversation dispatch history to determine what was already dispatched in this session. Do NOT infer from artifacts. If nothing has been dispatched, start from the beginning of the pipeline.
+Interpret the JSON output from the tool result:
+- Non-empty object with stage keys (e.g. `{"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress"}`): use it as the **exclusive signal** for the dispatch table. A stage is considered complete ONLY if its value is `"completed"`. Skip steps 2a-2e.
+- Empty `{}` or an `unavailable` marker: fall through to the dispatch-history fallback in steps 2a-2e. Do NOT infer stage completion from artifacts.
 
 ### Steps 2a-2e: Dispatch History Fallback
 
@@ -71,18 +64,24 @@ These checks run ONLY when stage_states is unavailable (empty JSON from step 2.0
 
 When stage_states is unavailable, use conversation context to identify which skills were already dispatched in this session. Artifacts are used only to check preconditions (e.g., "does a PR exist?") — not to declare stages complete.
 
+Run each check as a separate single-line command and read the output from the tool result. `$SDLC_TARGET_REPO` is exported by the harness so `git -C` picks it up without further shell composition; `gh` uses `$GH_REPO` automatically for the cross-repo case.
+
 ```bash
-REPO="${SDLC_TARGET_REPO:-.}"
-
 # 2a. Check if a plan doc references this issue
-grep -r "#{issue_number}" "$REPO/docs/plans/" 2>/dev/null
+grep -r "#{issue_number}" docs/plans/
+```
 
-# 2b. Check if a feature branch exists (in the target repo)
-git -C "$REPO" branch -a | grep session/
+```bash
+# 2b. List all branches (filter for session/ prefix in the tool result)
+git -C "$SDLC_TARGET_REPO" branch -a
+```
 
-# 2c. Check if a PR already exists (gh uses GH_REPO automatically)
+```bash
+# 2c. Check if a PR already exists
 gh pr list --search "#{issue_number}" --state open
 ```
+
+Filter the outputs by reading the tool results -- do not pipe through `grep` / `head` / `||`. The LLM interprets the output and decides the next step.
 
 If a PR exists, fetch its full state for assessment:
 ```bash
@@ -99,21 +98,24 @@ gh pr view {pr_number} --json number,headRefName,reviewDecision,statusCheckRollu
 
 This step is REQUIRED when a PR exists and review is clean (APPROVED). Skip it only if the pipeline hasn't reached the REVIEW stage yet.
 
+Run each check as a separate single-line command -- no pipes, no command substitution, no `||` fallbacks. The LLM interprets the tool results and decides the next step.
+
 ```bash
-# 3a. Check if any docs/ files were changed in the PR
-gh pr diff {pr_number} --name-only | grep -c '^docs/' || echo "0"
-
-# 3b. Check the plan's ## Documentation section for required doc tasks
-PLAN_PATH=$(grep -rl "#{issue_number}" "$REPO/docs/plans/" 2>/dev/null | head -1)
-if [ -n "$PLAN_PATH" ]; then
-    # Extract the Documentation section and check for unchecked tasks
-    sed -n '/^## Documentation/,/^## /p' "$PLAN_PATH" | grep -c '\- \[ \]' || echo "0"
-fi
-
-# 3c. Check stage_states for DOCS stage completion (reuse $STAGE_STATES from Step 2.0)
-# NOTE: No re-query needed -- $STAGE_STATES was already fetched in Step 2.0
-echo "$STAGE_STATES" | python -c "import sys,json; s=json.load(sys.stdin); print('DOCS_DONE' if s.get('DOCS')=='completed' else 'DOCS_NOT_DONE')" 2>/dev/null || echo "DOCS_NOT_DONE"
+# 3a. List files changed in the PR (count docs/ entries from the tool result)
+gh pr diff {pr_number} --name-only
 ```
+
+```bash
+# 3b. Find the plan path for this issue (first match from the tool result)
+grep -rl "#{issue_number}" docs/plans/
+```
+
+```bash
+# 3c. Read the plan's Documentation section (inspect for unchecked tasks in the tool result)
+cat docs/plans/{plan-filename}.md
+```
+
+For the DOCS stage completion check, re-read the `python -m tools.sdlc_stage_query` output from Step 2.0. Do not pipe JSON through a shell here.
 
 **Decision logic for docs**:
 - If the plan has a `## Documentation` section with unchecked tasks → docs NOT done

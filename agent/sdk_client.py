@@ -1962,8 +1962,12 @@ async def get_agent_response_sdk(
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
         if _session_type == SessionType.PM:
-            # PM session: PM persona, full permissions but hook-restricted.
-            # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
+            # PM session: PM persona with hook-restricted tool access.
+            # agent/hooks/pre_tool_use.py enforces: (1) Write/Edit blocked to paths
+            # outside docs/, (2) Bash restricted to a read-only allowlist
+            # (git status/log/diff/show, gh issue/pr view/list, tail logs/,
+            # cat docs/, python -m tools.valor_session status, etc.).
+            # Any mutation must be dispatched to a dev-session subagent.
             custom_system_prompt = load_pm_system_prompt(working_dir)
             logger.info(f"[{request_id}] PM session mode: PM persona, bypassPermissions")
         elif project_mode == "pm":

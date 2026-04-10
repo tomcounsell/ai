@@ -101,25 +101,13 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
    ```
    - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
    - If no state (output is `null`): proceed normally — initialize state after worktree creation
-4. **Check issue comment freshness** - Verify the plan has incorporated the latest issue comments before building:
+4. **Check issue comment freshness** - Verify the plan has incorporated the latest issue comments before building. This check is delegated to a helper script so the orchestrator only runs a single allowlisted command. If the script exits non-zero, the plan is stale and `/do-plan` must run before the build:
    ```bash
-   # Extract tracking issue number and last_comment_id from plan frontmatter
-   ISSUE_NUM=$(grep '^tracking:' {PLAN_PATH} | grep -oP '/issues/\K\d+')
-   PLAN_COMMENT_ID=$(grep '^last_comment_id:' {PLAN_PATH} | sed 's/last_comment_id: *//' | tr -d ' ')
-   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-
-   if [ -n "$ISSUE_NUM" ]; then
-     LATEST_COMMENT_ID=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '.[-1].id // empty' 2>/dev/null)
-     if [ -n "$LATEST_COMMENT_ID" ] && [ "$LATEST_COMMENT_ID" != "$PLAN_COMMENT_ID" ]; then
-       echo "STALE PLAN: Issue #${ISSUE_NUM} has new comments (latest: ${LATEST_COMMENT_ID}, plan has: ${PLAN_COMMENT_ID})"
-       echo "Run /do-plan to incorporate the latest feedback before building."
-       exit 1
-     fi
-   fi
+   python scripts/check_plan_freshness.py {PLAN_PATH}
    ```
-   - If the plan's `last_comment_id` matches the latest comment: proceed
-   - If there are newer comments: **STOP** and report that the plan needs updating via `/do-plan` first
-   - If no tracking issue or no comments exist: skip this check
+   - Exit 0: plan is fresh (last_comment_id matches the latest comment, or no tracking issue, or no comments exist)
+   - Exit 1: plan is stale; stop and report that the plan needs updating via `/do-plan` first
+   - Implementation: the script reads the plan frontmatter (`tracking:`, `last_comment_id:`) and calls `gh issue view {number} --json comments` to fetch the latest comment id. It does NOT use `gh api` -- `gh api` is excluded from PM session Bash by `agent/hooks/pre_tool_use.py::PM_BASH_ALLOWED_PREFIXES` as a silent mutation vector.
 5. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
 6. **Resolve target repo** - Determine which repo the plan belongs to (see "Target Repo Resolution" above):
    ```bash
