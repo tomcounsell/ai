@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Large
 owner: Valor
