@@ -1,0 +1,11 @@
+{
+  "issue_number": 697,
+  "plan_slug": "fix-happy-path-pipeline",
+  "issue_title": "Fix happy path testing pipeline: broken Rodney install, missing integration validation",
+  "merged_pr_number": 725,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 2,
+  "test_tasks_checked": 3,
+  "file_assertions_checked": 4
+}

@@ -1,0 +1,11 @@
+{
+  "issue_number": 625,
+  "plan_slug": "watchdog-judge-context",
+  "issue_title": "Watchdog health check misclassifies productive sessions as stuck loops",
+  "merged_pr_number": 635,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 4,
+  "file_assertions_checked": 0
+}

@@ -1,0 +1,11 @@
+{
+  "issue_number": 860,
+  "plan_slug": "popoto_orphan_cleanup_wiring",
+  "issue_title": "bug: Popoto orphan cleanup reflection never executes \u2014 82 Sentry events in 14 days",
+  "merged_pr_number": 863,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 3,
+  "file_assertions_checked": 0
+}

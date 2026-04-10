@@ -1,0 +1,11 @@
+{
+  "issue_number": 683,
+  "plan_slug": "summarizer-integration-cleanup",
+  "issue_title": "Summarizer integration cleanup: stale docs, config consolidation, test gaps",
+  "merged_pr_number": 684,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 1,
+  "test_tasks_checked": 3,
+  "file_assertions_checked": 3
+}

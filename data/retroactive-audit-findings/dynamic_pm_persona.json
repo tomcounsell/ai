@@ -1,0 +1,21 @@
+{
+  "issue_number": 541,
+  "plan_slug": "dynamic_pm_persona",
+  "issue_title": "Dynamic PM persona: conversational Q&A mode vs structured work mode",
+  "merged_pr_number": 545,
+  "auditable": true,
+  "findings": [
+    {
+      "type": "missing_doc",
+      "severity": "high",
+      "still_relevant": true,
+      "confidence": "high",
+      "expected_file": "docs/features/chat-dev-session-architecture.md",
+      "evidence": "- [ ] Update `docs/features/chat-dev-session-architecture.md` \u2014 add Q&A formatting section describing the prose vs structured split",
+      "description": "Documentation task says 'docs/features/chat-dev-session-architecture.md' should exist but it does not at HEAD"
+    }
+  ],
+  "doc_tasks_checked": 2,
+  "test_tasks_checked": 5,
+  "file_assertions_checked": 0
+}

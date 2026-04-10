@@ -1,0 +1,11 @@
+{
+  "issue_number": 731,
+  "plan_slug": "service-split",
+  "issue_title": "Extract standalone worker service from bridge monolith",
+  "merged_pr_number": 737,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 8,
+  "file_assertions_checked": 0
+}

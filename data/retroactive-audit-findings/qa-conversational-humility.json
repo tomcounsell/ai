@@ -1,0 +1,11 @@
+{
+  "issue_number": 589,
+  "plan_slug": "qa-conversational-humility",
+  "issue_title": "QA responses need conversational humility \u2014 edit pass for tone control",
+  "merged_pr_number": 602,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 5,
+  "file_assertions_checked": 0
+}

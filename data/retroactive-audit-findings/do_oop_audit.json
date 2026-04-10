@@ -1,0 +1,11 @@
+{
+  "issue_number": 437,
+  "plan_slug": "do_oop_audit",
+  "issue_title": "Create OOP/data modeling audit skill (do-oop-audit)",
+  "merged_pr_number": 513,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 2,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 0
+}

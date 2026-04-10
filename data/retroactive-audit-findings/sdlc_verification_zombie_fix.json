@@ -1,0 +1,11 @@
+{
+  "issue_number": 708,
+  "plan_slug": "sdlc_verification_zombie_fix",
+  "issue_title": "Retroactive SDLC verification for session zombie fix (#700/#703)",
+  "merged_pr_number": 720,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 2,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 2
+}

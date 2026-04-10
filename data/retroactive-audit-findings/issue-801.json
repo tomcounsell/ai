@@ -1,0 +1,9 @@
+{
+  "issue_number": 801,
+  "plan_slug": "issue-801",
+  "issue_title": "fix(queue): prevent duplicate worker spawns per chat_id via _starting_workers guard (#785)",
+  "merged_pr_number": 801,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

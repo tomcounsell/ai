@@ -1,0 +1,11 @@
+{
+  "issue_number": 567,
+  "plan_slug": "reply_to_session_resume",
+  "issue_title": "Reply-to should resume original AgentSession, not create a new one",
+  "merged_pr_number": 573,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 0
+}

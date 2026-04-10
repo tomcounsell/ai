@@ -1,0 +1,11 @@
+{
+  "issue_number": 656,
+  "plan_slug": "dashboard-artifact-inference",
+  "issue_title": "Dashboard shows stale pipeline state \u2014 missing artifact inference from #645",
+  "merged_pr_number": 663,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 2,
+  "test_tasks_checked": 5,
+  "file_assertions_checked": 0
+}

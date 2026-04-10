@@ -1,0 +1,11 @@
+{
+  "issue_number": 566,
+  "plan_slug": "reflections-regroup",
+  "issue_title": "Regroup Reflections: 19 monolithic steps into 14 independent + pipeline units",
+  "merged_pr_number": 572,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 1,
+  "test_tasks_checked": 7,
+  "file_assertions_checked": 0
+}

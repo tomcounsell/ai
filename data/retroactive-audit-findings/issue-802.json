@@ -1,0 +1,9 @@
+{
+  "issue_number": 802,
+  "plan_slug": "issue-802",
+  "issue_title": "fix(sdlc): enforce CRITIQUE and REVIEW gates in PM persona and sdk_client",
+  "merged_pr_number": 802,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

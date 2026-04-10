@@ -1,0 +1,11 @@
+{
+  "issue_number": 544,
+  "plan_slug": "pm-sdlc-decision-rules",
+  "issue_title": "PM SDLC decision rules: auto-merge on clean reviews, patch on findings, never silently skip",
+  "merged_pr_number": 550,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 2,
+  "test_tasks_checked": 2,
+  "file_assertions_checked": 0
+}

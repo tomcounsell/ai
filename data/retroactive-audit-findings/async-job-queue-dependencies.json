@@ -1,0 +1,11 @@
+{
+  "issue_number": 501,
+  "plan_slug": "async-job-queue-dependencies",
+  "issue_title": "Async job queue with branch-session mapping and dependency tracking",
+  "merged_pr_number": 512,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 0
+}

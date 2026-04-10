@@ -1,0 +1,11 @@
+{
+  "issue_number": 804,
+  "plan_slug": "fix-valor-session-kill",
+  "issue_title": "bug: valor-session kill uses transition_status() for terminal 'killed' status",
+  "merged_pr_number": 812,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 1
+}

@@ -1,0 +1,21 @@
+{
+  "issue_number": 477,
+  "plan_slug": "unified_web_ui",
+  "issue_title": "Unified Web UI: infrastructure, reflections dashboard, and SDLC observer",
+  "merged_pr_number": 511,
+  "auditable": true,
+  "findings": [
+    {
+      "type": "missing_test",
+      "severity": "medium",
+      "still_relevant": true,
+      "confidence": "high",
+      "expected_file": "tests/unit/test_reflection_model.py",
+      "evidence": "- [ ] `tests/unit/test_reflection_model.py` (if exists) \u2014 UPDATE: verify `mark_completed()` still works with existing callers after `run_history` append logic is added. The `mark_completed()` signature remains unchanged; history append is internal.",
+      "description": "Test Impact says 'tests/unit/test_reflection_model.py' should exist but it does not at HEAD"
+    }
+  ],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 1,
+  "file_assertions_checked": 0
+}

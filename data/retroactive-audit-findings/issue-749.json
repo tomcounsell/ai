@@ -1,0 +1,9 @@
+{
+  "issue_number": 749,
+  "plan_slug": "issue-749",
+  "issue_title": "feat(steering): externalize session steering via queued_steering_messages",
+  "merged_pr_number": 749,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

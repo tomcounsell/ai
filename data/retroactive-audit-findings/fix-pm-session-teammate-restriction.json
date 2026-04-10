@@ -1,0 +1,11 @@
+{
+  "issue_number": 827,
+  "plan_slug": "fix-pm-session-teammate-restriction",
+  "issue_title": "bug: PM sessions receive Teammate read-only restriction due to is_dm proxy (refactor artifact from PR #796)",
+  "merged_pr_number": 837,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 4,
+  "file_assertions_checked": 0
+}

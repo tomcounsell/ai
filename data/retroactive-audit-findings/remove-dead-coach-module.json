@@ -1,0 +1,41 @@
+{
+  "issue_number": 654,
+  "plan_slug": "remove-dead-coach-module",
+  "issue_title": "Remove dead coach module (bridge/coach.py) and tests",
+  "merged_pr_number": 661,
+  "auditable": true,
+  "findings": [
+    {
+      "type": "stale_test_file",
+      "severity": "low",
+      "still_relevant": true,
+      "confidence": "medium",
+      "expected_file": "tests/unit/test_coach.py",
+      "evidence": "- [ ] `tests/unit/test_coach.py` (all 54 tests) -- DELETE: tests for removed module",
+      "description": "Test file was supposed to be deleted but checking state unclear"
+    },
+    {
+      "type": "missing_artifact",
+      "severity": "medium",
+      "still_relevant": true,
+      "confidence": "medium",
+      "expected_file": "bridge/coach.py",
+      "evidence": "- [ ] `bridge/coach.py` deleted",
+      "section": "Success Criteria",
+      "description": "Success Criteria references 'bridge/coach.py' which does not exist at HEAD"
+    },
+    {
+      "type": "missing_artifact",
+      "severity": "medium",
+      "still_relevant": true,
+      "confidence": "medium",
+      "expected_file": "tests/unit/test_coach.py",
+      "evidence": "- [ ] `tests/unit/test_coach.py` deleted",
+      "section": "Success Criteria",
+      "description": "Success Criteria references 'tests/unit/test_coach.py' which does not exist at HEAD"
+    }
+  ],
+  "doc_tasks_checked": 2,
+  "test_tasks_checked": 1,
+  "file_assertions_checked": 2
+}

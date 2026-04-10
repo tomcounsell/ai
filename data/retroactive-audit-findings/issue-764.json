@@ -1,0 +1,9 @@
+{
+  "issue_number": 764,
+  "plan_slug": "issue-764",
+  "issue_title": "Unify AgentSession parent field on parent_agent_session_id (#757)",
+  "merged_pr_number": 764,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

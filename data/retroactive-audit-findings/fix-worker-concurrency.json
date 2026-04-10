@@ -1,0 +1,11 @@
+{
+  "issue_number": 810,
+  "plan_slug": "fix-worker-concurrency",
+  "issue_title": "bug: worker runs sessions in parallel despite per-chat serialization \u2014 no global concurrency cap",
+  "merged_pr_number": 814,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 3,
+  "file_assertions_checked": 0
+}

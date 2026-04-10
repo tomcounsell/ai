@@ -1,0 +1,11 @@
+{
+  "issue_number": 757,
+  "plan_slug": "unify_agent_session_parent_field",
+  "issue_title": "AgentSession dual parent fields (parent_session_id vs parent_agent_session_id) are never synced",
+  "merged_pr_number": 764,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 3,
+  "file_assertions_checked": 0
+}

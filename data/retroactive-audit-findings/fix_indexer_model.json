@@ -1,0 +1,11 @@
+{
+  "issue_number": 611,
+  "plan_slug": "fix_indexer_model",
+  "issue_title": "Knowledge indexer uses stale hardcoded model ID (404)",
+  "merged_pr_number": 615,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 2
+}

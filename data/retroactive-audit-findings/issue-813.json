@@ -1,0 +1,9 @@
+{
+  "issue_number": 813,
+  "plan_slug": "issue-813",
+  "issue_title": "fix: local session type now reflects SESSION_TYPE env var",
+  "merged_pr_number": 813,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

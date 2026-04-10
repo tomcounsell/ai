@@ -1,0 +1,9 @@
+{
+  "issue_number": 784,
+  "plan_slug": "issue-784",
+  "issue_title": "fix(worker): trigger session pickup immediately via Redis pub/sub (#778)",
+  "merged_pr_number": 784,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

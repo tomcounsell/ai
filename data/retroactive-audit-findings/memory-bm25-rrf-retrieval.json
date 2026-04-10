@@ -1,0 +1,11 @@
+{
+  "issue_number": 598,
+  "plan_slug": "memory-bm25-rrf-retrieval",
+  "issue_title": "Add BM25Field to Memory model and upgrade retrieval with RRF fusion",
+  "merged_pr_number": 604,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 6,
+  "file_assertions_checked": 0
+}

@@ -1,0 +1,11 @@
+{
+  "issue_number": 701,
+  "plan_slug": "session_lifecycle_consolidation",
+  "issue_title": "Consolidate AgentSession lifecycle mutations into single-entrypoint functions",
+  "merged_pr_number": 721,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 0
+}

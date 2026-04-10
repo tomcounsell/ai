@@ -1,0 +1,11 @@
+{
+  "issue_number": 657,
+  "plan_slug": "dashboard-session-visibility",
+  "issue_title": "Dashboard session visibility: fix broken timestamps, surface hidden fields, add parent/child hierarchy",
+  "merged_pr_number": 664,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 4,
+  "file_assertions_checked": 0
+}

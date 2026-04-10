@@ -1,0 +1,22 @@
+{
+  "issue_number": 500,
+  "plan_slug": "cross-agent-knowledge-relay",
+  "issue_title": "Cross-agent knowledge relay: persistent findings from parallel work",
+  "merged_pr_number": 517,
+  "auditable": true,
+  "findings": [
+    {
+      "type": "missing_artifact",
+      "severity": "medium",
+      "still_relevant": true,
+      "confidence": "medium",
+      "expected_file": "models/finding.py",
+      "evidence": "- [x] `Finding` model defined in `models/finding.py` with DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter, and CoOccurrenceField",
+      "section": "Success Criteria",
+      "description": "Success Criteria references 'models/finding.py' which does not exist at HEAD"
+    }
+  ],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 1
+}

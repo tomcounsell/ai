@@ -1,0 +1,11 @@
+{
+  "issue_number": 861,
+  "plan_slug": "chunked_document_retrieval",
+  "issue_title": "Chunked document retrieval: per-chunk embeddings for long documents",
+  "merged_pr_number": 864,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 2,
+  "file_assertions_checked": 0
+}

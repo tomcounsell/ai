@@ -1,0 +1,9 @@
+{
+  "issue_number": 793,
+  "plan_slug": "issue-793",
+  "issue_title": "fix: resolve AgentSession status index corruption (ghost running sessions)",
+  "merged_pr_number": 793,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

@@ -1,0 +1,11 @@
+{
+  "issue_number": 773,
+  "plan_slug": "sustainable_self_healing",
+  "issue_title": "Sustainable self-healing: wire CircuitBreaker + reflection scheduler to govern the session queue",
+  "merged_pr_number": 842,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 0
+}

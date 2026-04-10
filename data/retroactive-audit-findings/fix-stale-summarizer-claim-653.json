@@ -1,0 +1,11 @@
+{
+  "issue_number": 653,
+  "plan_slug": "fix-stale-summarizer-claim-653",
+  "issue_title": "Fix stale summarizer claim in pipeline-state-machine.md",
+  "merged_pr_number": 660,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 1,
+  "test_tasks_checked": 0,
+  "file_assertions_checked": 0
+}

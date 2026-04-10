@@ -1,0 +1,48 @@
+{
+  "issue_number": 564,
+  "plan_slug": "cross_repo_poller_fix",
+  "issue_title": "Issue poller dispatches plan creation in wrong working directory for cross-repo issues, corrupting ai repo",
+  "merged_pr_number": 575,
+  "auditable": true,
+  "findings": [
+    {
+      "type": "missing_doc",
+      "severity": "high",
+      "still_relevant": true,
+      "confidence": "high",
+      "expected_file": "docs/features/issue-poller.md",
+      "evidence": "- [ ] Update `docs/features/issue-poller.md` (if it exists) or create it, describing the cross-repo dispatch behavior",
+      "description": "Documentation task says 'docs/features/issue-poller.md' should exist but it does not at HEAD"
+    },
+    {
+      "type": "missing_test",
+      "severity": "medium",
+      "still_relevant": true,
+      "confidence": "high",
+      "expected_file": "tests/test_issue_poller.py",
+      "evidence": "- [ ] `tests/test_issue_poller.py::TestProcessIssue::test_plans_new_unique_issue` \u2014 UPDATE: assert `dispatch_plan_creation` is called with `working_directory` argument",
+      "description": "Test Impact says 'tests/test_issue_poller.py' should exist but it does not at HEAD"
+    },
+    {
+      "type": "missing_test",
+      "severity": "medium",
+      "still_relevant": true,
+      "confidence": "high",
+      "expected_file": "tests/test_issue_poller.py",
+      "evidence": "- [ ] `tests/test_issue_poller.py::TestProcessIssue::test_flags_insufficient_context` \u2014 UPDATE: `process_issue` signature change (add `working_directory` with default)",
+      "description": "Test Impact says 'tests/test_issue_poller.py' should exist but it does not at HEAD"
+    },
+    {
+      "type": "missing_test",
+      "severity": "medium",
+      "still_relevant": true,
+      "confidence": "high",
+      "expected_file": "tests/test_issue_poller.py",
+      "evidence": "- [ ] `tests/test_issue_poller.py::TestProcessIssue::test_skips_existing_plan` \u2014 UPDATE: signature change",
+      "description": "Test Impact says 'tests/test_issue_poller.py' should exist but it does not at HEAD"
+    }
+  ],
+  "doc_tasks_checked": 1,
+  "test_tasks_checked": 3,
+  "file_assertions_checked": 0
+}

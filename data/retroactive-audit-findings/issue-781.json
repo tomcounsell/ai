@@ -1,0 +1,9 @@
+{
+  "issue_number": 781,
+  "plan_slug": "issue-781",
+  "issue_title": "Fix: valor_session create triggers worker immediately via Redis pub/sub",
+  "merged_pr_number": 781,
+  "auditable": false,
+  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
+  "findings": []
+}

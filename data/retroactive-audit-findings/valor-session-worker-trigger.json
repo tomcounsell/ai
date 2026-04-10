@@ -1,0 +1,11 @@
+{
+  "issue_number": 778,
+  "plan_slug": "valor-session-worker-trigger",
+  "issue_title": "valor_session create does not trigger the worker \u2014 sessions sit pending up to 10 minutes",
+  "merged_pr_number": 781,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 4,
+  "file_assertions_checked": 0
+}

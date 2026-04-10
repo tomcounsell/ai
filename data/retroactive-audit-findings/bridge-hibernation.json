@@ -1,0 +1,11 @@
+{
+  "issue_number": 840,
+  "plan_slug": "bridge-hibernation",
+  "issue_title": "Bridge hibernation: structured recovery for Telegram auth and connectivity failures",
+  "merged_pr_number": 845,
+  "auditable": true,
+  "findings": [],
+  "doc_tasks_checked": 0,
+  "test_tasks_checked": 3,
+  "file_assertions_checked": 0
+}
