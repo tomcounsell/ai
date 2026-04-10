@@ -1,17 +1,22 @@
-"""Consolidated session lifecycle management.
+"""Consolidated session lifecycle management -- **status authority with CAS**.
 
 All session status mutations should go through this module:
 - finalize_session() for terminal transitions (completed, failed, killed, abandoned, cancelled)
 - transition_status() for non-terminal transitions (pending, running, active, dormant,
   waiting_for_children, superseded, paused_circuit, paused)
+- update_session() for atomic re-read + field application + status transition
+- get_authoritative_session() for centralized tie-break re-read
 
-This ensures consistent lifecycle logging, auto-tagging, branch checkpointing,
-and parent finalization regardless of which code path triggers the transition.
+This module owns the full mutation path: callers hand in a session_id (or instance),
+the module re-reads from Redis, applies changes, and CAS-saves. A StatusConflictError
+is raised when the on-disk status has changed since the caller's in-memory snapshot,
+preventing silent stomps from concurrent writers.
 
 Design constraints:
 - Must be importable from .claude/hooks/stop.py subprocess context (limited sys.path)
 - Uses lazy imports for heavy dependencies (tools.session_tags, agent.agent_session_queue)
 - All side effects are optional and fail-safe (catch and log, never block status save)
+- CAS uses Python-level compare-and-set (re-read + status compare), not Redis WATCH/MULTI/EXEC
 """
 
 import logging
@@ -19,10 +24,43 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# Terminal statuses — sessions in these states are "done"
+
+class StatusConflictError(Exception):
+    """Raised when CAS detects a status conflict during lifecycle transition.
+
+    The on-disk session status differs from what the caller expected,
+    indicating a concurrent writer has already changed the status.
+
+    Attributes:
+        session_id: The session_id of the conflicting session.
+        expected_status: The status the caller expected to find on disk.
+        actual_status: The actual status found on disk after re-read.
+        reason: Human-readable context for the conflict.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        expected_status: str,
+        actual_status: str,
+        reason: str = "",
+    ):
+        self.session_id = session_id
+        self.expected_status = expected_status
+        self.actual_status = actual_status
+        self.reason = reason
+        detail = f" ({reason})" if reason else ""
+        super().__init__(
+            f"Status conflict for session {session_id}: "
+            f"expected {expected_status!r} on disk, "
+            f"found {actual_status!r}{detail}"
+        )
+
+
+# Terminal statuses -- sessions in these states are "done"
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "cancelled"})
 
-# Non-terminal statuses — sessions in these states are still active or paused
+# Non-terminal statuses -- sessions in these states are still active or paused
 NON_TERMINAL_STATUSES = frozenset(
     {
         "pending",
@@ -36,7 +74,7 @@ NON_TERMINAL_STATUSES = frozenset(
     }
 )
 
-# Recovery ownership — maps every non-terminal status to the process responsible
+# Recovery ownership -- maps every non-terminal status to the process responsible
 # for detecting stuck sessions in that state and recovering them.
 # This is an informational constant; it is not used for runtime routing.
 # See docs/features/session-recovery-mechanisms.md for the full rationale.
@@ -55,6 +93,127 @@ RECOVERY_OWNERSHIP: dict[str, str] = {
 ALL_STATUSES = TERMINAL_STATUSES | NON_TERMINAL_STATUSES
 
 
+def get_authoritative_session(session_id: str, project_key: str | None = None):
+    """Re-read a session from Redis with tie-break logic.
+
+    Centralizes the pattern of querying AgentSession by session_id and
+    choosing the best record when duplicates exist. Tie-break logic:
+    1. Prefer records with status="running" (active execution)
+    2. Fall back to most recent by created_at
+
+    This replaces the blind ``list(...)[0]`` pattern used in 15+ call sites.
+
+    Args:
+        session_id: The session_id to look up.
+        project_key: Optional project_key filter for scoped queries.
+
+    Returns:
+        The authoritative AgentSession instance, or None if not found.
+    """
+    if not session_id:
+        logger.warning("[lifecycle-cas] get_authoritative_session called with empty session_id")
+        return None
+
+    from models.agent_session import AgentSession
+
+    try:
+        filters = {"session_id": session_id}
+        if project_key:
+            filters["project_key"] = project_key
+        sessions = list(AgentSession.query.filter(**filters))
+    except Exception as e:
+        logger.warning(
+            "[lifecycle-cas] Redis query failed for session_id=%s: %s",
+            session_id,
+            e,
+        )
+        return None
+
+    if not sessions:
+        logger.warning(
+            "[lifecycle-cas] No session found for session_id=%s",
+            session_id,
+        )
+        return None
+
+    if len(sessions) == 1:
+        return sessions[0]
+
+    # Tie-break: prefer running, then most recent by created_at
+    running = [s for s in sessions if getattr(s, "status", None) == "running"]
+    if running:
+        # Among running records, pick most recent
+        running.sort(key=lambda s: getattr(s, "created_at", 0) or 0, reverse=True)
+        return running[0]
+
+    # No running record -- pick most recent by created_at
+    sessions.sort(key=lambda s: getattr(s, "created_at", 0) or 0, reverse=True)
+    return sessions[0]
+
+
+def update_session(
+    session_id: str,
+    new_status: str | None = None,
+    fields: dict | None = None,
+    expected_status: str | None = None,
+    reason: str = "",
+) -> None:
+    """Atomic re-read + field application + status transition.
+
+    This is the preferred API for callers that need to set companion fields
+    (e.g., priority, started_at) alongside a status transition. The module
+    handles re-read, CAS check, field application, and save in one call.
+
+    Args:
+        session_id: The session_id to update.
+        new_status: Optional new status to transition to. If terminal,
+            delegates to finalize_session(). If non-terminal, delegates
+            to transition_status().
+        fields: Optional dict of field names to values to apply to the
+            session object before saving.
+        expected_status: If provided, the on-disk status must match this
+            value or StatusConflictError is raised.
+        reason: Human-readable reason for the transition.
+
+    Raises:
+        ValueError: If session_id is empty, or both new_status and fields are None.
+        StatusConflictError: If expected_status is provided and doesn't match on-disk.
+    """
+    if not session_id:
+        raise ValueError("session_id must not be empty")
+    if new_status is None and not fields:
+        raise ValueError("At least one of new_status or fields must be provided")
+
+    session = get_authoritative_session(session_id)
+    if session is None:
+        raise ValueError(f"No session found for session_id={session_id!r}")
+
+    # CAS check: if caller specified expected_status, verify on-disk matches
+    actual_status = getattr(session, "status", None)
+    if expected_status is not None and actual_status != expected_status:
+        raise StatusConflictError(
+            session_id=session_id,
+            expected_status=expected_status,
+            actual_status=actual_status or "unknown",
+            reason=reason,
+        )
+
+    # Apply companion fields
+    if fields:
+        for field_name, value in fields.items():
+            setattr(session, field_name, value)
+
+    # Delegate to the appropriate transition function
+    if new_status is not None:
+        if new_status in TERMINAL_STATUSES:
+            finalize_session(session, new_status, reason=reason)
+        else:
+            transition_status(session, new_status, reason=reason)
+    else:
+        # Field-only update (no status change)
+        session.save()
+
+
 def finalize_session(
     session,
     status: str,
@@ -67,22 +226,25 @@ def finalize_session(
     """Finalize a session with a terminal status.
 
     Executes all completion side effects in order:
-    1. Lifecycle transition log
-    2. Auto-tag session (unless skip_auto_tag)
-    3. Checkpoint branch state (unless skip_checkpoint)
-    4. Finalize parent session (unless skip_parent or no parent)
-    5. Set status + completed_at + save
+    1. CAS re-read + status comparison (conflict detection)
+    2. Lifecycle transition log
+    3. Auto-tag session (unless skip_auto_tag)
+    4. Checkpoint branch state (unless skip_checkpoint)
+    5. Finalize parent session (unless skip_parent or no parent)
+    6. Set status + completed_at + save
 
     Idempotent: if the session is already in the target terminal state,
     logs and returns without re-executing side effects.
 
+    CAS behavior: Re-reads the session from Redis and compares the on-disk
+    status against the caller's in-memory status. If they differ, raises
+    StatusConflictError. The caller's object is used for the save (not the
+    re-read), preserving any companion fields set before this call.
+
     Lazy-load safety: Before saving, this function backfills
     session._saved_field_values["status"] with the current status so that
     Popoto's IndexedFieldMixin.on_save() guard can call srem() to remove the
-    old index entry. Lazy-loaded sessions (from _create_lazy_model) only have
-    KeyFields pre-populated in _saved_field_values, so without this backfill
-    the old status index entry is never removed and the session appears in both
-    old and new status index sets simultaneously.
+    old index entry.
 
     Args:
         session: AgentSession instance to finalize.
@@ -94,6 +256,7 @@ def finalize_session(
 
     Raises:
         ValueError: If session is None or status is not terminal.
+        StatusConflictError: If CAS detects a concurrent status change.
     """
     if session is None:
         raise ValueError("session must not be None")
@@ -113,6 +276,34 @@ def finalize_session(
             f"already in terminal state {status!r}, skipping finalize"
         )
         return
+
+    # CAS: re-read from Redis and compare on-disk status against caller's snapshot.
+    # The re-read is ONLY for the status comparison -- the caller's object is used
+    # for the save to preserve any companion fields set before this call.
+    session_id = getattr(session, "session_id", None)
+    if session_id:
+        cas_start = time.monotonic()
+        try:
+            fresh = get_authoritative_session(session_id)
+            if fresh is not None:
+                on_disk_status = getattr(fresh, "status", None)
+                if on_disk_status != current_status:
+                    cas_elapsed = (time.monotonic() - cas_start) * 1000
+                    logger.debug(
+                        "[lifecycle-cas] CAS overhead: %.1fms (conflict detected)", cas_elapsed
+                    )
+                    raise StatusConflictError(
+                        session_id=session_id,
+                        expected_status=current_status or "unknown",
+                        actual_status=on_disk_status or "unknown",
+                        reason=f"finalize_session to {status!r}: {reason}",
+                    )
+            cas_elapsed = (time.monotonic() - cas_start) * 1000
+            logger.debug("[lifecycle-cas] CAS overhead: %.1fms (finalize)", cas_elapsed)
+        except StatusConflictError:
+            raise
+        except Exception as e:
+            logger.debug(f"[lifecycle-cas] CAS re-read failed (non-fatal, proceeding): {e}")
 
     # 1. Lifecycle transition log
     try:
@@ -160,7 +351,7 @@ def finalize_session(
     # this, lazy-loaded sessions (created via _create_lazy_model) start with an empty
     # _saved_field_values dict and the guard `if old_value is not None` is never
     # satisfied, leaving the session stranded in both old and new status index sets.
-    # See: popoto/models/encoding.py _create_lazy_model() — only KeyFields are seeded.
+    # See: popoto/models/encoding.py _create_lazy_model() -- only KeyFields are seeded.
     # NOTE: _saved_field_values is a Popoto internal. If Popoto is upgraded, verify
     # this coupling is still valid by checking on_save() in IndexedFieldMixin.
     if hasattr(session, "_saved_field_values"):
@@ -186,15 +377,18 @@ def transition_status(
     terminal->non-terminal transitions (e.g., _mark_superseded, revival) must pass
     reject_from_terminal=False explicitly.
 
-    Idempotent: if the session is already in the target state, logs and returns.
+    Idempotent: if the session is already in the target state, still saves to
+    persist any companion fields set by the caller (fixes #873).
+
+    CAS behavior: Re-reads the session from Redis and compares the on-disk
+    status against the caller's in-memory status. If they differ, raises
+    StatusConflictError. The caller's object is used for the save (not the
+    re-read), preserving any companion fields set before this call.
 
     Lazy-load safety: Before saving, this function backfills
     session._saved_field_values["status"] with the current status so that
     Popoto's IndexedFieldMixin.on_save() guard can call srem() to remove the
-    old index entry. Lazy-loaded sessions (from _create_lazy_model) only have
-    KeyFields pre-populated in _saved_field_values, so without this backfill
-    the old status index entry is never removed and the session appears in both
-    old and new status index sets simultaneously.
+    old index entry.
 
     Args:
         session: AgentSession instance to transition.
@@ -207,6 +401,7 @@ def transition_status(
     Raises:
         ValueError: If session is None, new_status is a terminal status,
             or current status is terminal and reject_from_terminal is True.
+        StatusConflictError: If CAS detects a concurrent status change.
     """
     if session is None:
         raise ValueError("session must not be None")
@@ -231,12 +426,42 @@ def transition_status(
             f"(e.g., revival or superseding)."
         )
 
-    # Idempotency: if already in this state, skip
+    # CAS: re-read from Redis and compare on-disk status against caller's snapshot.
+    # The re-read is ONLY for the status comparison -- the caller's object is used
+    # for the save to preserve any companion fields set before this call.
+    session_id = getattr(session, "session_id", None)
+    if session_id:
+        cas_start = time.monotonic()
+        try:
+            fresh = get_authoritative_session(session_id)
+            if fresh is not None:
+                on_disk_status = getattr(fresh, "status", None)
+                if on_disk_status != current_status:
+                    cas_elapsed = (time.monotonic() - cas_start) * 1000
+                    logger.debug(
+                        "[lifecycle-cas] CAS overhead: %.1fms (conflict detected)", cas_elapsed
+                    )
+                    raise StatusConflictError(
+                        session_id=session_id,
+                        expected_status=current_status or "unknown",
+                        actual_status=on_disk_status or "unknown",
+                        reason=f"transition_status to {new_status!r}: {reason}",
+                    )
+            cas_elapsed = (time.monotonic() - cas_start) * 1000
+            logger.debug("[lifecycle-cas] CAS overhead: %.1fms (transition)", cas_elapsed)
+        except StatusConflictError:
+            raise
+        except Exception as e:
+            logger.debug(f"[lifecycle-cas] CAS re-read failed (non-fatal, proceeding): {e}")
+
+    # Idempotency: if already in this state, still save to persist companion fields
+    # (fixes #873 -- companion field edits were silently dropped on idempotent path)
     if current_status == new_status:
         logger.debug(
             f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
-            f"already in state {new_status!r}, skipping transition"
+            f"already in state {new_status!r}, saving companion fields"
         )
+        session.save()
         return
 
     # Lifecycle transition log
@@ -285,7 +510,7 @@ def _finalize_parent_sync(
     except Exception as exc:
         logger.warning(
             "[session-hierarchy] Parent session %s lookup raised exception "
-            "during finalization (%s) — treating child as orphaned",
+            "during finalization (%s) -- treating child as orphaned",
             parent_id,
             exc,
         )
@@ -294,7 +519,7 @@ def _finalize_parent_sync(
     if parent is None:
         logger.warning(
             f"[session-hierarchy] Parent session {parent_id} not found during "
-            f"finalization — parent may have been deleted or already finalized"
+            f"finalization -- parent may have been deleted or already finalized"
         )
         return
 
@@ -330,11 +555,11 @@ def _finalize_parent_sync(
     if non_terminal:
         logger.debug(
             f"[session-hierarchy] Parent {parent_id} has "
-            f"{len(non_terminal)} non-terminal children — waiting"
+            f"{len(non_terminal)} non-terminal children -- waiting"
         )
         return
 
-    # All children are terminal — determine final parent status
+    # All children are terminal -- determine final parent status
     any_failed = any(s == "failed" for s in child_statuses)
     new_status = "failed" if any_failed else "completed"
 

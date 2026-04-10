@@ -1297,11 +1297,15 @@ def _recover_interrupted_agent_sessions_startup() -> int:
             entry.message_text or "",
         )
         try:
-            from models.session_lifecycle import transition_status
+            from models.session_lifecycle import update_session
 
-            entry.priority = "high"
-            entry.started_at = None
-            transition_status(entry, "pending", reason="startup recovery")
+            update_session(
+                entry.session_id,
+                new_status="pending",
+                fields={"priority": "high", "started_at": None},
+                expected_status="running",
+                reason="startup recovery",
+            )
             logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
             count += 1
         except Exception as e:
@@ -1431,6 +1435,10 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                     )
                 else:
+                    # Apply companion fields directly to the already-loaded entry,
+                    # then transition via transition_status() which has its own CAS
+                    # re-read. This avoids the redundant Redis re-read that
+                    # update_session() would do.
                     entry.priority = "high"
                     entry.started_at = None
                     transition_status(
@@ -2476,22 +2484,17 @@ async def _enqueue_nudge(
     # expectations, and all other metadata that would be lost if we called
     # enqueue_agent_session() (which creates a brand new AgentSession record).
     #
-    # Uses delete-and-recreate to work around Popoto's KeyField index corruption
-    # bug (on_save() adds to new index set but never removes from old one).
-    # Note: _pop_agent_session no longer uses delete-and-recreate -- it mutates
-    # status in place via transition_status() because status is an IndexedField,
-    # not a KeyField. This fallback path must recreate because it may need to
-    # rewrite other dict-backed fields (e.g., initial_telegram_message) and to
-    # guarantee a fresh AutoKeyField id for observability.
-    sessions = await asyncio.to_thread(
-        lambda: list(AgentSession.query.filter(session_id=session.session_id))
-    )
-    if not sessions:
-        # Diagnose why the session is missing before falling back.
-        # Check Redis directly for key existence and TTL to aid debugging.
-        _diag = _diagnose_missing_session(session.session_id)
+    # Uses get_authoritative_session for tie-break re-read (prefers running,
+    # then most recent by created_at) instead of blind sessions[0].
+    from models.session_lifecycle import get_authoritative_session
+
+    orig_session_id = session.session_id
+    reread_session = await asyncio.to_thread(get_authoritative_session, orig_session_id)
+    if reread_session is None:
+        # Session not found in Redis — fall back to recreate from in-memory metadata.
+        _diag = _diagnose_missing_session(orig_session_id)
         logger.error(
-            f"[{session.project_key}] No session found for {session.session_id} "
+            f"[{session.project_key}] No session found for {orig_session_id} "
             f"— falling back to recreate from AgentSession metadata. "
             f"Diagnostics: {_diag}"
         )
@@ -2502,7 +2505,7 @@ async def _enqueue_nudge(
         if current_status in _TERMINAL_STATUSES:
             logger.warning(
                 f"[{session.project_key}] Fallback recreate blocked: session "
-                f"{session.session_id} has terminal status {current_status!r}"
+                f"{orig_session_id} has terminal status {current_status!r}"
             )
             return
         # Fallback: recreate session preserving ALL metadata from the
@@ -2527,13 +2530,13 @@ async def _enqueue_nudge(
         _ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
         logger.info(
             f"[{session.project_key}] Recreated session "
-            f"{session.session_id} from AgentSession metadata "
+            f"{orig_session_id} from AgentSession metadata "
             f"(fallback path, auto_continue_count="
             f"{auto_continue_count})"
         )
         return
 
-    session = sessions[0]
+    session = reread_session
 
     # Re-read guard: session status may have changed between the initial check
     # and this point (e.g., another process finalized the session).
@@ -2546,7 +2549,9 @@ async def _enqueue_nudge(
         )
         return
 
-    # Use lifecycle module for consistent transition logging.
+    # Apply companion fields directly to the already-loaded session object,
+    # then transition via transition_status() which has its own CAS re-read.
+    # This avoids the redundant Redis re-read that update_session() would do.
     from models.session_lifecycle import transition_status
 
     session.message_text = nudge_feedback
@@ -2686,9 +2691,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
     if slug:
         # Try to read current stage from the AgentSession
         try:
-            sessions = list(AgentSession.query.filter(session_id=session.session_id))
-            if sessions:
-                stage = sessions[0].current_stage
+            from models.session_lifecycle import get_authoritative_session as _get_auth
+
+            _auth = _get_auth(session.session_id)
+            if _auth:
+                stage = _auth.current_stage
         except Exception as e:
             logger.debug(
                 f"[{session.project_key}] current_stage lookup failed for "
@@ -3887,11 +3894,15 @@ def _cli_flush_agent_session(agent_session_id: str) -> None:
 
 def _cli_recover_single_agent_session(session: AgentSession) -> None:
     """Recover a stuck session by resetting it to pending."""
-    from models.session_lifecycle import transition_status
+    from models.session_lifecycle import update_session
 
-    session.priority = "high"
-    session.started_at = None
-    transition_status(session, "pending", reason="CLI manual recovery")
+    update_session(
+        session.session_id,
+        new_status="pending",
+        fields={"priority": "high", "started_at": None},
+        expected_status="running",
+        reason="CLI manual recovery",
+    )
     print(f"  Re-enqueued as pending (id: {session.agent_session_id})")
 
 
