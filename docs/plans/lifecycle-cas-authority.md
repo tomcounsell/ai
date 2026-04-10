@@ -448,9 +448,14 @@ No agent integration required -- this is an internal refactor of the session lif
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-10 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Adversary | `_enqueue_nudge` blind `sessions[0]` at line 2536 not migrated to `get_authoritative_session()` — same blind re-read pattern the plan centralizes | Task 4 (build-migrate-callsites) should add this site | `_enqueue_nudge` line 2536: replace `session = sessions[0]` with `session = get_authoritative_session(session.session_id)` and handle `None` return. The function already re-reads but uses the blind `[0]` pattern without tie-break. |
+| CONCERN | Adversary, Skeptic | `transition_status()` idempotent path currently returns early (line 240) — plan says "still call `session.save()`" but doesn't specify where the companion fields get applied when caller sets them *before* calling `transition_status()` and on-disk status already matches | Task 2 (build-cas-lifecycle) | The CAS re-read replaces the caller's in-memory object with a fresh one. Companion fields set by the caller on the *old* object (e.g., `entry.priority = "high"` at line 1302) will be lost unless the new `transition_status()` explicitly copies them from the caller's object or the caller switches to `update_session(fields={...})`. Plan must clarify: does the idempotent save use the *re-read* object or the *caller's* object? If re-read, companion fields are silently dropped — exactly the #873 bug. |
+| CONCERN | Operator | Plan specifies "CAS overhead must be under 5ms" but no logging or metric emission is described for measuring this in production — only "measured in test" | Task 5 (validate-cas) | Add a `time.monotonic()` pair around the CAS re-read+compare in `finalize_session()`/`transition_status()` and emit `logger.debug("[lifecycle-cas] CAS overhead: %.1fms", elapsed_ms)`. The 5ms threshold can then be monitored from existing log aggregation. |
+| NIT | Simplifier | Task 1 marks `Parallel: true` but has no sibling task to run alongside — all downstream tasks depend on it sequentially | Task 1 | Cosmetic only; remove `Parallel: true` from Task 1 to avoid confusion in orchestration tooling |
+| NIT | Archaeologist | Plan references line 2688 for the racy `status="running"` filter but actual code is at line 2760 (post-drift) — the freshness check section acknowledges line drift in session_lifecycle.py but not in agent_session_queue.py | Freshness Check section | Update the `agent_session_queue.py:2684` and `2688` references to `2760` in the Freshness Check section to prevent builder confusion |
 
 ---
 
