@@ -1263,7 +1263,11 @@ def _get_agent_session_timeout(session) -> int:
 
 
 async def _agent_session_health_check() -> None:
-    """Unified health check for all sessions — the single recovery mechanism.
+    """Health check for worker-managed sessions (running and pending).
+
+    Other non-terminal statuses (active, dormant, paused, paused_circuit) are
+    monitored by the bridge-hosted watchdog in monitoring/session_watchdog.py.
+    See RECOVERY_OWNERSHIP in models/session_lifecycle.py for the full coverage map.
 
     Scans both 'running' and 'pending' sessions:
 
