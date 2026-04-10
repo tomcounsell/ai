@@ -138,14 +138,14 @@ should be treated as already-addressed unless there is specific evidence of gaps
 
 ## Next Steps
 
-**No action required.** The audit found zero unaddressed gaps after thorough relevance analysis.
+**Audit complete.** All 21 initially-detected findings resolved or addressed.
 
-All 21 initially-detected findings were either:
-- Intentional deletions (ObserverTelemetry, coach module)
-- Renamed files (job_queue_race → agent_session_queue_race + worker_drain)
-- Renamed/rearchitected docs (chat-dev → pm-dev architecture)
-- Wrong paths in original plans (docs/deployment.md → docs/features/deployment.md)
-- Never-needed files (test_reflection_model.py was conditional)
-- Removed features (issue_poller deleted via #565)
+Findings dispositioned as:
+- Intentional deletions: ObserverTelemetry, coach module
+- Renamed files: job_queue_race → agent_session_queue_race (drain guard tests exist)
+- Superseded docs: chat-dev-session-architecture → pm-dev-session-architecture.md
+- Wrong paths in original plans: docs/deployment.md → docs/features/deployment.md
+- Removed features: issue_poller deleted via #565
+- Phase 4 fix: `tests/unit/test_reflection_model.py` added (12 tests, all passing)
 
-Future plans should be reviewed against this report's findings to avoid generating similar false-positive audit detections.
+Future plans should be reviewed against this report's findings to avoid similar false-positive audit detections.
