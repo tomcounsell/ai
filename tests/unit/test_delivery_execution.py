@@ -209,6 +209,8 @@ class TestSelfSummaryFallback:
         mock_client = AsyncMock()
 
         summarized = _make_summarized_response(needs_self_summary=True)
+        # Must be >= 200 chars to trigger summarizer path
+        long_narration = "Let me investigate the configuration. " * 10
 
         with (
             patch(
@@ -221,17 +223,16 @@ class TestSelfSummaryFallback:
             await send_response_with_files(
                 mock_client,
                 None,
-                "Let me check. Let me investigate.",  # narration-only, short
+                long_narration,
                 chat_id=123,
                 reply_to=456,
                 session=session,
             )
 
-        # Should have sent something (either narration fallback or truncated)
-        if mock_send.called:
-            sent_text = mock_send.call_args[0][2]  # positional: client, chat_id, text
-            # Either the narration fallback message or the original text
-            assert len(sent_text) > 0
+        # Should have sent something (either narration fallback or truncated original)
+        assert mock_send.called, "send_markdown should have been called"
+        sent_text = mock_send.call_args[0][2]
+        assert len(sent_text) > 0
 
     async def test_narration_gate_replaces_narration_text(self):
         """is_narration_only gate replaces narration with NARRATION_FALLBACK_MESSAGE."""
@@ -242,7 +243,8 @@ class TestSelfSummaryFallback:
         mock_client = AsyncMock()
 
         summarized = _make_summarized_response(needs_self_summary=True)
-        narration_text = "Let me check. Let me investigate."
+        # Must be >= 200 chars to trigger summarizer path
+        narration_text = "Let me check the configuration. " * 10
 
         with (
             patch(
@@ -262,9 +264,9 @@ class TestSelfSummaryFallback:
                 session=session,
             )
 
-        if mock_send.called:
-            sent_text = mock_send.call_args[0][2]
-            assert sent_text == NARRATION_FALLBACK_MESSAGE
+        assert mock_send.called, "send_markdown should have been called"
+        sent_text = mock_send.call_args[0][2]
+        assert sent_text == NARRATION_FALLBACK_MESSAGE
 
     async def test_loop_prevention_skips_steering_when_already_pending(self):
         """If summarizer-fallback steering already pending, skip and fall through."""
