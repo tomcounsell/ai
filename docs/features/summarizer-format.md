@@ -6,7 +6,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 1. **SDLC: always summarize (even empty responses). Non-SDLC: summarize if >= 200 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Even empty SDK responses render SDLC stage progress if session data is available. Non-SDLC short responses (< 200 chars) pass through raw -- this preserves programmatic skill output like `/update` that's already formatted.
 2. **SDLC template rendering**: Stage progress lines and link footers are rendered in Python code, not by the LLM. The LLM only generates bullet summaries and questions.
-3. **Question extraction (anti-fabrication)**: The LLM can surface questions using a `---` separator and `>> ` prefix, but ONLY questions that are **verbatim present** in the raw agent output. Declarative statements and plans must never be reframed as questions. The `expectations` field is set only when explicit questions exist. Legacy `? ` prefix is accepted and normalized to `>> ` by `_normalize_question_prefix()`.
+3. **Question extraction (anti-fabrication)**: The LLM can surface questions using a `---` separator and `>> ` prefix, but ONLY questions that are **verbatim present** in the raw agent output. Declarative statements and plans must never be reframed as questions. The `expectations` field is set only when explicit questions exist. The `? ` prefix from older formats is accepted and normalized to `>> ` by `_normalize_question_prefix()`.
 
 ## Output Format
 
@@ -92,7 +92,7 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 
 ## Implementation
 
-- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer with inline stage progress and link footer rendering), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_linkify_references()` (auto-link PR/Issue refs)
+- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer with inline stage progress and link footer rendering), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (`?` to `>>` prefix conversion), `_linkify_references()` (auto-link PR/Issue refs), `SELF_SUMMARY_INSTRUCTION` (steering prompt for fallback self-summary), `STEERING_DEFERRED` (sentinel for deferred delivery)
 - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg. `_truncate_at_sentence_boundary()` ensures clean truncation at Telegram's 4096-char limit.
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
 - `agent/agent_session_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `determine_delivery_action()` for routing decisions and passes `agent_session`
