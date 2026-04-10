@@ -29,6 +29,7 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     migrations,
+    npm_tools,
     officecli,
     rodney,
     service,
@@ -120,6 +121,7 @@ class UpdateResult:
     migration_result: migrations.MigrationResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
+    npm_tools_result: npm_tools.NpmToolsResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -499,6 +501,22 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         log(f"WARN: Rodney {rr.action}: {rr.error}", v)
         result.warnings.append(f"Rodney: {rr.error}")
+
+    # Step 3.9: npm global tools (excalidraw-export, etc.)
+    log("Checking npm tools...", v)
+    result.npm_tools_result = npm_tools.install_or_update()
+    for npm_r in result.npm_tools_result.results:
+        if npm_r.success:
+            if npm_r.action == "skipped":
+                log(f"  {npm_r.name} {npm_r.version} (up to date)", v)
+            else:
+                log(f"  {npm_r.name} {npm_r.action}: {npm_r.version}", v, always=True)
+        else:
+            if npm_r.name == "npm":
+                log("  WARN: npm not available — skipping npm tools", v)
+            else:
+                log(f"  WARN: {npm_r.name}: {npm_r.error}", v)
+                result.warnings.append(f"npm:{npm_r.name}: {npm_r.error}")
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
