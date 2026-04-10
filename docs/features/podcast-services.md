@@ -46,6 +46,22 @@ Core podcast record. Key fields for navigation and access control:
 
 **View access control:** `PodcastListView` shows `is_public=True` podcasts plus the authenticated user's private podcasts. Detail views (`PodcastDetailView`, `EpisodeDetailView`, etc.) use `_get_accessible_podcast()` which returns 404 for private podcasts unless `request.user == podcast.owner`. `PodcastFeedView` allows authenticated owners to access private feeds without `?token=`.
 
+### PodcastSubscription
+Bridge between a billing record (`common.Subscription`) and a `Podcast`. Both FKs are OneToOne — one billing record serves one podcast and one podcast has one active subscription in MVP scope. Subscriber email and name are denormalized to avoid requiring a Django User account.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `subscription` | OneToOneField → common.Subscription | Billing record from Stripe |
+| `podcast` | OneToOneField → podcast.Podcast | The podcast the subscriber receives |
+| `subscriber_email` | EmailField (db_index) | Denormalized from Stripe |
+| `subscriber_name` | CharField | Denormalized from Stripe |
+| `status` | TextChoices (`active`, `churned`) | Subscription lifecycle |
+| `cadence` | TextChoices (`weekly`, `biweekly`) | Episode delivery frequency |
+| `length_minutes` | PositiveIntegerField (default 15) | Target episode length |
+| `topic_focus` | TextField (blank) | Subscriber-specified curation focus |
+| `next_drop_at` | DateTimeField (null) | Scheduled next episode delivery |
+| `do_not_email` | BooleanField | Suppress all outbound emails |
+
 ### Episode
 Core episode record. Services read and write these fields:
 

@@ -8,6 +8,7 @@ from apps.podcast.models import (
     Podcast,
     PodcastAccessToken,
     PodcastConfig,
+    PodcastSubscription,
 )
 
 
@@ -117,3 +118,12 @@ class PodcastAccessTokenAdmin(ModelAdmin):
     list_display = ["podcast", "label", "is_active", "access_count", "last_accessed_at"]
     list_filter = ["is_active", "podcast"]
     readonly_fields = ["token", "last_accessed_at", "access_count"]
+
+
+@admin.register(PodcastSubscription)
+class PodcastSubscriptionAdmin(ModelAdmin):
+    list_display = ["subscriber_email", "podcast", "status", "cadence", "next_drop_at"]
+    list_filter = ["status", "cadence", "podcast"]
+    search_fields = ["subscriber_email", "subscriber_name"]
+    raw_id_fields = ["subscription", "podcast"]
+    ordering = ["-created_at"]

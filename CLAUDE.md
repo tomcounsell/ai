@@ -350,6 +350,7 @@ Django `@task`-per-step pipeline for autonomous episode production.
 | `Episode` | Core episode record with audio, transcript, report, and metadata fields |
 | `EpisodeArtifact` | Versioned content artifacts (brief, research, digest, briefing, plan, metadata, companions) |
 | `EpisodeWorkflow` | OneToOne with Episode: tracks current_step, status, blocked_on, history (JSONField) |
+| `PodcastSubscription` | Links a billing `Subscription` (common) to a `Podcast`; stores cadence, episode length, topic focus, next drop datetime, and email suppression |
 
 Workflow statuses: `pending`, `running`, `paused_for_human`, `paused_at_gate`, `failed`, `complete`
 

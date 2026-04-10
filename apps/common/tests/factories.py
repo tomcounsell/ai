@@ -376,3 +376,85 @@ class SMSFactory(ModelFactory):
 
         data.update(kwargs)
         return super().create(**data)
+
+
+class SubscriptionFactory(ModelFactory):
+    """Factory for common.Subscription model."""
+
+    from apps.common.models import Subscription
+
+    model_class = Subscription
+    default_data = {
+        "plan_name": "Podcast Subscription",
+        "price": 999,
+        "interval": "monthly",
+        "status": "active",
+    }
+
+
+class PodcastFactory(ModelFactory):
+    """Factory for podcast.Podcast model."""
+
+    from apps.podcast.models import Podcast
+
+    model_class = Podcast
+    default_data = {
+        "title": lambda: f"Test Podcast {random.randint(1000, 9999)}",
+        "slug": None,  # set in create()
+        "description": "A test podcast about technology.",
+        "author_name": "Test Author",
+        "author_email": "author@example.com",
+    }
+
+    @classmethod
+    def create(cls, **kwargs) -> "Podcast":
+        """Create a Podcast with a unique slug derived from the title."""
+        data = cls.default_data.copy()
+
+        # Process callable defaults
+        for key, value in data.items():
+            if callable(value):
+                data[key] = value()
+
+        data.update(kwargs)
+
+        if not data.get("slug"):
+            data["slug"] = slugify(data["title"])
+
+        return super().create(**data)
+
+
+class PodcastSubscriptionFactory(ModelFactory):
+    """Factory for podcast.PodcastSubscription model."""
+
+    from apps.podcast.models import PodcastSubscription
+
+    model_class = PodcastSubscription
+    default_data = {
+        "subscriber_email": lambda: f"subscriber_{random.randint(1000, 9999)}@example.com",
+        "subscriber_name": "Test Subscriber",
+        "status": "active",
+        "cadence": "weekly",
+        "length_minutes": 15,
+        "topic_focus": "AI and technology",
+    }
+
+    @classmethod
+    def create(cls, **kwargs) -> "PodcastSubscription":
+        """Create a PodcastSubscription with all required relationships."""
+        data = cls.default_data.copy()
+
+        # Process callable defaults
+        for key, value in data.items():
+            if callable(value):
+                data[key] = value()
+
+        data.update(kwargs)
+
+        if not data.get("subscription"):
+            data["subscription"] = SubscriptionFactory.create()
+
+        if not data.get("podcast"):
+            data["podcast"] = PodcastFactory.create()
+
+        return super().create(**data)

@@ -4,6 +4,7 @@ from .episode_artifact import EpisodeArtifact
 from .episode_workflow import EpisodeWorkflow
 from .podcast import Podcast
 from .podcast_config import PodcastConfig
+from .podcast_subscription import PodcastSubscription
 
 __all__ = [
     "Episode",
@@ -12,4 +13,5 @@ __all__ = [
     "Podcast",
     "PodcastAccessToken",
     "PodcastConfig",
+    "PodcastSubscription",
 ]
