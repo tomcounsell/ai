@@ -176,8 +176,7 @@ def _sync_chunks(doc, content: str, project_key: str) -> None:
                 created += 1
             except Exception as e:
                 logger.warning(
-                    f"Failed to create chunk {chunk_data['chunk_index']} "
-                    f"for document {doc_id}: {e}"
+                    f"Failed to create chunk {chunk_data['chunk_index']} for document {doc_id}: {e}"
                 )
 
         if created > 0:

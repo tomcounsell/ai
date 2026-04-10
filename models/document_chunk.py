@@ -66,9 +66,7 @@ class DocumentChunk(Model):
             return 0
 
     @classmethod
-    def search(
-        cls, query_text: str, project_key: str | None = None, top_k: int = 5
-    ) -> list[dict]:
+    def search(cls, query_text: str, project_key: str | None = None, top_k: int = 5) -> list[dict]:
         """Search chunks by semantic similarity to query text.
 
         Embeds the query via the configured OpenAI provider, loads all chunk
