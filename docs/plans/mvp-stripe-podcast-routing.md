@@ -164,6 +164,25 @@ Already handled — `hasattr(subscription, 'podcast_subscription')` is False. No
 - Multi-podcast subscriber support (one-to-one enforced by OneToOneField)
 - Webhook endpoint authentication beyond Stripe signature verification
 
+## Update System
+
+No update system changes required — this feature is purely internal to the codebase. The webhook endpoint is exposed via the web server, not the bridge or worker. New operators must configure `STRIPE_WEBHOOK_SECRET` and `STRIPE_PODCAST_PRICE_ID` in their environment (documented in `.env.example`), but no changes are needed to the update script or remote-update skill.
+
+## Agent Integration
+
+No agent integration required — this feature is a Stripe webhook receiver and a Django admin action. Neither component is exposed to the Telegram agent or needs MCP server wrapping. The webhook endpoint is called by Stripe, not by the agent. The admin action is invoked manually by the operator through the Django admin UI.
+
+## Documentation
+
+- [ ] Create `docs/features/stripe-podcast-routing.md` describing the webhook endpoint, the metadata contract (fields: `podcast_id`, `topic_focus`, `subscriber_email`, `subscriber_name`, `cadence`), the idempotency guarantee, and the admin action operator workflow
+- [ ] Update `.env.example` with `STRIPE_PODCAST_PRICE_ID=price_xxx` and `STRIPE_WEBHOOK_SECRET=whsec_xxx` placeholder entries
+- [ ] Add entry to `docs/features/README.md` index table for `stripe-podcast-routing`
+
+## Test Impact
+
+- [ ] `apps/api/tests/test_stripe_webhook.py` — REPLACE: file is currently a stub ("All tests have been removed"). Replace entirely with a full test module covering the new webhook view and both handler extensions (7 test cases as specified in Step 6)
+- [ ] `apps/integration/stripe/tests/test_shortcuts.py` — UPDATE if needed: verify existing shortcut tests still pass after `create_subscription_checkout` is used in the admin action (no change expected — shortcuts are unchanged)
+
 ## Success Criteria
 
 - [ ] `GET`/`POST /webhooks/stripe/` — POST with valid payload and signature returns HTTP 200 with JSON
