@@ -244,6 +244,7 @@ class SummarizedResponse:
     text: str
     full_output_file: Path | None = None
     was_summarized: bool = False
+    needs_self_summary: bool = False
     artifacts: dict[str, list[str]] = field(default_factory=dict)
     context_summary: str | None = None
     expectations: str | None = None
@@ -1134,6 +1135,24 @@ stakeholder-friendly language describing the feature or behavior affected."""
 # NOT blockers: code bugs (agent can fix), test failures (agent can debug), implementation
 # decisions (agent should decide), finding the right approach (agent's job).
 
+# Compact self-summary instruction injected via session steering when all summarizer
+# backends fail. Derived from SUMMARIZER_SYSTEM_PROMPT quality rules but kept short
+# to avoid polluting the agent's context window.
+SELF_SUMMARY_INSTRUCTION = (
+    "Your previous output could not be summarized by the automated summarizer. "
+    "Please re-state your output as a concise update for the project manager. "
+    "Rules: lead with outcomes, not process. Use 2-4 bullet points starting with "
+    '"\\u2022 ". Omit internal code details, line counts, and plans for next steps. '
+    "Preserve any commit hashes, PR/issue numbers, and explicit questions. "
+    "Do NOT include narration like 'Let me investigate' or 'I will check'. "
+    "If your work produced no substantive results, say so plainly."
+)
+
+# Sentinel returned by send_response_with_files when self-summary steering was
+# injected. Distinguishes "message deferred to agent self-summary" from "send
+# failed" so the bridge callback does not log a spurious error.
+STEERING_DEFERRED = "STEERING_DEFERRED"
+
 
 async def _summarize_with_haiku(prompt: str) -> StructuredSummary | None:
     """Try structured summarization via Anthropic Haiku API using tool_use.
@@ -1492,15 +1511,15 @@ async def summarize_response(
             expectations=expectations,
         )
 
-    # All backends failed — truncate as last resort
-    logger.error("All summarization backends failed, truncating")
-    truncated = raw_response
-    if len(truncated) > SAFETY_TRUNCATE:
-        truncated = truncated[: SAFETY_TRUNCATE - 3] + "..."
-
+    # All backends failed — signal self-summary via session steering instead
+    # of delivering raw truncated text. The caller (send_response_with_files)
+    # will push a steering message and the agent will self-summarize on its
+    # next turn. Files and artifacts are preserved for immediate delivery.
+    logger.error("All summarization backends failed, requesting self-summary via steering")
     return SummarizedResponse(
-        text=truncated,
+        text="",
         full_output_file=full_output_file,
         was_summarized=False,
+        needs_self_summary=True,
         artifacts=artifacts,
     )
