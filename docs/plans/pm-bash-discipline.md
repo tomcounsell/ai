@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -380,13 +380,13 @@ No agent integration required — this is a restriction on the existing Bash too
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/pm-dev-session-architecture.md`: add an "Enforcement" section after the existing session-type table. Content: two short paragraphs describing (1) the Write/Edit-to-docs restriction (already in place), (2) the new Bash read-only allowlist restriction, and (3) the anomaly-response rule in the PM persona. Point readers at `agent/hooks/pre_tool_use.py` as the ground truth for the allowlist and `config/personas/project-manager.md` as the ground truth for the anomaly-response rule. This covers AC #8.
-- [ ] No `docs/features/README.md` index change needed — `pm-dev-session-architecture.md` already has an entry.
+- [x] Update `docs/features/pm-dev-session-architecture.md`: add an "Enforcement" section after the existing session-type table. Content: two short paragraphs describing (1) the Write/Edit-to-docs restriction (already in place), (2) the new Bash read-only allowlist restriction, and (3) the anomaly-response rule in the PM persona. Point readers at `agent/hooks/pre_tool_use.py` as the ground truth for the allowlist and `config/personas/project-manager.md` as the ground truth for the anomaly-response rule. This covers AC #8.
+- [x] No `docs/features/README.md` index change needed — `pm-dev-session-architecture.md` already has an entry.
 
 ### Inline Documentation
-- [ ] Update the stale comment at `agent/sdk_client.py:1965-1966` per the exact replacement text in the Technical Approach section. This covers AC #4.
-- [ ] Add a module-level docstring comment in `agent/hooks/pre_tool_use.py` briefly noting that the Bash branch now enforces a PM allowlist. Point readers at the test file for the authoritative list of allowed/blocked commands.
-- [ ] Inline docstring for the new `_is_pm_allowed_bash` helper: describe inputs, return value, the metacharacter guard, and why allowlist over denylist.
+- [x] Update the stale comment at `agent/sdk_client.py:1965-1966` per the exact replacement text in the Technical Approach section. This covers AC #4.
+- [x] Add a module-level docstring comment in `agent/hooks/pre_tool_use.py` briefly noting that the Bash branch now enforces a PM allowlist. Point readers at the test file for the authoritative list of allowed/blocked commands.
+- [x] Inline docstring for the new `_is_pm_allowed_bash` helper: describe inputs, return value, the metacharacter guard, and why allowlist over denylist.
 
 ### External Documentation Site
 - Not applicable. This repo does not publish a Sphinx/MkDocs site.
