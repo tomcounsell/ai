@@ -148,10 +148,10 @@ PLAN_PATH="docs/plans/${SLUG}.md"
 # Read plan from origin/main (authoritative copy), not from cwd (which may be a stale worktree)
 PLAN_TEXT=$(git show origin/main:${PLAN_PATH} 2>/dev/null) || { echo "WARN: No plan found at origin/main:${PLAN_PATH} -- skipping completion gate"; exit 0; }
 
-python3 -c "
+echo "$PLAN_TEXT" | python3 -c "
 import re, sys, yaml
 
-plan_text = '''$PLAN_TEXT'''
+plan_text = sys.stdin.read()
 if not plan_text.strip():
     print('WARN: Empty plan at origin/main:$PLAN_PATH -- skipping completion gate')
     sys.exit(0)

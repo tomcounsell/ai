@@ -5,11 +5,9 @@ Covers Bug 1 fix: README-based display name extraction replacing .title() mangli
 
 import contextlib
 import os
-import re
 import sys
 import textwrap
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -37,44 +35,42 @@ SAMPLE_README = textwrap.dedent("""\
 """)
 
 
-@pytest.fixture
-def mock_readme(tmp_path):
-    """Create a mock docs/features/README.md."""
-    readme_path = tmp_path / "docs" / "features" / "README.md"
-    readme_path.parent.mkdir(parents=True, exist_ok=True)
-    readme_path.write_text(SAMPLE_README)
-    return readme_path
-
-
 # --- Tests for extract_feature_name_from_index ---
 
 
 class TestExtractFeatureNameFromIndex:
-    """Test README-based display name extraction."""
+    """Test README-based display name extraction using the real function."""
 
-    def test_acronym_heavy_filename_pm(self, mock_readme):
+    @pytest.fixture(autouse=True)
+    def _setup_readme(self, tmp_path):
+        """Create a docs/features/README.md and chdir so the real function finds it."""
+        readme_path = tmp_path / "docs" / "features" / "README.md"
+        readme_path.parent.mkdir(parents=True, exist_ok=True)
+        readme_path.write_text(SAMPLE_README)
+        self._tmp = tmp_path
+
+    def _extract(self, filename: str) -> str | None:
+        with _chdir(self._tmp):
+            return extract_feature_name_from_index(filename)
+
+    def test_acronym_heavy_filename_pm(self):
         """PM in filename should resolve to PM/Dev Session Architecture, not Pm/Dev..."""
-        with patch(
-            "scripts.migrate_completed_plan.Path",
-            side_effect=lambda p: mock_readme if p == "docs/features/README.md" else Path(p),
-        ):
-            # Direct test: parse the README content
-            result = _extract_from_content(SAMPLE_README, "pm-dev-session-architecture.md")
-            assert result == "PM/Dev Session Architecture"
+        result = self._extract("pm-dev-session-architecture.md")
+        assert result == "PM/Dev Session Architecture"
 
     def test_acronym_heavy_filename_sdlc(self):
         """SDLC in filename should resolve correctly."""
-        result = _extract_from_content(SAMPLE_README, "sdlc-critique-stage.md")
+        result = self._extract("sdlc-critique-stage.md")
         assert result == "SDLC Critique Stage"
 
     def test_acronym_heavy_filename_ai(self):
         """AI in filename should resolve correctly."""
-        result = _extract_from_content(SAMPLE_README, "ai-evaluator.md")
+        result = self._extract("ai-evaluator.md")
         assert result == "AI Evaluator"
 
     def test_display_text_differs_from_filename(self):
         """Display text can contain characters not in filename (e.g., slashes)."""
-        result = _extract_from_content(SAMPLE_README, "pm-dev-session-architecture.md")
+        result = self._extract("pm-dev-session-architecture.md")
         assert result == "PM/Dev Session Architecture"
         # Verify .title() would have mangled this
         mangled = "pm-dev-session-architecture".replace("-", " ").title()
@@ -83,17 +79,17 @@ class TestExtractFeatureNameFromIndex:
 
     def test_hyphenated_compound_name(self):
         """Compound names with hyphens (do-build) should resolve correctly."""
-        result = _extract_from_content(SAMPLE_README, "do-build-ai-evaluator.md")
+        result = self._extract("do-build-ai-evaluator.md")
         assert result == "Do-Build AI Evaluator"
 
     def test_missing_readme_entry(self):
         """Filename with no matching README row returns None."""
-        result = _extract_from_content(SAMPLE_README, "nonexistent-feature.md")
+        result = self._extract("nonexistent-feature.md")
         assert result is None
 
     def test_simple_filename(self):
         """Simple filename without acronyms works fine."""
-        result = _extract_from_content(SAMPLE_README, "bridge-self-healing.md")
+        result = self._extract("bridge-self-healing.md")
         assert result == "Bridge Self-Healing"
 
 
@@ -241,15 +237,6 @@ class TestEndToEndMigrationChain:
 
 
 # --- Helpers ---
-
-
-def _extract_from_content(readme_content: str, filename: str) -> str | None:
-    """Extract feature name directly from README content (bypasses filesystem)."""
-    pattern = rf"\|\s*\[([^\]]+)\]\({re.escape(filename)}\)"
-    match = re.search(pattern, readme_content)
-    if match:
-        return match.group(1)
-    return None
 
 
 @contextlib.contextmanager
