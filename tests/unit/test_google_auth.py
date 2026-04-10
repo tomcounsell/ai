@@ -7,8 +7,6 @@ for the auth module at tools/google_workspace/auth.py.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -323,6 +321,26 @@ class TestGetCredentials:
         assert result is mock_creds
         saved = json.loads(token_file.read_text())
         assert saved["token"] == "new_access_token"
+
+    def test_headless_oserror_raises_google_auth_error(self, tmp_path):
+        """OSError from run_local_server raises GoogleAuthError with guidance."""
+        token_file = tmp_path / "nonexistent_token.json"
+        creds_file = tmp_path / "creds.json"
+        creds_file.write_text('{"installed": {"client_id": "c", "client_secret": "s"}}')
+
+        mock_flow = MagicMock()
+        mock_flow.run_local_server.side_effect = OSError("No display")
+
+        with (
+            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
+            patch("tools.google_workspace.auth.CREDENTIALS_PATH", creds_file),
+            patch(
+                "tools.google_workspace.auth.InstalledAppFlow.from_client_secrets_file",
+                return_value=mock_flow,
+            ),
+            pytest.raises(GoogleAuthError, match="headless environment"),
+        ):
+            get_credentials()
 
 
 class TestClearTokens:

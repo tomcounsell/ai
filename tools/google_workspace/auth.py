@@ -212,12 +212,15 @@ def get_credentials() -> Credentials:
                 "Download OAuth client credentials from Google Cloud Console."
             )
         flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-        # Try local server first; fall back to console for headless environments
+        # Try local server; headless environments must run OAuth on a machine with a browser
         try:
             creds = flow.run_local_server(port=0)
         except OSError:
-            logger.info("Local server unavailable (headless?), falling back to console auth")
-            creds = flow.run_console()
+            raise GoogleAuthError(
+                "Cannot open browser for OAuth consent (headless environment). "
+                "Run `valor-calendar --reauth` on a machine with a browser, "
+                "then copy the token file to this machine.",
+            )
         TOKEN_PATH.write_text(creds.to_json())
 
     return creds
