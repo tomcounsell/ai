@@ -59,7 +59,7 @@ After a successful token refresh, the service cache (`_service_cache`) is cleare
 
 ### Headless environment support
 
-When `flow.run_local_server()` fails (e.g., in a headless SSH session or launchd service), the auth flow falls back to `flow.run_console()`, which prints a URL for manual browser authentication.
+When `flow.run_local_server()` fails (e.g., in a headless SSH session or launchd service), the auth flow raises a `GoogleAuthError` with instructions to run `valor-calendar --reauth` on a machine with a browser and then copy the token file to the headless machine.
 
 ## CLI Flags
 
