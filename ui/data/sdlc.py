@@ -148,11 +148,11 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: context_summary, then slug, then truncated message."""
-        if self.context_summary:
-            return self.context_summary
+        """Human-friendly name: slug, then context_summary, then truncated message."""
         if self.slug:
             return self.slug
+        if self.context_summary:
+            return self.context_summary
         if self.message_text:
             text = self.message_text[:60]
             if len(self.message_text) > 60:
