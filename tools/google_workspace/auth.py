@@ -215,12 +215,12 @@ def get_credentials() -> Credentials:
         # Try local server; headless environments must run OAuth on a machine with a browser
         try:
             creds = flow.run_local_server(port=0)
-        except OSError:
+        except OSError as e:
             raise GoogleAuthError(
                 "Cannot open browser for OAuth consent (headless environment). "
                 "Run `valor-calendar --reauth` on a machine with a browser, "
                 "then copy the token file to this machine.",
-            )
+            ) from e
         TOKEN_PATH.write_text(creds.to_json())
 
     return creds

@@ -99,7 +99,7 @@ Re-authentication successful. Token saved.
 | `tools/google_workspace/auth.py` | Core auth module with error handling |
 | `tools/valor_calendar.py` | CLI entry point with --check and --reauth flags |
 | `.claude/skills/setup/SKILL.md` | Setup skill referencing --check and --reauth |
-| `tests/unit/test_google_auth.py` | 28 unit tests covering all error paths |
+| `tests/unit/test_google_auth.py` | 29 unit tests covering all error paths |
 | `config/settings.py` | GoogleAuthSettings with credentials_dir |
 
 ## Tracking
