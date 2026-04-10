@@ -5,6 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-04-10
 tracking: https://github.com/tomcounsell/ai/issues/851
+revision_applied: true
 ---
 
 # Fix Google Workspace OAuth Flow
@@ -90,6 +91,12 @@ No prerequisites -- this work has no external dependencies beyond what's already
 - `--reauth` calls `clear_tokens()` then `get_credentials()` (which triggers the browser flow)
 - `--check` calls `verify_token()` and prints a human-readable status
 
+> **Implementation Note (service cache invalidation):** `_service_cache` in `auth.py` caches `Resource` objects keyed by `(api, version)` but never invalidates when tokens are refreshed or cleared. After `--reauth`, any cached services still hold stale credentials. `clear_tokens()` already calls `_service_cache.clear()`, but `get_credentials()` does NOT clear the cache after a successful refresh. Add `_service_cache.clear()` inside the refresh branch of `get_credentials()` to ensure stale services are evicted when tokens change.
+
+> **Implementation Note (legacy token cleanup):** `clear_tokens()` only deletes the per-machine token (`TOKEN_PATH`) but leaves `_SHARED_TOKEN_PATH` intact. If the module is re-imported or the process restarts, `_get_token_path()` will re-migrate the stale shared token. `clear_tokens()` should also delete `_SHARED_TOKEN_PATH` if it exists, or at minimum log a warning that a shared token remains.
+
+> **Implementation Note (scope verification reliability):** Google OAuth token files do not always contain the granted scopes -- `Credentials.from_authorized_user_file()` may return `None` for `creds.scopes`. `verify_token()` must handle `creds.scopes is None` as "unknown scopes" rather than treating it as a mismatch. The scope check should be: if scopes are present and don't match, report mismatch; if scopes are absent, report "scopes unknown -- reauth recommended if scope expansion is needed."
+
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
@@ -124,6 +131,8 @@ No existing tests affected -- the auth module had no behavioral tests; only path
 **Impact:** `--reauth` cannot complete on servers without a display
 **Mitigation:** Detect headless environment and print manual instructions ("Copy this URL, paste in browser, enter the code")
 
+> **Implementation Note (headless detection):** The plan says "detect headless" but does not specify how. Use `os.environ.get("DISPLAY")` on Linux and check for `os.environ.get("SSH_TTY")` as signals. On macOS (the primary platform), headless is rare but can occur in launchd services. The concrete implementation: wrap `flow.run_local_server(port=0)` in a try/except for `OSError` / `webbrowser.Error`. On failure, fall back to `flow.run_console()` which prints a URL for manual browser auth. This is a built-in method in `google_auth_oauthlib` -- no custom code needed.
+
 ## Race Conditions
 
 No race conditions identified -- all token operations are synchronous, single-process, and use per-machine token files to avoid cross-machine conflicts.
@@ -141,6 +150,8 @@ No race conditions identified -- all token operations are synchronous, single-pr
 The `/update` skill's `cal_integration.py` calls `generate_calendar_config()` which uses `get_service()`. After this change, `generate_calendar_config()` will receive clearer error messages from the auth module. No changes needed to the update script itself -- the improved error messages will propagate automatically through the existing error handling in `cal_integration.py`.
 
 No update system changes required beyond what the auth module improvements provide automatically.
+
+> **Implementation Note (cal_integration error surfacing):** The plan states that improved error messages "propagate automatically" through `cal_integration.py`, but this is optimistic. `cal_integration.py` line 211 catches `Exception` broadly and returns `error=f"Calendar API auth failed: {e}"`. The `str()` representation of `GoogleAuthError` must include the recovery command in its message (via `__str__` override), not just in a `.recovery_command` attribute, so that the existing `f"...{e}"` pattern surfaces it. No changes to `cal_integration.py` itself are needed if `GoogleAuthError.__str__()` returns the full actionable message.
 
 ## Agent Integration
 
@@ -193,7 +204,10 @@ No agent integration required -- the auth module is called internally by `valor_
 - On `RefreshError`: raise `GoogleAuthError("Token revoked or expired. Run: valor-calendar --reauth")`
 - On `TransportError`: raise `GoogleAuthError("Network error during token refresh. Check connectivity and retry.")`
 - Add `verify_token() -> dict` function that checks: token file exists, parseable, has required scopes, not expired or has refresh token. Returns `{"valid": bool, "status": str, "scopes": list, "expired": bool}`
-- Add scope validation: if loaded token scopes don't match `SCOPES`, include mismatch in status
+- Add scope validation: if loaded token scopes don't match `SCOPES`, include mismatch in status. Handle `creds.scopes is None` as "scopes unknown" (not mismatch) since token files don't always contain granted scopes
+- Clear `_service_cache` after successful token refresh in `get_credentials()` to prevent stale cached services
+- Update `clear_tokens()` to also delete `_SHARED_TOKEN_PATH` if it exists, preventing stale token re-migration
+- Ensure `GoogleAuthError.__str__()` returns the full actionable message (including recovery command) so that callers using `f"...{e}"` patterns surface it correctly
 
 ### 2. Add --reauth and --check CLI flags to valor_calendar.py
 - **Task ID**: build-cli-flags
@@ -206,6 +220,7 @@ No agent integration required -- the auth module is called internally by `valor_
 - Add `--check` flag handling: calls `verify_token()`, prints formatted status, exits with code 0 if valid, 1 if not
 - Update the usage line to include new flags: `Usage: valor-calendar [--project PROJECT] [--reauth] [--check] <session-slug>`
 - Update the `except Exception` block in `main()` to check for `GoogleAuthError` and print the recovery command
+- Wrap `flow.run_local_server(port=0)` in try/except for `OSError`; on failure, fall back to `flow.run_console()` for headless environments
 
 ### 3. Fix /setup skill Step 4
 - **Task ID**: build-setup-fix
@@ -234,6 +249,10 @@ No agent integration required -- the auth module is called internally by `valor_
 - Test `verify_token()` returns scope mismatch status when token scopes differ from `SCOPES`
 - Test `--check` flag exits 0 when token is valid, exits 1 when invalid
 - Test `--reauth` flag calls `clear_tokens()` and `get_credentials()`
+- Test `verify_token()` returns "scopes unknown" when `creds.scopes` is `None`
+- Test `clear_tokens()` removes both per-machine and shared legacy token files
+- Test `_service_cache` is cleared after token refresh in `get_credentials()`
+- Test `GoogleAuthError` string representation includes recovery command
 
 ### 5. Final validation
 - **Task ID**: validate-all
@@ -269,9 +288,14 @@ No agent integration required -- the auth module is called internally by `valor_
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Operator | `_service_cache` never invalidates on token refresh -- stale credentials persist after reauth | Technical Approach | Clear `_service_cache` in refresh branch of `get_credentials()` |
+| CONCERN | Operator | `clear_tokens()` leaves `_SHARED_TOKEN_PATH` intact, enabling stale token re-migration | Technical Approach | Delete or warn about shared token in `clear_tokens()` |
+| CONCERN | Archaeologist | `verify_token()` scope check unreliable -- `creds.scopes` may be `None` from token file | Technical Approach | Handle `None` scopes as "unknown" rather than mismatch |
+| CONCERN | Adversary | Headless detection underspecified -- `run_local_server()` will hang/fail with no display | Risk 1 | Wrap in try/except, fall back to `flow.run_console()` |
+| CONCERN | Operator | `cal_integration.py` catches `Exception` broadly -- `GoogleAuthError` recovery command only surfaces if `__str__()` includes it | Update System | Ensure `GoogleAuthError.__str__()` returns full actionable message |
+| CONCERN | Simplifier | Module-level `TOKEN_PATH = _get_token_path()` is computed once at import time -- correct for this use case but worth documenting | N/A (acknowledged) | Add docstring note that TOKEN_PATH is stable per-process |
 
 ---
 
