@@ -130,20 +130,13 @@ If no token exists, run the OAuth flow:
 cd ~/src/ai
 
 # This will open browser for Google OAuth consent
-.venv/bin/valor-calendar test
-
-# Or use the CLI directly
-.venv/bin/python -c "
-from tools.google_workspace.auth import get_service
-service = get_service('calendar', 'v3')
-print('OAuth flow complete, token saved')
-"
+.venv/bin/valor-calendar --reauth
 ```
 
-The user must complete the OAuth consent in their browser. After completion, verify the token was created:
+The user must complete the OAuth consent in their browser. After completion, verify the token is valid:
 
 ```bash
-ls ~/Desktop/Valor/google_token.json
+.venv/bin/valor-calendar --check
 ```
 
 ### 4.3 Create calendar mappings
@@ -416,7 +409,7 @@ uv sync --all-extras
 ### Calendar OAuth fails
 1. Verify credentials file exists: `ls ~/Desktop/Valor/google_credentials.json`
 2. Ensure Google Calendar API is enabled in Cloud Console
-3. Re-run OAuth: `.venv/bin/valor-calendar test`
+3. Re-run OAuth: `.venv/bin/valor-calendar --reauth`
 
 ### Bridge won't start
 1. Check logs: `tail -50 logs/bridge.log`
