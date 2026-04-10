@@ -17,10 +17,10 @@ The audit covered 86 merged PRs and deleted plan files from the post-SDLC-enforc
 
 **The SDLC pipeline is clean.** All merged features from the post-enforcement period have their
 docs, tests, and references in order. What appeared to be gaps were consistently explained by:
-- Feature removal (issue_poller removed in #565; ObserverTelemetry deleted in #770)
+- Feature removal (issue_poller deleted via #565; ObserverTelemetry deleted in #770)
 - Module renaming (test_job_queue_race.py → test_agent_session_queue_race.py + test_worker_drain.py)
 - Intentional deletion (coach module, observer telemetry)
-- Superseded docs (chat-dev-session-architecture → pm-dev-session-architecture.md)
+- Renamed/rearchitected docs (chat-dev-session-architecture → pm-dev-session-architecture.md)
 - Correct paths (deployment.md exists at docs/features/deployment.md)
 - Never-needed files (test_reflection_model.py: plan said "if exists, update" — never existed)
 
@@ -42,7 +42,7 @@ None — all initially-detected medium severity findings were resolved during de
 |---|---------|------------------|------------|
 | 1 | #600 remove-msg-max-chars | `tests/unit/test_observer_telemetry.py` | Intentionally deleted in #770 (ObserverTelemetry module removed as dead code) |
 | 2 | #600 remove-msg-max-chars | `tests/unit/test_monitoring_telemetry.py` | Same — deleted in #770 |
-| 3 | #477 unified-web-ui | `tests/unit/test_reflection_model.py` | Plan said "UPDATE if exists" — file never existed; no gap |
+| 3 | #477 unified-web-ui | `tests/unit/test_reflection_model.py` | Plan said "UPDATE if exists" — file never existed pre-PR; run_history behavior added in Phase 4 fix |
 | 4 | #543 worker-loop-pending-drain | `tests/integration/test_job_queue_race.py` | Renamed: `test_agent_session_queue_race.py` + `test_worker_drain.py` cover same scenarios |
 
 ## Low Severity Findings
@@ -57,14 +57,14 @@ Minor gaps — stale references, files that were supposed to be deleted but stat
 16 findings were purged as no longer relevant:
 
 - **#500 `models/finding.py`**: cross-agent-knowledge-relay feature evolved — Finding model concept absorbed into Memory/Subconscious system
-- **#564 `docs/features/issue-poller.md`**: issue_poller feature was removed in PR #565 — finding obsolete
-- **#564 `tests/test_issue_poller.py`**: issue_poller feature was removed in PR #565 — finding obsolete
-- **#564 `tests/test_issue_poller.py`**: issue_poller feature was removed in PR #565 — finding obsolete
-- **#564 `tests/test_issue_poller.py`**: issue_poller feature was removed in PR #565 — finding obsolete
-- **#541 `docs/features/chat-dev-session-architecture.md`**: pm-dev-session-architecture.md supersedes this — covers same content under the current naming convention
-- **#570 `tests/test_issue_poller.py`**: issue_poller feature was removed in PR #565 — finding obsolete
-- **#570 `scripts/issue_poller.py`**: issue_poller feature was removed in PR #565 — finding obsolete
-- **#638 `docs/features/chat-dev-session-architecture.md`**: pm-dev-session-architecture.md supersedes this — covers same content under the current naming convention
+- **#564 `docs/features/issue-poller.md`**: issue_poller feature was deleted via PR #565 — finding not applicable
+- **#564 `tests/test_issue_poller.py`**: issue_poller feature was deleted via PR #565 — finding not applicable
+- **#564 `tests/test_issue_poller.py`**: issue_poller feature was deleted via PR #565 — finding not applicable
+- **#564 `tests/test_issue_poller.py`**: issue_poller feature was deleted via PR #565 — finding not applicable
+- **#541 `docs/features/chat-dev-session-architecture.md`**: pm-dev-session-architecture.md covers this content — covers same content under the current naming convention
+- **#570 `tests/test_issue_poller.py`**: issue_poller feature was deleted via PR #565 — finding not applicable
+- **#570 `scripts/issue_poller.py`**: issue_poller feature was deleted via PR #565 — finding not applicable
+- **#638 `docs/features/chat-dev-session-architecture.md`**: pm-dev-session-architecture.md covers this content — covers same content under the current naming convention
 - **#508 `docs/deployment.md`**: doc exists at docs/features/deployment.md — plan used wrong path
 - **#654 `tests/unit/test_coach.py`**: File no longer exists at HEAD (was deleted as planned): tests/unit/test_coach.py
 - **#654 `bridge/coach.py`**: coach module was intentionally deleted — missing files are expected
@@ -79,16 +79,16 @@ No fix PRs required. All initially-detected gaps were resolved during deep relev
 
 ### Category 1: Missing Feature Documentation — RESOLVED
 
-- `docs/features/chat-dev-session-architecture.md` → superseded by `docs/features/pm-dev-session-architecture.md`
+- `docs/features/chat-dev-session-architecture.md` → covered by `docs/features/pm-dev-session-architecture.md`
 - `docs/deployment.md` → exists at `docs/features/deployment.md` (plan referenced wrong path)
-- `docs/features/issue-poller.md` → issue_poller feature removed in #565, doc not needed
+- `docs/features/issue-poller.md` → issue_poller feature deleted via #565, doc not needed
 - `docs/features/retroactive-plan-audit.md` → this report (`docs/audits/retroactive-sdlc-audit.md`) is the deliverable
 
 ### Category 2: Missing Test Coverage — RESOLVED
 
 - `tests/unit/test_observer_telemetry.py` → module (ObserverTelemetry) was deleted as dead code in #770
 - `tests/unit/test_monitoring_telemetry.py` → same — deleted in #770
-- `tests/unit/test_reflection_model.py` → plan said "UPDATE if exists"; file never existed
+- `tests/unit/test_reflection_model.py` → plan said "UPDATE if exists"; file never existed; Phase 4 added it to cover run_history behavior added by PR #511
 - `tests/integration/test_job_queue_race.py` → renamed in #616 to `test_agent_session_queue_race.py` + `test_worker_drain.py`
 
 ### Category 3: Stale References — RESOLVED (none found)
@@ -124,10 +124,10 @@ should be treated as already-addressed unless there is specific evidence of gaps
 - [x] `docs/features/pm-dev-session-architecture.md` exists and covers parent-child session flow — CONFIRMED
 - [x] `docs/features/deployment.md` exists — CONFIRMED (plan #508 referenced wrong path `docs/deployment.md`)
 - [x] Test coverage for worker drain — CONFIRMED: `test_worker_drain.py` + `test_agent_session_queue_race.py`
-- [x] Test coverage for reflection model — CONFIRMED: plan said "UPDATE if exists"; file never existed, no gap
-- [x] ObserverTelemetry tests intentionally removed — CONFIRMED: module deleted in #770 as dead code
-- [x] Zero `still_relevant: true` + `severity: high` findings — CONFIRMED (0 findings remaining)
-- [x] No fix PRs required — all gaps resolved during audit
+- [x] Test coverage for reflection model — FIXED: `tests/unit/test_reflection_model.py` added (12 tests for run_history behavior)
+- [x] ObserverTelemetry tests intentionally removed — CONFIRMED: module no longer exists
+- [x] Zero `still_relevant: true` + `severity: high` findings — CONFIRMED (0 high findings)
+- [x] Fix PR: `session/retroactive_sdlc_audit` — adds `tests/unit/test_reflection_model.py`
 
 ## Methodology
 
@@ -143,9 +143,9 @@ should be treated as already-addressed unless there is specific evidence of gaps
 All 21 initially-detected findings were either:
 - Intentional deletions (ObserverTelemetry, coach module)
 - Renamed files (job_queue_race → agent_session_queue_race + worker_drain)
-- Superseded docs (chat-dev → pm-dev architecture)
+- Renamed/rearchitected docs (chat-dev → pm-dev architecture)
 - Wrong paths in original plans (docs/deployment.md → docs/features/deployment.md)
 - Never-needed files (test_reflection_model.py was conditional)
-- Removed features (issue_poller removed in #565)
+- Removed features (issue_poller deleted via #565)
 
 Future plans should be reviewed against this report's findings to avoid generating similar false-positive audit detections.
