@@ -526,7 +526,7 @@ tail_logs() {
 # === Worker Management ===
 
 get_worker_pid() {
-    pgrep -f "python -m worker" 2>/dev/null || pgrep -f "python.*worker/__main__" 2>/dev/null || true
+    pgrep -fi "python -m worker" 2>/dev/null || pgrep -fi "python.*worker/__main__" 2>/dev/null || true
 }
 
 is_worker_running() {

@@ -188,13 +188,13 @@ def is_reflections_installed() -> bool:
 def get_worker_pid() -> int | None:
     """Get PID of running worker process."""
     try:
-        result = run_cmd(["pgrep", "-f", "python -m worker"])
+        result = run_cmd(["pgrep", "-fi", "python -m worker"])
         if result.returncode == 0 and result.stdout.strip():
             return int(result.stdout.strip().split()[0])
     except Exception:
         pass
     try:
-        result = run_cmd(["pgrep", "-f", "python.*worker/__main__"])
+        result = run_cmd(["pgrep", "-fi", "python.*worker/__main__"])
         if result.returncode == 0 and result.stdout.strip():
             return int(result.stdout.strip().split()[0])
     except Exception:

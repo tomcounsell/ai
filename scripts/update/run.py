@@ -708,6 +708,79 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as e:
         log(f"WARN: Session cleanup failed: {e}", v)
 
+    # Step 5.6: Repair Popoto field-index corruption.
+    #
+    # Popoto maintains secondary indexes (e.g. $IndexF:AgentSession:status:running)
+    # that map field values to object keys. When a session is deleted without going
+    # through the ORM (e.g. a crash mid-write), its object hash is gone but the
+    # index entry remains. Every AgentSession.query.filter(status=...) then hits a
+    # hgetall miss and logs "one or more redis keys points to missing objects".
+    #
+    # Detection: scan $IndexF:AgentSession:* keys and check each member's backing
+    # hash (read-only). If stale entries found, use rebuild_indexes() to atomically
+    # drop all indexes and reconstruct them from actual hashes — correct ORM path.
+    try:
+        from popoto.models.query import POPOTO_REDIS_DB
+
+        from models.agent_session import AgentSession
+
+        prefix = f"$IndexF:{AgentSession.__name__}:"
+        index_keys = POPOTO_REDIS_DB.keys(f"{prefix}*")
+
+        stale_by_index: dict[str, list[bytes]] = {}
+        for index_key in index_keys:
+            members = POPOTO_REDIS_DB.smembers(index_key)
+            stale = [m for m in members if not POPOTO_REDIS_DB.hgetall(m)]
+            if stale:
+                label = index_key.decode().removeprefix(prefix)
+                stale_by_index[label] = stale
+
+        total_stale = sum(len(v) for v in stale_by_index.values())
+
+        if total_stale:
+            log(
+                f"Popoto field index: {total_stale} stale pointer(s) across "
+                f"{len(stale_by_index)} index(es) — rebuilding",
+                v,
+                always=True,
+            )
+            for label, stale_members in sorted(stale_by_index.items()):
+                # Parse stale object keys for diagnostics.
+                # Key format: AgentSession:{chat_id}:{session_id}:{parent_id}:{project}:{role}
+                for raw in stale_members:
+                    try:
+                        parts = raw.decode().split(":")
+                        chat_id = parts[1] if len(parts) > 1 else "?"
+                        session_id = parts[2][:8] if len(parts) > 2 else "?"
+                        role = parts[5] if len(parts) > 5 else "?"
+                        log(
+                            f"  [{label}] chat={chat_id} session={session_id}... role={role}",
+                            v,
+                            always=True,
+                        )
+                    except Exception:
+                        log(f"  [{label}] {raw!r} (unparseable)", v, always=True)
+
+            # Surface the root cause before repairing.
+            if any("status" in k for k in stale_by_index):
+                log(
+                    "  ROOT CAUSE HINT: status index has stale entries — a session hash was "
+                    "removed without going through the ORM (crash mid-write or finalize_session "
+                    "failure). Check for unhandled exceptions in finalize_session().",
+                    v,
+                    always=True,
+                )
+
+            # repair_indexes() clears $IndexF: indexes (which rebuild_indexes()
+            # misses) then calls rebuild_indexes() to reconstruct everything
+            # from actual hashes — correct ORM path, no raw Redis writes.
+            _, rebuilt = AgentSession.repair_indexes()
+            log(f"Popoto field index rebuilt ({rebuilt} session(s) indexed)", v)
+        else:
+            log("Popoto field index: OK (no stale pointers)", v)
+    except Exception as e:
+        log(f"WARN: Popoto index repair failed: {e}", v)
+
     # Step 6: Environment verification
     if config.do_verify:
         log("Verifying environment...", v)

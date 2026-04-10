@@ -1374,6 +1374,35 @@ class AgentSession(Model):
     # === Cleanup ===
 
     @classmethod
+    def repair_indexes(cls) -> tuple[int, int]:
+        """Clear stale IndexedField index entries then rebuild all indexes.
+
+        Popoto's built-in rebuild_indexes() clears KeyField and SortedField
+        indexes but not IndexedField ($IndexF:) indexes. This method fills
+        that gap: it first clears all $IndexF:ClassName:* keys (using Popoto's
+        own Redis connection), then calls rebuild_indexes() so every index is
+        reconstructed cleanly from actual hashes.
+
+        Returns:
+            (stale_count, rebuilt_count) — stale pointers removed and sessions
+            indexed during rebuild.
+        """
+        from popoto.models.query import POPOTO_REDIS_DB
+
+        # Find all $IndexF indexes for this model and count stale entries before clearing.
+        prefix = f"$IndexF:{cls.__name__}:"
+        stale_count = 0
+        for index_key in POPOTO_REDIS_DB.keys(f"{prefix}*"):
+            for member in POPOTO_REDIS_DB.smembers(index_key):
+                if not POPOTO_REDIS_DB.hgetall(member):
+                    stale_count += 1
+            # Delete the whole index key — rebuild_indexes() will reconstruct it.
+            POPOTO_REDIS_DB.delete(index_key)
+
+        rebuilt_count = cls.rebuild_indexes()
+        return stale_count, rebuilt_count
+
+    @classmethod
     def cleanup_expired(cls, max_age_days: int = 90) -> int:
         """Delete AgentSession Redis metadata older than max_age_days."""
         cutoff = datetime.now(tz=UTC).timestamp() - (max_age_days * 86400)
