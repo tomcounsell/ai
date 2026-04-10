@@ -1,0 +1,21 @@
+stateDiagram-v2
+    [*] --> Prospect
+    Prospect --> Pitched: sample sent
+    Pitched --> Suppressed: no / bounce
+    Pitched --> Interested: yes
+    Pitched --> [*]: timeout silent
+    Interested --> CheckoutPending: checkout email sent
+    CheckoutPending --> Active: stripe success
+    CheckoutPending --> Abandoned: 7d no checkout
+    Abandoned --> [*]
+    Active --> PreviewPending: preview sent
+    PreviewPending --> Active: approved or silent
+    Active --> Paused: pause
+    Paused --> Active: resume
+    Active --> Drifting: no access 14d
+    Drifting --> Active: access resumed
+    Drifting --> Disengaged: no access 30d
+    Disengaged --> Active: access resumed
+    Active --> Churned: stop or cancel
+    Disengaged --> Churned: billing fail
+    Churned --> [*]

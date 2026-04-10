@@ -1,0 +1,27 @@
+sequenceDiagram
+    actor Operator
+    participant Agent
+    participant Generator as Sample Generator
+    participant Outbound as Email Out
+    actor Target
+    participant Inbound as Email In
+
+    Operator->>Agent: approve pitch target
+    Agent->>Generator: generate 4-min sample
+    Generator-->>Agent: sample mp3 and URL
+    Agent->>Outbound: send SAMPLE email
+    Outbound->>Target: delivered
+
+    alt reply yes
+        Target->>Inbound: reply
+        Inbound->>Agent: intent YES
+        Agent->>Outbound: send CHECKOUT email
+    else reply no or unsubscribe
+        Target->>Inbound: reply
+        Inbound->>Agent: intent NO
+        Agent->>Agent: add to suppression list
+    else silence 7 days
+        Agent->>Outbound: optional single nudge
+    else silence 14 days
+        Agent->>Agent: permanent silence
+    end

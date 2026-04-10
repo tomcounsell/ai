@@ -1,0 +1,21 @@
+sequenceDiagram
+    actor Prospect
+    participant Agent
+    participant Stripe
+    participant DB
+    participant Mail
+
+    Prospect->>Agent: reply yes
+    Agent->>Mail: CHECKOUT email with link
+    Mail->>Prospect: delivered
+    Prospect->>Stripe: click checkout link
+    Stripe-->>Prospect: hosted checkout page
+    Prospect->>Stripe: enter card and pay
+    Stripe->>Agent: checkout.session.completed
+    Agent->>DB: create PodcastSubscription
+    Agent->>DB: create Podcast with defaults
+    Agent->>DB: create PodcastAccessToken
+    Agent->>Mail: ACCESS READY with feed URL
+    Mail->>Prospect: delivered
+    Note over Prospect,Mail: 24 hours later
+    Agent->>Mail: EPISODE 1 PREVIEW

@@ -1,0 +1,68 @@
+erDiagram
+    Podcast ||--o| PodcastConfig : has
+    Podcast ||--o{ PodcastAccessToken : has
+    Podcast ||--o{ Episode : contains
+    Podcast ||--o| PodcastSubscription : has
+    PodcastSubscription ||--o{ EpisodePreview : proposes
+    PodcastSubscription ||--o{ SubscriberReply : receives
+    PodcastSubscription ||--o{ BillingEvent : logs
+    PitchTarget ||--o| PodcastPitch : pitched
+    PodcastPitch ||--|| Episode : sampleOf
+    PodcastPitch ||--o{ SubscriberReply : generates
+    Episode ||--o{ EpisodeArtifact : produces
+    Episode ||--|| EpisodeWorkflow : has
+
+    PodcastSubscription {
+        uuid id
+        string subscriber_email
+        string subscriber_name
+        string stripe_customer_id
+        string stripe_subscription_id
+        string status
+        string cadence
+        int length_minutes
+        string depth_level
+        string topic_focus
+        datetime next_drop_at
+    }
+    PodcastPitch {
+        uuid id
+        string recipient_email
+        string recipient_name
+        uuid sample_episode_id
+        datetime sent_at
+        string status
+        datetime replied_at
+    }
+    EpisodePreview {
+        uuid id
+        uuid subscription_id
+        string proposed_title
+        json segments
+        datetime drop_date
+        string status
+    }
+    SubscriberReply {
+        uuid id
+        string from_email
+        string subject
+        text body
+        string parsed_intent
+        bool escalated
+        datetime received_at
+    }
+    PitchTarget {
+        uuid id
+        string email
+        string name
+        string source
+        json enrichment_data
+        string status
+    }
+    BillingEvent {
+        uuid id
+        uuid subscription_id
+        string stripe_event_id
+        string event_type
+        datetime received_at
+    }

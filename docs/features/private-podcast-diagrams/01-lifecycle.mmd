@@ -1,0 +1,12 @@
+flowchart LR
+    P([Prospect]) --> S1[Stage 1: PITCH]
+    S1 -->|yes| S2[Stage 2: CONVERSION]
+    S1 -.->|silence| X1([No follow-up])
+    S1 -.->|no| X2([Suppressed])
+    S2 -->|paid| S3[Stage 3: FIRST EPISODE]
+    S3 -->|silence / perfect| S4[Stage 4: STEADY SERVICE]
+    S3 -->|swap / pivot| S3
+    S4 -->|weekly cycle| S4
+    S4 -.->|pause| PA([Paused])
+    S4 -.->|stop / churn| R([Revoked])
+    PA -.->|resume| S4

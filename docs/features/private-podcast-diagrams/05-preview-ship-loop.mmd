@@ -1,0 +1,15 @@
+flowchart TD
+    Scheduled([Drop date minus 48h]) --> GenPreview[Generate preview - title and segments]
+    GenPreview --> SendPreview[Send PREVIEW email]
+    SendPreview --> Wait{Reply within 48h}
+    Wait -->|silence| Produce[Enqueue produce_episode]
+    Wait -->|perfect| Produce
+    Wait -->|swap X for Y| Adjust[Update preview]
+    Wait -->|skip| SkipCycle[Skip this cycle]
+    Wait -->|pivot topic| Pivot[Update topic focus]
+    Adjust --> Produce
+    Pivot --> GenPreview
+    Produce --> Ship[Episode ships on drop date]
+    Ship --> NewEpisode[Send NEW EPISODE email]
+    NewEpisode --> NextCycle([Schedule next cycle])
+    SkipCycle --> NextCycle
