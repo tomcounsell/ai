@@ -214,17 +214,18 @@ def handle_subscription_created(event: dict[str, Any]) -> dict[str, Any]:
         # Create subscription record
         subscription = Subscription.objects.create(
             stripe_id=subscription_id,
-            stripe_customer_id=customer_id,
+            stripe_customer_id=customer_id or "",
             stripe_price_id=price_id or "",
             status=status,
             current_period_start=current_period_start,
             current_period_end=current_period_end,
             cancel_at_period_end=cancel_at_period_end,
             start_date=current_period_start,
-            metadata=metadata,
             user=user,
             plan_name=plan_name,
             plan_description=metadata.get("plan_description", ""),
+            price=0,  # Price in cents; 0 when not available from webhook event
+            interval="monthly",  # Default; updated by customer.subscription.updated if needed
         )
 
         logger.info(

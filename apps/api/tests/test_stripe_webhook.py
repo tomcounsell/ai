@@ -15,7 +15,6 @@ import json
 import uuid
 from unittest.mock import MagicMock, patch
 
-import pytest
 from django.test import Client, TestCase
 from django.urls import reverse
 
@@ -26,8 +25,6 @@ from apps.integration.stripe.webhook import (
     handle_subscription_deleted,
 )
 from apps.podcast.models import PodcastSubscription
-
-pytest.importorskip("stripe", reason="stripe package not installed")
 
 
 def _make_subscription_event(
