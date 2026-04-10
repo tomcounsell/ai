@@ -3,7 +3,10 @@
 Covers Bug 1 fix: README-based display name extraction replacing .title() mangling.
 """
 
+import contextlib
+import os
 import re
+import sys
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -11,16 +14,13 @@ from unittest.mock import patch
 import pytest
 
 # Import the functions under test directly
-import sys
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.migrate_completed_plan import (
-    extract_feature_name_from_index,
-    validate_feature_index,
-    validate_feature_doc,
+from scripts.migrate_completed_plan import (  # noqa: E402
     extract_feature_doc_path,
+    extract_feature_name_from_index,
+    validate_feature_doc,
+    validate_feature_index,
 )
-
 
 # --- Fixtures ---
 
@@ -29,7 +29,7 @@ SAMPLE_README = textwrap.dedent("""\
 
     | Feature | Description | Status |
     |---------|-------------|--------|
-    | [PM/Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split | Shipped |
+    | [PM/Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev split | Shipped |
     | [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation | Shipped |
     | [AI Evaluator](ai-evaluator.md) | Semantic build evaluation | Shipped |
     | [Bridge Self-Healing](bridge-self-healing.md) | Crash recovery | Shipped |
@@ -223,7 +223,7 @@ class TestEndToEndMigrationChain:
 
             # Step 2: extract name from index (the new way - Bug 1 fix)
             feature_name = extract_feature_name_from_index("pm-dev-session-architecture.md")
-            assert feature_name is not None, "Failed to extract feature name from README"
+            assert feature_name is not None, "Failed to extract feature name"
             assert feature_name == "PM/Dev Session Architecture"
 
             # Step 3: validate the extracted name is in the index
@@ -235,9 +235,8 @@ class TestEndToEndMigrationChain:
             assert mangled_name == "Pm Dev Session Architecture"
             # This would have failed because "Pm" != "PM"
             valid_old, _ = validate_feature_index(mangled_name)
-            # The old approach fails because validate_feature_index uses re.IGNORECASE
-            # but the escaped "Pm Dev Session Architecture" won't match "PM/Dev Session Architecture"
-            # because of the "/" character difference
+            # The old approach fails: "Pm Dev Session Architecture"
+            # won't match "PM/Dev Session Architecture" (missing "/")
             assert valid_old is False, "Old .title() approach should fail due to missing /"
 
 
@@ -251,10 +250,6 @@ def _extract_from_content(readme_content: str, filename: str) -> str | None:
     if match:
         return match.group(1)
     return None
-
-
-import contextlib
-import os
 
 
 @contextlib.contextmanager
