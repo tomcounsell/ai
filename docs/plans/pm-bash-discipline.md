@@ -278,20 +278,20 @@ one attempt succeeded. That is not a valid recovery path.
 ### Empty/Invalid Input Handling
 **Decision (unambiguous):** `_is_pm_allowed_bash` returns `False` for empty, whitespace-only, and `None` inputs. All three are blocked for PM sessions. Empty commands serve no legitimate PM purpose and a bare empty string is a classifier-evasion vector.
 
-- [ ] Test `test_pm_empty_command_blocked`: `_is_pm_allowed_bash("")` returns `False`; calling `pre_tool_use_hook` with a PM session and `tool_input={"command": ""}` returns `{"decision": "block", ...}`.
-- [ ] Test `test_pm_whitespace_only_blocked`: `_is_pm_allowed_bash("   ")` returns `False`; PM session with whitespace command is blocked.
-- [ ] Test `test_pm_none_command_handled_gracefully`: `_is_pm_allowed_bash(None)` returns `False` (defensive — the upstream `tool_input.get("command", "")` already defaults to `""`, so `None` is upstream-impossible, but the helper must not raise).
-- [ ] Test `test_pm_missing_command_key_blocked`: `asyncio.run(pre_tool_use_hook({"tool_name": "Bash", "tool_input": {}}, "tu", mock_context))["decision"] == "block"` for a PM session — a missing `command` key defaults to `""` which must be blocked.
+- [x] Test `test_pm_empty_command_blocked`: `_is_pm_allowed_bash("")` returns `False`; calling `pre_tool_use_hook` with a PM session and `tool_input={"command": ""}` returns `{"decision": "block", ...}`.
+- [x] Test `test_pm_whitespace_only_blocked`: `_is_pm_allowed_bash("   ")` returns `False`; PM session with whitespace command is blocked.
+- [x] Test `test_pm_none_command_handled_gracefully`: `_is_pm_allowed_bash(None)` returns `False` (defensive — the upstream `tool_input.get("command", "")` already defaults to `""`, so `None` is upstream-impossible, but the helper must not raise).
+- [x] Test `test_pm_missing_command_key_blocked`: `asyncio.run(pre_tool_use_hook({"tool_name": "Bash", "tool_input": {}}, "tu", mock_context))["decision"] == "block"` for a PM session — a missing `command` key defaults to `""` which must be blocked.
 
 The helper signature begins with `if not command or not command.strip(): return False`. This single guard handles all three invalid inputs.
 
 ### Error State Rendering
-- [ ] When the hook returns `{"decision": "block", "reason": "..."}`, the SDK surfaces the `reason` string to the model as the tool result. Verify the reason string is informative enough for the model to correct course: it names the session type, says which command was blocked, and points at "spawn a dev-session subagent" as the resolution. Test asserts the reason string contains the command, "PM session", and "dev-session".
+- [x] When the hook returns `{"decision": "block", "reason": "..."}`, the SDK surfaces the `reason` string to the model as the tool result. Verify the reason string is informative enough for the model to correct course: it names the session type, says which command was blocked, and points at "spawn a dev-session subagent" as the resolution. Test asserts the reason string contains the command, "PM session", and "dev-session".
 
 ## Test Impact
 
-- [ ] `tests/unit/test_pm_session_permissions.py::TestPMWriteRestriction` — NO CHANGE. The Write/Edit tests remain valid; this plan adds a sibling class, not modifies existing tests.
-- [ ] `tests/unit/test_pm_session_permissions.py` (module-level) — UPDATE: add a new `TestPMBashRestriction` class alongside the existing `TestPMWriteRestriction`. Add at least 10 test cases:
+- [x] `tests/unit/test_pm_session_permissions.py::TestPMWriteRestriction` — NO CHANGE. The Write/Edit tests remain valid; this plan adds a sibling class, not modifies existing tests.
+- [x] `tests/unit/test_pm_session_permissions.py` (module-level) — UPDATE: add a new `TestPMBashRestriction` class alongside the existing `TestPMWriteRestriction`. Add at least 10 test cases:
   - `test_pm_blocked_from_rm_rf` — the incident command
   - `test_pm_blocked_from_git_clone`
   - `test_pm_blocked_from_git_commit`
@@ -324,8 +324,8 @@ The helper signature begins with `if not command or not command.strip(): return 
   - `test_pm_sensitive_file_check_runs_before_pm_allowlist` — `SESSION_TYPE=pm` attempting `echo x > .env` is blocked, AND the `reason` string contains `"sensitive"` (case-insensitive) AND does NOT contain `"PM session"`. This pins the ordering contract: the sensitive-file check must fire BEFORE the PM allowlist, so a sensitive-file violation surfaces as a "sensitive file" error, not a "PM command not allowlisted" error. If this test fails, either the hook ordering is wrong or the reason strings must be updated to match. **Note:** it may be impossible to construct a command that passes the allowlist but fails the sensitive-file check (all sensitive-file patterns require metachars like `>` which the metacharacter guard blocks first). If the test proves vacuous — i.e., `echo x > .env` is blocked by the metacharacter guard before either sensitive-file or PM-allowlist layers see it — delete this test and replace with a code comment at the hook site documenting the intended check order.
   - `test_pm_empty_command_blocked`
   - `test_pm_whitespace_only_blocked`
-- [ ] `tests/unit/test_pre_tool_use_hook.py` — NO CHANGE. This file tests the standalone shell script at `.claude/hooks/pre_tool_use.py`, which is not modified by this plan.
-- [ ] `tests/unit/test_pre_tool_use_start_stage.py` — NO CHANGE. Tests stage-extraction logic unrelated to tool access.
+- [x] `tests/unit/test_pre_tool_use_hook.py` — NO CHANGE. This file tests the standalone shell script at `.claude/hooks/pre_tool_use.py`, which is not modified by this plan.
+- [x] `tests/unit/test_pre_tool_use_start_stage.py` — NO CHANGE. Tests stage-extraction logic unrelated to tool access.
 
 **Test authenticity requirement (AC #5):** All new test cases invoke the real `pre_tool_use_hook` function via `asyncio.run(pre_tool_use_hook(input_data, ...))`. No stubs, no mocking of the hook itself. The only mock is `mock_context` (per the existing pattern for `TestPMWriteRestriction`). Environment setup uses `monkeypatch.setenv("SESSION_TYPE", "pm")` exactly as the existing Write/Edit tests do.
 
@@ -393,19 +393,19 @@ No agent integration required — this is a restriction on the existing Bash too
 
 ## Success Criteria
 
-- [ ] AC #1 — PM session Bash tool access is restricted. The SDK hook `pre_tool_use_hook` denies any Bash command from a PM session that is not in the allowlist (or that contains forbidden metacharacters). **Verification:** `grep -n '_is_pm_allowed_bash' agent/hooks/pre_tool_use.py` returns the helper + its call site.
-- [ ] AC #2 — All incident commands blocked. Unit tests assert that `rm -rf ai`, `git clone https://github.com/tomcounsell/ai.git`, `git checkout main`, `git reset --hard`, `git push`, `git commit -m "..."`, `pip install foo`, `uv sync`, `rm -rf .venv` are all rejected from a PM session with `{"decision": "block", ...}`.
-- [ ] AC #3 — All legitimate read-only commands still work. Unit tests assert that `git status`, `git log --oneline -10`, `git diff`, `git show HEAD`, `git branch`, `gh issue view 881`, `gh pr view 123`, `gh pr list`, `gh pr checks 123`, `tail logs/bridge.log`, `cat docs/plans/pm-bash-discipline.md`, `python -m tools.valor_session status --id X`, `python -m tools.agent_session_scheduler status` are all allowed (hook returns `{}` or no decision).
-- [ ] AC #4 — Stale comment repaired. `agent/sdk_client.py:1965-1966` reflects the real enforcement mechanism. **Verification:** the comment text contains `"Bash restricted"` and references `agent/hooks/pre_tool_use.py`.
-- [ ] AC #5 — Real hook-path test. The test cases invoke `asyncio.run(pre_tool_use_hook(...))` directly (not a stub, not a classifier helper in isolation). **Verification:** `grep -c 'pre_tool_use_hook(' tests/unit/test_pm_session_permissions.py` returns at least 25 after the fix (was 7 before).
-- [ ] AC #6 — PM persona anomaly-response rule added. `config/personas/project-manager.md` contains a "Anomaly Response" section with the text specified in the Technical Approach section. **Verification:** `grep -n "Anomaly Response" config/personas/project-manager.md` returns one line.
-- [ ] AC #7 — No regression in existing PM session tests. `pytest tests/unit/test_pm_session_permissions.py -v` shows all pre-existing tests (Write/Edit restrictions, env injection, permission mode) still pass. Full unit suite `pytest tests/unit/ -q` is green.
-- [ ] AC #8 — Feature doc updated. `docs/features/pm-dev-session-architecture.md` has a new "Enforcement" section describing both the Write/Edit blocklist and the Bash allowlist, plus the anomaly-response rule. **Verification:** `grep -n "Enforcement" docs/features/pm-dev-session-architecture.md` returns one line.
-- [ ] Tests pass (`/do-test`) — the full unit suite is green.
-- [ ] Documentation updated (`/do-docs`) — the feature doc and inline comment changes land.
-- [ ] Lint clean — `python -m ruff check .` and `python -m ruff format --check .` return exit code 0.
-- [ ] Allowlist audit complete (Task 0) — the validator has grepped `.claude/skills/**/*.md` and `config/personas/project-manager.md` for metacharacter patterns and `git -C`, refactored the PM-reachable skill blocks to be metacharacter-free, and published the finalized allowlist. The audit report is attached to the PR description. Task 0 output is what Task 1 implements verbatim.
-- [ ] Post-hook audit recheck (Task 6) — the shipped hook's allowlist matches Task 0's finalized allowlist, and no new regressions were introduced by Task 1.
+- [x] AC #1 — PM session Bash tool access is restricted. The SDK hook `pre_tool_use_hook` denies any Bash command from a PM session that is not in the allowlist (or that contains forbidden metacharacters). **Verification:** `grep -n '_is_pm_allowed_bash' agent/hooks/pre_tool_use.py` returns the helper + its call site.
+- [x] AC #2 — All incident commands blocked. Unit tests assert that `rm -rf ai`, `git clone https://github.com/tomcounsell/ai.git`, `git checkout main`, `git reset --hard`, `git push`, `git commit -m "..."`, `pip install foo`, `uv sync`, `rm -rf .venv` are all rejected from a PM session with `{"decision": "block", ...}`.
+- [x] AC #3 — All legitimate read-only commands still work. Unit tests assert that `git status`, `git log --oneline -10`, `git diff`, `git show HEAD`, `git branch`, `gh issue view 881`, `gh pr view 123`, `gh pr list`, `gh pr checks 123`, `tail logs/bridge.log`, `cat docs/plans/pm-bash-discipline.md`, `python -m tools.valor_session status --id X`, `python -m tools.agent_session_scheduler status` are all allowed (hook returns `{}` or no decision).
+- [x] AC #4 — Stale comment repaired. `agent/sdk_client.py:1965-1966` reflects the real enforcement mechanism. **Verification:** the comment text contains `"Bash restricted"` and references `agent/hooks/pre_tool_use.py`.
+- [x] AC #5 — Real hook-path test. The test cases invoke `asyncio.run(pre_tool_use_hook(...))` directly (not a stub, not a classifier helper in isolation). **Verification:** `grep -c 'pre_tool_use_hook(' tests/unit/test_pm_session_permissions.py` returns at least 25 after the fix (was 7 before).
+- [x] AC #6 — PM persona anomaly-response rule added. `config/personas/project-manager.md` contains a "Anomaly Response" section with the text specified in the Technical Approach section. **Verification:** `grep -n "Anomaly Response" config/personas/project-manager.md` returns one line.
+- [x] AC #7 — No regression in existing PM session tests. `pytest tests/unit/test_pm_session_permissions.py -v` shows all pre-existing tests (Write/Edit restrictions, env injection, permission mode) still pass. Full unit suite `pytest tests/unit/ -q` is green.
+- [x] AC #8 — Feature doc updated. `docs/features/pm-dev-session-architecture.md` has a new "Enforcement" section describing both the Write/Edit blocklist and the Bash allowlist, plus the anomaly-response rule. **Verification:** `grep -n "Enforcement" docs/features/pm-dev-session-architecture.md` returns one line.
+- [x] Tests pass (`/do-test`) — the full unit suite is green.
+- [x] Documentation updated (`/do-docs`) — the feature doc and inline comment changes land.
+- [x] Lint clean — `python -m ruff check .` and `python -m ruff format --check .` return exit code 0.
+- [x] Allowlist audit complete (Task 0) — the validator has grepped `.claude/skills/**/*.md` and `config/personas/project-manager.md` for metacharacter patterns and `git -C`, refactored the PM-reachable skill blocks to be metacharacter-free, and published the finalized allowlist. The audit report is attached to the PR description. Task 0 output is what Task 1 implements verbatim.
+- [x] Post-hook audit recheck (Task 6) — the shipped hook's allowlist matches Task 0's finalized allowlist, and no new regressions were introduced by Task 1.
 
 ## Team Orchestration
 
