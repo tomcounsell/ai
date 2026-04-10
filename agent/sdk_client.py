@@ -1500,18 +1500,28 @@ async def verify_harness_health(harness_name: str) -> bool:
         return False
 
     try:
-        # Run a minimal test command
+        # Run a minimal test command — we only need the system init event
+        # (emitted before any API call), so kill the process immediately
+        # after receiving it to avoid a full API round-trip.
         test_cmd = cmd_template + ["test"]
         proc = await asyncio.create_subprocess_exec(
             *test_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_data, _ = await proc.communicate()
-        stdout_text = stdout_data.decode("utf-8", errors="replace")
 
-        for line in stdout_text.splitlines():
-            line = line.strip()
+        # Read stdout line-by-line, kill as soon as we see the system event
+        healthy = False
+        assert proc.stdout is not None
+        while True:
+            try:
+                raw_line = await asyncio.wait_for(proc.stdout.readline(), timeout=10.0)
+            except TimeoutError:
+                logger.warning(f"Harness {harness_name} timed out waiting for system init event")
+                break
+            if not raw_line:
+                break  # EOF
+            line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
             try:
@@ -1528,10 +1538,19 @@ async def verify_harness_health(harness_name: str) -> bool:
                 logger.info(
                     f"Harness {harness_name} health check passed (apiKeySource={api_source})"
                 )
-                return True
+                healthy = True
+                break
 
-        logger.warning(f"Harness {harness_name} did not produce system init event")
-        return False
+        # Terminate immediately — no need to wait for the full API response
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass  # Already exited
+        await proc.wait()
+
+        if not healthy:
+            logger.warning(f"Harness {harness_name} did not produce system init event")
+        return healthy
 
     except Exception as e:
         logger.error(f"Harness health check failed for {harness_name}: {e}")

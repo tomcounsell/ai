@@ -8,7 +8,7 @@ Covers:
 
 import json
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -443,18 +443,27 @@ class TestVerifyHarnessHealth:
 
         system_event = json.dumps({"type": "system", "apiKeySource": "none"})
         result_event = json.dumps({"type": "result", "result": "test"})
-        stdout = f"{system_event}\n{result_event}\n".encode()
+        lines = [
+            f"{system_event}\n".encode(),
+            f"{result_event}\n".encode(),
+            b"",  # EOF
+        ]
 
         with patch("shutil.which", return_value="/usr/local/bin/claude"):
             with patch("asyncio.create_subprocess_exec") as mock_exec:
                 mock_proc = AsyncMock()
-                mock_proc.communicate = AsyncMock(return_value=(stdout, b""))
-                mock_proc.returncode = 0
+                mock_stdout = AsyncMock()
+                mock_stdout.readline = AsyncMock(side_effect=lines)
+                mock_proc.stdout = mock_stdout
+                mock_proc.kill = MagicMock()
+                mock_proc.wait = AsyncMock()
                 mock_exec.return_value = mock_proc
 
                 result = await verify_harness_health("claude-cli")
 
         assert result is True
+        # Process should be killed after system event (no API round-trip)
+        mock_proc.kill.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_api_key_billing_warning(self):
@@ -462,19 +471,26 @@ class TestVerifyHarnessHealth:
         from agent.sdk_client import verify_harness_health
 
         system_event = json.dumps({"type": "system", "apiKeySource": "env_var"})
-        stdout = f"{system_event}\n".encode()
+        lines = [
+            f"{system_event}\n".encode(),
+            b"",  # EOF
+        ]
 
         with patch("shutil.which", return_value="/usr/local/bin/claude"):
             with patch("asyncio.create_subprocess_exec") as mock_exec:
                 mock_proc = AsyncMock()
-                mock_proc.communicate = AsyncMock(return_value=(stdout, b""))
-                mock_proc.returncode = 0
+                mock_stdout = AsyncMock()
+                mock_stdout.readline = AsyncMock(side_effect=lines)
+                mock_proc.stdout = mock_stdout
+                mock_proc.kill = MagicMock()
+                mock_proc.wait = AsyncMock()
                 mock_exec.return_value = mock_proc
 
                 result = await verify_harness_health("claude-cli")
 
         # Should still return True (it works, just costs money)
         assert result is True
+        mock_proc.kill.assert_called_once()
 
 
 # --- Helper: async line iterator for mocking process.stdout ---

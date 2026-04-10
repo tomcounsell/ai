@@ -3021,9 +3021,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
         logger.info(
             f"{log_prefix} Routing dev session to CLI harness (DEV_SESSION_HARNESS={_harness_mode})"
         )
+        if _harness_mode != "claude-cli":
+            logger.warning(
+                f"{log_prefix} Non-claude harness '{_harness_mode}' selected — "
+                f"the streaming parser is claude-cli-specific (stream-json format); "
+                f"output may not be captured correctly"
+            )
 
         # Build a simple send_cb that delivers directly to chat
-        # (bypasses nudge loop for dev sessions)
+        # (bypasses nudge loop for dev sessions).
+        # Note: this closure captures `session` and `agent_session` from the
+        # enclosing scope — safe here because there is only one harness
+        # invocation per call to this function (no loop re-binding risk).
         async def _harness_send_cb(text: str) -> None:
             await send_cb(session.chat_id, text, session.telegram_message_id, agent_session)
 
