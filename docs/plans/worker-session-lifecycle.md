@@ -44,7 +44,7 @@ The nudge cycle data flow is the core path this plan modifies:
 3. **`_enqueue_nudge()`**: Sets session status back to "pending" with incremented `auto_continue_count`, calls `_ensure_worker(chat_id)`
 4. **`_ensure_worker()`**: Checks `_active_workers[chat_id]` — if the task is still running (not `.done()`), returns immediately. If the task exited (the bug), creates a new asyncio task running `_worker_loop(chat_id, event)`
 5. **`_worker_loop()`**: Pops the re-enqueued session, executes it, cycle repeats
-6. **Output**: `FileOutputHandler.send()` writes intermediate output to `logs/worker/{session_id}.log`
+6. **Output**: `TelegramRelayOutputHandler.send()` writes to Redis outbox for Telegram delivery and dual-writes to `logs/worker/{session_id}.log`
 
 **The bug**: Between steps 4 and 5, if the worker process has exited (because the previous `_worker_loop` broke out of its `while True` loop), `_ensure_worker()` cannot create a new asyncio task — there is no running event loop. The session is stranded as "pending" in Redis until launchd restarts the process.
 
@@ -76,7 +76,7 @@ No prerequisites — this work uses only existing infrastructure (Redis, asyncio
 
 ### Flow
 
-**Standalone worker startup** → Register FileOutputHandler → Recover interrupted sessions → Start worker loops for pending sessions → **Wait indefinitely** → Process nudge re-enqueues instantly → **SIGTERM** → Finish current session → Drain remaining sessions to "pending" → Exit
+**Standalone worker startup** → Register TelegramRelayOutputHandler (wrapping FileOutputHandler) → Recover interrupted sessions → Start worker loops for pending sessions → **Wait indefinitely** → Process nudge re-enqueues instantly → **SIGTERM** → Finish current session → Drain remaining sessions to "pending" → Exit
 
 ### Technical Approach
 
@@ -146,7 +146,7 @@ No prerequisites — this work uses only existing infrastructure (Redis, asyncio
 
 ## No-Gos (Out of Scope)
 
-- Telegram output from the standalone worker — output goes to `FileOutputHandler` only
+- ~~Telegram output from the standalone worker~~ — resolved by #843 (`TelegramRelayOutputHandler`)
 - Multi-process worker clustering — single process per machine
 - Changes to `determine_delivery_action()` logic — nudge decisions are unchanged
 - Changes to bridge behavior — bridge is I/O only, no execution logic
