@@ -131,12 +131,28 @@ Note: `_mark_superseded()` previously passed `reject_from_terminal=False` to con
 
 All other callers use the default `reject_from_terminal=True`.
 
+## CAS Conflict Detection
+
+As of PR #885 (issue #875), `models/session_lifecycle.py` uses compare-and-set (CAS) semantics to detect concurrent status mutations. Before writing a new status, `update_session()` re-reads the session from Redis and compares the current status against the expected value. If another process changed the status between the caller's read and write, the function raises `StatusConflictError` instead of silently overwriting.
+
+This is a Python-level compare (re-read + status compare before `save()`), not a Redis `WATCH`/`MULTI`/`EXEC` transaction. It closes the most common race windows — two workers finalizing the same session, or a health-check recovery firing while the session is completing — without adding Redis transaction complexity.
+
+Key APIs introduced by the CAS authority upgrade:
+
+| API | Purpose |
+|-----|---------|
+| `StatusConflictError` | Raised when CAS detects a concurrent status change |
+| `get_authoritative_session(session)` | Re-reads session from Redis; returns the freshest copy |
+| `update_session(session, new_status, reason, *, expected_status)` | CAS-guarded status transition: re-reads, compares `expected_status`, writes or raises `StatusConflictError` |
+
+Callers that previously did a bare `transition_status()` or `finalize_session()` in concurrent contexts (health checks, nudge re-enqueue, worker completion) now use `update_session()` with an explicit `expected_status` to make the race window detectable rather than silent.
+
 ## Race Conditions
 
 ### Status change between `determine_delivery_action()` and `_enqueue_nudge()`
 
 - **Window**: External process finalizes session between delivery decision and nudge enqueue
-- **Mitigation**: `_enqueue_nudge()` re-reads session status from Redis at entry and after query, returns early if terminal
+- **Mitigation**: `_enqueue_nudge()` re-reads session status from Redis at entry and after query, returns early if terminal. With CAS, the write itself would raise `StatusConflictError` if the status changed.
 
 ### Worker starts session before startup recovery fires (issue #727)
 
