@@ -155,28 +155,28 @@ The existing `TestCleanupStaleWorktree` tests patch `Path.exists`. The new tests
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_cleanup_stale_worktree`'s `except subprocess.CalledProcessError` block (currently lines 239–247) does NOT swallow the CalledProcessError silently — it logs at `error` level and then runs the fallback. After this change, the block still catches `CalledProcessError` from `git worktree remove --force`, but the subsequent `rmtree` call no longer hides its own errors. This is verified by test case **(d)** below: when `rmtree` succeeds, the test asserts the call was made; a follow-up assertion confirms `ignore_errors` was not passed (or was `False`).
-- [ ] The new guard raises `RuntimeError` — not caught anywhere in `create_worktree` (verified by reading lines 293–298). The test for the caller-side path is out of scope for this hotfix (see No-Gos).
+- [x] `_cleanup_stale_worktree`'s `except subprocess.CalledProcessError` block (currently lines 239–247) does NOT swallow the CalledProcessError silently — it logs at `error` level and then runs the fallback. After this change, the block still catches `CalledProcessError` from `git worktree remove --force`, but the subsequent `rmtree` call no longer hides its own errors. This is verified by test case **(d)** below: when `rmtree` succeeds, the test asserts the call was made; a follow-up assertion confirms `ignore_errors` was not passed (or was `False`).
+- [x] The new guard raises `RuntimeError` — not caught anywhere in `create_worktree` (verified by reading lines 293–298). The test for the caller-side path is out of scope for this hotfix (see No-Gos).
 
 ### Empty/Invalid Input Handling
-- [ ] Empty-string `worktree_path`: `Path("").resolve()` returns the current working directory on most platforms. This is dangerous behavior (could equal `repo_root` if cwd is the repo). Test case **(a)** implicitly covers this if the test runs from `repo_root`; we add an explicit empty-string test to lock the guard rejection regardless of cwd.
-- [ ] `None` `worktree_path`: Type signature says `str`; passing `None` would raise `TypeError` at `Path(None)`. Not in scope — upstream callers in `create_worktree` always pass a string from `git worktree list`.
-- [ ] Whitespace-only `worktree_path`: Same as empty string, resolves to cwd. The guard rejects it on the "not under .worktrees/" branch.
+- [x] Empty-string `worktree_path`: `Path("").resolve()` returns the current working directory on most platforms. This is dangerous behavior (could equal `repo_root` if cwd is the repo). Test case **(a)** implicitly covers this if the test runs from `repo_root`; we add an explicit empty-string test to lock the guard rejection regardless of cwd.
+- [x] `None` `worktree_path`: Type signature says `str`; passing `None` would raise `TypeError` at `Path(None)`. Not in scope — upstream callers in `create_worktree` always pass a string from `git worktree list`.
+- [x] Whitespace-only `worktree_path`: Same as empty string, resolves to cwd. The guard rejects it on the "not under .worktrees/" branch.
 
 ### Error State Rendering
-- [ ] This is an internal helper, no user-facing output. The `logger.critical` log is the observable signal for log audits and crash tracker. The test for the fallback path asserts `logger.critical` was called before `rmtree` (via `caplog` or `patch("agent.worktree_manager.logger")`).
+- [x] This is an internal helper, no user-facing output. The `logger.critical` log is the observable signal for log audits and crash tracker. The test for the fallback path asserts `logger.critical` was called before `rmtree` (via `caplog` or `patch("agent.worktree_manager.logger")`).
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree::test_prunes_when_directory_missing` — UPDATE: the test passes `/repo/.worktrees/feat` as the worktree path, which is valid under the new guard. Verify it still passes. No code change expected; listed here so the builder knows to re-run it.
-- [ ] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree::test_force_removes_existing_directory` — UPDATE: same as above, uses `/repo/.worktrees/old-feat`, valid under guard. No code change expected.
-- [ ] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree::test_fallback_rmtree_on_force_remove_failure` — UPDATE: passes `/repo/.worktrees/stuck`, valid under guard. The test currently asserts `mock_rmtree.assert_called_once()` — after the change, we also want to assert that `ignore_errors` was NOT passed (or was `False`). Tighten the assertion: `mock_rmtree.assert_called_once_with(Path("/repo/.worktrees/stuck").resolve())` or inspect `mock_rmtree.call_args.kwargs` to confirm `ignore_errors` is absent.
-- [ ] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree` — ADD four new test methods (detailed in Solution section):
+- [x] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree::test_prunes_when_directory_missing` — UPDATE: the test passes `/repo/.worktrees/feat` as the worktree path, which is valid under the new guard. Verify it still passes. No code change expected; listed here so the builder knows to re-run it.
+- [x] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree::test_force_removes_existing_directory` — UPDATE: same as above, uses `/repo/.worktrees/old-feat`, valid under guard. No code change expected.
+- [x] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree::test_fallback_rmtree_on_force_remove_failure` — UPDATE: passes `/repo/.worktrees/stuck`, valid under guard. The test currently asserts `mock_rmtree.assert_called_once()` — after the change, we also want to assert that `ignore_errors` was NOT passed (or was `False`). Tighten the assertion: `mock_rmtree.assert_called_once_with(Path("/repo/.worktrees/stuck").resolve())` or inspect `mock_rmtree.call_args.kwargs` to confirm `ignore_errors` is absent.
+- [x] `tests/unit/test_worktree_manager.py::TestCleanupStaleWorktree` — ADD four new test methods (detailed in Solution section):
   - `test_guard_rejects_repo_root_path` — calls `_cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo")` and asserts `RuntimeError` raised with a message mentioning both the path and `.worktrees`.
   - `test_guard_rejects_path_outside_worktrees` — calls with `worktree_path="/tmp/foo"` and asserts `RuntimeError`.
   - `test_guard_rejects_sibling_dir_under_repo` — calls with `worktree_path="/repo/some-other-dir"` and asserts `RuntimeError` (this is the "same repo but not under .worktrees/" case).
   - `test_fallback_does_not_pass_ignore_errors` — mirrors `test_fallback_rmtree_on_force_remove_failure` but explicitly asserts the `rmtree` call does not pass `ignore_errors=True`, and asserts `logger.critical` was called before the `rmtree`.
-- [ ] `tests/unit/test_worktree_manager.py::TestCreateWorktreeStaleRecovery` — No changes expected. The create-worktree tests mock `_cleanup_stale_worktree` directly, so they are insulated from the guard change.
+- [x] `tests/unit/test_worktree_manager.py::TestCreateWorktreeStaleRecovery` — No changes expected. The create-worktree tests mock `_cleanup_stale_worktree` directly, so they are insulated from the guard change.
 
 All four new tests live in the existing `TestCleanupStaleWorktree` class; no new class needed.
 
@@ -234,16 +234,16 @@ No changes to `docs/features/README.md` index (the feature page already exists).
 
 ## Success Criteria
 
-- [ ] `_cleanup_stale_worktree` raises `RuntimeError` when `worktree_path` resolves to `repo_root` or any path outside `repo_root / WORKTREES_DIR` (acceptance criterion 1 from issue #880).
-- [ ] `shutil.rmtree` fallback no longer uses `ignore_errors=True` (acceptance criterion 2).
-- [ ] `logger.critical` fires before the fallback `rmtree` call (acceptance criterion 3).
-- [ ] Four new unit tests in `TestCleanupStaleWorktree` cover cases (a) through (d) from the issue's acceptance criterion 4.
-- [ ] Existing `TestCleanupStaleWorktree` and `TestCreateWorktreeStaleRecovery` tests still pass (acceptance criterion 5).
-- [ ] `python -m ruff check .` exits 0 (acceptance criterion 6).
-- [ ] `python -m ruff format --check .` exits 0 (acceptance criterion 6).
-- [ ] `pytest tests/unit/test_worktree_manager.py -x -q` exits 0.
-- [ ] `docs/features/session-isolation.md` updated with the invariant note.
-- [ ] PR merges to main with the hotfix.
+- [x] `_cleanup_stale_worktree` raises `RuntimeError` when `worktree_path` resolves to `repo_root` or any path outside `repo_root / WORKTREES_DIR` (acceptance criterion 1 from issue #880).
+- [x] `shutil.rmtree` fallback no longer uses `ignore_errors=True` (acceptance criterion 2).
+- [x] `logger.critical` fires before the fallback `rmtree` call (acceptance criterion 3).
+- [x] Four new unit tests in `TestCleanupStaleWorktree` cover cases (a) through (d) from the issue's acceptance criterion 4.
+- [x] Existing `TestCleanupStaleWorktree` and `TestCreateWorktreeStaleRecovery` tests still pass (acceptance criterion 5).
+- [x] `python -m ruff check .` exits 0 (acceptance criterion 6).
+- [x] `python -m ruff format --check .` exits 0 (acceptance criterion 6).
+- [x] `pytest tests/unit/test_worktree_manager.py -x -q` exits 0.
+- [x] `docs/features/session-isolation.md` updated with the invariant note.
+- [x] PR merges to main with the hotfix.
 
 ## Team Orchestration
 
