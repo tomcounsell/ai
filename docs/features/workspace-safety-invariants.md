@@ -64,10 +64,14 @@ There is an inherent time-of-check-to-time-of-use gap: the directory could be re
 - The validation here is proactive/preventive, not a sole line of defense
 - The race window is milliseconds in practice
 
+## Sibling Guard: Worktree Cleanup Path-Containment
+
+`validate_workspace()` is the **launch-time** containment guard. A sibling **delete-time** guard lives in `_cleanup_stale_worktree()` in the same module. After the 2026-04-10 incident ([#880](https://github.com/tomcounsell/ai/issues/880)), `_cleanup_stale_worktree()` refuses to operate on any path outside `repo_root / .worktrees/` (including `repo_root` itself) and its `shutil.rmtree` fallback no longer passes `ignore_errors=True`. Together these two guards establish a general invariant: *destructive filesystem operations must validate their target path.* See the [Path-Containment Invariant](session-isolation.md#path-containment-invariant) section of session-isolation.md for details.
+
 ## Implementation
 
 - **Source**: `validate_workspace()` in `agent/worktree_manager.py`
 - **Tests**: `tests/unit/test_workspace_safety.py` (23 tests across 4 test classes)
 - **Plan**: `docs/plans/workspace-safety-invariants.md`
 - **Issue**: [#306](https://github.com/tomcounsell/ai/issues/306)
-- **Prior art**: PR #304 (reactive CWD death guard)
+- **Prior art**: PR #304 (reactive CWD death guard), PR #882 / issue #880 (delete-time path guard)
