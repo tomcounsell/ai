@@ -83,6 +83,31 @@ def validate_feature_doc(doc_path: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def extract_feature_name_from_index(feature_doc_filename: str) -> str | None:
+    """Extract the display name for a feature doc from the README index table.
+
+    Searches docs/features/README.md for a table row whose link target matches
+    the given filename (e.g., 'pm-dev-session-architecture.md') and returns the
+    bracketed display text (e.g., 'PM/Dev Session Architecture').
+
+    Returns None if no matching row is found.
+    """
+    index_path = Path("docs/features/README.md")
+    if not index_path.exists():
+        return None
+
+    content = index_path.read_text()
+
+    # Match table rows: | [Display Name](filename.md) | ... |
+    # The filename in the link target must match exactly
+    pattern = rf"\|\s*\[([^\]]+)\]\({re.escape(feature_doc_filename)}\)"
+    match = re.search(pattern, content)
+    if match:
+        return match.group(1)
+
+    return None
+
+
 def validate_feature_index(feature_name: str) -> tuple[bool, str]:
     """Validate feature is indexed in docs/features/README.md.
 
@@ -221,14 +246,22 @@ def main() -> int:
         return 1
     print("  PASS: Feature doc exists and has content")
 
-    # Extract feature name from doc path
-    feature_name = feature_doc_path.stem.replace("-", " ").title()
-    print(f"Feature name: {feature_name}")
-
-    # Validate feature index
-    valid, error = validate_feature_index(feature_name)
-    if not valid:
-        print(f"Error: {error}")
+    # Extract feature name from README index (avoids .title() mangling acronyms)
+    feature_doc_filename = feature_doc_path.name
+    feature_name = extract_feature_name_from_index(feature_doc_filename)
+    if feature_name:
+        print(f"Feature name (from index): {feature_name}")
+        # Validate using the extracted name
+        valid, error = validate_feature_index(feature_name)
+        if not valid:
+            print(f"Error: {error}")
+            return 1
+    else:
+        # Fallback: check if the filename appears as a link target in the index
+        print(
+            f"Warning: No README entry found linking to {feature_doc_filename}. "
+            f"Add entry to docs/features/README.md"
+        )
         return 1
     print("  PASS: Feature indexed in docs/features/README.md")
 
