@@ -1,9 +1,0 @@
-{
-  "issue_number": 789,
-  "plan_slug": "issue-789",
-  "issue_title": "fix(worker): exit code 1 on SIGTERM so launchd respects ThrottleInterval (#776)",
-  "merged_pr_number": 789,
-  "auditable": false,
-  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
-  "findings": []
-}

@@ -1,9 +1,0 @@
-{
-  "issue_number": 787,
-  "plan_slug": "issue-787",
-  "issue_title": "Fix watchdog UTC duration: _to_timestamp treats naive datetimes as local time",
-  "merged_pr_number": 787,
-  "auditable": false,
-  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
-  "findings": []
-}

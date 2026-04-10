@@ -131,7 +131,7 @@ should be treated as already-addressed unless there is specific evidence of gaps
 
 ## Methodology
 
-1. **Audit set**: 70 deleted plans recovered from git history via `git log --diff-filter=D --after='2026-03-24'` + 18 explicit #823 issues
+1. **Audit set**: 68 deleted plans recovered from git history via `git log --diff-filter=D --after='2026-03-24'` + 18 explicit #823 issues = 86 total audit items
 2. **Per-item audit**: Checked Documentation section, Test Impact section, and Success Criteria for each plan against HEAD file existence
 3. **Relevance filter**: Purged findings where the underlying feature was removed (issue_poller), the deletion was intentional (coach module), or data artifacts are gitignored by design
 4. **Deduplication**: Merged duplicate references to the same file (e.g., tests/test_issue_poller.py appeared 3x)

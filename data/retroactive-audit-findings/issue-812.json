@@ -1,9 +1,0 @@
-{
-  "issue_number": 812,
-  "plan_slug": "issue-812",
-  "issue_title": "fix: valor-session kill uses finalize_session for terminal transitions",
-  "merged_pr_number": 812,
-  "auditable": false,
-  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
-  "findings": []
-}

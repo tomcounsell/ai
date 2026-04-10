@@ -1,9 +1,0 @@
-{
-  "issue_number": 803,
-  "plan_slug": "issue-803",
-  "issue_title": "fix(tests): update stale format_duration assertions (#799)",
-  "merged_pr_number": 803,
-  "auditable": false,
-  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
-  "findings": []
-}

@@ -1,9 +1,0 @@
-{
-  "issue_number": 819,
-  "plan_slug": "issue-819",
-  "issue_title": "fix(timestamp): add explicit UTC labels to all timestamp display surfaces",
-  "merged_pr_number": 819,
-  "auditable": false,
-  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
-  "findings": []
-}

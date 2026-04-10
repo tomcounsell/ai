@@ -1,9 +1,0 @@
-{
-  "issue_number": 796,
-  "plan_slug": "issue-796",
-  "issue_title": "Purge ChatSession/DevSession vocabulary; use AgentSession with role",
-  "merged_pr_number": 796,
-  "auditable": false,
-  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
-  "findings": []
-}

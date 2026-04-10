@@ -1,9 +1,0 @@
-{
-  "issue_number": 794,
-  "plan_slug": "issue-794",
-  "issue_title": "feat(hooks): wire Skill tool invocations into PipelineStateMachine stage tracking",
-  "merged_pr_number": 794,
-  "auditable": false,
-  "reason": "Plan content not recoverable \u2014 using issue body only; skipping file assertions",
-  "findings": []
-}
