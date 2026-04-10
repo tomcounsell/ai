@@ -9,11 +9,11 @@ Fields:
     teammate_classified_count: Number of teammate classifications above threshold
     teammate_low_confidence_count: Number of teammate classifications below threshold
     work_classified_count: Number of work classifications
-    teammate_response_times: Sorted set of response times (score=timestamp)
-    work_response_times: Sorted set of response times (score=timestamp)
+    teammate_response_times: List of "elapsed:timestamp" strings (capped at 1000)
+    work_response_times: List of "elapsed:timestamp" strings (capped at 1000)
 """
 
-from popoto import IntField, KeyField, Model, SortedField
+from popoto import IntField, KeyField, ListField, Model
 
 
 class TeammateMetrics(Model):
@@ -28,11 +28,8 @@ class TeammateMetrics(Model):
     teammate_classified_count = IntField(default=0)
     teammate_low_confidence_count = IntField(default=0)
     work_classified_count = IntField(default=0)
-    teammate_response_times = SortedField(default=dict)
-    work_response_times = SortedField(default=dict)
-
-    # Max response time entries to keep per mode
-    _MAX_RESPONSE_TIMES = 1000
+    teammate_response_times = ListField(max_length=1000)
+    work_response_times = ListField(max_length=1000)
 
     @classmethod
     def get_or_create(cls) -> "TeammateMetrics":
