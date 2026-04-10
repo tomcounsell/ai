@@ -1297,11 +1297,15 @@ def _recover_interrupted_agent_sessions_startup() -> int:
             entry.message_text or "",
         )
         try:
-            from models.session_lifecycle import transition_status
+            from models.session_lifecycle import update_session
 
-            entry.priority = "high"
-            entry.started_at = None
-            transition_status(entry, "pending", reason="startup recovery")
+            update_session(
+                entry.session_id,
+                new_status="pending",
+                fields={"priority": "high", "started_at": None},
+                expected_status="running",
+                reason="startup recovery",
+            )
             logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
             count += 1
         except Exception as e:
@@ -1414,7 +1418,7 @@ async def _agent_session_health_check() -> None:
                     is_local,
                     reason,
                 )
-                from models.session_lifecycle import finalize_session, transition_status
+                from models.session_lifecycle import finalize_session, update_session
 
                 if is_local:
                     # Local CLI sessions have no bridge worker to resume them --
@@ -1431,11 +1435,11 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                     )
                 else:
-                    entry.priority = "high"
-                    entry.started_at = None
-                    transition_status(
-                        entry,
-                        "pending",
+                    update_session(
+                        entry.session_id,
+                        new_status="pending",
+                        fields={"priority": "high", "started_at": None},
+                        expected_status="running",
                         reason=f"health check: recovered stuck session (chat={worker_key})",
                     )
                     logger.info(
@@ -2686,9 +2690,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
     if slug:
         # Try to read current stage from the AgentSession
         try:
-            sessions = list(AgentSession.query.filter(session_id=session.session_id))
-            if sessions:
-                stage = sessions[0].current_stage
+            from models.session_lifecycle import get_authoritative_session as _get_auth
+
+            _auth = _get_auth(session.session_id)
+            if _auth:
+                stage = _auth.current_stage
         except Exception as e:
             logger.debug(
                 f"[{session.project_key}] current_stage lookup failed for "
