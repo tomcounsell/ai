@@ -6,6 +6,9 @@ owner: Valor
 created: 2026-04-10
 tracking: https://github.com/tomcounsell/ai/issues/881
 last_comment_id:
+revision_applied: true
+revision_date: 2026-04-10
+revision_critique_commit: 73d6ed07
 ---
 
 # PM Bash Discipline — Read-Only Enforcement for PM Sessions
@@ -168,8 +171,13 @@ gh pr checks
 gh pr status
 gh run view
 gh run list
-gh api  # read-only by the nature of typical PM use; see "No-Gos" for the tradeoff
 gh repo view
+# NOTE: `gh api` is DELIBERATELY NOT on the allowlist (resolves Concern C1).
+# `gh api ... --method POST/PATCH/PUT/DELETE` is a silent mutation vector that
+# would pass a naive prefix check. All read-only GitHub data the PM needs is
+# available via the `gh issue view`, `gh pr view`, `gh pr list`, `gh run view`,
+# and `gh repo view` verbs above. If a future PM use case genuinely needs `gh
+# api`, add it as a gated entry with a method-flag denylist, not as a bare prefix.
 
 # log/file reading
 tail logs/
@@ -204,6 +212,23 @@ curl localhost:8500/dashboard.json
 ```
 
 **Metacharacter guard.** Even if a command starts with an allowlisted prefix, the entire command string is rejected if it contains any of: `|`, `>`, `>>`, `<`, `&&`, `||`, `;`, `` ` ``, `$(`, `$((`. This prevents `git log | xargs rm`, `git status > /tmp/x && rm -rf ...`, command substitution injection, and similar smuggling. The one intentional exception is that plain `&` at end-of-string (background) is also rejected — PM sessions have no legitimate reason to background processes.
+
+**`git -C <path>` normalization (resolves Blocker B2).** The SDLC skills use `git -C "$REPO" <verb>` and `git -C $TARGET_REPO/.worktrees/{slug} <verb>` as the canonical cross-repo form (verified at 11+ call sites in `.claude/skills/sdlc/SKILL.md:81`, `.claude/skills/do-build/SKILL.md:70,77,88,126,189,190,297,411`, `.claude/skills/do-build/PR_AND_CLEANUP.md:49`, `.claude/skills/do-test/SKILL.md:62,72`, `.claude/skills/do-patch/SKILL.md:49`). Since the PM operates cross-repo via `SDLC_TARGET_REPO`, this is the dominant call form — not an edge case. A naive prefix check on `git status` would reject `git -C "/some/path" status`.
+
+**Fix:** In `_is_pm_allowed_bash`, after the metacharacter guard runs but before the prefix check, apply a normalization step that strips a leading `git -C <token>` where `<token>` is a double-quoted string, single-quoted string, or a single unquoted word:
+
+```python
+import re
+_GIT_DASH_C_PATTERN = re.compile(r'^git -C (?:"[^"]*"|\'[^\']*\'|\S+)\s+')
+# After metacharacter guard, before prefix matching:
+command = _GIT_DASH_C_PATTERN.sub('git ', command, count=1)
+```
+
+**Critical ordering.** The metacharacter guard MUST run BEFORE the normalization step. Otherwise an attacker could smuggle via the path argument: `git -C "$(rm -rf /)" status` would normalize to `git status` (allowed) but contains `$(` which must trigger the metacharacter guard first. The guard short-circuits this case before normalization ever runs.
+
+**After normalization, the prefix check runs against the normalized command.** A command like `git -C "/x" commit -m "y"` normalizes to `git commit -m "y"`, which is still rejected (commit is not allowlisted). A command like `git -C $REPO status` normalizes to `git status`, which is allowed.
+
+**Tests for normalization:** `test_pm_allowed_git_dash_c_status` (asserts `git -C "/some/path" status` and `git -C $REPO status` are both allowed); `test_git_dash_c_does_not_bypass_mutation` (asserts `git -C "/x" commit -m "y"` is still blocked); `test_git_dash_c_with_metacharacter_injection_blocked` (asserts `git -C "$(rm -rf /)" status` is blocked by the metacharacter guard, NOT allowed after normalization).
 
 **Why prefix matching and not full regex.** The model's Bash output is natural and consistent — the PM uses commands in their canonical form. A prefix check plus metacharacter rejection covers the realistic surface without the cost and bypass-risk of regex parsing. If a command is rejected by the allowlist, the block reason tells the model *which* allowlist prefix it's close to, so the model can correct (and humans auditing the allowlist can easily see what to add).
 
@@ -251,9 +276,14 @@ one attempt succeeded. That is not a valid recovery path.
 - [x] The new `_is_pm_allowed_bash` helper will be a pure function with no exception handlers — it returns a boolean. If it raises for any reason (unexpected), the enclosing `pre_tool_use_hook` function is not wrapped in a try/except, so the SDK would surface the error. A test asserts the helper never raises for empty strings, whitespace, or None.
 
 ### Empty/Invalid Input Handling
-- [ ] Test: empty Bash command string returns True from `_is_pm_allowed_bash` — no-op is allowed (the SDK would pass through a no-op Bash call harmlessly). OR test that empty string is blocked; pick one and document. **Decision:** block empty commands too — they serve no PM purpose and a bare empty string is a classifier-evasion vector.
-- [ ] Test: whitespace-only command `"   "` is blocked for PM sessions.
-- [ ] Test: None passed as command (shouldn't happen but defensive) — the helper handles it gracefully (returns False → command blocked).
+**Decision (unambiguous):** `_is_pm_allowed_bash` returns `False` for empty, whitespace-only, and `None` inputs. All three are blocked for PM sessions. Empty commands serve no legitimate PM purpose and a bare empty string is a classifier-evasion vector.
+
+- [ ] Test `test_pm_empty_command_blocked`: `_is_pm_allowed_bash("")` returns `False`; calling `pre_tool_use_hook` with a PM session and `tool_input={"command": ""}` returns `{"decision": "block", ...}`.
+- [ ] Test `test_pm_whitespace_only_blocked`: `_is_pm_allowed_bash("   ")` returns `False`; PM session with whitespace command is blocked.
+- [ ] Test `test_pm_none_command_handled_gracefully`: `_is_pm_allowed_bash(None)` returns `False` (defensive — the upstream `tool_input.get("command", "")` already defaults to `""`, so `None` is upstream-impossible, but the helper must not raise).
+- [ ] Test `test_pm_missing_command_key_blocked`: `asyncio.run(pre_tool_use_hook({"tool_name": "Bash", "tool_input": {}}, "tu", mock_context))["decision"] == "block"` for a PM session — a missing `command` key defaults to `""` which must be blocked.
+
+The helper signature begins with `if not command or not command.strip(): return False`. This single guard handles all three invalid inputs.
 
 ### Error State Rendering
 - [ ] When the hook returns `{"decision": "block", "reason": "..."}`, the SDK surfaces the `reason` string to the model as the tool result. Verify the reason string is informative enough for the model to correct course: it names the session type, says which command was blocked, and points at "spawn a dev-session subagent" as the resolution. Test asserts the reason string contains the command, "PM session", and "dev-session".
@@ -282,8 +312,16 @@ one attempt succeeded. That is not a valid recovery path.
   - `test_pm_allowed_tail_logs`
   - `test_pm_allowed_cat_docs_plans`
   - `test_pm_allowed_valor_session_status`
+  - `test_pm_allowed_git_dash_c_status` — `git -C "/some/path" status` and `git -C $REPO status` are both allowed after `git -C <token>` normalization (resolves B2)
+  - `test_pm_allowed_git_dash_c_log` — `git -C "$REPO" log --oneline -10` is allowed after normalization
+  - `test_git_dash_c_does_not_bypass_mutation` — `git -C "/x" commit -m "y"` normalizes to `git commit -m "y"` and is still blocked (commit is not allowlisted)
+  - `test_git_dash_c_with_metacharacter_injection_blocked` — `git -C "$(rm -rf /)" status` is blocked by the metacharacter guard BEFORE normalization runs (resolves B2 security ordering)
+  - `test_pm_blocked_gh_api_get` — `gh api repos/x/y/issues/1` is blocked because `gh api` is not allowlisted (resolves C1)
+  - `test_pm_blocked_gh_api_post` — `gh api repos/x/y/issues/1/comments --method POST --field body=z` is blocked
+  - `test_pm_none_command_handled_gracefully` — `_is_pm_allowed_bash(None)` returns False without raising
+  - `test_pm_missing_command_key_blocked` — PM session with `tool_input={}` (no command key) is blocked via the `.get("command", "")` default
   - `test_non_pm_session_bash_unrestricted` — `SESSION_TYPE=dev` can still run `rm -rf tmp/`
-  - `test_pm_sensitive_file_check_still_runs` — `SESSION_TYPE=pm` attempting `echo x > .env` is blocked by the sensitive-file check (not the new allowlist, but the check order matters)
+  - `test_pm_sensitive_file_check_runs_before_pm_allowlist` — `SESSION_TYPE=pm` attempting `echo x > .env` is blocked, AND the `reason` string contains `"sensitive"` (case-insensitive) AND does NOT contain `"PM session"`. This pins the ordering contract: the sensitive-file check must fire BEFORE the PM allowlist, so a sensitive-file violation surfaces as a "sensitive file" error, not a "PM command not allowlisted" error. If this test fails, either the hook ordering is wrong or the reason strings must be updated to match. **Note:** it may be impossible to construct a command that passes the allowlist but fails the sensitive-file check (all sensitive-file patterns require metachars like `>` which the metacharacter guard blocks first). If the test proves vacuous — i.e., `echo x > .env` is blocked by the metacharacter guard before either sensitive-file or PM-allowlist layers see it — delete this test and replace with a code comment at the hook site documenting the intended check order.
   - `test_pm_empty_command_blocked`
   - `test_pm_whitespace_only_blocked`
 - [ ] `tests/unit/test_pre_tool_use_hook.py` — NO CHANGE. This file tests the standalone shell script at `.claude/hooks/pre_tool_use.py`, which is not modified by this plan.
@@ -301,13 +339,13 @@ one attempt succeeded. That is not a valid recovery path.
 
 ## Risks
 
-### Risk 1: The allowlist is missing a command the PM actually needs, breaking its workflow
-**Impact:** A PM session hits a legitimate read-only command (e.g., `git fetch`, `git stash list`) that isn't in the allowlist, and the block prevents it from progressing. The session would either adapt (spawn a dev-session, which is correct but slower) or hibernate.
-**Mitigation:** Before merge, manually enumerate the Bash commands currently used by the PM persona and the SDLC skill files (`grep -rn 'git \|gh \|python -m tools.' .claude/skills/sdlc/ .claude/skills/do-*/ config/personas/project-manager.md`) and cross-check each against the allowlist. Any command used by a committed skill must be on the list. The build task includes this audit as a checklist item.
+### Risk 1: The allowlist breaks the PM's own `/sdlc` orchestration loop on first deploy
+**Impact:** **This is a deployment-blocking risk, not a routine audit item.** The critique of 2026-04-10 verified that `.claude/skills/sdlc/SKILL.md` uses `$(...)`, `|`, `||`, `>`, and `git -C` patterns at lines 51, 55, 81, 104, and 107 (`STAGE_STATES=$(python -m tools.sdlc_stage_query ...)`, `git -C "$REPO" branch -a | grep session/`, `gh pr diff {pr_number} --name-only | grep -c '^docs/' || echo "0"`, `PLAN_PATH=$(grep -rl ... | head -1)`). Every one of these is rejected by the metacharacter guard AND the prefix check. The moment this hook ships, the PM session is unable to advance past Step 2.0 of `/sdlc`. The same applies to 11+ `git -C` sites across `do-build/SKILL.md`, `do-test/SKILL.md`, `do-patch/SKILL.md`, and `do-build/PR_AND_CLEANUP.md`.
+**Mitigation:** The `git -C` case is resolved by the normalization step in the Technical Approach section (see "git -C <path> normalization"). The `$(...)`, `|`, `||`, `>` cases in `.claude/skills/sdlc/SKILL.md` require a refactor of the skill file itself — the hook cannot accept those patterns without re-opening the denylist/allowlist question. **Task 0 (Audit & Refactor) is a prerequisite to Task 1 (build-hook).** Task 0 must: (a) grep `.claude/skills/**/*.md` for `\$\(`, `\|`, `&&`, `\|\|`, `>`, `git -C`; (b) refactor `.claude/skills/sdlc/SKILL.md` lines 51, 55, 81, 104, 107 to be metacharacter-free (single-command-per-line, outputs captured via subsequent separate commands, or encapsulated in `python -m scripts.xxx` entry points); (c) refactor `gh api` call sites at `.claude/skills/do-build/SKILL.md:112` and `.claude/skills/do-patch/SKILL.md:52-53` to use typed `gh` verbs; (d) publish a finalized allowlist that Task 1 implements verbatim. No hook code is written until Task 0 lands.
 
 ### Risk 2: An allowlisted command can still be mutating with creative argumentation
 **Impact:** `git show HEAD -- file.py > /tmp/x.py` is rejected by the metacharacter guard. But `git show HEAD:file.py` (no redirection, no mutation) is allowed. If a future allowlist entry introduces a subcommand that mutates under unusual flags (e.g., `gh api --method POST`), that would be a silent gap.
-**Mitigation:** The initial allowlist is audited in the build task. For `gh api` specifically, the plan keeps it on the allowlist (PM does use it for status queries) but documents in the test comment that it's the one entry where the prefix check trusts the PM not to pass `--method POST/PATCH/DELETE/PUT`. A follow-up hardening can add a method-flag inspection if needed, but that is not in scope for this fix.
+**Mitigation:** `gh api` is DELIBERATELY excluded from the initial allowlist (see the allowlist block above and the comment within it) to close the most obvious creative-argumentation vector. The PM uses `gh issue view`, `gh pr view`, `gh pr list`, `gh run view`, and `gh repo view` — these cover all known orchestration data needs. If the allowlist audit (Task 0) finds a legitimate `gh api` call site in a PM-reachable skill file, it must be replaced with the equivalent typed verb (`gh issue view ... --json comments`, etc.) or the skill refactored, NOT added back to the allowlist as a bare prefix. See Audit Task 0 for the specific `gh api` call sites that must be checked and refactored: `.claude/skills/do-build/SKILL.md:112` (`LATEST_COMMENT_ID=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments ...)`) and `.claude/skills/do-patch/SKILL.md:52-53`.
 
 ### Risk 3: Non-PM sessions accidentally start getting `SESSION_TYPE=pm` due to an upstream bug
 **Impact:** A dev session suddenly becomes restricted and cannot commit or push, breaking the SDLC pipeline.
@@ -339,13 +377,6 @@ No update system changes required — this fix is purely internal to the Python 
 
 No agent integration required — this is a restriction on the existing Bash tool's PM-session behavior, not a new capability surfaced to the agent. The agent continues to use the same `Bash` tool name; the only change is that some command strings return a block decision instead of executing. No MCP server changes, no `.mcp.json` edits, no `mcp_servers/` additions. The bridge (`bridge/telegram_bridge.py`) is unaffected — it spawns PM sessions via the existing `ValorAgent` interface and the new hook behavior applies automatically.
 
-## Test Impact
-
-- [x] `tests/unit/test_pm_session_permissions.py` — UPDATE: add `TestPMBashRestriction` class with the ~25 test cases enumerated in the "Test Impact" section above. No existing tests in this file are modified.
-- [x] `tests/unit/test_pre_tool_use_hook.py` — NO CHANGE. This file tests the shell script at `.claude/hooks/pre_tool_use.py`, which is not modified.
-- [x] `tests/unit/test_pre_tool_use_start_stage.py` — NO CHANGE. Tests stage-extraction logic in the SDK hook, unrelated to the tool-access branch being modified.
-- [x] Integration tests — NO CHANGE. No integration tests currently exercise the PM-session + Bash + hook deny path end-to-end. The unit test in `test_pm_session_permissions.py` invokes the real hook function directly (per AC #5), which is the canonical test path for this layer.
-
 ## Documentation
 
 ### Feature Documentation
@@ -373,7 +404,8 @@ No agent integration required — this is a restriction on the existing Bash too
 - [ ] Tests pass (`/do-test`) — the full unit suite is green.
 - [ ] Documentation updated (`/do-docs`) — the feature doc and inline comment changes land.
 - [ ] Lint clean — `python -m ruff check .` and `python -m ruff format --check .` return exit code 0.
-- [ ] Allowlist audit complete — the builder has grepped the PM persona prompt and SDLC skill files for Bash commands and confirmed every legitimate read-only command is on the allowlist (Risk 1 mitigation).
+- [ ] Allowlist audit complete (Task 0) — the validator has grepped `.claude/skills/**/*.md` and `config/personas/project-manager.md` for metacharacter patterns and `git -C`, refactored the PM-reachable skill blocks to be metacharacter-free, and published the finalized allowlist. The audit report is attached to the PR description. Task 0 output is what Task 1 implements verbatim.
+- [ ] Post-hook audit recheck (Task 6) — the shipped hook's allowlist matches Task 0's finalized allowlist, and no new regressions were introduced by Task 1.
 
 ## Team Orchestration
 
@@ -399,18 +431,41 @@ No agent integration required — this is a restriction on the existing Bash too
 
 ## Step by Step Tasks
 
+### 0. Audit & refactor PM-reachable bash commands in skill files (PREREQUISITE — resolves B1)
+- **Task ID**: audit-and-refactor
+- **Depends On**: none
+- **Validates**: Written audit report committed to the PR description; `grep -rnE '\$\(|\|\||&&|\| |> ' .claude/skills/sdlc/SKILL.md .claude/skills/do-build/ .claude/skills/do-test/ .claude/skills/do-patch/ .claude/skills/do-pr-review/ config/personas/project-manager.md` returns zero matches in PM-reachable code paths, OR every remaining match is explicitly documented in the audit as "dev-session reachable only, not PM".
+- **Informed By**: Critique B1, Risk 1
+- **Assigned To**: pm-bash-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- **Step 0a.** Grep `.claude/skills/**/*.md` and `config/personas/project-manager.md` for `\$\(`, `\|`, `&&`, `\|\|`, `> `, `git -C`, `gh api`. Classify each hit as: (i) PM-reachable (the PM session will execute this block as part of `/sdlc` or a skill it invokes), or (ii) dev-session-only (the command runs inside a dev session spawned via Agent, where the PM Bash restriction does NOT apply).
+- **Step 0b.** For every PM-reachable match, refactor the skill file to remove the metacharacter:
+  - `.claude/skills/sdlc/SKILL.md:51` (`STAGE_STATES=$(python -m tools.sdlc_stage_query ...)`) → rewrite as a direct `python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID"` call with the output captured by the LLM's tool-result parsing, not by shell substitution.
+  - `.claude/skills/sdlc/SKILL.md:55` (same pattern with `AGENT_SESSION_ID`) → same treatment.
+  - `.claude/skills/sdlc/SKILL.md:81` (`git -C "$REPO" branch -a | grep session/`) → rewrite as `git branch -a` (run in the correct cwd) or two separate commands where the filter is done by the LLM.
+  - `.claude/skills/sdlc/SKILL.md:104` (`gh pr diff {pr_number} --name-only | grep -c '^docs/' || echo "0"`) → rewrite as `gh pr diff {pr_number} --name-only` with the docs-count filter done by the LLM.
+  - `.claude/skills/sdlc/SKILL.md:107` (`PLAN_PATH=$(grep -rl "#{issue_number}" "$REPO/docs/plans/" 2>/dev/null | head -1)`) → rewrite as `grep -rl "#{issue_number}" docs/plans/` with the first-match selection done by the LLM.
+  - `.claude/skills/do-build/SKILL.md:112` (`LATEST_COMMENT_ID=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '.[-1].id // empty' 2>/dev/null)`) → rewrite as `gh issue view ${ISSUE_NUM} --json comments` with the last-comment-id extraction done by the LLM, OR keep as-is if this block runs only inside the do-build dev session (classify in step 0a).
+  - `.claude/skills/do-patch/SKILL.md:52-53` (`gh api` calls) → same treatment.
+- **Step 0c.** For every `git -C` hit, verify it is accommodated by the normalization step in the Technical Approach. The normalization makes `git -C <token> <verb>` equivalent to `git <verb>` for allowlist purposes, so the skill files can keep their existing `git -C` idiom — no skill refactor required for `git -C` specifically.
+- **Step 0d.** Publish the finalized allowlist as the audit output. The finalized allowlist is what Task 1 implements verbatim.
+- **Step 0e.** Commit the skill refactors as a single commit titled `Refactor SDLC skill bash blocks to be metacharacter-free (prep for #881)`. This commit lands BEFORE Task 1 so the hook can be enabled against a clean skill tree.
+- **Exit criterion:** A PM session running `/sdlc` end-to-end with the proposed hook enabled would not hit a metacharacter block on the refactored skill files. Verified by grep + manual trace of the `/sdlc` Step 2.0 flow.
+
 ### 1. Extend the SDK hook with the PM Bash allowlist
 - **Task ID**: build-hook
-- **Depends On**: none
+- **Depends On**: audit-and-refactor
 - **Validates**: `tests/unit/test_pm_session_permissions.py::TestPMBashRestriction` (created in task 2)
-- **Informed By**: Freshness Check (existing hook infrastructure), Design Decision (Option 2 allowlist)
+- **Informed By**: Task 0 output (finalized allowlist), Freshness Check (existing hook infrastructure), Design Decision (Option 2 allowlist)
 - **Assigned To**: pm-bash-hook-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add the `_is_pm_allowed_bash(command: str) -> bool` helper to `agent/hooks/pre_tool_use.py`, implementing the prefix allowlist and metacharacter guard from the Technical Approach section.
+- Add the `_is_pm_allowed_bash(command: str) -> bool` helper to `agent/hooks/pre_tool_use.py`, implementing the prefix allowlist (from Task 0 output) and metacharacter guard from the Technical Approach section.
+- **Implement the `git -C <token>` normalization step** per the Technical Approach section. The metacharacter guard MUST run BEFORE normalization to prevent `git -C "$(rm -rf /)" status`-style injection.
 - Extend the `if tool_name == "Bash":` branch in `pre_tool_use_hook` so that after the sensitive-file checks, it runs the PM check: `if _is_pm_session() and not _is_pm_allowed_bash(command): return {"decision": "block", "reason": "..."}`.
 - Write the block `reason` string to include the offending command (truncated to 200 chars), the words "PM session", and the phrase "spawn a dev-session subagent" so the model has a clear recovery path.
-- Add a module-level docstring comment noting the PM Bash enforcement, and an inline docstring for `_is_pm_allowed_bash` with its contract.
+- Add a module-level docstring comment noting the PM Bash enforcement, and an inline docstring for `_is_pm_allowed_bash` with its contract (including the `git -C` normalization behavior and the metacharacter guard ordering).
 
 ### 2. Add the test cases
 - **Task ID**: build-tests
@@ -453,21 +508,22 @@ No agent integration required — this is a restriction on the existing Bash too
 - Add an "Enforcement" section to `docs/features/pm-dev-session-architecture.md` per the Documentation section.
 - Include explicit file:line pointers to `agent/hooks/pre_tool_use.py` (for the hook) and `config/personas/project-manager.md` (for the anomaly rule).
 
-### 6. Allowlist audit
-- **Task ID**: audit-allowlist
+### 6. Post-hook audit recheck (sanity-verify Task 0 against the shipped hook)
+- **Task ID**: recheck-audit
 - **Depends On**: build-hook
-- **Validates**: Written audit report in the PR description
+- **Validates**: Written recheck report in the PR description confirming that every skill-file command identified in Task 0 still matches the shipped allowlist and that no new regressions were introduced by the hook code
 - **Assigned To**: pm-bash-validator
 - **Agent Type**: validator
 - **Parallel**: false
+- This is a sanity recheck of the Task 0 finalized allowlist against the actually-implemented hook. It should be a no-op if Task 0 was done properly.
 - Run `grep -rn 'git \|gh \|tail \|cat \|python -m tools.' .claude/skills/sdlc/ .claude/skills/do-build/ .claude/skills/do-plan-critique/ .claude/skills/do-test/ .claude/skills/do-docs/ .claude/skills/do-patch/ .claude/skills/do-pr-review/ config/personas/project-manager.md`.
-- For each unique Bash command pattern found, verify it matches an allowlist prefix in `agent/hooks/pre_tool_use.py`.
-- If any legitimate read-only command is missing, file a one-line finding and add it to the allowlist (and add a corresponding test).
-- Attach the audit result to the PR description.
+- For each unique Bash command pattern found, verify it matches an allowlist prefix in the shipped `agent/hooks/pre_tool_use.py`.
+- If any legitimate read-only command is missing (unexpected after Task 0), file a finding and STOP — this means Task 0 was incomplete and must be re-run, not that Task 1 should be patched.
+- Attach the recheck report to the PR description.
 
 ### 7. Final validation
 - **Task ID**: validate-all
-- **Depends On**: build-hook, build-tests, build-comment, build-persona, build-feature-doc, audit-allowlist
+- **Depends On**: build-hook, build-tests, build-comment, build-persona, build-feature-doc, recheck-audit
 - **Assigned To**: pm-bash-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -594,6 +650,20 @@ Concerns C1-C4 are non-blocking but should be addressed in the revision pass. NI
 - Rewrite the sensitive-file-ordering test to assert `"sensitive" in reason and "PM session" not in reason`.
 
 Once the revision pass lands, re-run critique to confirm the blockers are resolved before proceeding to `/do-build`.
+
+### Revision Pass Applied — 2026-04-10
+
+All 2 blockers, 4 concerns, and 1 nit from critique commit `73d6ed07` have been addressed in-plan:
+
+- **B1 (allowlist breaks /sdlc loop):** Added **Task 0 — Audit & refactor PM-reachable bash commands in skill files** as a prerequisite to Task 1. Task 0 explicitly lists the affected `.claude/skills/sdlc/SKILL.md` lines (51, 55, 81, 104, 107) and the refactor for each. Risk 1 upgraded to a deployment-blocking risk with the audit as the mitigation. Task 6 retitled to "Post-hook audit recheck" (a sanity verification, not the primary audit).
+- **B2 (git -C not accommodated):** Added a "`git -C <path>` normalization" subsection to Technical Approach. The `_is_pm_allowed_bash` helper now strips a leading `git -C <token>` before prefix matching, with the metacharacter guard running BEFORE normalization to prevent `git -C "$(rm -rf /)" status`-style injection. Four new tests added: `test_pm_allowed_git_dash_c_status`, `test_pm_allowed_git_dash_c_log`, `test_git_dash_c_does_not_bypass_mutation`, `test_git_dash_c_with_metacharacter_injection_blocked`.
+- **C1 (`gh api` silent mutation vector):** `gh api` DELIBERATELY removed from the initial allowlist. The allowlist block now includes an inline comment explaining why. Risk 2 rewritten to match. Task 0 includes refactoring the two known `gh api` PM-reachable sites (`.claude/skills/do-build/SKILL.md:112` and `.claude/skills/do-patch/SKILL.md:52-53`) to use typed `gh` verbs. Two new tests added: `test_pm_blocked_gh_api_get`, `test_pm_blocked_gh_api_post`.
+- **C2 (ambiguous sensitive-file-ordering test):** `test_pm_sensitive_file_check_still_runs` renamed to `test_pm_sensitive_file_check_runs_before_pm_allowlist` and now asserts `"sensitive" in reason.lower() and "PM session" not in reason`. The test spec explicitly flags the vacuous-case escape hatch: if `echo x > .env` is blocked by the metacharacter guard before either sensitive-file or PM-allowlist layers see it, the test is deleted in favor of a code comment.
+- **C3 (empty-string spec contradiction):** Failure Path Test Strategy rewritten to unambiguously state: `_is_pm_allowed_bash` returns `False` for empty, whitespace-only, and `None` inputs. Four tests enumerated: `test_pm_empty_command_blocked`, `test_pm_whitespace_only_blocked`, `test_pm_none_command_handled_gracefully`, `test_pm_missing_command_key_blocked`. The helper signature begins with `if not command or not command.strip(): return False`.
+- **C4 (audit task ordering is wrong):** Task 0 (audit) now precedes Task 1 (build-hook). Task 1's `Depends On` updated from `none` to `audit-and-refactor`. Task 6 (formerly `audit-allowlist`) renamed to `recheck-audit` with clarified role as a sanity verification that Task 0 was thorough.
+- **N1 (duplicate `## Test Impact` section):** Deleted the second `## Test Impact` block. Single source of truth retained at the original location.
+
+Frontmatter updated: `revision_applied: true` set so the next SDLC dispatch routes to Row 4c (`/do-build`) rather than looping back to `/do-plan`. Per critique-verdict protocol, however, the revision introduces a non-trivial architectural change (Task 0 as a prerequisite + `git -C` normalization semantics), so a re-critique is RECOMMENDED before build to verify the blockers are actually resolved and no new issues were introduced. The SDLC router will make that call based on the stage_states transition.
 
 ---
 
