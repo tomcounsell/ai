@@ -14,13 +14,13 @@ The sessions table is the primary view, auto-refreshing every 5 seconds via HTMX
 | Column | Source | Notes |
 |--------|--------|-------|
 | Project | `project_key` + `projects.json` lookup | Shows project name with metadata popover (repo, chat, stack, machine) |
-| Name | `display_name` property | Fallback chain: `context_summary` > `slug` > truncated `message_text` |
+| Name | `display_name` property | Fallback chain: `slug` > `context_summary` > truncated `message_text` |
 | Persona | `session_type` / `session_mode` | dev (blue), Teammate (green), PM (purple). `classification_type` badge shown alongside |
 | Status | `status` field | Color-coded badge. Stale sessions (running >10 min without update) show dashed border + "(stale)" label |
 | SDLC Stages | `stage_states` | Dot indicators: completed (green), in-progress (blue), failed (red), ready (yellow) |
 | Started | `started_at` or `created_at` | Formatted timestamp |
 | Duration | Computed from start to completion or now | Formatted duration |
-| Links/Activity | `turn_count`/`tool_call_count`, issue/PR URLs | Activity badge shows turns/tool-calls; issue and PR links |
+| Links/Activity | `turn_count`/`tool_call_count`, issue/PR URLs | Activity badge shows turns/tool-calls; issue and PR links (captured via PostToolUse hook or backfilled from session history) |
 
 ### Parent/Child Hierarchy
 
