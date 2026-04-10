@@ -7,6 +7,7 @@ from django.views.generic import RedirectView
 
 from apps.ai.views import MCPOAuthMetadataView
 from apps.api.views.health_views import deep_health_check, health_check
+from apps.api.views.stripe import stripe_webhook_view
 from apps.public.views.landing_views import HomeView
 from settings.env import DEBUG, LOCAL
 from settings.unfold import (
@@ -106,6 +107,8 @@ def serve_markdown_file(request, filename):
 
 
 urlpatterns = [
+    # Stripe webhook — top-level to avoid /api/ prefix on a non-API-consumer endpoint
+    path("webhooks/stripe/", stripe_webhook_view, name="stripe-webhook"),
     # OAuth Authorization Server Metadata (RFC 8414)
     path(
         ".well-known/oauth-authorization-server",

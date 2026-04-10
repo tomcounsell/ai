@@ -231,12 +231,49 @@ def handle_subscription_created(event: dict[str, Any]) -> dict[str, Any]:
             f"Created subscription record: {subscription.id}, Stripe ID: {subscription_id}"
         )
 
+        # Extend for podcast subscriptions when podcast_id metadata is present
+        podcast_subscription_created = False
+        podcast_id = metadata.get("podcast_id")
+        if podcast_id:
+            try:
+                from apps.podcast.models import Podcast, PodcastSubscription
+
+                podcast = Podcast.objects.get(id=podcast_id)
+                subscriber_email = metadata.get("subscriber_email", "") or (
+                    user.email if user else ""
+                )
+                ps, podcast_subscription_created = PodcastSubscription.objects.get_or_create(
+                    subscription=subscription,
+                    podcast=podcast,
+                    defaults={
+                        "subscriber_email": subscriber_email,
+                        "subscriber_name": metadata.get("subscriber_name", ""),
+                        "topic_focus": metadata.get("topic_focus", ""),
+                        "cadence": metadata.get(
+                            "cadence", PodcastSubscription.Cadence.WEEKLY
+                        ),
+                    },
+                )
+                if podcast_subscription_created:
+                    logger.info(
+                        f"Created PodcastSubscription {ps.id} for podcast {podcast_id}"
+                    )
+                else:
+                    logger.info(
+                        f"PodcastSubscription already exists for subscription {subscription_id}"
+                    )
+            except Podcast.DoesNotExist:
+                logger.warning(
+                    f"Podcast {podcast_id} not found — skipping PodcastSubscription creation"
+                )
+
         return {
             "success": True,
             "status": "processed",
             "event_type": "customer.subscription.created",
             "subscription_id": subscription_id,
             "subscription_status": status,
+            "podcast_subscription_created": podcast_subscription_created,
         }
     except Exception as e:
         logger.error(f"Error processing customer.subscription.created: {str(e)}")
@@ -353,6 +390,17 @@ def handle_subscription_deleted(event: dict[str, Any]) -> dict[str, Any]:
             subscription.save()
 
             logger.info(f"Marked subscription {subscription_id} as canceled")
+
+            # Transition linked PodcastSubscription to CHURNED if present
+            if hasattr(subscription, "podcast_subscription"):
+                from apps.podcast.models import PodcastSubscription
+
+                ps = subscription.podcast_subscription
+                ps.status = PodcastSubscription.Status.CHURNED
+                ps.save(update_fields=["status", "modified_at"])
+                logger.info(
+                    f"Transitioned PodcastSubscription {ps.id} to CHURNED"
+                )
 
             return {
                 "success": True,

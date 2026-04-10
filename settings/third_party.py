@@ -79,6 +79,7 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_ENABLED = os.environ.get("STRIPE_ENABLED", "False").lower() == "true" or (
     STRIPE_API_KEY and STRIPE_WEBHOOK_SECRET
 )
+STRIPE_PODCAST_PRICE_ID = os.environ.get("STRIPE_PODCAST_PRICE_ID", "")
 
 # Social Auth
 SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = os.environ.get("SOCIAL_AUTH_GOOGLE_OAUTH2_KEY", "")

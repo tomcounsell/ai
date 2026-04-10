@@ -1,5 +1,8 @@
+from django.conf import settings
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
+
+from apps.integration.stripe.shortcuts import create_subscription_checkout
 
 from apps.podcast.models import (
     Episode,
@@ -74,6 +77,44 @@ class PodcastAdmin(ModelAdmin):
     raw_id_fields = ["owner"]
     ordering = ["title"]
     inlines = [PodcastConfigInline, PodcastAccessTokenInline, EpisodeInline]
+    actions = ["generate_checkout_url"]
+
+    @admin.action(description="Generate Stripe Checkout URL")
+    def generate_checkout_url(self, request, queryset):
+        """
+        Generate a Stripe Checkout URL for the selected podcast(s).
+
+        Uses STRIPE_PODCAST_PRICE_ID from settings. Displays the URL in
+        an admin message so the operator can copy it and share with the subscriber.
+        """
+        price_id = getattr(settings, "STRIPE_PODCAST_PRICE_ID", "")
+        if not price_id:
+            self.message_user(
+                request,
+                "STRIPE_PODCAST_PRICE_ID is not configured. Set it in your environment.",
+                level="error",
+            )
+            return
+
+        for podcast in queryset:
+            result = create_subscription_checkout(
+                price_id=price_id,
+                metadata={
+                    "podcast_id": str(podcast.id),
+                    "topic_focus": "",
+                },
+            )
+            if result.get("success") and result.get("url"):
+                self.message_user(
+                    request,
+                    f"{podcast.title}: {result['url']}",
+                )
+            else:
+                self.message_user(
+                    request,
+                    f"{podcast.title}: Failed — {result.get('error', 'unknown')}",
+                    level="error",
+                )
 
 
 @admin.register(Episode)
