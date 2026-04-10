@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 
 class TestReflectionMarkCompleted:
     """Tests for Reflection.mark_completed() including run_history append."""
@@ -109,7 +107,6 @@ class TestReflectionMarkCompleted:
 
     def test_mark_completed_caller_signature_unchanged(self):
         """Existing callers using (duration) and (duration, error=msg) still work."""
-        from agent.reflection_scheduler import ReflectionScheduler
 
         # Verify the method signature matches what reflection_scheduler calls
         import inspect
