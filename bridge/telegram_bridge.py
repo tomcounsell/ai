@@ -1688,6 +1688,7 @@ async def main():
         enter_hibernation,
         exit_hibernation,
         is_auth_error,
+        is_hibernating,
         replay_buffered_output,
     )
 
@@ -1739,14 +1740,21 @@ async def main():
     global _bridge_was_connected
     _bridge_was_connected = True
     _clear_flood_backoff()
-    # Clear hibernation flag and replay any buffered output from downtime
+    # Replay buffered output ONLY if we actually hibernated (auth expiry).
+    # Worker `FileOutputHandler` dual-writes every successful delivery to
+    # `logs/worker/*.log` for audit, so scanning that dir on every reconnect
+    # would re-send messages already delivered via the Redis outbox path.
+    # Ordinary bridge crashes are handled by the Redis outbox; only the
+    # auth-required flag signals a scenario where replay is meaningful.
+    was_hibernating = is_hibernating()
     exit_hibernation()
-    try:
-        replayed = await replay_buffered_output(client)
-        if replayed:
-            logger.info("[hibernation] Replayed %d buffered output entries", replayed)
-    except Exception as e:
-        logger.error("[hibernation] Buffered output replay failed: %s", e)
+    if was_hibernating:
+        try:
+            replayed = await replay_buffered_output(client)
+            if replayed:
+                logger.info("[hibernation] Replayed %d buffered output entries", replayed)
+        except Exception as e:
+            logger.error("[hibernation] Buffered output replay failed: %s", e)
     # Read last_connected BEFORE writing new timestamp so catchup gets the real gap
     global _catchup_last_connected
     _catchup_last_connected = _read_last_connected()
