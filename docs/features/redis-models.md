@@ -46,8 +46,8 @@ TeammateMetrics (singleton, key="global")
   teammate_classified_count (IntField)
   teammate_low_confidence_count (IntField)
   work_classified_count (IntField)
-  teammate_response_times (SortedField)
-  work_response_times (SortedField)
+  teammate_response_times (ListField, max_length=1000)
+  work_response_times (ListField, max_length=1000)
 ```
 
 ## Cross-References
