@@ -2715,12 +2715,44 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"stage={stage}: {working_dir}"
                 )
             except Exception as e:
-                logger.warning(
-                    f"[branch-mapping] Failed to create worktree for "
-                    f"slug={slug}: {e} — using original working dir"
-                )
+                _stype = getattr(session, "session_type", None)
+                if _stype == "dev":
+                    # Dev sessions with a slug MUST have worktree isolation.
+                    # Falling back to the main checkout would contaminate it.
+                    # See issue #887: session-isolation-bypass incident (2026-04-10).
+                    logger.critical(
+                        f"[branch-mapping] FATAL: Failed to create worktree for "
+                        f"dev session slug={slug}: {e} — refusing to proceed in "
+                        f"main checkout to prevent contamination"
+                    )
+                    raise RuntimeError(
+                        f"Worktree provisioning failed for dev session "
+                        f"slug={slug}: {e}. Refusing to run in main checkout."
+                    ) from e
+                else:
+                    logger.warning(
+                        f"[branch-mapping] Failed to create worktree for "
+                        f"slug={slug}: {e} — using original working dir"
+                    )
     else:
         branch_name = _session_branch_name(session.session_id)
+
+    # Main-checkout protection guard (issue #887): dev sessions with a slug
+    # must NEVER run in the repo root. If worktree provisioning was skipped
+    # or silently failed, catch it here before any git operations run.
+    _stype = getattr(session, "session_type", None)
+    if _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir):
+        logger.critical(
+            f"[worktree-guard] Dev session {session.session_id} with slug={slug} "
+            f"resolved to main checkout ({working_dir}). Refusing to proceed — "
+            f"this would contaminate the shared working directory. "
+            f"See issue #887."
+        )
+        raise RuntimeError(
+            f"Dev session with slug={slug} must run in a worktree, "
+            f"but working_dir={working_dir} is not a worktree. "
+            f"This is a safety guard to prevent main checkout contamination (issue #887)."
+        )
 
     # Compute task list ID for sub-agent task isolation
     # Tier 2: planned work uses the slug directly

@@ -151,6 +151,16 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         working_dir = args.working_dir or str(_repo_root)
 
+        # If --slug is provided, validate and provision worktree (issue #887)
+        slug = getattr(args, "slug", None)
+        if slug:
+            from agent.worktree_manager import _validate_slug, get_or_create_worktree
+
+            _validate_slug(slug)  # Raises ValueError for invalid slugs
+            wt_path = get_or_create_worktree(Path(working_dir), slug)
+            working_dir = str(wt_path)
+            print(f"  Worktree:    {working_dir}", file=sys.stderr)
+
         session_type = role  # pm, dev, teammate
 
         # Resolve project_key: explicit flag takes priority, else derive from cwd
@@ -171,6 +181,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 telegram_message_id=0,
                 session_type=session_type,
                 parent_agent_session_id=parent_id,
+                slug=slug,
             )
             return session_id
 
@@ -484,6 +495,14 @@ def main() -> int:
             "Explicit project key (overrides automatic cwd-based resolution). "
             "If omitted, the key is derived from the current working directory "
             "by matching against projects.json."
+        ),
+    )
+    create_parser.add_argument(
+        "--slug",
+        help=(
+            "Work item slug for worktree isolation. When provided, a worktree "
+            "is provisioned at .worktrees/{slug}/ and working_dir is set to it. "
+            "This ensures the session runs in an isolated directory (issue #887)."
         ),
     )
     create_parser.add_argument("--json", action="store_true", help="Output JSON")
