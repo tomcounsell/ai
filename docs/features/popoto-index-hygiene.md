@@ -10,7 +10,7 @@ When AgentSession records expire (via TTL), crash, or are deleted without proper
 
 ### TeammateMetrics Popoto Model
 
-`models/teammate_metrics.py` replaces raw Redis counters in `agent/teammate_metrics.py`. Uses a single-instance pattern: one record keyed by `"global"` stores all classification counters (IntField) and response time sorted sets (SortedField). The public API (`record_classification`, `record_response_time`, `get_stats`) is preserved unchanged.
+`models/teammate_metrics.py` replaces raw Redis counters in `agent/teammate_metrics.py`. Uses a single-instance pattern: one record keyed by `"global"` stores all classification counters (IntField) and response time lists (ListField, capped at 1000 entries). The public API (`record_classification`, `record_response_time`, `get_stats`) is preserved unchanged.
 
 ### AgentSession Meta.ttl
 

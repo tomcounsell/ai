@@ -60,19 +60,21 @@ class TestRecordClassification:
 class TestRecordResponseTime:
     def test_records_teammate_time(self):
         mock_metrics = MagicMock()
-        mock_metrics.teammate_response_times = {}
-        mock_metrics.work_response_times = {}
+        mock_metrics.teammate_response_times = MagicMock()
+        mock_metrics.work_response_times = MagicMock()
         with patch("agent.teammate_metrics._get_metrics", return_value=mock_metrics):
             record_response_time("teammate", 1.5)
-            mock_metrics.save.assert_called_once()
+            mock_metrics.teammate_response_times.push.assert_called_once()
+            mock_metrics.work_response_times.push.assert_not_called()
 
     def test_records_work_time(self):
         mock_metrics = MagicMock()
-        mock_metrics.teammate_response_times = {}
-        mock_metrics.work_response_times = {}
+        mock_metrics.teammate_response_times = MagicMock()
+        mock_metrics.work_response_times = MagicMock()
         with patch("agent.teammate_metrics._get_metrics", return_value=mock_metrics):
             record_response_time("work", 2.3)
-            mock_metrics.save.assert_called_once()
+            mock_metrics.work_response_times.push.assert_called_once()
+            mock_metrics.teammate_response_times.push.assert_not_called()
 
     def test_no_metrics_does_not_crash(self):
         with patch("agent.teammate_metrics._get_metrics", return_value=None):

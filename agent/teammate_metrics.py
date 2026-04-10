@@ -5,7 +5,8 @@ times. All operations are fire-and-forget -- metrics failures must never
 affect message processing.
 
 Uses the TeammateMetrics Popoto model (single-instance pattern) instead of
-raw Redis commands for proper ORM lifecycle and index management.
+raw Redis commands for proper ORM lifecycle and index management. Response
+times are stored via ListField.push() which performs atomic LPUSH+LTRIM.
 """
 
 from __future__ import annotations
@@ -16,9 +17,6 @@ import time
 from agent.intent_classifier import TEAMMATE_CONFIDENCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
-
-# Max response time entries to keep per mode
-_MAX_RESPONSE_TIMES = 1000
 
 
 def _get_metrics():
@@ -59,6 +57,9 @@ def record_classification(intent: str, confidence: float) -> None:
 def record_response_time(mode: str, elapsed_seconds: float) -> None:
     """Record response time for a teammate or work session.
 
+    Stores an "elapsed:timestamp" entry via ListField.push(), which
+    performs an atomic LPUSH+LTRIM capped at max_length (1000).
+
     Args:
         mode: "teammate" or "work"
         elapsed_seconds: Time from message receipt to response delivery.
@@ -68,27 +69,13 @@ def record_response_time(mode: str, elapsed_seconds: float) -> None:
         if not metrics:
             return
 
-        # Store as member:score in the sorted field (score=timestamp for time-windowed analysis)
-        member = f"{elapsed_seconds:.2f}:{time.time():.0f}"
-        timestamp = time.time()
+        entry = f"{elapsed_seconds:.2f}:{time.time():.0f}"
 
         if mode == "teammate":
-            times = dict(metrics.teammate_response_times or {})
-            times[member] = timestamp
-            # Keep only last N entries by removing oldest
-            if len(times) > _MAX_RESPONSE_TIMES:
-                sorted_entries = sorted(times.items(), key=lambda x: x[1])
-                times = dict(sorted_entries[-_MAX_RESPONSE_TIMES:])
-            metrics.teammate_response_times = times
+            metrics.teammate_response_times.push(entry)
         else:
-            times = dict(metrics.work_response_times or {})
-            times[member] = timestamp
-            if len(times) > _MAX_RESPONSE_TIMES:
-                sorted_entries = sorted(times.items(), key=lambda x: x[1])
-                times = dict(sorted_entries[-_MAX_RESPONSE_TIMES:])
-            metrics.work_response_times = times
+            metrics.work_response_times.push(entry)
 
-        metrics.save()
         logger.debug(f"[teammate_metrics] Recorded {mode} response time: {elapsed_seconds:.2f}s")
     except Exception as e:
         logger.debug(f"[teammate_metrics] Failed to record response time: {e}")
