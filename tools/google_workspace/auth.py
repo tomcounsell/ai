@@ -106,7 +106,8 @@ def verify_token() -> dict:
 
     Returns a structured dict with:
         valid (bool): Whether the token is usable
-        status (str): One of "valid", "missing", "invalid", "expired", "scope_mismatch", "scopes_unknown"
+        status (str): One of "valid", "missing", "invalid",
+            "expired", "scope_mismatch", "scopes_unknown"
         scopes (list | None): Scopes from the token, or None if unavailable
         expired (bool): Whether the token is expired
         has_refresh_token (bool): Whether a refresh token is present
