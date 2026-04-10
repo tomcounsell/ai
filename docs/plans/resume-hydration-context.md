@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Critiqued
 type: feature
 appetite: Small
 owner: Valor
@@ -50,9 +50,9 @@ No prior issues found related to resume hydration or injecting context into resu
 
 ## Data Flow
 
-1. **Entry point**: Worker calls `_pop_agent_session()` which transitions a pending session to running
-2. **Steering drain (existing)**: At line 697, `pop_all_steering_messages()` drains queued messages and prepends them to `chosen.message_text`
-3. **Resume hydration (new)**: After steering drain, detect whether this is a resume by checking for prior `resume.json` files in `logs/sessions/{session_id}/`. If resume detected, call `_get_git_summary()` with the session's working directory and prepend a `<resumed-session-context>` block to `chosen.message_text`
+1. **Entry point**: Worker calls `_pop_agent_session()` (hot path) or `_pop_agent_session_with_fallback()` (drain timeout / exit diagnostic), both of which transition a pending session to running
+2. **Resume hydration (new)**: After steering drain in both paths, call shared `_maybe_inject_resume_hydration(chosen, worker_key)`. Detect whether this is a resume by checking for 2+ `*_resume.json` files in `logs/sessions/{session_id}/` (1 file = first start only). If resume detected and `chosen.working_dir` is set and `chosen.session_type == "pm"`, call `_get_git_summary()` and prepend a `<resumed-session-context>` block to `chosen.message_text`
+3. **Steering drain (existing)**: At line 697 / line 828, `pop_all_steering_messages()` drains queued messages and appends them to `chosen.message_text` (after hydration context)
 4. **Session execution**: `_execute_agent_session()` passes `session.message_text` to the Claude Agent SDK. The agent sees the context block on its first turn
 5. **Snapshot capture**: `save_session_snapshot()` at line 2665 writes `resume.json` as before (unchanged)
 
@@ -74,20 +74,22 @@ No prerequisites -- this work has no external dependencies.
 
 ### Key Elements
 
-- **Resume detection**: Check for prior `*_resume.json` files in the session's log directory (`logs/sessions/{session_id}/`). If any exist, this is a resume.
+- **Resume detection**: Check for `*_resume.json` files in the session's log directory (`logs/sessions/{session_id}/`). If 2+ exist, this is a resume (1 file = first start snapshot only).
 - **Git summary capture**: Call the existing `_get_git_summary()` with a bumped depth of `-10` commits for the injected hint (the snapshot writer continues using `-3` independently).
 - **Message prepend**: Prepend a `<resumed-session-context>` tagged block to `chosen.message_text` following the same pattern as the steering message drain.
 - **Session-type scoping**: Apply to PM sessions only. Dev sessions are one-shot stage executors; teammate sessions are conversational. Neither benefits from commit-based stage hints.
 
 ### Flow
 
-**Session popped** -> steering messages drained -> resume check -> if resume + PM: prepend context block -> session executes with hint on first turn
+**Session popped** (either path) -> resume hydration check -> if resume + PM + working_dir set: prepend context block -> steering messages drained -> session executes with hint on first turn
 
 ### Technical Approach
 
-**Hook point**: Add a new try/except block immediately after the steering drain block (line 722) in `_pop_agent_session()`. This keeps the injection mechanism consolidated in one place.
+**Hook point**: Extract an `async _maybe_inject_resume_hydration(chosen, worker_key)` helper. Call it from both `_pop_agent_session()` (after line 722) and `_pop_agent_session_with_fallback()` (after line 848). This prevents the two code paths from diverging and ensures sessions popped via the sync fallback also receive hydration.
 
-**Resume detection via filesystem**: Check `SESSION_LOGS_DIR / chosen.session_id` for existing `*_resume.json` files. This is the most reliable signal -- it uses filesystem evidence that `save_session_snapshot()` already writes. No new Redis keys or model fields needed.
+**Resume detection via filesystem**: Check `SESSION_LOGS_DIR / chosen.session_id` for existing `*_resume.json` files. Since `save_session_snapshot(event="resume")` is called on every session start (line 2665), the first start always produces exactly 1 resume file. Therefore, resume is detected when 2+ `*_resume.json` files exist (meaning the session has been started at least twice). No new Redis keys or model fields needed.
+
+**Working directory guard**: If `chosen.working_dir` is falsy (empty string or None), skip hydration entirely with a debug log. Do not rely on `_get_git_summary()`'s fallback to the repo root, as that would produce misleading git state for worktree-isolated sessions.
 
 **`_get_git_summary()` with depth override**: Add an optional `log_depth` parameter to `_get_git_summary()` (default 3, preserving current behavior). The hydration block calls it with `log_depth=10` to capture more of the branch's commit history for stage correlation.
 
@@ -116,6 +118,8 @@ already committed.
 ### Empty/Invalid Input Handling
 - [ ] `_get_git_summary()` with `log_depth=10` in a non-git directory returns an error string (already handled by existing code)
 - [ ] Empty session log directory (no prior resume.json files) correctly skips hydration
+- [ ] Session with exactly 1 resume.json (first start only) correctly skips hydration
+- [ ] Session with falsy `working_dir` (None or empty string) correctly skips hydration with debug log
 
 ### Error State Rendering
 - [ ] Not applicable -- no user-visible output from this feature; the hint is internal to the agent prompt
@@ -168,13 +172,15 @@ No agent integration required -- this is a worker-internal change to the session
 
 ## Success Criteria
 
-- [ ] When a PM session is resumed (has prior resume.json files), `chosen.message_text` is prepended with a `<resumed-session-context>` block containing recent branch commits
+- [ ] When a PM session is resumed (has 2+ prior resume.json files), `chosen.message_text` is prepended with a `<resumed-session-context>` block containing recent branch commits
+- [ ] Hydration works via both `_pop_agent_session()` and `_pop_agent_session_with_fallback()` paths (shared helper)
 - [ ] The hint uses `_get_git_summary()` with `log_depth=10` -- one code path for git state capture
-- [ ] Initial (non-resume) PM session starts do NOT receive the hint
+- [ ] Initial (non-resume) PM session starts (1 or 0 resume.json files) do NOT receive the hint
 - [ ] Non-PM sessions (dev, teammate) never receive the hint regardless of resume state
+- [ ] PM sessions with falsy `working_dir` never receive the hint (guard prevents wrong-directory git summary)
 - [ ] If git summary fails, the prepend silently skips with a warning log -- session start never crashes
 - [ ] No new AgentSession fields, no new Redis keys
-- [ ] Unit test: resumed PM session gets prepend; fresh PM session does not; dev session does not
+- [ ] Unit test: resumed PM session gets prepend; fresh PM session does not; dev session does not; falsy working_dir does not
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -199,31 +205,34 @@ No agent integration required -- this is a worker-internal change to the session
 ### 1. Add `log_depth` parameter to `_get_git_summary()`
 - **Task ID**: build-git-summary-depth
 - **Depends On**: none
-- **Validates**: tests/unit/test_session_logs.py (create)
+- **Validates**: tests/unit/test_resume_hydration.py (create)
 - **Assigned To**: hydration-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Add optional `log_depth: int = 3` parameter to `_get_git_summary()` in `agent/session_logs.py`
 - Use `log_depth` in the `git log --oneline -{log_depth}` subprocess call instead of hardcoded `-3`
 - Update the function docstring to document the parameter
-- Write a unit test verifying `log_depth` controls the number of commits returned
+- Write a unit test in `tests/unit/test_resume_hydration.py` verifying `log_depth` controls the number of commits returned
 
-### 2. Add resume hydration block to `_pop_agent_session()`
+### 2. Add resume hydration to both pop paths via shared helper
 - **Task ID**: build-hydration-prepend
 - **Depends On**: build-git-summary-depth
 - **Validates**: tests/unit/test_resume_hydration.py (create)
 - **Assigned To**: hydration-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- After the steering drain block (line 722) in `_pop_agent_session()`, add a new try/except block
+- Create `async _maybe_inject_resume_hydration(chosen: AgentSession, worker_key: str)` helper in `agent/agent_session_queue.py`
 - Import `SESSION_LOGS_DIR` from `agent.session_logs` and `_get_git_summary`
-- Check `chosen.session_type == "pm"` -- skip silently for other types
-- Check for existing `*_resume.json` files in `SESSION_LOGS_DIR / chosen.session_id` -- skip if none found (fresh start)
+- Guard: if `chosen.session_type != "pm"`, return silently (dev/teammate sessions skip)
+- Guard: if `chosen.working_dir` is falsy, log debug and return (avoid wrong-directory git summary)
+- Check for `*_resume.json` files in `SESSION_LOGS_DIR / chosen.session_id` -- if fewer than 2 found, return (1 file = first start only, 2+ = genuine resume)
 - Call `_get_git_summary(working_dir=chosen.working_dir, log_depth=10)`
-- Prepend the `<resumed-session-context>` block to `chosen.message_text` using the same pattern as steering drain
+- Prepend the `<resumed-session-context>` block to `chosen.message_text`
 - Call `await chosen.async_save()` to persist the updated message_text
 - Log info: number of prior resume files found, hydration injected
-- On any exception: log warning and continue (matching steering drain error handling pattern)
+- Wrap entire body in try/except: log warning and return on any exception (matching steering drain error handling pattern)
+- Call `_maybe_inject_resume_hydration(chosen, worker_key)` from `_pop_agent_session()` (after line 722, before return)
+- Call `_maybe_inject_resume_hydration(chosen, worker_key)` from `_pop_agent_session_with_fallback()` (after line 848, before return)
 
 ### 3. Write unit tests for resume hydration
 - **Task ID**: build-hydration-tests
@@ -232,11 +241,15 @@ No agent integration required -- this is a worker-internal change to the session
 - **Assigned To**: hydration-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Test: PM session with prior resume.json files gets `<resumed-session-context>` prepended
-- Test: PM session with no prior resume.json files does NOT get prepend
-- Test: Dev session with prior resume.json files does NOT get prepend
-- Test: If `_get_git_summary()` raises an exception, session start proceeds without the hint
+- Test: `_get_git_summary(log_depth=10)` produces 10 commit lines (validates Task 1)
+- Test: PM session with 2+ prior resume.json files gets `<resumed-session-context>` prepended
+- Test: PM session with exactly 1 resume.json file (first start only) does NOT get prepend
+- Test: PM session with no resume.json files does NOT get prepend
+- Test: Dev session with 2+ prior resume.json files does NOT get prepend
+- Test: PM session with falsy `working_dir` does NOT get prepend (even with 2+ resume files)
+- Test: If `_get_git_summary()` raises an exception, helper returns without crashing
 - Test: The prepend includes output from `_get_git_summary(log_depth=10)`
+- Test: Glob pattern `*_resume.json` matches actual filename format from `save_session_snapshot(event="resume")`
 - Use mocks for filesystem checks and `_get_git_summary` to keep tests fast and isolated
 
 ### 4. Validate implementation
@@ -277,14 +290,19 @@ No agent integration required -- this is a worker-internal change to the session
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Hydration test exists | `pytest tests/unit/test_resume_hydration.py -v` | exit code 0 |
+| Hydration tests exist | `pytest tests/unit/test_resume_hydration.py -v` | exit code 0, covers log_depth + hydration + guards |
 | No new model fields | `git diff HEAD -- models/agent_session.py` | output contains  |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-10. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Adversary, Operator | `_pop_agent_session_with_fallback()` (lines 828-848) has a duplicate steering drain that also needs the hydration block. Sessions popped via the sync fallback path would silently skip hydration. | Plan revised: Task 2 updated to cover both paths via shared helper | Extract `_maybe_inject_resume_hydration(chosen, worker_key)` async helper; call from both `_pop_agent_session()` and `_pop_agent_session_with_fallback()` |
+| CONCERN | Skeptic, Adversary | `chosen.working_dir` may be empty/None at pop time. The fallback in `_get_git_summary()` would silently produce git state for the wrong directory, which is worse than no summary. | Plan revised: explicit guard added to Task 2 | If `chosen.working_dir` is falsy, skip hydration entirely with a debug log. Do not rely on the fallback path. |
+| CONCERN | Skeptic | Resume detection checking for 1+ `*_resume.json` files will always trigger after first start, since `save_session_snapshot(event="resume")` is called at line 2665 on every session start. Must check for 2+ files to distinguish "resumed at least once" from "first start only". | Plan revised: resume detection threshold updated to 2+ files | The glob `*_resume.json` matches the filename format. But 1 file = first start, 2+ files = resumed. Task 2 and tests updated. |
+| NIT | Simplifier | Hydration context should be prepended before steering messages so the agent orients itself before processing new instructions. | Accepted: prepend order revised in Task 2 | Hydration block runs first, steering drain appends after. |
+| NIT | Operator | `test_session_logs.py` for `log_depth` parameter is not in the Verification table. | Plan revised: merged into `test_resume_hydration.py` | Keep all tests in one file to simplify verification. |
 
 ---
 
