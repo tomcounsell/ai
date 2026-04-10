@@ -90,7 +90,9 @@ if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
         fi
     fi
     sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$WORKER_LABEL|g" "$WORKER_PLIST" > "$WORKER_DST"
-    launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"
+    if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+        echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+    fi
 fi
 
 # ── Sync newsyslog log rotation config if changed ────────────────────
