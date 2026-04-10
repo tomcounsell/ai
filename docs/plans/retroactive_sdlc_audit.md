@@ -15,7 +15,7 @@ last_comment_id:
 The SDLC pipeline was built incrementally. Many PRs merged before full enforcement existed — missing reviews, skipped critiques, deleted plans without deliverable verification. Issue #823 identified 18 specific PRs that merged with incomplete SDLC. Beyond those, plan files get deleted from `docs/plans/` when marked "completed" without verifying that all plan deliverables (docs, tests, config updates) were actually shipped.
 
 **Current behavior:**
-259 plan files have been deleted from `docs/plans/` over the last 3 months. Of the 18 #823 issues, only 6 still have plan files — the other 12 were deleted. Nobody knows the full scope of missing test coverage, missing feature docs, stale references, and orphaned code.
+270 plan files have been deleted from `docs/plans/` over the last 3 months. Of the 18 #823 issues, only 6 still have plan files — the other 12 were deleted. Nobody knows the full scope of missing test coverage, missing feature docs, stale references, and orphaned code.
 
 **Desired outcome:**
 A complete, deduplicated inventory of SDLC gaps across recent merged work, with targeted fix PRs that close each gap. After completion, every merged feature from the audit set has its docs, tests, and references in order.
@@ -72,10 +72,10 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/retroactive_sd
 
 ### Technical Approach
 
-- **Phase 1 (audit set)**: Single agent walks git history, recovers plan content via `git show`, cross-references with `gh` CLI to find merged PRs. Output: `data/retroactive-audit-set.json`
-- **Phase 2 (per-item audit)**: 1 read-only subagent per audit item using P-Thread pattern. Each subagent receives plan content and checks against HEAD using `validate_build.py` functions (`parse_file_assertions`, `parse_verification_table`, `parse_success_criteria_commands`) plus manual doc/test checks. Output: `data/retroactive-audit-findings/{slug}.json`
+- **Phase 1 (audit set)**: Single agent walks git history, recovers plan content via `git show`, cross-references with `gh` CLI to find merged PRs. For each audit item, fetches the PR diff via `gh pr diff {number}` and saves it to a temp file `data/retroactive-audit-diffs/{slug}.diff` (or embeds inline in the JSON if under 50KB). If `merged_pr_number` is null, skip diff fetch and proceed with plan content only. Plan content is truncated to 10,000 chars if needed to keep the JSON manageable. Output: `data/retroactive-audit-set.json`
+- **Phase 2 (per-item audit)**: 1 read-only subagent per audit item using P-Thread pattern. Each subagent receives plan content and the PR diff (if available) and checks against HEAD using `validate_build.py` functions (`parse_file_assertions`, `parse_verification_table`, `parse_success_criteria_commands`) plus manual doc/test checks. Output: `data/retroactive-audit-findings/{slug}.json`
 - **Phase 3 (synthesis)**: Single orchestrator pass — collect findings, purge `still_relevant: false`, deduplicate overlapping gaps, merge related findings, severity triage. Output: `docs/audits/retroactive-sdlc-audit.md`
-- **Phase 4 (fixes)**: 1 builder agent per fix category (missing docs, test gaps, stale refs, etc.), each creating a focused PR through normal SDLC
+- **Phase 4 (fixes)**: 1 builder agent per fix category (missing docs, test gaps, stale refs, etc.), each creating a focused PR through full SDLC (Plan → Build → Test → Review → Merge) — no hotfix shortcuts
 
 Key decisions:
 - Reuse `validate_build.py` functions — no reimplementation
@@ -106,7 +106,7 @@ No existing tests affected — this is a greenfield chore with no prior test cov
 
 ## Rabbit Holes
 
-- **Auditing all 259 deleted plans**: Most old plans predate structured SDLC and their requirements are stale after months of refactoring. Scope to the 18 #823 issues + post-SDLC deleted plans (~30-50 total).
+- **Auditing all 270 deleted plans**: Most old plans predate structured SDLC and their requirements are stale after months of refactoring. Scope to the 18 #823 issues + post-SDLC deleted plans (~30-50 total).
 - **Deep AI judge review**: The original #444 proposed AI-judged review of every finding. Replace with simpler subagent checks against HEAD — if the file exists and tests pass, the deliverable is satisfied.
 - **Fixing everything found**: Some findings will be `still_relevant: false` because features were rewritten or deprecated. Only fix what still matters at HEAD.
 - **Running verification table commands**: Old plan verification commands may reference removed files, changed APIs, or dangerous operations. Stick to file-existence and grep checks only.
@@ -207,13 +207,15 @@ No agent integration required — this is an orchestrator-controlled workflow us
 - **Assigned To**: audit-set-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Walk git history: `git log --diff-filter=D --name-only -- 'docs/plans/*.md'` to find deleted plans
+- Walk git history anchored to issue #443 close date (2026-03-24): `git log --diff-filter=D --after="2026-03-24" --name-only -- 'docs/plans/*.md'` to find deleted plans in the post-SDLC-enforcement window
 - For each deleted plan, recover content: `git show {commit}^:docs/plans/{slug}.md`
 - Parse frontmatter to get `tracking:` issue URL and `status:` field
 - Cross-reference with `gh` CLI to find the merged PR for each tracking issue
+- For each audit item with a known `merged_pr_number`, fetch the PR diff: `gh pr diff {number} > data/retroactive-audit-diffs/{slug}.diff` (skip if PR number unknown)
 - Include all 18 #823 issues explicitly: #819, #815, #813, #812, #807, #803, #802, #801, #796, #794, #793, #790, #789, #787, #781, #784, #764, #749
 - Filter to post-SDLC plans (those with structured frontmatter and checklists)
-- Save output to `data/retroactive-audit-set.json` with schema: `{issue_number, plan_slug, plan_content, merged_pr_number, source}`
+- Truncate `plan_content` to 10,000 chars if needed before embedding in JSON
+- Save output to `data/retroactive-audit-set.json` with schema: `{issue_number, plan_slug, plan_content, merged_pr_number, pr_diff_path, source}`
 
 ### 2. Per-Item Audit (Phase 2)
 - **Task ID**: audit-items
@@ -221,12 +223,12 @@ No agent integration required — this is an orchestrator-controlled workflow us
 - **Assigned To**: item-auditor-{slug} (one per audit item)
 - **Agent Type**: validator
 - **Parallel**: true (batches of 10)
-- Receive plan content and merged PR diff
+- Receive plan content and merged PR diff (loaded from `pr_diff_path` if present in audit set; proceed with plan content only if absent)
 - Use `validate_build.py` functions to check file assertions against HEAD
 - Check `## Documentation` section tasks — verify referenced docs exist
 - Check `## Test Impact` section — verify referenced test files exist
 - Check `## Success Criteria` — verify file-based criteria are met
-- Mark each finding with `still_relevant: true/false` based on current HEAD state
+- Mark each finding with `still_relevant: true/false` based on current HEAD state; fallback rule: if uncertain, default to `still_relevant: true, confidence: "low"` — never mark `still_relevant: false` without a concrete HEAD check (file deleted or feature removed from codebase entrypoints)
 - Save per-item findings to `data/retroactive-audit-findings/{slug}.json`
 
 ### 3. Synthesize and Triage (Phase 3)
@@ -274,8 +276,9 @@ No agent integration required — this is an orchestrator-controlled workflow us
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify all fix PRs pass CI
-- Verify zero `still_relevant: true` + `severity: high` findings remain
-- Generate final report
+- Re-run file-existence checks for each finding — a finding is "addressed" when its `file_path` exists at HEAD (for missing docs/tests) or the stale reference no longer appears (for stale refs)
+- Verify zero `still_relevant: true` + `severity: high` findings remain unaddressed: `grep -rl '"severity": "high"' data/retroactive-audit-findings/ | xargs grep -l '"still_relevant": true'` should return no files
+- Generate final report documenting fix PRs merged and outstanding low/medium findings
 
 ## Verification
 
@@ -285,18 +288,26 @@ No agent integration required — this is an orchestrator-controlled workflow us
 | Audit set valid JSON | `python -c "import json; json.load(open('data/retroactive-audit-set.json'))"` | exit code 0 |
 | Findings directory exists | `ls data/retroactive-audit-findings/*.json \| wc -l` | output > 0 |
 | Triage report exists | `test -f docs/audits/retroactive-sdlc-audit.md && echo OK` | exit code 0 |
-| No high-severity gaps remaining | `grep -c '"severity": "high".*"still_relevant": true' docs/audits/retroactive-sdlc-audit.md` | exit code 1 |
+| No high-severity gaps remaining | `grep -rl '"severity": "high"' data/retroactive-audit-findings/ | xargs grep -l '"still_relevant": true' 2>/dev/null` | empty output (no matching files) |
 
 ## Critique Results
 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Adversary, Skeptic | Verification table "No high-severity gaps remaining" greps JSON strings from a markdown file — always passes vacuously | Fix verify command to target `data/retroactive-audit-findings/*.json` | Use `grep -rl '"severity": "high".*"still_relevant": true' data/retroactive-audit-findings/` expecting empty output |
+| CONCERN | Skeptic, Operator | Task 2 says subagents "receive merged PR diff" but no fetch mechanism defined in Task 1 output schema | Clarify in Task 2 that PR diff is optional context; use `gh pr view {number} --json body` instead of full diff | If `merged_pr_number` is null, skip diff fetch. Guard: default to plan content only. |
+| CONCERN | Skeptic, Simplifier | Source B ("recently deleted plans") has no git anchor — date/commit unspecified; actual count is 270, not 259 | Pin to #443 merge date: `gh pr view 443 --json mergedAt` then use `--after` in git log filter | `git log --diff-filter=D --after="{#443_mergedAt}" --name-only -- 'docs/plans/*.md'` then grep for frontmatter `^---` |
+| CONCERN | Adversary, Operator | `still_relevant` judgment by subagents is substantive, not mechanical — incorrect `false` silently discards real gaps | Add fallback rule: if uncertain, default to `still_relevant: true, confidence: "low"` | Never mark `still_relevant: false` without a concrete HEAD check (file deleted or feature removed from entrypoints) |
+| CONCERN | Operator, User | Open Question #2 (fix PR SDLC process) left unresolved — affects Phase 4 effort estimate significantly | **RESOLVED:** All fix PRs go through full SDLC (Plan → Build → Test → Review → Merge) — standard for this repo | No abbreviated paths; full pipeline for every fix category |
+| NIT | Skeptic | Plan says "259 deleted plans" but git shows 270 | Update or remove specific count | n/a |
+| NIT | Simplifier | `plan_content` stored inline in JSON array — 30-50 plans × ~5KB = 150-250KB blob | Consider `data/retroactive-audit-plans/{slug}.md` files with lean JSON index | n/a |
+| NIT | Operator | No mechanism to mark findings "addressed" after fix PRs merge — Task 7 "verify zero high" is undefined | Task 7 should re-run file-existence checks per finding or define "addressed" = fix PR merged + file exists at HEAD | n/a |
 
 ---
 
 ## Open Questions
 
-1. Should we scope Source B (recently deleted plans) to the last 3 months, or extend further back? There are 259 deleted plans in 3 months — auditing all is possible but may produce mostly stale findings.
-2. For Phase 4 fix PRs, should each fix PR go through the full SDLC pipeline (plan/critique/build/test/review), or can they be treated as hotfix patches given the findings are pre-triaged?
+1. Should we scope Source B (recently deleted plans) to the last 3 months, or extend further back? There are 270 deleted plans in 3 months — auditing all is possible but may produce mostly stale findings. The git date anchor (2026-03-24, issue #443 close date) provides the cutoff; plans deleted before that date are out of scope.
+2. ~~For Phase 4 fix PRs, should each fix PR go through the full SDLC pipeline?~~ **RESOLVED:** Each fix PR goes through the full SDLC pipeline (Plan → Build → Test → Review → Merge) — this is the standard for this repo and ensures the fixes themselves don't accumulate new SDLC debt.
 3. Should findings with `severity: low` be tracked as future issues or dismissed permanently?
