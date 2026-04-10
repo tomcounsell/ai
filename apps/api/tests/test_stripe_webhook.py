@@ -13,13 +13,17 @@ Covers:
 
 import json
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from django.test import Client, TestCase
 from django.urls import reverse
 
 from apps.common.models import Subscription
-from apps.common.tests.factories import PodcastFactory, PodcastSubscriptionFactory, SubscriptionFactory
+from apps.common.tests.factories import (
+    PodcastFactory,
+    PodcastSubscriptionFactory,
+    SubscriptionFactory,
+)
 from apps.integration.stripe.webhook import (
     handle_subscription_created,
     handle_subscription_deleted,
@@ -95,7 +99,7 @@ class TestStripeWebhookView(TestCase):
             self.url,
             data=b'{"type":"customer.subscription.created"}',
             content_type="application/json",
-            HTTP_STRIPE_SIGNATURE="t=123,v1=abc",
+            headers={"stripe-signature": "t=123,v1=abc"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -116,7 +120,7 @@ class TestStripeWebhookView(TestCase):
             self.url,
             data=b'{"type":"customer.subscription.created"}',
             content_type="application/json",
-            HTTP_STRIPE_SIGNATURE="t=bad,v1=bad",
+            headers={"stripe-signature": "t=bad,v1=bad"},
         )
 
         self.assertEqual(response.status_code, 400)
@@ -209,16 +213,18 @@ class TestHandleSubscriptionCreatedWithPodcast(TestCase):
         podcast = self.podcast
 
         # Directly invoke the get_or_create that the extension uses
-        from apps.podcast.models import Podcast
-
         ps2, was_created = PodcastSubscription.objects.get_or_create(
             subscription=sub,
             podcast=podcast,
             defaults={"subscriber_email": "bob@example.com"},
         )
 
-        self.assertFalse(was_created, "Second get_or_create must not create a duplicate")
-        self.assertEqual(PodcastSubscription.objects.filter(subscription=sub).count(), 1)
+        self.assertFalse(
+            was_created, "Second get_or_create must not create a duplicate"
+        )
+        self.assertEqual(
+            PodcastSubscription.objects.filter(subscription=sub).count(), 1
+        )
 
     def test_missing_podcast_id_not_found_does_not_fail(self):
         """
@@ -270,7 +276,7 @@ class TestHandleSubscriptionDeleted(TestCase):
         success without error and does not raise.
         """
         sub_id = f"sub_{uuid.uuid4().hex[:16]}"
-        sub = SubscriptionFactory.create(stripe_id=sub_id)
+        SubscriptionFactory.create(stripe_id=sub_id)
 
         event = _make_deleted_event(sub_id)
         result = handle_subscription_deleted(event)
