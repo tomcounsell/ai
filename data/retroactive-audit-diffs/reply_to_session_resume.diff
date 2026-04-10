@@ -1,0 +1,724 @@
+diff --git a/bridge/context.py b/bridge/context.py
+index 921952968..d896e423f 100644
+--- a/bridge/context.py
++++ b/bridge/context.py
+@@ -419,6 +419,133 @@ def format_reply_chain(chain: list[dict]) -> str:
+     return "\n".join(lines)
+ 
+ 
++async def resolve_root_session_id(
++    client: TelegramClient,
++    chat_id: int,
++    reply_to_msg_id: int,
++    project_key: str,
++) -> str:
++    """Resolve the canonical session_id for a reply-to message chain.
++
++    Walks backward through the reply chain to find the oldest human (non-Valor)
++    message, then derives the session_id from that message's ID. This ensures
++    that all replies in a conversation thread — even replies to Valor's responses
++    — map to the same canonical session_id as the original human message.
++
++    Resolution strategy (in order of preference):
++    1. Cache-first walk: query TelegramMessage.query.filter(chat_id, message_id)
++       to traverse the chain without Telegram API calls.
++    2. API fallback: if any cache lookup misses, call fetch_reply_chain() to
++       walk the chain via the Telegram API.
++    3. Final fallback: on any exception, return a session_id derived directly
++       from reply_to_msg_id (preserves previous behavior).
++
++    Args:
++        client: Telegram client (used for API fallback).
++        chat_id: Telegram chat ID.
++        reply_to_msg_id: message_id of the message being replied to.
++        project_key: Project key for session_id formatting.
++
++    Returns:
++        Canonical session_id string, e.g. "tg_{project_key}_{chat_id}_{root_msg_id}".
++    """
++    fallback = f"tg_{project_key}_{chat_id}_{reply_to_msg_id}"
++
++    try:
++        # ── Step 1: Cache-first walk via TelegramMessage ──────────────────────
++        root_msg_id = await _cache_walk_root(chat_id, reply_to_msg_id)
++        if root_msg_id is not None:
++            session_id = f"tg_{project_key}_{chat_id}_{root_msg_id}"
++            logger.debug(
++                f"[session-root] cache walk resolved {reply_to_msg_id} → "
++                f"{root_msg_id} (session={session_id})"
++            )
++            return session_id
++
++        # ── Step 2: API fallback via fetch_reply_chain ────────────────────────
++        logger.debug(
++            f"[session-root] cache miss for msg_id={reply_to_msg_id}, "
++            f"falling back to Telegram API chain walk"
++        )
++        chain = await fetch_reply_chain(client, chat_id, reply_to_msg_id)
++        # Chain is chronological (oldest first). Find the first non-Valor message.
++        for entry in chain:
++            if entry.get("sender") != "Valor":
++                root_msg_id = entry["message_id"]
++                session_id = f"tg_{project_key}_{chat_id}_{root_msg_id}"
++                logger.debug(
++                    f"[session-root] API chain walk resolved {reply_to_msg_id} → "
++                    f"{root_msg_id} (session={session_id})"
++                )
++                return session_id
++
++        # Chain is empty or all Valor messages — use fallback
++        logger.debug(
++            f"[session-root] chain walk found no human root for msg_id={reply_to_msg_id}, "
++            f"using fallback session_id"
++        )
++        return fallback
++
++    except Exception as exc:
++        # ── Step 3: Final fallback ─────────────────────────────────────────────
++        logger.debug(
++            f"[session-root] exception during root resolution for msg_id={reply_to_msg_id}: "
++            f"{exc}. Using fallback session_id."
++        )
++        return fallback
++
++
++async def _cache_walk_root(chat_id: int, start_msg_id: int, max_hops: int = 20) -> int | None:
++    """Walk the reply chain using TelegramMessage cache records.
++
++    Starting from start_msg_id, follow reply_to_msg_id links through cached
++    TelegramMessage records until we find the oldest non-Valor message.
++
++    Returns:
++        The message_id of the root human message, or None if any cache lookup
++        misses (caller should fall back to the Telegram API).
++    """
++    from models.telegram import TelegramMessage
++
++    current_id = start_msg_id
++    seen = set()
++
++    for _ in range(max_hops):
++        if current_id in seen:
++            break
++        seen.add(current_id)
++
++        try:
++            records = list(
++                TelegramMessage.query.filter(chat_id=str(chat_id), message_id=current_id)
++            )
++        except Exception:
++            # Filter failure means the index isn't usable — signal cache miss
++            return None
++
++        if not records:
++            # Cache miss — caller should fall back to API
++            return None
++
++        record = records[0]
++
++        # If this message was sent by someone other than Valor, it's the root
++        sender = getattr(record, "sender", None)
++        if sender != "Valor":
++            return current_id
++
++        # This is a Valor message — follow its reply_to_msg_id if present
++        parent_id = getattr(record, "reply_to_msg_id", None)
++        if not parent_id:
++            # Valor message with no parent — use it as the best available root
++            return current_id
++
++        current_id = parent_id
++
++    # Hit max_hops — return whatever we landed on
++    return current_id
++
++
+ # =============================================================================
+ # Link Summarization
+ # =============================================================================
+diff --git a/bridge/response.py b/bridge/response.py
+index d7d8a5328..bf51162c1 100644
+--- a/bridge/response.py
++++ b/bridge/response.py
+@@ -8,7 +8,7 @@
+ 
+ from telethon import TelegramClient
+ from telethon.tl.functions.messages import SendReactionRequest
+-from telethon.tl.types import ReactionEmoji
++from telethon.tl.types import Message, ReactionEmoji
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -374,7 +374,7 @@ async def send_response_with_files(
+     chat_id: int | None = None,
+     reply_to: int | None = None,
+     session=None,
+-) -> bool:
++) -> Message | None:
+     """
+     Send response to Telegram, handling both files and text.
+ 
+@@ -384,7 +384,8 @@ async def send_response_with_files(
+     4. Send remaining text (if any) with Markdown formatting
+ 
+     Can be called with event (handler context) or chat_id+reply_to (queue context).
+-    Returns True if any content was sent, False otherwise.
++    Returns the sent Message object if text was sent, None if nothing was sent.
++    Callers that only need a truthy/falsy check can still use `if sent:`.
+ 
+     Args:
+         session: Optional AgentSession for summarizer context enrichment.
+@@ -395,7 +396,7 @@ async def send_response_with_files(
+ 
+     if not _chat_id:
+         logger.error("send_response_with_files: no chat_id available")
+-        return False
++        return None
+ 
+     # Filter out tool logs before processing
+     original_response = response
+@@ -410,7 +411,7 @@ async def send_response_with_files(
+             )
+             response = "Done."
+         else:
+-            return False
++            return None
+ 
+     text, files = extract_files_from_response(response)
+ 
+@@ -539,13 +540,13 @@ async def send_response_with_files(
+     # skip text/summarizer output. This prevents sending both PM
+     # self-messages AND a summarized version of the same content.
+     # Guard coverage: pm_bypass blocks summarization AND text sending.
++    # Return a sentinel truthy value (True casts to int 1 which is truthy) since
++    # PM self-messages aren't tracked via the text send path.
+     if pm_bypass:
+-        return True  # Signal that content was "sent" (PM already delivered it)
+-
+-    # Track if we sent anything
+-    sent_content = bool(files)
++        return True  # type: ignore[return-value]  # PM already delivered it
+ 
+     # Send text if there's meaningful content
++    sent_msg = None
+     if text and not text.isspace():
+         # Sentence-aware truncation at Telegram's 4096-char limit
+         if len(text) > 4096:
+@@ -554,8 +555,7 @@ async def send_response_with_files(
+             # Use markdown parse mode with plain-text fallback
+             from bridge.markdown import send_markdown
+ 
+-            await send_markdown(client, _chat_id, text, reply_to=_reply_to)
+-            sent_content = True
++            sent_msg = await send_markdown(client, _chat_id, text, reply_to=_reply_to)
+         except Exception as e:
+             logger.error(f"Failed to send text message to chat {_chat_id} ({len(text)} chars): {e}")
+             # Persist to dead-letter queue for later retry
+@@ -570,7 +570,13 @@ async def send_response_with_files(
+             except Exception as dl_err:
+                 logger.error(f"Dead-letter persist also failed: {dl_err}")
+ 
+-    return sent_content
++    # Return the sent Message object if text was sent; fall back to truthy if
++    # only files were sent (no message_id available from file sends).
++    if sent_msg is not None:
++        return sent_msg
++    if files:
++        return True  # type: ignore[return-value]  # files were sent, no text Message object
++    return None
+ 
+ 
+ def get_processing_emoji(message: str) -> str:
+diff --git a/bridge/telegram_bridge.py b/bridge/telegram_bridge.py
+index 732f0d2fa..2bfd41d21 100644
+--- a/bridge/telegram_bridge.py
++++ b/bridge/telegram_bridge.py
+@@ -66,6 +66,7 @@
+     build_context_prefix,  # noqa: F401
+     build_conversation_history,  # noqa: F401
+     is_status_question,  # noqa: F401
++    resolve_root_session_id,
+ )
+ from bridge.media import (  # noqa: E402
+     MEDIA_DIR,  # noqa: F401
+@@ -942,8 +943,12 @@ async def handler(event):
+         # Use the is_reply_to_valor flag from should_respond_async
+         # (already checked there, no need to query Telegram again)
+         if is_reply_to_valor and message.reply_to_msg_id:
+-            # Continue the session from the replied message
+-            session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
++            # Walk the reply chain to find the root human message so that all
++            # replies in a thread map to the same canonical session_id regardless
++            # of which message in the thread is being replied to.
++            session_id = await resolve_root_session_id(
++                client, event.chat_id, message.reply_to_msg_id, project_key
++            )
+             logger.info(f"[routing] Session {session_id} (continuation=True)")
+         else:
+             # No reply-to: try semantic routing before creating a fresh session
+@@ -1617,12 +1622,18 @@ async def _send(chat_id: str, text: str, reply_to_msg_id: int, session=None) ->
+                         )
+                         if sent:
+                             try:
++                                # Capture the Telegram message_id from the returned Message
++                                # object so outbound TelegramMessage records have message_id
++                                # populated. This enables reverse lookup via
++                                # TelegramMessage.query.filter(chat_id=X, message_id=Y).
++                                sent_msg_id = getattr(sent, "id", None)
+                                 store_message(
+                                     chat_id=chat_id,
+                                     content=filtered,  # full content, no truncation
+                                     sender="Valor",
+                                     timestamp=utc_now(),
+                                     message_type="response",
++                                    message_id=sent_msg_id,
+                                 )
+                             except Exception:
+                                 pass
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 9bca2de35..462030c64 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -87,6 +87,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
+ | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
+ | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
++| [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
+ | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
+ | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
+ | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
+diff --git a/docs/features/bridge-response-improvements.md b/docs/features/bridge-response-improvements.md
+index 9b23bd6f3..55d27e0c4 100644
+--- a/docs/features/bridge-response-improvements.md
++++ b/docs/features/bridge-response-improvements.md
+@@ -36,12 +36,12 @@ Prevents context pollution by using Telegram's reply-to feature for session mana
+ 
+ | Message Type | Session Behavior |
+ |--------------|------------------|
+-| Reply to Valor's message | Continue that session |
++| Reply to Valor's message | Resume original session (root-resolved) |
+ | New message (no reply) | Fresh session using message ID |
+ 
+-**Session ID format**: `tg_{project}_{chat_id}_{msg_id}`
++**Session ID format**: `tg_{project}_{chat_id}_{root_msg_id}` — where `root_msg_id` is the oldest human message in the reply chain, resolved via `resolve_root_session_id()` in `bridge/context.py`. This ensures replying to any message in a thread (including Valor's responses) always maps to the original session. See [Session Management](session-management.md) for details.
+ 
+-**Location**: Handler in `bridge/telegram_bridge.py` around line 1222
++**Location**: Handler in `bridge/telegram_bridge.py` around line 943
+ 
+ ### 3. Retry with Self-Healing ✅
+ 
+diff --git a/docs/features/session-management.md b/docs/features/session-management.md
+new file mode 100644
+index 000000000..fc6af43b2
+--- /dev/null
++++ b/docs/features/session-management.md
+@@ -0,0 +1,91 @@
++# Session Management: Reply-Chain Root Resolution
++
++## Overview
++
++When a user replies to any message in a Telegram conversation thread — including Valor's own responses — the bridge resolves the **canonical session_id** by walking the reply chain to find the original human message that started the thread.
++
++This ensures that all replies in a conversation map to **one AgentSession** regardless of which message in the thread is being replied to.
++
++## Problem
++
++Prior to this fix, session_id derivation used `reply_to_msg_id` directly:
++
++```python
++# Before (broken for replies to Valor's responses):
++session_id = f"tg_{project_key}_{chat_id}_{message.reply_to_msg_id}"
++```
++
++This worked for the first reply (directly to the original human message), but broke when the user replied to Valor's response instead:
++
++| Step | Message | reply_to | session_id derived |
++|------|---------|----------|-------------------|
++| 1 | User msg_8111 | — | `tg_..._8111` (correct) |
++| 2 | Valor msg_8113 | — | (outbound) |
++| 3 | User msg_8114 | reply_to=8113 | `tg_..._8113` (wrong!) |
++
++Step 3 created a new AgentSession instead of resuming the original, producing duplicate dashboard rows.
++
++## Solution
++
++`resolve_root_session_id()` in `bridge/context.py` walks the reply chain backward to find the oldest non-Valor message, then derives the session_id from that message's ID.
++
++```python
++# After (correct):
++session_id = await resolve_root_session_id(
++    client, event.chat_id, message.reply_to_msg_id, project_key
++)
++```
++
++## Resolution Strategy
++
++The resolver uses a three-step fallback chain:
++
++1. **Cache-first walk** (`_cache_walk_root`): Query `TelegramMessage.query.filter(chat_id=X, message_id=Y)` to walk the chain using Redis records. No Telegram API calls needed when records are cached. `message_id` is a `KeyField` enabling O(1) indexed lookup.
++
++2. **API fallback** (`fetch_reply_chain`): If any cache lookup misses (record not in Redis), fall back to the Telegram API chain walk (up to 20 hops). Walks the full thread and finds the oldest non-Valor message.
++
++3. **Final fallback**: On any exception (network error, Redis unavailable), return a session_id derived directly from `reply_to_msg_id`. This preserves the old behavior as a safe degraded path — no message delivery is blocked.
++
++## Outbound message_id Storage
++
++As a prerequisite, `send_response_with_files` was updated to return `Message | None` instead of `bool`. The `_send` callback in `bridge/telegram_bridge.py` now captures the returned Telegram `Message.id` and passes it to `store_message`:
++
++```python
++sent_msg_id = getattr(sent, "id", None)
++store_message(..., message_id=sent_msg_id)
++```
++
++This populates `TelegramMessage.message_id` for outbound records, making future cache-first walks effective even for chains that start with a Valor response.
++
++## Data Model Change
++
++`TelegramMessage.message_id` was promoted from a plain `Field` to a `KeyField`:
++
++```python
++# Before:
++message_id = Field(type=int, null=True)
++
++# After:
++message_id = KeyField(null=True)
++```
++
++`KeyField` adds a set-based index in Redis that enables `filter(message_id=X)` as an O(1) lookup. No data migration is required — `KeyField` is a superset of `Field` for nullable values.
++
++## Graceful Degradation
++
++The resolver never blocks message delivery:
++
++- Cache miss → API walk (transparent to user)
++- API failure → `reply_to_msg_id` direct (old behavior, one extra AgentSession at worst)
++- Any exception → `reply_to_msg_id` direct (safe fallback logged at DEBUG level)
++
++## Race Conditions
++
++Two rapid replies both derive the same root session_id before either is processed. This is handled by `enqueue_job()`'s same-session_id supersede logic (lines 318–336 of `telegram_bridge.py`). No shared mutable state in the chain walk.
++
++## Related Features
++
++- [Mid-Session Steering](mid-session-steering.md) — Steering check that routes replies to running sessions uses the same canonical session_id.
++- [Semantic Session Routing](semantic-session-routing.md) — Handles unthreaded messages (no reply-to); this feature handles explicit reply-to chains.
++- [Session Isolation](session-isolation.md) — Two-tier task list scoping that depends on consistent session_id derivation.
++- [Agent Session Model](agent-session-model.md) — AgentSession lifecycle model tracking per session_id.
+diff --git a/docs/features/steering-queue.md b/docs/features/steering-queue.md
+index 4c649d380..325cfb694 100644
+--- a/docs/features/steering-queue.md
++++ b/docs/features/steering-queue.md
+@@ -72,13 +72,18 @@ Why not a popoto Model: steering messages are ephemeral, consumed once, and don'
+ 
+ #### 2. Bridge Changes (`bridge/telegram_bridge.py`)
+ 
+-In `handle_new_message`, after detecting `is_reply_to_valor` and building the `session_id`:
++In `handle_new_message`, after detecting `is_reply_to_valor`, the bridge resolves the canonical root session_id via `resolve_root_session_id()` (see `docs/features/session-management.md`):
+ 
+-```
++```python
+ if is_reply_to_valor and message.reply_to_msg_id:
+-    session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
+-
+-    # NEW: Check if this session is currently running
++    # Walk the reply chain to find the original human message's session_id.
++    # This handles replies to Valor's responses correctly — uses Popoto cache
++    # first, falls back to Telegram API, falls back to reply_to_msg_id directly.
++    session_id = await resolve_root_session_id(
++        client, event.chat_id, message.reply_to_msg_id, project_key
++    )
++
++    # Check if this session is currently running
+     active_sessions = AgentSession.query.filter(session_id=session_id, status="active")
+     if active_sessions:
+         # Route to steering queue instead of job queue
+diff --git a/docs/features/telegram-history.md b/docs/features/telegram-history.md
+index a22e26b86..6ca80cac5 100644
+--- a/docs/features/telegram-history.md
++++ b/docs/features/telegram-history.md
+@@ -26,7 +26,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of
+ **`TelegramMessage`** (`models/telegram.py`) - Source of truth for all Telegram messages
+ - `msg_id` - Auto-generated key
+ - `chat_id` - Telegram chat ID (KeyField, used for filtering)
+-- `message_id` - Telegram message ID
++- `message_id` - Telegram message ID (KeyField(null=True), enables O(1) indexed filter for reverse lookup)
+ - `direction` - "in" or "out" (KeyField)
+ - `sender` - Message sender name (KeyField)
+ - `content` - Full message content (up to 50,000 chars, no truncation)
+diff --git a/docs/plans/reply_to_session_resume.md b/docs/plans/reply_to_session_resume.md
+index 0d2742751..c0b680ece 100644
+--- a/docs/plans/reply_to_session_resume.md
++++ b/docs/plans/reply_to_session_resume.md
+@@ -167,24 +167,24 @@ User replies to Valor's message → `handle_new_message` detects `is_reply_to_va
+ ## Failure Path Test Strategy
+ 
+ ### Exception Handling Coverage
+-- [ ] `resolve_root_session_id` catches all exceptions and returns fallback session_id — test with mock client that raises `ConnectionError`
+-- [ ] `fetch_reply_chain` already catches per-hop exceptions — verify fallback behavior when mid-chain fetch fails
+-- [ ] Existing `except (ConnectionError, OSError)` and `except Exception` blocks in the steering check handle failures — no regression expected
++- [x] `resolve_root_session_id` catches all exceptions and returns fallback session_id — test with mock client that raises `ConnectionError`
++- [x] `fetch_reply_chain` already catches per-hop exceptions — verify fallback behavior when mid-chain fetch fails
++- [x] Existing `except (ConnectionError, OSError)` and `except Exception` blocks in the steering check handle failures — no regression expected
+ 
+ ### Empty/Invalid Input Handling
+-- [ ] Empty reply chain (Telegram returns no messages) → falls back to `reply_to_msg_id` directly
+-- [ ] Chain consisting entirely of Valor messages (bot responding to itself) → uses last available human message_id, or falls back to `reply_to_msg_id`
+-- [ ] `reply_to_msg_id=None` guard: `resolve_root_session_id` should not be called with None (guarded at call site by `if is_reply_to_valor and message.reply_to_msg_id`)
++- [x] Empty reply chain (Telegram returns no messages) → falls back to `reply_to_msg_id` directly
++- [x] Chain consisting entirely of Valor messages (bot responding to itself) → uses last available human message_id, or falls back to `reply_to_msg_id`
++- [x] `reply_to_msg_id=None` guard: `resolve_root_session_id` should not be called with None (guarded at call site by `if is_reply_to_valor and message.reply_to_msg_id`)
+ 
+ ### Error State Rendering
+-- [ ] If root resolution degrades to fallback, user still receives a response — graceful degradation test
+-- [ ] No user-visible errors introduced — resolution happens before steering
++- [x] If root resolution degrades to fallback, user still receives a response — graceful degradation test
++- [x] No user-visible errors introduced — resolution happens before steering
+ 
+ ## Test Impact
+ 
+-- [ ] `tests/integration/test_steering.py` — UPDATE: Add `test_reply_to_valor_response_resolves_root_session` test case verifying reply-to-Valor msg_id resolves to original human-message-based session_id
+-- [ ] `tests/unit/test_model_relationships.py` — No change expected (tests `agent_session_id` back-reference, unaffected by this fix)
+-- [ ] Call sites of `send_response_with_files` that check return type — UPDATE: assert `Message | None` instead of `bool`
++- [x] `tests/integration/test_steering.py` — UPDATE: Add `test_reply_to_valor_response_resolves_root_session` test case verifying reply-to-Valor msg_id resolves to original human-message-based session_id
++- [x] `tests/unit/test_model_relationships.py` — No change expected (tests `agent_session_id` back-reference, unaffected by this fix)
++- [x] Call sites of `send_response_with_files` that check return type — UPDATE: assert `Message | None` instead of `bool`
+ 
+ ## Rabbit Holes
+ 
+@@ -240,21 +240,21 @@ No agent integration required — this is a bridge-internal change in the Telegr
+ 
+ ## Documentation
+ 
+-- [ ] Update or create `docs/features/session-management.md` to describe reply-chain root resolution behavior
+-- [ ] Add entry to `docs/features/README.md` index table if `session-management.md` is new
+-- [ ] Add docstring to `resolve_root_session_id` and the updated session_id derivation block in `handle_new_message`
++- [x] Update or create `docs/features/session-management.md` to describe reply-chain root resolution behavior
++- [x] Add entry to `docs/features/README.md` index table if `session-management.md` is new
++- [x] Add docstring to `resolve_root_session_id` and the updated session_id derivation block in `handle_new_message`
+ 
+ ## Success Criteria
+ 
+-- [ ] Reply to any message in a Valor thread (including Valor's responses) resumes the original AgentSession
+-- [ ] Dashboard shows exactly one row per conversation thread
+-- [ ] If original session is running/active, reply is injected via steering (no new job created)
+-- [ ] If original session is completed/dormant, it is resumed with the same session_id
+-- [ ] Outbound `TelegramMessage` records have `message_id` populated after the fix
+-- [ ] Existing steering tests continue to pass
+-- [ ] New test `test_reply_to_valor_response_resolves_root_session` passes
+-- [ ] Tests pass (`/do-test`)
+-- [ ] Documentation updated (`/do-docs`)
++- [x] Reply to any message in a Valor thread (including Valor's responses) resumes the original AgentSession
++- [x] Dashboard shows exactly one row per conversation thread
++- [x] If original session is running/active, reply is injected via steering (no new job created)
++- [x] If original session is completed/dormant, it is resumed with the same session_id
++- [x] Outbound `TelegramMessage` records have `message_id` populated after the fix
++- [x] Existing steering tests continue to pass
++- [x] New test `test_reply_to_valor_response_resolves_root_session` passes
++- [x] Tests pass (`/do-test`)
++- [x] Documentation updated (`/do-docs`)
+ 
+ ## Team Orchestration
+ 
+diff --git a/models/telegram.py b/models/telegram.py
+index fb1629b92..807bfc8b5 100644
+--- a/models/telegram.py
++++ b/models/telegram.py
+@@ -24,7 +24,7 @@ class TelegramMessage(Model):
+ 
+     msg_id = AutoKeyField()
+     chat_id = KeyField()
+-    message_id = Field(type=int, null=True)  # Telegram's message ID
++    message_id = KeyField(null=True)  # Telegram's message ID (KeyField enables O(1) filter lookup)
+     direction = KeyField()  # "in" | "out"
+     sender = KeyField()
+     content = Field(max_length=MSG_MAX_CHARS)
+diff --git a/tests/integration/test_steering.py b/tests/integration/test_steering.py
+index 3fcd0735c..c92227bcd 100644
+--- a/tests/integration/test_steering.py
++++ b/tests/integration/test_steering.py
+@@ -468,3 +468,185 @@ async def test_watchdog_repushes_on_injection_failure(self):
+         msg = pop_steering_message(session_id)
+         assert msg is not None
+         assert msg["text"] == "update the tests"
++
++
++class TestResolveRootSessionId:
++    """Tests for resolve_root_session_id in bridge/context.py.
++
++    These tests verify that reply-to messages resolve to the original human
++    message's session_id regardless of which message in the thread is replied to.
++    All tests use mocked Telegram clients and mocked TelegramMessage cache records.
++    """
++
++    @pytest.mark.asyncio
++    async def test_reply_to_valor_response_resolves_root_session(self):
++        """Reply to Valor's message should resolve to the original human session_id.
++
++        Scenario:
++          msg_8111 (human) → msg_8113 (Valor response) → msg_8114 (human reply to 8113)
++        Expected: resolve_root_session_id(client, chat, 8113, key) == "tg_key_chat_8111"
++        """
++        from bridge.context import resolve_root_session_id
++
++        chat_id = 99001
++        project_key = "testproject"
++
++        # Simulate TelegramMessage cache:
++        # msg_8113 is a Valor outbound message that has reply_to_msg_id=8111
++        # msg_8111 is the original human inbound message
++        def mock_filter(chat_id=None, message_id=None):
++            if message_id == 8113:
++                record = type(
++                    "TelegramMsg",
++                    (),
++                    {"sender": "Valor", "reply_to_msg_id": 8111, "message_id": 8113},
++                )()
++                return [record]
++            elif message_id == 8111:
++                record = type(
++                    "TelegramMsg",
++                    (),
++                    {"sender": "Valor Engels", "reply_to_msg_id": None, "message_id": 8111},
++                )()
++                return [record]
++            return []
++
++        mock_query = type("Q", (), {"filter": staticmethod(mock_filter)})()
++        mock_client = AsyncMock()
++
++        with patch("models.telegram.TelegramMessage") as mock_tm:
++            mock_tm.query = mock_query
++            result = await resolve_root_session_id(mock_client, chat_id, 8113, project_key)
++
++        assert result == f"tg_{project_key}_{chat_id}_8111"
++        # Telegram API should NOT have been called (cache hit path)
++        mock_client.get_messages.assert_not_called()
++
++    @pytest.mark.asyncio
++    async def test_resolve_root_session_id_fallback_on_error(self):
++        """Exception during chain walk should return fallback session_id.
++
++        If both cache walk and API walk throw, the result must be derived
++        directly from reply_to_msg_id (old behavior, safe fallback).
++        """
++        from bridge.context import resolve_root_session_id
++
++        chat_id = 99002
++        project_key = "testproject"
++        reply_to_msg_id = 5555
++
++        mock_client = AsyncMock()
++        mock_client.get_messages.side_effect = ConnectionError("Telegram unavailable")
++
++        with patch("models.telegram.TelegramMessage") as mock_tm:
++            mock_tm.query.filter.side_effect = RuntimeError("Redis unavailable")
++            result = await resolve_root_session_id(
++                mock_client, chat_id, reply_to_msg_id, project_key
++            )
++
++        # Must fall back gracefully to reply_to_msg_id-based session_id
++        assert result == f"tg_{project_key}_{chat_id}_{reply_to_msg_id}"
++
++    @pytest.mark.asyncio
++    async def test_resolve_root_session_id_all_valor_chain(self):
++        """Chain consisting entirely of Valor messages falls through to API.
++
++        If the cache walk finds only Valor messages with no parent, the function
++        should accept the last Valor message as the root rather than looping forever.
++        When the API also returns only Valor messages, it should use the fallback.
++        """
++        from bridge.context import resolve_root_session_id
++
++        chat_id = 99003
++        project_key = "testproject"
++        reply_to_msg_id = 7777
++
++        # Cache: single Valor message with no reply_to_msg_id
++        def mock_filter(chat_id=None, message_id=None):
++            if message_id == 7777:
++                record = type(
++                    "TelegramMsg",
++                    (),
++                    {"sender": "Valor", "reply_to_msg_id": None, "message_id": 7777},
++                )()
++                return [record]
++            return []
++
++        mock_query = type("Q", (), {"filter": staticmethod(mock_filter)})()
++        mock_client = AsyncMock()
++
++        with patch("models.telegram.TelegramMessage") as mock_tm:
++            mock_tm.query = mock_query
++            result = await resolve_root_session_id(
++                mock_client, chat_id, reply_to_msg_id, project_key
++            )
++
++        # Valor-only chain with no parent: should use the Valor msg_id as root
++        # (best-effort fallback within cache walk — still deterministic)
++        assert result == f"tg_{project_key}_{chat_id}_7777"
++
++    @pytest.mark.asyncio
++    async def test_resolve_root_session_id_direct_reply_to_human(self):
++        """Reply directly to a human message resolves to that human message."""
++        from bridge.context import resolve_root_session_id
++
++        chat_id = 99004
++        project_key = "testproject"
++        reply_to_msg_id = 1234
++
++        # Cache: msg_1234 is a human message (not Valor)
++        def mock_filter(chat_id=None, message_id=None):
++            if message_id == 1234:
++                record = type(
++                    "TelegramMsg",
++                    (),
++                    {"sender": "Alice", "reply_to_msg_id": None, "message_id": 1234},
++                )()
++                return [record]
++            return []
++
++        mock_query = type("Q", (), {"filter": staticmethod(mock_filter)})()
++        mock_client = AsyncMock()
++
++        with patch("models.telegram.TelegramMessage") as mock_tm:
++            mock_tm.query = mock_query
++            result = await resolve_root_session_id(
++                mock_client, chat_id, reply_to_msg_id, project_key
++            )
++
++        assert result == f"tg_{project_key}_{chat_id}_1234"
++
++    @pytest.mark.asyncio
++    async def test_resolve_root_session_id_api_fallback_on_cache_miss(self):
++        """Cache miss triggers API chain walk to find root."""
++        from bridge.context import resolve_root_session_id
++
++        chat_id = 99005
++        project_key = "testproject"
++        reply_to_msg_id = 9999
++
++        # Cache: no records (simulate cache miss)
++        def mock_filter(chat_id=None, message_id=None):
++            return []
++
++        mock_query = type("Q", (), {"filter": staticmethod(mock_filter)})()
++
++        # API chain: returns a chain with root human message at msg_id=8800
++        async def mock_fetch_reply_chain(client, cid, mid, max_depth=20):
++            return [
++                {"sender": "Bob", "content": "hello", "message_id": 8800, "date": None},
++                {"sender": "Valor", "content": "hi", "message_id": 8801, "date": None},
++                {"sender": "Bob", "content": "follow up", "message_id": 9999, "date": None},
++            ]
++
++        mock_client = AsyncMock()
++
++        with patch("models.telegram.TelegramMessage") as mock_tm:
++            mock_tm.query = mock_query
++            with patch("bridge.context.fetch_reply_chain", side_effect=mock_fetch_reply_chain):
++                result = await resolve_root_session_id(
++                    mock_client, chat_id, reply_to_msg_id, project_key
++                )
++
++        # First human message in chain is msg_id=8800
++        assert result == f"tg_{project_key}_{chat_id}_8800"

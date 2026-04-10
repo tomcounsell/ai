@@ -1,0 +1,563 @@
+diff --git a/docs/features/session-lifecycle.md b/docs/features/session-lifecycle.md
+index 84090f10..38cc1d98 100644
+--- a/docs/features/session-lifecycle.md
++++ b/docs/features/session-lifecycle.md
+@@ -41,6 +41,8 @@ For terminal transitions. Executes all completion side effects in order:
+ 
+ **Idempotent**: if the session is already in the target terminal state, logs and returns without re-executing side effects.
+ 
++**Lazy-load safety**: Before saving, `finalize_session()` backfills `session._saved_field_values["status"]` with the current status. Popoto's `_create_lazy_model()` only seeds `_saved_field_values` with KeyFields, so lazy-loaded sessions have no `"status"` entry. Without this backfill, `IndexedFieldMixin.on_save()` skips `srem()` and the session accumulates in both the old and new status index sets simultaneously (ghost sessions).
++
+ **Skip flags**: The hooks subprocess paths (`stop.py`, `subagent_stop.py`) use `skip_auto_tag=True, skip_checkpoint=True` to avoid importing heavy dependencies that may not be available in the subprocess context.
+ 
+ ### `transition_status(session, new_status, reason, *, reject_from_terminal=True)`
+@@ -53,6 +55,8 @@ For non-terminal transitions. Logs the lifecycle transition and updates the stat
+ 
+ **Idempotent**: if the session is already in the target state, logs and returns.
+ 
++**Lazy-load safety**: Before saving, `transition_status()` backfills `session._saved_field_values["status"]` with the current status. This mirrors the same backfill in `finalize_session()` — both functions share the same Popoto lazy-load coupling. See `finalize_session()` above for the full explanation.
++
+ **Terminal respawn protection**: By default, `transition_status()` rejects transitions from terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`). This prevents accidental respawning of finished sessions. Callers that legitimately need terminal-to-non-terminal transitions must pass `reject_from_terminal=False` explicitly. Currently two callers use this opt-out:
+ - `_mark_superseded()`: `completed->superseded` (intentional bookkeeping)
+ - `user_prompt_submit.py` hook: `completed->running` (user reactivates local session)
+diff --git a/docs/plans/agent-session-index-corruption.md b/docs/plans/agent-session-index-corruption.md
+index b6d709bb..d9794bae 100644
+--- a/docs/plans/agent-session-index-corruption.md
++++ b/docs/plans/agent-session-index-corruption.md
+@@ -1,5 +1,5 @@
+ ---
+-status: Ready
++status: docs_complete
+ type: bug
+ appetite: Small
+ owner: valor
+@@ -108,12 +108,12 @@ Ghost session in running index → `kill --session-id <id>` → `_kill_agent_ses
+ 
+ ## Test Impact
+ 
+-- [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: the `new_agent_session_id` key in the kill result dict is removed (no recreate); update assertions that check this key
+-- [ ] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: may need new test covering lazy-load backfill; review existing tests for `transition_status` to verify they still pass
+-- [ ] `tests/unit/test_agent_session_queue_revival_helper.py` — UPDATE if it tests `_kill_agent_session` indirectly
++- [x] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: the `new_agent_session_id` key in the kill result dict is removed (no recreate); update assertions that check this key
++- [x] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: may need new test covering lazy-load backfill; review existing tests for `transition_status` to verify they still pass
++- [x] `tests/unit/test_agent_session_queue_revival_helper.py` — UPDATE if it tests `_kill_agent_session` indirectly
+ 
+ New test to add:
+-- [ ] `tests/unit/test_agent_session_index_corruption.py` — CREATE: verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry (unit test with real Redis or mocked `_saved_field_values`)
++- [x] `tests/unit/test_agent_session_index_corruption.py` — CREATE: verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry (unit test with real Redis or mocked `_saved_field_values`)
+ 
+ ## Rabbit Holes
+ 
+@@ -152,20 +152,20 @@ No agent integration required — `_kill_agent_session` and `transition_status`
+ 
+ ## Documentation
+ 
+-- [ ] Update docstring on `transition_status()` in `models/session_lifecycle.py` to note the `_saved_field_values` backfill and why it exists (lazy-load Popoto behavior)
+-- [ ] Update docstring on `_kill_agent_session()` to note that `finalize_session()` is used instead of delete-and-recreate
++- [x] Update docstring on `transition_status()` in `models/session_lifecycle.py` to note the `_saved_field_values` backfill and why it exists (lazy-load Popoto behavior)
++- [x] Update docstring on `_kill_agent_session()` to note that `finalize_session()` is used instead of delete-and-recreate
+ 
+ No new feature docs needed — this is a bug fix with no user-visible API changes.
+ 
+ ## Success Criteria
+ 
+-- [ ] `transition_status()` correctly removes the old `status` index entry even when called on a lazy-loaded `AgentSession`
+-- [ ] `kill --session-id <id>` marks all matching running sessions as killed without creating additional ghost records
+-- [ ] Running kill on a ghost session does not increase the number of running sessions in the index
+-- [ ] Dashboard running count matches actual active worker processes
+-- [ ] Unit test in `tests/unit/test_agent_session_index_corruption.py` verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry
+-- [ ] Tests pass (`/do-test`)
+-- [ ] Lint clean (`python -m ruff check .`)
++- [x] `transition_status()` correctly removes the old `status` index entry even when called on a lazy-loaded `AgentSession`
++- [x] `kill --session-id <id>` marks all matching running sessions as killed without creating additional ghost records
++- [x] Running kill on a ghost session does not increase the number of running sessions in the index
++- [x] Dashboard running count matches actual active worker processes
++- [x] Unit test in `tests/unit/test_agent_session_index_corruption.py` verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry
++- [x] Tests pass (`/do-test`)
++- [x] Lint clean (`python -m ruff check .`)
+ 
+ ## Team Orchestration
+ 
+diff --git a/models/session_lifecycle.py b/models/session_lifecycle.py
+index fafc221f..e5849e4e 100644
+--- a/models/session_lifecycle.py
++++ b/models/session_lifecycle.py
+@@ -52,6 +52,14 @@ def finalize_session(
+     Idempotent: if the session is already in the target terminal state,
+     logs and returns without re-executing side effects.
+ 
++    Lazy-load safety: Before saving, this function backfills
++    session._saved_field_values["status"] with the current status so that
++    Popoto's IndexedFieldMixin.on_save() guard can call srem() to remove the
++    old index entry. Lazy-loaded sessions (from _create_lazy_model) only have
++    KeyFields pre-populated in _saved_field_values, so without this backfill
++    the old status index entry is never removed and the session appears in both
++    old and new status index sets simultaneously.
++
+     Args:
+         session: AgentSession instance to finalize.
+         status: Terminal status to set (completed, failed, killed, abandoned, cancelled).
+@@ -123,6 +131,16 @@ def finalize_session(
+                 logger.debug(f"[lifecycle] Parent finalization failed (non-fatal): {e}")
+ 
+     # 5. Set status + completed_at + save
++    # Backfill _saved_field_values["status"] so Popoto's IndexedFieldMixin.on_save()
++    # knows the old status and calls srem() to remove the old index entry. Without
++    # this, lazy-loaded sessions (created via _create_lazy_model) start with an empty
++    # _saved_field_values dict and the guard `if old_value is not None` is never
++    # satisfied, leaving the session stranded in both old and new status index sets.
++    # See: popoto/models/encoding.py _create_lazy_model() — only KeyFields are seeded.
++    # NOTE: _saved_field_values is a Popoto internal. If Popoto is upgraded, verify
++    # this coupling is still valid by checking on_save() in IndexedFieldMixin.
++    if hasattr(session, "_saved_field_values"):
++        session._saved_field_values["status"] = current_status
+     session.status = status
+     session.completed_at = time.time()
+     session.save()
+@@ -146,6 +164,14 @@ def transition_status(
+ 
+     Idempotent: if the session is already in the target state, logs and returns.
+ 
++    Lazy-load safety: Before saving, this function backfills
++    session._saved_field_values["status"] with the current status so that
++    Popoto's IndexedFieldMixin.on_save() guard can call srem() to remove the
++    old index entry. Lazy-loaded sessions (from _create_lazy_model) only have
++    KeyFields pre-populated in _saved_field_values, so without this backfill
++    the old status index entry is never removed and the session appears in both
++    old and new status index sets simultaneously.
++
+     Args:
+         session: AgentSession instance to transition.
+         new_status: Non-terminal status to set.
+@@ -196,6 +222,15 @@ def transition_status(
+         logger.debug(f"[lifecycle] Lifecycle log failed (non-fatal): {e}")
+ 
+     # Set status + save
++    # Backfill _saved_field_values["status"] so Popoto's IndexedFieldMixin.on_save()
++    # knows the old status and calls srem() to remove the old index entry. Without
++    # this, lazy-loaded sessions (created via _create_lazy_model) start with an empty
++    # _saved_field_values dict and the guard `if old_value is not None` is never
++    # satisfied, leaving the session stranded in both old and new status index sets.
++    # NOTE: _saved_field_values is a Popoto internal. If Popoto is upgraded, verify
++    # this coupling is still valid by checking on_save() in IndexedFieldMixin.
++    if hasattr(session, "_saved_field_values"):
++        session._saved_field_values["status"] = current_status
+     session.status = new_status
+     session.save()
+ 
+diff --git a/tests/unit/test_agent_session_index_corruption.py b/tests/unit/test_agent_session_index_corruption.py
+new file mode 100644
+index 00000000..7aa3b688
+--- /dev/null
++++ b/tests/unit/test_agent_session_index_corruption.py
+@@ -0,0 +1,205 @@
++"""Tests for AgentSession status index corruption fixes.
++
++Validates that status transitions on lazy-loaded sessions correctly remove the
++old index entry from Redis, preventing ghost "running" entries.
++
++Root cause (Bug 1): Popoto's _create_lazy_model() initialises _saved_field_values
++with only KeyFields populated. IndexedFieldMixin.on_save() skips the srem() call
++when the old value is not present in _saved_field_values. The fix backfills
++_saved_field_values["status"] in both transition_status() and finalize_session()
++before calling session.save().
++"""
++
++from unittest.mock import MagicMock, patch
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++
++def _make_lazy_session(status="running"):
++    """Simulate a lazy-loaded AgentSession with minimal _saved_field_values.
++
++    Popoto's _create_lazy_model seeds _saved_field_values with KeyFields only
++    (e.g., agent_session_id). Status is an IndexedField and is NOT in
++    _saved_field_values after lazy load.
++    """
++    session = MagicMock()
++    session.status = status
++    session.session_id = "sess-lazy-001"
++    session.agent_session_id = "ase-lazy-001"
++    session.parent_agent_session_id = None
++    # Simulate lazy-loaded state: only key field is seeded, not status
++    session._saved_field_values = {"agent_session_id": "ase-lazy-001"}
++    return session
++
++
++def _make_fully_loaded_session(status="running"):
++    """Simulate a fully-loaded AgentSession with all field values populated.
++
++    This represents a session that was saved/loaded normally — _saved_field_values
++    includes the current status, so on_save() would already work correctly.
++    """
++    session = MagicMock()
++    session.status = status
++    session.session_id = "sess-full-001"
++    session.agent_session_id = "ase-full-001"
++    session.parent_agent_session_id = None
++    # Fully-loaded: _saved_field_values includes status
++    session._saved_field_values = {"agent_session_id": "ase-full-001", "status": status}
++    return session
++
++
++# ---------------------------------------------------------------------------
++# transition_status — lazy-load backfill
++# ---------------------------------------------------------------------------
++
++
++class TestTransitionStatusLazyLoadBackfill:
++    def test_backfills_saved_field_values_on_lazy_session(self):
++        """transition_status() must set _saved_field_values['status'] before save().
++
++        This is the core Bug 1 fix: ensures Popoto's on_save() guard can remove
++        the old index entry even when the session was lazy-loaded.
++        """
++        from models.session_lifecycle import transition_status
++
++        session = _make_lazy_session(status="running")
++
++        transition_status(session, "dormant")
++
++        # _saved_field_values["status"] must be set to the OLD status before save
++        assert session._saved_field_values["status"] == "running"
++        session.save.assert_called_once()
++
++    def test_backfills_even_when_current_status_is_pending(self):
++        """Backfill works for pending -> running transition too."""
++        from models.session_lifecycle import transition_status
++
++        session = _make_lazy_session(status="pending")
++
++        transition_status(session, "running")
++
++        assert session._saved_field_values["status"] == "pending"
++        session.save.assert_called_once()
++
++    def test_does_not_crash_when_no_saved_field_values_attr(self):
++        """If session has no _saved_field_values attribute, backfill is skipped silently."""
++        from models.session_lifecycle import transition_status
++
++        session = MagicMock()
++        session.status = "pending"
++        session.session_id = "sess-no-attr"
++        session.agent_session_id = "ase-no-attr"
++        session.parent_agent_session_id = None
++        # Simulate session object without _saved_field_values (e.g., future Popoto change)
++        del session._saved_field_values
++
++        # Should not raise
++        transition_status(session, "running")
++        session.save.assert_called_once()
++
++    def test_fully_loaded_session_backfill_is_still_correct(self):
++        """For fully-loaded sessions, backfill sets _saved_field_values to old status.
++
++        Overwriting with the same value is harmless — it's idempotent.
++        """
++        from models.session_lifecycle import transition_status
++
++        session = _make_fully_loaded_session(status="pending")
++
++        transition_status(session, "running")
++
++        assert session._saved_field_values["status"] == "pending"
++        session.save.assert_called_once()
++
++    def test_idempotent_noop_when_already_in_target_status(self):
++        """transition_status() is a no-op when already in the target state."""
++        from models.session_lifecycle import transition_status
++
++        session = _make_lazy_session(status="running")
++
++        transition_status(session, "running")
++
++        session.save.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# finalize_session — lazy-load backfill
++# ---------------------------------------------------------------------------
++
++
++class TestFinalizeSessionLazyLoadBackfill:
++    def test_backfills_saved_field_values_on_lazy_session(self):
++        """finalize_session() must set _saved_field_values['status'] before save().
++
++        Both transition_status() and finalize_session() use session.save(), so
++        both need the backfill to ensure the old index entry is removed.
++        """
++        from models.session_lifecycle import finalize_session
++
++        session = _make_lazy_session(status="running")
++
++        with (
++            patch.object(session, "log_lifecycle_transition"),
++            patch("models.session_lifecycle._finalize_parent_sync"),
++        ):
++            finalize_session(
++                session,
++                "killed",
++                reason="CLI kill",
++                skip_auto_tag=True,
++                skip_checkpoint=True,
++                skip_parent=True,
++            )
++
++        assert session._saved_field_values["status"] == "running"
++        session.save.assert_called_once()
++
++    def test_backfills_for_abandoned_transition(self):
++        """Backfill works when finalizing as abandoned."""
++        from models.session_lifecycle import finalize_session
++
++        session = _make_lazy_session(status="running")
++
++        with patch.object(session, "log_lifecycle_transition"):
++            finalize_session(
++                session,
++                "abandoned",
++                skip_auto_tag=True,
++                skip_checkpoint=True,
++                skip_parent=True,
++            )
++
++        assert session._saved_field_values["status"] == "running"
++        session.save.assert_called_once()
++
++    def test_idempotent_noop_when_already_in_terminal_state(self):
++        """finalize_session() is a no-op when session is already in that terminal state."""
++        from models.session_lifecycle import finalize_session
++
++        session = _make_lazy_session(status="killed")
++
++        finalize_session(session, "killed", skip_auto_tag=True, skip_checkpoint=True)
++
++        session.save.assert_not_called()
++
++    def test_does_not_crash_when_no_saved_field_values_attr(self):
++        """If session has no _saved_field_values attribute, backfill is skipped silently."""
++        from models.session_lifecycle import finalize_session
++
++        session = MagicMock()
++        session.status = "running"
++        session.session_id = "sess-no-attr"
++        session.agent_session_id = "ase-no-attr"
++        session.parent_agent_session_id = None
++        del session._saved_field_values
++
++        finalize_session(
++            session,
++            "killed",
++            skip_auto_tag=True,
++            skip_checkpoint=True,
++            skip_parent=True,
++        )
++        session.save.assert_called_once()
+diff --git a/tests/unit/test_agent_session_scheduler_kill.py b/tests/unit/test_agent_session_scheduler_kill.py
+index b1f21cdc..7b8d48d0 100644
+--- a/tests/unit/test_agent_session_scheduler_kill.py
++++ b/tests/unit/test_agent_session_scheduler_kill.py
+@@ -6,7 +6,7 @@
+ 3. cmd_kill --all with no sessions returns "nothing to kill"
+ 4. _find_process_by_session_id returns None for unknown session
+ 5. _kill_process handles ProcessLookupError (already dead)
+-6. _kill_agent_session sets status to "killed" via delete-and-recreate
++6. _kill_agent_session sets status to "killed" via finalize_session() (in-place mutation)
+ 7. cmd_status includes killed_count and killed_sessions in output
+ 8. Recovery functions filter on status="running" (killed jobs excluded by query)
+ """
+@@ -235,54 +235,35 @@ def fake_kill(pid, sig):
+ class TestKillJob:
+     @patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None)
+     def test_sets_status_to_killed(self, _mock_find):
+-        """_kill_agent_session transitions session status to 'killed' via delete-and-recreate."""
++        """_kill_agent_session transitions session status to 'killed' via finalize_session()."""
+         session = _FakeSession(
+             agent_session_id="session-abc", session_id="sess-1", status="running"
+         )
+-        created_job = _FakeSession(
+-            agent_session_id="session-new", session_id="sess-1", status="killed"
+-        )
+-
+-        fake_fields = {
+-            "session_id": "sess-1",
+-            "status": "running",
+-            "priority": "normal",
+-        }
+ 
+-        with (
+-            patch(
+-                "agent.agent_session_queue._extract_agent_session_fields",
+-                return_value=dict(fake_fields),
+-            ),
+-            patch(
+-                "models.agent_session.AgentSession.create", return_value=created_job
+-            ) as mock_create,
+-        ):
++        with patch("models.session_lifecycle.finalize_session") as mock_finalize:
+             result = _kill_agent_session(session)
+ 
+         assert result["status"] == "killed"
+         assert result["previous_status"] == "running"
+-        assert session._deleted is True
+-        # Verify the create call used status="killed"
+-        create_kwargs = mock_create.call_args[1]
+-        assert create_kwargs["status"] == "killed"
+-        assert "completed_at" in create_kwargs
++        # finalize_session must be called with the session and "killed"
++        mock_finalize.assert_called_once_with(
++            session,
++            "killed",
++            reason="CLI kill",
++            skip_auto_tag=True,
++            skip_checkpoint=True,
++        )
++        # delete() must NOT be called — no more delete-and-recreate
++        assert session._deleted is False
+ 
+     def test_skip_process_kill_for_pending(self):
+         """For pending sessions, skip_process_kill=True skips process termination."""
+         session = _FakeSession(
+             agent_session_id="session-pend", session_id="sess-2", status="pending"
+         )
+-        created_job = _FakeSession(
+-            agent_session_id="session-new", session_id="sess-2", status="killed"
+-        )
+ 
+         with (
+-            patch(
+-                "agent.agent_session_queue._extract_agent_session_fields",
+-                return_value={"session_id": "sess-2", "status": "pending"},
+-            ),
+-            patch("models.agent_session.AgentSession.create", return_value=created_job),
++            patch("models.session_lifecycle.finalize_session"),
+             patch("tools.agent_session_scheduler._find_process_by_session_id") as mock_find,
+         ):
+             result = _kill_agent_session(session, skip_process_kill=True)
+@@ -300,17 +281,8 @@ def test_kills_process_when_running(self, mock_kill_proc, mock_find):
+         session = _FakeSession(
+             agent_session_id="session-run", session_id="sess-3", status="running"
+         )
+-        created_job = _FakeSession(
+-            agent_session_id="session-new", session_id="sess-3", status="killed"
+-        )
+ 
+-        with (
+-            patch(
+-                "agent.agent_session_queue._extract_agent_session_fields",
+-                return_value={"session_id": "sess-3", "status": "running"},
+-            ),
+-            patch("models.agent_session.AgentSession.create", return_value=created_job),
+-        ):
++        with patch("models.session_lifecycle.finalize_session"):
+             result = _kill_agent_session(session)
+ 
+         mock_find.assert_called_once_with("sess-3")
+@@ -375,24 +347,9 @@ def test_kill_all_kills_running_and_pending(self, capsys):
+             }
+         )
+ 
+-        created_sessions = [
+-            _FakeSession(agent_session_id="new-1", status="killed"),
+-            _FakeSession(agent_session_id="new-2", status="killed"),
+-        ]
+-        create_call_count = [0]
+-
+-        def fake_create(**kwargs):
+-            session = created_sessions[create_call_count[0]]
+-            create_call_count[0] += 1
+-            return session
+-
+         with (
+             patch("models.agent_session.AgentSession.query", fake_query),
+-            patch("models.agent_session.AgentSession.create", side_effect=fake_create),
+-            patch(
+-                "agent.agent_session_queue._extract_agent_session_fields",
+-                return_value={"status": "running"},
+-            ),
++            patch("models.session_lifecycle.finalize_session"),
+             patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
+         ):
+             ret = cmd_kill(_make_args(all=True))
+@@ -411,15 +368,10 @@ def test_kill_specific_job_by_id(self, capsys):
+             agent_session_id="other-session", session_id="s-other", status="running"
+         )
+         fake_query = _FakeQuery(sessions_by_status={"running": [other, target]})
+-        created = _FakeSession(agent_session_id="new-target", status="killed")
+ 
+         with (
+             patch("models.agent_session.AgentSession.query", fake_query),
+-            patch("models.agent_session.AgentSession.create", return_value=created),
+-            patch(
+-                "agent.agent_session_queue._extract_agent_session_fields",
+-                return_value={"status": "running"},
+-            ),
++            patch("models.session_lifecycle.finalize_session"),
+             patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
+         ):
+             ret = cmd_kill(_make_args(agent_session_id="target-session"))
+@@ -444,15 +396,10 @@ def test_kill_by_session_id(self, capsys):
+             agent_session_id="session-entry", session_id="target-session", status="running"
+         )
+         fake_query = _FakeQuery(sessions_by_status={"running": [target]})
+-        created = _FakeSession(agent_session_id="new-sess", status="killed")
+ 
+         with (
+             patch("models.agent_session.AgentSession.query", fake_query),
+-            patch("models.agent_session.AgentSession.create", return_value=created),
+-            patch(
+-                "agent.agent_session_queue._extract_agent_session_fields",
+-                return_value={"status": "running"},
+-            ),
++            patch("models.session_lifecycle.finalize_session"),
+             patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
+         ):
+             ret = cmd_kill(_make_args(session_id="target-session"))
+diff --git a/tools/agent_session_scheduler.py b/tools/agent_session_scheduler.py
+index ce3f20e5..2274ffbb 100644
+--- a/tools/agent_session_scheduler.py
++++ b/tools/agent_session_scheduler.py
+@@ -796,14 +796,19 @@ def _kill_process(pid: int) -> dict:
+ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
+     """Kill a single session: terminate its subprocess and set status to killed.
+ 
++    Uses finalize_session() for in-place status mutation rather than the old
++    delete-and-recreate pattern. The delete-and-recreate pattern was unsafe:
++    nullable KeyField values that were never set on the source object caused
++    Popoto to stringify the field descriptor object into the key, producing a
++    corrupted hash key that could never be resolved or deleted via ORM calls.
++
+     Args:
+         target: AgentSession instance to kill.
+         skip_process_kill: If True, skip process termination (for pending sessions).
+ 
+     Returns a dict with kill result details.
+     """
+-    from agent.agent_session_queue import _extract_agent_session_fields
+-    from models.agent_session import AgentSession
++    from models.session_lifecycle import finalize_session
+ 
+     result = {
+         "agent_session_id": target.agent_session_id,
+@@ -821,13 +826,11 @@ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
+         else:
+             result["process"] = {"pid": None, "action": "no_process_found"}
+ 
+-    # Set status to killed using delete-and-recreate (Popoto pattern)
+-    fields = _extract_agent_session_fields(target)
+-    target.delete()
+-    fields["status"] = "killed"
+-    fields["completed_at"] = datetime.now(tz=UTC)
+-    new_session = AgentSession.create(**fields)
+-    result["new_agent_session_id"] = new_session.agent_session_id
++    # Set status to killed using in-place mutation via finalize_session().
++    # skip_auto_tag and skip_checkpoint are set because the CLI kill context
++    # may not have a git repo or session tags config available; all side
++    # effects in finalize_session() are already wrapped in try/except anyway.
++    finalize_session(target, "killed", reason="CLI kill", skip_auto_tag=True, skip_checkpoint=True)
+     result["status"] = "killed"
+ 
+     logger.info(

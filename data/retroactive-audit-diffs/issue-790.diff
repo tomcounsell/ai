@@ -1,0 +1,152 @@
+diff --git a/ui/app.py b/ui/app.py
+index 94d211201..99e60db05 100644
+--- a/ui/app.py
++++ b/ui/app.py
+@@ -54,7 +54,7 @@ def _filter_format_duration(seconds: float | None) -> str:
+     if seconds is None:
+         return "-"
+     if seconds < 60:
+-        return "<1m"
++        return f"{round(seconds)}s"
+     if seconds < 3600:
+         return f"{int(seconds / 60)}m"
+     return f"{int(seconds / 3600)}h"
+diff --git a/ui/static/style.css b/ui/static/style.css
+index 6b278d996..474b3575b 100644
+--- a/ui/static/style.css
++++ b/ui/static/style.css
+@@ -218,15 +218,10 @@ h3 {
+     background: var(--green-bg);
+ }
+ 
+-/* Status labels — plain colored text, no pill */
+-.status-label {
+-    font-size: 13px;
+-    font-weight: 500;
+-}
+ 
+ .status-running { color: #22c55e; }
+ .status-pending { color: #eab308; }
+-.status-dormant { color: var(--purple); font-size: 11px; }
++.status-dormant { color: #f87171; font-size: 11px; }
+ .status-active, .status-waiting_for_children { color: #22c55e; }
+ .status-completed { color: #6b7280; }
+ .status-failed, .status-error, .status-abandoned, .status-killed {
+@@ -235,17 +230,26 @@ h3 {
+ }
+ 
+ .priority-icon {
++    display: inline-block;
++    width: 16px;
++    text-align: left;
+     font-size: 12px;
+-    margin-right: 2px;
++}
++
++.status-label {
++    display: inline-block;
++    width: 48px;
++    text-align: left;
++    font-size: 13px;
++    font-weight: 500;
+ }
+ 
+ .duration-label {
+     display: inline-block;
+-    width: 28px;
+-    text-align: right;
++    width: 32px;
++    text-align: left;
+     font-size: 11px;
+     color: var(--text-muted);
+-    margin-left: 2px;
+ }
+ 
+ .badge-ok, .badge-success {
+diff --git a/ui/templates/_partials/sessions_table.html b/ui/templates/_partials/sessions_table.html
+index 5cf7aed82..7b363c818 100644
+--- a/ui/templates/_partials/sessions_table.html
++++ b/ui/templates/_partials/sessions_table.html
+@@ -47,7 +47,7 @@
+     </td>
+     <td>
+         {% if s.session_type %}
+-        <span class="badge badge-{{ 'blue' if s.session_type == 'Developer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ s.session_type }}</span>
++        <span class="badge badge-{{ 'blue' if s.session_type == 'Developer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ 'PM' if s.session_type == 'Project Manager' else ('dev' if s.session_type == 'Developer' else s.session_type) }}</span>
+         {% else %}
+         <span class="text-muted">-</span>
+         {% endif %}
+@@ -58,8 +58,8 @@
+     <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
+     <td>
+         {% if s.status %}
+-        {% set terminal = s.status in ('failed', 'error', 'abandoned', 'killed') %}
+-        {% if not terminal %}{% if s.priority == 'urgent' %}<span class="priority-icon" style="color:#f97316" title="Urgent">⬆⬆</span>{% elif s.priority == 'high' %}<span class="priority-icon" style="color:#f97316" title="High priority">⬆</span>{% elif s.priority == 'low' %}<span class="priority-icon" style="color:#3b82f6" title="Low priority">⬇</span>{% endif %}{% endif %}<span class="status-label status-{{ s.status }}{% if s.is_stale %} stale{% endif %}" title="{{ s.status }}{% if s.is_stale %} (stale){% endif %}">{% if s.status == 'running' %}▶▶▶{% elif s.status == 'pending' %}⏸{% elif s.status == 'dormant' %}dormant{% elif s.status in ('waiting_for_children', 'active') %}▶{% elif s.status == 'completed' %}☑{% else %}{{ s.status }}{% endif %}{% if s.is_stale %} ·{% endif %}</span><span class="duration-label mono">{{ s.duration | format_duration }}</span>
++        {% set terminal = s.status in ('failed', 'error', 'abandoned', 'killed', 'completed') %}
++        {% if not terminal %}{% if s.priority == 'urgent' %}<span class="priority-icon" style="color:#f97316" title="Urgent">⬆⬆</span>{% elif s.priority == 'high' %}<span class="priority-icon" style="color:#f97316" title="High priority">⬆</span>{% elif s.priority == 'low' %}<span class="priority-icon" style="color:#3b82f6" title="Low priority">⬇</span>{% endif %}{% endif %}<span class="status-label status-{{ s.status }}{% if s.is_stale %} stale{% endif %}" title="{{ s.status }}{% if s.is_stale %} (stale){% endif %}">{% if s.status == 'running' %}▶▶{% elif s.status == 'pending' %}<span style="font-size:1.5em;line-height:1">⏸</span>{% elif s.status == 'dormant' %}dormant{% elif s.status in ('waiting_for_children', 'active') %}▶{% elif s.status == 'completed' %}<span style="font-size:1.5em;line-height:1">✔</span>{% else %}{{ s.status }}{% endif %}{% if s.is_stale %} ·{% endif %}</span><span class="duration-label mono">{{ s.duration | format_duration }}</span>
+         {% if s.watchdog_unhealthy %}
+         <span class="badge badge-warning" title="{{ s.watchdog_unhealthy }}">!</span>
+         {% endif %}
+diff --git a/ui/templates/index.html b/ui/templates/index.html
+index 2ad9fae81..ca7fe1bf4 100644
+--- a/ui/templates/index.html
++++ b/ui/templates/index.html
+@@ -56,8 +56,8 @@ <h2>{{ machine_name }} — Active Groups</h2>
+             <tr>
+                 <td>{{ row.group_name }}</td>
+                 <td style="text-align: right;">
+-                    {% if row.persona == 'developer' %}<span class="badge badge-blue">Developer</span>
+-                    {% elif row.persona == 'project-manager' %}<span class="badge badge-purple">Project Manager</span>
++                    {% if row.persona == 'developer' %}<span class="badge badge-blue">dev</span>
++                    {% elif row.persona == 'project-manager' %}<span class="badge badge-purple">PM</span>
+                     {% elif row.persona == 'teammate' %}<span class="badge badge-green">Teammate</span>
+                     {% else %}<span class="badge badge-skipped">{{ row.persona }}</span>
+                     {% endif %}
+diff --git a/ui/templates/reflections/_partials/status_grid.html b/ui/templates/reflections/_partials/status_grid.html
+index e87b9569a..0bb705c00 100644
+--- a/ui/templates/reflections/_partials/status_grid.html
++++ b/ui/templates/reflections/_partials/status_grid.html
+@@ -3,16 +3,19 @@
+ <table class="data-table">
+     <thead>
+         <tr>
++            <th style="width: 20px;"></th>
+             <th>Name</th>
+-            <th>Status</th>
+-            <th>Last Run</th>
+             <th>Timing</th>
+-            <th>Priority</th>
+         </tr>
+     </thead>
+     <tbody>
+         {% for r in reflections %}
+         <tr>
++            <td style="text-align: center;">
++                {% if not r.enabled %}<span class="badge badge-skipped">off</span>
++                {% elif r.last_status in ('error', 'failed') %}<span style="color: var(--red);">●</span>
++                {% else %}<span style="color: #22c55e;">●</span>{% endif %}
++            </td>
+             <td>
+                 <div class="card-title">{{ r.name }}</div>
+                 <div class="text-muted" style="font-size: 12px;">{{ r.description }}</div>
+@@ -20,14 +23,13 @@
+                 <div style="font-size: 11px; color: var(--red); margin-top: 4px; font-family: var(--font-mono);">{{ r.last_error }}</div>
+                 {% endif %}
+             </td>
+-            <td>{% if not r.enabled %}<span class="badge badge-skipped">disabled</span>{% else %}{{ status_badge(r.last_status) }}{% endif %}</td>
+-            <td class="mono">{{ format_ts(r.last_run) }}</td>
+-            <td class="mono">
+-                <span style="display: inline-block; min-width: 5ch;">{{ format_interval(r.interval) }}</span>
+-                <span class="text-muted">/</span>
+-                <span style="display: inline-block; min-width: 5ch;">{{ format_dur(r.last_duration) }}</span>
++            <td class="mono" style="white-space: nowrap;">
++                <span class="priority-icon">{% if r.priority == 'urgent' %}⬆⬆{% elif r.priority == 'high' %}⬆{% elif r.priority == 'low' %}⬇{% endif %}</span>
++                <span style="display: inline-block; width: 80px;">{{ format_ts(r.last_run) }}</span>
++                <span class="duration-label">{{ format_dur(r.last_duration) }}</span>
++                <span class="text-muted" style="margin: 0 4px;">→</span>
++                <span style="display: inline-block; width: 80px;">{{ format_ts(r.next_due) }}</span>
+             </td>
+-            <td><span class="badge badge-{{ r.priority }}">{{ r.priority }}</span></td>
+         </tr>
+         {% endfor %}
+     </tbody>

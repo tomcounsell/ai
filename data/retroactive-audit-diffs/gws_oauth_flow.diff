@@ -1,0 +1,1115 @@
+diff --git a/.claude/skills/setup/SKILL.md b/.claude/skills/setup/SKILL.md
+index 0f81dc4ef..6b263db21 100644
+--- a/.claude/skills/setup/SKILL.md
++++ b/.claude/skills/setup/SKILL.md
+@@ -130,20 +130,13 @@ If no token exists, run the OAuth flow:
+ cd ~/src/ai
+ 
+ # This will open browser for Google OAuth consent
+-.venv/bin/valor-calendar test
+-
+-# Or use the CLI directly
+-.venv/bin/python -c "
+-from tools.google_workspace.auth import get_service
+-service = get_service('calendar', 'v3')
+-print('OAuth flow complete, token saved')
+-"
++.venv/bin/valor-calendar --reauth
+ ```
+ 
+-The user must complete the OAuth consent in their browser. After completion, verify the token was created:
++The user must complete the OAuth consent in their browser. After completion, verify the token is valid:
+ 
+ ```bash
+-ls ~/Desktop/Valor/google_token.json
++.venv/bin/valor-calendar --check
+ ```
+ 
+ ### 4.3 Create calendar mappings
+@@ -416,7 +409,7 @@ uv sync --all-extras
+ ### Calendar OAuth fails
+ 1. Verify credentials file exists: `ls ~/Desktop/Valor/google_credentials.json`
+ 2. Ensure Google Calendar API is enabled in Cloud Console
+-3. Re-run OAuth: `.venv/bin/valor-calendar test`
++3. Re-run OAuth: `.venv/bin/valor-calendar --reauth`
+ 
+ ### Bridge won't start
+ 1. Check logs: `tail -50 logs/bridge.log`
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 6c8ad065a..97f1da131 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -50,6 +50,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Git State Guard](git-state-guard.md) | Detects and resolves dirty git state (merges, rebases, cherry-picks) before SDLC branch operations | Shipped |
+ | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
+ | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
++| [Google Workspace Auth](google-workspace-auth.md) | Error-resilient OAuth with verify_token(), --reauth/--check CLI flags, and actionable error messages | Shipped |
+ | [Happy Path Testing Pipeline](happy-path-testing-pipeline.md) | Three-stage pipeline (discover, generate, run) for deterministic browser regression tests without LLM tokens | Shipped |
+ | [Hooks Best Practices & Audit](hooks-best-practices.md) | `/audit-hooks` skill, codified hook safety patterns, and daily reflections integration | Shipped |
+ | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
+diff --git a/docs/features/config-architecture.md b/docs/features/config-architecture.md
+index bb26e8ff0..9870dc717 100644
+--- a/docs/features/config-architecture.md
++++ b/docs/features/config-architecture.md
+@@ -70,7 +70,7 @@ All Google auth credentials and calendar config live in `~/Desktop/Valor/`:
+ | File | Purpose |
+ |------|---------|
+ | `~/Desktop/Valor/google_credentials.json` | OAuth client credentials (from Google Cloud Console) |
+-| `~/Desktop/Valor/google_token.json` | OAuth token (auto-generated) |
++| `~/Desktop/Valor/google_token.<machine>.json` | Per-machine OAuth token (auto-generated) |
+ | `~/Desktop/Valor/calendar_config.json` | Calendar project-to-ID mapping |
+ 
+ Note: The DM whitelist is stored in the `dms.whitelist` array within `projects.json`, not as a separate file.
+diff --git a/docs/features/google-calendar-integration.md b/docs/features/google-calendar-integration.md
+index dbc629c64..ff8052233 100644
+--- a/docs/features/google-calendar-integration.md
++++ b/docs/features/google-calendar-integration.md
+@@ -83,10 +83,12 @@ Slugs not in the config fall back to the `default` entry (or `primary` if no def
+ ### OAuth Credentials
+ 
+ - Credentials: `~/Desktop/Valor/google_credentials.json` (from Google Cloud Console)
+-- Token: `~/Desktop/Valor/google_token.json` (auto-generated on first run)
++- Token: `~/Desktop/Valor/google_token.<machine-name>.json` (per-machine, auto-generated on first run)
+ - Scopes: `https://www.googleapis.com/auth/calendar`
+ 
++See `docs/features/google-workspace-auth.md` for error handling, `verify_token()`, and `--reauth`/`--check` CLI flags.
++
+ ## Setup & Validation
+ 
+-- `/setup` command (Step 3) walks through OAuth consent and calendar config creation
+-- `/update` command (Step 7) validates OAuth connectivity, config file, and per-project calendar accessibility
++- `/setup` command (Step 4) walks through OAuth consent using `valor-calendar --reauth` and validates with `valor-calendar --check`
++- `/update` command validates OAuth connectivity, config file, and per-project calendar accessibility
+diff --git a/docs/features/google-workspace-auth.md b/docs/features/google-workspace-auth.md
+new file mode 100644
+index 000000000..fb88fa30e
+--- /dev/null
++++ b/docs/features/google-workspace-auth.md
+@@ -0,0 +1,108 @@
++# Google Workspace Auth
++
++Error-resilient OAuth authentication for Google Workspace APIs with proactive token health checks and user-facing recovery commands.
++
++## Overview
++
++The auth module (`tools/google_workspace/auth.py`) manages OAuth2 credentials for Google APIs. Tokens are stored per-machine in `~/Desktop/Valor/` to avoid iCloud sync race conditions. This feature adds structured error handling, a `verify_token()` health check, and CLI flags for token management.
++
++## Components
++
++### GoogleAuthError
++
++Custom exception that wraps raw Google auth exceptions with recovery instructions. The `__str__()` method includes the recovery command so that callers using `f"...{e}"` patterns surface actionable instructions automatically.
++
++```python
++from tools.google_workspace.auth import GoogleAuthError
++
++try:
++    creds = get_credentials()
++except GoogleAuthError as e:
++    # str(e) includes "Recovery: valor-calendar --reauth"
++    print(f"Auth failed: {e}")
++```
++
++### verify_token()
++
++Proactive token health check that validates token state without making API calls. Returns a structured dict:
++
++```python
++from tools.google_workspace.auth import verify_token
++
++result = verify_token()
++# {
++#     "valid": True/False,
++#     "status": "valid" | "missing" | "invalid" | "expired" | "scope_mismatch" | "scopes_unknown",
++#     "scopes": ["https://..."] | None,
++#     "expired": True/False,
++#     "has_refresh_token": True/False,
++# }
++```
++
++**Status values:**
++- `valid` -- Token is usable (may be expired but has refresh token)
++- `missing` -- No token file found
++- `invalid` -- Token file exists but is corrupted or not valid JSON
++- `expired` -- Token expired with no refresh token available
++- `scope_mismatch` -- Token scopes do not include required Calendar scope
++- `scopes_unknown` -- Token file does not contain scope information (common with older tokens)
++
++### Error handling in get_credentials()
++
++`get_credentials()` catches specific Google auth exceptions instead of letting raw tracebacks propagate:
++
++- **`RefreshError`** -- Token revoked or expired beyond refresh. Raises `GoogleAuthError` with recovery command pointing to `valor-calendar --reauth`.
++- **`TransportError`** -- Network error during token refresh. Raises `GoogleAuthError` with connectivity guidance.
++- **`FileNotFoundError`** -- No OAuth client credentials file. Preserved from original behavior.
++
++After a successful token refresh, the service cache (`_service_cache`) is cleared to prevent stale cached API clients from using old credentials.
++
++### Headless environment support
++
++When `flow.run_local_server()` fails (e.g., in a headless SSH session or launchd service), the auth flow raises a `GoogleAuthError` with instructions to run `valor-calendar --reauth` on a machine with a browser and then copy the token file to the headless machine.
++
++## CLI Flags
++
++### valor-calendar --check
++
++Validates token health and prints a human-readable status. Exits with code 0 if the token is valid, 1 if not.
++
++```bash
++$ valor-calendar --check
++Token status: valid
++Scopes: https://www.googleapis.com/auth/calendar
++```
++
++### valor-calendar --reauth
++
++Clears all stored tokens (per-machine and shared legacy) and re-runs the OAuth consent flow. Opens the browser for Google OAuth consent.
++
++```bash
++$ valor-calendar --reauth
++Clearing stored tokens...
++Starting OAuth consent flow (browser will open)...
++Re-authentication successful. Token saved.
++```
++
++## Token storage
++
++- **Per-machine token:** `~/Desktop/Valor/google_token.<machine-name>.json`
++- **Legacy shared token:** `~/Desktop/Valor/google_token.json` (deleted by `clear_tokens()`)
++- **OAuth client credentials:** `~/Desktop/Valor/google_credentials.json`
++
++`clear_tokens()` removes both the per-machine token and the shared legacy token to prevent stale token re-migration when the module is re-imported.
++
++## Related files
++
++| File | Purpose |
++|------|---------|
++| `tools/google_workspace/auth.py` | Core auth module with error handling |
++| `tools/valor_calendar.py` | CLI entry point with --check and --reauth flags |
++| `.claude/skills/setup/SKILL.md` | Setup skill referencing --check and --reauth |
++| `tests/unit/test_google_auth.py` | 29 unit tests covering all error paths |
++| `config/settings.py` | GoogleAuthSettings with credentials_dir |
++
++## Tracking
++
++- Issue: #851
++- Plan: `docs/plans/gws_oauth_flow.md`
+diff --git a/docs/plans/gws_oauth_flow.md b/docs/plans/gws_oauth_flow.md
+index c1976f057..1548e3554 100644
+--- a/docs/plans/gws_oauth_flow.md
++++ b/docs/plans/gws_oauth_flow.md
+@@ -1,5 +1,5 @@
+ ---
+-status: Planning
++status: docs_complete
+ type: bug
+ appetite: Small
+ owner: Valor
+@@ -100,21 +100,21 @@ No prerequisites -- this work has no external dependencies beyond what's already
+ ## Failure Path Test Strategy
+ 
+ ### Exception Handling Coverage
+-- [ ] The bare `creds.refresh(Request())` in `get_credentials()` (line 89) currently has no exception handler -- add try/except for `RefreshError` and `TransportError` with tests asserting the custom `GoogleAuthError` is raised with recovery instructions
+-- [ ] The `except Exception` in `valor_calendar.py:main()` (line 285) already queues locally on failure -- verify it logs the actionable message from the new error type
++- [x] The bare `creds.refresh(Request())` in `get_credentials()` (line 89) currently has no exception handler -- add try/except for `RefreshError` and `TransportError` with tests asserting the custom `GoogleAuthError` is raised with recovery instructions
++- [x] The `except Exception` in `valor_calendar.py:main()` (line 285) already queues locally on failure -- verify it logs the actionable message from the new error type
+ 
+ ### Empty/Invalid Input Handling
+-- [ ] Test `get_credentials()` when token file exists but contains invalid JSON
+-- [ ] Test `get_credentials()` when token file exists but is empty
+-- [ ] Test `verify_token()` when credentials dir does not exist
++- [x] Test `get_credentials()` when token file exists but contains invalid JSON
++- [x] Test `get_credentials()` when token file exists but is empty
++- [x] Test `verify_token()` when credentials dir does not exist
+ 
+ ### Error State Rendering
+-- [ ] Verify `--check` prints clear status for each failure mode (no token, expired, revoked, wrong scopes)
+-- [ ] Verify `--reauth` prints success/failure message after completing the flow
++- [x] Verify `--check` prints clear status for each failure mode (no token, expired, revoked, wrong scopes)
++- [x] Verify `--reauth` prints success/failure message after completing the flow
+ 
+ ## Test Impact
+ 
+-- [ ] `tests/unit/test_config_consolidation.py::TestGoogleAuthNoFallback` -- no change needed, these test path hygiene not auth behavior
++- [x] `tests/unit/test_config_consolidation.py::TestGoogleAuthNoFallback` -- no change needed, these test path hygiene not auth behavior
+ - No other existing tests touch the auth module directly. All new tests are additive.
+ 
+ No existing tests affected -- the auth module had no behavioral tests; only path/config tests exist in `test_config_consolidation.py` which remain valid.
+@@ -159,20 +159,20 @@ No agent integration required -- the auth module is called internally by `valor_
+ 
+ ## Documentation
+ 
+-- [ ] Create `docs/features/google-workspace-auth.md` describing the auth module, error handling, and recovery commands
+-- [ ] Update `/setup` skill Step 4 to reference `valor-calendar --check` and `valor-calendar --reauth` instead of nonexistent `valor-calendar test`
+-- [ ] Add inline docstrings to new `verify_token()`, `GoogleAuthError`, and CLI flag handling
++- [x] Create `docs/features/google-workspace-auth.md` describing the auth module, error handling, and recovery commands
++- [x] Update `/setup` skill Step 4 to reference `valor-calendar --check` and `valor-calendar --reauth` instead of nonexistent `valor-calendar test`
++- [x] Add inline docstrings to new `verify_token()`, `GoogleAuthError`, and CLI flag handling
+ 
+ ## Success Criteria
+ 
+-- [ ] `get_credentials()` catches `RefreshError` and `TransportError` with specific error messages including recovery commands
+-- [ ] `valor-calendar --reauth` clears token and re-runs OAuth consent flow end-to-end
+-- [ ] `valor-calendar --check` prints token health status (valid/expired/revoked/missing)
+-- [ ] `verify_token()` returns structured result usable by `/setup` and `/update`
+-- [ ] `/setup` skill Step 4 references commands that actually exist
+-- [ ] Unit tests cover: successful refresh, revoked token error, missing credentials file, invalid token file, scope mismatch, `--check` output, `--reauth` flow
+-- [ ] Tests pass (`/do-test`)
+-- [ ] Documentation updated (`/do-docs`)
++- [x] `get_credentials()` catches `RefreshError` and `TransportError` with specific error messages including recovery commands
++- [x] `valor-calendar --reauth` clears token and re-runs OAuth consent flow end-to-end
++- [x] `valor-calendar --check` prints token health status (valid/expired/revoked/missing)
++- [x] `verify_token()` returns structured result usable by `/setup` and `/update`
++- [x] `/setup` skill Step 4 references commands that actually exist
++- [x] Unit tests cover: successful refresh, revoked token error, missing credentials file, invalid token file, scope mismatch, `--check` output, `--reauth` flow
++- [x] Tests pass (`/do-test`)
++- [x] Documentation updated (`/do-docs`)
+ 
+ ## Team Orchestration
+ 
+diff --git a/docs/tools-reference.md b/docs/tools-reference.md
+index 2b8959ead..4527eeb45 100644
+--- a/docs/tools-reference.md
++++ b/docs/tools-reference.md
+@@ -404,11 +404,14 @@ Located in `tools/google_workspace/`.
+ Google Calendar integration for work time tracking.
+ 
+ ```bash
+-valor-calendar test                    # Test OAuth connection
+-valor-calendar list                    # List upcoming events
+-valor-calendar create "Meeting" start end  # Create event
++valor-calendar <session-slug>          # Log time for a work session
++valor-calendar --check                 # Validate token health (exit 0=valid, 1=invalid)
++valor-calendar --reauth                # Clear tokens and re-run OAuth consent flow
++valor-calendar --version               # Print version
+ ```
+ 
++See `docs/features/google-workspace-auth.md` for error handling and token management details.
++
+ ## Tool Development
+ 
+ See `/add-feature` skill for how to create new tools.
+diff --git a/tests/unit/test_google_auth.py b/tests/unit/test_google_auth.py
+new file mode 100644
+index 000000000..c1d64429a
+--- /dev/null
++++ b/tests/unit/test_google_auth.py
+@@ -0,0 +1,461 @@
++"""Tests for Google Workspace OAuth authentication module.
++
++Tests cover error handling, verify_token(), CLI flags, and edge cases
++for the auth module at tools/google_workspace/auth.py.
++"""
++
++from __future__ import annotations
++
++import json
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from tools.google_workspace.auth import (
++    GoogleAuthError,
++    _service_cache,
++    clear_tokens,
++    get_credentials,
++    verify_token,
++)
++
++
++@pytest.fixture(autouse=True)
++def _clean_service_cache():
++    """Ensure service cache is clean before and after each test."""
++    _service_cache.clear()
++    yield
++    _service_cache.clear()
++
++
++class TestGoogleAuthError:
++    """Tests for the GoogleAuthError exception class."""
++
++    def test_str_includes_recovery_command(self):
++        err = GoogleAuthError("Token revoked.", recovery_command="valor-calendar --reauth")
++        assert "valor-calendar --reauth" in str(err)
++        assert "Token revoked." in str(err)
++
++    def test_str_without_recovery_command(self):
++        err = GoogleAuthError("Network error.")
++        assert "Network error." in str(err)
++
++    def test_recovery_command_attribute(self):
++        err = GoogleAuthError("msg", recovery_command="valor-calendar --reauth")
++        assert err.recovery_command == "valor-calendar --reauth"
++
++    def test_no_recovery_command_attribute(self):
++        err = GoogleAuthError("msg")
++        assert err.recovery_command is None
++
++    def test_str_in_fstring_surfaces_recovery(self):
++        """Verify f"...{e}" pattern surfaces the recovery command."""
++        err = GoogleAuthError("Token expired.", recovery_command="valor-calendar --reauth")
++        message = f"Auth failed: {err}"
++        assert "valor-calendar --reauth" in message
++
++
++class TestVerifyToken:
++    """Tests for verify_token() function."""
++
++    def test_missing_token_file(self, tmp_path):
++        with patch("tools.google_workspace.auth.TOKEN_PATH", tmp_path / "nonexistent.json"):
++            result = verify_token()
++        assert result["valid"] is False
++        assert result["status"] == "missing"
++
++    def test_invalid_json_token_file(self, tmp_path):
++        token_file = tmp_path / "token.json"
++        token_file.write_text("not valid json {{{")
++        with patch("tools.google_workspace.auth.TOKEN_PATH", token_file):
++            result = verify_token()
++        assert result["valid"] is False
++        assert result["status"] == "invalid"
++
++    def test_empty_token_file(self, tmp_path):
++        token_file = tmp_path / "token.json"
++        token_file.write_text("")
++        with patch("tools.google_workspace.auth.TOKEN_PATH", token_file):
++            result = verify_token()
++        assert result["valid"] is False
++        assert result["status"] == "invalid"
++
++    def test_non_dict_json_token_file(self, tmp_path):
++        token_file = tmp_path / "token.json"
++        token_file.write_text('"just a string"')
++        with patch("tools.google_workspace.auth.TOKEN_PATH", token_file):
++            result = verify_token()
++        assert result["valid"] is False
++        assert result["status"] == "invalid"
++
++    def test_valid_token_with_scopes(self, tmp_path):
++        token_file = tmp_path / "token.json"
++        token_data = {
++            "token": "access_token_value",
++            "refresh_token": "refresh_token_value",
++            "client_id": "client_id",
++            "client_secret": "client_secret",
++        }
++        token_file.write_text(json.dumps(token_data))
++
++        mock_creds = MagicMock()
++        mock_creds.scopes = {"https://www.googleapis.com/auth/calendar"}
++        mock_creds.expired = False
++        mock_creds.valid = True
++        mock_creds.refresh_token = "refresh_token_value"
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++        ):
++            result = verify_token()
++        assert result["valid"] is True
++        assert result["status"] == "valid"
++        assert "https://www.googleapis.com/auth/calendar" in result["scopes"]
++
++    def test_scope_mismatch(self, tmp_path):
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.scopes = {"https://www.googleapis.com/auth/drive"}
++        mock_creds.expired = False
++        mock_creds.valid = True
++        mock_creds.refresh_token = "r"
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++        ):
++            result = verify_token()
++        assert result["valid"] is False
++        assert result["status"] == "scope_mismatch"
++
++    def test_scopes_none_treated_as_unknown(self, tmp_path):
++        """When creds.scopes is None, should not be treated as mismatch."""
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.scopes = None
++        mock_creds.expired = False
++        mock_creds.valid = True
++        mock_creds.refresh_token = "r"
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++        ):
++            result = verify_token()
++        # Should be valid (not scope_mismatch) since scopes are unknown
++        assert result["valid"] is True
++        assert result["scopes"] is None
++
++    def test_expired_without_refresh_token(self, tmp_path):
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.scopes = None
++        mock_creds.expired = True
++        mock_creds.valid = False
++        mock_creds.refresh_token = None
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++        ):
++            result = verify_token()
++        assert result["valid"] is False
++        assert result["status"] == "expired"
++
++    def test_expired_with_refresh_token(self, tmp_path):
++        """Expired token with refresh token is still considered valid (auto-refreshable)."""
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.scopes = None
++        mock_creds.expired = True
++        mock_creds.valid = False
++        mock_creds.refresh_token = "refresh_token"
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++        ):
++            result = verify_token()
++        assert result["valid"] is True
++        assert result["status"] == "valid"
++        assert result["has_refresh_token"] is True
++
++    def test_credentials_dir_missing(self, tmp_path):
++        """verify_token should handle nonexistent parent directory gracefully."""
++        nonexistent = tmp_path / "does_not_exist" / "token.json"
++        with patch("tools.google_workspace.auth.TOKEN_PATH", nonexistent):
++            result = verify_token()
++        assert result["valid"] is False
++        assert result["status"] == "missing"
++
++
++class TestGetCredentials:
++    """Tests for get_credentials() error handling."""
++
++    def test_refresh_error_raises_google_auth_error(self, tmp_path):
++        from google.auth.exceptions import RefreshError
++
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.expired = True
++        mock_creds.refresh_token = "refresh"
++        mock_creds.valid = False
++        mock_creds.refresh.side_effect = RefreshError("Token has been revoked")
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++            pytest.raises(GoogleAuthError, match="valor-calendar --reauth"),
++        ):
++            get_credentials()
++
++    def test_transport_error_raises_google_auth_error(self, tmp_path):
++        from google.auth.exceptions import TransportError
++
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.expired = True
++        mock_creds.refresh_token = "refresh"
++        mock_creds.valid = False
++        mock_creds.refresh.side_effect = TransportError("Connection refused")
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++            pytest.raises(GoogleAuthError, match="Network error"),
++        ):
++            get_credentials()
++
++    def test_missing_credentials_file_raises_file_not_found(self, tmp_path):
++        token_file = tmp_path / "nonexistent_token.json"
++        creds_file = tmp_path / "nonexistent_creds.json"
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch("tools.google_workspace.auth.CREDENTIALS_PATH", creds_file),
++            pytest.raises(FileNotFoundError, match="Google credentials not found"),
++        ):
++            get_credentials()
++
++    def test_service_cache_cleared_after_refresh(self, tmp_path):
++        """Verify _service_cache is cleared after successful token refresh."""
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.expired = True
++        mock_creds.refresh_token = "refresh"
++        mock_creds.valid = False
++        mock_creds.refresh.return_value = None  # success
++        mock_creds.to_json.return_value = '{"token": "new"}'
++
++        # Pre-populate the service cache
++        _service_cache[("calendar", "v3")] = MagicMock()
++        assert len(_service_cache) == 1
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++        ):
++            get_credentials()
++
++        assert len(_service_cache) == 0
++
++    def test_successful_refresh_saves_token(self, tmp_path):
++        token_file = tmp_path / "token.json"
++        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
++
++        mock_creds = MagicMock()
++        mock_creds.expired = True
++        mock_creds.refresh_token = "refresh"
++        mock_creds.valid = False
++        mock_creds.refresh.return_value = None
++        mock_creds.to_json.return_value = '{"token": "new_access_token"}'
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch(
++                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
++                return_value=mock_creds,
++            ),
++        ):
++            result = get_credentials()
++
++        assert result is mock_creds
++        saved = json.loads(token_file.read_text())
++        assert saved["token"] == "new_access_token"
++
++    def test_headless_oserror_raises_google_auth_error(self, tmp_path):
++        """OSError from run_local_server raises GoogleAuthError with guidance."""
++        token_file = tmp_path / "nonexistent_token.json"
++        creds_file = tmp_path / "creds.json"
++        creds_file.write_text('{"installed": {"client_id": "c", "client_secret": "s"}}')
++
++        mock_flow = MagicMock()
++        mock_flow.run_local_server.side_effect = OSError("No display")
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch("tools.google_workspace.auth.CREDENTIALS_PATH", creds_file),
++            patch(
++                "tools.google_workspace.auth.InstalledAppFlow.from_client_secrets_file",
++                return_value=mock_flow,
++            ),
++            pytest.raises(GoogleAuthError, match="headless environment"),
++        ):
++            get_credentials()
++
++
++class TestClearTokens:
++    """Tests for clear_tokens() function."""
++
++    def test_removes_per_machine_token(self, tmp_path):
++        token_file = tmp_path / "token.machine.json"
++        token_file.write_text('{"token": "t"}')
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
++            patch("tools.google_workspace.auth._SHARED_TOKEN_PATH", tmp_path / "shared.json"),
++        ):
++            clear_tokens()
++
++        assert not token_file.exists()
++
++    def test_removes_shared_legacy_token(self, tmp_path):
++        shared_file = tmp_path / "google_token.json"
++        shared_file.write_text('{"token": "shared"}')
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", tmp_path / "per_machine.json"),
++            patch("tools.google_workspace.auth._SHARED_TOKEN_PATH", shared_file),
++        ):
++            clear_tokens()
++
++        assert not shared_file.exists()
++
++    def test_clears_service_cache(self, tmp_path):
++        _service_cache[("calendar", "v3")] = MagicMock()
++
++        with (
++            patch("tools.google_workspace.auth.TOKEN_PATH", tmp_path / "nonexistent.json"),
++            patch("tools.google_workspace.auth._SHARED_TOKEN_PATH", tmp_path / "shared.json"),
++        ):
++            clear_tokens()
++
++        assert len(_service_cache) == 0
++
++
++class TestCLIFlags:
++    """Tests for --check and --reauth CLI flag handlers."""
++
++    def test_check_flag_valid_exits_0(self, tmp_path):
++        valid_result = {
++            "valid": True,
++            "status": "valid",
++            "scopes": ["https://www.googleapis.com/auth/calendar"],
++            "expired": False,
++            "has_refresh_token": True,
++        }
++        with patch("tools.google_workspace.auth.verify_token", return_value=valid_result):
++            from tools.valor_calendar import _handle_check
++
++            with pytest.raises(SystemExit) as exc_info:
++                _handle_check()
++            assert exc_info.value.code == 0
++
++    def test_check_flag_invalid_exits_1(self, tmp_path):
++        invalid_result = {
++            "valid": False,
++            "status": "missing",
++            "scopes": None,
++            "expired": False,
++            "has_refresh_token": False,
++        }
++        with patch("tools.google_workspace.auth.verify_token", return_value=invalid_result):
++            from tools.valor_calendar import _handle_check
++
++            with pytest.raises(SystemExit) as exc_info:
++                _handle_check()
++            assert exc_info.value.code == 1
++
++    def test_reauth_calls_clear_and_get(self):
++        mock_clear = MagicMock()
++        mock_get = MagicMock()
++
++        with (
++            patch("tools.google_workspace.auth.clear_tokens", mock_clear),
++            patch("tools.google_workspace.auth.get_credentials", mock_get),
++        ):
++            from tools.valor_calendar import _handle_reauth
++
++            _handle_reauth()
++
++        mock_clear.assert_called_once()
++        mock_get.assert_called_once()
++
++    def test_check_scope_mismatch_exits_1(self):
++        mismatch_result = {
++            "valid": False,
++            "status": "scope_mismatch",
++            "scopes": ["https://www.googleapis.com/auth/drive"],
++            "expired": False,
++            "has_refresh_token": True,
++        }
++        with patch("tools.google_workspace.auth.verify_token", return_value=mismatch_result):
++            from tools.valor_calendar import _handle_check
++
++            with pytest.raises(SystemExit) as exc_info:
++                _handle_check()
++            assert exc_info.value.code == 1
++
++    def test_check_expired_no_refresh_exits_1(self):
++        expired_result = {
++            "valid": False,
++            "status": "expired",
++            "scopes": None,
++            "expired": True,
++            "has_refresh_token": False,
++        }
++        with patch("tools.google_workspace.auth.verify_token", return_value=expired_result):
++            from tools.valor_calendar import _handle_check
++
++            with pytest.raises(SystemExit) as exc_info:
++                _handle_check()
++            assert exc_info.value.code == 1
+diff --git a/tools/google_workspace/README.md b/tools/google_workspace/README.md
+index b08b6fb96..e5718eefa 100644
+--- a/tools/google_workspace/README.md
++++ b/tools/google_workspace/README.md
+@@ -9,10 +9,19 @@ Internal authentication utility for Google APIs. This is **not a standalone tool
+ ## Usage
+ 
+ ```python
+-from tools.google_workspace.auth import get_calendar_service
++from tools.google_workspace.auth import get_service, get_credentials, verify_token, GoogleAuthError
+ 
+-service = get_calendar_service()
++service = get_service("calendar", "v3")
+ events = service.events().list(calendarId="primary").execute()
++
++# Proactive token health check (no API calls)
++result = verify_token()  # {"valid": bool, "status": str, ...}
++
++# Error handling with recovery instructions
++try:
++    creds = get_credentials()
++except GoogleAuthError as e:
++    print(f"Auth failed: {e}")  # Includes recovery command
+ ```
+ 
+ ## Configuration
+@@ -21,7 +30,7 @@ Credentials are stored in the directory specified by `GOOGLE_CREDENTIALS_DIR` en
+ 
+ Required files:
+ - `google_credentials.json` -- OAuth client configuration
+-- `google_token.json` -- Cached OAuth token (auto-generated on first auth)
++- `google_token.<machine-name>.json` -- Per-machine OAuth token (auto-generated on first auth)
+ 
+ ## Consumers
+ 
+diff --git a/tools/google_workspace/auth.py b/tools/google_workspace/auth.py
+index 41750858f..07f1ad8ed 100644
+--- a/tools/google_workspace/auth.py
++++ b/tools/google_workspace/auth.py
+@@ -3,16 +3,22 @@
+ Handles OAuth2 credential management for Google APIs.
+ Credentials and tokens stored in ~/Desktop/Valor/ (env: GOOGLE_CREDENTIALS_DIR).
+ Tokens are per-machine to avoid iCloud sync race conditions on refresh.
++
++TOKEN_PATH is computed once at import time via _get_token_path() and remains
++stable for the lifetime of the process. This is intentional -- per-machine
++token paths do not change within a single process.
+ """
+ 
+ from __future__ import annotations
+ 
++import json
+ import logging
+ import os
+ import platform
+ import subprocess
+ from pathlib import Path
+ 
++from google.auth.exceptions import RefreshError, TransportError
+ from google.auth.transport.requests import Request
+ from google.oauth2.credentials import Credentials
+ from google_auth_oauthlib.flow import InstalledAppFlow
+@@ -32,6 +38,23 @@
+ _SHARED_TOKEN_PATH = CONFIG_DIR / "google_token.json"
+ 
+ 
++class GoogleAuthError(Exception):
++    """Raised when Google OAuth operations fail with actionable recovery instructions.
++
++    The string representation includes the recovery command so that callers
++    using f"...{e}" patterns surface it correctly without needing to access
++    the recovery_command attribute directly.
++    """
++
++    def __init__(self, message: str, recovery_command: str | None = None):
++        self.recovery_command = recovery_command
++        if recovery_command:
++            full_message = f"{message}\nRecovery: {recovery_command}"
++        else:
++            full_message = message
++        super().__init__(full_message)
++
++
+ def _get_machine_name() -> str:
+     """Get a filesystem-safe machine name for per-machine token files."""
+     try:
+@@ -78,16 +101,110 @@ def _get_token_path() -> Path:
+ ]
+ 
+ 
++def verify_token() -> dict:
++    """Check token health without making API calls.
++
++    Returns a structured dict with:
++        valid (bool): Whether the token is usable
++        status (str): One of "valid", "missing", "invalid",
++            "expired", "scope_mismatch", "scopes_unknown"
++        scopes (list | None): Scopes from the token, or None if unavailable
++        expired (bool): Whether the token is expired
++        has_refresh_token (bool): Whether a refresh token is present
++    """
++    result = {
++        "valid": False,
++        "status": "missing",
++        "scopes": None,
++        "expired": False,
++        "has_refresh_token": False,
++    }
++
++    if not TOKEN_PATH.exists():
++        return result
++
++    # Check if token file is valid JSON
++    try:
++        token_data = json.loads(TOKEN_PATH.read_text())
++        if not isinstance(token_data, dict):
++            result["status"] = "invalid"
++            return result
++    except (json.JSONDecodeError, OSError):
++        result["status"] = "invalid"
++        return result
++
++    # Load credentials from token file
++    try:
++        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
++    except Exception:
++        result["status"] = "invalid"
++        return result
++
++    result["has_refresh_token"] = bool(creds.refresh_token)
++    result["expired"] = bool(creds.expired)
++
++    # Check scopes -- token files don't always contain granted scopes
++    if creds.scopes is not None:
++        result["scopes"] = list(creds.scopes)
++        # Check if required scopes are present
++        required = set(SCOPES)
++        granted = set(creds.scopes)
++        if not required.issubset(granted):
++            result["status"] = "scope_mismatch"
++            return result
++    else:
++        # Scopes unknown -- can't verify, but not necessarily a mismatch
++        result["scopes"] = None
++
++    # Check validity
++    if creds.expired:
++        if creds.refresh_token:
++            # Expired but has refresh token -- can be refreshed
++            result["status"] = "valid"
++            result["valid"] = True
++        else:
++            result["status"] = "expired"
++    elif creds.valid:
++        result["status"] = "valid"
++        result["valid"] = True
++    else:
++        # Not expired but not valid -- scopes unknown, recommend reauth
++        if creds.scopes is None:
++            result["status"] = "scopes_unknown"
++        else:
++            result["status"] = "expired"
++
++    return result
++
++
+ def get_credentials() -> Credentials:
+-    """Load or refresh OAuth credentials. Opens browser consent on first run."""
++    """Load or refresh OAuth credentials. Opens browser consent on first run.
++
++    Raises:
++        GoogleAuthError: On token refresh failure (revoked, network error) with
++            recovery instructions pointing to `valor-calendar --reauth`.
++        FileNotFoundError: When no OAuth client credentials file exists.
++    """
+     creds = None
+ 
+     if TOKEN_PATH.exists():
+         creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+ 
+     if creds and creds.expired and creds.refresh_token:
+-        creds.refresh(Request())
++        try:
++            creds.refresh(Request())
++        except RefreshError as e:
++            raise GoogleAuthError(
++                "Token revoked or expired. Re-authentication required.",
++                recovery_command="valor-calendar --reauth",
++            ) from e
++        except TransportError as e:
++            raise GoogleAuthError(
++                "Network error during token refresh. Check connectivity and retry.",
++            ) from e
+         TOKEN_PATH.write_text(creds.to_json())
++        # Invalidate cached services -- they hold stale credentials after refresh
++        _service_cache.clear()
+     elif not creds or not creds.valid:
+         if not CREDENTIALS_PATH.exists():
+             raise FileNotFoundError(
+@@ -95,7 +212,15 @@ def get_credentials() -> Credentials:
+                 "Download OAuth client credentials from Google Cloud Console."
+             )
+         flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
+-        creds = flow.run_local_server(port=0)
++        # Try local server; headless environments must run OAuth on a machine with a browser
++        try:
++            creds = flow.run_local_server(port=0)
++        except OSError as e:
++            raise GoogleAuthError(
++                "Cannot open browser for OAuth consent (headless environment). "
++                "Run `valor-calendar --reauth` on a machine with a browser, "
++                "then copy the token file to this machine.",
++            ) from e
+         TOKEN_PATH.write_text(creds.to_json())
+ 
+     return creds
+@@ -114,7 +239,14 @@ def get_service(api: str, version: str) -> Resource:
+ 
+ 
+ def clear_tokens() -> None:
+-    """Delete stored OAuth token."""
++    """Delete stored OAuth tokens (per-machine and shared legacy).
++
++    Also clears the service cache to prevent stale credentials from persisting.
++    Deletes _SHARED_TOKEN_PATH to prevent stale token re-migration on restart.
++    """
+     if TOKEN_PATH.exists():
+         TOKEN_PATH.unlink()
++    if _SHARED_TOKEN_PATH.exists():
++        _SHARED_TOKEN_PATH.unlink()
++        logger.info("Removed shared legacy token to prevent re-migration")
+     _service_cache.clear()
+diff --git a/tools/valor_calendar.py b/tools/valor_calendar.py
+index 412859456..06a42c572 100644
+--- a/tools/valor_calendar.py
++++ b/tools/valor_calendar.py
+@@ -1,12 +1,17 @@
+ """valor-calendar: Log work sessions as Google Calendar events.
+ 
+-Usage: valor-calendar [--project PROJECT] <session-slug>
++Usage: valor-calendar [--project PROJECT] [--reauth] [--check] <session-slug>
+ 
+ Routes to the correct Google Calendar by project name using
+ config/calendar_config.json. Falls back to "default" calendar
+ when no project is specified or no mapping exists.
+ Creates or extends events using 30-minute segment rounding.
+ Falls back to offline queue on auth failure.
++
++Flags:
++    --reauth    Clear stored tokens and re-run OAuth consent flow
++    --check     Validate token health and print status (exit 0=valid, 1=invalid)
++    --version   Print version and exit
+ """
+ 
+ from __future__ import annotations
+@@ -241,12 +246,71 @@ def process_calendar_event(service, calendar_id: str, slug: str, now: datetime)
+     return f"Extended event '{slug}' to {event_start.strftime('%H:%M')}-{seg_end.strftime('%H:%M')}"
+ 
+ 
++def _handle_check() -> None:
++    """Handle --check flag: validate token health and print status."""
++    from tools.google_workspace.auth import verify_token
++
++    result = verify_token()
++    status = result["status"]
++
++    if result["valid"]:
++        print(f"Token status: {status}")
++        if result["scopes"]:
++            print(f"Scopes: {', '.join(result['scopes'])}")
++        elif result["scopes"] is None:
++            print("Scopes: unknown (reauth recommended if scope expansion needed)")
++        if result["expired"] and result["has_refresh_token"]:
++            print("Note: Token expired but has refresh token (will auto-refresh)")
++        sys.exit(0)
++    else:
++        print(f"Token status: {status}")
++        if status == "missing":
++            print("No token file found. Run: valor-calendar --reauth")
++        elif status == "invalid":
++            print("Token file is corrupted or unreadable. Run: valor-calendar --reauth")
++        elif status == "expired":
++            print("Token expired with no refresh token. Run: valor-calendar --reauth")
++        elif status == "scope_mismatch":
++            granted = result.get("scopes", [])
++            print(f"Granted scopes: {', '.join(granted) if granted else 'none'}")
++            print("Required scopes not granted. Run: valor-calendar --reauth")
++        elif status == "scopes_unknown":
++            print("Cannot verify scopes. Run: valor-calendar --reauth")
++        sys.exit(1)
++
++
++def _handle_reauth() -> None:
++    """Handle --reauth flag: clear tokens and re-run OAuth consent."""
++    from tools.google_workspace.auth import clear_tokens, get_credentials
++
++    print("Clearing stored tokens...")
++    clear_tokens()
++
++    print("Starting OAuth consent flow (browser will open)...")
++    try:
++        get_credentials()
++        print("Re-authentication successful. Token saved.")
++    except Exception as e:
++        print(f"Re-authentication failed: {e}", file=sys.stderr)
++        sys.exit(1)
++
++
+ def main() -> None:
+     if len(sys.argv) > 1 and sys.argv[1] == "--version":
+-        print("valor-calendar 0.1.0")
++        print("valor-calendar 0.2.0")
+         return
+ 
+     args = sys.argv[1:]
++
++    # Handle --check and --reauth before other argument parsing
++    if "--check" in args:
++        _handle_check()
++        return
++
++    if "--reauth" in args:
++        _handle_reauth()
++        return
++
+     project = None
+ 
+     # Parse --project flag
+@@ -257,7 +321,7 @@ def main() -> None:
+             args = args[:idx] + args[idx + 2 :]
+ 
+     if not args:
+-        print("Usage: valor-calendar [--project PROJECT] <session-slug>")
++        print("Usage: valor-calendar [--project PROJECT] [--reauth] [--check] <session-slug>")
+         sys.exit(1)
+ 
+     slug = args[0]
+@@ -269,7 +333,7 @@ def main() -> None:
+         sys.exit(0)
+ 
+     try:
+-        from tools.google_workspace.auth import get_service
++        from tools.google_workspace.auth import GoogleAuthError, get_service
+ 
+         service = get_service("calendar", "v3")
+ 
+@@ -282,6 +346,10 @@ def main() -> None:
+         result = process_calendar_event(service, calendar_id, slug, now)
+         print(result)
+ 
++    except GoogleAuthError as e:
++        queue_entry(slug, now, project)
++        print(f"Auth error: {e}", file=sys.stderr)
++        sys.exit(1)
+     except Exception as e:
+         queue_entry(slug, now, project)
+         print(f"Queued locally (auth/network issue): {e}", file=sys.stderr)

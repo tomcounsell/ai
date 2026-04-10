@@ -1,0 +1,214 @@
+diff --git a/bridge/response.py b/bridge/response.py
+index bf51162c1..3b6acb6ff 100644
+--- a/bridge/response.py
++++ b/bridge/response.py
+@@ -431,17 +431,30 @@ async def send_response_with_files(
+             pass  # Fall back to existing session object
+ 
+     # PM self-messaging bypass: if the PM already sent messages via the
+-    # send_telegram tool during this session, skip the summarizer entirely.
+-    # The PM authored its own messages — the summarizer would be redundant.
+-    # Only set emoji reaction (handled by the caller). See issue #497.
++    # send_telegram tool during this session (or its parent ChatSession in
++    # SDLC flows), skip the summarizer entirely. The PM authored its own
++    # messages — the summarizer would be redundant.
++    # Only set emoji reaction (handled by the caller). See issue #497, #571.
+     # NOTE: We still send any extracted files (<<FILE:>> markers) before
+     # returning, so file attachments are not lost on PM self-message sessions.
+     pm_bypass = session and hasattr(session, "has_pm_messages") and session.has_pm_messages()
++    pm_bypass_source = "session"
++    if not pm_bypass and session and hasattr(session, "get_parent_chat_session"):
++        parent = session.get_parent_chat_session()
++        if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
++            pm_bypass = True
++            pm_bypass_source = "parent"
+     if pm_bypass:
++        # Log pm_sent_message_ids from the source that triggered the bypass
++        if pm_bypass_source == "parent" and hasattr(session, "get_parent_chat_session"):
++            _parent = session.get_parent_chat_session()
++            _bypass_ids = getattr(_parent, "pm_sent_message_ids", []) if _parent else []
++        else:
++            _bypass_ids = getattr(session, "pm_sent_message_ids", [])
+         logger.info(
+-            f"Skipping summarizer: PM self-messaged during session "
++            f"Skipping summarizer: PM self-messaged during {pm_bypass_source} "
+             f"{getattr(session, 'session_id', 'unknown')} "
+-            f"(pm_sent_message_ids={getattr(session, 'pm_sent_message_ids', [])})"
++            f"(pm_sent_message_ids={_bypass_ids})"
+         )
+ 
+     is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
+diff --git a/bridge/summarizer.py b/bridge/summarizer.py
+index 801dee986..48b717cda 100644
+--- a/bridge/summarizer.py
++++ b/bridge/summarizer.py
+@@ -1086,10 +1086,20 @@ def _write_full_output_file(text: str) -> Path:
+ Never include full URLs in bullets — link rendering is handled separately by \
+ the _linkify_references post-processor.
+ 
+-DEVELOPER METRICS SUPPRESSION:
++DEVELOPER INTERNALS SUPPRESSION:
+ - Do not include line counts, file counts, addition/deletion counts, or exact test \
+ pass/fail numbers. Use outcome language instead: "shipped and tested", "all tests \
+-passing", "reviewed and approved". The PM cares about outcomes, not metrics."""
++passing", "reviewed and approved". The PM cares about outcomes, not metrics.
++- Never include root-cause explanations or describe HOW a fix works internally. \
++Do not mention internal method, function, or class names (e.g., _internal_method, \
++SomeModel, InternalClass). Do not reference deserialization/serialization logic, \
++architectural component names, or code line numbers.
++- Describe WHAT was fixed and the user-visible outcome, not the internal mechanism. \
++Good: "Fixed the data migration bug that caused fields to be empty on save." \
++Bad: "Root cause was lazy deserialization not populating the key tracking fields. \
++Fix: eagerly decode only certain field values during internal model creation."
++- If the original text contains internal code references, translate them into \
++stakeholder-friendly language describing the feature or behavior affected."""
+ 
+ # Blocker flag logic explained:
+ # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
+diff --git a/docs/features/pm-telegram-tool.md b/docs/features/pm-telegram-tool.md
+index 1eb78eac8..dff6da312 100644
+--- a/docs/features/pm-telegram-tool.md
++++ b/docs/features/pm-telegram-tool.md
+@@ -62,7 +62,8 @@ The summarizer is retained as a safety net. The decision tree in `bridge/respons
+ 
+ 1. Refresh the AgentSession from Redis to get the latest `pm_sent_message_ids`.
+ 2. If `session.has_pm_messages()` returns True: skip summarizer, return True. The PM already delivered its own messages.
+-3. If the PM did not self-message: fall through to the existing summarizer path. The response text is compressed and sent as before.
++3. **Parent session lookup** (issue #571): If the session itself has no PM messages but has a `parent_chat_session_id` (i.e., it is a DevSession in an SDLC flow), look up the parent ChatSession via `get_parent_chat_session()` and check `has_pm_messages()` on the parent. If the parent has PM messages, skip the summarizer. This prevents dual messages in SDLC flows where the PM (ChatSession) self-messages and the DevSession output would otherwise also be summarized and sent.
++4. If neither session nor parent has PM messages: fall through to the existing summarizer path. The response text is compressed and sent as before.
+ 
+ This means:
+ - If the PM persona crashes before calling the tool, the summarizer catches the output.
+diff --git a/tests/unit/test_summarizer.py b/tests/unit/test_summarizer.py
+index dfcc95913..2fc94c382 100644
+--- a/tests/unit/test_summarizer.py
++++ b/tests/unit/test_summarizer.py
+@@ -1914,6 +1914,8 @@ async def test_no_bypass_when_no_pm_messages(self):
+         mock_session.pm_sent_message_ids = []
+         mock_session.session_id = "test-session"
+         mock_session.is_sdlc = False
++        # Ensure parent lookup also returns no PM messages
++        mock_session.get_parent_chat_session.return_value = None
+ 
+         # Mock send_markdown to avoid Telethon calls
+         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
+@@ -1931,6 +1933,119 @@ async def test_no_bypass_when_no_pm_messages(self):
+         assert mock_send.called or result is True
+ 
+ 
++class TestSummarizerBypassParentSession:
++    """Tests for PM bypass guard with parent ChatSession lookup (issue #571).
++
++    In SDLC flows, the DevSession (child) is passed to send_response_with_files,
++    but PM messages are recorded on the parent ChatSession. The guard must check
++    the parent session when the child has no PM messages.
++    """
++
++    @pytest.mark.asyncio
++    async def test_bypass_when_parent_has_pm_messages(self):
++        """DevSession with parent ChatSession that has PM messages -> bypass fires."""
++        from bridge.response import send_response_with_files
++
++        mock_client = MagicMock()
++        mock_parent = MagicMock()
++        mock_parent.has_pm_messages.return_value = True
++        mock_parent.pm_sent_message_ids = [100, 101]
++
++        mock_session = MagicMock()
++        mock_session.has_pm_messages.return_value = False
++        mock_session.pm_sent_message_ids = []
++        mock_session.session_id = "dev-session-1"
++        mock_session.get_parent_chat_session.return_value = mock_parent
++
++        result = await send_response_with_files(
++            mock_client,
++            None,
++            "DevSession agent output",
++            chat_id=12345,
++            reply_to=67890,
++            session=mock_session,
++        )
++
++        assert result is True
++
++    @pytest.mark.asyncio
++    async def test_no_bypass_when_parent_is_dangling(self):
++        """DevSession with dangling parent_chat_session_id -> bypass does not fire."""
++        from bridge.response import send_response_with_files
++
++        mock_client = MagicMock()
++        mock_session = MagicMock()
++        mock_session.has_pm_messages.return_value = False
++        mock_session.pm_sent_message_ids = []
++        mock_session.session_id = "dev-session-2"
++        mock_session.get_parent_chat_session.return_value = None
++        mock_session.is_sdlc = False
++
++        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
++            mock_send.return_value = MagicMock()
++            result = await send_response_with_files(
++                mock_client,
++                None,
++                "Short",
++                chat_id=12345,
++                reply_to=67890,
++                session=mock_session,
++            )
++
++        assert mock_send.called or result is True
++
++    @pytest.mark.asyncio
++    async def test_no_bypass_when_no_parent(self):
++        """Session without parent_chat_session_id -> no parent lookup, no bypass."""
++        from bridge.response import send_response_with_files
++
++        mock_client = MagicMock()
++        mock_session = MagicMock()
++        mock_session.has_pm_messages.return_value = False
++        mock_session.pm_sent_message_ids = []
++        mock_session.session_id = "chat-session-1"
++        mock_session.is_sdlc = False
++        # Remove get_parent_chat_session to simulate a plain session
++        del mock_session.get_parent_chat_session
++
++        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
++            mock_send.return_value = MagicMock()
++            result = await send_response_with_files(
++                mock_client,
++                None,
++                "Short",
++                chat_id=12345,
++                reply_to=67890,
++                session=mock_session,
++            )
++
++        assert mock_send.called or result is True
++
++
++class TestSummarizerInternalsSuppressionPrompt:
++    """Tests that SUMMARIZER_SYSTEM_PROMPT bans implementation details (issue #571)."""
++
++    def test_prompt_contains_internals_suppression_section(self):
++        """The prompt should have DEVELOPER INTERNALS SUPPRESSION, not just metrics."""
++        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
++
++        assert "DEVELOPER INTERNALS SUPPRESSION" in SUMMARIZER_SYSTEM_PROMPT
++
++    def test_prompt_bans_root_cause_explanations(self):
++        """The prompt should explicitly prohibit root-cause explanations."""
++        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
++
++        assert "root-cause" in SUMMARIZER_SYSTEM_PROMPT.lower()
++
++    def test_prompt_bans_internal_method_names(self):
++        """The prompt should prohibit internal method/function/class names."""
++        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
++
++        assert "method" in SUMMARIZER_SYSTEM_PROMPT.lower()
++        assert "function" in SUMMARIZER_SYSTEM_PROMPT.lower()
++        assert "class name" in SUMMARIZER_SYSTEM_PROMPT.lower()
++
++
+ class TestNormalizeQuestionPrefix:
+     """Tests for _normalize_question_prefix."""
+ 

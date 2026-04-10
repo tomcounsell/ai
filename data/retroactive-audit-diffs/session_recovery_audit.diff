@@ -1,0 +1,818 @@
+diff --git a/.claude/hooks/user_prompt_submit.py b/.claude/hooks/user_prompt_submit.py
+index 5234ddbb..d95c684a 100644
+--- a/.claude/hooks/user_prompt_submit.py
++++ b/.claude/hooks/user_prompt_submit.py
+@@ -71,6 +71,7 @@ def main():
+                             agent_session,
+                             "running",
+                             reason="subsequent prompt reactivated local session",
++                            reject_from_terminal=False,
+                         )
+                         # If transition was idempotent (already running), field
+                         # changes above were not saved. Ensure they persist.
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index 3bc438f0..96dd5f9f 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -77,7 +77,7 @@ def determine_delivery_action(
+         "drop"          — drop output (completion already sent)
+         "deliver_already_completed" — deliver without nudge (session already done)
+     """
+-    if session_status == "completed":
++    if session_status in _TERMINAL_STATUSES:
+         return "deliver_already_completed"
+     if completion_sent:
+         return "drop"
+@@ -254,7 +254,10 @@ def _mark_superseded():
+             ]
+             for old in old_completed:
+                 transition_status(
+-                    old, "superseded", reason=f"superseded by new session for {session_id}"
++                    old,
++                    "superseded",
++                    reason=f"superseded by new session for {session_id}",
++                    reject_from_terminal=False,
+                 )
+                 logger.info(
+                     f"Marked old completed session {old.id} as superseded "
+@@ -1750,6 +1753,18 @@ async def _enqueue_nudge(
+         nudge_feedback: Nudge message sent to the agent.
+     """
+ 
++    # Terminal status guard: re-read session status from Redis and bail if terminal.
++    # This makes _enqueue_nudge() self-defending rather than relying on caller
++    # discipline (e.g., determine_delivery_action() upstream).
++    current_status = getattr(session, "status", None)
++    if current_status in _TERMINAL_STATUSES:
++        logger.warning(
++            f"[{session.project_key}] _enqueue_nudge() called for session "
++            f"{session.session_id} in terminal status {current_status!r} — "
++            f"returning early to prevent respawn"
++        )
++        return
++
+     logger.info(
+         f"[{session.project_key}] Nudge message "
+         f"({len(nudge_feedback)} chars): {nudge_feedback[:120]!r}"
+@@ -1775,6 +1790,16 @@ async def _enqueue_nudge(
+             f"— falling back to recreate from AgentSession metadata. "
+             f"Diagnostics: {_diag}"
+         )
++        # Fallback path terminal guard: this path bypasses transition_status()
++        # entirely (uses raw async_create), so it needs its own independent
++        # terminal status check. The session object we have is from when it was
++        # popped — re-check against the status we already read above.
++        if current_status in _TERMINAL_STATUSES:
++            logger.warning(
++                f"[{session.project_key}] Fallback recreate blocked: session "
++                f"{session.session_id} has terminal status {current_status!r}"
++            )
++            return
+         # Fallback: recreate session preserving ALL metadata from the
+         # underlying AgentSession that was loaded when the session was popped.
+         # This prevents loss of context_summary, expectations, issue_url,
+@@ -1805,6 +1830,17 @@ async def _enqueue_nudge(
+ 
+     session = sessions[0]
+ 
++    # Re-read guard: session status may have changed between the initial check
++    # and this point (e.g., another process finalized the session).
++    reread_status = getattr(session, "status", None)
++    if reread_status in _TERMINAL_STATUSES:
++        logger.warning(
++            f"[{session.project_key}] _enqueue_nudge() main path: session "
++            f"{session.session_id} is now in terminal status {reread_status!r} "
++            f"(changed since entry check) — returning early"
++        )
++        return
++
+     # Use lifecycle module for consistent transition logging.
+     from models.session_lifecycle import transition_status
+ 
+@@ -2441,6 +2477,31 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
+     except Exception as e:
+         logger.warning(f"[{project_key}] Redis revival check failed: {e}")
+ 
++    # Terminal-session filter: check if any terminal session exists for the same
++    # chat with a matching branch. If so, the work is done — skip revival for
++    # that branch to avoid respawning completed/failed work.
++    if branches:
++        try:
++            terminal_branches = set()
++            for t_status in _TERMINAL_STATUSES:
++                for t_session in AgentSession.query.filter(
++                    project_key=project_key, status=t_status
++                ):
++                    if str(t_session.chat_id) == chat_id_str:
++                        t_branch = _session_branch_name(t_session.session_id)
++                        terminal_branches.add(t_branch)
++            # Remove branches that have a terminal sibling
++            filtered = [b for b in branches if b not in terminal_branches]
++            if len(filtered) < len(branches):
++                removed = set(branches) - set(filtered)
++                logger.info(
++                    f"[{project_key}] Revival: filtered out {len(removed)} branch(es) "
++                    f"with terminal sessions: {removed}"
++                )
++            branches = filtered
++        except Exception as e:
++            logger.warning(f"[{project_key}] Terminal-session revival filter failed: {e}")
++
+     # Verify branches actually exist in git (they may have been cleaned up)
+     if branches:
+         existing = []
+diff --git a/docs/features/README.md b/docs/features/README.md
+index e5ab5bb3..bf176c0f 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -98,6 +98,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention | Shipped |
+ | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
+ | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
++| [Session Recovery Mechanisms](session-recovery-mechanisms.md) | Catalogue of all 7 recovery mechanisms with terminal status safety audit, guards, race condition analysis, and regression tests | Shipped |
+ | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
+ | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
+ | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
+diff --git a/docs/features/session-lifecycle.md b/docs/features/session-lifecycle.md
+index 5cf566a4..aaceb340 100644
+--- a/docs/features/session-lifecycle.md
++++ b/docs/features/session-lifecycle.md
+@@ -43,16 +43,21 @@ For terminal transitions. Executes all completion side effects in order:
+ 
+ **Skip flags**: The hooks subprocess paths (`stop.py`, `subagent_stop.py`) use `skip_auto_tag=True, skip_checkpoint=True` to avoid importing heavy dependencies that may not be available in the subprocess context.
+ 
+-### `transition_status(session, new_status, reason)`
++### `transition_status(session, new_status, reason, *, reject_from_terminal=True)`
+ 
+ For non-terminal transitions. Logs the lifecycle transition and updates the status.
+ 
+-1. **Lifecycle log** -- `session.log_lifecycle_transition(new_status, reason)` (always)
+-2. **Status + save** -- sets `session.status`, calls `session.save()`
++1. **Terminal guard** -- if `reject_from_terminal=True` (default) and current status is terminal, raises `ValueError`
++2. **Lifecycle log** -- `session.log_lifecycle_transition(new_status, reason)` (always)
++3. **Status + save** -- sets `session.status`, calls `session.save()`
+ 
+ **Idempotent**: if the session is already in the target state, logs and returns.
+ 
+-**Revival**: `completed->pending` is explicitly allowed for session revival/auto-continue. This is the only terminal-to-non-terminal transition permitted.
++**Terminal respawn protection**: By default, `transition_status()` rejects transitions from terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`). This prevents accidental respawning of finished sessions. Callers that legitimately need terminal-to-non-terminal transitions must pass `reject_from_terminal=False` explicitly. Currently two callers use this opt-out:
++- `_mark_superseded()`: `completed->superseded` (intentional bookkeeping)
++- `user_prompt_submit.py` hook: `completed->running` (user reactivates local session)
++
++See [Session Recovery Mechanisms](session-recovery-mechanisms.md) for the full audit of all recovery paths.
+ 
+ ## Completion Flow
+ 
+diff --git a/docs/features/session-recovery-mechanisms.md b/docs/features/session-recovery-mechanisms.md
+new file mode 100644
+index 00000000..c3d68ec8
+--- /dev/null
++++ b/docs/features/session-recovery-mechanisms.md
+@@ -0,0 +1,141 @@
++# Session Recovery Mechanisms
++
++Catalogue of all 7 session recovery mechanisms, their triggers, terminal status safety, and guard implementations.
++
++## Overview
++
++The session system has 7 mechanisms that can revive, recover, or re-enqueue sessions. After the zombie loop fix (PR #703) and lifecycle consolidation (PR #721), a systematic audit (issue #723) verified that all mechanisms respect terminal session states.
++
++**Terminal statuses**: `completed`, `failed`, `killed`, `abandoned`, `cancelled`
++
++## Active Mechanisms (5)
++
++### 1. Startup Recovery (`_recover_interrupted_agent_sessions_startup`)
++
++| Property | Value |
++|----------|-------|
++| Location | `agent/agent_session_queue.py` |
++| Trigger | Bridge process startup |
++| What it does | Resets all `running` sessions to `pending` (orphaned from previous process) |
++| Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
++| Guard | Query filter (`status="running"`) |
++
++### 2. Health Check (`_agent_session_health_check`)
++
++| Property | Value |
++|----------|-------|
++| Location | `agent/agent_session_queue.py` |
++| Trigger | Periodic timer (every 60s) |
++| What it does | Recovers stuck `running` sessions (dead worker, timeout) back to `pending`; starts workers for stalled `pending` sessions |
++| Terminal safety | **Safe by query scope** -- only queries `status="running"` and `status="pending"` |
++| Guard | Query filter (only non-terminal statuses) + `transition_status()` with default `reject_from_terminal=True` |
++
++### 3. Hierarchy Health Check (`_agent_session_hierarchy_health_check`)
++
++| Property | Value |
++|----------|-------|
++| Location | `agent/agent_session_queue.py` |
++| Trigger | Periodic timer |
++| What it does | Fixes orphaned children (parent deleted) and stuck parents (all children terminal) |
++| Terminal safety | **Safe** -- orphan fix preserves original status via `_extract_agent_session_fields`; stuck parent fix only finalizes (terminal transition), never revives |
++| Guard | `status` field in `_AGENT_SESSION_FIELDS` preserves terminal status during delete-and-recreate |
++
++### 4. Nudge Re-enqueue (`_enqueue_nudge`)
++
++| Property | Value |
++|----------|-------|
++| Location | `agent/agent_session_queue.py` |
++| Trigger | Agent output during execution (auto-continue) |
++| What it does | Re-enqueues session with nudge message for continued execution |
++| Terminal safety | **Guarded** -- three-layer defense |
++| Guards | (1) Entry guard checks `session.status in TERMINAL_STATUSES`, returns early. (2) Main path re-reads session from Redis after query, returns early if terminal. (3) Fallback path (bypasses `transition_status`) has independent terminal check before `async_create`. |
++
++### 5. Delivery Action Router (`determine_delivery_action`)
++
++| Property | Value |
++|----------|-------|
++| Location | `agent/agent_session_queue.py` |
++| Trigger | Every agent output (decides deliver vs nudge) |
++| What it does | Returns `deliver_already_completed` for terminal sessions, preventing nudge paths |
++| Terminal safety | **Guarded** -- checks `session_status in TERMINAL_STATUSES` (all 5 statuses) |
++| Guard | First check in function: `if session_status in _TERMINAL_STATUSES` |
++
++## Confirmed Safe Mechanisms (2)
++
++### 6. Session Watchdog
++
++| Property | Value |
++|----------|-------|
++| Location | `bridge/session_watchdog.py` (PostToolUse hook) |
++| Trigger | Every tool use during agent execution |
++| What it does | Monitors for stuck loops, sets `watchdog_unhealthy` flag |
++| Terminal safety | **Safe by design** -- only sets flags on the running session, never mutates status. The flag feeds into `determine_delivery_action()` which routes to `deliver` instead of `nudge`. |
++| Guard | N/A (no status mutation) |
++
++### 7. Bridge Watchdog
++
++| Property | Value |
++|----------|-------|
++| Location | `monitoring/bridge_watchdog.py` |
++| Trigger | Separate launchd service (every 60s) |
++| What it does | Monitors bridge process health, restarts if unresponsive |
++| Terminal safety | **Safe by design** -- has no `AgentSession` imports, operates at process level only |
++| Guard | N/A (no session awareness) |
++
++## Guard Implementation: `transition_status()` `reject_from_terminal`
++
++The `transition_status()` function in `models/session_lifecycle.py` now has a `reject_from_terminal` parameter (default `True`):
++
++- **Default behavior**: Raises `ValueError` when the session's current status is terminal, preventing accidental `completed->pending` or similar transitions
++- **Explicit opt-out**: Callers that need terminal-to-non-terminal transitions pass `reject_from_terminal=False`
++
++### Callers requiring `reject_from_terminal=False`
++
++| Caller | Transition | Reason |
++|--------|-----------|--------|
++| `_mark_superseded()` in `enqueue_agent_session()` | `completed->superseded` | Intentional bookkeeping when a new session replaces an old one |
++| `.claude/hooks/user_prompt_submit.py` | `completed->running` | User types new prompt into a completed local session |
++
++All other callers use the default `reject_from_terminal=True`.
++
++## Race Conditions
++
++### Status change between `determine_delivery_action()` and `_enqueue_nudge()`
++
++- **Window**: External process finalizes session between delivery decision and nudge enqueue
++- **Mitigation**: `_enqueue_nudge()` re-reads session status from Redis at entry and after query, returns early if terminal
++
++### Revival check finds session about to complete
++
++- **Window**: `check_revival()` finds pending session that completes between query and user response
++- **Mitigation**: Revival only sends notification; actual respawn happens later via `queue_revival_agent_session()` -> `enqueue_agent_session()`, by which time the session is terminal and guards catch it
++
++## Known Limitations
++
++- **Redis TTL expiry**: If terminal session records expire from Redis before a revival check, the terminal-sibling filter in `check_revival()` cannot detect them. Revival may proceed for sessions whose completion record has expired. This is acceptable: if the record is gone, there is no reliable way to detect prior completion.
++
++## Test Coverage
++
++All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
++
++| Test | Mechanism | What it proves |
++|------|-----------|---------------|
++| `test_terminal_status_returns_already_completed` | determine_delivery_action | All 5 terminal statuses route to `deliver_already_completed` |
++| `test_nudge_main_path_skips_terminal` | _enqueue_nudge entry | Terminal sessions blocked before Redis query |
++| `test_nudge_fallback_path_skips_terminal` | _enqueue_nudge fallback | Terminal sessions blocked before `async_create` |
++| `test_nudge_reread_guard_catches_late_terminal` | _enqueue_nudge re-read | Late terminal status (race) caught after Redis query |
++| `test_revival_skips_completed_session_branch` | check_revival | Branches with terminal siblings filtered out |
++| `test_rejects_from_terminal_by_default` | transition_status | Default rejects all 5 terminal->non-terminal |
++| `test_allows_from_terminal_when_explicitly_permitted` | transition_status | Explicit opt-out works |
++| `test_startup_recovery_only_queries_running` | startup recovery | Only queries running, not terminal |
++| `test_watchdog_unhealthy_flag_routes_to_deliver` | session watchdog | Flag routes to deliver, not nudge |
++| `test_bridge_watchdog_has_no_agent_session_import` | bridge watchdog | No AgentSession imports |
++
++## Related
++
++- [Session Lifecycle](session-lifecycle.md) -- State machine and lifecycle module
++- [Agent Session Health Monitor](agent-session-health-monitor.md) -- Health check details
++- [Bridge Self-Healing](bridge-self-healing.md) -- Bridge watchdog and crash recovery
++- Issue #723 -- Original audit issue
++- PR #703 -- Zombie loop fix (hierarchy health check vector)
++- PR #721 -- Lifecycle consolidation
+diff --git a/models/session_lifecycle.py b/models/session_lifecycle.py
+index d5a718bc..20c4fa17 100644
+--- a/models/session_lifecycle.py
++++ b/models/session_lifecycle.py
+@@ -132,13 +132,17 @@ def transition_status(
+     session,
+     new_status: str,
+     reason: str = "",
++    *,
++    reject_from_terminal: bool = True,
+ ) -> None:
+     """Transition a session to a non-terminal status.
+ 
+     Logs the lifecycle transition and updates the status.
+ 
+-    Special case: completed->pending is allowed for session revival/auto-continue.
+-    This is the only terminal->non-terminal transition permitted.
++    By default, rejects transitions from terminal statuses to prevent accidental
++    respawning of completed/failed/killed sessions. Callers that legitimately need
++    terminal->non-terminal transitions (e.g., _mark_superseded, revival) must pass
++    reject_from_terminal=False explicitly.
+ 
+     Idempotent: if the session is already in the target state, logs and returns.
+ 
+@@ -146,10 +150,13 @@ def transition_status(
+         session: AgentSession instance to transition.
+         new_status: Non-terminal status to set.
+         reason: Human-readable reason for the transition.
++        reject_from_terminal: If True (default), raise ValueError when the session's
++            current status is terminal. Pass False for intentional terminal->non-terminal
++            transitions (e.g., completed->superseded, revival).
+ 
+     Raises:
+-        ValueError: If session is None or new_status is a terminal status
+-            (use finalize_session() instead).
++        ValueError: If session is None, new_status is a terminal status,
++            or current status is terminal and reject_from_terminal is True.
+     """
+     if session is None:
+         raise ValueError("session must not be None")
+@@ -164,8 +171,17 @@ def transition_status(
+     if new_status not in NON_TERMINAL_STATUSES:
+         raise ValueError(f"Unknown status {new_status!r}. Known: {', '.join(sorted(ALL_STATUSES))}")
+ 
+-    # Idempotency: if already in this state, skip
++    # Guard: reject transitions from terminal statuses unless explicitly allowed
+     current_status = getattr(session, "status", None)
++    if reject_from_terminal and current_status in TERMINAL_STATUSES:
++        raise ValueError(
++            f"Cannot transition session {getattr(session, 'session_id', '?')} "
++            f"from terminal status {current_status!r} to {new_status!r}. "
++            f"Pass reject_from_terminal=False if this is intentional "
++            f"(e.g., revival or superseding)."
++        )
++
++    # Idempotency: if already in this state, skip
+     if current_status == new_status:
+         logger.debug(
+             f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
+diff --git a/tests/unit/test_duplicate_delivery.py b/tests/unit/test_duplicate_delivery.py
+index 520eaa63..38e314ef 100644
+--- a/tests/unit/test_duplicate_delivery.py
++++ b/tests/unit/test_duplicate_delivery.py
+@@ -147,14 +147,15 @@ class TestCompletedSessionGuard:
+     """Fix 3: Auto-continue skips when session is already completed."""
+ 
+     def test_completed_session_skips_auto_continue(self):
+-        """When agent_session.status == 'completed', output is delivered without nudge."""
++        """When session_status is terminal, output is delivered without nudge."""
+         # Verify the guard exists in the code
+         from pathlib import Path
+ 
+         queue_code = Path("agent/agent_session_queue.py").read_text()
+ 
+-        # The guard should check session_status == "completed" (in determine_delivery_action)
+-        assert 'session_status == "completed"' in queue_code
++        # The guard should check session_status against all TERMINAL_STATUSES
++        # (was previously just == "completed", now checks all terminal statuses)
++        assert "session_status in _TERMINAL_STATUSES" in queue_code
+         # It should deliver to chat without nudge
+         assert "delivering without nudge" in queue_code
+ 
+diff --git a/tests/unit/test_recovery_respawn_safety.py b/tests/unit/test_recovery_respawn_safety.py
+new file mode 100644
+index 00000000..fe9d669a
+--- /dev/null
++++ b/tests/unit/test_recovery_respawn_safety.py
+@@ -0,0 +1,339 @@
++"""Regression tests for session recovery respawn safety.
++
++Each test proves that a specific recovery mechanism cannot respawn a session
++that is in a terminal status (completed, failed, killed, abandoned, cancelled).
++
++Covers all 5 active mechanisms + 2 confirmed-safe mechanisms:
++1. _recover_interrupted_agent_sessions_startup() — startup recovery
++2. _agent_session_health_check() — periodic health check
++3. _agent_session_hierarchy_health_check() — parent/child health check
++4. _enqueue_nudge() main path — nudge re-enqueue
++5. _enqueue_nudge() fallback path — nudge fallback recreate
++6. determine_delivery_action() — delivery routing (all terminal statuses)
++7. check_revival() — revival detection
++8. Session watchdog — confirmed safe (only sets flags, never mutates status)
++9. Bridge watchdog — confirmed safe (no AgentSession imports)
++
++Also tests transition_status() reject_from_terminal guard.
++"""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from models.session_lifecycle import TERMINAL_STATUSES, transition_status
++
++
++def _mock_agent_session(**kwargs):
++    """Create a mock AgentSession with sensible defaults."""
++    defaults = {
++        "session_id": "test-session-123",
++        "agent_session_id": "agent-sess-456",
++        "status": "running",
++        "project_key": "test-project",
++        "chat_id": "12345",
++        "working_dir": "/tmp/test",
++        "priority": "normal",
++        "started_at": 1000.0,
++        "completed_at": None,
++        "parent_agent_session_id": None,
++        "message_text": "test message",
++        "auto_continue_count": 0,
++        "task_list_id": None,
++        "slug": None,
++        "initial_telegram_message": {"message_text": "test", "sender_name": "user"},
++    }
++    defaults.update(kwargs)
++    session = MagicMock()
++    for k, v in defaults.items():
++        setattr(session, k, v)
++    session.save = MagicMock()
++    session.delete = MagicMock()
++    session.log_lifecycle_transition = MagicMock()
++    return session
++
++
++class TestDetermineDeliveryActionTerminalStatuses:
++    """determine_delivery_action() returns deliver_already_completed for ALL terminal statuses."""
++
++    @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
++    def test_terminal_status_returns_already_completed(self, terminal_status):
++        """Each terminal status should return deliver_already_completed."""
++        from agent.agent_session_queue import determine_delivery_action
++
++        action = determine_delivery_action(
++            msg="some output",
++            stop_reason="end_turn",
++            auto_continue_count=0,
++            max_nudge_count=5,
++            session_status=terminal_status,
++        )
++        assert action == "deliver_already_completed", (
++            f"Terminal status {terminal_status!r} should return "
++            f"deliver_already_completed, got {action!r}"
++        )
++
++    def test_non_terminal_does_not_return_already_completed(self):
++        """Non-terminal statuses should NOT return deliver_already_completed."""
++        from agent.agent_session_queue import determine_delivery_action
++
++        action = determine_delivery_action(
++            msg="some output",
++            stop_reason="end_turn",
++            auto_continue_count=0,
++            max_nudge_count=5,
++            session_status="running",
++        )
++        assert action != "deliver_already_completed"
++
++
++class TestEnqueueNudgeTerminalGuard:
++    """_enqueue_nudge() returns early when session is in a terminal status."""
++
++    @pytest.mark.asyncio
++    @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
++    async def test_nudge_main_path_skips_terminal(self, terminal_status):
++        """_enqueue_nudge() entry guard blocks terminal sessions from being nudged."""
++        from agent.agent_session_queue import _enqueue_nudge
++
++        session = _mock_agent_session(status=terminal_status)
++
++        # If the guard works, it returns early without querying Redis or calling
++        # transition_status. We patch AgentSession.query to detect any leak.
++        with patch("agent.agent_session_queue.AgentSession") as mock_as:
++            mock_as.query.filter.return_value = []
++            await _enqueue_nudge(
++                session=session,
++                branch_name="session/test",
++                task_list_id="tl-1",
++                auto_continue_count=1,
++                output_msg="agent output",
++                nudge_feedback="continue",
++            )
++            # Should NOT have queried Redis (guard returns before that)
++            mock_as.query.filter.assert_not_called()
++
++    @pytest.mark.asyncio
++    async def test_nudge_fallback_path_skips_terminal(self):
++        """_enqueue_nudge() fallback path blocks terminal sessions from async_create."""
++        from agent.agent_session_queue import _enqueue_nudge
++
++        # Session is completed but Redis returns empty (triggering fallback path)
++        session = _mock_agent_session(status="completed")
++
++        with (
++            patch("agent.agent_session_queue.AgentSession") as mock_as,
++            patch("agent.agent_session_queue._diagnose_missing_session", return_value="diag"),
++            patch("agent.agent_session_queue._extract_agent_session_fields", return_value={}),
++        ):
++            # The entry guard catches this before we even get to the fallback,
++            # so async_create should never be called.
++            mock_as.query.filter.return_value = []
++            mock_as.async_create = MagicMock()
++            await _enqueue_nudge(
++                session=session,
++                branch_name="session/test",
++                task_list_id="tl-1",
++                auto_continue_count=1,
++                output_msg="agent output",
++            )
++            mock_as.async_create.assert_not_called()
++
++    @pytest.mark.asyncio
++    async def test_nudge_reread_guard_catches_late_terminal(self):
++        """Main path re-read guard catches session that became terminal after entry check."""
++        from agent.agent_session_queue import _enqueue_nudge
++
++        # Session starts as "running" (passes entry guard) but Redis returns
++        # a version that is now "completed" (another process finalized it).
++        session = _mock_agent_session(status="running")
++        completed_session = _mock_agent_session(status="completed")
++
++        with patch("agent.agent_session_queue.AgentSession") as mock_as:
++            mock_as.query.filter.return_value = [completed_session]
++            await _enqueue_nudge(
++                session=session,
++                branch_name="session/test",
++                task_list_id="tl-1",
++                auto_continue_count=1,
++                output_msg="agent output",
++            )
++            # Should NOT have called transition_status (guard returns early)
++            # Verify by checking that the completed session was not modified
++            assert completed_session.status == "completed"
++
++
++class TestCheckRevivalTerminalFilter:
++    """check_revival() filters out branches whose sessions have terminal status siblings."""
++
++    def test_revival_skips_completed_session_branch(self):
++        """check_revival() returns None when all candidate branches have terminal siblings."""
++        from agent.agent_session_queue import check_revival
++
++        pending_session = _mock_agent_session(
++            session_id="chat-123-msg-1", status="pending", chat_id="12345"
++        )
++        completed_session = _mock_agent_session(
++            session_id="chat-123-msg-1", status="completed", chat_id="12345"
++        )
++
++        def mock_filter(**kwargs):
++            status = kwargs.get("status")
++            if status == "pending":
++                return [pending_session]
++            if status == "running":
++                return []
++            if status == "completed":
++                return [completed_session]
++            # Other terminal statuses
++            return []
++
++        with (
++            patch("agent.agent_session_queue.AgentSession") as mock_as,
++            patch("agent.agent_session_queue._load_cooldowns", return_value={}),
++        ):
++            mock_as.query.filter.side_effect = mock_filter
++            result = check_revival(
++                project_key="test-project",
++                working_dir="/tmp/test",
++                chat_id="12345",
++            )
++        # Should return None because the only candidate branch has a terminal sibling
++        assert result is None
++
++    def test_revival_passes_non_terminal_branches(self):
++        """check_revival() returns revival info for branches without terminal siblings."""
++        from agent.agent_session_queue import check_revival
++
++        pending_session = _mock_agent_session(
++            session_id="chat-123-msg-2", status="pending", chat_id="12345"
++        )
++
++        def mock_filter(**kwargs):
++            status = kwargs.get("status")
++            if status == "pending":
++                return [pending_session]
++            if status == "running":
++                return []
++            # No terminal sessions exist
++            return []
++
++        with (
++            patch("agent.agent_session_queue.AgentSession") as mock_as,
++            patch("agent.agent_session_queue._load_cooldowns", return_value={}),
++            patch("subprocess.run") as mock_run,
++            patch("agent.agent_session_queue.get_branch_state") as mock_bs,
++        ):
++            mock_as.query.filter.side_effect = mock_filter
++            # Branch exists in git
++            mock_run.return_value = SimpleNamespace(stdout="  session/chat-123-msg-2\n")
++            mock_bs.return_value = SimpleNamespace(has_uncommitted_changes=False, active_plan=None)
++            result = check_revival(
++                project_key="test-project",
++                working_dir="/tmp/test",
++                chat_id="12345",
++            )
++        assert result is not None
++        assert result["branch"] == "session/chat-123-msg-2"
++
++
++class TestTransitionStatusRejectFromTerminal:
++    """transition_status() rejects terminal->non-terminal by default."""
++
++    @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
++    def test_rejects_from_terminal_by_default(self, terminal_status):
++        """transition_status() raises ValueError for terminal->non-terminal."""
++        session = _mock_agent_session(status=terminal_status)
++        with pytest.raises(ValueError, match="terminal status"):
++            transition_status(session, "pending", "test")
++
++    @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
++    def test_allows_from_terminal_when_explicitly_permitted(self, terminal_status):
++        """transition_status() allows terminal->non-terminal with reject_from_terminal=False."""
++        session = _mock_agent_session(status=terminal_status)
++        # Should NOT raise
++        transition_status(
++            session, "superseded", "intentional supersede", reject_from_terminal=False
++        )
++        assert session.status == "superseded"
++
++    def test_completed_to_superseded_with_reject_false(self):
++        """Protects the _mark_superseded() path: completed->superseded with explicit opt-out."""
++        session = _mock_agent_session(status="completed")
++        transition_status(
++            session,
++            "superseded",
++            reason="superseded by new session",
++            reject_from_terminal=False,
++        )
++        assert session.status == "superseded"
++        session.save.assert_called_once()
++
++    def test_error_message_includes_both_statuses(self):
++        """Error message should include both current and target status for debugging."""
++        session = _mock_agent_session(status="completed")
++        with pytest.raises(ValueError, match="completed") as exc_info:
++            transition_status(session, "pending", "bad transition")
++        assert "pending" in str(exc_info.value)
++
++    def test_non_terminal_to_non_terminal_unaffected(self):
++        """Default reject_from_terminal=True does not affect non-terminal->non-terminal."""
++        session = _mock_agent_session(status="running")
++        transition_status(session, "pending", "re-enqueue")
++        assert session.status == "pending"
++
++
++class TestStartupRecoverySkipsTerminal:
++    """_recover_interrupted_agent_sessions_startup() only recovers running sessions."""
++
++    def test_startup_recovery_only_queries_running(self):
++        """Startup recovery queries status='running' only — terminal sessions are untouched."""
++        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
++
++        # The function queries AgentSession.query.filter(status="running").
++        # Terminal sessions are never queried, so they cannot be recovered.
++        with patch("agent.agent_session_queue.AgentSession") as mock_as:
++            mock_as.query.filter.return_value = []
++            count = _recover_interrupted_agent_sessions_startup()
++
++        assert count == 0
++        # Verify it only queried "running" status
++        mock_as.query.filter.assert_called_once_with(status="running")
++
++
++class TestSessionWatchdogSafe:
++    """Session watchdog is safe — it only sets flags, never mutates session status directly."""
++
++    def test_watchdog_unhealthy_flag_routes_to_deliver(self):
++        """Watchdog sets unhealthy flag which routes to deliver, not nudge."""
++        from agent.agent_session_queue import determine_delivery_action
++
++        action = determine_delivery_action(
++            msg="some output",
++            stop_reason="end_turn",
++            auto_continue_count=0,
++            max_nudge_count=5,
++            session_status="running",
++            watchdog_unhealthy="stuck > 300s",
++        )
++        assert action == "deliver"
++
++
++class TestBridgeWatchdogSafe:
++    """Bridge watchdog is confirmed safe — it has no AgentSession imports."""
++
++    def test_bridge_watchdog_has_no_agent_session_import(self):
++        """Verify bridge_watchdog.py does not import AgentSession."""
++        from pathlib import Path
++
++        watchdog_path = Path(__file__).parent.parent.parent / "monitoring" / "bridge_watchdog.py"
++        if not watchdog_path.exists():
++            pytest.skip("bridge_watchdog.py not found")
++        content = watchdog_path.read_text()
++        assert "AgentSession" not in content, (
++            "bridge_watchdog.py should not import AgentSession — "
++            "it monitors the bridge process, not session state"
++        )
+diff --git a/tests/unit/test_session_lifecycle_consolidation.py b/tests/unit/test_session_lifecycle_consolidation.py
+index c4b1d5c7..dc33eb72 100644
+--- a/tests/unit/test_session_lifecycle_consolidation.py
++++ b/tests/unit/test_session_lifecycle_consolidation.py
+@@ -88,9 +88,7 @@ def test_lifecycle_log_called(self, mock_session):
+         with patch("agent.agent_session_queue.checkpoint_branch_state"):
+             finalize_session(mock_session, "completed", "test reason")
+ 
+-        mock_session.log_lifecycle_transition.assert_called_once_with(
+-            "completed", "test reason"
+-        )
++        mock_session.log_lifecycle_transition.assert_called_once_with("completed", "test reason")
+ 
+     def test_lifecycle_log_failure_nonfatal(self, mock_session):
+         """Lifecycle log failure doesn't block status save."""
+@@ -158,9 +156,7 @@ def test_skip_auto_tag(self, mock_session):
+ 
+     def test_skip_checkpoint(self, mock_session):
+         """skip_checkpoint prevents checkpoint_branch_state from running."""
+-        with patch(
+-            "agent.agent_session_queue.checkpoint_branch_state"
+-        ) as mock_checkpoint:
++        with patch("agent.agent_session_queue.checkpoint_branch_state") as mock_checkpoint:
+             finalize_session(mock_session, "completed", "test", skip_checkpoint=True)
+ 
+         mock_checkpoint.assert_not_called()
+@@ -271,9 +267,14 @@ def test_waiting_for_children_transition(self, mock_session):
+         mock_session.save.assert_called_once()
+ 
+     def test_superseded_transition(self, mock_session):
+-        """Session transitions to superseded."""
++        """Session transitions to superseded (from terminal requires explicit opt-out)."""
+         mock_session.status = "completed"
+-        transition_status(mock_session, "superseded", "replaced by newer session")
++        transition_status(
++            mock_session,
++            "superseded",
++            "replaced by newer session",
++            reject_from_terminal=False,
++        )
+ 
+         assert mock_session.status == "superseded"
+         mock_session.save.assert_called_once()
+@@ -282,9 +283,7 @@ def test_lifecycle_log_called(self, mock_session):
+         """log_lifecycle_transition is called."""
+         transition_status(mock_session, "pending", "test reason")
+ 
+-        mock_session.log_lifecycle_transition.assert_called_once_with(
+-            "pending", "test reason"
+-        )
++        mock_session.log_lifecycle_transition.assert_called_once_with("pending", "test reason")
+ 
+ 
+ class TestTransitionStatusIdempotency:
+@@ -321,10 +320,21 @@ def test_unknown_status_raises(self, mock_session):
+ class TestTransitionStatusRevival:
+     """completed->pending revival flow works through transition_status."""
+ 
+-    def test_completed_to_pending(self, mock_session):
+-        """completed->pending is the auto-continue/revival path."""
++    def test_completed_to_pending_blocked_by_default(self, mock_session):
++        """completed->pending is blocked by default reject_from_terminal=True."""
+         mock_session.status = "completed"
+-        transition_status(mock_session, "pending", "auto-continue re-enqueue")
++        with pytest.raises(ValueError, match="terminal status"):
++            transition_status(mock_session, "pending", "auto-continue re-enqueue")
++
++    def test_completed_to_pending_with_explicit_opt_out(self, mock_session):
++        """completed->pending is allowed with reject_from_terminal=False (revival path)."""
++        mock_session.status = "completed"
++        transition_status(
++            mock_session,
++            "pending",
++            "auto-continue re-enqueue",
++            reject_from_terminal=False,
++        )
+ 
+         assert mock_session.status == "pending"
+         mock_session.save.assert_called_once()

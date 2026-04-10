@@ -1,0 +1,1168 @@
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 452f7c556..6c8ad065a 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -54,7 +54,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Hooks Best Practices & Audit](hooks-best-practices.md) | `/audit-hooks` skill, codified hook safety patterns, and daily reflections integration | Shipped |
+ | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
+ | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
+-| [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, and companion memories for subconscious recall | Shipped |
++| [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, companion memories for subconscious recall, and per-chunk embeddings for fine-grained semantic search over long documents | Shipped |
+ | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
+ | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
+ | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
+diff --git a/docs/features/knowledge-document-integration.md b/docs/features/knowledge-document-integration.md
+index f84e6d533..506203f16 100644
+--- a/docs/features/knowledge-document-integration.md
++++ b/docs/features/knowledge-document-integration.md
+@@ -89,7 +89,72 @@ A Popoto Redis model storing indexed documents:
+ 
+ Embeddings are generated automatically by Popoto's `EmbeddingField` using the globally configured `OpenAIProvider`. The provider is set via `popoto.configure(embedding_provider=OpenAIProvider())` at bridge startup.
+ 
+-### 5. Companion Memories
++### 5. Document Chunking
++
++Long documents are split into overlapping chunks, each with its own embedding, enabling fine-grained semantic search. This eliminates the two failure modes of single-vector document embedding: content truncation (documents over 8,192 tokens had content silently dropped) and signal dilution (a single embedding averages the semantic signal across the entire document).
++
++#### DocumentChunk Model
++
++A Popoto Redis model storing individual chunks:
++
++| Field | Type | Description |
++|-------|------|-------------|
++| `chunk_id` | AutoKeyField | Unique identifier |
++| `document_doc_id` | KeyField | FK to parent KnowledgeDocument |
++| `chunk_index` | IntField | Ordering index within parent (0-based) |
++| `content` | ContentField | Chunk text (stored on filesystem) |
++| `embedding` | EmbeddingField | Auto-generated via OpenAI `text-embedding-3-small` |
++| `file_path` | KeyField | Denormalized parent document path |
++| `project_key` | KeyField | Denormalized project key for filtering |
++
++#### Chunking Strategy
++
++The chunking engine (`tools/knowledge/chunking.py`) splits documents using a heading-aware strategy:
++
++1. **Short documents** (under `CHUNK_SIZE_TOKENS`): Produce a single chunk -- no unnecessary splitting.
++2. **Documents with headings**: Split at h1/h2 boundaries. If a heading section exceeds `CHUNK_SIZE_TOKENS`, it is sub-split by token count with overlap.
++3. **Documents without headings**: Split entirely by token count with overlap.
++
++Token counting uses `tiktoken` with the `cl100k_base` encoding (same encoding as `text-embedding-3-small`). Default constants:
++
++| Constant | Value | Description |
++|----------|-------|-------------|
++| `CHUNK_SIZE_TOKENS` | 1500 | Target tokens per chunk |
++| `CHUNK_OVERLAP_TOKENS` | 200 | Overlap between adjacent chunks (~800 characters) |
++
++The 200-token overlap ensures concepts at chunk boundaries appear in at least one chunk's embedding.
++
++#### Chunk Lifecycle
++
++Chunks are managed entirely by the indexer pipeline:
++
++- **On index**: After `KnowledgeDocument.safe_upsert()`, the indexer computes the content hash and compares it to the existing document's hash. If content changed, `_sync_chunks()` deletes all old chunks and creates new ones.
++- **On delete**: `delete_file()` deletes all chunks for the document before deleting the parent.
++- **Orphan cleanup**: `_cleanup_orphan_chunks()` runs at the end of `full_scan()`, deleting any chunks whose parent `KnowledgeDocument` no longer exists.
++
++#### Chunk Search
++
++`DocumentChunk.search(query_text, project_key=None, top_k=5)` provides chunk-level semantic search:
++
++1. Embeds the query via `OpenAIProvider`
++2. Loads all chunk embeddings via `EmbeddingField.load_embeddings(DocumentChunk)`
++3. Computes cosine similarity
++4. Filters by `project_key` if provided
++5. Returns top-K results as:
++
++```python
++[{
++    "chunk_text": str,      # The matching chunk content
++    "file_path": str,       # Parent document file path
++    "chunk_index": int,     # Position within parent document
++    "score": float,         # Cosine similarity score
++    "project_key": str      # Project key for isolation
++}]
++```
++
++The parent document's own `EmbeddingField` is retained for document-level similarity (e.g., "find documents like this one").
++
++### 6. Companion Memories
+ 
+ Each indexed document gets one or more companion Memory records that integrate with the existing subconscious memory system:
+ 
+@@ -101,7 +166,7 @@ Each indexed document gets one or more companion Memory records that integrate w
+ 
+ Companion memories enter the bloom filter like any other memory. When the agent works on a related project, the bloom fires, the thought is injected, and the agent can read the full file on demand.
+ 
+-### 6. Memory `reference` Field
++### 7. Memory `reference` Field
+ 
+ The Memory model has a new `reference` StringField (default empty string). This is a generic JSON pointer for actionable next steps -- not limited to knowledge documents. The field is backwards-compatible; existing memories are unaffected.
+ 
+@@ -143,6 +208,8 @@ The existing `tools/knowledge_search/` is a standalone SQLite-based knowledge se
+ | Large doc threshold | 2000 words | `tools/knowledge/indexer.py` |
+ | Knowledge importance | 3.0 | `tools/knowledge/indexer.py` |
+ | Summary fallback length | 500 chars | `tools/knowledge/indexer.py` |
++| Chunk size | 1500 tokens | `tools/knowledge/chunking.py` |
++| Chunk overlap | 200 tokens | `tools/knowledge/chunking.py` |
+ | Supported extensions | `.md`, `.txt`, `.markdown`, `.text` | `tools/knowledge/indexer.py` |
+ | Health check interval | 60 seconds | `bridge/telegram_bridge.py` heartbeat |
+ 
+@@ -151,8 +218,10 @@ The existing `tools/knowledge_search/` is a standalone SQLite-based knowledge se
+ | File | Purpose |
+ |------|---------|
+ | `models/knowledge_document.py` | KnowledgeDocument Popoto model with `safe_upsert()` and `delete_by_path()` |
++| `models/document_chunk.py` | DocumentChunk Popoto model with `delete_by_parent()` and `search()` |
+ | `models/memory.py` | Memory model with `reference` field and `SOURCE_KNOWLEDGE` constant |
+-| `tools/knowledge/indexer.py` | Indexer pipeline: `index_file()`, `delete_file()`, `full_scan()`, companion memory creation |
++| `tools/knowledge/indexer.py` | Indexer pipeline: `index_file()`, `delete_file()`, `full_scan()`, chunk sync, companion memory creation |
++| `tools/knowledge/chunking.py` | Chunking engine: heading-aware + token-count splitting with overlap |
+ | `tools/knowledge/scope_resolver.py` | Scope resolution from file paths to `(project_key, scope)` via projects.json |
+ | `bridge/knowledge_watcher.py` | `KnowledgeWatcher` class wrapping watchdog Observer with debouncing and health checks |
+ | `bridge/telegram_bridge.py` | Bridge integration: watcher startup, shutdown, and 60s health check |
+@@ -164,10 +233,10 @@ High reversibility -- to remove this feature:
+ 1. Remove watcher startup/shutdown/health-check code from `bridge/telegram_bridge.py`
+ 2. Delete `bridge/knowledge_watcher.py`
+ 3. Delete `tools/knowledge/` directory
+-4. Delete `models/knowledge_document.py`
++4. Delete `models/knowledge_document.py` and `models/document_chunk.py`
+ 5. Remove `reference` field and `SOURCE_KNOWLEDGE` from `models/memory.py`
+-6. Remove `watchdog` from `pyproject.toml`
+-7. Flush Redis keys: `redis-cli KEYS "*KnowledgeDocument*" | xargs redis-cli DEL`
++6. Remove `watchdog` and `tiktoken` from `pyproject.toml`
++7. Flush Redis keys: `redis-cli KEYS "*KnowledgeDocument*" | xargs redis-cli DEL` and `redis-cli KEYS "*DocumentChunk*" | xargs redis-cli DEL`
+ 
+ No existing behavior changes. No schema migrations involved.
+ 
+diff --git a/docs/features/subconscious-memory.md b/docs/features/subconscious-memory.md
+index 5b002708f..30c613c6d 100644
+--- a/docs/features/subconscious-memory.md
++++ b/docs/features/subconscious-memory.md
+@@ -112,10 +112,13 @@ The knowledge document integration system indexes work-vault files as companion
+ 
+ 1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog
+ 2. `index_file()` reads content, resolves project scope, upserts `KnowledgeDocument` (Redis + filesystem)
+-3. Haiku summarizes the document content (fallback: first 500 chars)
+-4. Companion Memory records are created with `source="knowledge"`, `importance=3.0`, and a `reference` JSON pointer to the source file
+-5. Companion memories enter the bloom filter and surface as `<thought>` blocks during related work
+-6. The agent reads the full file on demand using the reference pointer
++3. After upsert, `_sync_chunks()` splits the content into overlapping `DocumentChunk` records (each with its own embedding) for fine-grained semantic search
++4. Haiku summarizes the document content (fallback: first 500 chars)
++5. Companion Memory records are created with `source="knowledge"`, `importance=3.0`, and a `reference` JSON pointer to the source file
++6. Companion memories enter the bloom filter and surface as `<thought>` blocks during related work
++7. The agent reads the full file on demand using the reference pointer
++
++**Chunk-level search:** `DocumentChunk.search(query_text, project_key)` returns matching chunks with parent document path, chunk index, and similarity score. See [Knowledge Document Integration](knowledge-document-integration.md#5-document-chunking) for chunking strategy and configuration.
+ 
+ **Importance tier:** Knowledge memories sit at 3.0 -- above agent observations (1.0) but below human messages (6.0). Large documents (>2000 words) are split by top-level headings, producing one companion memory per section.
+ 
+@@ -254,7 +257,9 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
+ | `.claude/hooks/post_tool_use.py` | Claude Code PostToolUse hook with memory recall and AgentSession activity tracking |
+ | `.claude/hooks/stop.py` | Claude Code Stop hook with extraction, AgentSession completion, and post-merge learning |
+ | `models/knowledge_document.py` | KnowledgeDocument model for indexed work-vault files |
+-| `tools/knowledge/indexer.py` | Knowledge indexer pipeline (index, delete, full scan, companion memories) |
++| `models/document_chunk.py` | DocumentChunk model for per-chunk embeddings and chunk-level search |
++| `tools/knowledge/indexer.py` | Knowledge indexer pipeline (index, delete, full scan, chunk sync, companion memories) |
++| `tools/knowledge/chunking.py` | Chunking engine: heading-aware + token-count splitting with overlap |
+ | `tools/knowledge/scope_resolver.py` | File path to project scope resolution via projects.json |
+ | `bridge/knowledge_watcher.py` | Filesystem watcher for work-vault changes (watchdog + debounce) |
+ | `config/personas/_base.md` | Thought priming instruction for agents |
+diff --git a/docs/plans/chunked_document_retrieval.md b/docs/plans/chunked_document_retrieval.md
+index 74fb529b9..c92d5e3fe 100644
+--- a/docs/plans/chunked_document_retrieval.md
++++ b/docs/plans/chunked_document_retrieval.md
+@@ -1,5 +1,5 @@
+ ---
+-status: Planning
++status: Complete
+ type: feature
+ appetite: Medium
+ owner: Valor
+@@ -106,22 +106,22 @@ The new model is straightforward (follows `KnowledgeDocument` patterns exactly),
+ ## Failure Path Test Strategy
+ 
+ ### Exception Handling Coverage
+-- [ ] `DocumentChunk` save failures must not crash the parent `KnowledgeDocument` indexing -- wrap chunk creation in try/except with logging, consistent with `safe_upsert()` pattern
+-- [ ] If `tiktoken` encoding fails for a chunk, log warning and skip that chunk rather than failing the entire document
++- [x] `DocumentChunk` save failures must not crash the parent `KnowledgeDocument` indexing -- wrap chunk creation in try/except with logging, consistent with `safe_upsert()` pattern
++- [x] If `tiktoken` encoding fails for a chunk, log warning and skip that chunk rather than failing the entire document
+ 
+ ### Empty/Invalid Input Handling
+-- [ ] Empty document content produces zero chunks (no empty `DocumentChunk` records)
+-- [ ] Document with only whitespace produces zero chunks
+-- [ ] Very short documents (under chunk size) produce exactly one chunk
+-- [ ] Documents with no headings fall back to token-count splitting correctly
++- [x] Empty document content produces zero chunks (no empty `DocumentChunk` records)
++- [x] Document with only whitespace produces zero chunks
++- [x] Very short documents (under chunk size) produce exactly one chunk
++- [x] Documents with no headings fall back to token-count splitting correctly
+ 
+ ### Error State Rendering
+-- [ ] No user-visible output -- chunk search results are consumed programmatically by the agent. Errors are logged.
++- [x] No user-visible output -- chunk search results are consumed programmatically by the agent. Errors are logged.
+ 
+ ## Test Impact
+ 
+-- [ ] `tests/unit/test_knowledge_document.py::test_model_has_required_fields` -- UPDATE: add `DocumentChunk` import and field checks in a new test class
+-- [ ] `tests/unit/test_knowledge_document.py::TestKnowledgeDocumentModel` -- No change needed (existing tests for `KnowledgeDocument` are unaffected since its interface is unchanged)
++- [x] `tests/unit/test_knowledge_document.py::test_model_has_required_fields` -- UPDATE: add `DocumentChunk` import and field checks in a new test class
++- [x] `tests/unit/test_knowledge_document.py::TestKnowledgeDocumentModel` -- No change needed (existing tests for `KnowledgeDocument` are unaffected since its interface is unchanged)
+ 
+ No other existing tests are affected -- the indexer tests (`tests/unit/test_knowledge_indexer.py`) test companion memory creation but not chunk creation (which does not exist yet). The new chunking logic will have its own test file.
+ 
+@@ -172,22 +172,22 @@ A follow-up could expose `search_chunks()` via an MCP server tool for direct chu
+ 
+ ## Documentation
+ 
+-- [ ] Update `docs/features/knowledge-document-integration.md` to document the chunking system, `DocumentChunk` model, and chunk search
+-- [ ] Add entry to `docs/features/README.md` index table if not already present
+-- [ ] Code comments on chunking algorithm (heading-aware splitting, overlap logic)
+-- [ ] Docstrings for `DocumentChunk` model, `_sync_chunks()`, `search_chunks()`, and chunking utility functions
++- [x] Update `docs/features/knowledge-document-integration.md` to document the chunking system, `DocumentChunk` model, and chunk search
++- [x] Add entry to `docs/features/README.md` index table if not already present
++- [x] Code comments on chunking algorithm (heading-aware splitting, overlap logic)
++- [x] Docstrings for `DocumentChunk` model, `_sync_chunks()`, `search_chunks()`, and chunking utility functions
+ 
+ ## Success Criteria
+ 
+-- [ ] Long documents (>8,192 tokens) are fully embedded with no content loss
+-- [ ] Semantic search for a specific passage returns the chunk containing that passage
+-- [ ] Search results include: matching chunk text, parent document file path, chunk index, and similarity score
+-- [ ] Chunk overlap ensures concepts at chunk boundaries are discoverable
+-- [ ] Existing `KnowledgeDocument` records continue to work (backward compatible)
+-- [ ] Re-indexing a changed document regenerates its chunks (no stale chunks left behind)
+-- [ ] Short documents (under chunk size threshold) produce a single chunk
+-- [ ] Tests pass (`/do-test`)
+-- [ ] Documentation updated (`/do-docs`)
++- [x] Long documents (>8,192 tokens) are fully embedded with no content loss
++- [x] Semantic search for a specific passage returns the chunk containing that passage
++- [x] Search results include: matching chunk text, parent document file path, chunk index, and similarity score
++- [x] Chunk overlap ensures concepts at chunk boundaries are discoverable
++- [x] Existing `KnowledgeDocument` records continue to work (backward compatible)
++- [x] Re-indexing a changed document regenerates its chunks (no stale chunks left behind)
++- [x] Short documents (under chunk size threshold) produce a single chunk
++- [x] Tests pass (`/do-test`)
++- [x] Documentation updated (`/do-docs`)
+ 
+ ## Team Orchestration
+ 
+diff --git a/models/__init__.py b/models/__init__.py
+index 3e125af5f..8297f21a6 100644
+--- a/models/__init__.py
++++ b/models/__init__.py
+@@ -14,6 +14,7 @@
+ - Memory: subconscious memory records (human instructions, agent observations)
+ - TeammateMetrics: teammate mode classification counters and response times
+ - KnowledgeDocument: knowledge base indexed documents with embeddings
++- DocumentChunk: per-chunk embeddings for fine-grained document search
+ - PRReviewAudit: deduplication tracker for PR review audit findings
+ """
+ 
+@@ -22,6 +23,7 @@
+ from models.chat import Chat
+ from models.dead_letter import DeadLetter
+ from models.dedup import DedupRecord
++from models.document_chunk import DocumentChunk
+ from models.knowledge_document import KnowledgeDocument
+ from models.link import Link
+ from models.memory import Memory
+@@ -39,6 +41,7 @@
+     "DedupRecord",
+     "DeadLetter",
+     "BridgeEvent",
++    "DocumentChunk",
+     "KnowledgeDocument",
+     "PRReviewAudit",
+     "Reflection",
+diff --git a/models/document_chunk.py b/models/document_chunk.py
+new file mode 100644
+index 000000000..18deaab6b
+--- /dev/null
++++ b/models/document_chunk.py
+@@ -0,0 +1,140 @@
++"""DocumentChunk model for chunked document retrieval.
++
++Stores individual chunks of a KnowledgeDocument with per-chunk embeddings.
++Each chunk is a segment of the parent document, enabling fine-grained
++semantic search over long documents.
++
++Chunks are managed entirely by the indexer pipeline -- when a document
++is re-indexed, all old chunks are deleted and regenerated.
++"""
++
++import logging
++
++import numpy as np
++from popoto import AutoKeyField, IntField, KeyField, Model
++from popoto.fields.content_field import ContentField
++from popoto.fields.embedding_field import EmbeddingField
++
++logger = logging.getLogger(__name__)
++
++
++class DocumentChunk(Model):
++    """Individual chunk of a KnowledgeDocument with its own embedding.
++
++    Fields:
++        chunk_id: Auto-generated unique key.
++        document_doc_id: FK to parent KnowledgeDocument.doc_id.
++        chunk_index: Ordering index within the parent document (0-based).
++        content: Chunk text stored on filesystem via ContentField.
++        embedding: Auto-generated embedding from content via OpenAI provider.
++        file_path: Denormalized parent document file path (for search results).
++        project_key: Denormalized project key (for filtering).
++    """
++
++    chunk_id = AutoKeyField()
++    document_doc_id = KeyField()
++    chunk_index = IntField(default=0)
++    content = ContentField(store="filesystem")
++    embedding = EmbeddingField(source="content")
++    file_path = KeyField()
++    project_key = KeyField()
++
++    @classmethod
++    def delete_by_parent(cls, doc_id: str) -> int:
++        """Delete all chunks belonging to a parent document.
++
++        Args:
++            doc_id: The parent KnowledgeDocument.doc_id.
++
++        Returns:
++            Number of chunks deleted.
++        """
++        try:
++            chunks = cls.query.filter(document_doc_id=doc_id)
++            count = 0
++            for chunk in chunks:
++                try:
++                    chunk.delete()
++                    count += 1
++                except Exception as e:
++                    logger.warning(f"Failed to delete chunk {chunk.chunk_id}: {e}")
++            if count > 0:
++                logger.info(f"Deleted {count} chunks for document {doc_id}")
++            return count
++        except Exception as e:
++            logger.warning(f"DocumentChunk.delete_by_parent failed for {doc_id}: {e}")
++            return 0
++
++    @classmethod
++    def search(cls, query_text: str, project_key: str | None = None, top_k: int = 5) -> list[dict]:
++        """Search chunks by semantic similarity to query text.
++
++        Embeds the query via the configured OpenAI provider, loads all chunk
++        embeddings, computes cosine similarity, and returns the top-K matches.
++
++        Args:
++            query_text: The search query string.
++            project_key: Optional project key filter.
++            top_k: Maximum number of results to return.
++
++        Returns:
++            List of dicts with keys: chunk_text, file_path, chunk_index, score, project_key.
++        """
++        try:
++            # Embed the query
++            from popoto.fields.embedding_field import OpenAIProvider
++
++            provider = OpenAIProvider()
++            query_embedding = provider.embed(query_text)
++            if query_embedding is None:
++                logger.warning("DocumentChunk.search: failed to embed query")
++                return []
++
++            query_vec = np.array(query_embedding, dtype=np.float32)
++
++            # Load all chunk embeddings
++            embeddings_dict = EmbeddingField.load_embeddings(cls)
++            if not embeddings_dict:
++                return []
++
++            # Score each chunk
++            results = []
++            for chunk_id, embedding_vec in embeddings_dict.items():
++                try:
++                    chunk = cls.query.get(chunk_id=chunk_id)
++                    if chunk is None:
++                        continue
++
++                    # Filter by project_key if specified
++                    if project_key and chunk.project_key != project_key:
++                        continue
++
++                    # Cosine similarity
++                    emb = np.array(embedding_vec, dtype=np.float32)
++                    dot = np.dot(query_vec, emb)
++                    norm_q = np.linalg.norm(query_vec)
++                    norm_e = np.linalg.norm(emb)
++                    if norm_q == 0 or norm_e == 0:
++                        continue
++                    score = float(dot / (norm_q * norm_e))
++
++                    results.append(
++                        {
++                            "chunk_text": chunk.content or "",
++                            "file_path": chunk.file_path or "",
++                            "chunk_index": chunk.chunk_index or 0,
++                            "score": score,
++                            "project_key": chunk.project_key or "",
++                        }
++                    )
++                except Exception as e:
++                    logger.debug(f"Error scoring chunk {chunk_id}: {e}")
++                    continue
++
++            # Sort by score descending, return top-K
++            results.sort(key=lambda x: x["score"], reverse=True)
++            return results[:top_k]
++
++        except Exception as e:
++            logger.warning(f"DocumentChunk.search failed: {e}")
++            return []
+diff --git a/pyproject.toml b/pyproject.toml
+index 35346fb3d..c1f2c062d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -26,6 +26,7 @@ dependencies = [
+     "pyyaml>=6.0.3",
+     "rich>=13.0.0", # Required by pydantic logfire plugin
+     "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
++    "tiktoken>=0.7.0", # Token counting for document chunk boundaries
+     "watchdog>=4.0.0", # Filesystem watcher for knowledge document indexing
+     "fastapi>=0.115.0", # Web UI framework
+     "uvicorn[standard]>=0.34.0", # ASGI server for web UI
+diff --git a/tests/README.md b/tests/README.md
+index 846bd6be0..945bcc7b5 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -198,6 +198,8 @@ tests/
+ | Level | File | Tests | Description |
+ |-------|------|------:|-------------|
+ | unit | `test_model_relationships.py` | 30 | Redis model relationships |
++| unit | `test_document_chunk.py` | 7 | DocumentChunk model, import, search behavior |
++| unit | `test_chunking.py` | 15 | Chunking engine: heading-aware, token-count, overlap |
+ | unit | `test_memory_model.py` | 151 | Memory model (decay, confidence, write filter, bloom) |
+ | unit | `test_memory_hook.py` | 135 | PostToolUse thought injection, sliding window |
+ | unit | `test_memory_extraction.py` | 107 | Post-session Haiku extraction, outcome detection |
+diff --git a/tests/unit/test_chunking.py b/tests/unit/test_chunking.py
+new file mode 100644
+index 000000000..14d2250d1
+--- /dev/null
++++ b/tests/unit/test_chunking.py
+@@ -0,0 +1,193 @@
++"""Tests for the chunking engine."""
++
++import pytest
++
++
++@pytest.mark.unit
++class TestChunkDocument:
++    """Test the chunk_document function."""
++
++    def test_importable(self):
++        """Chunking module can be imported."""
++        from tools.knowledge.chunking import chunk_document
++
++        assert chunk_document is not None
++
++    def test_empty_content_produces_no_chunks(self):
++        """Empty content returns empty list."""
++        from tools.knowledge.chunking import chunk_document
++
++        assert chunk_document("") == []
++        assert chunk_document("   ") == []
++        assert chunk_document("\n\n") == []
++
++    def test_none_content_produces_no_chunks(self):
++        """None content returns empty list."""
++        from tools.knowledge.chunking import chunk_document
++
++        assert chunk_document(None) == []
++
++    def test_short_doc_produces_single_chunk(self):
++        """A short document under the token limit produces exactly one chunk."""
++        from tools.knowledge.chunking import chunk_document
++
++        content = "This is a short document with just a few sentences."
++        chunks = chunk_document(content)
++        assert len(chunks) == 1
++        assert chunks[0]["chunk_index"] == 0
++        assert chunks[0]["text"] == content
++
++    def test_long_doc_produces_multiple_chunks(self):
++        """A document exceeding CHUNK_SIZE_TOKENS produces multiple chunks."""
++        from tools.knowledge.chunking import CHUNK_SIZE_TOKENS, chunk_document
++
++        # Generate content that definitely exceeds the chunk size
++        # ~4 chars per token, so CHUNK_SIZE_TOKENS * 6 chars should exceed it
++        long_content = "This is a test sentence that will be repeated many times. " * (
++            CHUNK_SIZE_TOKENS // 5
++        )
++        chunks = chunk_document(long_content)
++        assert len(chunks) > 1
++
++        # Verify chunk indices are sequential
++        for i, chunk in enumerate(chunks):
++            assert chunk["chunk_index"] == i
++            assert isinstance(chunk["text"], str)
++            assert len(chunk["text"]) > 0
++
++    def test_heading_aware_splitting(self):
++        """Documents with headings split at heading boundaries."""
++        from tools.knowledge.chunking import chunk_document
++
++        content = """# Section One
++
++This is the first section with some content.
++It has multiple lines of text.
++
++# Section Two
++
++This is the second section with different content.
++It also has multiple lines.
++
++# Section Three
++
++This is the third section."""
++
++        chunks = chunk_document(content)
++        # Short doc with headings should still be a single chunk
++        # since total tokens are under the limit
++        assert len(chunks) >= 1
++        # The content should be preserved
++        full_text = " ".join(c["text"] for c in chunks)
++        assert "Section One" in full_text
++        assert "Section Two" in full_text
++        assert "Section Three" in full_text
++
++    def test_heading_aware_splitting_large_doc(self):
++        """Large documents with headings split at heading boundaries."""
++        from tools.knowledge.chunking import CHUNK_SIZE_TOKENS, chunk_document
++
++        # Create a document with headings where each section is large
++        section_content = "This is test content. " * (CHUNK_SIZE_TOKENS // 3)
++        content = f"""# Section One
++
++{section_content}
++
++# Section Two
++
++{section_content}
++
++# Section Three
++
++{section_content}"""
++
++        chunks = chunk_document(content)
++        assert len(chunks) > 1
++
++    def test_overlap_between_adjacent_chunks(self):
++        """Adjacent chunks have overlapping content when split by tokens."""
++        from tools.knowledge.chunking import CHUNK_SIZE_TOKENS, chunk_document
++
++        # Create content without headings to force token-based splitting
++        # Use unique words to verify overlap
++        words = [f"word{i}" for i in range(CHUNK_SIZE_TOKENS * 3)]
++        content = " ".join(words)
++
++        chunks = chunk_document(content)
++        assert len(chunks) > 1
++
++        # Check that adjacent chunks share some content (overlap)
++        for i in range(len(chunks) - 1):
++            current_words = set(chunks[i]["text"].split())
++            next_words = set(chunks[i + 1]["text"].split())
++            overlap = current_words & next_words
++            assert len(overlap) > 0, (
++                f"No overlap between chunk {i} and chunk {i + 1}"
++            )
++
++    def test_chunk_output_format(self):
++        """Each chunk has the expected dict structure."""
++        from tools.knowledge.chunking import chunk_document
++
++        content = "A simple test document."
++        chunks = chunk_document(content)
++        assert len(chunks) == 1
++
++        chunk = chunks[0]
++        assert "chunk_index" in chunk
++        assert "text" in chunk
++        assert isinstance(chunk["chunk_index"], int)
++        assert isinstance(chunk["text"], str)
++
++    def test_whitespace_only_produces_no_chunks(self):
++        """Document with only whitespace produces zero chunks."""
++        from tools.knowledge.chunking import chunk_document
++
++        assert chunk_document("   \n\n   \t   ") == []
++
++    def test_no_headings_falls_back_to_token_splitting(self):
++        """Documents without headings use token-count splitting."""
++        from tools.knowledge.chunking import CHUNK_SIZE_TOKENS, chunk_document
++
++        # Long content without any headings
++        content = "No headings here just plain text. " * (CHUNK_SIZE_TOKENS // 3)
++        chunks = chunk_document(content)
++        assert len(chunks) > 1
++
++
++@pytest.mark.unit
++class TestTokenCounting:
++    """Test token counting utilities."""
++
++    def test_count_tokens(self):
++        """Token counting returns a reasonable positive integer."""
++        from tools.knowledge.chunking import _count_tokens
++
++        count = _count_tokens("Hello, world!")
++        assert isinstance(count, int)
++        assert count > 0
++
++    def test_count_tokens_empty(self):
++        """Empty string has zero tokens."""
++        from tools.knowledge.chunking import _count_tokens
++
++        count = _count_tokens("")
++        assert count == 0
++
++
++@pytest.mark.unit
++class TestConstants:
++    """Test chunking constants."""
++
++    def test_chunk_size_is_reasonable(self):
++        """CHUNK_SIZE_TOKENS is a reasonable value."""
++        from tools.knowledge.chunking import CHUNK_SIZE_TOKENS
++
++        assert 500 <= CHUNK_SIZE_TOKENS <= 5000
++
++    def test_overlap_is_smaller_than_chunk_size(self):
++        """CHUNK_OVERLAP_TOKENS is smaller than CHUNK_SIZE_TOKENS."""
++        from tools.knowledge.chunking import CHUNK_OVERLAP_TOKENS, CHUNK_SIZE_TOKENS
++
++        assert CHUNK_OVERLAP_TOKENS < CHUNK_SIZE_TOKENS
++        assert CHUNK_OVERLAP_TOKENS > 0
+diff --git a/tests/unit/test_document_chunk.py b/tests/unit/test_document_chunk.py
+new file mode 100644
+index 000000000..f420f9a32
+--- /dev/null
++++ b/tests/unit/test_document_chunk.py
+@@ -0,0 +1,70 @@
++"""Tests for the DocumentChunk model."""
++
++import pytest
++
++
++@pytest.mark.unit
++@pytest.mark.models
++class TestDocumentChunkModel:
++    """Test DocumentChunk model definition and methods."""
++
++    def test_model_importable(self):
++        """DocumentChunk model can be imported."""
++        from models.document_chunk import DocumentChunk
++
++        assert DocumentChunk is not None
++
++    def test_model_importable_from_package(self):
++        """DocumentChunk can be imported from models package."""
++        from models import DocumentChunk
++
++        assert DocumentChunk is not None
++
++    def test_model_has_required_fields(self):
++        """Model has all fields specified in the plan."""
++        from models.document_chunk import DocumentChunk
++
++        field_names = [
++            "chunk_id",
++            "document_doc_id",
++            "chunk_index",
++            "content",
++            "embedding",
++            "file_path",
++            "project_key",
++        ]
++        for field_name in field_names:
++            assert hasattr(DocumentChunk, field_name), f"Missing field: {field_name}"
++
++    def test_delete_by_parent_handles_missing_parent(self):
++        """delete_by_parent returns 0 for a nonexistent parent doc."""
++        from models.document_chunk import DocumentChunk
++
++        result = DocumentChunk.delete_by_parent("nonexistent-doc-id-12345")
++        assert result == 0
++
++    def test_search_with_no_chunks_returns_empty(self):
++        """search returns empty list when no chunks exist."""
++        from models.document_chunk import DocumentChunk
++
++        # Use a very specific project key to avoid matching real data
++        result = DocumentChunk.search(
++            "test query", project_key="__test_nonexistent_project__", top_k=5
++        )
++        assert isinstance(result, list)
++        # Should be empty since no chunks exist for this project key
++        # (may return empty even without project_key filter if no chunks at all)
++
++    def test_search_returns_list_type(self):
++        """search always returns a list, even on error."""
++        from models.document_chunk import DocumentChunk
++
++        result = DocumentChunk.search("any query")
++        assert isinstance(result, list)
++
++    def test_has_class_methods(self):
++        """Model has expected class methods."""
++        from models.document_chunk import DocumentChunk
++
++        assert callable(getattr(DocumentChunk, "delete_by_parent", None))
++        assert callable(getattr(DocumentChunk, "search", None))
+diff --git a/tools/knowledge/chunking.py b/tools/knowledge/chunking.py
+new file mode 100644
+index 000000000..310528b99
+--- /dev/null
++++ b/tools/knowledge/chunking.py
+@@ -0,0 +1,170 @@
++"""Chunking engine for splitting documents into embeddable chunks.
++
++Splits document content into overlapping chunks suitable for individual
++embedding. Uses heading-aware splitting when possible, falling back to
++token-count splitting.
++
++Constants:
++    CHUNK_SIZE_TOKENS: Target size for each chunk (~1500 tokens).
++    CHUNK_OVERLAP_TOKENS: Overlap between adjacent chunks (~200 tokens).
++"""
++
++import logging
++import re
++
++import tiktoken
++
++logger = logging.getLogger(__name__)
++
++# Configurable chunk parameters
++CHUNK_SIZE_TOKENS = 1500
++CHUNK_OVERLAP_TOKENS = 200
++
++# Cache tiktoken encoding at module level for performance
++_encoding = None
++
++
++def _get_encoding() -> tiktoken.Encoding:
++    """Get the cached tiktoken encoding (cl100k_base, same as text-embedding-3-small)."""
++    global _encoding
++    if _encoding is None:
++        _encoding = tiktoken.get_encoding("cl100k_base")
++    return _encoding
++
++
++def _count_tokens(text: str) -> int:
++    """Count tokens in text using tiktoken cl100k_base encoding."""
++    try:
++        return len(_get_encoding().encode(text))
++    except Exception as e:
++        logger.warning(f"tiktoken encoding failed, estimating: {e}")
++        # Fallback: rough estimate of ~4 chars per token
++        return len(text) // 4
++
++
++def _split_by_headings(content: str) -> list[tuple[str, str]]:
++    """Split content by top-level (h1/h2) headings.
++
++    Returns list of (heading, section_content) tuples.
++    If no headings found, returns single entry with empty heading.
++    """
++    sections = []
++    current_heading = ""
++    current_lines = []
++
++    for line in content.split("\n"):
++        if re.match(r"^#{1,2}\s+", line):
++            if current_lines:
++                section_text = "\n".join(current_lines).strip()
++                if section_text:
++                    sections.append((current_heading, section_text))
++            current_heading = line.strip()
++            current_lines = []
++        else:
++            current_lines.append(line)
++
++    # Save last section
++    if current_lines:
++        section_text = "\n".join(current_lines).strip()
++        if section_text:
++            sections.append((current_heading, section_text))
++
++    if not sections:
++        return [("", content.strip())]
++
++    return sections
++
++
++def _split_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str]:
++    """Split text into chunks by token count with overlap.
++
++    Args:
++        text: The text to split.
++        chunk_size: Maximum tokens per chunk.
++        overlap: Number of overlapping tokens between adjacent chunks.
++
++    Returns:
++        List of chunk text strings.
++    """
++    encoding = _get_encoding()
++    try:
++        tokens = encoding.encode(text)
++    except Exception as e:
++        logger.warning(f"tiktoken encoding failed in _split_by_tokens: {e}")
++        return [text] if text.strip() else []
++
++    if len(tokens) <= chunk_size:
++        return [text] if text.strip() else []
++
++    chunks = []
++    start = 0
++    while start < len(tokens):
++        end = min(start + chunk_size, len(tokens))
++        chunk_tokens = tokens[start:end]
++        try:
++            chunk_text = encoding.decode(chunk_tokens)
++        except Exception:
++            chunk_text = text[start * 4 : end * 4]  # rough fallback
++
++        if chunk_text.strip():
++            chunks.append(chunk_text.strip())
++
++        # Advance by (chunk_size - overlap) to create overlap
++        step = chunk_size - overlap
++        if step <= 0:
++            step = chunk_size  # safety: prevent infinite loop
++        start += step
++
++    return chunks
++
++
++def chunk_document(content: str) -> list[dict]:
++    """Split document content into chunks for individual embedding.
++
++    Strategy:
++    1. If the document is under CHUNK_SIZE_TOKENS, return a single chunk.
++    2. Split by h1/h2 headings.
++    3. For sections exceeding CHUNK_SIZE_TOKENS, sub-split by token count with overlap.
++    4. For documents with no headings, split entirely by token count with overlap.
++
++    Args:
++        content: The full document text.
++
++    Returns:
++        List of dicts: [{"chunk_index": int, "text": str}, ...]
++        Empty list for empty/whitespace-only content.
++    """
++    if not content or not content.strip():
++        return []
++
++    content = content.strip()
++
++    # Short document: single chunk
++    total_tokens = _count_tokens(content)
++    if total_tokens <= CHUNK_SIZE_TOKENS:
++        return [{"chunk_index": 0, "text": content}]
++
++    # Try heading-aware splitting
++    sections = _split_by_headings(content)
++
++    # If only one section with no heading, it means no headings were found
++    # Fall back to pure token splitting
++    if len(sections) == 1 and sections[0][0] == "":
++        token_chunks = _split_by_tokens(content, CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_TOKENS)
++        return [{"chunk_index": i, "text": chunk} for i, chunk in enumerate(token_chunks)]
++
++    # Process each heading section
++    all_chunks = []
++    for heading, section_text in sections:
++        # Prepend heading to section content for context
++        full_section = f"{heading}\n\n{section_text}" if heading else section_text
++
++        section_tokens = _count_tokens(full_section)
++        if section_tokens <= CHUNK_SIZE_TOKENS:
++            all_chunks.append(full_section)
++        else:
++            # Sub-split large sections by token count
++            sub_chunks = _split_by_tokens(full_section, CHUNK_SIZE_TOKENS, CHUNK_OVERLAP_TOKENS)
++            all_chunks.extend(sub_chunks)
++
++    return [{"chunk_index": i, "text": chunk} for i, chunk in enumerate(all_chunks)]
+diff --git a/tools/knowledge/indexer.py b/tools/knowledge/indexer.py
+index 3509f2b1d..aec4b2f4d 100644
+--- a/tools/knowledge/indexer.py
++++ b/tools/knowledge/indexer.py
+@@ -4,16 +4,17 @@
+ - Reads file content
+ - Resolves project scope
+ - Upserts KnowledgeDocument records
++- Syncs DocumentChunk records for fine-grained search
+ - Creates/refreshes companion Memory records with reference pointers
+ 
+ Companion memories use source="knowledge" and importance=3.0, positioned
+ between agent observations (1.0) and human messages (6.0).
+ """
+ 
++import hashlib
+ import json
+ import logging
+ import os
+-import re
+ from pathlib import Path
+ 
+ from config.models import HAIKU
+@@ -58,36 +59,11 @@ def _make_reference(file_path: str) -> str:
+ def _split_by_headings(content: str) -> list[tuple[str, str]]:
+     """Split content by top-level (h1/h2) headings.
+ 
+-    Returns list of (heading, section_content) tuples.
+-    If no headings found, returns single entry with empty heading.
++    Delegates to the canonical implementation in tools.knowledge.chunking.
+     """
+-    # Split on lines starting with # or ##
+-    sections = []
+-    current_heading = ""
+-    current_lines = []
+-
+-    for line in content.split("\n"):
+-        if re.match(r"^#{1,2}\s+", line):
+-            # Save previous section if it has content
+-            if current_lines:
+-                section_text = "\n".join(current_lines).strip()
+-                if section_text:
+-                    sections.append((current_heading, section_text))
+-            current_heading = line.strip()
+-            current_lines = []
+-        else:
+-            current_lines.append(line)
+-
+-    # Save last section
+-    if current_lines:
+-        section_text = "\n".join(current_lines).strip()
+-        if section_text:
+-            sections.append((current_heading, section_text))
+-
+-    if not sections:
+-        return [("", content.strip())]
+-
+-    return sections
++    from tools.knowledge.chunking import _split_by_headings as _chunking_split_by_headings
++
++    return _chunking_split_by_headings(content)
+ 
+ 
+ def _summarize_content(content: str, file_path: str) -> str:
+@@ -130,11 +106,113 @@ def _summarize_content(content: str, file_path: str) -> str:
+     return truncated
+ 
+ 
++def _sync_chunks(doc, content: str, project_key: str) -> None:
++    """Sync DocumentChunk records for a KnowledgeDocument.
++
++    Deletes all existing chunks for the document, then creates new chunks
++    from the content. Each chunk gets its own embedding via EmbeddingField.
++
++    Wrapped in try/except to maintain crash isolation -- chunk failures
++    must not break document indexing.
++
++    Args:
++        doc: The parent KnowledgeDocument instance.
++        content: The full document content to chunk.
++        project_key: Project key for the chunks.
++    """
++    try:
++        from models.document_chunk import DocumentChunk
++        from tools.knowledge.chunking import chunk_document
++
++        doc_id = doc.doc_id
++
++        # Delete all existing chunks for this document
++        DocumentChunk.delete_by_parent(doc_id)
++
++        # Split content into chunks
++        chunks = chunk_document(content)
++        if not chunks:
++            logger.debug(f"No chunks produced for document {doc_id}")
++            return
++
++        # Create new chunks
++        created = 0
++        for chunk_data in chunks:
++            try:
++                chunk = DocumentChunk(
++                    document_doc_id=doc_id,
++                    chunk_index=chunk_data["chunk_index"],
++                    content=chunk_data["text"],
++                    file_path=doc.file_path or "",
++                    project_key=project_key,
++                )
++                chunk.save()
++                created += 1
++            except Exception as e:
++                logger.warning(
++                    f"Failed to create chunk {chunk_data['chunk_index']} for document {doc_id}: {e}"
++                )
++
++        if created > 0:
++            logger.info(f"Created {created} chunks for document {doc_id}")
++
++    except Exception as e:
++        logger.warning(f"Chunk sync failed for document (non-fatal): {e}")
++
++
++def _cleanup_orphan_chunks() -> int:
++    """Delete DocumentChunk records whose parent KnowledgeDocument no longer exists.
++
++    Called at the end of full_scan() to clean up orphans from partial failures.
++
++    Returns:
++        Number of orphan chunks deleted.
++    """
++    try:
++        from models.document_chunk import DocumentChunk
++        from models.knowledge_document import KnowledgeDocument
++
++        all_chunks = DocumentChunk.query.all()
++        if not all_chunks:
++            return 0
++
++        # Group chunks by parent doc_id
++        chunks_by_parent: dict[str, list] = {}
++        for chunk in all_chunks:
++            parent_id = chunk.document_doc_id
++            if parent_id not in chunks_by_parent:
++                chunks_by_parent[parent_id] = []
++            chunks_by_parent[parent_id].append(chunk)
++
++        orphan_count = 0
++        for parent_id, chunks in chunks_by_parent.items():
++            try:
++                parent = KnowledgeDocument.query.get(doc_id=parent_id)
++                if parent is None:
++                    # Parent doesn't exist -- these are orphans
++                    for chunk in chunks:
++                        try:
++                            chunk.delete()
++                            orphan_count += 1
++                        except Exception:
++                            pass
++            except Exception:
++                pass
++
++        if orphan_count > 0:
++            logger.info(f"Cleaned up {orphan_count} orphan chunks")
++        return orphan_count
++
++    except Exception as e:
++        logger.warning(f"Orphan chunk cleanup failed (non-fatal): {e}")
++        return 0
++
++
+ def index_file(file_path: str) -> bool:
+     """Index a single file from the work-vault.
+ 
+     Reads the file, resolves scope, upserts KnowledgeDocument,
+-    and creates/refreshes companion Memory records.
++    syncs DocumentChunk records, and creates/refreshes companion Memory records.
+ 
+     Returns True if indexing succeeded, False otherwise.
+     """
+@@ -155,6 +233,21 @@ def index_file(file_path: str) -> bool:
+             logger.debug(f"File not found: {abs_path}")
+             return False
+ 
++        # Read file content for hash comparison
++        try:
++            with open(abs_path, encoding="utf-8", errors="replace") as f:
++                raw_content = f.read()
++        except Exception as e:
++            logger.warning(f"Failed to read file {abs_path}: {e}")
++            return False
++
++        if not raw_content.strip():
++            logger.debug(f"Skipping empty file: {abs_path}")
++            return False
++
++        # Compute content hash BEFORE safe_upsert to detect changes
++        content_hash = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
++
+         # Resolve scope
+         from tools.knowledge.scope_resolver import resolve_scope
+ 
+@@ -165,13 +258,25 @@ def index_file(file_path: str) -> bool:
+ 
+         project_key, scope = scope_result
+ 
+-        # Upsert KnowledgeDocument
++        # Check if content has changed (for chunk sync decision)
+         from models.knowledge_document import KnowledgeDocument
+ 
++        existing_docs = KnowledgeDocument.query.filter(file_path=abs_path)
++        content_changed = True
++        if existing_docs:
++            existing_doc = existing_docs[0]
++            if existing_doc.content_hash == content_hash:
++                content_changed = False
++
++        # Upsert KnowledgeDocument
+         doc = KnowledgeDocument.safe_upsert(abs_path, project_key, scope)
+         if doc is None:
+             return False
+ 
++        # Sync chunks only if content changed
++        if content_changed:
++            _sync_chunks(doc, raw_content, project_key)
++
+         # Create companion memories
+         _create_companion_memories(abs_path, project_key, scope, doc.content or "")
+         return True
+@@ -241,20 +346,30 @@ def _create_companion_memories(file_path: str, project_key: str, scope: str, con
+ 
+ 
+ def delete_file(file_path: str) -> bool:
+-    """Delete a KnowledgeDocument and its companion memories.
++    """Delete a KnowledgeDocument, its chunks, and companion memories.
+ 
+     Returns True if cleanup succeeded, False otherwise.
+     """
+     try:
+         abs_path = os.path.normpath(os.path.expanduser(file_path))
+ 
++        from models.document_chunk import DocumentChunk
+         from models.knowledge_document import KnowledgeDocument
+ 
++        # Delete chunks before deleting the parent document
++        existing = KnowledgeDocument.query.filter(file_path=abs_path)
++        if existing:
++            for doc in existing:
++                try:
++                    DocumentChunk.delete_by_parent(doc.doc_id)
++                except Exception as e:
++                    logger.warning(f"Chunk cleanup failed for {doc.doc_id}: {e}")
++
+         doc_deleted = KnowledgeDocument.delete_by_path(abs_path)
+         _delete_companion_memories(abs_path)
+ 
+         if doc_deleted:
+-            logger.info(f"Deleted knowledge document and companions: {abs_path}")
++            logger.info(f"Deleted knowledge document, chunks, and companions: {abs_path}")
+         return doc_deleted
+ 
+     except Exception as e:
+@@ -337,6 +452,9 @@ def full_scan(vault_path: str | None = None) -> dict[str, int]:
+                 logger.debug(f"Error scanning {file_path}: {e}")
+                 stats["errors"] += 1
+ 
++    # Clean up orphan chunks from partial failures
++    _cleanup_orphan_chunks()
++
+     logger.info(
+         f"Full scan complete: {stats['indexed']} indexed, "
+         f"{stats['skipped']} skipped, {stats['errors']} errors"

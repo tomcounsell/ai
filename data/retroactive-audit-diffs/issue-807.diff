@@ -1,0 +1,748 @@
+diff --git a/.claude/skills/do-build/SKILL.md b/.claude/skills/do-build/SKILL.md
+index 5743e897..349b5493 100644
+--- a/.claude/skills/do-build/SKILL.md
++++ b/.claude/skills/do-build/SKILL.md
+@@ -165,6 +165,14 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special
+     - If exit code 0: all plan assertions pass, proceed to review
+     - If exit code 1: feed the failure report into `/do-patch` for fixes, then re-run validation (up to 3 iterations)
+     - The script checks file existence assertions, verification table commands, and success criteria from the plan
++16c. **Run AI semantic evaluation against acceptance criteria** - After validate_build.py passes, run the AI evaluator:
++    ```bash
++    (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)
++    ```
++    - Exit code 0: all criteria PASS or PARTIAL — log any PARTIAL verdicts as warnings, proceed to step 17
++    - Exit code 2: FAIL verdicts found — bundle ALL FAIL verdicts into a single `/do-patch` call (not one call per FAIL); log `[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt X/2)` before each invocation; max 2 iterations; if FAIL persists after 2 iterations, log "AI evaluator: 2 iterations reached, proceeding to review" and proceed to step 17
++    - Exit code 3: no `## Acceptance Criteria` section — log "AI evaluator: no Acceptance Criteria section, skipping" and proceed to step 17
++    - Exit code 1 or any error: log "AI evaluator failed (non-blocking): {error}" and proceed to step 17
+ 17. **Advance to review stage** after tests pass:
+     ```bash
+     python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 65ab08da..f5428fbe 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -40,6 +40,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
+ | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |
+ | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
++| [Do-Build AI Evaluator](do-build-ai-evaluator.md) | AI semantic evaluator step in /do-build pipeline: reads plan Acceptance Criteria, compares against git diff, returns PASS/PARTIAL/FAIL verdicts with evidence | Shipped |
+ | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
+ | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
+ | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
+diff --git a/docs/features/do-build-ai-evaluator.md b/docs/features/do-build-ai-evaluator.md
+new file mode 100644
+index 00000000..b09758b7
+--- /dev/null
++++ b/docs/features/do-build-ai-evaluator.md
+@@ -0,0 +1,109 @@
++# Do-Build AI Evaluator
++
++## Overview
++
++The AI evaluator is a semantic build gate that runs during the `/do-build` pipeline. After the deterministic `validate_build.py` checks pass, the AI evaluator reads the plan's `## Acceptance Criteria` section and compares each criterion against the actual code changes (`git diff main..HEAD`) using Claude Haiku as an AI judge.
++
++The evaluator is **advisory and non-blocking** — evaluator failures never halt the pipeline. FAIL verdicts trigger up to 2 `/do-patch` cycles to fix gaps; PARTIAL verdicts log as warnings; errors are caught and logged before the pipeline continues to the review stage.
++
++## Pipeline Position
++
++The AI evaluator runs as **step 16c** in the `/do-build` workflow:
++
++```
++validate_build.py (step 16b)  → deterministic checks pass
++  ↓
++evaluate_build.py (step 16c)  → AI semantic evaluation
++  ↓
++advance_stage('review') (step 17)
++```
++
++The evaluator runs **after** all deterministic checks and **before** the pipeline advances to the review stage.
++
++## Verdict Types
++
++Each acceptance criterion receives one of three verdicts:
++
++| Verdict | Meaning | Pipeline Response |
++|---------|---------|------------------|
++| `PASS` | Criterion clearly met in the diff | No action — proceed normally |
++| `PARTIAL` | Criterion partially met or uncertain | Log as warning, proceed (non-blocking) |
++| `FAIL` | Criterion not met | Route to `/do-patch` (max 2 iterations) |
++
++## Routing Logic
++
++### FAIL Verdicts
++
++When one or more FAIL verdicts are found:
++
++1. All FAIL verdicts are bundled into a **single** `/do-patch` call (not one per FAIL)
++2. The log emits: `[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt X/2)`
++3. After the patch, `evaluate_build.py` re-runs
++4. If FAIL persists after 2 iterations: log `"AI evaluator: 2 iterations reached, proceeding to review"` and continue
++5. If FAIL resolves: proceed to review stage
++
++### PARTIAL Verdicts
++
++PARTIAL verdicts are **warning-only**:
++- Logged to `logs/evaluate_build.log` at INFO level
++- Emitted to stderr as: `WARNING: AC criterion PARTIAL — {criterion}: {evidence}`
++- Do not block the pipeline or trigger patches
++
++### Errors (Non-blocking)
++
++Any evaluator error (API timeout, JSON parse failure, missing script) is caught and logged:
++- `"AI evaluator failed (non-blocking): {error}"`
++- Pipeline proceeds to review stage without delay
++
++## Exit Code Reference
++
++| Code | Meaning | Pipeline Action |
++|------|---------|----------------|
++| `0` | All criteria PASS or PARTIAL | Log PARTIAL warnings, proceed to review |
++| `1` | Unexpected error (API error, JSON parse failure) | Log warning, proceed to review (non-blocking) |
++| `2` | One or more FAIL verdicts | Route to `/do-patch` (max 2 iterations) |
++| `3` | No `## Acceptance Criteria` section, or empty diff | Log skip warning, proceed to review |
++
++## How to Disable
++
++The AI evaluator is **automatically skipped** when:
++- The plan has no `## Acceptance Criteria` section (exit code 3)
++- The `## Acceptance Criteria` section is present but empty (exit code 3)
++- The git diff is empty (no code changes) (exit code 3)
++
++To intentionally skip evaluation, omit the `## Acceptance Criteria` section from the plan, or leave it empty.
++
++## Script Reference
++
++**File:** `scripts/evaluate_build.py`
++
++**Usage:**
++```bash
++python scripts/evaluate_build.py <plan-path>
++python scripts/evaluate_build.py --dry-run <plan-path>  # Mock PASS verdicts, no API call
++python scripts/evaluate_build.py --help
++```
++
++**Output format** (stdout, JSON):
++```json
++{
++  "verdicts": [
++    {"criterion": "The evaluator script exists", "verdict": "PASS", "evidence": "Found scripts/evaluate_build.py in diff."},
++    {"criterion": "FAIL verdicts route to /do-patch", "verdict": "PARTIAL", "evidence": "Routing logic present but patch invocation not verified."}
++  ]
++}
++```
++
++**Logging:** Events are written to `logs/evaluate_build.log` (same directory as `logs/bridge.log`). FAIL verdicts log at WARNING; PASS/PARTIAL at INFO.
++
++## Model Selection
++
++The evaluator uses **Claude Haiku** (`config.models.HAIKU`) for speed and cost efficiency. Haiku is well-suited for structured JSON classification tasks like verdict generation. The 60-second internal timeout ensures builds are not delayed beyond 1 minute in worst-case scenarios.
++
++## Design Decisions
++
++- **Additive, not a replacement**: The deterministic `validate_build.py` runs first. The AI evaluator adds a semantic layer on top — it never replaces structural checks.
++- **Non-blocking by design**: Any evaluator malfunction (API error, timeout, missing file) is caught at exit code 1 and treated as a skip. The pipeline always advances to review.
++- **Max 2 patch iterations**: Capped to prevent runaway cycles on builds where the AI evaluator is over-strict. Human review handles any remaining gaps.
++- **All FAILs bundled**: Multiple FAIL verdicts are sent to `/do-patch` as a single structured list, not one call per FAIL. This keeps patch cycles atomic and reduces noise.
++- **Read-only contract**: `evaluate_build.py` never modifies any files. It reads the plan and diff, calls the AI, writes to stdout only.
+diff --git a/docs/features/plan-completion-gate.md b/docs/features/plan-completion-gate.md
+index b0cd2f42..b3491edc 100644
+--- a/docs/features/plan-completion-gate.md
++++ b/docs/features/plan-completion-gate.md
+@@ -44,6 +44,8 @@ Design principles:
+ 
+ Step 16b in `.claude/skills/do-build/SKILL.md` runs `validate_build.py` after the definition-of-done check. If validation fails (exit 1), the failure report feeds into `/do-patch` for fixes, with up to 3 retry iterations before advancing to review.
+ 
++Step 16c (the **AI semantic evaluator**) runs immediately after. It reads the plan's `## Acceptance Criteria` section and compares each criterion against the git diff using Claude Haiku as an AI judge. FAIL verdicts route to `/do-patch` (max 2 iterations); PARTIAL verdicts are logged as warnings; any evaluator error is caught and treated as a skip. The evaluator is non-blocking — pipeline always advances to review. See `docs/features/do-build-ai-evaluator.md` for the full spec.
++
+ ### 4. `/do-pr-review` plan checkbox validation
+ 
+ Step 4b in `.claude/skills/do-pr-review/sub-skills/code-review.md` walks each unchecked `- [ ]` item in key plan sections and assesses whether the PR diff addresses it:
+@@ -70,6 +72,8 @@ A plan checkbox scan in `.claude/commands/do-merge.md` runs between the pipeline
+ |------|------|
+ | `scripts/validate_build.py` | Deterministic plan-to-build validator |
+ | `tests/unit/test_validate_build.py` | Unit tests for the validator |
++| `scripts/evaluate_build.py` | AI semantic evaluator (step 16c) — verdict per acceptance criterion |
++| `tests/unit/test_evaluate_build.py` | Unit tests for the AI evaluator |
+ | `.claude/skills/do-docs/SKILL.md` | Removed plan status update section |
+ | `.claude/skills/do-build/SKILL.md` | Added validate_build.py step (16b) |
+ | `.claude/skills/do-pr-review/sub-skills/code-review.md` | Added checkbox validation (4b) |
+@@ -78,7 +82,7 @@ A plan checkbox scan in `.claude/commands/do-merge.md` runs between the pipeline
+ ## How It Works End-to-End
+ 
+ 1. Developer creates a plan with checkboxes across sections (Acceptance Criteria, Test Impact, Documentation, etc.)
+-2. `/do-build` implements the plan and runs `validate_build.py` to verify file assertions and verification commands pass
++2. `/do-build` implements the plan and runs `validate_build.py` (step 16b) to verify file assertions and verification commands pass, then `evaluate_build.py` (step 16c) for AI semantic evaluation against Acceptance Criteria
+ 3. `/do-pr-review` cross-references unchecked plan items against the PR diff and flags unaddressed items
+ 4. `/do-docs` updates documentation and writes `status: docs_complete` to the plan frontmatter, signaling DOCS stage completion
+ 5. `/do-merge` scans for any remaining unchecked items and blocks the merge if requirements are still open
+diff --git a/docs/plans/do-build-ai-evaluator.md b/docs/plans/completed/do-build-ai-evaluator.md
+similarity index 99%
+rename from docs/plans/do-build-ai-evaluator.md
+rename to docs/plans/completed/do-build-ai-evaluator.md
+index 6d5e10af..a9e120fc 100644
+--- a/docs/plans/do-build-ai-evaluator.md
++++ b/docs/plans/completed/do-build-ai-evaluator.md
+@@ -1,5 +1,5 @@
+ ---
+-status: In Progress
++status: docs_complete
+ type: feature
+ appetite: Small
+ owner: Valor Engels
+diff --git a/scripts/evaluate_build.py b/scripts/evaluate_build.py
+new file mode 100644
+index 00000000..c1af6eef
+--- /dev/null
++++ b/scripts/evaluate_build.py
+@@ -0,0 +1,247 @@
++#!/usr/bin/env python3
++"""AI semantic evaluator for build acceptance criteria.
++
++Reads the plan's ## Acceptance Criteria section and compares against
++git diff main..HEAD using an AI judge. Returns structured verdicts.
++
++Usage:
++    python scripts/evaluate_build.py <plan-path>
++    python scripts/evaluate_build.py --dry-run <plan-path>
++    python scripts/evaluate_build.py --help
++
++Exit codes:
++    0 - All criteria PASS or PARTIAL (no FAIL)
++    1 - Unexpected error (non-blocking — caller logs and proceeds)
++    2 - One or more FAIL verdicts
++    3 - No ## Acceptance Criteria section in plan or empty diff (skip with warning)
++"""
++
++import json
++import logging
++import re
++import subprocess
++import sys
++from pathlib import Path
++
++import anthropic
++
++from config.models import HAIKU
++
++# Configure logging to file and stderr
++LOG_FILE = Path("logs/evaluate_build.log")
++
++
++def _setup_logging() -> logging.Logger:
++    """Set up logging to file and stderr."""
++    logger = logging.getLogger("evaluate_build")
++    logger.setLevel(logging.DEBUG)
++
++    # File handler
++    try:
++        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
++        fh = logging.FileHandler(LOG_FILE)
++        fh.setLevel(logging.DEBUG)
++        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
++        logger.addHandler(fh)
++    except Exception:
++        pass  # Log file setup failure is non-blocking
++
++    # Stderr handler for visible messages
++    sh = logging.StreamHandler(sys.stderr)
++    sh.setLevel(logging.WARNING)
++    sh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
++    logger.addHandler(sh)
++
++    return logger
++
++
++logger = _setup_logging()
++
++
++def extract_section(plan_text: str, heading: str) -> str:
++    """Extract content of a markdown section by heading name.
++
++    Returns the text between the heading and the next heading of level 1-3,
++    or end of document. Does not distinguish heading levels -- any heading
++    at level 1, 2, or 3 terminates the section.
++    """
++    pattern = r"^(#{1,3}) " + re.escape(heading) + r"\s*\n(.*?)(?=^#{1,3} |\Z)"
++    match = re.search(pattern, plan_text, re.MULTILINE | re.DOTALL)
++    if match:
++        return match.group(2)
++    return ""
++
++
++def get_git_diff() -> str:
++    """Run git diff main..HEAD and return output string."""
++    try:
++        result = subprocess.run(
++            ["git", "diff", "main..HEAD"],
++            capture_output=True,
++            text=True,
++            timeout=30,
++        )
++        return result.stdout
++    except Exception as e:
++        logger.warning(f"Failed to run git diff: {e}")
++        return ""
++
++
++def evaluate_criteria(criteria_text: str, diff_text: str) -> list[dict]:
++    """Call Anthropic API (Claude Haiku) to evaluate acceptance criteria against diff.
++
++    Returns a list of verdict dicts: {"criterion": str, "verdict": str, "evidence": str}
++    """
++    prompt = f"""You are a build acceptance evaluator. Given a list of acceptance criteria and a git diff, assess each criterion.
++
++For each criterion output:
++- verdict: "PASS" if clearly met, "PARTIAL" if partially met or uncertain, "FAIL" if not met
++- evidence: one sentence explaining what you found (or didn't find) in the diff
++
++Acceptance Criteria:
++{criteria_text}
++
++Git Diff (main..HEAD):
++{diff_text}
++
++Respond with valid JSON only:
++{{"verdicts": [{{"criterion": "<text>", "verdict": "PASS|PARTIAL|FAIL", "evidence": "<sentence>"}}]}}"""
++
++    client = anthropic.Anthropic()
++    message = client.messages.create(
++        model=HAIKU,
++        max_tokens=2048,
++        timeout=60,
++        messages=[{"role": "user", "content": prompt}],
++    )
++
++    response_text = message.content[0].text
++    data = json.loads(response_text)
++    return data["verdicts"]
++
++
++def _make_dry_run_verdicts(criteria_text: str) -> list[dict]:
++    """Parse criteria and return mock PASS verdicts for each (--dry-run mode)."""
++    verdicts = []
++    lines = criteria_text.strip().splitlines()
++    for line in lines:
++        line = line.strip()
++        if not line:
++            continue
++        # Strip checkbox markers
++        line = re.sub(r"^-\s*\[[ xX]\]\s*", "", line)
++        line = re.sub(r"^\*\s*", "", line)
++        if line:
++            verdicts.append(
++                {
++                    "criterion": line,
++                    "verdict": "PASS",
++                    "evidence": "[dry-run] Mock PASS verdict — no API call made.",
++                }
++            )
++    return verdicts
++
++
++def main() -> int:
++    dry_run = "--dry-run" in sys.argv
++    args = [a for a in sys.argv[1:] if a != "--dry-run"]
++
++    if not args or args[0] in ("--help", "-h"):
++        print("Usage: python scripts/evaluate_build.py [--dry-run] <plan-path>")
++        print()
++        print("AI semantic evaluator for build acceptance criteria.")
++        print("Reads the plan's ## Acceptance Criteria section and compares")
++        print("against git diff main..HEAD using Claude Haiku.")
++        print()
++        print("Options:")
++        print("  --dry-run   Parse criteria and diff but skip API call;")
++        print("              output mock PASS verdicts for testing.")
++        print("  --help      Show this help and exit.")
++        print()
++        print("Exit codes:")
++        print("  0 - All criteria PASS or PARTIAL (no FAIL)")
++        print("  1 - Unexpected error (non-blocking — caller logs and proceeds)")
++        print("  2 - One or more FAIL verdicts")
++        print("  3 - No ## Acceptance Criteria section or empty diff (skip)")
++        return 0
++
++    plan_path = Path(args[0])
++    if not plan_path.exists():
++        print(f"Error: Plan file not found: {plan_path}", file=sys.stderr)
++        logger.warning(f"Plan file not found: {plan_path}")
++        return 1
++
++    try:
++        plan_text = plan_path.read_text()
++    except Exception as e:
++        print(f"Error reading plan file: {e}", file=sys.stderr)
++        logger.warning(f"Error reading plan file: {e}")
++        return 1
++
++    # Extract Acceptance Criteria section
++    criteria_text = extract_section(plan_text, "Acceptance Criteria")
++    if not criteria_text or not criteria_text.strip():
++        msg = "AI evaluator: no Acceptance Criteria section, skipping"
++        print(msg, file=sys.stderr)
++        logger.warning(msg)
++        return 3
++
++    # Get git diff
++    diff_text = get_git_diff()
++    if not diff_text or not diff_text.strip():
++        msg = "AI evaluator: empty diff, skipping"
++        print(msg, file=sys.stderr)
++        logger.warning(msg)
++        return 3
++
++    # Run evaluation (or dry-run)
++    try:
++        if dry_run:
++            verdicts = _make_dry_run_verdicts(criteria_text)
++        else:
++            verdicts = evaluate_criteria(criteria_text, diff_text)
++    except json.JSONDecodeError as e:
++        msg = f"AI evaluator failed (non-blocking): JSON parse error — {e}"
++        print(msg, file=sys.stderr)
++        logger.warning(msg)
++        return 1
++    except Exception as e:
++        msg = f"AI evaluator failed (non-blocking): {e}"
++        print(msg, file=sys.stderr)
++        logger.warning(msg)
++        return 1
++
++    # Output structured verdicts to stdout
++    output = {"verdicts": verdicts}
++    print(json.dumps(output, indent=2))
++
++    # Log and collect results
++    fail_count = 0
++    partial_count = 0
++    pass_count = 0
++
++    for v in verdicts:
++        criterion = v.get("criterion", "")
++        verdict = v.get("verdict", "").upper()
++        evidence = v.get("evidence", "")
++
++        if verdict == "FAIL":
++            fail_count += 1
++            logger.warning(f"AC criterion FAIL — {criterion}: {evidence}")
++        elif verdict == "PARTIAL":
++            partial_count += 1
++            logger.info(f"AC criterion PARTIAL — {criterion}: {evidence}")
++            print(f"WARNING: AC criterion PARTIAL — {criterion}: {evidence}", file=sys.stderr)
++        else:
++            pass_count += 1
++            logger.info(f"AC criterion PASS — {criterion}: {evidence}")
++
++    logger.info(f"Evaluation complete: {pass_count} PASS, {partial_count} PARTIAL, {fail_count} FAIL")
++
++    if fail_count > 0:
++        return 2
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/unit/test_evaluate_build.py b/tests/unit/test_evaluate_build.py
+new file mode 100644
+index 00000000..9c43a004
+--- /dev/null
++++ b/tests/unit/test_evaluate_build.py
+@@ -0,0 +1,298 @@
++"""Unit tests for scripts/evaluate_build.py.
++
++Tests section parsing, verdict formatting, exit code logic, and
++CLI behavior without making real API calls.
++"""
++
++import json
++import subprocess
++import sys
++from pathlib import Path
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++# Add scripts to path for direct imports
++sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
++
++import evaluate_build
++from evaluate_build import (
++    _make_dry_run_verdicts,
++    extract_section,
++    get_git_diff,
++)
++
++PLAN_WITH_AC = """\
++---
++status: In Progress
++---
++
++# Feature Plan
++
++## Problem
++This is a test problem.
++
++## Acceptance Criteria
++
++- [ ] The evaluator script exists at `scripts/evaluate_build.py`
++- [ ] Running with --help exits 0 with usage text
++- [ ] FAIL verdicts route to /do-patch
++
++## Success Criteria
++
++- [ ] `python scripts/evaluate_build.py --help` exits 0
++"""
++
++PLAN_WITHOUT_AC = """\
++---
++status: In Progress
++---
++
++# Feature Plan
++
++## Problem
++This is a test problem.
++
++## Success Criteria
++
++- [ ] `python scripts/evaluate_build.py --help` exits 0
++"""
++
++PLAN_WITH_EMPTY_AC = """\
++---
++status: In Progress
++---
++
++# Feature Plan
++
++## Acceptance Criteria
++
++## Success Criteria
++
++- [ ] Something
++"""
++
++
++class TestExtractSection:
++    """Tests for the extract_section utility function."""
++
++    def test_extract_section_with_ac_section(self):
++        """Parses criteria from a plan with ## Acceptance Criteria."""
++        result = extract_section(PLAN_WITH_AC, "Acceptance Criteria")
++        assert "evaluator script exists" in result
++        assert "Running with --help exits 0" in result
++        assert "FAIL verdicts route to /do-patch" in result
++
++    def test_extract_section_without_ac_section(self):
++        """Returns empty string when section is absent."""
++        result = extract_section(PLAN_WITHOUT_AC, "Acceptance Criteria")
++        assert result == ""
++
++    def test_extract_section_returns_only_that_section(self):
++        """Does not bleed into adjacent sections."""
++        result = extract_section(PLAN_WITH_AC, "Acceptance Criteria")
++        assert "Success Criteria" not in result
++        assert "python scripts/evaluate_build.py --help" not in result
++
++    def test_extract_section_empty_content(self):
++        """Returns empty string when section header exists but no content."""
++        result = extract_section(PLAN_WITH_EMPTY_AC, "Acceptance Criteria")
++        # The section content is just whitespace
++        assert result.strip() == ""
++
++
++class TestDryRunVerdicts:
++    """Tests for the --dry-run mock verdict generator."""
++
++    def test_dry_run_returns_pass_for_each_criterion(self):
++        """Generates a PASS verdict for each non-empty criterion line."""
++        criteria = """\
++- [ ] The evaluator script exists
++- [ ] Running with --help exits 0
++- [ ] FAIL verdicts route to /do-patch
++"""
++        verdicts = _make_dry_run_verdicts(criteria)
++        assert len(verdicts) == 3
++        for v in verdicts:
++            assert v["verdict"] == "PASS"
++            assert "[dry-run]" in v["evidence"]
++
++    def test_dry_run_strips_checkbox_markers(self):
++        """Criterion text does not include the `- [ ]` prefix."""
++        criteria = "- [ ] The evaluator script exists\n"
++        verdicts = _make_dry_run_verdicts(criteria)
++        assert len(verdicts) == 1
++        assert verdicts[0]["criterion"] == "The evaluator script exists"
++
++    def test_dry_run_skips_empty_lines(self):
++        """Empty lines do not produce verdicts."""
++        criteria = "\n\n- [ ] Only one criterion\n\n"
++        verdicts = _make_dry_run_verdicts(criteria)
++        assert len(verdicts) == 1
++
++
++class TestExitCodes:
++    """Tests for CLI exit code behavior."""
++
++    def _run_script(self, args, cwd=None):
++        """Helper to run evaluate_build.py as a subprocess."""
++        result = subprocess.run(
++            [sys.executable, "scripts/evaluate_build.py"] + args,
++            capture_output=True,
++            text=True,
++            cwd=cwd or str(Path(__file__).parent.parent.parent),
++        )
++        return result
++
++    def test_exit_code_0_on_help(self):
++        """--help exits 0."""
++        result = self._run_script(["--help"])
++        assert result.returncode == 0
++        assert "Usage:" in result.stdout
++
++    def test_exit_code_3_on_missing_ac_section(self, tmp_path):
++        """Runs evaluate_build.py on a temp plan file without AC section, exits 3."""
++        plan_file = tmp_path / "no_ac_plan.md"
++        plan_file.write_text(PLAN_WITHOUT_AC)
++
++        result = subprocess.run(
++            [sys.executable, "scripts/evaluate_build.py", str(plan_file)],
++            capture_output=True,
++            text=True,
++            cwd=str(Path(__file__).parent.parent.parent),
++        )
++        assert result.returncode == 3, f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
++        assert "no Acceptance Criteria section" in result.stderr or "empty diff" in result.stderr
++
++    def test_exit_code_3_on_empty_ac_section(self, tmp_path):
++        """Runs evaluate_build.py on a plan with empty AC section, exits 3."""
++        plan_file = tmp_path / "empty_ac_plan.md"
++        plan_file.write_text(PLAN_WITH_EMPTY_AC)
++
++        result = subprocess.run(
++            [sys.executable, "scripts/evaluate_build.py", str(plan_file)],
++            capture_output=True,
++            text=True,
++            cwd=str(Path(__file__).parent.parent.parent),
++        )
++        assert result.returncode == 3, f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
++
++    def test_exit_code_1_on_missing_plan(self):
++        """Runs evaluate_build.py on a nonexistent file path, exits 1."""
++        result = self._run_script(["/nonexistent/path/to/plan.md"])
++        assert result.returncode == 1, f"Expected exit 1, got {result.returncode}. stderr: {result.stderr}"
++
++    def test_exit_code_0_on_dry_run_with_ac(self, tmp_path):
++        """Uses --dry-run flag on a plan with AC, exits 0 (all PASS)."""
++        plan_file = tmp_path / "test_plan.md"
++        plan_file.write_text(PLAN_WITH_AC)
++
++        # We need to run in the worktree or repo root so git diff runs
++        # In dry-run mode with AC section, it still needs a non-empty diff
++        # Mock get_git_diff to return non-empty diff
++        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py b/foo.py\n+some change"):
++            with patch.object(sys, "argv", ["evaluate_build.py", "--dry-run", str(plan_file)]):
++                exit_code = evaluate_build.main()
++        assert exit_code == 0
++
++
++class TestVerdictFormatting:
++    """Tests for verdict output formatting."""
++
++    def test_verdict_output_is_valid_json(self, tmp_path):
++        """evaluate_build.py outputs valid JSON to stdout."""
++        plan_file = tmp_path / "test_plan.md"
++        plan_file.write_text(PLAN_WITH_AC)
++
++        mock_verdicts = [
++            {"criterion": "criterion 1", "verdict": "PASS", "evidence": "Found in diff."},
++            {"criterion": "criterion 2", "verdict": "PARTIAL", "evidence": "Partially found."},
++        ]
++
++        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py b/foo.py\n+change"):
++            with patch.object(evaluate_build, "evaluate_criteria", return_value=mock_verdicts):
++                with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
++                    import io
++                    from contextlib import redirect_stdout
++                    captured = io.StringIO()
++                    with redirect_stdout(captured):
++                        exit_code = evaluate_build.main()
++
++        output = captured.getvalue()
++        data = json.loads(output)
++        assert "verdicts" in data
++        assert len(data["verdicts"]) == 2
++
++    def test_partial_verdict_logs_warning(self, tmp_path, capsys):
++        """PARTIAL verdicts emit WARNING to stderr."""
++        plan_file = tmp_path / "test_plan.md"
++        plan_file.write_text(PLAN_WITH_AC)
++
++        mock_verdicts = [
++            {"criterion": "criterion 1", "verdict": "PARTIAL", "evidence": "Partially implemented."},
++        ]
++
++        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
++            with patch.object(evaluate_build, "evaluate_criteria", return_value=mock_verdicts):
++                with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
++                    import io
++                    from contextlib import redirect_stdout
++                    captured = io.StringIO()
++                    with redirect_stdout(captured):
++                        exit_code = evaluate_build.main()
++
++        assert exit_code == 0
++        captured_err = capsys.readouterr()
++        assert "PARTIAL" in captured_err.err
++
++    def test_fail_verdict_returns_exit_2(self, tmp_path):
++        """FAIL verdicts cause exit code 2."""
++        plan_file = tmp_path / "test_plan.md"
++        plan_file.write_text(PLAN_WITH_AC)
++
++        mock_verdicts = [
++            {"criterion": "criterion 1", "verdict": "FAIL", "evidence": "Not found in diff."},
++        ]
++
++        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
++            with patch.object(evaluate_build, "evaluate_criteria", return_value=mock_verdicts):
++                with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
++                    import io
++                    from contextlib import redirect_stdout
++                    captured = io.StringIO()
++                    with redirect_stdout(captured):
++                        exit_code = evaluate_build.main()
++
++        assert exit_code == 2
++
++    def test_api_error_returns_exit_1(self, tmp_path):
++        """API errors are caught and return exit code 1 (non-blocking)."""
++        plan_file = tmp_path / "test_plan.md"
++        plan_file.write_text(PLAN_WITH_AC)
++
++        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
++            with patch.object(evaluate_build, "evaluate_criteria", side_effect=Exception("API timeout")):
++                with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
++                    import io
++                    from contextlib import redirect_stdout
++                    captured = io.StringIO()
++                    with redirect_stdout(captured):
++                        exit_code = evaluate_build.main()
++
++        assert exit_code == 1
++
++    def test_json_decode_error_returns_exit_1(self, tmp_path):
++        """JSON parse errors are caught and return exit code 1 (non-blocking)."""
++        plan_file = tmp_path / "test_plan.md"
++        plan_file.write_text(PLAN_WITH_AC)
++
++        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
++            with patch.object(evaluate_build, "evaluate_criteria", side_effect=json.JSONDecodeError("bad", "", 0)):
++                with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
++                    import io
++                    from contextlib import redirect_stdout
++                    captured = io.StringIO()
++                    with redirect_stdout(captured):
++                        exit_code = evaluate_build.main()
++
++        assert exit_code == 1

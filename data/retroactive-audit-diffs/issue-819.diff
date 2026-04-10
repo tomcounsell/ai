@@ -1,0 +1,307 @@
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 2860d225..96473ba8 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -18,15 +18,14 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
+ | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
+ | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
+-| [Bridge/Worker Architecture](bridge-worker-architecture.md) | Bridge/worker process separation: bridge as pure I/O adapter, worker as sole session executor, Redis contract, operator CLI | Shipped |
+ | [Bridge Resilience](bridge-resilience.md) | Circuit breaker, unified recovery loop, degraded mode, structured logging | Shipped |
+ | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
+ | [Bridge Self-Healing](bridge-self-healing.md) | Automatic crash recovery with session lock cleanup, watchdog, escalation, flood-backoff persistence, and dynamic catchup lookback | Shipped |
+ | [Bridge Workflow Gaps](bridge-workflow-gaps.md) | Auto-continue for status updates, output classification, and session log snapshots | Shipped |
++| [Bridge/Worker Architecture](bridge-worker-architecture.md) | Bridge/worker process separation: bridge as pure I/O adapter, worker as sole session executor, Redis contract, operator CLI. Includes per-chat serialization, global `MAX_CONCURRENT_SESSIONS` semaphore, Redis pop lock (TOCTOU prevention), and CLI session UUID isolation. | Shipped |
+ | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
+ | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
+ | [Chat Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
+-| [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
+ | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
+ | [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
+ | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
+@@ -74,6 +73,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
+ | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
+ | [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
++| [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
+ | [PM Telegram Tool](pm-telegram-tool.md) | PM session composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |
+ | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
+ | [Popoto Index Hygiene](popoto-index-hygiene.md) | Automated cleanup of orphaned Popoto index entries, Meta.ttl on AgentSession, raw Redis migration to Popoto models, daily rebuild_indexes reflection | Shipped |
+@@ -87,7 +87,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
+ | [Scale Agent Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
+ | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
+-| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics, Implementation Note enforcement, concern-triggered revision pass, and propagation check | Shipped |
++| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
+ | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
+ | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
+ | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
+@@ -98,11 +98,11 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
+ | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
+ | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
+-| [Session Steering](session-steering.md) | Externalized steering via `AgentSession.queued_steering_messages` — any process can steer a running session; worker injects messages at turn boundaries; `valor-session` CLI for create/steer/status/list/kill | Shipped |
+ | [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention, stale cleanup via `_active_workers` liveness check, and Redis re-read in `_complete_agent_session` to capture accumulated `stage_states` | Shipped |
+ | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
+ | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
+ | [Session Recovery Mechanisms](session-recovery-mechanisms.md) | Catalogue of all 7 recovery mechanisms with terminal status safety audit, guards, race condition analysis, and regression tests | Shipped |
++| [Session Steering](session-steering.md) | Externalized steering via `AgentSession.queued_steering_messages` — any process can steer a running session; worker injects messages at turn boundaries; `valor-session` CLI for create/steer/status/list/kill | Shipped |
+ | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
+ | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
+ | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
+@@ -129,7 +129,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) | Branch-side retry for flaky tests, deterministic junitxml baseline parsing, and completeness validation for test classification | Shipped |
+ | [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
+ | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
+-| [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC with `bridge/utc.py` utilities; local conversion only at display boundary | Shipped |
++| [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC; CLI/log surfaces show explicit UTC labels, conversational surfaces convert to local time | Shipped |
+ | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |
+ | [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
+ | [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing without Telegram, OutputHandler protocol, FileOutputHandler fallback, launchd service | Shipped |
+diff --git a/docs/features/session-management.md b/docs/features/session-management.md
+index ccff2f7b..e4ec5105 100644
+--- a/docs/features/session-management.md
++++ b/docs/features/session-management.md
+@@ -83,6 +83,26 @@ The resolver never blocks message delivery:
+ 
+ Two rapid replies both derive the same root session_id before either is processed. This is handled by `enqueue_agent_session()`'s same-session_id supersede logic (lines 318–336 of `telegram_bridge.py`). No shared mutable state in the chain walk.
+ 
++## Timestamp Display Format
++
++All timestamp displays in the session CLI include an explicit UTC label to prevent ambiguity when comparing timestamps across sources.
++
++**`python -m tools.valor_session status`** output:
++```
++Created:  2026-04-07 05:49:00 UTC
++Started:  2026-04-07 06:04:28 UTC
++Updated:  2026-04-07 06:34:12 UTC
++```
++
++**`logs/worker.log`** entries:
++```
++2026-04-07 13:03:54 UTC worker INFO ...
++```
++
++Both surfaces use UTC. The `_format_ts()` helper in `tools/valor_session.py` appends ` UTC` to all formatted timestamps and treats naive ISO strings as UTC (matching internal storage per PR #557). The worker logger uses a `_UTCFormatter` subclass with `converter = time.gmtime` so log lines never show local time.
++
++This avoids the 7-hour offset error that occurs when mixing `valor_session status` (which stores UTC) with worker.log lines that previously used local time (UTC+7).
++
+ ## Related Features
+ 
+ - [Mid-Session Steering](mid-session-steering.md) — Steering check that routes replies to running sessions uses the same canonical session_id.
+diff --git a/docs/features/utc-timestamps.md b/docs/features/utc-timestamps.md
+index 8a8a0c4d..473b0c20 100644
+--- a/docs/features/utc-timestamps.md
++++ b/docs/features/utc-timestamps.md
+@@ -44,7 +44,9 @@ The `StructuredJsonFormatter` in `bridge/log_format.py` emits UTC timestamps wit
+ 
+ ## Display Layer
+ 
+-When presenting timestamps to humans (Telegram messages, UI), use `to_local()`:
++Display surfaces fall into two categories:
++
++**Conversational output** (Telegram messages, UI relative times): convert to local time with `to_local()`:
+ 
+ ```python
+ from bridge.utc import utc_now, to_local
+@@ -53,7 +55,17 @@ ts = utc_now()  # Store this
+ display = to_local(ts).strftime("%H:%M")  # Show this to humans
+ ```
+ 
+-The principle: **store UTC, display local -- never the reverse**.
++**CLI and log output** (operator-facing tools): display UTC explicitly with a ` UTC` label so operators can safely compare timestamps from different sources without timezone confusion:
++
++```
++# python -m tools.valor_session status
++Created:  2026-04-07 05:49:00 UTC
++
++# logs/worker.log
++2026-04-07 13:03:54 UTC worker INFO ...
++```
++
++The CLI uses `_format_ts()` in `tools/valor_session.py` (appends ` UTC` to all outputs). The worker uses `_UTCFormatter` with `converter = time.gmtime` so log lines always reflect UTC regardless of the machine's local timezone.
+ 
+ ## Migration Notes
+ 
+@@ -65,5 +77,7 @@ The principle: **store UTC, display local -- never the reverse**.
+ 
+ ## Related
+ 
+-- Issue: [#542](https://github.com/tomcounsell/ai/issues/542)
++- Issue: [#542](https://github.com/tomcounsell/ai/issues/542) — UTC normalization (internal storage)
++- Issue: [#792](https://github.com/tomcounsell/ai/issues/792) — Timestamp display labels (CLI/log surfaces)
+ - Plan: `docs/plans/542-utc-timestamp-normalization.md`
++- Plan: `docs/plans/timestamp-timezone-labels.md`
+diff --git a/docs/plans/timestamp-timezone-labels.md b/docs/plans/timestamp-timezone-labels.md
+index 2bd7a0c4..431ce4a6 100644
+--- a/docs/plans/timestamp-timezone-labels.md
++++ b/docs/plans/timestamp-timezone-labels.md
+@@ -1,5 +1,5 @@
+ ---
+-status: Ready
++status: docs_complete
+ type: bug
+ appetite: Small
+ owner: tomcounsell
+diff --git a/tests/unit/test_valor_session_format_ts.py b/tests/unit/test_valor_session_format_ts.py
+new file mode 100644
+index 00000000..0543a88b
+--- /dev/null
++++ b/tests/unit/test_valor_session_format_ts.py
+@@ -0,0 +1,48 @@
++"""Tests for _format_ts timezone labeling in tools/valor_session.py."""
++
++from tools.valor_session import _format_ts
++
++
++def test_float_timestamp_ends_with_utc() -> None:
++    """Float unix timestamp should format with UTC suffix."""
++    result = _format_ts(1700000000.0)
++    assert result.endswith(" UTC"), f"Expected UTC suffix, got: {repr(result)}"
++
++
++def test_float_timestamp_format() -> None:
++    """Float unix timestamp should format as YYYY-MM-DD HH:MM:SS UTC."""
++    result = _format_ts(1700000000.0)
++    assert len(result) == len("2023-11-14 22:13:20 UTC"), f"Unexpected format: {repr(result)}"
++
++
++def test_iso_string_no_offset_ends_with_utc() -> None:
++    """ISO string without timezone offset should be treated as UTC and labeled."""
++    result = _format_ts("2026-04-07T05:49:00")
++    assert result.endswith(" UTC"), f"Expected UTC suffix, got: {repr(result)}"
++    assert result == "2026-04-07 05:49:00 UTC"
++
++
++def test_iso_string_with_utc_offset_ends_with_utc() -> None:
++    """ISO string with +00:00 offset should be labeled UTC."""
++    result = _format_ts("2026-04-07T05:49:00+00:00")
++    assert result.endswith(" UTC"), f"Expected UTC suffix, got: {repr(result)}"
++    assert result == "2026-04-07 05:49:00 UTC"
++
++
++def test_none_returns_dash() -> None:
++    """None input should return the dash placeholder."""
++    result = _format_ts(None)
++    assert result == "—"
++
++
++def test_integer_timestamp_ends_with_utc() -> None:
++    """Integer unix timestamp should also get UTC suffix."""
++    result = _format_ts(1700000000)
++    assert result.endswith(" UTC"), f"Expected UTC suffix, got: {repr(result)}"
++
++
++def test_malformed_string_returns_truncated() -> None:
++    """Malformed input falls back to truncated string without UTC label."""
++    result = _format_ts("garbage-not-a-date")
++    # Falls back to str(ts)[:19] — no UTC label, just raw truncated string
++    assert result == "garbage-not-a-date"[:19]
+diff --git a/tests/unit/test_worker_entry.py b/tests/unit/test_worker_entry.py
+index 85018dff..693b0f43 100644
+--- a/tests/unit/test_worker_entry.py
++++ b/tests/unit/test_worker_entry.py
+@@ -453,6 +453,35 @@ def test_sigterm_exit_note_in_source(self):
+             "Exit code 1 log line must mention ThrottleInterval for operator clarity"
+         )
+ 
++    def test_configure_logging_uses_utc_formatter(self):
++        """_configure_logging() must attach a UTC-converting formatter to handlers."""
++        import logging
++        import time
++
++        from worker.__main__ import _configure_logging
++
++        # Clear existing handlers so we can inspect what _configure_logging adds
++        root_logger = logging.getLogger()
++        original_handlers = root_logger.handlers[:]
++        root_logger.handlers = []
++
++        try:
++            _configure_logging()
++            handlers = root_logger.handlers
++            assert len(handlers) >= 1, "_configure_logging must attach at least one handler"
++            for handler in handlers:
++                fmt = handler.formatter
++                assert fmt is not None, f"Handler {handler} has no formatter"
++                assert getattr(fmt, "converter", None) is time.gmtime, (
++                    f"Handler {handler} formatter.converter must be time.gmtime (UTC), "
++                    f"got: {getattr(fmt, 'converter', None)}"
++                )
++        finally:
++            # Restore original handlers
++            for h in root_logger.handlers:
++                h.close()
++            root_logger.handlers = original_handlers
++
+     def test_launchctl_bootout_in_stop_worker(self):
+         """scripts/valor-service.sh stop_worker() must use launchctl bootout not unload."""
+         source = (Path(__file__).parent.parent.parent / "scripts" / "valor-service.sh").read_text()
+diff --git a/tools/valor_session.py b/tools/valor_session.py
+index 25c99bd2..7639f82b 100644
+--- a/tools/valor_session.py
++++ b/tools/valor_session.py
+@@ -119,7 +119,9 @@ def _format_ts(ts: str | float | None) -> str:
+             dt = datetime.fromtimestamp(ts, tz=UTC)
+         else:
+             dt = datetime.fromisoformat(str(ts))
+-        return dt.strftime("%Y-%m-%d %H:%M:%S")
++            if dt.tzinfo is None:
++                dt = dt.replace(tzinfo=UTC)
++        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+     except Exception:
+         return str(ts)[:19]
+ 
+diff --git a/worker/__main__.py b/worker/__main__.py
+index bc8ddbea..02f2b83b 100644
+--- a/worker/__main__.py
++++ b/worker/__main__.py
+@@ -19,6 +19,7 @@
+ import os
+ import signal
+ import sys
++import time
+ from pathlib import Path
+ 
+ logger = logging.getLogger("worker")
+@@ -28,6 +29,12 @@
+ _shutdown_via_signal = False
+ 
+ 
++class _UTCFormatter(logging.Formatter):
++    """Log formatter that always uses UTC for timestamps."""
++
++    converter = staticmethod(time.gmtime)
++
++
+ def _configure_logging() -> None:
+     """Set up logging for the standalone worker."""
+     log_dir = Path(__file__).parent.parent / "logs"
+@@ -35,16 +42,22 @@ def _configure_logging() -> None:
+ 
+     log_file = log_dir / "worker.log"
+ 
++    formatter = _UTCFormatter(
++        fmt="%(asctime)s UTC %(name)s %(levelname)s %(message)s",
++        datefmt="%Y-%m-%d %H:%M:%S",
++    )
++
+     handlers: list[logging.Handler] = [
+         logging.StreamHandler(sys.stderr),
+         logging.FileHandler(str(log_file)),
+     ]
++    for handler in handlers:
++        handler.setFormatter(formatter)
+ 
+-    logging.basicConfig(
+-        level=logging.INFO,
+-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+-        handlers=handlers,
+-    )
++    root_logger = logging.getLogger()
++    root_logger.setLevel(logging.INFO)
++    for handler in handlers:
++        root_logger.addHandler(handler)
+ 
+ 
+ def _parse_args() -> argparse.Namespace:

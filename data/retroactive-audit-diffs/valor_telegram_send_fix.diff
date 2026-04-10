@@ -1,0 +1,546 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 03d91991..ec4e102b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -88,12 +88,15 @@ officecli close report.docx   # Save and release
+ 
+ ## Reading Telegram Messages
+ 
+-Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically.
++Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically. Sending routes through the Redis relay (requires bridge to be running).
+ 
+ ```bash
+ valor-telegram read --chat "Dev: Valor" --limit 10
+ valor-telegram read --chat "Tom" --search "deployment"
+ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
++valor-telegram send --chat "Dev: Valor" "Hello world"
++valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
++valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
+ ```
+ 
+ ## Quick Commands
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index c7ea90d5..36d9289d 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -128,27 +128,6 @@ def determine_delivery_action(
+ )
+ 
+ 
+-def _ts(val, *, default=None):
+-    """Convert datetime or float to Unix timestamp.
+-
+-    Used by startup recovery and health check to normalize started_at/created_at
+-    values which may be datetime objects, floats, or None depending on Redis state.
+-
+-    Args:
+-        val: A datetime, int/float timestamp, or None.
+-        default: Value to return when val is None or unrecognized. Defaults to None.
+-    """
+-    if val is None:
+-        return default
+-    if isinstance(val, datetime):
+-        if val.tzinfo is None:
+-            val = val.replace(tzinfo=UTC)
+-        return val.timestamp()
+-    if isinstance(val, int | float):
+-        return float(val)
+-    return default
+-
+-
+ # Fields to extract from AgentSession for delete-and-recreate pattern.
+ # Excludes agent_session_id (AutoKeyField, auto-generated on create).
+ _AGENT_SESSION_FIELDS = [
+@@ -1106,6 +1085,18 @@ async def _agent_session_health_check() -> None:
+     recovered = 0
+     workers_started = 0
+ 
++    def _ts(val):
++        """Convert datetime or float to Unix timestamp."""
++        if val is None:
++            return None
++        if isinstance(val, datetime):
++            if val.tzinfo is None:
++                val = val.replace(tzinfo=UTC)
++            return val.timestamp()
++        if isinstance(val, int | float):
++            return float(val)
++        return None
++
+     # === Check RUNNING sessions_list ===
+     running_sessions = list(AgentSession.query.filter(status="running"))
+     for entry in running_sessions:
+@@ -2971,6 +2962,15 @@ def _cli_show_status() -> None:
+ 
+     now_ts = time.time()
+ 
++    def _to_ts_safe(val):
++        if val is None:
++            return 0.0
++        if isinstance(val, datetime):
++            return val.timestamp() if val.tzinfo else val.replace(tzinfo=UTC).timestamp()
++        if isinstance(val, int | float):
++            return float(val)
++        return 0.0
++
+     for chat_key, sessions_group in sorted(by_chat.items()):
+         project_key = sessions_group[0].project_key if sessions_group else chat_key
+         print(f"\n=== {project_key} (chat: {chat_key}) ===")
+@@ -2978,15 +2978,13 @@ def _cli_show_status() -> None:
+         worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
+         print(f"  Worker: {worker_status}")
+ 
+-        for session in sorted(sessions_group, key=lambda j: _ts(j.created_at, default=0.0)):
++        for session in sorted(sessions_group, key=lambda j: _to_ts_safe(j.created_at)):
+             duration = ""
+-            started_ts = _ts(getattr(session, "started_at", None), default=0.0)
++            started_ts = _to_ts_safe(getattr(session, "started_at", None))
+             if session.status == "running" and started_ts:
+                 duration = f" (running {format_duration(now_ts - started_ts)})"
+             elif session.created_at:
+-                duration = (
+-                    f" (queued {format_duration(now_ts - _ts(session.created_at, default=0.0))})"
+-                )
++                duration = f" (queued {format_duration(now_ts - _to_ts_safe(session.created_at))})"
+ 
+             session_id = (getattr(session, "session_id", "") or "")[:12]
+             corr_id = (getattr(session, "correlation_id", "") or "")[:8]
+diff --git a/tests/unit/test_valor_telegram.py b/tests/unit/test_valor_telegram.py
+index 832e1936..dfc441c0 100644
+--- a/tests/unit/test_valor_telegram.py
++++ b/tests/unit/test_valor_telegram.py
+@@ -1,8 +1,10 @@
+ """Tests for the unified valor-telegram CLI tool."""
+ 
++import argparse
++import json
+ import sys
+ from datetime import timedelta
+-from unittest.mock import patch
++from unittest.mock import MagicMock, patch
+ 
+ import pytest
+ 
+@@ -128,3 +130,196 @@ def test_no_command_shows_help(self):
+         sys.argv = ["valor-telegram"]
+         result = main()
+         assert result == 1
++
++
++class TestCmdSend:
++    """Tests for the Redis-queue-based cmd_send() implementation."""
++
++    def _make_args(
++        self, chat="-123456", message="hello", file=None, image=None, audio=None, reply_to=None
++    ):
++        """Build a mock Namespace matching what argparse produces for 'send'."""
++        ns = argparse.Namespace(
++            chat=chat,
++            message=message,
++            file=file,
++            image=image,
++            audio=audio,
++            reply_to=reply_to,
++        )
++        return ns
++
++    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
++    @patch("tools.valor_telegram._get_redis_connection")
++    def test_successful_queue_push(self, mock_redis_fn, mock_resolve, capsys):
++        """Successful send queues payload to Redis and prints confirmation."""
++        from tools.valor_telegram import cmd_send
++
++        mock_redis = MagicMock()
++        mock_redis_fn.return_value = mock_redis
++
++        args = self._make_args(chat="Dev: Valor", message="test message")
++        result = cmd_send(args)
++
++        assert result == 0
++        mock_redis.rpush.assert_called_once()
++        mock_redis.expire.assert_called_once()
++
++        # Check payload structure
++        call_args = mock_redis.rpush.call_args
++        key = call_args[0][0]
++        raw_payload = call_args[0][1]
++        assert key.startswith("telegram:outbox:cli-")
++
++        payload = json.loads(raw_payload)
++        assert payload["chat_id"] == "-100123456"
++        assert payload["text"] == "test message"
++        assert payload["session_id"].startswith("cli-")
++        assert payload["reply_to"] is None
++        assert "timestamp" in payload
++
++        captured = capsys.readouterr()
++        assert "Message queued" in captured.out
++        assert "chars" in captured.out
++
++    @patch("tools.valor_telegram.resolve_chat", return_value=None)
++    def test_unknown_chat_returns_error(self, mock_resolve, capsys):
++        """Unknown chat name prints error and returns 1."""
++        from tools.valor_telegram import cmd_send
++
++        args = self._make_args(chat="NonexistentChat", message="hello")
++        result = cmd_send(args)
++
++        assert result == 1
++        captured = capsys.readouterr()
++        assert "Unknown chat" in captured.err
++        assert "valor-telegram chats" in captured.err
++
++    def test_empty_message_no_file_returns_error(self, capsys):
++        """Empty message with no file returns error code 1."""
++        from tools.valor_telegram import cmd_send
++
++        args = self._make_args(chat="-123456", message="")
++        result = cmd_send(args)
++
++        assert result == 1
++        captured = capsys.readouterr()
++        assert "Must provide a message or file" in captured.err
++
++    def test_nonexistent_file_returns_error(self, capsys, tmp_path):
++        """Non-existent file path returns error before queueing."""
++        from tools.valor_telegram import cmd_send
++
++        args = self._make_args(chat="-123456", message="", file="/nonexistent/path/file.png")
++        result = cmd_send(args)
++
++        assert result == 1
++        captured = capsys.readouterr()
++        assert "File not found" in captured.err
++
++    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
++    @patch("tools.valor_telegram._get_redis_connection")
++    def test_message_truncation_at_4096_chars(self, mock_redis_fn, mock_resolve):
++        """Messages longer than 4096 chars are truncated before queuing."""
++        from tools.valor_telegram import cmd_send
++
++        mock_redis = MagicMock()
++        mock_redis_fn.return_value = mock_redis
++
++        long_message = "x" * 5000
++        args = self._make_args(chat="-100123456", message=long_message)
++        result = cmd_send(args)
++
++        assert result == 0
++        call_args = mock_redis.rpush.call_args
++        payload = json.loads(call_args[0][1])
++        assert len(payload["text"]) <= 4096
++
++    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
++    @patch("tools.valor_telegram._get_redis_connection")
++    def test_reply_to_included_in_payload(self, mock_redis_fn, mock_resolve):
++        """reply_to is included in payload when --reply-to is provided."""
++        from tools.valor_telegram import cmd_send
++
++        mock_redis = MagicMock()
++        mock_redis_fn.return_value = mock_redis
++
++        args = self._make_args(chat="-100123456", message="hello", reply_to=999)
++        result = cmd_send(args)
++
++        assert result == 0
++        payload = json.loads(mock_redis.rpush.call_args[0][1])
++        assert payload["reply_to"] == 999
++
++    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
++    @patch("tools.valor_telegram._get_redis_connection")
++    def test_file_path_included_in_payload(self, mock_redis_fn, mock_resolve, tmp_path):
++        """file_paths included in payload when --file provided."""
++        from tools.valor_telegram import cmd_send
++
++        mock_redis = MagicMock()
++        mock_redis_fn.return_value = mock_redis
++
++        test_file = tmp_path / "test.png"
++        test_file.write_bytes(b"\x89PNG")
++
++        args = self._make_args(chat="-100123456", message="caption", file=str(test_file))
++        result = cmd_send(args)
++
++        assert result == 0
++        payload = json.loads(mock_redis.rpush.call_args[0][1])
++        assert "file_paths" in payload
++        assert len(payload["file_paths"]) == 1
++        assert payload["file_paths"][0].endswith("test.png")
++
++    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
++    @patch("tools.valor_telegram._get_redis_connection")
++    def test_redis_failure_returns_error(self, mock_redis_fn, mock_resolve, capsys):
++        """Redis connection failure returns error code 1 with helpful message."""
++        from tools.valor_telegram import cmd_send
++
++        mock_redis = MagicMock()
++        mock_redis.rpush.side_effect = Exception("Connection refused")
++        mock_redis_fn.return_value = mock_redis
++
++        args = self._make_args(chat="-100123456", message="hello")
++        result = cmd_send(args)
++
++        assert result == 1
++        captured = capsys.readouterr()
++        assert "Failed to queue message in Redis" in captured.err
++
++    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
++    @patch("tools.valor_telegram._get_redis_connection")
++    def test_session_id_uses_cli_prefix(self, mock_redis_fn, mock_resolve):
++        """Session ID uses cli- prefix to avoid collision with bridge session IDs."""
++        from tools.valor_telegram import cmd_send
++
++        mock_redis = MagicMock()
++        mock_redis_fn.return_value = mock_redis
++
++        args = self._make_args(chat="-100123456", message="hello")
++        cmd_send(args)
++
++        payload = json.loads(mock_redis.rpush.call_args[0][1])
++        assert payload["session_id"].startswith("cli-")
++        # Session ID is cli-{unix_timestamp} - should be numeric after prefix
++        suffix = payload["session_id"][4:]
++        assert suffix.isdigit()
++
++    def test_send_subparser_has_reply_to_flag(self):
++        """Verify --reply-to flag is registered on the send subparser."""
++        import argparse
++
++        # Parse a send command with --reply-to
++        sys.argv = ["valor-telegram", "send", "--chat", "-123", "--reply-to", "456", "msg"]
++        # We can't call main() without it executing cmd_send, so test argparse directly
++        parser = argparse.ArgumentParser()
++        sub = parser.add_subparsers(dest="command")
++        send_p = sub.add_parser("send")
++        send_p.add_argument("--chat", required=True)
++        send_p.add_argument("message", nargs="?", default="")
++        send_p.add_argument("--reply-to", type=int, default=None)
++
++        parsed = parser.parse_args(["send", "--chat", "-123", "--reply-to", "456", "msg"])
++        assert parsed.reply_to == 456
+diff --git a/tools/valor_telegram.py b/tools/valor_telegram.py
+index e4004d2c..4658f7a4 100644
+--- a/tools/valor_telegram.py
++++ b/tools/valor_telegram.py
+@@ -7,6 +7,7 @@
+     valor-telegram read --chat "Tom" --search "deployment"
+     valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+     valor-telegram send --chat "Dev: Valor" "Hello world"
++    valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
+     valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
+     valor-telegram chats
+ """
+@@ -17,11 +18,15 @@
+ import os
+ import re
+ import sys
++import time
+ from datetime import datetime, timedelta
+ from pathlib import Path
+ 
+ from bridge.utc import utc_now
+ 
++# Telegram message length limit (same constant as send_telegram.py)
++TELEGRAM_MAX_LENGTH = 4096
++
+ 
+ def parse_since(text: str) -> datetime | None:
+     """Parse relative time strings like '1 hour ago', '30 minutes ago', '2 days ago'.
+@@ -282,8 +287,43 @@ def cmd_read(args: argparse.Namespace) -> int:
+     return 0
+ 
+ 
++def _linkify_text(text: str) -> str:
++    """Apply PR/Issue linkification to the message text.
++
++    Mirrors the same helper in send_telegram.py. Falls back to unmodified
++    text if the formatting module is unavailable.
++    """
++    try:
++        from bridge.formatting import linkify_references
++
++        project_key = os.environ.get("PROJECT_KEY", "ai")
++        return linkify_references(text, project_key)
++    except Exception:
++        return text
++
++
++def _get_redis_connection():
++    """Get a Redis connection using the project's standard pattern."""
++    import redis
++
++    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
++    return redis.Redis.from_url(redis_url, decode_responses=True)
++
++
+ def cmd_send(args: argparse.Namespace) -> int:
+-    """Send a message to a chat."""
++    """Send a message to a chat via the Redis relay.
++
++    Routes through the bridge relay (bridge/telegram_relay.py) rather than
++    creating a direct Telethon client. This avoids the SQLite session lock
++    conflict when the bridge is running, and gives us markdown formatting,
++    forum/reply_to support, and retry logic for free.
++
++    Queue contract (matches send_telegram.py and telegram_relay.py):
++        Key: telegram:outbox:{session_id}
++        Payload: {chat_id, reply_to, text, file_paths, session_id, timestamp}
++        TTL: 1 hour
++    """
++    # Resolve chat name to numeric ID
+     chat_id = resolve_chat(args.chat)
+     if not chat_id:
+         if args.chat.lstrip("-").isdigit():
+@@ -296,37 +336,70 @@ def cmd_send(args: argparse.Namespace) -> int:
+     text = args.message or ""
+     file_path = args.file or args.image or args.audio
+ 
++    # Validate: must have either text or a file
+     if not text and not file_path:
+         print("Error: Must provide a message or file to send.", file=sys.stderr)
+         return 1
+ 
++    # Validate file exists before queueing
+     if file_path and not Path(file_path).exists():
+         print(f"Error: File not found: {file_path}", file=sys.stderr)
+         return 1
+ 
+-    async def _send():
+-        try:
+-            client = _telethon_client()
+-        except RuntimeError as e:
+-            print(f"Error: {e}", file=sys.stderr)
+-            return 1
++    # Apply linkification and length truncation to text (skip for empty string,
++    # matching send_telegram.py's guard at line 138)
++    if text:
++        text = _linkify_text(text)
++        if len(text) > TELEGRAM_MAX_LENGTH:
++            # Truncate at sentence boundary if possible
++            truncated = text[: TELEGRAM_MAX_LENGTH - 3]
++            last_period = truncated.rfind(". ")
++            if last_period > TELEGRAM_MAX_LENGTH // 2:
++                truncated = truncated[: last_period + 1]
++            text = truncated + "..."
++
++    # Build relay-compatible payload
++    # Use synthetic session_id with cli- prefix to avoid collision with bridge session IDs
++    session_id = f"cli-{int(time.time())}"
++    reply_to = getattr(args, "reply_to", None)
++
++    payload: dict = {
++        "chat_id": chat_id,
++        "reply_to": int(reply_to) if reply_to else None,
++        "text": text,
++        "session_id": session_id,
++        "timestamp": time.time(),
++    }
++    if file_path:
++        # Relay expects file_paths as a list of absolute paths
++        payload["file_paths"] = [str(Path(file_path).resolve())]
+ 
+-        await client.start()
+-        try:
+-            entity = await client.get_entity(int(chat_id))
+-            if file_path:
+-                await client.send_file(entity, file_path, caption=text)
+-            else:
+-                await client.send_message(entity, text)
+-            print(f"Sent to {args.chat}")
+-            return 0
+-        except Exception as e:
+-            print(f"Error sending: {e}", file=sys.stderr)
+-            return 1
+-        finally:
+-            await client.disconnect()
++    # Push to Redis outbox queue
++    queue_key = f"telegram:outbox:{session_id}"
++    try:
++        r = _get_redis_connection()
++        r.rpush(queue_key, json.dumps(payload))
++        r.expire(queue_key, 3600)
++    except Exception as e:
++        print(f"Error: Failed to queue message in Redis: {e}", file=sys.stderr)
++        print(
++            "Ensure Redis is running and REDIS_URL is configured (default: redis://localhost:6379/0).",
++            file=sys.stderr,
++        )
++        return 1
+ 
+-    return asyncio.run(_send())
++    # Confirmation
++    parts = []
++    if text:
++        parts.append(f"{len(text)} chars")
++    if file_path:
++        parts.append(f"file: {Path(file_path).name}")
++    print(f"Message queued ({', '.join(parts)})")
++    print(
++        "Note: delivery requires the bridge relay to be running"
++        " (./scripts/valor-service.sh status)."
++    )
++    return 0
+ 
+ 
+ def cmd_chats(args: argparse.Namespace) -> int:
+@@ -390,6 +463,12 @@ def main() -> int:
+     send_parser.add_argument("--file", "-f", help="File to attach")
+     send_parser.add_argument("--image", "-i", help="Image to send")
+     send_parser.add_argument("--audio", "-a", help="Audio file to send")
++    send_parser.add_argument(
++        "--reply-to",
++        type=int,
++        default=None,
++        help="Message ID to reply to (required for forum groups/topics)",
++    )
+ 
+     # chats subcommand
+     chats_parser = subparsers.add_parser("chats", help="List known chats")
+diff --git a/ui/data/sdlc.py b/ui/data/sdlc.py
+index 6774f7e6..cba3e44f 100644
+--- a/ui/data/sdlc.py
++++ b/ui/data/sdlc.py
+@@ -124,9 +124,6 @@ class PipelineProgress(BaseModel):
+     current_stage: str | None = None
+     events: list[PipelineEvent] = []
+ 
+-    # Source context
+-    working_dir: str | None = None
+-
+     # Links
+     issue_url: str | None = None
+     plan_url: str | None = None
+@@ -151,24 +148,11 @@ def is_complete(self) -> bool:
+ 
+     @property
+     def display_name(self) -> str:
+-        """Human-friendly name: context_summary > slug > local label > truncated message."""
++        """Human-friendly name: context_summary, then slug, then truncated message."""
+         if self.context_summary:
+             return self.context_summary
+         if self.slug:
+             return self.slug
+-        # Local Claude Code sessions: show "Claude Code  <dir>  <branch>" instead of raw prompt
+-        is_local = self.session_id and self.session_id.startswith("local-")
+-        if is_local and self.message_text and not self.message_text.startswith("/"):
+-            import os
+-
+-            dir_part = os.path.basename(self.working_dir.rstrip("/")) if self.working_dir else ""
+-            branch_part = self.branch_name or ""
+-            parts = ["Claude Code"]
+-            if dir_part:
+-                parts.append(dir_part)
+-            if branch_part:
+-                parts.append(branch_part)
+-            return "  ".join(parts)
+         if self.message_text:
+             text = self.message_text[:60]
+             if len(self.message_text) > 60:
+@@ -462,7 +446,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
+         stages=stages,
+         current_stage=current,
+         events=events,
+-        working_dir=_safe_str(getattr(session, "working_dir", None)),
+         issue_url=_safe_str(session.issue_url),
+         plan_url=_safe_str(session.plan_url),
+         pr_url=_safe_str(session.pr_url),

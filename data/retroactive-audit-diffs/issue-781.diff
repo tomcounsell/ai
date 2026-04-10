@@ -1,0 +1,384 @@
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index 1db8574a..8d045af8 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -19,6 +19,7 @@
+ """
+ 
+ import asyncio
++import json
+ import logging
+ import os
+ import signal
+@@ -289,6 +290,19 @@ def _log_lifecycle():
+     except Exception as e:
+         logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
+ 
++    # Publish notification so the standalone worker picks up immediately (~1s latency)
++    # instead of waiting for the 5-minute health check. Fire-and-forget: publish
++    # failure is logged as a warning and never raises. If the worker is not running
++    # or Redis pub/sub drops the message, the health check is the safety net.
++    try:
++        from popoto.redis_db import POPOTO_REDIS_DB
++
++        payload = json.dumps({"chat_id": chat_id, "session_id": session_id})
++        await asyncio.to_thread(POPOTO_REDIS_DB.publish, "valor:sessions:new", payload)
++        logger.debug(f"Published session notification for chat_id={chat_id}")
++    except Exception as e:
++        logger.warning(f"Failed to publish session notification for {session_id}: {e}")
++
+     return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
+ 
+ 
+@@ -1328,6 +1342,79 @@ async def _agent_session_health_loop() -> None:
+         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
+ 
+ 
++async def _session_notify_listener() -> None:
++    """Subscribe to valor:sessions:new and wake the worker on new sessions.
++
++    Fire-and-forget coroutine started by the standalone worker alongside the
++    health monitor. Reconnects automatically on transient Redis errors.
++
++    Uses a queue to bridge the blocking pubsub.listen() thread and the asyncio
++    event loop: the background thread puts chat_ids onto the queue, and the
++    coroutine awaits them and calls _ensure_worker / sets the event.
++    """
++    while True:
++        notify_queue: asyncio.Queue = asyncio.Queue()
++        loop = asyncio.get_running_loop()
++
++        def _listen_in_thread() -> None:
++            """Blocking loop that drains pubsub and forwards chat_ids to the queue."""
++            try:
++                from popoto.redis_db import POPOTO_REDIS_DB
++
++                pubsub = POPOTO_REDIS_DB.pubsub()
++                pubsub.subscribe("valor:sessions:new")
++                logger.info("Session notify listener subscribed to valor:sessions:new")
++                for message in pubsub.listen():
++                    if message["type"] != "message":
++                        continue
++                    try:
++                        data = json.loads(message["data"])
++                        chat_id = data.get("chat_id")
++                        session_id = data.get("session_id")
++                        if chat_id is not None:
++                            logger.info(
++                                "Received session notify: chat_id=%s session_id=%s",
++                                chat_id,
++                                session_id,
++                            )
++                            loop.call_soon_threadsafe(notify_queue.put_nowait, chat_id)
++                    except json.JSONDecodeError as e:
++                        logger.warning("Session notify: bad JSON payload: %s", e)
++                    except Exception as e:
++                        logger.warning("Session notify: error processing message: %s", e)
++            except Exception as e:
++                logger.warning("Session notify listener thread error: %s", e)
++            finally:
++                # Signal the coroutine side to restart
++                loop.call_soon_threadsafe(notify_queue.put_nowait, None)
++
++        try:
++            # Run the blocking pubsub loop in a thread; process results here
++            listener_future = asyncio.to_thread(_listen_in_thread)
++            task = asyncio.create_task(listener_future)
++
++            while True:
++                chat_id = await notify_queue.get()
++                if chat_id is None:
++                    # Thread exited (error path); restart after delay
++                    break
++                _ensure_worker(chat_id)
++                event = _active_events.get(chat_id)
++                if event is not None:
++                    event.set()
++
++            task.cancel()
++            try:
++                await task
++            except (asyncio.CancelledError, Exception):
++                pass
++
++        except Exception as e:
++            logger.warning("Session notify listener error: %s. Retrying in 5s...", e)
++
++        await asyncio.sleep(5)
++
++
+ # === CLI Helpers ===
+ 
+ 
+diff --git a/docs/features/bridge-worker-architecture.md b/docs/features/bridge-worker-architecture.md
+index 1809f601..f360d353 100644
+--- a/docs/features/bridge-worker-architecture.md
++++ b/docs/features/bridge-worker-architecture.md
+@@ -57,6 +57,27 @@ The worker's startup sequence is deterministic:
+ 
+ At runtime, the worker processes sessions via `_worker_loop(chat_id)` until the queue is empty, then waits for new enqueue events.
+ 
++The worker also runs `_session_notify_listener()` as a background task (step 7 below). This listener subscribes to the `valor:sessions:new` Redis pub/sub channel and calls `_ensure_worker(chat_id)` immediately when a new session is published — enabling ~1s pickup latency for CLI-created sessions.
++
++| Step | Function | Purpose |
++|------|----------|---------|
++| 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new`, wake worker on notification |
++
++## Session Pickup: Fast Path vs Safety Net
++
++The worker uses two mechanisms to discover new sessions:
++
++| Mechanism | Latency | How It Works |
++|-----------|---------|-------------|
++| **Redis pub/sub** (fast path) | ~1 second | `_push_agent_session()` publishes `{"chat_id", "session_id"}` to `valor:sessions:new`. `_session_notify_listener()` subscribes and calls `_ensure_worker(chat_id)` immediately. |
++| **Health check loop** (safety net) | Up to 10 minutes | `_agent_session_health_loop()` fires every 300s. Sessions pending longer than 300s trigger `_ensure_worker(chat_id)` recovery. |
++
++The fast path covers normal operation. The health check catches edge cases: missed pub/sub messages (network blip, worker restart during publish), sessions created by paths that bypass `_push_agent_session()`, and sessions orphaned from a prior worker process.
++
++**Bridge path**: `enqueue_agent_session()` → `_push_agent_session()` publishes notification → worker receives within ~1s.
++
++**CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
++
+ ## Redis Communication Contract
+ 
+ The bridge and worker share a single contract: the `AgentSession` Popoto model in Redis.
+diff --git a/tests/integration/test_session_notify.py b/tests/integration/test_session_notify.py
+new file mode 100644
+index 00000000..d2be2536
+--- /dev/null
++++ b/tests/integration/test_session_notify.py
+@@ -0,0 +1,117 @@
++"""Integration test for the Redis pub/sub session notification path.
++
++Verifies that _push_agent_session() publishes to valor:sessions:new within 1 second,
++enabling the standalone worker to pick up CLI-created sessions immediately instead of
++waiting for the 5-minute health check.
++"""
++
++import asyncio
++import json
++import time
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import pytest
++
++from agent.agent_session_queue import _push_agent_session
++
++
++@pytest.fixture
++def mock_agent_session_cls():
++    """Patch AgentSession for integration tests."""
++    with patch("agent.agent_session_queue.AgentSession") as mock_cls:
++        mock_session = MagicMock()
++        mock_session.agent_session_id = "test-session-notify-001"
++        mock_cls.query.filter.return_value = []
++        mock_cls.async_create = AsyncMock(return_value=mock_session)
++        mock_cls.query.async_count = AsyncMock(return_value=1)
++        yield mock_cls
++
++
++class TestSessionNotifyPublish:
++    """Verify _push_agent_session publishes to valor:sessions:new."""
++
++    def test_publishes_to_notify_channel(self, mock_agent_session_cls):
++        """Calling _push_agent_session() should publish a notification within 1 second."""
++        received: list[dict] = []
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++
++            def capture_publish(channel, payload):
++                received.append({"channel": channel, "payload": payload})
++                return 1
++
++            mock_redis.publish = MagicMock(side_effect=capture_publish)
++
++            start = time.monotonic()
++            asyncio.run(
++                _push_agent_session(
++                    project_key="test",
++                    session_id="notify-test-sess",
++                    working_dir="/tmp",
++                    message_text="test message",
++                    sender_name="TestSender",
++                    chat_id="notify-chat-1",
++                    telegram_message_id=99,
++                )
++            )
++            elapsed = time.monotonic() - start
++
++            assert elapsed < 2.0, f"publish took too long: {elapsed:.2f}s"
++            assert len(received) == 1, f"expected 1 publish call, got {len(received)}"
++            assert received[0]["channel"] == "valor:sessions:new"
++            payload = json.loads(received[0]["payload"])
++            assert payload["chat_id"] == "notify-chat-1"
++            assert payload["session_id"] == "notify-test-sess"
++
++    def test_notify_failure_does_not_block_session_creation(self, mock_agent_session_cls):
++        """If Redis publish fails, session creation must still complete successfully."""
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.publish = MagicMock(side_effect=ConnectionError("Redis unavailable"))
++
++            # Should not raise; health check is the fallback
++            result = asyncio.run(
++                _push_agent_session(
++                    project_key="test",
++                    session_id="notify-fail-sess",
++                    working_dir="/tmp",
++                    message_text="test message",
++                    sender_name="TestSender",
++                    chat_id="notify-chat-2",
++                    telegram_message_id=100,
++                )
++            )
++
++            # Session was created despite publish failure
++            mock_agent_session_cls.async_create.assert_called_once()
++            assert isinstance(result, int)
++
++    def test_payload_contains_required_fields(self, mock_agent_session_cls):
++        """Notification payload must include chat_id and session_id."""
++        captured_payload: list[dict] = []
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++
++            def capture(channel, payload):
++                captured_payload.append(json.loads(payload))
++                return 1
++
++            mock_redis.publish = MagicMock(side_effect=capture)
++
++            asyncio.run(
++                _push_agent_session(
++                    project_key="myproject",
++                    session_id="field-check-sess",
++                    working_dir="/tmp",
++                    message_text="check fields",
++                    sender_name="FieldTester",
++                    chat_id="field-chat-99",
++                    telegram_message_id=42,
++                )
++            )
++
++            assert len(captured_payload) == 1
++            payload = captured_payload[0]
++            assert "chat_id" in payload
++            assert "session_id" in payload
++            assert payload["chat_id"] == "field-chat-99"
++            assert payload["session_id"] == "field-check-sess"
+diff --git a/tests/unit/test_agent_session_queue_async.py b/tests/unit/test_agent_session_queue_async.py
+index 795e3fad..3f043341 100644
+--- a/tests/unit/test_agent_session_queue_async.py
++++ b/tests/unit/test_agent_session_queue_async.py
+@@ -104,6 +104,67 @@ def test_push_agent_session_superseding_uses_to_thread(self, mock_agent_session)
+             assert mock_to_thread.call_count >= 1
+ 
+ 
++class TestPushAgentSessionPublish:
++    """Verify _push_agent_session publishes to valor:sessions:new after enqueue."""
++
++    def test_publish_called_after_enqueue(self, mock_agent_session):
++        """Publish to valor:sessions:new should be called after session is written."""
++        from agent.agent_session_queue import _push_agent_session
++
++        mock_agent_session.query.filter.return_value = []
++        mock_agent_session.async_create = AsyncMock(return_value=MagicMock())
++        mock_agent_session.query.async_count = AsyncMock(return_value=1)
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.publish = MagicMock(return_value=1)
++            asyncio.run(
++                _push_agent_session(
++                    project_key="test",
++                    session_id="sess-pub",
++                    working_dir="/tmp",
++                    message_text="hello",
++                    sender_name="Test",
++                    chat_id="chat-1",
++                    telegram_message_id=1,
++                )
++            )
++            mock_redis.publish.assert_called_once()
++            args = mock_redis.publish.call_args
++            assert args[0][0] == "valor:sessions:new"
++            import json
++
++            payload = json.loads(args[0][1])
++            assert payload["chat_id"] == "chat-1"
++            assert payload["session_id"] == "sess-pub"
++
++    def test_session_written_even_if_publish_fails(self, mock_agent_session):
++        """Publish failure must not prevent session creation."""
++        from agent.agent_session_queue import _push_agent_session
++
++        mock_agent_session.query.filter.return_value = []
++        mock_agent_session.async_create = AsyncMock(return_value=MagicMock())
++        mock_agent_session.query.async_count = AsyncMock(return_value=1)
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.publish = MagicMock(side_effect=Exception("Redis down"))
++            # Should not raise
++            result = asyncio.run(
++                _push_agent_session(
++                    project_key="test",
++                    session_id="sess-fail",
++                    working_dir="/tmp",
++                    message_text="hello",
++                    sender_name="Test",
++                    chat_id="chat-2",
++                    telegram_message_id=2,
++                )
++            )
++            # Session was still created
++            mock_agent_session.async_create.assert_called_once()
++            # Result is a count (not an exception)
++            assert isinstance(result, int)
++
++
+ class TestEnqueueContinuationAsyncWrapping:
+     """Verify _enqueue_nudge wraps sync filter in asyncio.to_thread."""
+ 
+diff --git a/worker/__main__.py b/worker/__main__.py
+index abdebebb..aa63bc2d 100644
+--- a/worker/__main__.py
++++ b/worker/__main__.py
+@@ -118,6 +118,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
+         _cleanup_orphaned_claude_processes,
+         _ensure_worker,
+         _recover_interrupted_agent_sessions_startup,
++        _session_notify_listener,
+         cleanup_corrupted_agent_sessions,
+         register_callbacks,
+         request_shutdown,
+@@ -204,6 +205,18 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
+     # Start health monitor as background task
+     health_task = asyncio.create_task(_agent_session_health_loop())
+ 
++    # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
++    notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
++
++    def _notify_task_done(t: asyncio.Task) -> None:
++        if t.cancelled():
++            return  # Normal shutdown path
++        exc = t.exception()
++        if exc is not None:
++            logger.error("Session notify listener exited unexpectedly: %s", exc)
++
++    notify_task.add_done_callback(_notify_task_done)
++
+     # Set up graceful shutdown
+     shutdown_event = asyncio.Event()
+ 
+@@ -236,6 +249,13 @@ def _signal_handler(sig, frame):
+     except asyncio.CancelledError:
+         pass
+ 
++    # Cancel pub/sub listener
++    notify_task.cancel()
++    try:
++        await notify_task
++    except asyncio.CancelledError:
++        pass
++
+     logger.info("Worker shutdown complete")
+ 
+ 

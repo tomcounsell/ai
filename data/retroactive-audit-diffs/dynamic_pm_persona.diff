@@ -1,0 +1,413 @@
+diff --git a/agent/job_queue.py b/agent/job_queue.py
+index a1e1c0e15..20f111319 100644
+--- a/agent/job_queue.py
++++ b/agent/job_queue.py
+@@ -2275,7 +2275,10 @@ async def do_work() -> str:
+     # Set reaction based on result and delivery state
+     # Skip if a continuation job was enqueued (defer reaction to that job)
+     if react_cb and not chat_state.defer_reaction:
+-        if task.error:
++        # Q&A sessions: clear the processing reaction instead of setting completion emoji
++        if agent_session and getattr(agent_session, "qa_mode", False) and not task.error:
++            emoji = None  # Clear reaction
++        elif task.error:
+             emoji = REACTION_ERROR
+         elif messenger.has_communicated():
+             emoji = REACTION_COMPLETE
+diff --git a/agent/qa_handler.py b/agent/qa_handler.py
+index 03586fec0..ec19fea22 100644
+--- a/agent/qa_handler.py
++++ b/agent/qa_handler.py
+@@ -28,20 +28,22 @@ def build_qa_instructions() -> str:
+     return (
+         "\n\nYou are answering an informational query directly. "
+         "Do NOT spawn a DevSession or use the Agent tool.\n\n"
++        "RESEARCH FIRST — before answering, gather evidence:\n"
++        "1. Search source code with Grep/Glob to find relevant files and implementations\n"
++        "2. Query the memory system: `python -m tools.memory_search search \"relevant query\"`\n"
++        "3. Consult knowledge base docs in docs/features/ and docs/ directories\n"
++        "4. Cite your findings — file paths, line numbers, memory entries, doc references\n\n"
+         "GUIDELINES:\n"
+         "- Answer the question directly and conversationally\n"
+-        "- Cite file paths, line numbers, and code snippets when relevant\n"
++        "- Back up claims with evidence from the codebase, memory, or docs\n"
+         "- Use read-only tools: Bash (git log, git status, gh issue view, "
+         "gh pr list, cat, grep, find), Read, Glob, Grep\n"
+         "- Do NOT write files, create branches, run tests, or modify code\n"
+         "- Do NOT use the Agent tool to spawn sub-agents\n"
+         "- If the question requires actual work (fixes, changes, deployments), "
+         "say so and suggest the user request it explicitly\n"
+-        "- Keep responses focused and concise\n"
+-        "- Use the Telegram send tool to deliver your answer:\n"
+-        '  `python tools/send_telegram.py "Your answer here"`\n'
++        "- Keep responses focused and concise\n\n"
+         "Write in a clear, direct style. You are a knowledgeable teammate "
+-        "who knows the codebase well.\n"
+-        "If you don't call the send tool, your return text will be "
+-        "automatically summarized and sent (fallback behavior)."
++        "who knows the codebase well. Your return text will be "
++        "automatically summarized and sent via Telegram."
+     )
+diff --git a/agent/sdk_client.py b/agent/sdk_client.py
+index 55ab0b9df..ce715742d 100644
+--- a/agent/sdk_client.py
++++ b/agent/sdk_client.py
+@@ -70,55 +70,6 @@
+ # interrupted regardless of total runtime.
+ SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
+ 
+-# === Crash Message Pool ===
+-# Varied crash fallback messages to avoid robotic repetition.
+-# Each includes next-step language so the user knows what to expect.
+-# A module-level variable tracks the last message to prevent consecutive
+-# repeats.
+-CRASH_MESSAGE_POOL = [
+-    (
+-        "Something went sideways and I couldn't recover. "
+-        "The error has been logged -- you may want to re-trigger."
+-    ),
+-    (
+-        "Hit an unexpected error during processing. "
+-        "Details are logged for investigation. Try again shortly."
+-    ),
+-    ("Ran into a problem I couldn't work around. The error is captured -- a retry should work."),
+-    (
+-        "Processing failed due to an internal error. "
+-        "It's been logged. You can re-send your message to try again."
+-    ),
+-    (
+-        "An error interrupted this session. "
+-        "The details are saved for debugging -- feel free to retry."
+-    ),
+-]
+-
+-_last_crash_message: str | None = None
+-
+-
+-def _get_crash_message() -> str:
+-    """Select a crash message from the pool, avoiding consecutive repeats.
+-
+-    Returns a varied, human-friendly crash message. Tracks the last
+-    message used to ensure no two consecutive crashes produce identical
+-    text.
+-    """
+-    global _last_crash_message
+-    import random
+-
+-    if not CRASH_MESSAGE_POOL:
+-        return "An error occurred. Please try again."
+-
+-    candidates = [m for m in CRASH_MESSAGE_POOL if m != _last_crash_message]
+-    if not candidates:
+-        candidates = CRASH_MESSAGE_POOL
+-
+-    selected = random.choice(candidates)
+-    _last_crash_message = selected
+-    return selected
+-
+ 
+ class CircuitOpenError(RuntimeError):
+     """Raised when the Anthropic circuit breaker is open.
+@@ -1582,18 +1533,6 @@ async def get_agent_response_sdk(
+                 "before progressing to the next one.\n"
+                 "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
+                 "or you need human input.\n\n"
+-                "**Interpreting stage outcomes:**\n"
+-                "DevSession output may contain `<!-- OUTCOME {\"status\":\"...\", ...} -->` JSON. "
+-                "Use this decision table:\n"
+-                "| Status | Action |\n"
+-                "| `success` | Proceed to next stage. If TEST+REVIEW+DOCS all passed clean → auto-merge (no human ask). |\n"
+-                "| `partial` | Dispatch PATCH for tech_debt/nits, then re-REVIEW. Never silently skip findings. |\n"
+-                "| `fail` | Dispatch PATCH for blockers, then re-REVIEW. |\n"
+-                "| no OUTCOME block | Use your judgment from the output text. |\n\n"
+-                "**Key principles:**\n"
+-                "- Findings are NEVER silently ignored — they are either fixed or annotated with inline code comments.\n"
+-                "- Auto-merge when all gates pass with zero findings. Do not ask permission for obvious merges.\n"
+-                "- Only escalate to human when genuinely blocked or when a decision requires business judgment.\n\n"
+                 "For trivial or docs-only work, use your judgment on whether the full "
+                 "pipeline is warranted.\n"
+                 "Use the Agent tool for all coding work — slash commands like /do-build "
+@@ -1725,4 +1664,7 @@ async def get_agent_response_sdk(
+             complete_transcript(session_id, status="failed", summary=error_summary)
+         except Exception:
+             pass  # Best-effort cleanup
+-        return _get_crash_message()
++        return (
++            "Sorry, I ran into an issue and couldn't recover. "
++            "The error has been logged for investigation."
++        )
+diff --git a/bridge/summarizer.py b/bridge/summarizer.py
+index e6f0c765b..801dee986 100644
+--- a/bridge/summarizer.py
++++ b/bridge/summarizer.py
+@@ -957,6 +957,9 @@ def _build_summary_prompt(
+             if history:
+                 recent = history[-5:]  # Last 5 entries
+                 context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
++        # Signal Q&A mode so the LLM uses prose format
++        if getattr(session, "qa_mode", False):
++            context_parts.append("qa_mode=True (use conversational prose, no bullets or emoji)")
+         if context_parts:
+             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
+ 
+@@ -1042,6 +1045,10 @@ def _write_full_output_file(text: str) -> Path:
+ 
+ 5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
+ 
++6. Q&A SESSIONS (when session context indicates qa_mode=True):
++   Respond in conversational prose — no bullets, no status emoji prefix, no structured template.
++   Write as a knowledgeable teammate answering a question. Cite sources naturally in prose.
++
+ GENERAL RULES:
+ - NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.
+   If work is in progress, report what has been DONE so far, not what will be done next.
+@@ -1329,6 +1336,11 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion:
+         except Exception as e:
+             logger.debug(f"Could not refresh session for summary: {e}")
+ 
++    # Q&A bypass: return prose directly without emoji prefix, bullet parsing,
++    # or structured template. The LLM summary is already in conversational form.
++    if session and getattr(session, "qa_mode", False):
++        return summary_text.strip()
++
+     # Parse questions from LLM output
+     bullets, questions = _parse_summary_and_questions(summary_text)
+ 
+diff --git a/bridge/telegram_bridge.py b/bridge/telegram_bridge.py
+index a24c70793..4b2b6cb86 100644
+--- a/bridge/telegram_bridge.py
++++ b/bridge/telegram_bridge.py
+@@ -847,9 +847,8 @@ async def handler(event):
+         # Save to subconscious memory (non-fatal, never crashes bridge)
+         try:
+             if text and text.strip() and not getattr(sender, "bot", False):
+-                from popoto import InteractionWeight
+-
+                 from models.memory import Memory
++                from popoto import InteractionWeight
+ 
+                 Memory.safe_save(
+                     agent_id=sender_name or "unknown",
+diff --git a/docs/features/chat-dev-session-architecture.md b/docs/features/chat-dev-session-architecture.md
+index f372d851e..7180eee25 100644
+--- a/docs/features/chat-dev-session-architecture.md
++++ b/docs/features/chat-dev-session-architecture.md
+@@ -169,6 +169,38 @@ python scripts/steer_child.py --list --parent-id <parent_id>
+ 
+ This reuses the same steering infrastructure (Redis queue, watchdog consumption) as Telegram reply-thread steering. See [Steering Queue](steering-queue.md) for the full steering architecture.
+ 
++## Q&A Formatting (Prose vs Structured)
++
++The PM persona uses different output formatting for Q&A sessions versus work sessions. The `qa_mode` flag on `AgentSession` is the single branch point for all formatting differences.
++
++### Q&A Mode (conversational prose)
++
++When `qa_mode=True`:
++- **Instructions**: `build_qa_instructions()` in `agent/qa_handler.py` emphasizes research-first behavior -- search code, query memory, consult docs, cite findings
++- **Summarizer**: The summarizer LLM receives `qa_mode=True` context and produces conversational prose instead of bullets
++- **Structured summary bypass**: `_compose_structured_summary()` in `bridge/summarizer.py` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
++- **Reaction**: Processing reaction is cleared (set to `None`) after Q&A delivery instead of setting a completion emoji
++- **Single delivery path**: Q&A always goes through the summarizer -- no dual-path ambiguity with `send_telegram.py`
++
++### Work Mode (structured formatting)
++
++When `qa_mode=False` or unset:
++- **Summarizer**: Produces bullet points with status emoji prefix
++- **Structured summary**: Full formatting with emoji, stage line (for SDLC), bullets, question section, and link footer
++- **Reaction**: Completion emoji set on success
++
++### Data Flow
++
++```
++Q&A message → intent classifier → qa_mode=True on AgentSession
++    → Agent researches (code, memory, docs)
++    → Agent returns prose answer
++    → Summarizer formats as prose (qa_mode context)
++    → _compose_structured_summary() bypasses structured template
++    → Telegram delivers prose directly
++    → Processing reaction cleared (None)
++```
++
+ ## Agent Definitions
+ 
+ The `dev-session` agent is defined in `agent/agent_definitions.py`:
+diff --git a/tests/unit/test_qa_handler.py b/tests/unit/test_qa_handler.py
+index fad99886e..6f7614283 100644
+--- a/tests/unit/test_qa_handler.py
++++ b/tests/unit/test_qa_handler.py
+@@ -24,15 +24,23 @@ def test_no_write_instruction(self):
+         result = build_qa_instructions()
+         assert "Do NOT write files" in result
+ 
+-    def test_telegram_send_instruction(self):
++    def test_no_send_telegram_instruction(self):
++        """Q&A should not reference send_telegram.py — single delivery path via summarizer."""
+         result = build_qa_instructions()
+-        assert "send_telegram.py" in result
++        assert "send_telegram.py" not in result
+ 
+     def test_conversational_tone(self):
+         result = build_qa_instructions()
+         assert "directly" in result
+         assert "conversational" in result.lower() or "conversationally" in result.lower()
+ 
++    def test_research_first_behavior(self):
++        """Q&A instructions should emphasize research before answering."""
++        result = build_qa_instructions()
++        assert "memory_search" in result
++        assert "Grep" in result or "Glob" in result
++        assert "evidence" in result.lower() or "cite" in result.lower()
++
+ 
+ class TestQaConstants:
+     def test_nudge_cap_less_than_default(self):
+diff --git a/tests/unit/test_qa_nudge_cap.py b/tests/unit/test_qa_nudge_cap.py
+index 48bdd5025..30e289d5a 100644
+--- a/tests/unit/test_qa_nudge_cap.py
++++ b/tests/unit/test_qa_nudge_cap.py
+@@ -37,3 +37,51 @@ def test_normal_cap_still_allows_more_nudges(self):
+             max_nudge_count=MAX_NUDGE_COUNT,
+         )
+         assert action == "nudge_empty"
++
++
++class TestQaReactionClearing:
++    """Tests for Q&A reaction clearing behavior (issue #541)."""
++
++    def test_qa_session_gets_none_reaction(self):
++        """Q&A sessions should clear the processing reaction (None) on success."""
++        from unittest.mock import MagicMock
++
++        session = MagicMock()
++        session.qa_mode = True
++
++        # The reaction logic in job_queue.py checks qa_mode and returns None
++        # for successful Q&A sessions. We test the conditional directly.
++        task_error = False
++        if session and getattr(session, "qa_mode", False) and not task_error:
++            emoji = None
++        else:
++            emoji = "completion"
++        assert emoji is None
++
++    def test_work_session_gets_completion_reaction(self):
++        """Non-Q&A sessions should still get a completion emoji."""
++        from unittest.mock import MagicMock
++
++        session = MagicMock()
++        session.qa_mode = False
++
++        task_error = False
++        if session and getattr(session, "qa_mode", False) and not task_error:
++            emoji = None
++        else:
++            emoji = "completion"
++        assert emoji == "completion"
++
++    def test_qa_error_gets_error_reaction(self):
++        """Q&A sessions with errors should still get error reaction."""
++        from unittest.mock import MagicMock
++
++        session = MagicMock()
++        session.qa_mode = True
++
++        task_error = True
++        if session and getattr(session, "qa_mode", False) and not task_error:
++            emoji = None
++        else:
++            emoji = "error"
++        assert emoji == "error"
+diff --git a/tests/unit/test_summarizer.py b/tests/unit/test_summarizer.py
+index 7a8e5a575..dfcc95913 100644
+--- a/tests/unit/test_summarizer.py
++++ b/tests/unit/test_summarizer.py
+@@ -36,6 +36,7 @@ def _mock_session_with_stages(stage_dict, links=None):
+     session.issue_url = (links or {}).get("issue")
+     session.plan_url = (links or {}).get("plan")
+     session.pr_url = (links or {}).get("pr")
++    session.qa_mode = False  # Default: not a Q&A session
+     return session
+ 
+ 
+@@ -1084,6 +1085,38 @@ def test_not_completion_uses_pending_emoji(self):
+         result = _compose_structured_summary("• Working on it", session=None, is_completion=False)
+         assert "⏳" in result
+ 
++    def test_qa_mode_returns_prose_without_emoji(self):
++        """Q&A sessions bypass structured formatting — return prose directly."""
++        from unittest.mock import MagicMock
++
++        session = MagicMock()
++        session.qa_mode = True
++        session.session_id = None  # Skip Redis refresh
++
++        result = _compose_structured_summary(
++            "The bridge uses Telethon for Telegram integration. See bridge/telegram_bridge.py.",
++            session=session,
++        )
++        # No emoji prefix
++        assert not result.startswith("✅")
++        assert not result.startswith("⏳")
++        assert not result.startswith("❌")
++        # Prose preserved as-is
++        assert "bridge uses Telethon" in result
++
++    def test_qa_mode_false_still_gets_structured(self):
++        """Non-Q&A sessions with qa_mode=False still get structured formatting."""
++        from unittest.mock import MagicMock
++
++        session = MagicMock()
++        session.qa_mode = False
++        session.session_id = None
++        session.status = "completed"
++
++        result = _compose_structured_summary("• Built it", session=session)
++        assert "✅" in result
++        assert "• Built it" in result
++
+ 
+ class TestNoMessageEcho:
+     """Tests verifying that message echo has been removed (issue #241).
+@@ -1105,6 +1138,7 @@ def test_no_echo_on_auto_continued_session(self):
+         session.message_text = "continue"
+         session.status = "running"
+         session.is_sdlc = True
++        session.qa_mode = False
+ 
+         result = _compose_structured_summary(
+             "• Built the bypass\n• Tests passing", session=session, is_completion=True
+@@ -1122,6 +1156,7 @@ def test_no_echo_on_regular_session(self):
+         session._get_history_list.return_value = ["[user] What time is it?"]
+         session.message_text = "What time is it?"
+         session.status = "completed"
++        session.qa_mode = False
+         session.get_links.return_value = {}
+ 
+         result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
+@@ -1242,6 +1277,26 @@ def test_non_sdlc_session_no_stage_line(self):
+         first_line = result.split("\n")[0].strip()
+         assert first_line in ("\u2705", "\u23f3", "\u274c", "") or len(first_line) > 0
+ 
++    def test_qa_mode_session_returns_prose(self):
++        """Q&A session bypasses all structured formatting."""
++        session = _mock_session_with_stages({})
++        session.qa_mode = True
++        session.session_id = None  # Skip Redis refresh
++        session.message_text = "How does the bridge work?"
++        session.status = "completed"
++
++        result = _compose_structured_summary(
++            "The bridge connects Telegram to Claude via Telethon. "
++            "See bridge/telegram_bridge.py for the main entry point.",
++            session=session,
++        )
++
++        # No structured formatting — pure prose
++        assert not result.startswith("\u2705")
++        assert not result.startswith("\u23f3")
++        assert "\u2022" not in result  # No bullet points
++        assert "bridge connects Telegram" in result
++
+ 
+ class TestSummarizationBypass:
+     """Tests for the non-SDLC short response bypass in response.py."""

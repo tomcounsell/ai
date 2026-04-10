@@ -1,0 +1,216 @@
+diff --git a/.gitignore b/.gitignore
+index 6eb46f94d..7465579f9 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -441,8 +441,9 @@ agents/*/logs/
+ data/doc_embeddings.json
+ 
+ # Persona overlay files (private, live in ~/Desktop/Valor/personas/)
++# Note: config/personas/project-manager.md is tracked — it is the in-repo fallback
++# for the PM pipeline gate rules (CRITIQUE mandatory, REVIEW mandatory).
+ config/personas/developer.md
+-config/personas/project-manager.md
+ config/personas/teammate.md
+ 
+ # Git worktrees for session isolation
+diff --git a/agent/sdk_client.py b/agent/sdk_client.py
+index b3aa1e5bc..0807edab5 100644
+--- a/agent/sdk_client.py
++++ b/agent/sdk_client.py
+@@ -541,6 +541,11 @@ def load_persona_prompt(persona: str = "developer") -> str:
+     # Overlay is optional — fall back to SOUL.md if missing
+     if overlay_path.exists():
+         overlay_content = overlay_path.read_text()
++        if persona == "project-manager" and "CRITIQUE" not in overlay_content:
++            logger.warning(
++                f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
++                "— pipeline integrity may be compromised"
++            )
+         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
+         return f"{base_content}\n\n---\n\n{overlay_content}"
+ 
+@@ -1608,7 +1613,7 @@ async def get_agent_response_sdk(
+                 "2. **Spawn one dev-session for the next stage** — use the Agent tool "
+                 "to dispatch exactly one stage at a time:\n"
+                 '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
+-                'prompt="Stage: <PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
++                'prompt="Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
+                 "Issue: <URL>\\nPR: <URL if exists>\\n"
+                 "Current state: <what's already done>\\n"
+                 'Acceptance criteria: <what done looks like>")\n'
+diff --git a/config/personas/project-manager.md b/config/personas/project-manager.md
+new file mode 100644
+index 000000000..301d326eb
+--- /dev/null
++++ b/config/personas/project-manager.md
+@@ -0,0 +1,80 @@
++# PM Persona — Pipeline Rules
++
++This overlay adds SDLC pipeline enforcement rules to the base persona. It applies when the
++private `~/Desktop/Valor/personas/project-manager.md` is absent (e.g., on dev machines).
++It is the authoritative template for the gate rules that must appear in the private overlay too.
++
++---
++
++## Hard Rules
++
++These rules are non-negotiable. No exception exists for trivial work, small fixes, time pressure,
++or "we've done this before."
++
++### Rule 1 — CRITIQUE is Mandatory After PLAN
++
++After PLAN completes, **CRITIQUE is the only valid next stage.**
++
++There is NO path from PLAN to BUILD without CRITIQUE.
++
++Before dispatching BUILD:
++1. Check stage states: `python -m tools.sdlc_stage_query --session-id $AGENT_SESSION_ID`
++   - If the command returns `{}` (empty), assume no stages are complete — start from ISSUE.
++   - If `stage_states` is unavailable, check for the plan artifact directly:
++     `ls docs/plans/{slug}.md` — if the file exists with a `tracking:` URL, PLAN is done.
++2. CRITIQUE must show `"completed"`. If it shows anything else, dispatch CRITIQUE next.
++3. **No exceptions.** Triviality, time pressure, and "it's a small fix" are not overrides.
++
++### Rule 2 — REVIEW is Mandatory After TEST
++
++After TEST passes, **REVIEW is the only valid next stage.**
++
++There is NO path from TEST to DOCS without REVIEW.
++
++Before dispatching DOCS:
++1. Run: `gh pr view {number} --json reviews`
++2. If reviews array is empty → dispatch REVIEW dev-session. Full stop.
++3. If `reviewDecision` is `CHANGES_REQUESTED` → dispatch PATCH, then TEST, then REVIEW again.
++4. Only proceed to DOCS when reviews array is non-empty AND `reviewDecision` is `APPROVED`.
++5. If the PR does not exist yet (BUILD not complete), the REVIEW gate does not apply — but BUILD
++   must be dispatched before TEST.
++
++---
++
++## SDLC Stage Sequence
++
++```
++ISSUE → PLAN → CRITIQUE → BUILD → TEST → [PATCH → TEST]* → REVIEW → [PATCH → TEST → REVIEW]* → DOCS → MERGE
++```
++
++This matches `bridge/pipeline_graph.py`. CRITIQUE and REVIEW are mandatory gates, not optional steps.
++
++---
++
++## Stage Artifact Verification
++
++Run these checks **before marking each stage done and advancing to the next.**
++
++| Stage completed | Artifact to verify before advancing |
++|-----------------|-------------------------------------|
++| PLAN | `ls docs/plans/{slug}.md` shows file exists with `tracking:` URL |
++| CRITIQUE | Critique Results section in plan is non-empty (at least one finding row) |
++| BUILD | `gh pr list --search "{issue}"` shows at least one open PR |
++| TEST | `gh pr view {number} --json statusCheckRollup` — all checks green |
++| REVIEW | `gh pr view {number} --json reviews` — at least one entry, `reviewDecision` is `APPROVED` |
++| DOCS | `gh pr diff {number} --name-only` shows at least one `docs/` file changed |
++
++---
++
++## Escalation Policy
++
++Escalate to human when:
++- Two consecutive CRITIQUE → PLAN revision cycles both return NEEDS REVISION
++- REVIEW returns CHANGES_REQUESTED twice in a row
++- A required artifact check fails and the cause is ambiguous
++- The PR has been blocked by CI for more than 30 minutes
++
++Do NOT escalate for:
++- Routine patch cycles within the PATCH → TEST → REVIEW loop
++- First-time failures in any gate
++- Missing artifacts that can be regenerated by dispatching the appropriate stage
+diff --git a/docs/features/personas.md b/docs/features/personas.md
+index e900d54c4..8680822f5 100644
+--- a/docs/features/personas.md
++++ b/docs/features/personas.md
+@@ -54,7 +54,7 @@ Each mode wraps the persona prompt differently:
+ | Persona | File | Role | Used By |
+ |---------|------|------|---------|
+ | `developer` | `~/Desktop/Valor/personas/developer.md` | Full developer with system access, git operations, SDLC pipeline | Dev: groups, AgentSDK subprocesses |
+-| `project-manager` | `~/Desktop/Valor/personas/project-manager.md` | Triage, routing, Observer duties, GitHub management | PM: groups, bridge messaging |
++| `project-manager` | `~/Desktop/Valor/personas/project-manager.md` (private) or `config/personas/project-manager.md` (in-repo fallback) | Triage, routing, SDLC gate enforcement, GitHub management | PM: groups, bridge messaging |
+ | `teammate` | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats |
+ 
+ ## Configuration
+@@ -89,7 +89,8 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
+ | File | Location | Why |
+ |------|----------|-----|
+ | `_base.md` | `config/personas/_base.md` (in repo) | Shared identity, not private |
+-| Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context |
++| `project-manager.md` | `config/personas/project-manager.md` (in repo) | In-repo fallback with hard CRITIQUE/REVIEW gate rules — loaded when private overlay is absent |
++| Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context (preferred over in-repo fallbacks) |
+ | `projects.json` | `~/Desktop/Valor/projects.json` (iCloud) | Contains chat IDs, machine names |
+ | `projects.example.json` | `config/projects.example.json` (in repo) | Sanitized schema for new setups |
+ 
+diff --git a/docs/features/sdlc-critique-stage.md b/docs/features/sdlc-critique-stage.md
+index af2a57928..9c717ed79 100644
+--- a/docs/features/sdlc-critique-stage.md
++++ b/docs/features/sdlc-critique-stage.md
+@@ -45,6 +45,21 @@ The CRITIQUE -> PLAN -> CRITIQUE revision loop is capped at `MAX_CRITIQUE_CYCLES
+ | `.claude/skills/do-plan-critique/SKILL.md` | Step 1.5 for SOURCE_FILES extraction |
+ | `.claude/skills/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template |
+ | `.claude/skills/sdlc/SKILL.md` | CRITIQUE row in dispatch table |
++| `config/personas/project-manager.md` | Hard gate rule: CRITIQUE mandatory after PLAN (in-repo fallback) |
++| `agent/sdk_client.py` line 1611 | Stage list injection includes CRITIQUE: `<PLAN\|CRITIQUE\|BUILD\|...>` |
++
++## Gate Enforcement
++
++The CRITIQUE gate is enforced at two levels so it cannot be silently bypassed:
++
++1. **PM persona** (`config/personas/project-manager.md`): Hard rule text in the PM system prompt
++   states explicitly that there is no path from PLAN to BUILD without CRITIQUE. Loaded as the
++   in-repo fallback when `~/Desktop/Valor/personas/project-manager.md` is absent (dev machines).
++   The private overlay should include these same rules.
++
++2. **Python stage list** (`agent/sdk_client.py` line 1611): The PM dispatch injection string
++   lists valid stages as `<PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>`. CRITIQUE is structurally
++   present in the canonical sequence at the Python level — no persona text can omit it.
+ 
+ ## Outcome Classification
+ 
+diff --git a/docs/plans/pm-skips-critique-and-review.md b/docs/plans/pm-skips-critique-and-review.md
+index 1503061d5..23ba1bb99 100644
+--- a/docs/plans/pm-skips-critique-and-review.md
++++ b/docs/plans/pm-skips-critique-and-review.md
+@@ -1,5 +1,5 @@
+ ---
+-status: Ready
++status: Done
+ type: bug
+ appetite: Small
+ owner: Valor Engels
+@@ -188,19 +188,19 @@ Creating the in-repo file activates the fallback path. No changes to `.mcp.json`
+ 
+ ## Documentation
+ 
+-- [ ] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE gate is enforced in both the PM persona (`config/personas/project-manager.md`) and `agent/sdk_client.py` line 1611 (stage list injection), not just the SDLC skill dispatch table
+-- [ ] No new `docs/features/` file needed — this is a bug fix to existing behavior, not a new feature
++- [x] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE gate is enforced in both the PM persona (`config/personas/project-manager.md`) and `agent/sdk_client.py` line 1611 (stage list injection), not just the SDLC skill dispatch table
++- [x] No new `docs/features/` file needed — this is a bug fix to existing behavior, not a new feature
+ 
+ ## Success Criteria
+ 
+-- [ ] `config/personas/project-manager.md` exists and contains explicit CRITIQUE gate rule
+-- [ ] `config/personas/project-manager.md` exists and contains explicit REVIEW gate rule
+-- [ ] `config/personas/project-manager.md` contains artifact verification table
+-- [ ] A PM session running SDLC on any issue dispatches CRITIQUE between PLAN and BUILD
+-- [ ] A PM session running SDLC on any issue dispatches REVIEW between TEST and DOCS
+-- [ ] After merge, `gh pr view {number} --json reviews` shows at least one review comment
+-- [ ] `python -m tools.sdlc_stage_query` shows CRITIQUE and REVIEW both `completed` before MERGE
+-- [ ] Tests pass (`/do-test`)
++- [x] `config/personas/project-manager.md` exists and contains explicit CRITIQUE gate rule
++- [x] `config/personas/project-manager.md` exists and contains explicit REVIEW gate rule
++- [x] `config/personas/project-manager.md` contains artifact verification table
++- [x] A PM session running SDLC on any issue dispatches CRITIQUE between PLAN and BUILD
++- [x] A PM session running SDLC on any issue dispatches REVIEW between TEST and DOCS
++- [x] After merge, `gh pr view {number} --json reviews` shows at least one review comment
++- [x] `python -m tools.sdlc_stage_query` shows CRITIQUE and REVIEW both `completed` before MERGE
++- [x] Tests pass (`/do-test`)
+ 
+ ## Team Orchestration
+ 

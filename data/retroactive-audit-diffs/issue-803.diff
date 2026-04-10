@@ -1,0 +1,28 @@
+diff --git a/tests/unit/test_ui_app.py b/tests/unit/test_ui_app.py
+index 5654c3f3..9a574b50 100644
+--- a/tests/unit/test_ui_app.py
++++ b/tests/unit/test_ui_app.py
+@@ -56,8 +56,8 @@ class TestJinja2Filters:
+     def test_format_duration_seconds(self):
+         from ui.app import _filter_format_duration
+ 
+-        assert _filter_format_duration(5.2) == "<1m"
+-        assert _filter_format_duration(59.9) == "<1m"
++        assert _filter_format_duration(5.2) == "5s"
++        assert _filter_format_duration(59.9) == "60s"
+ 
+     def test_format_duration_minutes(self):
+         from ui.app import _filter_format_duration
+diff --git a/tests/unit/test_ui_reflections_data.py b/tests/unit/test_ui_reflections_data.py
+index 9b8c5db2..b5f48d35 100644
+--- a/tests/unit/test_ui_reflections_data.py
++++ b/tests/unit/test_ui_reflections_data.py
+@@ -62,7 +62,7 @@ def test_format_duration(self):
+         from ui.app import _filter_format_duration
+ 
+         assert _filter_format_duration(None) == "-"
+-        assert _filter_format_duration(5.0) == "<1m"
++        assert _filter_format_duration(5.0) == "5s"
+         assert _filter_format_duration(120.0) == "2m"
+         assert _filter_format_duration(7200.0) == "2h"
+ 

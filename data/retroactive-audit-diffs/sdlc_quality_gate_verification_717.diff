@@ -1,0 +1,141 @@
+diff --git a/tests/integration/test_session_zombie_health_check.py b/tests/integration/test_session_zombie_health_check.py
+new file mode 100644
+index 000000000..89e1b0ba3
+--- /dev/null
++++ b/tests/integration/test_session_zombie_health_check.py
+@@ -0,0 +1,135 @@
++"""Integration test for health check orphan-fixing with real Redis.
++
++Validates that _agent_session_hierarchy_health_check() preserves
++session status when clearing orphaned parent references. This is
++the core fix for issue #700 (session completion zombie loop).
++
++Tests use real Redis via the autouse redis_test_db fixture in conftest.py.
++Per-worker db isolation (gw0->db1, gw1->db2) prevents xdist contamination.
++"""
++
++from datetime import UTC, datetime
++
++import pytest
++
++from models.agent_session import AgentSession
++
++
++@pytest.fixture
++def completed_child_with_orphaned_parent(redis_test_db):
++    """Create a completed child session whose parent does not exist in Redis.
++
++    This is the exact scenario that caused the zombie loop: the health check
++    detects the orphaned parent reference, deletes the child, and recreates
++    it. Without the status field in _AGENT_SESSION_FIELDS, the recreated
++    session would default to status='pending' and be re-executed.
++    """
++    return AgentSession.create(
++        session_id="zombie-test-child",
++        project_key="test",
++        status="completed",
++        chat_id="999",
++        sender_name="TestUser",
++        message_text="Test message",
++        created_at=datetime.now(tz=UTC),
++        parent_agent_session_id="nonexistent-parent-id",
++    )
++
++
++@pytest.fixture
++def failed_child_with_orphaned_parent(redis_test_db):
++    """Create a failed child session whose parent does not exist in Redis."""
++    return AgentSession.create(
++        session_id="zombie-test-failed-child",
++        project_key="test",
++        status="failed",
++        chat_id="999",
++        sender_name="TestUser",
++        message_text="Test message",
++        created_at=datetime.now(tz=UTC),
++        parent_agent_session_id="nonexistent-parent-id",
++    )
++
++
++class TestHealthCheckOrphanFixPreservesStatus:
++    """Health check orphan-fixing must preserve original session status.
++
++    When _agent_session_hierarchy_health_check() detects a child with a
++    non-existent parent, it clears the parent reference via delete-and-recreate.
++    The recreated session must retain its original status (completed, failed, etc.)
++    rather than defaulting to 'pending'.
++    """
++
++    @pytest.mark.asyncio
++    async def test_completed_child_stays_completed_after_health_check(
++        self, completed_child_with_orphaned_parent
++    ):
++        """A completed child with an orphaned parent must remain completed
++        after the health check clears the parent reference."""
++        from agent.agent_session_queue import _agent_session_hierarchy_health_check
++
++        child = completed_child_with_orphaned_parent
++        original_session_id = child.session_id
++
++        # Confirm preconditions
++        assert child.status == "completed"
++        assert child.parent_agent_session_id == "nonexistent-parent-id"
++
++        # Run the health check (detects orphan, clears parent via delete-and-recreate)
++        await _agent_session_hierarchy_health_check()
++
++        # Re-read from Redis to verify the recreated session
++        sessions = list(AgentSession.query.filter(session_id=original_session_id))
++        assert len(sessions) == 1, f"Expected 1 session, found {len(sessions)}"
++
++        recreated = sessions[0]
++        assert recreated.status == "completed", (
++            f"Health check changed completed status to '{recreated.status}' — zombie loop!"
++        )
++        assert recreated.parent_agent_session_id is None, (
++            "Health check should have cleared the orphaned parent reference"
++        )
++
++    @pytest.mark.asyncio
++    async def test_failed_child_stays_failed_after_health_check(
++        self, failed_child_with_orphaned_parent
++    ):
++        """A failed child with an orphaned parent must remain failed
++        after the health check clears the parent reference."""
++        from agent.agent_session_queue import _agent_session_hierarchy_health_check
++
++        child = failed_child_with_orphaned_parent
++        original_session_id = child.session_id
++
++        assert child.status == "failed"
++        assert child.parent_agent_session_id == "nonexistent-parent-id"
++
++        await _agent_session_hierarchy_health_check()
++
++        sessions = list(AgentSession.query.filter(session_id=original_session_id))
++        assert len(sessions) == 1, f"Expected 1 session, found {len(sessions)}"
++
++        recreated = sessions[0]
++        assert recreated.status == "failed", (
++            f"Health check changed failed status to '{recreated.status}'"
++        )
++        assert recreated.parent_agent_session_id is None
++
++    @pytest.mark.asyncio
++    async def test_orphaned_parent_reference_is_cleared(self, completed_child_with_orphaned_parent):
++        """The health check must clear the parent_agent_session_id when the
++        parent no longer exists, allowing the child to stand alone."""
++        from agent.agent_session_queue import _agent_session_hierarchy_health_check
++
++        child = completed_child_with_orphaned_parent
++
++        # Parent does not exist — verify by checking all sessions
++        all_sessions = list(AgentSession.query.all())
++        parent_exists = any(s.agent_session_id == "nonexistent-parent-id" for s in all_sessions)
++        assert not parent_exists, "Test setup error: parent should not exist"
++
++        await _agent_session_hierarchy_health_check()
++
++        sessions = list(AgentSession.query.filter(session_id=child.session_id))
++        assert len(sessions) == 1
++        assert sessions[0].parent_agent_session_id is None

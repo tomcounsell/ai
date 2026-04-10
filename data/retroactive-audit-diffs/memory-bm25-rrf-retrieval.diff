@@ -1,0 +1,1249 @@
+diff --git a/.claude/hooks/hook_utils/memory_bridge.py b/.claude/hooks/hook_utils/memory_bridge.py
+index 7b8e59cd3..93c470b9e 100644
+--- a/.claude/hooks/hook_utils/memory_bridge.py
++++ b/.claude/hooks/hook_utils/memory_bridge.py
+@@ -1,6 +1,6 @@
+ """Memory bridge for Claude Code hooks.
+ 
+-Wraps Memory model imports and ContextAssembler calls for use from
++Wraps Memory model imports and BM25+RRF retrieval calls for use from
+ hook scripts. Hooks are standalone scripts that run in fresh processes;
+ this module handles sys.path setup and import boilerplate.
+ 
+@@ -180,7 +180,7 @@ def recall(
+ 
+     Accumulates tool calls in a JSON sidecar file. Every WINDOW_SIZE
+     calls, extracts keywords, checks bloom filter, and queries
+-    ContextAssembler. Returns additionalContext string or None.
++    via BM25+RRF fusion. Returns additionalContext string or None.
+ 
+     This is the hook-side equivalent of agent/memory_hook.check_and_inject().
+     All exceptions are caught -- returns None on any failure.
+@@ -248,34 +248,27 @@ def recall(
+                 )
+             return None
+ 
+-        # Multi-query decomposition -- cluster keywords and query each cluster
++        # Multi-query decomposition -- cluster keywords and retrieve via BM25+RRF
+         import time
+ 
+         from agent.memory_hook import _cluster_keywords
++        from agent.memory_retrieval import retrieve_memories
+ 
+         project_key = _get_project_key()
+ 
+-        from popoto import ContextAssembler
+-
+-        assembler = ContextAssembler(
+-            model_class=Memory,
+-            score_weights={"relevance": 0.6, "confidence": 0.3},
+-            max_items=MAX_THOUGHTS,
+-            max_tokens=1000,
+-        )
+-
+         clusters = _cluster_keywords(unique_keywords)
+         all_records = []
+         seen_ids: set[str] = set()
+ 
+         query_start = time.monotonic()
+         for cluster in clusters:
+-            result = assembler.assemble(
+-                query_cues={"topic": " ".join(cluster[:5])},
+-                agent_id=project_key,
+-                partition_filters={"project_key": project_key},
++            cluster_query = " ".join(cluster[:5])
++            records = retrieve_memories(
++                query_text=cluster_query,
++                project_key=project_key,
++                limit=MAX_THOUGHTS,
+             )
+-            for record in result.records or []:
++            for record in records:
+                 rid = str(getattr(record, "memory_id", "") or "")
+                 if rid and rid not in seen_ids:
+                     seen_ids.add(rid)
+diff --git a/agent/memory_hook.py b/agent/memory_hook.py
+index b6301b41c..efb881ed8 100644
+--- a/agent/memory_hook.py
++++ b/agent/memory_hook.py
+@@ -1,7 +1,7 @@
+ """Subconscious memory thought injection for PostToolUse hook.
+ 
+-Checks ExistenceFilter for topic relevance, assembles context via
+-ContextAssembler, and returns <thought> blocks via additionalContext.
++Checks ExistenceFilter for topic relevance, retrieves memories via
++BM25 + RRF fusion, and returns <thought> blocks via additionalContext.
+ 
+ Rate-limited via sliding window: every WINDOW_SIZE tool calls, extracts
+ topic keywords from the current window plus previous windows in the buffer.
+@@ -158,12 +158,12 @@ def _cluster_keywords(keywords: list[str], max_clusters: int = 3) -> list[list[s
+ def _apply_category_weights(records: list) -> list:
+     """Re-rank memory records by applying category-based weight multipliers.
+ 
+-    After ContextAssembler returns scored results, multiply each record's
++    After RRF fusion returns scored results, multiply each record's
+     effective score by its category weight, then re-sort descending.
+     Records with missing or malformed metadata get the default weight (1.0).
+ 
+     Args:
+-        records: List of Memory records from ContextAssembler.
++        records: List of Memory records with `score` attribute (RRF score).
+ 
+     Returns:
+         Re-sorted list of records (same objects, new order).
+@@ -279,17 +279,10 @@ def check_and_inject(
+                 )
+             return None
+ 
+-        # Multi-query decomposition — cluster keywords and query each cluster
++        # Multi-query decomposition — cluster keywords and retrieve via BM25 + RRF
+         import time
+ 
+-        from popoto import ContextAssembler
+-
+-        assembler = ContextAssembler(
+-            model_class=Memory,
+-            score_weights={"relevance": 0.6, "confidence": 0.3},
+-            max_items=MAX_THOUGHTS,
+-            max_tokens=1000,
+-        )
++        from agent.memory_retrieval import retrieve_memories
+ 
+         clusters = _cluster_keywords(unique_keywords)
+         all_records = []
+@@ -297,12 +290,13 @@ def check_and_inject(
+ 
+         query_start = time.monotonic()
+         for cluster in clusters:
+-            result = assembler.assemble(
+-                query_cues={"topic": " ".join(cluster[:5])},
+-                agent_id=project_key,
+-                partition_filters={"project_key": project_key},
++            cluster_query = " ".join(cluster[:5])
++            records = retrieve_memories(
++                query_text=cluster_query,
++                project_key=project_key,
++                limit=MAX_THOUGHTS,
+             )
+-            for record in result.records or []:
++            for record in records:
+                 rid = str(getattr(record, "memory_id", "") or "")
+                 if rid and rid not in seen_ids:
+                     seen_ids.add(rid)
+diff --git a/agent/memory_retrieval.py b/agent/memory_retrieval.py
+new file mode 100644
+index 000000000..d292294db
+--- /dev/null
++++ b/agent/memory_retrieval.py
+@@ -0,0 +1,237 @@
++"""BM25 + RRF fusion retrieval for the subconscious memory system.
++
++Replaces ContextAssembler with a three-signal Reciprocal Rank Fusion:
++  1. BM25 keyword match quality (via BM25Field.search)
++  2. Temporal relevance (via DecayingSortedField sorted set)
++  3. Historical confidence (via ConfidenceField companion hash)
++
++Each signal produces a ranked list of (redis_key, score) tuples.
++RRF fuses them into a single ranking: score = sum(1 / (k + rank_i)).
++
++All functions are fail-silent -- retrieval failures never crash the agent.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Any
++
++logger = logging.getLogger(__name__)
++
++
++def _filter_by_project(
++    results: list[tuple[str, float]],
++    project_key: str,
++) -> list[tuple[str, float]]:
++    """Filter (redis_key, score) tuples to only those belonging to project_key.
++
++    Memory's project_key is a KeyField, so it is embedded in each Redis key.
++    We check that the project_key segment appears in the key string.
++
++    Args:
++        results: List of (redis_key, score) tuples.
++        project_key: Project partition key to filter by.
++
++    Returns:
++        Filtered list containing only entries whose key includes project_key.
++    """
++    if not project_key:
++        return results
++    return [(k, s) for k, s in results if project_key in k]
++
++
++def rrf_fuse(
++    *ranked_lists: list[tuple[str, float]],
++    k: int = 60,
++    limit: int = 10,
++) -> list[tuple[str, float]]:
++    """Fuse multiple ranked lists using Reciprocal Rank Fusion.
++
++    Each ranked list is a sequence of (key, score) tuples sorted by score
++    descending. The RRF score for a key is: sum(1 / (k + rank)) across
++    all lists where it appears (rank is 1-based).
++
++    Args:
++        *ranked_lists: Variable number of ranked (key, score) lists.
++        k: RRF constant. Higher = more uniform blending. Default 60.
++        limit: Maximum results to return.
++
++    Returns:
++        List of (key, rrf_score) tuples sorted by RRF score descending.
++    """
++    scores: dict[str, float] = {}
++
++    for ranked_list in ranked_lists:
++        if not ranked_list:
++            continue
++        for rank_idx, (key, _score) in enumerate(ranked_list):
++            # Normalize key to string (Redis returns bytes sometimes)
++            str_key = key.decode() if isinstance(key, bytes) else str(key)
++            rrf_score = 1.0 / (k + rank_idx + 1)  # 1-based rank
++            scores[str_key] = scores.get(str_key, 0.0) + rrf_score
++
++    # Sort by RRF score descending
++    fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
++    return fused[:limit]
++
++
++def get_relevance_ranked(
++    project_key: str,
++    limit: int = 50,
++) -> list[tuple[str, float]]:
++    """Get relevance-ranked memory keys from the DecayingSortedField.
++
++    Reads directly from the Redis sorted set backing Memory.relevance,
++    partitioned by project_key. Returns (redis_key, decay_score) tuples
++    sorted by score descending (most relevant first).
++
++    Args:
++        project_key: Project partition key.
++        limit: Maximum entries to return.
++
++    Returns:
++        List of (redis_key, score) tuples. Empty list on any error.
++    """
++    try:
++        from popoto import DecayingSortedField
++        from popoto.redis_db import POPOTO_REDIS_DB
++
++        from models.memory import Memory
++
++        sorted_set_key = DecayingSortedField.get_sortedset_db_key(Memory, "relevance", project_key)
++        results = POPOTO_REDIS_DB.zrevrange(sorted_set_key.redis_key, 0, limit - 1, withscores=True)
++        # Results are [(bytes_key, float_score), ...]
++        return [(k.decode() if isinstance(k, bytes) else str(k), float(s)) for k, s in results]
++    except Exception as e:
++        logger.warning(f"[memory_retrieval] relevance ranked fetch failed: {e}")
++        return []
++
++
++def get_confidence_ranked(
++    project_key: str,
++    limit: int = 50,
++) -> list[tuple[str, float]]:
++    """Get confidence-ranked memory keys from the ConfidenceField hash.
++
++    Reads all entries from the ConfidenceField companion hash, filters
++    to the given project_key, and sorts by confidence score descending.
++    Returns (redis_key, confidence) tuples.
++
++    Args:
++        project_key: Project partition key. Only entries whose Redis key
++            contains this value are returned.
++        limit: Maximum entries to return.
++
++    Returns:
++        List of (redis_key, confidence) tuples. Empty list on any error.
++    """
++    try:
++        import msgpack
++        from popoto import ConfidenceField
++        from popoto.redis_db import POPOTO_REDIS_DB
++
++        from models.memory import Memory
++
++        # Derive hash key from popoto API instead of hardcoding
++        base_key = ConfidenceField.get_special_use_field_db_key(Memory, "confidence")
++        hash_key = base_key.redis_key + ":data"
++        raw_data = POPOTO_REDIS_DB.hgetall(hash_key)
++
++        if not raw_data:
++            return []
++
++        entries: list[tuple[str, float]] = []
++        for member_key, packed_data in raw_data.items():
++            try:
++                str_key = member_key.decode() if isinstance(member_key, bytes) else str(member_key)
++                data = msgpack.unpackb(packed_data, raw=False)
++                confidence = float(data.get("confidence", 0.5))
++                entries.append((str_key, confidence))
++            except Exception:
++                continue
++
++        # Filter to project scope (project_key is embedded in Redis keys)
++        entries = _filter_by_project(entries, project_key)
++
++        # Sort by confidence descending
++        entries.sort(key=lambda x: x[1], reverse=True)
++        return entries[:limit]
++    except Exception as e:
++        logger.warning(f"[memory_retrieval] confidence ranked fetch failed: {e}")
++        return []
++
++
++def retrieve_memories(
++    query_text: str,
++    project_key: str,
++    limit: int = 10,
++    rrf_k: int | None = None,
++) -> list[Any]:
++    """Retrieve memories using BM25 + RRF fusion of three signals.
++
++    Combines BM25 keyword match, temporal relevance, and confidence
++    via Reciprocal Rank Fusion. Returns hydrated Memory instances
++    with a `score` attribute set to the RRF fusion score.
++
++    Args:
++        query_text: Search query string.
++        project_key: Project partition key.
++        limit: Maximum memories to return.
++        rrf_k: RRF constant override. Uses config default if None.
++
++    Returns:
++        List of Memory instances with `score` attribute, sorted by
++        RRF score descending. Empty list on any error.
++    """
++    try:
++        from popoto import BM25Field
++
++        from config.memory_defaults import RRF_K
++        from models.memory import Memory
++
++        if rrf_k is None:
++            rrf_k = RRF_K
++
++        # Signal 1: BM25 keyword match (global index, post-filtered to project)
++        try:
++            bm25_results = BM25Field.search(Memory, "bm25", query_text, limit=50)
++            bm25_results = _filter_by_project(bm25_results, project_key)
++        except Exception as e:
++            logger.warning(f"[memory_retrieval] BM25 search failed: {e}")
++            bm25_results = []
++
++        # Signal 2: Temporal relevance (decay-sorted, natively partitioned)
++        relevance_results = get_relevance_ranked(project_key, limit=50)
++
++        # Signal 3: Confidence (global hash, post-filtered to project)
++        confidence_results = get_confidence_ranked(project_key, limit=50)
++
++        # Fuse the three signals
++        fused = rrf_fuse(
++            bm25_results,
++            relevance_results,
++            confidence_results,
++            k=rrf_k,
++            limit=limit,
++        )
++
++        if not fused:
++            return []
++
++        # Hydrate Memory instances from fused keys
++        records = []
++        for redis_key, rrf_score in fused:
++            try:
++                record = Memory.query.get(redis_key)
++                if record is not None:
++                    # Attach RRF score for downstream use (_apply_category_weights)
++                    record.score = rrf_score
++                    records.append(record)
++            except Exception:
++                continue
++
++        return records
++
++    except Exception as e:
++        logger.warning(f"[memory_retrieval] retrieve_memories failed: {e}")
++        return []
+diff --git a/config/memory_defaults.py b/config/memory_defaults.py
+index 82ef7f714..67b77b8af 100644
+--- a/config/memory_defaults.py
++++ b/config/memory_defaults.py
+@@ -16,7 +16,7 @@
+         records (< 0.15) are silently dropped.
+ 
+     WF_PRIORITY_THRESHOLD: Above this, memories are tagged as priority.
+-        Priority memories get preferential treatment in ContextAssembler.
++        Priority memories get preferential treatment in retrieval ranking.
+ 
+     INITIAL_CONFIDENCE: Starting confidence for new memories.
+         0.5 is neutral — neither trusted nor distrusted.
+@@ -41,8 +41,15 @@
+ # Default project key used when VALOR_PROJECT_KEY env var is not set
+ DEFAULT_PROJECT_KEY = "dm"
+ 
+-# ContextAssembler tuning
+-MEMORY_SURFACING_THRESHOLD = 0.4  # slightly lower than default 0.5 to surface more
++# Reciprocal Rank Fusion (RRF) tuning
++# RRF_K controls blending uniformity: higher values give more weight to lower-ranked
++# items across lists. k=60 is the standard default from the original RRF paper
++# (Cormack et al., 2009). Lower k (e.g., 20) favors top-ranked items more aggressively.
++RRF_K = 60
++
++# BM25 tuning parameters (passed through to popoto defaults)
++BM25_K1 = 1.2  # Term frequency saturation. Higher = more weight to repeated terms.
++BM25_B = 0.75  # Length normalization. 0 = no normalization, 1 = full normalization.
+ 
+ # Injection limits
+ MAX_THOUGHTS_PER_INJECTION = 3
+@@ -59,8 +66,8 @@
+ DISMISSAL_IMPORTANCE_DECAY = 0.7  # multiply importance by this on threshold breach
+ MIN_IMPORTANCE_FLOOR = 0.2  # never decay below this
+ 
+-# Category recall weights -- post-query re-ranking multipliers for memory recall.
+-# After ContextAssembler returns scored results, each result's effective score is
++# Category recall weights -- post-fusion re-ranking multipliers for memory recall.
++# After RRF fusion returns scored results, each result's effective score is
+ # multiplied by the weight for its category before re-sorting. Higher weight = more
+ # likely to surface. Set all to 1.0 to disable re-ranking (no-op).
+ CATEGORY_RECALL_WEIGHTS: dict[str, float] = {
+@@ -84,4 +91,3 @@ def apply_defaults() -> None:
+     Defaults.ACTED_CONFIDENCE_SIGNAL = MEMORY_ACTED_SIGNAL
+     Defaults.CONTRADICTED_CONFIDENCE_SIGNAL = MEMORY_CONTRADICTED_SIGNAL
+     Defaults.DISMISSED_CYCLE_WEAKEN_FACTOR = MEMORY_DISMISSED_WEAKEN
+-    Defaults.DEFAULT_SURFACING_THRESHOLD = MEMORY_SURFACING_THRESHOLD
+diff --git a/docs/features/subconscious-memory.md b/docs/features/subconscious-memory.md
+index 484433101..3ba95585e 100644
+--- a/docs/features/subconscious-memory.md
++++ b/docs/features/subconscious-memory.md
+@@ -19,8 +19,8 @@ Human Message (Telegram)                    Agent Session
+         |                            _cluster_keywords()
+   Haiku Extraction  <---+             (multi-query split)
+   JSON -> metadata       |                   |
+-  importance=AGENT (1.0) |           ContextAssembler x N
+-        |                |            (per cluster query)
++  importance=AGENT (1.0) |     BM25 + RRF fusion per cluster
++        |                |      (keyword + relevance + confidence)
+         v                |                   |
+   Outcome Detection -----+                   v
+   (bigram overlap)                    <thought> blocks
+@@ -44,7 +44,7 @@ Telegram messages are saved as Memory records immediately on receipt in `bridge/
+ 2. `store_message()` saves to TelegramMessage (existing behavior)
+ 3. `Memory.safe_save()` creates a Memory record with `InteractionWeight.HUMAN` (6.0) importance
+ 4. ExistenceFilter bloom index is updated automatically on save
+-5. Memory is immediately available for future ContextAssembler queries
++5. Memory is immediately available for future BM25 + RRF retrieval queries
+ 
+ Empty text, bot messages, and media-only messages are skipped.
+ 
+@@ -57,7 +57,7 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on
+ 3. Every 3rd call, topic keywords are extracted from the buffer
+ 4. `ExistenceFilter.might_exist()` does an O(1) bloom check
+ 5. If positive and >5 unique keywords: `_cluster_keywords()` splits keywords into topical clusters (max 3 clusters of ~3-5 keywords each); otherwise uses a single query
+-6. `ContextAssembler.assemble()` runs per cluster, results are merged and deduplicated by `memory_id`
++6. `retrieve_memories()` runs per cluster using BM25 + RRF fusion (keyword match, temporal relevance, confidence), results are merged and deduplicated by `memory_id`
+ 7. Results are formatted as `<thought>content</thought>` blocks (max 3)
+ 8. Returned via `additionalContext` in the hook response
+ 9. Injected thoughts are tracked for later outcome detection
+@@ -145,7 +145,7 @@ Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory
+ 
+ ## Category-Weighted Recall
+ 
+-After ContextAssembler returns scored results, `_apply_category_weights()` re-ranks them by multiplying each record's score by a category-specific weight before sorting. This ensures that corrections and decisions -- higher-signal memory types -- surface preferentially over patterns and surprises when scores are similar.
++After RRF fusion returns scored results, `_apply_category_weights()` re-ranks them by multiplying each record's RRF score by a category-specific weight before sorting. This ensures that corrections and decisions -- higher-signal memory types -- surface preferentially over patterns and surprises when scores are similar.
+ 
+ **Weight table** (from `CATEGORY_RECALL_WEIGHTS` in `config/memory_defaults.py`):
+ 
+@@ -158,9 +158,9 @@ After ContextAssembler returns scored results, `_apply_category_weights()` re-ra
+ | `default` | 1.0 | Fallback for records with missing or unknown category |
+ 
+ **Mechanism:**
+-1. ContextAssembler returns scored records (relevance + confidence weighted)
++1. `retrieve_memories()` fuses BM25 keyword match, temporal relevance, and confidence via RRF
+ 2. `_apply_category_weights(records)` reads `metadata.category` from each record
+-3. Effective score = `record.score * category_weight`
++3. Effective score = `record.score * category_weight` (where score is the RRF fusion score)
+ 4. Records are re-sorted by effective score descending
+ 5. Top `MAX_THOUGHTS` records are formatted as `<thought>` blocks
+ 
+@@ -192,7 +192,7 @@ python -m tools.memory_search search "query" --category correction
+ python -m tools.memory_search search "query" --tag redis
+ ```
+ 
+-Metadata filtering happens after ContextAssembler returns results (ContextAssembler does not support field-level filtering). The `inspect` command displays metadata when present.
++Metadata filtering happens after retrieval returns results. The `inspect` command displays metadata when present.
+ 
+ ## Dismissal Tracking
+ 
+@@ -213,7 +213,7 @@ When the keyword buffer produces more than 5 unique keywords, `_cluster_keywords
+ 
+ **Mechanism:**
+ 1. `_cluster_keywords(keywords, max_clusters=3)` divides the list into chunks of ~3-5 keywords
+-2. Each cluster is queried separately via `ContextAssembler.assemble()`
++2. Each cluster is queried separately via `retrieve_memories()` (BM25 + RRF fusion)
+ 3. Results are merged and deduplicated by `memory_id`
+ 4. Tiny trailing clusters (<2 keywords) are merged into the previous cluster
+ 5. For <=5 keywords, a single query is used (no decomposition)
+@@ -236,9 +236,10 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
+ 
+ | File | Purpose |
+ |------|---------|
+-| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, write filter, access tracker, bloom, DictField metadata, reference pointer) |
+-| `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants and dismissal tracking thresholds |
++| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer) |
++| `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
+ | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
++| `agent/memory_retrieval.py` | BM25 + RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, ranked signal accessors |
+ | `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, bigram outcome detection, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
+ | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
+ | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
+@@ -265,7 +266,7 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
+ | `MEMORY_INITIAL_CONFIDENCE` | 0.5 | Starting confidence (neutral) |
+ | `MEMORY_ACTED_SIGNAL` | 0.85 | Confidence boost when agent acts on a memory |
+ | `MEMORY_CONTRADICTED_SIGNAL` | 0.15 | Confidence penalty when agent contradicts a memory |
+-| `MEMORY_SURFACING_THRESHOLD` | 0.4 | Minimum score for ContextAssembler to surface a memory |
++| `RRF_K` | 60 | Reciprocal Rank Fusion constant: higher = more uniform blending across signal lists |
+ | `MAX_THOUGHTS_PER_INJECTION` | 3 | Maximum thought blocks per injection event |
+ | `INJECTION_WINDOW_SIZE` | 3 | Tool calls per sliding window |
+ | `INJECTION_BUFFER_SIZE` | 9 | Total tool calls in rolling buffer |
+diff --git a/models/memory.py b/models/memory.py
+index 1403679d8..63ef89a16 100644
+--- a/models/memory.py
++++ b/models/memory.py
+@@ -1,6 +1,6 @@
+ """Memory model for the subconscious memory system.
+ 
+-Level 3 popoto model with DecayingSortedField, ConfidenceField,
++Level 3 popoto model with DecayingSortedField, ConfidenceField, BM25Field,
+ WriteFilterMixin, AccessTrackerMixin, and ExistenceFilter.
+ 
+ Memories are partitioned by project_key for per-project isolation.
+@@ -8,7 +8,7 @@
+ agent observations with low importance (InteractionWeight.AGENT = 1.0).
+ 
+ The ExistenceFilter fingerprints on content, enabling O(1) bloom checks
+-for topic relevance before running the full ContextAssembler query.
++for topic relevance before running the BM25 + RRF fusion retrieval.
+ """
+ 
+ import logging
+@@ -21,6 +21,7 @@
+ from popoto import (  # noqa: E402
+     AccessTrackerMixin,
+     AutoKeyField,
++    BM25Field,
+     ConfidenceField,
+     DecayingSortedField,
+     DictField,
+@@ -67,6 +68,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
+             last_outcome (str): "acted" or "dismissed"
+         relevance: Decay-sorted index, partitioned by project_key.
+         confidence: Bayesian confidence, updated by ObservationProtocol.
++        bm25: BM25 keyword search index on content for ranked retrieval.
+         bloom: ExistenceFilter for O(1) topic pre-checks.
+     """
+ 
+@@ -86,6 +88,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
+         partition_by="project_key",
+     )
+     confidence = ConfidenceField(initial_confidence=0.5)
++    bm25 = BM25Field(source="content")
+     bloom = ExistenceFilter(
+         error_rate=0.01,
+         capacity=100_000,
+diff --git a/tests/unit/test_memory_bridge.py b/tests/unit/test_memory_bridge.py
+index 9af5029fd..772beddcf 100644
+--- a/tests/unit/test_memory_bridge.py
++++ b/tests/unit/test_memory_bridge.py
+@@ -222,21 +222,13 @@ def test_recall_deja_vu_signal(self, tmp_path, monkeypatch):
+         mock_memory_cls = MagicMock()
+         mock_memory_cls._meta.fields.get.return_value = mock_bloom
+ 
+-        mock_result = MagicMock()
+-        mock_result.records = []  # No strong results
+-
+-        mock_assembler_instance = MagicMock()
+-        mock_assembler_instance.assemble.return_value = mock_result
+-
+-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
+-
+         with (
+             patch(
+                 "agent.memory_hook.extract_topic_keywords",
+                 return_value=keywords,
+             ),
+             patch("models.memory.Memory", mock_memory_cls),
+-            patch("popoto.ContextAssembler", mock_assembler_cls),
++            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
+             patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+         ):
+             for i in range(WINDOW_SIZE - 1):
+@@ -267,25 +259,17 @@ def test_recall_calls_apply_category_weights(self, tmp_path, monkeypatch):
+         mock_memory_cls = MagicMock()
+         mock_memory_cls._meta.fields.get.return_value = mock_bloom
+ 
+-        # Create mock records with content
++        # Create mock records with content and score (as set by retrieve_memories)
+         mock_record = MagicMock()
+         mock_record.memory_id = "rec-1"
+         mock_record.content = "test memory content for recall"
+         mock_record.metadata = {"category": "correction"}
+         mock_record.score = 0.8
+ 
+-        mock_result = MagicMock()
+-        mock_result.records = [mock_record]
+-
+-        mock_assembler_instance = MagicMock()
+-        mock_assembler_instance.assemble.return_value = mock_result
+-
+-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
+-
+         with (
+             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+             patch("models.memory.Memory", mock_memory_cls),
+-            patch("popoto.ContextAssembler", mock_assembler_cls),
++            patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
+             patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+             patch(
+                 "agent.memory_hook._apply_category_weights",
+diff --git a/tests/unit/test_memory_hook.py b/tests/unit/test_memory_hook.py
+index 4ae063cea..2ad801bb6 100644
+--- a/tests/unit/test_memory_hook.py
++++ b/tests/unit/test_memory_hook.py
+@@ -206,18 +206,10 @@ def test_vague_recognition_signal(self):
+         mock_memory_cls = MagicMock()
+         mock_memory_cls._meta.fields.get.return_value = mock_bloom
+ 
+-        mock_result = MagicMock()
+-        mock_result.records = []  # No strong results
+-
+-        mock_assembler_instance = MagicMock()
+-        mock_assembler_instance.assemble.return_value = mock_result
+-
+-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
+-
+         with (
+             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+             patch("models.memory.Memory", mock_memory_cls),
+-            patch("popoto.ContextAssembler", mock_assembler_cls),
++            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
+         ):
+             for i in range(INJECTION_WINDOW_SIZE - 1):
+                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+@@ -250,18 +242,10 @@ def test_no_signal_below_thresholds(self):
+         mock_memory_cls = MagicMock()
+         mock_memory_cls._meta.fields.get.return_value = mock_bloom
+ 
+-        mock_result = MagicMock()
+-        mock_result.records = []
+-
+-        mock_assembler_instance = MagicMock()
+-        mock_assembler_instance.assemble.return_value = mock_result
+-
+-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
+-
+         with (
+             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+             patch("models.memory.Memory", mock_memory_cls),
+-            patch("popoto.ContextAssembler", mock_assembler_cls),
++            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
+         ):
+             for i in range(INJECTION_WINDOW_SIZE - 1):
+                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+diff --git a/tests/unit/test_memory_retrieval.py b/tests/unit/test_memory_retrieval.py
+new file mode 100644
+index 000000000..5ed91bdad
+--- /dev/null
++++ b/tests/unit/test_memory_retrieval.py
+@@ -0,0 +1,526 @@
++"""Unit tests for agent/memory_retrieval.py -- BM25 + RRF fusion retrieval."""
++
++from unittest.mock import MagicMock, patch
++
++
++class TestFilterByProject:
++    """Test the _filter_by_project() helper."""
++
++    def test_filters_to_matching_keys(self):
++        from agent.memory_retrieval import _filter_by_project
++
++        results = [
++            ("Memory:agent1:projA:key1", 10.0),
++            ("Memory:agent1:projB:key2", 8.0),
++            ("Memory:agent1:projA:key3", 5.0),
++        ]
++        filtered = _filter_by_project(results, "projA")
++        assert len(filtered) == 2
++        assert all("projA" in k for k, _ in filtered)
++
++    def test_empty_project_key_returns_all(self):
++        from agent.memory_retrieval import _filter_by_project
++
++        results = [("Memory:a:projA:k1", 1.0), ("Memory:a:projB:k2", 2.0)]
++        filtered = _filter_by_project(results, "")
++        assert len(filtered) == 2
++
++    def test_no_matches_returns_empty(self):
++        from agent.memory_retrieval import _filter_by_project
++
++        results = [("Memory:a:projA:k1", 1.0), ("Memory:a:projB:k2", 2.0)]
++        filtered = _filter_by_project(results, "projC")
++        assert filtered == []
++
++    def test_empty_input_returns_empty(self):
++        from agent.memory_retrieval import _filter_by_project
++
++        assert _filter_by_project([], "projA") == []
++
++
++class TestRrfFuse:
++    """Test the rrf_fuse() function."""
++
++    def test_empty_lists(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        result = rrf_fuse([], [], [])
++        assert result == []
++
++    def test_single_list(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        ranked = [("key1", 10.0), ("key2", 5.0), ("key3", 1.0)]
++        result = rrf_fuse(ranked, k=60)
++        assert len(result) == 3
++        # key1 at rank 1 should have highest score
++        assert result[0][0] == "key1"
++        assert result[1][0] == "key2"
++        assert result[2][0] == "key3"
++
++    def test_two_lists_same_keys(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        list1 = [("key1", 10.0), ("key2", 5.0)]
++        list2 = [("key1", 8.0), ("key2", 3.0)]
++        result = rrf_fuse(list1, list2, k=60)
++        assert len(result) == 2
++        # key1 is rank 1 in both lists -> highest RRF
++        assert result[0][0] == "key1"
++
++    def test_two_lists_different_keys(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        list1 = [("key1", 10.0)]
++        list2 = [("key2", 8.0)]
++        result = rrf_fuse(list1, list2, k=60)
++        assert len(result) == 2
++        # Both at rank 1 in their respective lists -> equal RRF score
++        assert result[0][1] == result[1][1]
++
++    def test_rrf_score_calculation(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        # With k=60, rank 1 gives 1/(60+1) = 0.01639...
++        list1 = [("key1", 10.0)]
++        result = rrf_fuse(list1, k=60)
++        expected_score = 1.0 / (60 + 1)
++        assert abs(result[0][1] - expected_score) < 1e-10
++
++    def test_multi_list_rrf_accumulation(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        # key1 appears at rank 1 in all 3 lists
++        list1 = [("key1", 10.0)]
++        list2 = [("key1", 8.0)]
++        list3 = [("key1", 5.0)]
++        result = rrf_fuse(list1, list2, list3, k=60)
++        expected_score = 3.0 / (60 + 1)  # 3 * 1/(60+1)
++        assert abs(result[0][1] - expected_score) < 1e-10
++
++    def test_limit_caps_results(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        ranked = [(f"key{i}", float(10 - i)) for i in range(20)]
++        result = rrf_fuse(ranked, k=60, limit=5)
++        assert len(result) == 5
++
++    def test_bytes_keys_decoded(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        ranked = [(b"Memory:abc123", 10.0), (b"Memory:def456", 5.0)]
++        result = rrf_fuse(ranked, k=60)
++        assert all(isinstance(k, str) for k, _s in result)
++        assert result[0][0] == "Memory:abc123"
++
++    def test_ranking_order_matters(self):
++        """Items ranked higher in more lists get better RRF scores."""
++        from agent.memory_retrieval import rrf_fuse
++
++        # key1 is rank 1 in list1, rank 2 in list2
++        # key2 is rank 2 in list1, rank 1 in list2
++        list1 = [("key1", 10.0), ("key2", 5.0)]
++        list2 = [("key2", 10.0), ("key1", 5.0)]
++        result = rrf_fuse(list1, list2, k=60)
++        # Both should have equal RRF scores (symmetric)
++        assert abs(result[0][1] - result[1][1]) < 1e-10
++
++    def test_key_appearing_in_more_lists_ranks_higher(self):
++        """A key present in all 3 lists outranks one in only 1 list."""
++        from agent.memory_retrieval import rrf_fuse
++
++        # key1 in all 3 lists at rank 2
++        # key2 in only list1 at rank 1
++        list1 = [("key2", 10.0), ("key1", 5.0)]
++        list2 = [("key1", 5.0)]
++        list3 = [("key1", 5.0)]
++        result = rrf_fuse(list1, list2, list3, k=60)
++        # key1: 1/(60+2) + 1/(60+1) + 1/(60+1) = 0.01613 + 0.01639 + 0.01639
++        # key2: 1/(60+1) = 0.01639
++        assert result[0][0] == "key1"
++
++    def test_empty_individual_lists_ignored(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        ranked = [("key1", 10.0)]
++        result = rrf_fuse(ranked, [], [], k=60)
++        assert len(result) == 1
++        assert result[0][0] == "key1"
++
++    def test_graceful_with_no_args(self):
++        from agent.memory_retrieval import rrf_fuse
++
++        result = rrf_fuse()
++        assert result == []
++
++
++class TestGetRelevanceRanked:
++    """Test get_relevance_ranked() with mocked Redis."""
++
++    def test_returns_empty_on_error(self):
++        from agent.memory_retrieval import get_relevance_ranked
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.zrevrange.side_effect = Exception("connection failed")
++            result = get_relevance_ranked("test-project")
++            assert result == []
++
++    def test_returns_decoded_tuples(self):
++        from agent.memory_retrieval import get_relevance_ranked
++
++        mock_results = [
++            (b"Memory:key1:proj", 1000.0),
++            (b"Memory:key2:proj", 500.0),
++        ]
++
++        with (
++            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
++            patch("popoto.DecayingSortedField.get_sortedset_db_key") as mock_key,
++        ):
++            mock_key_obj = MagicMock()
++            mock_key_obj.redis_key = "$DecayingSortF:Memory:relevance:test"
++            mock_key.return_value = mock_key_obj
++            mock_redis.zrevrange.return_value = mock_results
++
++            result = get_relevance_ranked("test")
++
++        assert len(result) == 2
++        assert result[0] == ("Memory:key1:proj", 1000.0)
++        assert result[1] == ("Memory:key2:proj", 500.0)
++
++
++class TestGetConfidenceRanked:
++    """Test get_confidence_ranked() with mocked Redis."""
++
++    def _mock_confidence_field(self):
++        """Helper: patch ConfidenceField.get_special_use_field_db_key to return a mock key."""
++        mock_base_key = MagicMock()
++        mock_base_key.redis_key = "$ConfidencF:Memory:confidence"
++        return patch(
++            "popoto.ConfidenceField.get_special_use_field_db_key",
++            return_value=mock_base_key,
++        )
++
++    def test_returns_empty_on_error(self):
++        from agent.memory_retrieval import get_confidence_ranked
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.hgetall.side_effect = Exception("connection failed")
++            with self._mock_confidence_field():
++                result = get_confidence_ranked("proj")
++            assert result == []
++
++    def test_returns_empty_when_no_data(self):
++        from agent.memory_retrieval import get_confidence_ranked
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.hgetall.return_value = {}
++            with self._mock_confidence_field():
++                result = get_confidence_ranked("proj")
++            assert result == []
++
++    def test_returns_sorted_by_confidence(self):
++        import msgpack
++
++        from agent.memory_retrieval import get_confidence_ranked
++
++        mock_data = {
++            b"Memory:agent1:proj:key1": msgpack.packb({"confidence": 0.9, "evidence_count": 5}),
++            b"Memory:agent1:proj:key2": msgpack.packb({"confidence": 0.3, "evidence_count": 2}),
++            b"Memory:agent1:proj:key3": msgpack.packb({"confidence": 0.7, "evidence_count": 3}),
++        }
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.hgetall.return_value = mock_data
++            with self._mock_confidence_field():
++                result = get_confidence_ranked("proj")
++
++        assert len(result) == 3
++        # Should be sorted by confidence descending
++        assert result[0][0] == "Memory:agent1:proj:key1"
++        assert result[0][1] == 0.9
++        assert result[1][0] == "Memory:agent1:proj:key3"
++        assert result[1][1] == 0.7
++        assert result[2][0] == "Memory:agent1:proj:key2"
++        assert result[2][1] == 0.3
++
++    def test_filters_by_project_key(self):
++        """Only entries whose Redis key contains the project_key are returned."""
++        import msgpack
++
++        from agent.memory_retrieval import get_confidence_ranked
++
++        mock_data = {
++            b"Memory:agent1:projA:key1": msgpack.packb({"confidence": 0.9}),
++            b"Memory:agent1:projB:key2": msgpack.packb({"confidence": 0.8}),
++            b"Memory:agent1:projA:key3": msgpack.packb({"confidence": 0.7}),
++        }
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.hgetall.return_value = mock_data
++            with self._mock_confidence_field():
++                result = get_confidence_ranked("projA")
++
++        assert len(result) == 2
++        assert all("projA" in k for k, _s in result)
++
++    def test_limit_caps_results(self):
++        import msgpack
++
++        from agent.memory_retrieval import get_confidence_ranked
++
++        mock_data = {
++            f"Memory:agent1:proj:key{i}".encode(): msgpack.packb({"confidence": float(i) / 10})
++            for i in range(20)
++        }
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.hgetall.return_value = mock_data
++            with self._mock_confidence_field():
++                result = get_confidence_ranked("proj", limit=5)
++
++        assert len(result) == 5
++
++    def test_corrupt_entry_skipped(self):
++        import msgpack
++
++        from agent.memory_retrieval import get_confidence_ranked
++
++        mock_data = {
++            b"Memory:agent1:proj:good": msgpack.packb({"confidence": 0.8}),
++            b"Memory:agent1:proj:bad": b"not-valid-msgpack-\xff\xff",
++        }
++
++        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
++            mock_redis.hgetall.return_value = mock_data
++            with self._mock_confidence_field():
++                result = get_confidence_ranked("proj")
++
++        # Only the valid entry should be returned
++        assert len(result) == 1
++        assert result[0][0] == "Memory:agent1:proj:good"
++
++
++class TestRetrieveMemories:
++    """Test the full retrieve_memories() pipeline."""
++
++    def test_returns_empty_on_exception(self):
++        from agent.memory_retrieval import retrieve_memories
++
++        with patch("popoto.BM25Field") as mock_bm25:
++            mock_bm25.search.side_effect = Exception("boom")
++            with (
++                patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
++                patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
++            ):
++                result = retrieve_memories("test query", "proj")
++                assert result == []
++
++    def test_fuses_three_signals(self):
++        from agent.memory_retrieval import retrieve_memories
++
++        mock_record = MagicMock()
++        mock_record.memory_id = "test-123"
++
++        bm25_results = [("Memory:test-123:proj", 5.0)]
++        relevance_results = [("Memory:test-123:proj", 1000.0)]
++        confidence_results = [("Memory:test-123:proj", 0.8)]
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
++            patch("models.memory.Memory") as mock_memory_cls,
++        ):
++            mock_bm25.search.return_value = bm25_results
++            mock_memory_cls.query.get.return_value = mock_record
++
++            result = retrieve_memories("test query", "project", limit=10)
++
++        assert len(result) == 1
++        assert result[0] is mock_record
++        # Should have score attribute set
++        assert hasattr(result[0], "score")
++
++    def test_deduplicates_across_signals(self):
++        """Same key in multiple signals should produce one result."""
++        from agent.memory_retrieval import retrieve_memories
++
++        mock_record = MagicMock()
++        mock_record.memory_id = "test-123"
++
++        key = "Memory:test-123:proj"
++        bm25_results = [(key, 5.0)]
++        relevance_results = [(key, 1000.0)]
++        confidence_results = [(key, 0.8)]
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
++            patch("models.memory.Memory") as mock_memory_cls,
++        ):
++            mock_bm25.search.return_value = bm25_results
++            mock_memory_cls.query.get.return_value = mock_record
++
++            result = retrieve_memories("test query", "project", limit=10)
++
++        # Should be exactly 1 record, not 3
++        assert len(result) == 1
++
++    def test_bm25_failure_degrades_gracefully(self):
++        """When BM25 fails, retrieval still works with relevance + confidence."""
++        from agent.memory_retrieval import retrieve_memories
++
++        mock_record = MagicMock()
++        mock_record.memory_id = "test-456"
++
++        key = "Memory:test-456:proj"
++        relevance_results = [(key, 1000.0)]
++        confidence_results = [(key, 0.8)]
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
++            patch("models.memory.Memory") as mock_memory_cls,
++        ):
++            mock_bm25.search.side_effect = Exception("BM25 index missing")
++            mock_memory_cls.query.get.return_value = mock_record
++
++            result = retrieve_memories("test query", "project", limit=10)
++
++        # Should still return results from relevance + confidence
++        assert len(result) == 1
++
++    def test_empty_query_returns_empty(self):
++        """BM25 with empty query should not crash."""
++        from agent.memory_retrieval import retrieve_memories
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
++        ):
++            mock_bm25.search.return_value = []
++            result = retrieve_memories("", "proj")
++
++        assert result == []
++
++    def test_respects_rrf_k_override(self):
++        from agent.memory_retrieval import retrieve_memories
++
++        mock_record = MagicMock()
++        mock_record.memory_id = "test-789"
++
++        key = "Memory:test-789:proj"
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[(key, 100.0)]),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
++            patch("models.memory.Memory") as mock_memory_cls,
++        ):
++            mock_bm25.search.return_value = [(key, 5.0)]
++            mock_memory_cls.query.get.return_value = mock_record
++
++            result = retrieve_memories("test", "proj", rrf_k=20)
++
++        assert len(result) == 1
++        # With k=20, rank 1 gives 1/(20+1), appearing in 2 lists
++        expected_score = 2.0 / 21
++        assert abs(result[0].score - expected_score) < 1e-10
++
++    def test_hydration_failure_skips_record(self):
++        """If Memory.query.get fails for a key, that key is skipped."""
++        from agent.memory_retrieval import retrieve_memories
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
++            patch("models.memory.Memory") as mock_memory_cls,
++        ):
++            mock_bm25.search.return_value = [("Memory:missing:proj", 5.0)]
++            mock_memory_cls.query.get.return_value = None  # Not found
++
++            result = retrieve_memories("test query", "proj")
++
++        assert result == []
++
++    def test_bm25_results_filtered_by_project(self):
++        """BM25 returns global results; only those matching project_key should survive."""
++        from agent.memory_retrieval import retrieve_memories
++
++        mock_record = MagicMock()
++        mock_record.memory_id = "owned"
++
++        # BM25 returns results from two projects -- only projA should survive
++        bm25_results = [
++            ("Memory:agent1:projA:key1", 8.0),
++            ("Memory:agent1:projB:key2", 6.0),
++            ("Memory:agent1:projA:key3", 4.0),
++        ]
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
++            patch("models.memory.Memory") as mock_memory_cls,
++        ):
++            mock_bm25.search.return_value = bm25_results
++            mock_memory_cls.query.get.return_value = mock_record
++
++            result = retrieve_memories("test query", "projA", limit=10)
++
++        # projB key should be excluded -- only 2 results from projA
++        assert len(result) == 2
++        # Verify hydration was only called for projA keys
++        hydrated_keys = [call.args[0] for call in mock_memory_cls.query.get.call_args_list]
++        assert all("projA" in k for k in hydrated_keys)
++        assert not any("projB" in k for k in hydrated_keys)
++
++    def test_cross_project_isolation_all_signals(self):
++        """BM25 cross-project keys are filtered out before RRF fusion.
++
++        BM25 returns global results (both projA and projB). The _filter_by_project
++        call in retrieve_memories removes projB keys before they enter rrf_fuse.
++        Relevance and confidence helpers are mocked at function level (already filtered).
++        """
++        from agent.memory_retrieval import retrieve_memories
++
++        owned_record = MagicMock()
++        owned_record.memory_id = "owned"
++
++        # BM25 returns global results including foreign project
++        bm25_results = [
++            ("Memory:a:projA:k1", 9.0),
++            ("Memory:a:projB:k2", 7.0),  # foreign -- should be filtered out
++        ]
++        # Relevance is natively partitioned by project_key
++        relevance_results = [
++            ("Memory:a:projA:k1", 1000.0),
++        ]
++        # Confidence helper is mocked post-filter (already filtered to projA)
++        confidence_results = [
++            ("Memory:a:projA:k1", 0.9),
++        ]
++
++        with (
++            patch("popoto.BM25Field") as mock_bm25,
++            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
++            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
++            patch("models.memory.Memory") as mock_memory_cls,
++        ):
++            mock_bm25.search.return_value = bm25_results
++            mock_memory_cls.query.get.return_value = owned_record
++
++            result = retrieve_memories("test query", "projA", limit=10)
++
++        # Only projA key should survive -- projB filtered before fusion
++        assert len(result) == 1
++        assert result[0].memory_id == "owned"
++        # Verify hydration only called with projA key
++        hydrated_keys = [call.args[0] for call in mock_memory_cls.query.get.call_args_list]
++        assert len(hydrated_keys) == 1
++        assert "projA" in hydrated_keys[0]
+diff --git a/tools/memory_search/__init__.py b/tools/memory_search/__init__.py
+index ee72afe8d..cbb41bb95 100644
+--- a/tools/memory_search/__init__.py
++++ b/tools/memory_search/__init__.py
+@@ -34,7 +34,7 @@ def search(
+     category: str | None = None,
+     tag: str | None = None,
+ ) -> dict[str, Any]:
+-    """Search memories by query string using ContextAssembler.
++    """Search memories by query string using BM25 + RRF fusion.
+ 
+     Args:
+         query: The search query text.
+@@ -77,26 +77,20 @@ def search(
+             if not has_relevant:
+                 return {"results": [], "error": None}
+ 
+-        # Full assembly via ContextAssembler
+-        from popoto import ContextAssembler
++        # Retrieve via BM25 + RRF fusion
++        from agent.memory_retrieval import retrieve_memories
+ 
+-        assembler = ContextAssembler(
+-            model_class=Memory,
+-            score_weights={"relevance": 0.6, "confidence": 0.3},
+-            max_items=limit,
+-            max_tokens=2000,
+-        )
+-        result = assembler.assemble(
+-            query_cues={"topic": query},
+-            agent_id=project_key,
+-            partition_filters={"project_key": project_key},
++        all_records = retrieve_memories(
++            query_text=query,
++            project_key=project_key,
++            limit=limit,
+         )
+ 
+-        if not result.records:
++        if not all_records:
+             return {"results": [], "error": None}
+ 
+         # Post-retrieval metadata filtering
+-        filtered_records = result.records
++        filtered_records = all_records
+         if category:
+             filtered_records = [
+                 r
+@@ -116,7 +110,7 @@ def search(
+             results.append(
+                 {
+                     "content": getattr(record, "content", ""),
+-                    "score": getattr(record, "relevance", 0.0),
++                    "score": getattr(record, "score", 0.0),
+                     "confidence": getattr(record, "confidence", 0.0),
+                     "source": getattr(record, "source", ""),
+                     "access_count": getattr(record, "access_count", 0),

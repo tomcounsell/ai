@@ -1,0 +1,339 @@
+diff --git a/docs/features/happy-path-testing-pipeline.md b/docs/features/happy-path-testing-pipeline.md
+index e3c0a30a7..4413fbb76 100644
+--- a/docs/features/happy-path-testing-pipeline.md
++++ b/docs/features/happy-path-testing-pipeline.md
+@@ -100,7 +100,7 @@ The discovery skill extracts stable CSS selectors via `agent-browser eval` with
+ 
+ ## Rodney
+ 
+-[Rodney](https://github.com/nicois/rodney) is a headless Chrome test runner. It is installed as a prebuilt binary via the update system (`scripts/update/rodney.py`). No Go toolchain required.
++[Rodney](https://github.com/simonw/rodney) is a headless Chrome test runner. It is installed as a prebuilt binary via the update system (`scripts/update/rodney.py`). No Go toolchain required.
+ 
+ ### Rodney Command Mapping
+ 
+diff --git a/docs/plans/happy-path-testing-pipeline.md b/docs/plans/happy-path-testing-pipeline.md
+index 439728952..249829380 100644
+--- a/docs/plans/happy-path-testing-pipeline.md
++++ b/docs/plans/happy-path-testing-pipeline.md
+@@ -38,7 +38,7 @@ No prior work on deterministic browser test generation or Rodney integration exi
+ 
+ ## Architectural Impact
+ 
+-- **New dependencies**: Rodney prebuilt binary (from `github.com/nicois/rodney/releases`) must be installed on each machine
++- **New dependencies**: Rodney prebuilt binary (from `github.com/simonw/rodney/releases`) must be installed on each machine
+ - **Interface changes**: New `/do-test happy-paths` target in the test orchestrator; new trace JSON schema as the contract between stages 1 and 2
+ - **Coupling**: Low -- stages communicate only through trace JSON files and shell scripts on disk. No new imports into bridge or agent code
+ - **Data ownership**: Trace JSON and generated scripts live in `tests/happy-paths/` under version control
+@@ -149,7 +149,7 @@ case "$ARCH" in
+ esac
+ 
+ RODNEY_VERSION="v0.4.0"
+-RODNEY_URL="https://github.com/nicois/rodney/releases/download/${RODNEY_VERSION}/rodney-${OS}-${ARCH}.tar.gz"
++RODNEY_URL="https://github.com/simonw/rodney/releases/download/${RODNEY_VERSION}/rodney-${OS}-${ARCH}.tar.gz"
+ 
+ curl -sL "$RODNEY_URL" | tar xz -C /usr/local/bin/ rodney
+ chmod +x /usr/local/bin/rodney
+diff --git a/scripts/update/rodney.py b/scripts/update/rodney.py
+index 6cae2a077..2442a6829 100644
+--- a/scripts/update/rodney.py
++++ b/scripts/update/rodney.py
+@@ -19,7 +19,7 @@
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+-GITHUB_REPO = "nicois/rodney"
++GITHUB_REPO = "simonw/rodney"
+ INSTALL_DIR = Path.home() / ".local" / "bin"
+ BINARY_NAME = "rodney"
+ 
+diff --git a/tests/happy-paths/scripts/example-homepage.sh b/tests/happy-paths/scripts/example-homepage.sh
+new file mode 100755
+index 000000000..51869e436
+--- /dev/null
++++ b/tests/happy-paths/scripts/example-homepage.sh
+@@ -0,0 +1,19 @@
++#!/usr/bin/env bash
++# Happy path test: example-homepage
++# Generated from trace. Do not edit manually.
++# Source URL: https://example.com
++
++set -euo pipefail
++
++rodney open 'https://example.com'
++rodney assert 'document.title === '\''Example Domain'\'''
++rodney assert 'document.body.innerText.includes('\''This domain is for use in illustrative examples'\'')'
++rodney assert 'document.querySelector('\''h1'\'') !== null'
++
++# Final URL assertion
++rodney assert 'window.location.href.includes('\''example.com'\'')'
++
++# Final text assertions
++rodney assert 'document.body.innerText.includes('\''Example Domain'\'')'
++
++echo 'PASS: example-homepage'
+diff --git a/tests/happy-paths/traces/example-homepage.json b/tests/happy-paths/traces/example-homepage.json
+new file mode 100644
+index 000000000..54c7b261b
+--- /dev/null
++++ b/tests/happy-paths/traces/example-homepage.json
+@@ -0,0 +1,27 @@
++{
++  "name": "example-homepage",
++  "url": "https://example.com",
++  "steps": [
++    {
++      "action": "navigate",
++      "url": "https://example.com"
++    },
++    {
++      "action": "assert",
++      "type": "title_equals",
++      "value": "Example Domain"
++    },
++    {
++      "action": "assert",
++      "type": "text_visible",
++      "value": "This domain is for use in illustrative examples"
++    },
++    {
++      "action": "assert",
++      "type": "element_exists",
++      "value": "h1"
++    }
++  ],
++  "expected_final_url": "example.com",
++  "expected_text": ["Example Domain"]
++}
+diff --git a/tests/integration/test_happy_path_integration.py b/tests/integration/test_happy_path_integration.py
+new file mode 100644
+index 000000000..d8a468080
+--- /dev/null
++++ b/tests/integration/test_happy_path_integration.py
+@@ -0,0 +1,158 @@
++"""Integration tests for the happy path testing pipeline.
++
++Tests the trace-to-script generation pipeline end-to-end using real files
++(no mocks). Validates that parse_trace() and generate_script() produce
++correct Rodney shell scripts from trace JSON input.
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import subprocess
++from pathlib import Path
++
++import pytest
++
++from tools.happy_path_generator import generate_script
++from tools.happy_path_schema import parse_trace, validate_trace_file
++
++# Path to example trace committed in the repo
++EXAMPLE_TRACE_PATH = (
++    Path(__file__).parent.parent / "happy-paths" / "traces" / "example-homepage.json"
++)
++
++
++class TestTraceToScriptGeneration:
++    """Test the full trace-to-script generation pipeline with real files."""
++
++    def test_example_trace_loads_and_validates(self):
++        """Example trace JSON loads and passes schema validation."""
++        assert EXAMPLE_TRACE_PATH.exists(), f"Example trace missing: {EXAMPLE_TRACE_PATH}"
++
++        data = json.loads(EXAMPLE_TRACE_PATH.read_text())
++        is_valid, errors = validate_trace_file(data)
++
++        assert is_valid, f"Trace validation failed: {errors}"
++
++    def test_example_trace_parses_correctly(self):
++        """parse_trace() returns a Trace with expected fields."""
++        data = json.loads(EXAMPLE_TRACE_PATH.read_text())
++        trace = parse_trace(data)
++
++        assert trace.name == "example-homepage"
++        assert trace.url == "https://example.com"
++        assert len(trace.steps) == 4
++        assert trace.steps[0].action == "navigate"
++        assert trace.steps[0].url == "https://example.com"
++        assert trace.steps[1].action == "assert"
++        assert trace.steps[1].type == "title_equals"
++
++    def test_generate_script_produces_valid_output(self, tmp_path):
++        """generate_script() creates a valid shell script from the example trace."""
++        data = json.loads(EXAMPLE_TRACE_PATH.read_text())
++        trace = parse_trace(data)
++
++        output_path = tmp_path / "example-homepage.sh"
++        result = generate_script(trace, output_path)
++
++        assert result is True
++        assert output_path.exists()
++
++        content = output_path.read_text()
++        # Script should have a shebang
++        assert content.startswith("#!/usr/bin/env bash")
++        # Script should use strict mode
++        assert "set -euo pipefail" in content
++        # Script should contain rodney commands
++        assert "rodney open" in content
++        assert "rodney assert" in content
++        # Script should reference example.com
++        assert "example.com" in content
++        # Script should have a PASS message
++        assert "PASS: example-homepage" in content
++
++    def test_generate_script_is_syntactically_valid(self, tmp_path):
++        """Generated script passes bash -n syntax check."""
++        data = json.loads(EXAMPLE_TRACE_PATH.read_text())
++        trace = parse_trace(data)
++
++        output_path = tmp_path / "example-homepage.sh"
++        generate_script(trace, output_path)
++
++        result = subprocess.run(
++            ["bash", "-n", str(output_path)],
++            capture_output=True,
++            text=True,
++            timeout=10,
++        )
++        assert result.returncode == 0, f"Syntax error: {result.stderr}"
++
++    def test_empty_steps_produces_no_script(self, tmp_path):
++        """Trace with empty steps array produces no script (generator returns False)."""
++        data = {
++            "name": "empty-test",
++            "url": "https://example.com",
++            "steps": [],
++        }
++        trace = parse_trace(data)
++        output_path = tmp_path / "empty-test.sh"
++        result = generate_script(trace, output_path)
++
++        assert result is False
++        assert not output_path.exists()
++
++    def test_navigate_only_trace_produces_valid_script(self, tmp_path):
++        """Trace with only navigate steps produces a valid script."""
++        data = {
++            "name": "navigate-only",
++            "url": "https://example.com",
++            "steps": [
++                {"action": "navigate", "url": "https://example.com"},
++                {"action": "navigate", "url": "https://example.com/about"},
++            ],
++        }
++        trace = parse_trace(data)
++        output_path = tmp_path / "navigate-only.sh"
++        result = generate_script(trace, output_path)
++
++        assert result is True
++        content = output_path.read_text()
++        assert "rodney open 'https://example.com'" in content
++        assert "rodney open 'https://example.com/about'" in content
++
++    def test_committed_script_matches_generation(self, tmp_path):
++        """The committed example script matches what the generator produces."""
++        committed_script = (
++            Path(__file__).parent.parent / "happy-paths" / "scripts" / "example-homepage.sh"
++        )
++        if not committed_script.exists():
++            pytest.skip("Committed example script not found")
++
++        data = json.loads(EXAMPLE_TRACE_PATH.read_text())
++        trace = parse_trace(data)
++
++        output_path = tmp_path / "example-homepage.sh"
++        generate_script(trace, output_path)
++
++        assert output_path.read_text() == committed_script.read_text()
++
++
++class TestRodneyExecution:
++    """Tests that require Rodney to be installed. Skipped if unavailable."""
++
++    @pytest.fixture(autouse=True)
++    def _require_rodney(self):
++        if not shutil.which("rodney"):
++            pytest.skip("Rodney not installed")
++
++    def test_rodney_version(self):
++        """Rodney binary reports a version string."""
++        result = subprocess.run(
++            ["rodney", "--version"],
++            capture_output=True,
++            text=True,
++            timeout=10,
++        )
++        assert result.returncode == 0
++        assert len(result.stdout.strip()) > 0
+diff --git a/tests/unit/test_ui_app.py b/tests/unit/test_ui_app.py
+index 3836c5104..5654c3f3f 100644
+--- a/tests/unit/test_ui_app.py
++++ b/tests/unit/test_ui_app.py
+@@ -56,18 +56,18 @@ class TestJinja2Filters:
+     def test_format_duration_seconds(self):
+         from ui.app import _filter_format_duration
+ 
+-        assert _filter_format_duration(5.2) == "5.2s"
+-        assert _filter_format_duration(59.9) == "59.9s"
++        assert _filter_format_duration(5.2) == "<1m"
++        assert _filter_format_duration(59.9) == "<1m"
+ 
+     def test_format_duration_minutes(self):
+         from ui.app import _filter_format_duration
+ 
+-        assert _filter_format_duration(120.0) == "2.0m"
++        assert _filter_format_duration(120.0) == "2m"
+ 
+     def test_format_duration_hours(self):
+         from ui.app import _filter_format_duration
+ 
+-        assert _filter_format_duration(7200.0) == "2.0h"
++        assert _filter_format_duration(7200.0) == "2h"
+ 
+     def test_format_duration_none(self):
+         from ui.app import _filter_format_duration
+diff --git a/tools/happy_path_generator.py b/tools/happy_path_generator.py
+index 5a8092151..c5c87ec80 100644
+--- a/tools/happy_path_generator.py
++++ b/tools/happy_path_generator.py
+@@ -186,19 +186,19 @@ def generate_script(trace: Trace, output_path: Path) -> bool:
+ 
+     # Add final assertions if specified in trace
+     if trace.expected_final_url:
+-        pattern = trace.expected_final_url
++        pattern = trace.expected_final_url.replace("'", "\\'")
+         js_expr = f"window.location.href.includes('{pattern}')"
+         lines.append("")
+         lines.append("# Final URL assertion")
+-        lines.append(f"rodney assert '{js_expr}'")
++        lines.append(f"rodney assert {_shell_escape(js_expr)}")
+ 
+     if trace.expected_text:
+         lines.append("")
+         lines.append("# Final text assertions")
+         for text in trace.expected_text:
+-            escaped = text.replace("'", "\\'")
+-            js_expr = f"document.body.innerText.includes('{escaped}')"
+-            lines.append(f"rodney assert '{js_expr}'")
++            safe_text = text.replace("'", "\\'")
++            js_expr = f"document.body.innerText.includes('{safe_text}')"
++            lines.append(f"rodney assert {_shell_escape(js_expr)}")
+ 
+     lines.append("")
+     lines.append(f"echo 'PASS: {trace.name}'")
+diff --git a/tools/happy_path_runner.py b/tools/happy_path_runner.py
+index 8a9344ea3..05fe9b4d3 100644
+--- a/tools/happy_path_runner.py
++++ b/tools/happy_path_runner.py
+@@ -248,7 +248,7 @@ def main() -> int:
+ 
+     if not check_rodney_installed():
+         logger.error(
+-            "Rodney is not installed. Install from: https://github.com/nicois/rodney/releases"
++            "Rodney is not installed. Install from: https://github.com/simonw/rodney/releases"
+         )
+         return 2
+ 

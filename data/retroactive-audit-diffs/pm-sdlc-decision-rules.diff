@@ -1,0 +1,136 @@
+diff --git a/.claude/skills/do-patch/SKILL.md b/.claude/skills/do-patch/SKILL.md
+index 204850bc8..ba5e6558e 100644
+--- a/.claude/skills/do-patch/SKILL.md
++++ b/.claude/skills/do-patch/SKILL.md
+@@ -129,6 +129,11 @@ YOUR JOB:
+ If the fix requires understanding surrounding context, read the relevant files first.
+ If the failure has multiple root causes, fix all of them in this single pass.
+ If a fix would contradict the plan's no-gos or architectural decisions, report the conflict instead of proceeding.
++
++**Annotate rather than skip:** If a review finding is genuinely not worth fixing (e.g., a style nit in legacy code, a suggestion that contradicts the plan), do NOT silently skip it. Instead:
++- Add an inline code comment at the relevant location: `# NOTE: [finding summary] -- left as-is because [rationale]`
++- This creates a paper trail so the next reviewer does not re-flag the same issue.
++- The finding is then 'addressed' (annotated), not 'skipped'.
+ "
+ })
+ ```
+diff --git a/agent/sdk_client.py b/agent/sdk_client.py
+index e695b2af1..55ab0b9df 100644
+--- a/agent/sdk_client.py
++++ b/agent/sdk_client.py
+@@ -1582,6 +1582,18 @@ async def get_agent_response_sdk(
+                 "before progressing to the next one.\n"
+                 "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
+                 "or you need human input.\n\n"
++                "**Interpreting stage outcomes:**\n"
++                "DevSession output may contain `<!-- OUTCOME {\"status\":\"...\", ...} -->` JSON. "
++                "Use this decision table:\n"
++                "| Status | Action |\n"
++                "| `success` | Proceed to next stage. If TEST+REVIEW+DOCS all passed clean → auto-merge (no human ask). |\n"
++                "| `partial` | Dispatch PATCH for tech_debt/nits, then re-REVIEW. Never silently skip findings. |\n"
++                "| `fail` | Dispatch PATCH for blockers, then re-REVIEW. |\n"
++                "| no OUTCOME block | Use your judgment from the output text. |\n\n"
++                "**Key principles:**\n"
++                "- Findings are NEVER silently ignored — they are either fixed or annotated with inline code comments.\n"
++                "- Auto-merge when all gates pass with zero findings. Do not ask permission for obvious merges.\n"
++                "- Only escalate to human when genuinely blocked or when a decision requires business judgment.\n\n"
+                 "For trivial or docs-only work, use your judgment on whether the full "
+                 "pipeline is warranted.\n"
+                 "Use the Agent tool for all coding work — slash commands like /do-build "
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 9a641214c..9377da7f1 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -63,6 +63,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
+ | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
+ | [PM Telegram Tool](pm-telegram-tool.md) | ChatSession composes and sends its own Telegram messages via Redis IPC, with summarizer as fallback | Shipped |
++| [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
+ | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
+ | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
+ | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
+diff --git a/docs/features/do-patch-skill.md b/docs/features/do-patch-skill.md
+index 5e32ad65d..9de818a02 100644
+--- a/docs/features/do-patch-skill.md
++++ b/docs/features/do-patch-skill.md
+@@ -61,6 +61,16 @@ Capped at **3 patch→test→review iterations**. After 3 cycles, emits a struct
+    - Review blocker context → advance to `document`
+ 7. If fail: retry up to caller's iteration cap, then report stuck with details
+ 
++## Annotate Rather Than Skip
++
++When a review finding is genuinely not worth fixing (e.g., a style nit in older code, a suggestion that contradicts the plan), the builder adds an inline code comment instead of silently skipping:
++
++```python
++# NOTE: [finding summary] -- left as-is because [rationale]
++```
++
++This creates a paper trail so the next reviewer does not re-flag the same issue. The finding is "addressed" (annotated), not "skipped." See [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) for how the PM interprets these outcomes.
++
+ ## What /do-patch Never Does
+ 
+ - Never creates a PR
+@@ -83,6 +93,7 @@ python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}
+ 
+ ## Related
+ 
++- [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) — how the PM interprets review outcomes and routes to PATCH
+ - [Trace & Verify Protocol](trace-and-verify.md) — root cause analysis methodology used in Step 2
+ - [SDLC Enforcement](sdlc-enforcement.md) — the quality gate system this skill operates within
+ - `.claude/skills/do-patch/SKILL.md` — full skill definition
+diff --git a/docs/features/pm-sdlc-decision-rules.md b/docs/features/pm-sdlc-decision-rules.md
+new file mode 100644
+index 000000000..3da06f24d
+--- /dev/null
++++ b/docs/features/pm-sdlc-decision-rules.md
+@@ -0,0 +1,50 @@
++# PM SDLC Decision Rules
++
++## Overview
++
++The ChatSession PM persona orchestrates SDLC work by spawning DevSessions for each pipeline stage. DevSessions emit structured `<!-- OUTCOME -->` JSON blocks that encode the stage result. The PM decision rules tell the PM how to interpret these outcomes and route to the next stage automatically.
++
++## Problem Solved
++
++Without explicit decision rules, the PM had no instructions for:
++- Parsing OUTCOME blocks from DevSession output
++- Mapping status values (success/partial/fail) to next actions
++- Deciding when to auto-merge vs. escalate to human
++- Handling tech debt and nit findings (patch vs. skip)
++
++This led to the PM either asking permission for obvious merges or silently skipping review findings.
++
++## Decision Table
++
++| OUTCOME Status | PM Action |
++|----------------|-----------|
++| `success` | Proceed to next stage. If TEST + REVIEW + DOCS all passed clean, auto-merge without asking. |
++| `partial` | Dispatch PATCH for tech_debt/nits, then re-REVIEW. |
++| `fail` | Dispatch PATCH for blockers, then re-REVIEW. |
++| No OUTCOME block | PM uses judgment from the output text. |
++
++## Key Principles
++
++1. **Findings are never silently ignored.** They are either fixed or annotated with inline code comments explaining why they were left as-is.
++2. **Auto-merge on clean gates.** When all pipeline stages pass with zero findings, the PM merges without asking human permission.
++3. **Escalate only when genuinely blocked.** The PM only asks the human when a decision requires business judgment or the pipeline is stuck.
++
++## Annotate Rather Than Skip
++
++When a review finding is genuinely not worth fixing (e.g., a style nit in older code, a suggestion that contradicts the plan), the do-patch builder adds an inline code comment instead of silently skipping:
++
++```python
++# NOTE: [finding summary] -- left as-is because [rationale]
++```
++
++This creates a paper trail so the next reviewer does not re-flag the same issue. The finding is "addressed" (annotated), not "skipped."
++
++## Implementation
++
++- **PM dispatch rules**: `agent/sdk_client.py` -- appended to the PM dispatch instructions block (lines 1583-1596)
++- **Annotate pattern**: `.claude/skills/do-patch/SKILL.md` -- added after the builder agent prompt template
++
++## Related
++
++- [Chat/Dev Session Architecture](chat-dev-session-architecture.md) -- how ChatSession and DevSession interact
++- Issue [#544](https://github.com/tomcounsell/ai/issues/544) -- tracking issue

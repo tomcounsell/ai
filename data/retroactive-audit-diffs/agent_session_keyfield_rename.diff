@@ -1,0 +1,1509 @@
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index db8998b2f..d910d68d8 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -150,8 +150,8 @@ def classify_nudge_action(
+     "correlation_id",
+     # Claude Code identity mapping — must be preserved across delete-and-recreate
+     "claude_session_uuid",
+-    # Job hierarchy fields — must be preserved across delete-and-recreate
+-    "parent_job_id",
++    # Session hierarchy fields — must be preserved across delete-and-recreate
++    "parent_agent_session_id",
+     # === ChatSession/DevSession fields ===
+     "session_type",
+     "parent_chat_session_id",
+@@ -189,7 +189,7 @@ async def _push_agent_session(
+     auto_continue_count: int = 0,
+     correlation_id: str | None = None,
+     scheduled_at: datetime | float | None = None,
+-    parent_job_id: str | None = None,
++    parent_agent_session_id: str | None = None,
+     telegram_message_key: str | None = None,
+     session_type: str = SessionType.CHAT,
+     scheduling_depth: int = 0,  # ignored, now derived
+@@ -239,7 +239,7 @@ def _mark_superseded():
+                 old.status = "superseded"
+                 old.save()
+                 logger.info(
+-                    f"Marked old completed session {old.job_id} as superseded "
++                    f"Marked old completed session {old.id} as superseded "
+                     f"for session_id={session_id}"
+                 )
+ 
+@@ -263,7 +263,7 @@ def _mark_superseded():
+         auto_continue_count=auto_continue_count,
+         correlation_id=correlation_id,
+         scheduled_at=scheduled_at,
+-        parent_job_id=parent_job_id,
++        parent_agent_session_id=parent_agent_session_id,
+         telegram_message_key=telegram_message_key,
+     )
+ 
+@@ -543,7 +543,7 @@ def sort_key(j):
+     # Direct field mutation -- status is an IndexedField, not a KeyField,
+     # so save() correctly updates the secondary index.
+     logger.info(
+-        f"[chat:{chat_id}] Transitioning session {chosen.job_id} "
++        f"[chat:{chat_id}] Transitioning session {chosen.id} "
+         f"(session {chosen.session_id}) pending->running"
+     )
+     chosen.status = "running"
+@@ -554,7 +554,7 @@ def sort_key(j):
+     try:
+         chosen.log_lifecycle_transition("running", "worker picked up session")
+     except Exception as e:
+-        logger.warning(f"Failed to log lifecycle transition for session {chosen.job_id}: {e}")
++        logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
+ 
+     # Drain any steering messages queued during the pending window (#619).
+     # Follow-up messages arriving while the session was pending get pushed to
+@@ -573,13 +573,13 @@ def sort_key(j):
+                 await chosen.async_save()
+                 logger.info(
+                     f"[chat:{chat_id}] Drained {len(extra_texts)} steering message(s) "
+-                    f"into session {chosen.job_id} message_text"
++                    f"into session {chosen.id} message_text"
+                 )
+     except Exception as e:
+         # Drain failure must not crash session start
+         logger.warning(
+             f"[chat:{chat_id}] Failed to drain steering messages for session "
+-            f"{chosen.job_id} (non-fatal): {e}"
++            f"{chosen.id} (non-fatal): {e}"
+         )
+ 
+     return chosen
+@@ -647,7 +647,7 @@ def sort_key(j):
+ 
+         # Direct field mutation -- status is an IndexedField, not a KeyField.
+         logger.info(
+-            f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.job_id} "
++            f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.id} "
+             f"(session {chosen.session_id}) pending->running"
+         )
+         chosen.status = "running"
+@@ -657,7 +657,7 @@ def sort_key(j):
+         try:
+             chosen.log_lifecycle_transition("running", "worker picked up session (sync fallback)")
+         except Exception as e:
+-            logger.warning(f"Failed to log lifecycle transition for session {chosen.job_id}: {e}")
++            logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
+ 
+         # Drain steering messages (same logic as _pop_agent_session) (#619)
+         try:
+@@ -673,12 +673,12 @@ def sort_key(j):
+                     await chosen.async_save()
+                     logger.info(
+                         f"[chat:{chat_id}] Sync fallback: drained {len(extra_texts)} "
+-                        f"steering message(s) into session {chosen.job_id} message_text"
++                        f"steering message(s) into session {chosen.id} message_text"
+                     )
+         except Exception as e:
+             logger.warning(
+                 f"[chat:{chat_id}] Sync fallback: failed to drain steering messages "
+-                f"for session {chosen.job_id} (non-fatal): {e}"
++                f"for session {chosen.id} (non-fatal): {e}"
+             )
+ 
+         return chosen
+@@ -768,30 +768,30 @@ def cancel_agent_session(agent_session_id: str) -> bool:
+     return True
+ 
+ 
+-def retry_agent_session(job_id: str) -> AgentSession | None:
++def retry_agent_session(agent_session_id: str) -> AgentSession | None:
+     """Re-queue a failed or cancelled session with the same parameters.
+ 
+     Creates a new pending session preserving all fields from the original.
+ 
+     Args:
+-        job_id: The job_id of the session to retry.
++        agent_session_id: The id of the session to retry.
+ 
+     Returns:
+         The new AgentSession if retried, None if not found or not terminal.
+     """
+     try:
+-        session = AgentSession.query.get(job_id)
++        session = AgentSession.query.get(agent_session_id)
+     except Exception:
+-        logger.warning(f"[pm-controls] job_id {job_id} not found for retry")
++        logger.warning(f"[pm-controls] agent_session_id {agent_session_id} not found for retry")
+         return None
+ 
+     if not session:
+-        logger.warning(f"[pm-controls] No session found with job_id={job_id}")
++        logger.warning(f"[pm-controls] No session found with id={agent_session_id}")
+         return None
+ 
+     if session.status not in ("failed", "cancelled"):
+         logger.warning(
+-            f"[pm-controls] Session {session.job_id} status is {session.status!r} -- "
++            f"[pm-controls] Session {session.id} status is {session.status!r} -- "
+             f"can only retry failed/cancelled sessions"
+         )
+         return None
+@@ -803,7 +803,7 @@ def retry_agent_session(job_id: str) -> AgentSession | None:
+     fields["completed_at"] = None
+     fields["created_at"] = datetime.now(tz=UTC)
+     new_session = AgentSession.create(**fields)
+-    logger.info(f"[pm-controls] Retried session {session.job_id} -> {new_session.job_id}")
++    logger.info(f"[pm-controls] Retried session {session.id} -> {new_session.id}")
+ 
+     return new_session
+ 
+@@ -841,7 +841,7 @@ def get_queue_status(chat_id: str) -> dict:
+             continue
+ 
+         summary = {
+-            "agent_session_id": entry.job_id,
++            "agent_session_id": entry.id,
+             "session_id": entry.session_id,
+             "message_preview": (entry.message_text or "")[:100],
+             "priority": entry.priority,
+@@ -872,7 +872,7 @@ async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
+ async def _complete_agent_session(session: AgentSession, *, failed: bool = False) -> None:
+     """Mark a running session as completed and delete it from Redis.
+ 
+-    If this session is a child (has parent_job_id), finalize the parent BEFORE
++    If this session is a child (has parent_agent_session_id), finalize the parent BEFORE
+     deleting the child. The completing child's intended terminal status is
+     passed to _finalize_parent so it can correctly count terminal children
+     even though the child's Redis status hasn't been updated yet.
+@@ -887,14 +887,14 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
+     except Exception as e:
+         logger.debug(f"[checkpoint] Non-fatal checkpoint error at completion: {e}")
+ 
+-    parent_job_id = getattr(session, "parent_job_id", None)
++    parent_id = getattr(session, "parent_agent_session_id", None)
+ 
+     # Finalize parent BEFORE deleting child, passing the completing child's
+     # intended status so _finalize_parent can treat it as terminal
+-    if parent_job_id:
++    if parent_id:
+         child_status = "failed" if failed else "completed"
+         await _finalize_parent(
+-            parent_job_id,
++            parent_id,
+             completing_child_id=session.agent_session_id,
+             completing_child_status=child_status,
+         )
+@@ -903,7 +903,7 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
+ 
+ 
+ async def _finalize_parent(
+-    parent_job_id: str,
++    parent_id: str,
+     completing_child_id: str | None = None,
+     completing_child_status: str | None = None,
+ ) -> None:
+@@ -914,7 +914,7 @@ async def _finalize_parent(
+     already in a terminal state or no longer exists.
+ 
+     Args:
+-        parent_job_id: The agent_session_id of the parent AgentSession.
++        parent_id: The id of the parent AgentSession.
+         completing_child_id: If provided, the agent_session_id of the child that is
+             currently completing. Its Redis status may still be "running",
+             so completing_child_status overrides it.
+@@ -927,17 +927,17 @@ async def _finalize_parent(
+     # operations are synchronous under the hood. If the codebase ever moves to
+     # true async Redis, these will need updating.
+     try:
+-        parent = AgentSession.query.get(parent_job_id)
++        parent = AgentSession.query.get(parent_id)
+     except Exception:
+         logger.warning(
+-            f"[session-hierarchy] Parent session {parent_job_id} lookup raised "
++            f"[session-hierarchy] Parent session {parent_id} lookup raised "
+             f"exception during finalization — treating child as orphaned"
+         )
+         return
+ 
+     if parent is None:
+         logger.warning(
+-            f"[session-hierarchy] Parent session {parent_job_id} not found during "
++            f"[session-hierarchy] Parent session {parent_id} not found during "
+             f"finalization — parent may have been deleted or already finalized"
+         )
+         return
+@@ -945,7 +945,7 @@ async def _finalize_parent(
+     # Only finalize if parent is in waiting_for_children status
+     if parent.status != "waiting_for_children":
+         logger.debug(
+-            f"[session-hierarchy] Parent {parent_job_id} status is "
++            f"[session-hierarchy] Parent {parent_id} status is "
+             f"{parent.status!r}, skipping finalization"
+         )
+         return
+@@ -956,7 +956,7 @@ async def _finalize_parent(
+         # Edge case: parent has no children but is waiting_for_children.
+         # Transition to completed as a safety guard.
+         logger.warning(
+-            f"[session-hierarchy] Parent {parent_job_id} has no children but "
++            f"[session-hierarchy] Parent {parent_id} has no children but "
+             f"status is waiting_for_children — auto-completing"
+         )
+         _transition_parent(parent, "completed")
+@@ -977,7 +977,7 @@ def effective_status(child: AgentSession) -> str:
+     if non_terminal:
+         # Some children still running/pending — not ready to finalize
+         logger.debug(
+-            f"[session-hierarchy] Parent {parent_job_id} has "
++            f"[session-hierarchy] Parent {parent_id} has "
+             f"{len(non_terminal)} non-terminal children — waiting"
+         )
+         return
+@@ -989,7 +989,7 @@ def effective_status(child: AgentSession) -> str:
+     completed_count = sum(1 for s in child_statuses if s == "completed")
+     failed_count = sum(1 for s in child_statuses if s == "failed")
+     logger.info(
+-        f"[session-hierarchy] Finalizing parent {parent_job_id}: "
++        f"[session-hierarchy] Finalizing parent {parent_id}: "
+         f"{completed_count} completed, {failed_count} failed -> {new_status}"
+     )
+ 
+@@ -1001,7 +1001,7 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
+ 
+     Status is an IndexedField, so direct mutation and save is safe.
+     No delete-and-recreate needed, which means agent_session_id stays the same
+-    and children's parent_job_id references remain valid.
++    and children's parent_agent_session_id references remain valid.
+     """
+     parent.status = new_status
+     # Only set completed_at for terminal statuses, not for waiting_for_children
+@@ -1255,8 +1255,8 @@ def _ts(val):
+ async def _agent_session_hierarchy_health_check() -> None:
+     """Check for orphaned children and stuck parents in session hierarchy.
+ 
+-    1. Orphaned children: child's parent_job_id points to a non-existent session.
+-       Action: clear the parent_job_id field (child completes normally).
++    1. Orphaned children: child's parent_agent_session_id points to a non-existent session.
++       Action: clear the parent_agent_session_id field (child completes normally).
+     2. Stuck parents: status is waiting_for_children but all children are terminal.
+        Action: finalize the parent (transition to completed/failed).
+     """
+@@ -1266,22 +1266,22 @@ async def _agent_session_hierarchy_health_check() -> None:
+     # Check for orphaned children
+     try:
+         all_sessions = list(AgentSession.query.all())
+-        children_with_parent = [s for s in all_sessions if s.parent_job_id]
++        children_with_parent = [s for s in all_sessions if s.parent_agent_session_id]
+         parent_ids = {s.agent_session_id for s in all_sessions}
+ 
+         for child in children_with_parent:
+-            if child.parent_job_id not in parent_ids:
++            if child.parent_agent_session_id not in parent_ids:
+                 logger.warning(
+                     "[session-health] Orphaned child %s: parent %s no longer exists — "
+-                    "clearing parent_job_id",
++                    "clearing parent_agent_session_id",
+                     child.agent_session_id,
+-                    child.parent_job_id,
++                    child.parent_agent_session_id,
+                 )
+-                # Delete-and-recreate required: parent_job_id is a KeyField,
++                # Delete-and-recreate required: parent_agent_session_id is a KeyField,
+                 # so mutating it directly would corrupt the index.
+                 fields = _extract_agent_session_fields(child)
+                 child.delete()
+-                fields["parent_job_id"] = None
++                fields["parent_agent_session_id"] = None
+                 AgentSession.create(**fields)
+                 orphans_fixed += 1
+     except Exception as e:
+@@ -1478,7 +1478,7 @@ async def enqueue_agent_session(
+     auto_continue_count: int = 0,
+     correlation_id: str | None = None,
+     scheduled_at: float | None = None,
+-    parent_job_id: str | None = None,
++    parent_agent_session_id: str | None = None,
+     telegram_message_key: str | None = None,
+     session_type: str = SessionType.CHAT,
+     scheduling_depth: int = 0,  # ignored, now derived
+@@ -1511,7 +1511,7 @@ async def enqueue_agent_session(
+         auto_continue_count=auto_continue_count,
+         correlation_id=correlation_id,
+         scheduled_at=scheduled_at,
+-        parent_job_id=parent_job_id,
++        parent_agent_session_id=parent_agent_session_id,
+         telegram_message_key=telegram_message_key,
+         session_type=session_type,
+     )
+diff --git a/docs/features/agent-session-model.md b/docs/features/agent-session-model.md
+index e316d6f12..6e8afaf93 100644
+--- a/docs/features/agent-session-model.md
++++ b/docs/features/agent-session-model.md
+@@ -10,7 +10,7 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
+ 
+ ## Key Fields
+ 
+-**Identity:** `agent_session_id` (AutoKeyField), `session_id`, `session_type` (KeyField), `project_key` (KeyField), `chat_id` (KeyField), `status` (IndexedField)
++**Identity:** `id` (AutoKeyField), `session_id`, `session_type` (KeyField), `project_key` (KeyField), `chat_id` (KeyField), `status` (IndexedField). `agent_session_id` is a backward-compatible property alias for `id`.
+ 
+ **Queue-phase:** `priority`, `scheduled_at` (DatetimeField), `created_at` (SortedField, datetime), `started_at` (DatetimeField), `updated_at` (DatetimeField, auto_now), `completed_at` (DatetimeField), `auto_continue_count`
+ 
+@@ -22,7 +22,7 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
+ 
+ **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
+ 
+-**DevSession:** `parent_chat_session_id` (KeyField), `slug`, `parent_job_id` (KeyField)
++**DevSession:** `parent_chat_session_id` (KeyField), `slug`, `parent_agent_session_id` (KeyField)
+ 
+ All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float timestamps are auto-converted via `__setattr__`.
+ 
+@@ -51,7 +51,7 @@ Several fields that were previously stored as independent model fields are now d
+ | `stage_states` | Last `stage` event data | Setter appends a `stage` event |
+ | `last_commit_sha` | Last `checkpoint` event text | Setter appends a `checkpoint` event |
+ | `classification_type` | `extra_context["classification_type"]` | Setter updates `extra_context` |
+-| `scheduling_depth` | Walks `parent_job_id` chain (max 5) | Read-only |
++| `scheduling_depth` | Walks `parent_agent_session_id` chain (max 5) | Read-only |
+ 
+ ## SDLC Stage Tracking
+ 
+diff --git a/docs/features/chat-dev-session-architecture.md b/docs/features/chat-dev-session-architecture.md
+index b0b05bdfe..3d2145a01 100644
+--- a/docs/features/chat-dev-session-architecture.md
++++ b/docs/features/chat-dev-session-architecture.md
+@@ -75,7 +75,7 @@ resolve_chat_mode(project, chat_title, is_dm)
+ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does not support model inheritance, so both types share one model with nullable type-specific fields.
+ 
+ ### Shared fields (all sessions)
+-- `job_id` (AutoKeyField) -- primary key
++- `id` (AutoKeyField) -- primary key (aliased as `agent_session_id`)
+ - `session_id` -- Telegram-derived identifier
+ - `session_type` (KeyField) -- "chat" or "dev"
+ - `status` (KeyField) -- pending/running/active/dormant/completed/failed
+diff --git a/docs/features/claude-code-memory.md b/docs/features/claude-code-memory.md
+index 345f599fb..d5142503f 100644
+--- a/docs/features/claude-code-memory.md
++++ b/docs/features/claude-code-memory.md
+@@ -96,11 +96,11 @@ The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2
+ 
+ ## AgentSession Lifecycle Tracking
+ 
+-Local Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `job_id`:
++Local Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `agent_session_id`:
+ 
+-1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create(session_type="dev", ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The `job_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
+-2. **PostToolUse hook**: On every tool call, reads `job_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
+-3. **Stop hook**: Reads `job_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
++1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create(session_type="dev", ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
++2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
++3. **Stop hook**: Reads `agent_session_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
+ 
+ The dashboard at `localhost:8500` picks up local sessions automatically via `AgentSession.query` -- no dashboard code changes were needed. Local sessions appear alongside Telegram sessions with correct status, timestamps, and project key.
+ 
+@@ -113,7 +113,7 @@ Hooks are stateless processes -- each invocation starts fresh. State is persiste
+ | File | Location | Contents |
+ |------|----------|----------|
+ | Memory buffer | `data/sessions/{session_id}/memory_buffer.json` | Tool call count, rolling buffer (last 9 calls), injected thought IDs |
+-| Agent session | `data/sessions/{session_id}/agent_session.json` | `agent_session_job_id` for cross-hook lifecycle tracking, `merge_detected` flag for post-merge learning |
++| Agent session | `data/sessions/{session_id}/agent_session.json` | `agent_session_id` for cross-hook lifecycle tracking, `merge_detected` flag for post-merge learning |
+ 
+ The memory buffer sidecar structure:
+ ```json
+@@ -133,7 +133,7 @@ The memory buffer sidecar structure:
+ The agent session sidecar structure:
+ ```json
+ {
+-  "agent_session_job_id": "abc123",
++  "agent_session_id": "abc123",
+   "merge_detected": true,
+   "merged_pr_number": "560"
+ }
+diff --git a/docs/features/redis-models.md b/docs/features/redis-models.md
+index ae8f912e0..601915afe 100644
+--- a/docs/features/redis-models.md
++++ b/docs/features/redis-models.md
+@@ -6,8 +6,8 @@ Popoto models stored in Redis form the persistent state layer of the system. Thi
+ 
+ ```
+ TelegramMessage ──────── AgentSession
+-  msg_id                   job_id
+-  agent_session_id ──────> job_id
++  msg_id                   id
++  agent_session_id ──────> id
+   msg_id <─────────────── telegram_message_key
+   project_key              project_key
+   chat_id                  chat_id
+@@ -52,7 +52,7 @@ When a Telegram message triggers an agent session:
+ 1. **Bridge stores TelegramMessage** with media, URL, and classification metadata
+ 2. **Bridge enqueues AgentSession** with `telegram_message_key` pointing to the TelegramMessage's `msg_id`
+ 3. **Session worker resolves TelegramMessage** via `telegram_message_key` to get enrichment parameters
+-4. **Session worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.job_id`
++4. **Session worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.id`
+ 
+ This bidirectional link enables:
+ - Looking up which session processed a given message
+@@ -115,7 +115,7 @@ The script:
+ 
+ | Field | Purpose | Notes |
+ |-------|---------|-------|
+-| `job_id` | AgentSession primary key (AutoKeyField) | `session.id` property alias available |
++| `id` | AgentSession primary key (AutoKeyField) | `session.agent_session_id` backward-compat alias available |
+ | `session_id` | Telegram-derived session identifier | Format: `tg_{project}_{chat_id}_{msg_id}` |
+ | `telegram_message_id` | Telegram message ID (integer) | Renamed from `message_id` for clarity |
+ | `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
+@@ -133,12 +133,12 @@ Popoto field types have different implications for how records behave on mutatio
+ 
+ | Field | Type | Mutable? | Notes |
+ |-------|------|----------|-------|
+-| `job_id` | AutoKeyField | Never | Primary key, auto-generated |
++| `id` | AutoKeyField | Never | Primary key, auto-generated |
+ | `session_type` | KeyField | No | Set once at creation ("chat" or "dev") |
+ | `project_key` | KeyField | No | Set once at creation |
+ | `chat_id` | KeyField | No | Set once at creation |
+ | `parent_chat_session_id` | KeyField | No | Set once at creation (DevSession only) |
+-| `parent_job_id` | KeyField | No | Set once at creation (child jobs only) |
++| `parent_agent_session_id` | KeyField | No | Set once at creation (child sessions only) |
+ | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
+ 
+ ### AgentSession Datetime Fields
+diff --git a/docs/features/session-lifecycle-diagnostics.md b/docs/features/session-lifecycle-diagnostics.md
+index 2c6886771..bb235b431 100644
+--- a/docs/features/session-lifecycle-diagnostics.md
++++ b/docs/features/session-lifecycle-diagnostics.md
+@@ -29,7 +29,7 @@ Each call:
+ ### Log Format
+ 
+ ```
+-LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running job_id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up session"
++LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up session"
+ ```
+ 
+ Filter all lifecycle events: `grep LIFECYCLE logs/bridge.log`
+diff --git a/docs/guides/tool-rebuild-requirements.md b/docs/guides/tool-rebuild-requirements.md
+index 40c84c0a6..7d2920b62 100644
+--- a/docs/guides/tool-rebuild-requirements.md
++++ b/docs/guides/tool-rebuild-requirements.md
+@@ -377,7 +377,7 @@ See [tools/README.md](../tools/README.md) for usage documentation.
+ - `timeout_minutes`: Maximum runtime (default: 10)
+ 
+ **Output**:
+-- `job_id`: Scheduled job identifier
++- `agent_session_id`: Scheduled session identifier
+ - `status`: Scheduling status
+ - `tests_to_run`: List of tests that will run
+ - `estimated_duration`: Estimated run time
+diff --git a/docs/plans/agent_session_keyfield_rename.md b/docs/plans/agent_session_keyfield_rename.md
+new file mode 100644
+index 000000000..6aa3e9426
+--- /dev/null
++++ b/docs/plans/agent_session_keyfield_rename.md
+@@ -0,0 +1,296 @@
++---
++status: Completed
++type: chore
++appetite: Medium
++owner: Valor
++created: 2026-04-02
++tracking: https://github.com/tomcounsell/ai/issues/631
++last_comment_id:
++---
++
++# Rename AgentSession job_id and parent_job_id KeyFields
++
++## Problem
++
++The `job_id` AutoKeyField and `parent_job_id` KeyField on AgentSession are the last remnants of "job" vocabulary after #608 renamed everything else to "agent_session". Property aliases (`agent_session_id`, `id`) paper over the inconsistency for callers, but the underlying Redis key structure still uses the old names.
++
++**Current behavior:**
++Redis key pattern (fields sorted alphabetically by name):
++```
++AgentSession:{chat_id}:{job_id}:{parent_chat_session_id}:{parent_job_id}:{project_key}:{session_type}
++```
++
++Callers use `session.agent_session_id` or `session.id` which are property aliases for `job_id`. The model has backward-compat shims in `__init__` and `_normalize_kwargs` to translate between names.
++
++**Desired outcome:**
++- `job_id` renamed to `id` as the actual AutoKeyField
++- `parent_job_id` renamed to `parent_agent_session_id` as the actual KeyField
++- Redis keys migrated in-place without data loss
++- Property aliases and backward-compat shims removed (no longer needed)
++- All callers updated to use the new field names directly
++
++## Prior Art
++
++- **#608** (closed, PR #616 merged 2026-03-31): Renamed all "job" terminology to "agent_session" across codebase. Deliberately left `job_id` and `parent_job_id` unchanged due to Redis key migration complexity.
++- **#609** (closed, PR #628 merged 2026-04-01): AgentSession field cleanup. Added `id` and `agent_session_id` property aliases but kept `job_id` as the AutoKeyField. Created `scripts/migrate_agent_session_fields.py` for hash field renames (not key renames).
++- **#295** (closed, PR #392 merged 2026-03-13): Strengthened Popoto model relationships and naming. Earlier cleanup pass.
++
++## Spike Results
++
++### spike-1: Key position analysis after rename
++- **Assumption**: "Renaming job_id to id and parent_job_id to parent_agent_session_id changes key segment positions"
++- **Method**: code-read
++- **Finding**: Confirmed. Current alphabetical order: `chat_id`(1), `job_id`(2), `parent_chat_session_id`(3), `parent_job_id`(4), `project_key`(5), `session_type`(6). New order: `chat_id`(1), `id`(2), `parent_agent_session_id`(3), `parent_chat_session_id`(4), `project_key`(5), `session_type`(6). Positions 2 stays the same field (just renamed). Positions 3 and 4 swap: `parent_agent_session_id` takes position 3, `parent_chat_session_id` moves to position 4.
++- **Confidence**: high
++- **Impact on plan**: The migration script must swap segments 3 and 4 when constructing new keys, and rename the hash fields inside each record.
++
++### spike-2: Popoto RENAME + rebuild_indexes pattern
++- **Assumption**: "Popoto's Recipe 7/8 SCAN+RENAME pattern works for KeyField renames"
++- **Method**: code-read of `popoto/models/migrations.py`
++- **Finding**: Recipe 7 (Add a KeyField) provides exact pattern: SCAN old keys, construct new key, `pipeline.rename(old, new)`, update `$Class:AgentSession` set, then `rebuild_indexes()`. No dedicated "rename KeyField" recipe exists, but the mechanics are identical. The `rebuild_indexes()` method clears all secondary indexes and rebuilds from a SCAN of `AgentSession:*`, so it handles index drift automatically.
++- **Confidence**: high
++- **Impact on plan**: Use Recipe 7 pattern directly. The existing `scripts/migrate_agent_session_fields.py` can be extended or replaced.
++
++### spike-3: Cross-reference safety
++- **Assumption**: "Other models storing job_id UUIDs as foreign keys don't need migration"
++- **Method**: code-read
++- **Finding**: Confirmed. Fields like `TelegramMessage.agent_session_id` and `parent_chat_session_id` store the UUID value, not the field name. The UUID values are preserved during key rename -- only the Redis key structure changes. No cross-reference migration needed.
++- **Confidence**: high
++- **Impact on plan**: No additional model migrations required.
++
++## Data Flow
++
++1. **Migration script**: SCAN `AgentSession:*` Redis keys -> parse 6 colon-separated segments -> swap segments 3 and 4 -> `RENAME` old key to new key -> update `$Class:AgentSession` set
++2. **Hash field rename**: For each renamed key, `HSET` new field names (`id`, `parent_agent_session_id`) with old values, `HDEL` old field names (`job_id`, `parent_job_id`)
++3. **Index rebuild**: `AgentSession.rebuild_indexes()` clears all sorted sets, field indexes, and class set, then re-scans and re-indexes
++4. **Model update**: Change field declarations, remove property aliases, remove `_normalize_kwargs` shims for `parent_agent_session_id`
++5. **Caller update**: Replace all `job_id` references with `id` and `parent_job_id` with `parent_agent_session_id` across 8 files
++
++## Architectural Impact
++
++- **New dependencies**: None
++- **Interface changes**: `AgentSession.job_id` -> `AgentSession.id`, `AgentSession.parent_job_id` -> `AgentSession.parent_agent_session_id`. Property aliases removed.
++- **Coupling**: Decreases -- removes indirection layer of property aliases
++- **Data ownership**: No change -- AgentSession continues to own its identity
++- **Reversibility**: Medium -- would require another migration script to reverse the key rename, but the pattern is symmetric
++
++## Appetite
++
++**Size:** Medium
++
++**Team:** Solo dev
++
++**Interactions:**
++- PM check-ins: 0 (straightforward migration)
++- Review rounds: 1 (validate migration safety)
++
++## Prerequisites
++
++No prerequisites -- this work uses existing Redis infrastructure and Popoto ORM capabilities.
++
++## Solution
++
++### Key Elements
++
++- **Migration script**: SCAN + RENAME pattern from Popoto Recipe 7, handles key restructuring and hash field renames in a single pass
++- **Model field rename**: Change `job_id` to `id` (AutoKeyField) and `parent_job_id` to `parent_agent_session_id` (KeyField)
++- **Alias cleanup**: Remove property aliases (`agent_session_id`, `id` properties) and `_normalize_kwargs` backward-compat shims
++- **Caller updates**: Mechanical find-and-replace across 8 files
++
++### Flow
++
++**Run migration script** (dry-run first) → **Validate key structure** → **Update model fields** → **Update callers** → **Run tests** → **Deploy with migration**
++
++### Technical Approach
++
++- Write a new migration script `scripts/migrate_agent_session_keyfield_rename.py` that:
++  1. SCANs all `AgentSession:*` keys (excluding index keys)
++  2. Parses each key into segments
++  3. Constructs new key with swapped segments 3/4 and renamed segment values
++  4. Uses `pipeline.rename()` for atomic key rename
++  5. Updates `$Class:AgentSession` set membership
++  6. Renames hash fields inside each record (`job_id` -> `id`, `parent_job_id` -> `parent_agent_session_id`)
++  7. Calls `AgentSession.rebuild_indexes()` after all renames
++- The migration is idempotent: re-running on already-migrated data is a no-op (keys already match new pattern). Detection: if the key already contains `parent_agent_session_id` in position 3 (instead of `parent_chat_session_id`), skip it.
++- Dry-run mode logs what would change without modifying Redis
++- Supports `--reverse` flag to undo the migration (swap segments back, rename hash fields to old names) for rollback scenarios
++- Tracks progress: logs each key as it's processed, so partial failures can be diagnosed and resumed
++
++## Failure Path Test Strategy
++
++### Exception Handling Coverage
++- [x] Migration script must handle partial failures (some keys renamed, others not) by tracking progress and supporting resume
++- [x] If `RENAME` fails for a key (e.g., target already exists), log and continue rather than aborting
++
++### Empty/Invalid Input Handling
++- [x] Migration handles empty Redis (zero AgentSession records) gracefully
++- [x] Migration handles keys with None/empty segments (null KeyField values)
++
++### Error State Rendering
++- [x] Migration reports clear summary: total records, migrated, skipped, errors
++
++## Test Impact
++
++- [x] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: replace all `parent_job_id` references with `parent_agent_session_id`, replace `job_id` with `id`
++- [x] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: replace `parent_job_id` reference with `parent_agent_session_id`
++- [x] `tests/unit/test_model_relationships.py` — UPDATE: replace `job_id` references with `id`, update `_AGENT_SESSION_FIELDS` assertion for `parent_job_id`
++- [x] `tests/integration/test_agent_session_scheduler.py` — UPDATE: replace `job_id` and `parent_job_id` references with `id` and `parent_agent_session_id`
++
++## Rabbit Holes
++
++- **Renaming `parent_chat_session_id`**: This field is correctly named and not part of this scope. Don't touch it.
++- **Renaming the model class**: `AgentSession` is the correct name. Don't rename it.
++- **Adding a Popoto migration framework**: Just write a standalone script. Don't build a generic migration system.
++- **Updating the existing `scripts/migrate_agent_session_fields.py`**: That script served a different purpose (hash field renames for #609). Write a new script for the structural key migration.
++
++## Risks
++
++### Risk 1: Partial migration leaves Redis in inconsistent state
++**Impact:** Some keys use old pattern, some use new. Popoto can't find records using old keys after model is updated.
++**Mitigation:** Migration script uses Redis pipeline for atomicity within batches. Dry-run mode validates before applying. Model update is deployed only after migration completes successfully.
++
++### Risk 2: Running bridge during migration causes key conflicts
++**Impact:** New sessions created during migration use new pattern, old sessions still have old pattern.
++**Mitigation:** Stop the bridge before running migration. Migration is fast (pipeline batches of 500). Restart bridge after migration + model update.
++
++## Race Conditions
++
++### Race 1: Bridge creates new session during migration
++**Location:** Migration script + bridge session creation
++**Trigger:** Bridge creates a new AgentSession while migration is renaming keys
++**Data prerequisite:** Migration must complete before model code is updated
++**State prerequisite:** Bridge must be stopped during migration
++**Mitigation:** Deployment sequence: stop bridge -> run migration -> deploy code with new field names -> start bridge. This eliminates the race entirely.
++
++## No-Gos (Out of Scope)
++
++- Renaming `parent_chat_session_id` (correctly named, not part of "job" cleanup)
++- Building a generic Popoto migration framework
++- Modifying the existing `migrate_agent_session_fields.py` script
++- Changing any UUID values (only field names and key structure change)
++- Multi-machine migration coordination (single Redis instance, single migration run)
++
++## Update System
++
++The migration script must run on the production machine before the code update deploys. Update sequence:
++1. Stop bridge (`./scripts/valor-service.sh stop`)
++2. Pull new code (`git pull`)
++3. Run migration (`python scripts/migrate_agent_session_keyfield_rename.py`)
++4. Restart bridge (`./scripts/valor-service.sh restart`)
++
++The update skill (`scripts/remote-update.sh`) should be checked to see if it needs a post-pull migration hook. If not, the migration can be run manually as a one-time operation.
++
++## Agent Integration
++
++No agent integration required -- this is a model-internal rename. The agent interacts with AgentSession through the queue and scheduler, which will be updated as part of the caller changes. No MCP server or bridge changes needed.
++
++## Documentation
++
++### Feature Documentation
++- [x] Update `docs/features/README.md` if it references `job_id` field names
++- [x] No new feature doc needed -- this is a rename, not a new feature
++
++### Inline Documentation
++- [x] Update docstrings in `models/agent_session.py` that reference `job_id`
++- [x] Update comments in `agent/agent_session_queue.py` and `tools/agent_session_scheduler.py`
++
++## Success Criteria
++
++- [x] `job_id` field renamed to `id` (AutoKeyField) in model
++- [x] `parent_job_id` field renamed to `parent_agent_session_id` (KeyField) in model
++- [x] `agent_session_id` property alias kept (thin one-line alias for `.id` — 30+ callers make removal not worth the risk)
++- [x] Migration script successfully renames all existing Redis keys (dry-run validates)
++- [x] Zero references to `job_id` or `parent_job_id` remain in Python files (excluding migration script and `# legacy` markers)
++- [x] All tests pass (`/do-test`)
++- [x] Documentation updated (`/do-docs`)
++
++## Team Orchestration
++
++### Team Members
++
++- **Builder (migration)**
++  - Name: migration-builder
++  - Role: Write migration script and update model + callers
++  - Agent Type: builder
++  - Resume: true
++
++- **Validator (migration)**
++  - Name: migration-validator
++  - Role: Verify migration script correctness and test coverage
++  - Agent Type: validator
++  - Resume: true
++
++### Step by Step Tasks
++
++### 1. Write migration script
++- **Task ID**: build-migration-script
++- **Depends On**: none
++- **Validates**: `scripts/migrate_agent_session_keyfield_rename.py` runs without error in dry-run mode
++- **Informed By**: spike-1 (key position swap), spike-2 (Popoto RENAME pattern)
++- **Assigned To**: migration-builder
++- **Agent Type**: builder
++- **Parallel**: true
++- Create `scripts/migrate_agent_session_keyfield_rename.py` with SCAN + RENAME + rebuild_indexes pattern
++- Support `--dry-run` flag
++- Handle idempotency (skip keys already in new format)
++- Handle null KeyField segments
++
++### 2. Update model fields and remove aliases
++- **Task ID**: build-model-update
++- **Depends On**: build-migration-script
++- **Validates**: `tests/unit/test_model_relationships.py`, `tests/unit/test_agent_session_hierarchy.py`
++- **Assigned To**: migration-builder
++- **Agent Type**: builder
++- **Parallel**: false
++- Rename `job_id` to `id` (AutoKeyField) in `models/agent_session.py`
++- Rename `parent_job_id` to `parent_agent_session_id` (KeyField) in `models/agent_session.py`
++- Remove `agent_session_id` property and `id` property aliases
++- Remove `_normalize_kwargs` shims for `parent_agent_session_id`
++- Update all internal references within the model file
++
++### 3. Update callers
++- **Task ID**: build-caller-update
++- **Depends On**: build-model-update
++- **Validates**: `tests/unit/test_agent_session_scheduler_kill.py`, `tests/integration/test_agent_session_scheduler.py`
++- **Assigned To**: migration-builder
++- **Agent Type**: builder
++- **Parallel**: false
++- Update `agent/agent_session_queue.py`: replace `job_id` with `id`, `parent_job_id` with `parent_agent_session_id`
++- Update `tools/agent_session_scheduler.py`: same replacements (including function parameters like `retry_agent_session(job_id: str)` → `retry_agent_session(agent_session_id: str)`)
++- Update `_AGENT_SESSION_FIELDS` list if it references old names
++- Update all local variable names that refer to the AgentSession identifier (e.g., `job_id = ...` → `agent_session_id = ...`)
++- Update all 4 test files with new field names
++- Grep entire project (`grep -rn 'job_id\|parent_job_id' --include='*.py'`) to catch any references outside the 8 known files
++
++### 4. Validate all changes
++- **Task ID**: validate-all
++- **Depends On**: build-caller-update
++- **Assigned To**: migration-validator
++- **Agent Type**: validator
++- **Parallel**: false
++- Run `pytest tests/unit/ -x -q` to verify all unit tests pass
++- Run `python -m ruff check .` and `python -m ruff format --check .`
++- Verify zero remaining `job_id` or `parent_job_id` references in Python files (excluding migration script and git history)
++- Verify migration script dry-run completes without error
++
++## Verification
++
++| Check | Command | Expected |
++|-------|---------|----------|
++| Tests pass | `pytest tests/ -x -q` | exit code 0 |
++| Lint clean | `python -m ruff check .` | exit code 0 |
++| Format clean | `python -m ruff format --check .` | exit code 0 |
++| No stale job_id refs | `grep -rn 'job_id' --include='*.py' . \| grep -v migrate_agent_session \| grep -v '# legacy'` | exit code 1 |
++| Migration dry-run | `python scripts/migrate_agent_session_keyfield_rename.py --dry-run` | exit code 0 |
++
++## Critique Results
++
++<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
++
++---
++
++## Open Questions
++
++None — all questions resolved.
++
++- **Resolved:** Field named `id` (not `agent_session_id`) per owner decision on 2026-04-02.
+diff --git a/models/agent_session.py b/models/agent_session.py
+index 58813b0b1..763cfb0d8 100644
+--- a/models/agent_session.py
++++ b/models/agent_session.py
+@@ -64,13 +64,13 @@ class AgentSession(Model):
+         running  - Worker picked up, agent executing
+         active   - Session in progress (transcript tracking)
+         dormant  - Paused on open question
+-        waiting_for_children - Parent job waiting for child jobs to complete
++        waiting_for_children - Parent session waiting for child sessions to complete
+         completed - Work finished successfully
+         failed   - Work failed
+     """
+ 
+     # === Identity ===
+-    job_id = AutoKeyField()
++    id = AutoKeyField()
+     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
+     session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
+     project_key = KeyField()
+@@ -151,7 +151,7 @@ class AgentSession(Model):
+     slug = Field(null=True)  # Derives branch, plan path, worktree
+ 
+     # === Session hierarchy fields ===
+-    parent_job_id = KeyField(null=True)
++    parent_agent_session_id = KeyField(null=True)
+ 
+     # === Backward-compatible field name mapping ===
+ 
+@@ -223,14 +223,18 @@ def _normalize_kwargs(cls, kwargs: dict) -> dict:
+         elif "scheduled_after" in kwargs:
+             kwargs.pop("scheduled_after")
+ 
+-        if "parent_agent_session_id" in kwargs and "parent_job_id" not in kwargs:
+-            kwargs["parent_job_id"] = kwargs.pop("parent_agent_session_id")
+-        elif "parent_agent_session_id" in kwargs:
+-            kwargs.pop("parent_agent_session_id")
++        # Map old field names to new ones  # legacy
++        if "parent_job_id" in kwargs and "parent_agent_session_id" not in kwargs:  # legacy
++            kwargs["parent_agent_session_id"] = kwargs.pop("parent_job_id")  # legacy
++        elif "parent_job_id" in kwargs:  # legacy
++            kwargs.pop("parent_job_id")  # legacy
+ 
+         if "agent_session_id" in kwargs:
+             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
+ 
++        if "job_id" in kwargs:  # legacy
++            kwargs.pop("job_id")  # legacy
++
+         # Map old history to session_events
+         if "history" in kwargs and "session_events" not in kwargs:
+             kwargs["session_events"] = kwargs.pop("history")
+@@ -306,25 +310,20 @@ async def async_create(cls, **kwargs) -> "AgentSession":
+         kwargs = cls._normalize_kwargs(kwargs)
+         return await super().async_create(**kwargs)
+ 
+-    # === Backward-compatible property: agent_session_id -> job_id ===
++    # === Backward-compatible property: agent_session_id -> id ===
+ 
+     @property
+     def agent_session_id(self) -> str | None:
+-        """Backward-compatible alias for job_id."""
+-        return self.job_id
++        """Backward-compatible alias for id."""
++        return self.id
+ 
+     @agent_session_id.setter
+     def agent_session_id(self, value: str) -> None:
+-        """Backward-compatible setter for job_id."""
+-        self.job_id = value
++        """Backward-compatible setter for id."""
++        self.id = value
+ 
+     # === Compatibility property aliases ===
+ 
+-    @property
+-    def id(self) -> str | None:
+-        """Alias for job_id."""
+-        return self.job_id
+-
+     @property
+     def sender_name(self) -> str | None:
+         """Extract sender_name from initial_telegram_message."""
+@@ -494,7 +493,7 @@ def work_item_slug(self) -> str | None:
+ 
+     @property
+     def scheduling_depth(self) -> int:
+-        """Derive scheduling depth by walking parent_job_id chain.
++        """Derive scheduling depth by walking parent_agent_session_id chain.
+ 
+         Returns the depth of the parent chain, capped at 5 for safety.
+         """
+@@ -502,7 +501,7 @@ def scheduling_depth(self) -> int:
+         current = self
+         max_depth = 5
+         while depth < max_depth:
+-            pid = current.parent_job_id
++            pid = current.parent_agent_session_id
+             if not pid:
+                 break
+             try:
+@@ -773,7 +772,7 @@ def get_parent_chat_session(self) -> "AgentSession | None":
+         except Exception:
+             logger.warning(
+                 f"Parent chat session {self.parent_chat_session_id} not found "
+-                f"for dev session {self.job_id}"
++                f"for dev session {self.id}"
+             )
+             return None
+ 
+@@ -782,9 +781,9 @@ def get_dev_sessions(self) -> list["AgentSession"]:
+         if not self.is_chat:
+             return []
+         try:
+-            return list(AgentSession.query.filter(parent_chat_session_id=self.job_id))
++            return list(AgentSession.query.filter(parent_chat_session_id=self.id))
+         except Exception as e:
+-            logger.warning(f"Failed to query dev sessions for chat {self.job_id}: {e}")
++            logger.warning(f"Failed to query dev sessions for chat {self.id}: {e}")
+             return []
+ 
+     # === PM self-messaging helpers ===
+@@ -922,7 +921,7 @@ def log_lifecycle_transition(self, new_status: str, context: str = "") -> None:
+ 
+         logger.info(
+             f"LIFECYCLE session={self.session_id} transition={old_status}\u2192{new_status} "
+-            f"job_id={self.job_id} project={self.project_key} "
++            f"id={self.id} project={self.project_key} "
+             f"duration_in_prev_state={duration:.1f}s" + (f' context="{context}"' if context else "")
+         )
+ 
+@@ -1013,23 +1012,23 @@ def pop_steering_messages(self) -> list[str]:
+ 
+     def get_parent(self) -> "AgentSession | None":
+         """Return the parent AgentSession if this is a child session."""
+-        if not self.parent_job_id:
++        if not self.parent_agent_session_id:
+             return None
+         try:
+-            parent = AgentSession.query.get(self.parent_job_id)
++            parent = AgentSession.query.get(self.parent_agent_session_id)
+             return parent
+         except Exception:
+             logger.warning(
+-                f"Parent agent session {self.parent_job_id} not found for child {self.job_id}"
++                f"Parent agent session {self.parent_agent_session_id} not found for child {self.id}"
+             )
+             return None
+ 
+     def get_children(self) -> list["AgentSession"]:
+-        """Return all child AgentSessions linked via parent_job_id."""
++        """Return all child AgentSessions linked via parent_agent_session_id."""
+         try:
+-            return list(AgentSession.query.filter(parent_job_id=self.job_id))
++            return list(AgentSession.query.filter(parent_agent_session_id=self.id))
+         except Exception as e:
+-            logger.warning(f"Failed to query children for agent session {self.job_id}: {e}")
++            logger.warning(f"Failed to query children for agent session {self.id}: {e}")
+             return []
+ 
+     def get_completion_progress(self) -> tuple[int, int, int]:
+diff --git a/scripts/migrate_agent_session_keyfield_rename.py b/scripts/migrate_agent_session_keyfield_rename.py
+new file mode 100644
+index 000000000..f383b64dd
+--- /dev/null
++++ b/scripts/migrate_agent_session_keyfield_rename.py
+@@ -0,0 +1,233 @@
++#!/usr/bin/env python3
++"""Migrate AgentSession Redis key structure for KeyField rename.
++
++Renames job_id -> id and parent_job_id -> parent_agent_session_id.
++
++This script handles the structural key migration (not just hash field renames):
++1. SCANs all AgentSession:* keys (excluding index keys)
++2. Parses each key into 6 colon-separated segments
++3. Swaps segments 3 and 4 (parent_agent_session_id takes position 3,
++   parent_chat_session_id moves to position 4)
++4. Renames hash fields (job_id -> id, parent_job_id -> parent_agent_session_id)
++5. Uses pipeline.rename() for atomic key rename
++6. Updates $Class:AgentSession set membership
++7. Calls AgentSession.rebuild_indexes() after all renames
++
++Key structure change (old -> new):
++  AgentSession:{chat_id}:{job_id}:{pcs_id}:{pj_id}:{pk}:{st}
++  AgentSession:{chat_id}:{id}:{pas_id}:{pcs_id}:{pk}:{st}
++
++Segments 3 and 4 swap because Popoto orders KeyFields alphabetically:
++  - parent_agent_session_id (new name) sorts before parent_chat_session_id
++  - parent_job_id (old name) sorted after parent_chat_session_id
++
++Usage:
++  python scripts/migrate_agent_session_keyfield_rename.py --dry-run
++  python scripts/migrate_agent_session_keyfield_rename.py
++  python scripts/migrate_agent_session_keyfield_rename.py --reverse
++"""
++
++import argparse
++import logging
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).parent.parent))
++
++logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
++logger = logging.getLogger(__name__)
++
++# Hash field renames
++HASH_FIELD_RENAMES = {
++    "job_id": "id",
++    "parent_job_id": "parent_agent_session_id",
++}
++
++# Reverse hash field renames (for --reverse)
++HASH_FIELD_RENAMES_REVERSE = {v: k for k, v in HASH_FIELD_RENAMES.items()}
++
++# Keys to skip (index/sorted-set infrastructure keys)
++SKIP_PATTERNS = (b":_sorted_set:", b":_field_index:")
++
++
++def _is_index_key(key: bytes) -> bool:
++    """Check if a Redis key is a Popoto index key (not a data record)."""
++    return any(p in key for p in SKIP_PATTERNS)
++
++
++def migrate_keys(dry_run: bool = True, reverse: bool = False) -> dict:
++    """Rename AgentSession Redis keys and hash fields.
++
++    Args:
++        dry_run: If True, log what would happen without making changes.
++        reverse: If True, undo the migration (swap segments back).
++
++    Returns:
++        Dict with migration stats.
++    """
++    import popoto
++
++    redis_client = popoto.redis_db.get_REDIS_DB()
++
++    stats = {
++        "total_records": 0,
++        "migrated": 0,
++        "skipped_already_migrated": 0,
++        "skipped_index_keys": 0,
++        "errors": 0,
++    }
++
++    field_renames = HASH_FIELD_RENAMES_REVERSE if reverse else HASH_FIELD_RENAMES
++    direction = "reverse" if reverse else "forward"
++
++    # Phase 1: Find all AgentSession hash keys
++    cursor = 0
++    all_keys = []
++    while True:
++        cursor, keys = redis_client.scan(cursor, match="AgentSession:*", count=500)
++        all_keys.extend(keys)
++        if cursor == 0:
++            break
++
++    hash_keys = [k for k in all_keys if not _is_index_key(k)]
++    stats["skipped_index_keys"] = len(all_keys) - len(hash_keys)
++    stats["total_records"] = len(hash_keys)
++    logger.info(f"Found {len(hash_keys)} AgentSession hash records ({direction} migration)")
++
++    if not hash_keys:
++        logger.info("No records to migrate.")
++        return stats
++
++    # Phase 2: Rename keys and hash fields
++    class_set_key = "$Class:AgentSession"
++
++    for key in hash_keys:
++        key_str = key.decode() if isinstance(key, bytes) else key
++        try:
++            parts = key.split(b":")
++            # Expected 7 parts: [AgentSession, chat_id, id, seg3, seg4, project_key, session_type]
++            if len(parts) != 7:
++                logger.info(
++                    f"  Skipping key with unexpected segment count ({len(parts)}): {key_str}"
++                )
++                stats["skipped_wrong_segments"] = stats.get("skipped_wrong_segments", 0) + 1
++                continue
++
++            # Check hash fields to determine if already migrated
++            if not reverse:
++                # Forward: check if 'id' hash field already exists (new format)
++                has_new_field = redis_client.hexists(key, "id")
++                has_old_field = redis_client.hexists(key, "job_id")
++                if has_new_field and not has_old_field:
++                    stats["skipped_already_migrated"] += 1
++                    continue
++            else:
++                # Reverse: check if 'job_id' hash field already exists (old format)
++                has_old_field = redis_client.hexists(key, "job_id")
++                has_new_field = redis_client.hexists(key, "id")
++                if has_old_field and not has_new_field:
++                    stats["skipped_already_migrated"] += 1
++                    continue
++
++            # Construct new key by swapping segments 3 and 4
++            new_parts = list(parts)
++            new_parts[3], new_parts[4] = parts[4], parts[3]
++            new_key = b":".join(new_parts)
++            new_key_str = new_key.decode() if isinstance(new_key, bytes) else new_key
++
++            logger.info(f"  Migrating: {key_str}")
++            logger.info(f"         -> {new_key_str}")
++
++            if not dry_run:
++                pipe = redis_client.pipeline()
++
++                # Rename the key (swap segments 3 and 4)
++                if new_key != key:
++                    pipe.rename(key, new_key)
++                    # Update $Class:AgentSession set
++                    pipe.srem(class_set_key, key_str)
++                    pipe.sadd(class_set_key, new_key_str)
++
++                # Rename hash fields atomically with key rename
++                target_key = new_key if new_key != key else key
++                for old_field, new_field in field_renames.items():
++                    old_val = redis_client.hget(key, old_field)
++                    if old_val is not None:
++                        pipe.hset(target_key, new_field, old_val)
++                        pipe.hdel(target_key, old_field)
++                        logger.info(f"    Hash field: {old_field} -> {new_field}")
++
++                pipe.execute()
++            else:
++                # Log hash field changes that would happen
++                for old_field, new_field in field_renames.items():
++                    old_val = redis_client.hget(key, old_field)
++                    if old_val is not None:
++                        logger.info(f"    Would rename hash field: {old_field} -> {new_field}")
++
++            stats["migrated"] += 1
++
++        except Exception as e:
++            stats["errors"] += 1
++            logger.error(f"Error migrating {key_str}: {e}")
++
++    # Phase 3: Rebuild indexes
++    if not dry_run and stats["migrated"] > 0:
++        logger.info("Rebuilding Popoto indexes...")
++        try:
++            from models.agent_session import AgentSession
++
++            AgentSession.rebuild_indexes()
++            logger.info("Index rebuild complete.")
++        except Exception as e:
++            logger.error(f"Failed to rebuild indexes: {e}")
++
++    return stats
++
++
++def main():
++    parser = argparse.ArgumentParser(
++        description="Migrate AgentSession Redis key structure for KeyField rename"
++    )
++    parser.add_argument(
++        "--dry-run",
++        action="store_true",
++        help="Log what would happen without making changes",
++    )
++    parser.add_argument(
++        "--reverse",
++        action="store_true",
++        help="Reverse the migration (undo key rename)",
++    )
++    args = parser.parse_args()
++
++    mode_parts = []
++    if args.dry_run:
++        mode_parts.append("DRY RUN")
++    if args.reverse:
++        mode_parts.append("REVERSE")
++    mode = " + ".join(mode_parts) if mode_parts else "LIVE"
++
++    logger.info(f"=== AgentSession KeyField Rename Migration ({mode}) ===")
++
++    stats = migrate_keys(dry_run=args.dry_run, reverse=args.reverse)
++
++    logger.info("=== Migration Results ===")
++    for key, value in stats.items():
++        logger.info(f"  {key}: {value}")
++
++    if not args.dry_run and stats["migrated"] > 0:
++        logger.info(f"Successfully migrated {stats['migrated']} records.")
++    elif args.dry_run and stats["migrated"] > 0:
++        logger.info(f"Would migrate {stats['migrated']} records. Run without --dry-run to apply.")
++    else:
++        logger.info("No records needed migration.")
++
++    if stats["errors"] > 0:
++        logger.warning(f"{stats['errors']} error(s) occurred during migration.")
++        return 1
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/integration/test_agent_session_scheduler.py b/tests/integration/test_agent_session_scheduler.py
+index a1870123d..2f9d64abb 100644
+--- a/tests/integration/test_agent_session_scheduler.py
++++ b/tests/integration/test_agent_session_scheduler.py
+@@ -67,7 +67,7 @@ def _create_pending(
+     scheduling_depth=0,
+     created_at=None,
+     session_id=None,
+-    parent_job_id=None,
++    parent_agent_session_id=None,
+     **kwargs,
+ ):
+     """Helper to create a pending AgentSession for testing."""
+@@ -77,7 +77,7 @@ def _create_pending(
+         priority=priority,
+         created_at=created_at or time.time(),
+         session_id=session_id or f"test-{time.time_ns()}",
+-        parent_job_id=parent_job_id,
++        parent_agent_session_id=parent_agent_session_id,
+         working_dir="/tmp/test",
+         message_text=message,
+         sender_name="Test",
+@@ -182,7 +182,7 @@ def test_scheduled_at_field(self):
+         assert session.scheduled_at is not None
+ 
+     def test_scheduling_depth_derived(self):
+-        """scheduling_depth is derived from parent_job_id chain."""
++        """scheduling_depth is derived from parent_agent_session_id chain."""
+         session = _create_pending()
+         assert session.scheduling_depth == 0  # No parent
+ 
+@@ -385,9 +385,9 @@ def test_depth_cap_enforced(self):
+ 
+         # Create a chain of 3 parent sessions to reach depth 3
+         s0 = _create_pending(session_id="chain-root")
+-        s1 = _create_pending(session_id="chain-1", parent_job_id=s0.job_id)
+-        s2 = _create_pending(session_id="chain-2", parent_job_id=s1.job_id)
+-        leaf = _create_pending(session_id="chain-leaf", parent_job_id=s2.job_id)
++        s1 = _create_pending(session_id="chain-1", parent_agent_session_id=s0.id)
++        s2 = _create_pending(session_id="chain-2", parent_agent_session_id=s1.id)
++        leaf = _create_pending(session_id="chain-leaf", parent_agent_session_id=s2.id)
+ 
+         import os
+ 
+diff --git a/tests/unit/test_agent_session_hierarchy.py b/tests/unit/test_agent_session_hierarchy.py
+index 77876e367..cd1799520 100644
+--- a/tests/unit/test_agent_session_hierarchy.py
++++ b/tests/unit/test_agent_session_hierarchy.py
+@@ -1,7 +1,7 @@
+ """Unit tests for session hierarchy: parent-child session decomposition (issue #359).
+ 
+ Tests cover:
+-- AgentSession.parent_job_id field
++- AgentSession.parent_agent_session_id field
+ - get_parent(), get_children(), get_completion_progress() helpers
+ - _finalize_parent() completion propagation logic
+ - _transition_parent() status transitions
+@@ -28,7 +28,7 @@ def _make_session(self, **kwargs):
+         session.agent_session_id = kwargs.get("agent_session_id", "test-session-1")
+         session.session_id = kwargs.get("session_id", "test-session-1")
+         session.status = kwargs.get("status", "pending")
+-        session.parent_job_id = kwargs.get("parent_job_id", None)
++        session.parent_agent_session_id = kwargs.get("parent_agent_session_id", None)
+         session.message_text = kwargs.get("message_text", "test message")
+         session.priority = kwargs.get("priority", "normal")
+         session.created_at = kwargs.get("created_at", time.time())
+@@ -39,14 +39,14 @@ def _make_session(self, **kwargs):
+ 
+     @patch("models.agent_session.AgentSession.query")
+     def test_get_parent_returns_parent(self, mock_query):
+-        """get_parent() returns the parent session when parent_job_id is set."""
++        """get_parent() returns the parent session when parent_agent_session_id is set."""
+         from models.agent_session import AgentSession
+ 
+         parent = self._make_session(agent_session_id="parent-1")
+         mock_query.get.return_value = parent
+ 
+         child = AgentSession()
+-        child.parent_job_id = "parent-1"
++        child.parent_agent_session_id = "parent-1"
+         child.agent_session_id = "child-1"
+ 
+         result = child.get_parent()
+@@ -55,11 +55,11 @@ def test_get_parent_returns_parent(self, mock_query):
+ 
+     @patch("models.agent_session.AgentSession.query")
+     def test_get_parent_returns_none_when_no_parent(self, mock_query):
+-        """get_parent() returns None when parent_job_id is not set."""
++        """get_parent() returns None when parent_agent_session_id is not set."""
+         from models.agent_session import AgentSession
+ 
+         child = AgentSession()
+-        child.parent_job_id = None
++        child.parent_agent_session_id = None
+         child.agent_session_id = "child-1"
+ 
+         result = child.get_parent()
+@@ -72,8 +72,8 @@ def test_get_children_returns_children(self, mock_query):
+         from models.agent_session import AgentSession
+ 
+         children = [
+-            self._make_session(agent_session_id="child-1", parent_job_id="parent-1"),
+-            self._make_session(agent_session_id="child-2", parent_job_id="parent-1"),
++            self._make_session(agent_session_id="child-1", parent_agent_session_id="parent-1"),
++            self._make_session(agent_session_id="child-2", parent_agent_session_id="parent-1"),
+         ]
+         mock_query.filter.return_value = children
+ 
+@@ -82,7 +82,7 @@ def test_get_children_returns_children(self, mock_query):
+ 
+         result = parent.get_children()
+         assert len(result) == 2
+-        mock_query.filter.assert_called_once_with(parent_job_id="parent-1")
++        mock_query.filter.assert_called_once_with(parent_agent_session_id="parent-1")
+ 
+     @patch("models.agent_session.AgentSession.query")
+     def test_get_children_returns_empty_when_none(self, mock_query):
+@@ -405,17 +405,17 @@ def test_children_subcommand_exists(self):
+ 
+ 
+ # ===================================================================
+-# _AGENT_SESSION_FIELDS includes parent_job_id
++# _AGENT_SESSION_FIELDS includes parent_agent_session_id
+ # ===================================================================
+ 
+ 
+ class TestSessionFieldsIncludesParentSessionId:
+-    """Verify parent_job_id is in the extract list."""
++    """Verify parent_agent_session_id is in the extract list."""
+ 
+-    def test_parent_job_id_in_session_fields(self):
++    def test_parent_agent_session_id_in_session_fields(self):
+         from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+ 
+-        assert "parent_job_id" in _AGENT_SESSION_FIELDS
++        assert "parent_agent_session_id" in _AGENT_SESSION_FIELDS
+ 
+ 
+ # ===================================================================
+diff --git a/tests/unit/test_agent_session_scheduler_kill.py b/tests/unit/test_agent_session_scheduler_kill.py
+index 0bf3bec65..b1f21cdc1 100644
+--- a/tests/unit/test_agent_session_scheduler_kill.py
++++ b/tests/unit/test_agent_session_scheduler_kill.py
+@@ -62,7 +62,7 @@ def __init__(
+         self.started_at = extra.get("started_at", None)
+         self.scheduled_at = extra.get("scheduled_at", None)
+         self.issue_url = extra.get("issue_url", None)
+-        self.parent_job_id = extra.get("parent_job_id", None)
++        self.parent_agent_session_id = extra.get("parent_agent_session_id", None)
+         self.completed_at = extra.get("completed_at", None)
+         self._deleted = False
+ 
+diff --git a/tests/unit/test_model_relationships.py b/tests/unit/test_model_relationships.py
+index 38b727ad1..a56891096 100644
+--- a/tests/unit/test_model_relationships.py
++++ b/tests/unit/test_model_relationships.py
+@@ -472,32 +472,21 @@ def test_dry_run_argument_parsing(self):
+ class TestAgentSessionIdAlias:
+     """Test the AgentSession.id property that aliases agent_session_id."""
+ 
+-    def test_id_property_exists(self):
+-        """AgentSession should have an 'id' property."""
+-        from models.agent_session import AgentSession
+-
+-        assert hasattr(AgentSession, "id")
+-        assert isinstance(AgentSession.id, property)
++    def test_id_field_exists(self):
++        """AgentSession should have an 'id' AutoKeyField."""
++        from popoto import AutoKeyField
+ 
+-    def test_id_property_has_getter(self):
+-        """The id property should have a getter function."""
+         from models.agent_session import AgentSession
+ 
+-        assert AgentSession.id.fget is not None
++        assert hasattr(AgentSession, "id")
++        assert isinstance(AgentSession.id, AutoKeyField)
+ 
+-    def test_id_returns_agent_session_id_value(self):
+-        """AgentSession.id should delegate to self.agent_session_id."""
++    def test_agent_session_id_property_exists(self):
++        """AgentSession should have an 'agent_session_id' backward-compat property."""
+         from models.agent_session import AgentSession
+ 
+-        # Verify the property implementation logic
+-        class FakeSession:
+-            def __init__(self, jid):
+-                self.job_id = jid
+-
+-            id = AgentSession.id
+-
+-        assert FakeSession("session-xyz").id == "session-xyz"
+-        assert FakeSession(None).id is None
++        assert isinstance(AgentSession.agent_session_id, property)
++        assert AgentSession.agent_session_id.fget is not None
+ 
+ 
+ # ===================================================================
+diff --git a/tools/agent_session_scheduler.py b/tools/agent_session_scheduler.py
+index 4f9bf0d58..3fac41b1e 100644
+--- a/tools/agent_session_scheduler.py
++++ b/tools/agent_session_scheduler.py
+@@ -105,7 +105,7 @@ def _check_rate_limit(project_key: str) -> bool:
+             sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
+             for s in sessions:
+                 # Check if session has a parent (agent-scheduled, not human-initiated)
+-                if s.parent_job_id:
++                if s.parent_agent_session_id:
+                     created = _to_ts(s.created_at) or 0
+                     if created > cutoff:
+                         recent_scheduled += 1
+@@ -136,15 +136,15 @@ def _output(data: dict) -> None:
+     print(json.dumps(data, indent=2))
+ 
+ 
+-def _get_parent_session(parent_job_id: str):
+-    """Look up a parent AgentSession by agent_session_id for field inheritance.
++def _get_parent_session(parent_id: str):
++    """Look up a parent AgentSession by id for field inheritance.
+ 
+     Returns the parent session or None if not found.
+     """
+     try:
+         from models.agent_session import AgentSession
+ 
+-        return AgentSession.query.get(parent_job_id)
++        return AgentSession.query.get(parent_id)
+     except Exception:
+         return None
+ 
+@@ -278,18 +278,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
+     session_type = getattr(args, "session_type", None) or SessionType.CHAT
+ 
+     # Parent session inheritance
+-    parent_job_id = getattr(args, "parent_session", None)
++    parent_id = getattr(args, "parent_session", None)
+     parent_session = None
+-    if parent_job_id:
+-        if not parent_job_id.strip():
++    if parent_id:
++        if not parent_id.strip():
+             _output({"status": "error", "message": "--parent-session cannot be empty."})
+             return 1
+-        parent_session = _get_parent_session(parent_job_id)
++        parent_session = _get_parent_session(parent_id)
+         if parent_session is None:
+             _output(
+                 {
+                     "status": "error",
+-                    "message": f"Parent session {parent_job_id} not found.",
++                    "message": f"Parent session {parent_id} not found.",
+                 }
+             )
+             return 1
+@@ -339,7 +339,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
+             scheduled_at=scheduled_at,
+             issue_url=issue_url,
+             correlation_id=inherited_correlation_id,
+-            parent_job_id=parent_job_id,
++            parent_agent_session_id=parent_id,
+         )
+ 
+         # Transition parent to waiting_for_children if not already
+@@ -348,10 +348,10 @@ def cmd_schedule(args: argparse.Namespace) -> int:
+                 from agent.agent_session_queue import _transition_parent
+ 
+                 _transition_parent(parent_session, "waiting_for_children")
+-                logger.info(f"Parent {parent_job_id} transitioned to waiting_for_children")
++                logger.info(f"Parent {parent_id} transitioned to waiting_for_children")
+             except Exception as e:
+                 logger.warning(
+-                    f"Failed to transition parent {parent_job_id} to waiting_for_children: {e}"
++                    f"Failed to transition parent {parent_id} to waiting_for_children: {e}"
+                 )
+ 
+         # Count queue position
+@@ -372,8 +372,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
+             "queue_position": queue_position,
+             "scheduled_at": scheduled_iso,
+         }
+-        if parent_job_id:
+-            result["parent_job_id"] = parent_job_id
++        if parent_id:
++            result["parent_agent_session_id"] = parent_id
+ 
+         _output(result)
+         return 0
+@@ -405,8 +405,8 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
+         session_info["scheduled_at"] = _to_iso(j.scheduled_at)
+     if j.issue_url:
+         session_info["issue_url"] = j.issue_url
+-    if j.parent_job_id:
+-        session_info["parent_job_id"] = j.parent_job_id
++    if j.parent_agent_session_id:
++        session_info["parent_agent_session_id"] = j.parent_agent_session_id
+ 
+     if include_children and j.status == "waiting_for_children":
+         completed, total, failed = j.get_completion_progress()
+@@ -450,8 +450,8 @@ def cmd_status(args: argparse.Namespace) -> int:
+         pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), _to_ts(j.created_at) or 0))
+ 
+         # Separate root sessions from child sessions for tree display
+-        root_pending = [j for j in pending if not j.parent_job_id]
+-        child_pending = [j for j in pending if j.parent_job_id]
++        root_pending = [j for j in pending if not j.parent_agent_session_id]
++        child_pending = [j for j in pending if j.parent_agent_session_id]
+ 
+         result = {
+             "project": project_key,
+@@ -660,7 +660,7 @@ def cmd_children(args: argparse.Namespace) -> int:
+         completed, total, failed = parent.get_completion_progress()
+ 
+         result = {
+-            "parent_job_id": args.agent_session_id,
++            "parent_agent_session_id": args.agent_session_id,
+             "parent_status": parent.status,
+             "progress": {
+                 "completed": completed,

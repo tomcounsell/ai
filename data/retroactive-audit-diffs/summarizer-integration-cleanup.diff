@@ -1,0 +1,400 @@
+diff --git a/bridge/summarizer.py b/bridge/summarizer.py
+index 10546e443..4ef5dd636 100644
+--- a/bridge/summarizer.py
++++ b/bridge/summarizer.py
+@@ -32,21 +32,29 @@
+ 
+ from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
+ from config.enums import PersonaType
+-from config.models import MODEL_FAST, OPENROUTER_HAIKU
++from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
+ from utils.api_keys import get_anthropic_api_key
+ 
+ logger = logging.getLogger(__name__)
+ 
+-# Thresholds
+-FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
+-SAFETY_TRUNCATE = 4096  # Telegram hard limit
++# Thresholds (overridable via env vars; values must be positive integers)
++# FILE_ATTACH_THRESHOLD: character count above which the full agent response is
++# also sent as a .txt file attachment. Valid range: 500-10000 (default 3000).
++FILE_ATTACH_THRESHOLD = int(os.environ.get("FILE_ATTACH_THRESHOLD", "3000"))
++# SAFETY_TRUNCATE: hard ceiling in characters when all summarization backends
++# fail and we must truncate the raw text. Valid range: 1000-8192 (default 4096).
++SAFETY_TRUNCATE = int(os.environ.get("SAFETY_TRUNCATE", "4096"))
+ 
+-# OpenRouter config
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
++# OpenRouter config imported from config.models
+ 
+ # Classification confidence threshold — below this, default to QUESTION
+ # (conservative: pauses for human input rather than auto-continuing)
+-CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
++# Override via env var; value must be a float between 0.0 and 1.0.
++# Valid range: 0.0-1.0 (default 0.80). Higher values make the system more
++# conservative, defaulting to QUESTION when confidence is below this threshold.
++CLASSIFICATION_CONFIDENCE_THRESHOLD = float(
++    os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD", "0.80")
++)
+ 
+ 
+ def _extract_open_questions(text: str) -> list[str]:
+diff --git a/config/models.py b/config/models.py
+index d626e5e51..4252c628f 100644
+--- a/config/models.py
++++ b/config/models.py
+@@ -7,6 +7,8 @@
+ When model versions change, update them in ONE place here.
+ """
+ 
++import os
++
+ # =============================================================================
+ # ANTHROPIC DIRECT API MODELS
+ # Format: model ID as used with Anthropic's API directly
+@@ -32,6 +34,22 @@
+ OPUS = "claude-opus-4-5-20251101"
+ 
+ 
++# =============================================================================
++# OPENROUTER API ENDPOINTS
++# Override via environment variables for custom/proxy deployments
++# =============================================================================
++
++# Chat completions endpoint (used by summarizer, tools, scripts).
++# Override: set OPENROUTER_URL env var to point at a custom or proxy endpoint.
++OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
++
++# Embeddings endpoint (used by knowledge_search / doc_impact_finder).
++# Override: set OPENROUTER_EMBEDDINGS_URL env var for a custom embeddings proxy.
++OPENROUTER_EMBEDDINGS_URL = os.environ.get(
++    "OPENROUTER_EMBEDDINGS_URL", "https://openrouter.ai/api/v1/embeddings"
++)
++
++
+ # =============================================================================
+ # OPENROUTER MODELS
+ # Format: provider/model as used with OpenRouter API
+diff --git a/docs/features/summarizer-format.md b/docs/features/summarizer-format.md
+index 91b3056de..49182fcdf 100644
+--- a/docs/features/summarizer-format.md
++++ b/docs/features/summarizer-format.md
+@@ -42,14 +42,14 @@ Issue #273
+ 
+ Simple emoji + bullets format, no stage line or link footer. Still summarized via Haiku. No message echo -- Telegram's reply-to feature provides context about what the response is answering.
+ 
+-### Q&A Mode (Prose)
++### Teammate Mode (Prose)
+ ```
+ The bridge connects Telegram to Claude via Telethon. See bridge/telegram_bridge.py
+ for the main entry point. The nudge loop in agent/agent_session_queue.py handles delivery
+ routing based on stop_reason classification.
+ ```
+ 
+-When `qa_mode=True` on the session, `_compose_structured_summary()` bypasses all structured formatting — no emoji prefix, no bullet parsing, no template. The LLM summary (already in conversational prose via `qa_mode=True` context in the prompt) is returned directly. The processing reaction is cleared instead of setting a completion emoji.
++When `session.session_mode == PersonaType.TEAMMATE`, `_compose_structured_summary()` bypasses all structured formatting — no emoji prefix, no bullet parsing, no template. The LLM summary (already in conversational prose via the `persona=teammate` context injected into the prompt) is returned directly. The processing reaction is cleared instead of setting a completion emoji.
+ 
+ ## Emoji Vocabulary
+ 
+@@ -86,13 +86,13 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
+ **Safeguards:**
+ - Negative lookbehind `(?<!\[)` prevents double-linking text already inside markdown `[...]` syntax
+ - Graceful fallback: missing project_key, missing GitHub config, or no session returns text unchanged
+-- This is additive -- `_render_link_footer()` continues to work as the canonical link source for SDLC jobs
++- This is additive — the link footer rendered in `_compose_structured_summary()` continues to work as the canonical link source for SDLC jobs
+ 
+ **Called from:** `_compose_structured_summary()`, applied to the final joined text just before return.
+ 
+ ## Implementation
+ 
+-- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_render_stage_progress()`, `_render_link_footer()`, `_linkify_references()` (auto-link PR/Issue refs)
++- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer with inline stage progress and link footer rendering), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_linkify_references()` (auto-link PR/Issue refs)
+ - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg. `_truncate_at_sentence_boundary()` ensures clean truncation at Telegram's 4096-char limit.
+ - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
+ - `agent/agent_session_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `classify_nudge_action()` for routing decisions and passes `agent_session`
+@@ -167,7 +167,7 @@ The `expectations` field description explicitly states it should only be set whe
+ 3. **Questions**: Preserved exactly, surfaced after bullets via `---` separator with `>> ` prefix
+ 4. **SDLC work**: Emoji + stage line + bullets + questions + link footer (no message echo)
+ 5. **Status updates**: 2-4 bullet points
+-6. **Q&A sessions** (`qa_mode=True`): Conversational prose — no bullets, no emoji prefix, no structured template. Bypasses `_compose_structured_summary()` formatting entirely.
++6. **Teammate sessions** (`PersonaType.TEAMMATE`): Conversational prose — no bullets, no emoji prefix, no structured template. Bypasses `_compose_structured_summary()` formatting entirely.
+ 
+ ## Telegram Markdown
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 4ff2a4a37..2aef3d9b6 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -6,7 +6,7 @@ requires-python = ">=3.11"
+ dependencies = [
+     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
+     "anthropic==0.89.0", # CRITICAL — pin exact, upgrade via /update only
+-    "claude-agent-sdk==0.1.55", # CRITICAL — pin exact, upgrade via /update only
++    "claude-agent-sdk==0.1.56", # CRITICAL — pin exact, upgrade via /update only
+     "mcp>=1.8.0", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
+     "python-dotenv>=1.0.0",
+     "httpx>=0.27.0",
+diff --git a/scripts/autoexperiment.py b/scripts/autoexperiment.py
+index b94366288..74b6519ed 100644
+--- a/scripts/autoexperiment.py
++++ b/scripts/autoexperiment.py
+@@ -32,13 +32,10 @@
+ 
+ import requests
+ 
+-from config.models import MODEL_EXPERIMENT, OPENROUTER_HAIKU
++from config.models import MODEL_EXPERIMENT, OPENROUTER_HAIKU, OPENROUTER_URL
+ 
+ logger = logging.getLogger(__name__)
+ 
+-# OpenRouter endpoint
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+-
+ # Accumulates costs from eval function calls so the runner can track them.
+ # Drained by ExperimentRunner after each eval_fn() call.
+ _eval_cost_accumulator: list[float] = []
+diff --git a/tests/ai_judge/judge.py b/tests/ai_judge/judge.py
+index 7886da2e8..515216102 100644
+--- a/tests/ai_judge/judge.py
++++ b/tests/ai_judge/judge.py
+@@ -14,6 +14,8 @@
+ from pathlib import Path
+ from typing import Any
+ 
++from config.models import OPENROUTER_URL
++
+ 
+ class JudgmentScore(Enum):
+     """Score levels for AI judgments."""
+@@ -98,7 +100,7 @@ def _call_openrouter(prompt: str, config: JudgeConfig) -> str | None:
+         import httpx
+ 
+         response = httpx.post(
+-            "https://openrouter.ai/api/v1/chat/completions",
++            OPENROUTER_URL,
+             headers={
+                 "Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json",
+diff --git a/tests/integration/test_summarizer_integration.py b/tests/integration/test_summarizer_integration.py
+new file mode 100644
+index 000000000..b774e811b
+--- /dev/null
++++ b/tests/integration/test_summarizer_integration.py
+@@ -0,0 +1,100 @@
++"""
++Integration tests for the summarizer pipeline.
++
++Tests real API calls and the response->summarizer wiring chain.
++"""
++
++import os
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import pytest
++
++from bridge.summarizer import ClassificationResult, OutputType, classify_output
++
++
++@pytest.mark.integration
++@pytest.mark.skipif(
++    not os.environ.get("ANTHROPIC_API_KEY"),
++    reason="ANTHROPIC_API_KEY not set -- skipping live classification test",
++)
++@pytest.mark.asyncio
++async def test_classify_output_real_api():
++    """Call classify_output() with real Anthropic API and validate the result."""
++    text = (
++        "I've finished implementing the feature. The tests pass and the PR is ready "
++        "for review at https://github.com/example/repo/pull/42. Let me know if you "
++        "want any changes."
++    )
++
++    result = await classify_output(text)
++
++    # Must return a valid ClassificationResult
++    assert isinstance(result, ClassificationResult)
++    assert isinstance(result.output_type, OutputType)
++    assert result.confidence > 0
++    assert isinstance(result.reason, str)
++    assert len(result.reason) > 0
++
++
++@pytest.mark.integration
++@pytest.mark.asyncio
++async def test_response_summarizer_wiring():
++    """Verify that send_response_with_files invokes summarize_response for long text."""
++    from bridge.response import send_response_with_files
++
++    # Build a response long enough to trigger summarization (>= 200 chars)
++    long_text = "Here is a detailed status update. " * 20  # ~680 chars
++
++    # Mock Telegram client that captures sent messages
++    mock_client = AsyncMock()
++    sent_message = MagicMock()
++    sent_message.id = 999
++    mock_client.send_message = AsyncMock(return_value=sent_message)
++
++    # Mock event with chat_id
++    mock_event = MagicMock()
++    mock_event.chat_id = 12345
++    mock_event.message.id = 1
++
++    # Create a minimal session that is not SDLC (to test the len>=200 path)
++    # Must explicitly set has_pm_messages to return False to avoid pm_bypass,
++    # and is_sdlc to False so we test the len>=200 path.
++    mock_session = MagicMock()
++    mock_session.session_id = "test-session-123"
++    mock_session.session_type = "teammate"
++    mock_session.sdlc_stage = None
++    mock_session.github_issue_url = None
++    mock_session.github_pr_url = None
++    mock_session.delivery_action = None
++    mock_session.has_pm_messages = MagicMock(return_value=False)
++    mock_session.get_parent_session = MagicMock(return_value=None)
++    mock_session.is_sdlc = False
++
++    # Patch AgentSession.query to return our mock session, and the summarizer
++    with (
++        patch("bridge.response.filter_tool_logs", return_value=long_text),
++        patch("bridge.response.extract_files_from_response", return_value=(long_text, [])),
++        patch("bridge.summarizer.summarize_response") as mock_summarize,
++        patch("models.agent_session.AgentSession") as mock_agent_session_cls,
++    ):
++        from bridge.summarizer import SummarizedResponse
++
++        mock_summarize.return_value = SummarizedResponse(
++            text="Summarized output", was_summarized=True
++        )
++
++        # Make the session query return our mock
++        mock_agent_session_cls.query.filter.return_value = [mock_session]
++
++        await send_response_with_files(
++            client=mock_client,
++            event=mock_event,
++            response=long_text,
++            session=mock_session,
++        )
++
++        # Verify summarize_response was called with the long text and session
++        mock_summarize.assert_called_once()
++        call_args = mock_summarize.call_args
++        assert call_args[0][0] == long_text  # first positional arg is text
++        assert call_args[1]["session"] == mock_session  # session kwarg
+diff --git a/tools/doc_summary/__init__.py b/tools/doc_summary/__init__.py
+index 1fabe92c8..9d7d77a96 100644
+--- a/tools/doc_summary/__init__.py
++++ b/tools/doc_summary/__init__.py
+@@ -10,10 +10,9 @@
+ 
+ import requests
+ 
+-from config.models import MODEL_FAST, OPENROUTER_HAIKU
++from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
+ 
+ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+ # Summarization is a fast/cheap task - use Haiku
+ DEFAULT_MODEL = MODEL_FAST
+ DEFAULT_MODEL_OPENROUTER = OPENROUTER_HAIKU
+diff --git a/tools/documentation/__init__.py b/tools/documentation/__init__.py
+index 8e107f2dd..d4c46c4eb 100644
+--- a/tools/documentation/__init__.py
++++ b/tools/documentation/__init__.py
+@@ -10,10 +10,9 @@
+ 
+ import requests
+ 
+-from config.models import MODEL_REASONING, OPENROUTER_SONNET
++from config.models import MODEL_REASONING, OPENROUTER_SONNET, OPENROUTER_URL
+ 
+ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+ # Documentation generation needs reasoning capability
+ DEFAULT_MODEL = MODEL_REASONING
+ DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
+diff --git a/tools/image_analysis/__init__.py b/tools/image_analysis/__init__.py
+index 7a6f3900c..313399d86 100644
+--- a/tools/image_analysis/__init__.py
++++ b/tools/image_analysis/__init__.py
+@@ -12,10 +12,9 @@
+ 
+ import requests
+ 
+-from config.models import MODEL_VISION, SONNET
++from config.models import MODEL_VISION, OPENROUTER_URL, SONNET
+ 
+ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+ # Vision tasks - Anthropic API (primary), OpenRouter (fallback)
+ DEFAULT_MODEL = SONNET
+ DEFAULT_MODEL_OPENROUTER = MODEL_VISION
+diff --git a/tools/image_gen/__init__.py b/tools/image_gen/__init__.py
+index 61bb90c9a..16e3717da 100644
+--- a/tools/image_gen/__init__.py
++++ b/tools/image_gen/__init__.py
+@@ -13,9 +13,7 @@
+ import requests
+ 
+ from bridge.utc import utc_now
+-from config.models import IMAGE_ASPECT_RATIOS, MODEL_IMAGE_GEN
+-
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
++from config.models import IMAGE_ASPECT_RATIOS, MODEL_IMAGE_GEN, OPENROUTER_URL
+ 
+ 
+ class ImageGenError(Exception):
+diff --git a/tools/image_tagging/__init__.py b/tools/image_tagging/__init__.py
+index e66b72dcc..fb9548654 100644
+--- a/tools/image_tagging/__init__.py
++++ b/tools/image_tagging/__init__.py
+@@ -12,10 +12,9 @@
+ 
+ import requests
+ 
+-from config.models import MODEL_VISION, SONNET
++from config.models import MODEL_VISION, OPENROUTER_URL, SONNET
+ 
+ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+ # Vision tasks - Anthropic API (primary), OpenRouter (fallback)
+ DEFAULT_MODEL = SONNET
+ DEFAULT_MODEL_OPENROUTER = MODEL_VISION
+diff --git a/tools/knowledge_search/__init__.py b/tools/knowledge_search/__init__.py
+index cada7d3ae..f9fdbb770 100644
+--- a/tools/knowledge_search/__init__.py
++++ b/tools/knowledge_search/__init__.py
+@@ -13,7 +13,8 @@
+ 
+ import requests
+ 
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
++from config.models import OPENROUTER_EMBEDDINGS_URL
++
+ EMBEDDING_MODEL = "openai/text-embedding-3-small"
+ DEFAULT_DB_PATH = Path.home() / ".valor" / "knowledge.db"
+ 
+@@ -65,7 +66,7 @@ def _compute_embedding(text: str, api_key: str) -> list[float] | None:
+     """Compute embedding for text using OpenRouter."""
+     try:
+         response = requests.post(
+-            "https://openrouter.ai/api/v1/embeddings",
++            OPENROUTER_EMBEDDINGS_URL,
+             headers={
+                 "Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json",
+diff --git a/tools/test_judge/__init__.py b/tools/test_judge/__init__.py
+index d5863a01b..6693bf1e4 100644
+--- a/tools/test_judge/__init__.py
++++ b/tools/test_judge/__init__.py
+@@ -11,9 +11,8 @@
+ import anthropic
+ import requests
+ 
+-from config.models import MODEL_REASONING, OPENROUTER_SONNET
++from config.models import MODEL_REASONING, OPENROUTER_SONNET, OPENROUTER_URL
+ 
+-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+ DEFAULT_MODEL = MODEL_REASONING
+ DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
+ 

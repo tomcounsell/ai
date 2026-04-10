@@ -1,0 +1,669 @@
+diff --git a/.claude/hooks/hook_utils/memory_bridge.py b/.claude/hooks/hook_utils/memory_bridge.py
+index d8e511e60..7b8e59cd3 100644
+--- a/.claude/hooks/hook_utils/memory_bridge.py
++++ b/.claude/hooks/hook_utils/memory_bridge.py
+@@ -299,6 +299,14 @@ def recall(
+                 )
+             return None
+ 
++        # Re-rank by category weights (corrections/decisions surface higher)
++        try:
++            from agent.memory_hook import _apply_category_weights
++
++            all_records = _apply_category_weights(all_records)
++        except Exception:
++            pass  # fail silent -- use unranked order
++
+         # Format as thought blocks
+         thoughts: list[str] = []
+         injected = state.get("injected", [])
+diff --git a/agent/memory_extraction.py b/agent/memory_extraction.py
+index f8fdcc01d..9b6296e1a 100644
+--- a/agent/memory_extraction.py
++++ b/agent/memory_extraction.py
+@@ -45,7 +45,7 @@
+ }
+ DEFAULT_CATEGORY_IMPORTANCE = 1.0  # fallback for uncategorized
+ 
+-# Post-merge extraction prompt
++# Post-merge extraction prompt -- requests structured JSON with metadata
+ POST_MERGE_EXTRACTION_PROMPT = (
+     "You are reviewing a merged pull request. Extract the single most"
+     " important project-level takeaway — knowledge that would help a"
+@@ -54,8 +54,13 @@
+     "Focus on architectural decisions, design patterns chosen, or"
+     " conventions established. Skip implementation details.\n"
+     "\n"
+-    "Return a single sentence. If there is no meaningful project-level"
+-    " takeaway, return NONE.\n"
++    "Return a JSON object with these fields:\n"
++    '  "observation": the takeaway (one sentence, specific)\n'
++    '  "category": one of "decision", "correction", "pattern", "surprise"\n'
++    '  "tags": list of domain tags (1-3 short keywords)\n'
++    '  "file_paths": list of key file paths from the diff (up to 5)\n'
++    "\n"
++    "If there is no meaningful project-level takeaway, return NONE.\n"
+     "\n"
+     "PR Title: {title}\n"
+     "PR Description: {body}\n"
+@@ -284,18 +289,37 @@ async def extract_post_merge_learning(
+ 
+             project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+ 
++        # Try to parse structured JSON response for metadata
++        content_text = raw_text
++        metadata: dict = {"category": "decision"}  # default for post-merge
++        try:
++            parsed = json.loads(raw_text)
++            if isinstance(parsed, dict):
++                observation = parsed.get("observation", "")
++                if observation and len(observation) >= 20:
++                    content_text = observation
++                    metadata = {
++                        "category": parsed.get("category", "decision"),
++                        "tags": parsed.get("tags", []),
++                        "file_paths": parsed.get("file_paths", []),
++                    }
++        except (json.JSONDecodeError, TypeError):
++            # Non-JSON response -- use raw text with default metadata
++            pass
++
+         m = Memory.safe_save(
+             agent_id="post-merge",
+             project_key=project_key,
+-            content=raw_text[:500],
++            content=content_text[:500],
+             importance=7.0,
+             source=SOURCE_AGENT,
++            metadata=metadata,
+         )
+ 
+         if m:
+-            logger.info(f"[memory_extraction] Post-merge learning saved: {raw_text[:100]}")
++            logger.info(f"[memory_extraction] Post-merge learning saved: {content_text[:100]}")
+             return {
+-                "content": raw_text[:500],
++                "content": content_text[:500],
+                 "memory_id": getattr(m, "memory_id", ""),
+             }
+ 
+diff --git a/agent/memory_hook.py b/agent/memory_hook.py
+index 34faf62fd..b6301b41c 100644
+--- a/agent/memory_hook.py
++++ b/agent/memory_hook.py
+@@ -155,6 +155,56 @@ def _cluster_keywords(keywords: list[str], max_clusters: int = 3) -> list[list[s
+     return clusters[:max_clusters]
+ 
+ 
++def _apply_category_weights(records: list) -> list:
++    """Re-rank memory records by applying category-based weight multipliers.
++
++    After ContextAssembler returns scored results, multiply each record's
++    effective score by its category weight, then re-sort descending.
++    Records with missing or malformed metadata get the default weight (1.0).
++
++    Args:
++        records: List of Memory records from ContextAssembler.
++
++    Returns:
++        Re-sorted list of records (same objects, new order).
++    """
++    if not records:
++        return records
++
++    try:
++        from config.memory_defaults import CATEGORY_RECALL_WEIGHTS
++
++        default_weight = CATEGORY_RECALL_WEIGHTS.get("default", 1.0)
++
++        def _get_weight(record: Any) -> float:
++            try:
++                meta = getattr(record, "metadata", None)
++                if not isinstance(meta, dict):
++                    return default_weight
++                category = meta.get("category", "")
++                if not isinstance(category, str):
++                    return default_weight
++                return CATEGORY_RECALL_WEIGHTS.get(category, default_weight)
++            except Exception:
++                return default_weight
++
++        def _get_score(record: Any) -> float:
++            try:
++                return float(getattr(record, "score", 0.0) or 0.0)
++            except (TypeError, ValueError):
++                return 0.0
++
++        # Sort by weighted score descending
++        return sorted(
++            records,
++            key=lambda r: _get_score(r) * _get_weight(r),
++            reverse=True,
++        )
++    except Exception:
++        # Fail silent -- return unmodified order
++        return records
++
++
+ def check_and_inject(
+     session_id: str,
+     tool_name: str,
+@@ -275,6 +325,9 @@ def check_and_inject(
+                 )
+             return None
+ 
++        # Re-rank by category weights (corrections/decisions surface higher)
++        all_records = _apply_category_weights(all_records)
++
+         # Format as <thought> blocks
+         thoughts: list[str] = []
+         session_thoughts = _injected_thoughts.setdefault(session_id, [])
+diff --git a/config/memory_defaults.py b/config/memory_defaults.py
+index 120752532..82ef7f714 100644
+--- a/config/memory_defaults.py
++++ b/config/memory_defaults.py
+@@ -59,6 +59,18 @@
+ DISMISSAL_IMPORTANCE_DECAY = 0.7  # multiply importance by this on threshold breach
+ MIN_IMPORTANCE_FLOOR = 0.2  # never decay below this
+ 
++# Category recall weights -- post-query re-ranking multipliers for memory recall.
++# After ContextAssembler returns scored results, each result's effective score is
++# multiplied by the weight for its category before re-sorting. Higher weight = more
++# likely to surface. Set all to 1.0 to disable re-ranking (no-op).
++CATEGORY_RECALL_WEIGHTS: dict[str, float] = {
++    "correction": 1.5,
++    "decision": 1.3,
++    "pattern": 1.0,
++    "surprise": 1.0,
++    "default": 1.0,
++}
++
+ 
+ def apply_defaults() -> None:
+     """Override popoto Defaults with memory-tuned values.
+diff --git a/config/personas/_base.md b/config/personas/_base.md
+index 18ddc7718..e069ddd99 100644
+--- a/config/personas/_base.md
++++ b/config/personas/_base.md
+@@ -452,3 +452,23 @@ python -m tools.memory_search save "Chose ContextAssembler over raw Redis querie
+ - Do not save things already in CLAUDE.md or project docs — avoid duplication
+ - Do not save every observation — the passive extraction system handles routine learnings
+ - When in doubt, do not save. High signal-to-noise ratio matters more than completeness.
++
++### When to Search
++
++Most memory recall happens passively via `<thought>` injection. But when you need to actively retrieve past knowledge, use the memory search tool with metadata filters:
++
++```bash
++# Search by topic with category filter (corrections are past mistakes to avoid)
++python -m tools.memory_search search "redis connection" --category correction
++
++# Search by tag for domain-specific knowledge
++python -m tools.memory_search search "deployment" --tag infrastructure
++
++# Browse recent memories by category
++python -m tools.memory_search search "" --category decision
++```
++
++**When to actively search** (vs relying on passive recall):
++- Debugging a recurring issue -- search for corrections in that area
++- Starting work on a subsystem you have not touched recently -- search for decisions
++- Before making an architectural choice -- search for related patterns and decisions
+diff --git a/docs/features/README.md b/docs/features/README.md
+index c52bbfaff..5f6dbe67e 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -99,7 +99,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
+ | [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child ChatSession-to-DevSession steering | Shipped |
+ | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
+-| [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, and multi-query decomposition for broader retrieval | Shipped |
++| [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, and category-weighted recall re-ranking | Shipped |
+ | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |
+ | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
+ | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
+diff --git a/docs/features/claude-code-memory.md b/docs/features/claude-code-memory.md
+index bd7efd711..d952eb405 100644
+--- a/docs/features/claude-code-memory.md
++++ b/docs/features/claude-code-memory.md
+@@ -192,9 +192,10 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
+ | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
+ | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |
+ | Session tracking | AgentSession created by bridge handler (`create_chat()`/`create_dev()`) | AgentSession created by UserPromptSubmit hook (`create_local()`) |
+-| Shared code | `extract_topic_keywords()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
++| Category re-ranking | `_apply_category_weights()` in `check_and_inject()` | `_apply_category_weights()` imported from `agent.memory_hook` in `recall()` |
++| Shared code | `extract_topic_keywords()`, `_apply_category_weights()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
+ 
+-Both paths write to the same Redis Memory model. Memories created in Claude Code sessions are visible to Telegram agent sessions and vice versa. Deja vu thresholds are shared via `config/memory_defaults.py`.
++Both paths write to the same Redis Memory model. Memories created in Claude Code sessions are visible to Telegram agent sessions and vice versa. Deja vu thresholds and category recall weights are shared via `config/memory_defaults.py`.
+ 
+ ## Tracking
+ 
+diff --git a/docs/features/subconscious-memory.md b/docs/features/subconscious-memory.md
+index 416ac4b8a..b67dab28e 100644
+--- a/docs/features/subconscious-memory.md
++++ b/docs/features/subconscious-memory.md
+@@ -105,7 +105,9 @@ Agents can deliberately persist high-level concepts using `python -m tools.memor
+ 
+ ### Flow 6: Post-Merge Learning Extraction
+ 
+-After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0. This captures architectural decisions and conventions established by shipped code.
++After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0 and structured metadata (category, tags, file_paths) matching the post-session extraction schema. This captures architectural decisions and conventions established by shipped code.
++
++The extraction prompt requests structured JSON output. If Haiku returns valid JSON, the observation, category, tags, and file_paths are parsed and passed as metadata to `Memory.safe_save()`. If Haiku returns non-JSON (plain text), the text is saved with a default metadata of `{"category": "decision"}`. This ensures all memory creation paths produce consistent metadata.
+ 
+ The function is designed to be called from the SDLC merge stage or a post-merge script. It returns None gracefully if no meaningful takeaway is found or if the API call fails.
+ 
+@@ -122,6 +124,31 @@ The memory system also runs in Claude Code CLI sessions via hooks. See [Claude C
+ 
+ Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types. All memory capabilities (ingestion, recall, deja vu signals, extraction, outcome detection, post-merge learning, multi-query decomposition) now have feature parity across both paths.
+ 
++## Category-Weighted Recall
++
++After ContextAssembler returns scored results, `_apply_category_weights()` re-ranks them by multiplying each record's score by a category-specific weight before sorting. This ensures that corrections and decisions -- higher-signal memory types -- surface preferentially over patterns and surprises when scores are similar.
++
++**Weight table** (from `CATEGORY_RECALL_WEIGHTS` in `config/memory_defaults.py`):
++
++| Category | Weight | Effect |
++|----------|--------|--------|
++| `correction` | 1.5 | Boosted -- past mistakes should be top of mind |
++| `decision` | 1.3 | Boosted -- architectural choices are high-value context |
++| `pattern` | 1.0 | Neutral -- general observations keep existing rank |
++| `surprise` | 1.0 | Neutral |
++| `default` | 1.0 | Fallback for records with missing or unknown category |
++
++**Mechanism:**
++1. ContextAssembler returns scored records (relevance + confidence weighted)
++2. `_apply_category_weights(records)` reads `metadata.category` from each record
++3. Effective score = `record.score * category_weight`
++4. Records are re-sorted by effective score descending
++5. Top `MAX_THOUGHTS` records are formatted as `<thought>` blocks
++
++**Fail-safe:** If metadata is None, not a dict, or missing the category key, the default weight (1.0) is used. If `CATEGORY_RECALL_WEIGHTS` cannot be imported, records are returned in their original order.
++
++Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `agent.memory_hook`.
++
+ ## Structured Metadata
+ 
+ Memory records carry an optional `metadata` DictField with structured data from extraction and outcome tracking. Old records without metadata return `{}` (no migration needed).
+@@ -182,9 +209,7 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
+ 
+ | Capability | Claude Code | SDK/Agent | Action |
+ |-----------|-------------|-----------|--------|
+-| Deja vu signals (vague recognition, novel territory) | Yes | No | Port to `agent/memory_hook.py` |
+ | Prompt ingestion (auto-save user input) | Yes (UserPromptSubmit hook) | No (Telegram messages only) | Add ingestion hook or equivalent to SDK path |
+-| Post-merge learning extraction | No | Yes (SDLC merge stage) | Port to Claude Code Stop hook or post-merge script |
+ 
+ ## Key Files
+ 
+@@ -224,6 +249,7 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
+ | `DISMISSAL_DECAY_THRESHOLD` | 3 | Consecutive dismissals before importance decays |
+ | `DISMISSAL_IMPORTANCE_DECAY` | 0.7 | Importance multiplier on threshold breach |
+ | `MIN_IMPORTANCE_FLOOR` | 0.2 | Minimum importance after decay (never drops below this) |
++| `CATEGORY_RECALL_WEIGHTS` | `{correction: 1.5, decision: 1.3, pattern: 1.0, surprise: 1.0, default: 1.0}` | Post-query re-ranking multipliers by category |
+ 
+ ## Error Handling
+ 
+@@ -254,4 +280,5 @@ No schema migrations are involved. Redis keys can be flushed without side effect
+ - Intentional saves: [#521](https://github.com/tomcounsell/ai/issues/521) (PR [#524](https://github.com/tomcounsell/ai/pull/524))
+ - Prior art: Issue #394 (original agent memory integration layer)
+ - Retrieval enhancement: [#583](https://github.com/tomcounsell/ai/issues/583) (PR [#584](https://github.com/tomcounsell/ai/pull/584)) -- structured metadata, dismissal tracking, multi-query decomposition
++- Metadata-aware recall: [#586](https://github.com/tomcounsell/ai/issues/586) -- category-weighted recall re-ranking, post-merge metadata parity, retrieval recipes
+ - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)
+diff --git a/tests/unit/test_memory_bridge.py b/tests/unit/test_memory_bridge.py
+index 129bb54a4..9af5029fd 100644
+--- a/tests/unit/test_memory_bridge.py
++++ b/tests/unit/test_memory_bridge.py
+@@ -247,6 +247,62 @@ def test_recall_deja_vu_signal(self, tmp_path, monkeypatch):
+         assert "encountered something related" in result
+ 
+ 
++class TestRecallCategoryReranking:
++    """Test that recall() applies category re-ranking via _apply_category_weights."""
++
++    def test_recall_calls_apply_category_weights(self, tmp_path, monkeypatch):
++        """Recall calls _apply_category_weights on results before formatting."""
++        from hook_utils.memory_bridge import WINDOW_SIZE, recall
++
++        monkeypatch.setattr(
++            "hook_utils.memory_bridge._get_sidecar_dir",
++            lambda sid: tmp_path / sid,
++        )
++
++        keywords = ["memory", "recall", "weights", "category", "test"]
++
++        mock_bloom = MagicMock()
++        mock_bloom.might_exist = MagicMock(return_value=True)
++
++        mock_memory_cls = MagicMock()
++        mock_memory_cls._meta.fields.get.return_value = mock_bloom
++
++        # Create mock records with content
++        mock_record = MagicMock()
++        mock_record.memory_id = "rec-1"
++        mock_record.content = "test memory content for recall"
++        mock_record.metadata = {"category": "correction"}
++        mock_record.score = 0.8
++
++        mock_result = MagicMock()
++        mock_result.records = [mock_record]
++
++        mock_assembler_instance = MagicMock()
++        mock_assembler_instance.assemble.return_value = mock_result
++
++        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
++
++        with (
++            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
++            patch("models.memory.Memory", mock_memory_cls),
++            patch("popoto.ContextAssembler", mock_assembler_cls),
++            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
++            patch(
++                "agent.memory_hook._apply_category_weights",
++                wraps=lambda records: records,
++            ) as mock_rerank,
++        ):
++            for i in range(WINDOW_SIZE - 1):
++                recall("test-session", "Read", {"file_path": f"f{i}.py"})
++            result = recall("test-session", "Read", {"file_path": "final.py"})
++
++        # Verify _apply_category_weights was called
++        mock_rerank.assert_called_once()
++        # Verify we got thought output
++        assert result is not None
++        assert "<thought>" in result
++
++
+ class TestIngest:
+     """Test the ingest() function."""
+ 
+diff --git a/tests/unit/test_memory_extraction.py b/tests/unit/test_memory_extraction.py
+index 60f023d9e..5b3f16554 100644
+--- a/tests/unit/test_memory_extraction.py
++++ b/tests/unit/test_memory_extraction.py
+@@ -312,6 +312,128 @@ async def test_post_merge_prompt_format(self):
+         assert "Description of the PR" in formatted
+         assert "file1.py, file2.py" in formatted
+ 
++    def test_post_merge_prompt_requests_structured_json(self):
++        """Verify the prompt asks for structured JSON with metadata fields."""
++        from agent.memory_extraction import POST_MERGE_EXTRACTION_PROMPT
++
++        assert "category" in POST_MERGE_EXTRACTION_PROMPT
++        assert "tags" in POST_MERGE_EXTRACTION_PROMPT
++        assert "file_paths" in POST_MERGE_EXTRACTION_PROMPT
++        assert "JSON" in POST_MERGE_EXTRACTION_PROMPT
++
++
++class TestPostMergeJsonParsing:
++    """Test JSON parsing in extract_post_merge_learning()."""
++
++    @pytest.mark.asyncio
++    async def test_json_response_extracts_metadata(self):
++        """When Haiku returns JSON, metadata is parsed and passed to safe_save."""
++        import json
++        from unittest.mock import MagicMock, patch
++
++        from agent.memory_extraction import extract_post_merge_learning
++
++        json_response = json.dumps(
++            {
++                "observation": "Post-query re-ranking is safer than pre-query filtering",
++                "category": "decision",
++                "tags": ["memory", "recall"],
++                "file_paths": ["agent/memory_hook.py"],
++            }
++        )
++
++        mock_message = MagicMock()
++        mock_message.content = [MagicMock(text=json_response)]
++
++        mock_client = MagicMock()
++        mock_client.messages.create.return_value = mock_message
++
++        mock_memory = MagicMock()
++        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
++
++        with (
++            patch("anthropic.Anthropic", return_value=mock_client),
++            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
++            patch("models.memory.Memory", mock_memory),
++            patch("models.memory.SOURCE_AGENT", "agent"),
++        ):
++            result = await extract_post_merge_learning(
++                "Add recall weights", "Description", "agent/memory_hook.py"
++            )
++
++        assert result is not None
++        # Verify safe_save was called with metadata
++        call_kwargs = mock_memory.safe_save.call_args[1]
++        assert call_kwargs["metadata"]["category"] == "decision"
++        assert call_kwargs["metadata"]["tags"] == ["memory", "recall"]
++        assert call_kwargs["metadata"]["file_paths"] == ["agent/memory_hook.py"]
++
++    @pytest.mark.asyncio
++    async def test_non_json_response_uses_default_metadata(self):
++        """When Haiku returns plain text, default metadata is used."""
++        from unittest.mock import MagicMock, patch
++
++        from agent.memory_extraction import extract_post_merge_learning
++
++        mock_message = MagicMock()
++        mock_message.content = [
++            MagicMock(text="Post-query re-ranking is safer than pre-query filtering")
++        ]
++
++        mock_client = MagicMock()
++        mock_client.messages.create.return_value = mock_message
++
++        mock_memory = MagicMock()
++        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
++
++        with (
++            patch("anthropic.Anthropic", return_value=mock_client),
++            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
++            patch("models.memory.Memory", mock_memory),
++            patch("models.memory.SOURCE_AGENT", "agent"),
++        ):
++            result = await extract_post_merge_learning(
++                "Add recall weights", "Description", "diff summary"
++            )
++
++        assert result is not None
++        call_kwargs = mock_memory.safe_save.call_args[1]
++        assert call_kwargs["metadata"]["category"] == "decision"
++
++    @pytest.mark.asyncio
++    async def test_json_short_observation_falls_back_to_raw(self):
++        """When JSON observation is too short, falls back to raw text."""
++        import json
++        from unittest.mock import MagicMock, patch
++
++        from agent.memory_extraction import extract_post_merge_learning
++
++        json_response = json.dumps(
++            {"observation": "short", "category": "pattern", "tags": [], "file_paths": []}
++        )
++
++        mock_message = MagicMock()
++        mock_message.content = [MagicMock(text=json_response)]
++
++        mock_client = MagicMock()
++        mock_client.messages.create.return_value = mock_message
++
++        mock_memory = MagicMock()
++        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
++
++        with (
++            patch("anthropic.Anthropic", return_value=mock_client),
++            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
++            patch("models.memory.Memory", mock_memory),
++            patch("models.memory.SOURCE_AGENT", "agent"),
++        ):
++            result = await extract_post_merge_learning("Add recall weights", "Description", "diff")
++
++        assert result is not None
++        # Should have used the raw JSON text since observation was too short
++        call_kwargs = mock_memory.safe_save.call_args[1]
++        assert json_response[:100] in call_kwargs["content"]
++
+ 
+ class TestPersistOutcomeMetadata:
+     """Test agent/memory_extraction.py _persist_outcome_metadata()."""
+@@ -444,3 +566,12 @@ def test_persona_has_when_not_to_save(self):
+         persona_path = pathlib.Path("config/personas/_base.md")
+         content = persona_path.read_text()
+         assert "When NOT to Save" in content
++
++    def test_persona_has_when_to_search(self):
++        import pathlib
++
++        persona_path = pathlib.Path("config/personas/_base.md")
++        content = persona_path.read_text()
++        assert "When to Search" in content
++        assert "--category correction" in content
++        assert "--tag" in content
+diff --git a/tests/unit/test_memory_hook.py b/tests/unit/test_memory_hook.py
+index 6cb115caf..4ae063cea 100644
+--- a/tests/unit/test_memory_hook.py
++++ b/tests/unit/test_memory_hook.py
+@@ -274,6 +274,127 @@ def test_no_signal_below_thresholds(self):
+         _tool_buffers.pop(session, None)
+ 
+ 
++class TestApplyCategoryWeights:
++    """Test agent/memory_hook.py _apply_category_weights()."""
++
++    def test_empty_list_returns_empty(self):
++        from agent.memory_hook import _apply_category_weights
++
++        assert _apply_category_weights([]) == []
++
++    def test_none_metadata_gets_default_weight(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        record = MagicMock()
++        record.metadata = None
++        record.score = 1.0
++        result = _apply_category_weights([record])
++        assert len(result) == 1
++        assert result[0] is record
++
++    def test_missing_category_gets_default_weight(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        record = MagicMock()
++        record.metadata = {}
++        record.score = 1.0
++        result = _apply_category_weights([record])
++        assert len(result) == 1
++
++    def test_correction_ranks_higher_than_pattern(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        correction = MagicMock()
++        correction.metadata = {"category": "correction"}
++        correction.score = 1.0
++
++        pattern = MagicMock()
++        pattern.metadata = {"category": "pattern"}
++        pattern.score = 1.0
++
++        result = _apply_category_weights([pattern, correction])
++        # correction (weight 1.5) should rank before pattern (weight 1.0)
++        assert result[0] is correction
++        assert result[1] is pattern
++
++    def test_decision_ranks_higher_than_pattern(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        decision = MagicMock()
++        decision.metadata = {"category": "decision"}
++        decision.score = 1.0
++
++        pattern = MagicMock()
++        pattern.metadata = {"category": "pattern"}
++        pattern.score = 1.0
++
++        result = _apply_category_weights([pattern, decision])
++        assert result[0] is decision
++
++    def test_high_score_pattern_beats_low_score_correction(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        correction = MagicMock()
++        correction.metadata = {"category": "correction"}
++        correction.score = 0.5
++
++        pattern = MagicMock()
++        pattern.metadata = {"category": "pattern"}
++        pattern.score = 1.0
++
++        result = _apply_category_weights([correction, pattern])
++        # pattern (1.0 * 1.0 = 1.0) beats correction (0.5 * 1.5 = 0.75)
++        assert result[0] is pattern
++
++    def test_non_dict_metadata_gets_default_weight(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        record = MagicMock()
++        record.metadata = "not a dict"
++        record.score = 1.0
++        result = _apply_category_weights([record])
++        assert len(result) == 1
++
++    def test_non_string_category_gets_default_weight(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        record = MagicMock()
++        record.metadata = {"category": 123}
++        record.score = 1.0
++        result = _apply_category_weights([record])
++        assert len(result) == 1
++
++    def test_preserves_all_records(self):
++        from unittest.mock import MagicMock
++
++        from agent.memory_hook import _apply_category_weights
++
++        records = []
++        for i in range(5):
++            r = MagicMock()
++            r.metadata = {"category": "pattern"}
++            r.score = float(i)
++            records.append(r)
++
++        result = _apply_category_weights(records)
++        assert len(result) == 5
++        assert set(id(r) for r in result) == set(id(r) for r in records)
++
++
+ class TestGetInjectedThoughts:
+     """Test agent/memory_hook.py get_injected_thoughts()."""
+ 
+diff --git a/tests/unit/test_memory_ingestion.py b/tests/unit/test_memory_ingestion.py
+index 742b6ef18..b9d16e991 100644
+--- a/tests/unit/test_memory_ingestion.py
++++ b/tests/unit/test_memory_ingestion.py
+@@ -84,6 +84,6 @@ def test_priming_is_at_end_of_file(self):
+ 
+         content = base_md.read_text()
+         # Memory sections should be at the end of the file
+-        last_section = content[-2500:]
++        last_section = content[-3500:]
+         assert "Subconscious Memory" in last_section
+         assert "Intentional Memory" in last_section

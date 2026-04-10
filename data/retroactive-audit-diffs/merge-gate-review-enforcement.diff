@@ -1,0 +1,113 @@
+diff --git a/.claude/commands/do-merge.md b/.claude/commands/do-merge.md
+index fe113920..7586fd6f 100644
+--- a/.claude/commands/do-merge.md
++++ b/.claude/commands/do-merge.md
+@@ -103,6 +103,33 @@ print('ALL_GATES_PASS' if all_pass else 'GATES_FAILED')
+ "
+ ```
+ 
++### Structured Review Comment Check
++
++Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment:
++
++```bash
++REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
++LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
++  --jq '[.[] | select(.body | startswith("## Review:"))] | last | .body // ""' \
++  2>/dev/null) || { echo "REVIEW_COMMENT: FAIL — gh api call failed (network/auth error)"; echo "GATES_FAILED"; exit 1; }
++
++if [ -z "$LAST_REVIEW" ]; then
++  echo "REVIEW_COMMENT: FAIL — No '## Review:' comment found on PR #$ARGUMENTS"
++  echo "Run /do-pr-review before merging."
++  echo "GATES_FAILED"
++elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
++  BLOCKERS=$(echo "$LAST_REVIEW" | grep "^- \[ \]" | head -20)
++  echo "REVIEW_COMMENT: FAIL — Most recent review is 'Changes Requested'"
++  echo "Unchecked blockers:"
++  echo "$BLOCKERS"
++  echo "GATES_FAILED"
++else
++  echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved'"
++fi
++```
++
++If the review comment check prints GATES_FAILED, report the specific blocker and do NOT proceed with the merge.
++
+ ### Plan Completion Gate
+ 
+ Before merging, scan the plan document for unchecked items that indicate unfinished work:
+diff --git a/.claude/hooks/validators/validate_issue_recon.py b/.claude/hooks/validators/validate_issue_recon.py
+index a37a23ba..83e016a8 100644
+--- a/.claude/hooks/validators/validate_issue_recon.py
++++ b/.claude/hooks/validators/validate_issue_recon.py
+@@ -68,10 +68,10 @@
+ 
+ # Bucket headers expected in a complete recon summary
+ BUCKET_PATTERNS = [
+-    r"\*\*Confirmed\*\*",
+-    r"\*\*Revised\*\*",
+-    r"\*\*Pre-requisites?\*\*",
+-    r"\*\*Dropped\*\*",
++    r"\*\*Confirmed:?\*\*",
++    r"\*\*Revised:?\*\*",
++    r"\*\*Pre-requisites?:?\*\*",
++    r"\*\*Dropped:?\*\*",
+ ]
+ 
+ 
+diff --git a/docs/features/README.md b/docs/features/README.md
+index de56d1a0..41a83d57 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -90,7 +90,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
+ | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
+ | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
+-| [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
++| [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, MERGE pipeline stage, and structured review comment enforcement | Shipped |
+ | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
+ | [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
+ | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
+diff --git a/docs/features/sdlc-pipeline-integrity.md b/docs/features/sdlc-pipeline-integrity.md
+index 4dd3a161..2942b2a6 100644
+--- a/docs/features/sdlc-pipeline-integrity.md
++++ b/docs/features/sdlc-pipeline-integrity.md
+@@ -48,6 +48,8 @@ The merge guard is a PreToolUse hook that regex-matches `\bgh\s+pr\s+merge\b` in
+ 
+ MERGE is now a proper pipeline stage routed after DOCS completes. The `/do-merge` skill checks prerequisites (TEST, REVIEW, DOCS completed) before presenting the PR for human merge authorization.
+ 
++**Structured review comment check** (added in #823): Before authorizing merge, `/do-merge` scans PR issue comments for the most recent `## Review:` comment. Blocks if no such comment exists (review never ran), or if the most recent comment starts with `## Review: Changes Requested` (lists unchecked `- [ ]` items as blockers). Passes only if the most recent comment starts with `## Review: Approved`. This closes the gap where the REVIEW stage could be marked `completed` in Redis without an actual approval comment existing on the PR.
++
+ ## Pipeline Flow
+ 
+ ```
+diff --git a/docs/plans/merge-gate-review-enforcement.md b/docs/plans/merge-gate-review-enforcement.md
+index cad4461a..493b8f76 100644
+--- a/docs/plans/merge-gate-review-enforcement.md
++++ b/docs/plans/merge-gate-review-enforcement.md
+@@ -183,17 +183,17 @@ No agent integration required — `/do-merge` is a Claude Code skill invoked dir
+ 
+ ## Documentation
+ 
+-- [ ] Update `docs/features/sdlc-pipeline.md` (if it exists) to note that `/do-merge` verifies review comment content, not just stage state
+-- [ ] If no such doc exists, add a note to `docs/features/README.md` under the merge gate entry
++- [x] Update `docs/features/sdlc-pipeline.md` (if it exists) to note that `/do-merge` verifies review comment content, not just stage state — `docs/features/sdlc-pipeline.md` does not exist; added entry to `docs/features/README.md` instead
++- [x] If no such doc exists, add a note to `docs/features/README.md` under the merge gate entry — done; `docs/features/sdlc-pipeline-integrity.md` created with full feature documentation
+ 
+ ## Success Criteria
+ 
+-- [ ] `/do-merge` blocks merge when no `## Review:` comment exists on the PR
+-- [ ] `/do-merge` blocks merge and lists unchecked `- [ ]` items when most recent `## Review:` comment starts with `## Review: Changes Requested`
+-- [ ] `/do-merge` passes when most recent `## Review:` comment starts with `## Review: Approved`
+-- [ ] Multiple review rounds handled correctly — only the last `## Review:` comment counts
+-- [ ] `validate_issue_recon.py` passes for issues whose recon uses `**Confirmed:** N items` format
+-- [ ] Tests pass (`/do-test`)
++- [x] `/do-merge` blocks merge when no `## Review:` comment exists on the PR
++- [x] `/do-merge` blocks merge and lists unchecked `- [ ]` items when most recent `## Review:` comment starts with `## Review: Changes Requested`
++- [x] `/do-merge` passes when most recent `## Review:` comment starts with `## Review: Approved`
++- [x] Multiple review rounds handled correctly — only the last `## Review:` comment counts
++- [x] `validate_issue_recon.py` passes for issues whose recon uses `**Confirmed:** N items` format — `python .claude/hooks/validators/validate_issue_recon.py 823` exits 0
++- [x] Tests pass (`/do-test`) — `test_bare_hash_is_question` is pre-existing on main (not a regression)
+ 
+ ## Team Orchestration
+ 

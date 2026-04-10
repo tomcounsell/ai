@@ -1,0 +1,562 @@
+diff --git a/bridge/enrichment.py b/bridge/enrichment.py
+index 219d61d14..dafcca70e 100644
+--- a/bridge/enrichment.py
++++ b/bridge/enrichment.py
+@@ -109,18 +109,18 @@ async def enrich_message(
+                 # so we pass the enriched_text which should contain the URLs.
+                 yt_enriched, youtube_results = await process_youtube_urls_in_text(enriched_text)
+                 successful = sum(1 for r in youtube_results if r.get("success"))
++                # Always apply enriched text — failure context strings must reach the agent too
++                enriched_text = yt_enriched
+                 if successful > 0:
+-                    enriched_text = yt_enriched
+                     logger.info(
+                         f"Enrichment: transcribed {successful}/{len(parsed_urls)} YouTube video(s)"
+                     )
+-                else:
+-                    for r in youtube_results:
+-                        if r.get("error"):
+-                            logger.warning(
+-                                f"Enrichment: YouTube processing failed for "
+-                                f"{r.get('video_id')}: {r.get('error')}"
+-                            )
++                for r in youtube_results:
++                    if r.get("error"):
++                        logger.warning(
++                            f"Enrichment: YouTube processing failed for "
++                            f"{r.get('video_id')}: {r.get('error')}"
++                        )
+         except Exception as e:
+             logger.warning(f"Enrichment: YouTube processing failed: {e}")
+             failed_steps.append("youtube")
+diff --git a/docs/features/youtube-transcription.md b/docs/features/youtube-transcription.md
+index ba3c504d1..f8285c2b1 100644
+--- a/docs/features/youtube-transcription.md
++++ b/docs/features/youtube-transcription.md
+@@ -2,10 +2,13 @@
+ 
+ **Status**: Implemented
+ **Implemented**: 2026-01-20
++**Updated**: 2026-04-06
+ 
+ ## Overview
+ 
+-When users share YouTube links, Valor automatically downloads the audio, transcribes it using OpenAI Whisper, and includes the transcript (or summary for long videos) in the message context. This allows Claude to understand and discuss video content intelligently.
++When users share YouTube links, Valor automatically fetches the transcript and includes it (or a summary for long videos) in the message context. This allows Claude to understand and discuss video content intelligently.
++
++The primary path uses the YouTube caption API (no API key required). If captions are unavailable, it falls back to downloading audio and transcribing with OpenAI Whisper. When both paths fail, the agent receives an actionable failure message instead of the original unaltered text.
+ 
+ ## Features
+ 
+@@ -18,18 +21,20 @@ Supports multiple YouTube URL formats:
+ - `youtube.com/embed/VIDEO_ID`
+ - `youtube.com/v/VIDEO_ID`
+ 
+-### Audio Extraction
++### Caption-First Transcription (Primary Path)
+ 
+-Uses yt-dlp (YouTube-DL fork) to download audio:
+-- Downloads best available audio quality
+-- Converts to MP3 format (192K quality)
+-- Caches downloaded audio by video ID to avoid re-downloads
++Uses `youtube-transcript-api` to fetch auto-generated or manual captions:
++- No API key required
++- Works for any video with captions (the vast majority of YouTube content)
++- Fast and stateless — no audio download needed
++- Falls through to Whisper path if captions are unavailable
+ 
+-### Transcription
++### Audio Transcription (Whisper Fallback)
+ 
+-Uses OpenAI Whisper API for accurate speech-to-text:
+-- Supports multiple audio formats (MP3, M4A, WAV, WebM, OGG, Opus)
+-- Handles various languages automatically
++If captions are unavailable, falls back to audio download + OpenAI Whisper:
++- Uses yt-dlp to download best available audio quality, converted to MP3
++- Caches downloaded audio by video ID to avoid re-downloads
++- Requires `OPENAI_API_KEY` environment variable
+ 
+ ### Smart Summarization
+ 
+@@ -51,38 +56,53 @@ Gets video info (title, duration, live status)
+     |
+     v
+ [If live stream] -> Returns "[YouTube Live Stream: title]"
+-[If >15 min]     -> Returns "[Video too long to transcribe: title (mm:ss)]"
++[If too long]    -> Returns "[Video too long to transcribe: title (mm:ss)]"
++    |
++    v
++Try YouTubeTranscriptApi().fetch(video_id) [caption path]
+     |
+     v
+-Downloads audio via yt-dlp (or uses cache)
++[If captions found] -> Join segments into transcript text, proceed to summarization
++[If TranscriptsDisabled / NoTranscriptFound / VideoUnavailable] -> fall through to Whisper
+     |
+     v
+-Transcribes via Whisper API
++[Whisper path] Download audio via yt-dlp (or use cache)
+     |
+     v
+-[If >2000 chars] -> Summarizes with GPT-4o-mini
++[If OPENAI_API_KEY set] Transcribe via Whisper API -> proceed to summarization
++[If no key or download fails] -> return actionable failure context
++    |
++    v
++[If >2000 chars] -> Summarize with GPT-4o-mini
+     |
+     v
+ Passes enriched message to agent:
+   "Check this out https://youtube.com/watch?v=xxx
+ 
+-   [YouTube video - Title transcript summary: The video discusses...]"
++   [YouTube video - Title transcript: The video discusses...]"
+     |
+     v
+ Claude can discuss video content intelligently
+ ```
+ 
++## Enrichment Behavior
++
++`bridge/enrichment.py` always applies the YouTube-enriched text to the agent context, regardless of whether transcription succeeded or failed. This ensures the agent receives either a transcript or an actionable failure explanation — never just the original URL with no context.
++
+ ## Edge Case Handling
+ 
+ | Case | Behavior |
+ |------|----------|
+-| Videos >15 minutes | Returns message with video title and duration, skips transcription |
++| Captions available | Caption path succeeds; no audio download needed |
++| Captions unavailable, Whisper configured | Falls back to yt-dlp + Whisper transcription |
++| Captions unavailable, no Whisper key | Agent receives actionable failure context with manual workaround suggestion |
++| Videos beyond duration limit | Returns message with video title and duration, skips transcription |
+ | Live streams | Detected and skipped with informative message |
+-| Private videos | Download fails, returns error message gracefully |
++| Private videos | Download/caption fetch fails, returns error message gracefully |
+ | Age-restricted | May fail, returns error message |
+ | Network errors | Logs error, continues with original message |
+-| Whisper API failure | Returns "transcription failed" message |
+-| Already cached | Uses cached audio file, skips download |
++| Already cached (audio) | Uses cached audio file, skips download |
++| youtube-transcript-api not installed | Falls through to Whisper path with a warning log |
+ 
+ ## Implementation Files
+ 
+@@ -91,49 +111,50 @@ Claude can discuss video content intelligently
+   - `is_youtube_url()` - Check if URL is YouTube
+   - `extract_youtube_urls()` - Find all YouTube URLs in text
+   - `get_youtube_video_info()` - Get video metadata via yt-dlp
+-  - `download_youtube_audio()` - Download audio via yt-dlp
+-  - `transcribe_audio_file()` - Transcribe using Whisper API
++  - `download_youtube_audio()` / `download_youtube_audio_async()` - Download audio via yt-dlp
++  - `transcribe_audio_file()` - Transcribe using Whisper API (fallback)
+   - `summarize_transcript()` - Summarize long transcripts with GPT-4o-mini
+-  - `process_youtube_url()` - Full processing pipeline
++  - `process_youtube_url()` - Full processing pipeline (caption-first)
+   - `process_youtube_urls_in_text()` - Process all YouTube URLs in message
+ 
+-- `bridge/telegram_bridge.py`: Integration with message handler
+-  - Detects YouTube URLs before processing
++- `bridge/enrichment.py`: Deferred message enrichment
+   - Calls `process_youtube_urls_in_text()` for transcription
+-  - Enriches message with transcript/summary context
++  - Always applies `yt_enriched` text to agent context (no `if successful > 0` guard)
+ 
+ ## Dependencies
+ 
+ ### Python Packages
+-- `yt-dlp>=2024.1.0` - YouTube audio download
++- `youtube-transcript-api>=0.6.0` - Caption-based transcription (no API key required, primary path)
++- `yt-dlp>=2024.1.0` - YouTube audio download (Whisper fallback only)
+ 
+ ### System Requirements
+-- `ffmpeg` - Required by yt-dlp for audio extraction
++- `ffmpeg` - Required by yt-dlp for audio extraction (only needed for Whisper fallback)
+   - macOS: `brew install ffmpeg`
+   - Ubuntu: `apt install ffmpeg`
+   - Windows: Download from ffmpeg.org
+ 
+ ### API Keys
+-- `OPENAI_API_KEY` - For Whisper transcription and GPT summarization
++- `OPENAI_API_KEY` - Optional; required only for Whisper transcription and GPT summarization
+ 
+ ## Configuration
+ 
+ ### Constants (in link_analysis)
+ 
+ ```python
+-# Maximum video duration (15 minutes)
+-MAX_VIDEO_DURATION = 900
++# Maximum video duration (env var YOUTUBE_MAX_VIDEO_DURATION, default 10 hours)
++MAX_VIDEO_DURATION = int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION", "36000"))
+ 
+-# Audio cache directory
++# Audio cache directory (Whisper fallback only)
+ YOUTUBE_MEDIA_DIR = Path("data/media/youtube")
+ ```
+ 
+ ## Testing
+ 
+-1. Send YouTube video link -> Valor should include transcript in response context
+-2. Send YouTube Shorts -> Should work the same as regular videos
+-3. Send youtu.be link -> Should detect and process
+-4. Send video >15 min -> Should return "too long" message with duration
+-5. Send live stream -> Should return "live stream" message
+-6. Send private video -> Should gracefully handle with error message
+-7. Send same video twice -> Should use cached audio on second request
++1. Send YouTube video link with captions → Valor should include transcript in response context
++2. Send YouTube Shorts → Should work the same as regular videos (usually have captions)
++3. Send youtu.be link → Should detect and process
++4. Send a video known to have no captions and no Whisper key → Agent should receive actionable failure message
++5. Send video beyond duration limit → Should return "too long" message with duration
++6. Send live stream → Should return "live stream" message
++7. Send private video → Should gracefully handle with error message
++8. Send same video twice → Should use cached audio file on second request (if Whisper path was used)
+diff --git a/pyproject.toml b/pyproject.toml
+index 2aef3d9b6..85a70cc09 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -13,6 +13,7 @@ dependencies = [
+     "requests>=2.31.0", # Required for Google API requests transport
+     "ollama>=0.3.0", # Local LLM fallback for summarization
+     "yt-dlp>=2024.1.0", # YouTube audio download for transcription
++    "youtube-transcript-api>=0.6.0", # Caption-based YouTube transcription (no API key required)
+     "popoto>=1.4.4", # Redis ORM — agent memory primitives (requires long filename fix)
+     "google-auth-oauthlib>=1.2.0", # Google OAuth for Workspace APIs
+     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
+diff --git a/tests/unit/test_youtube_transcription.py b/tests/unit/test_youtube_transcription.py
+new file mode 100644
+index 000000000..919a0931d
+--- /dev/null
++++ b/tests/unit/test_youtube_transcription.py
+@@ -0,0 +1,265 @@
++"""Unit tests for YouTube caption-first transcription and enrichment suppression fix.
++
++Tests:
++1. Caption success path — mock YouTubeTranscriptApi returns segments
++2. All-fail path — captions disabled, Whisper not configured
++3. Enrichment always-apply — bridge/enrichment.py sets enriched_text even on failure
++"""
++
++import json
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import pytest
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++
++def make_caption_segments(text: str) -> list[dict]:
++    """Produce minimal transcript API segment list from a text string."""
++    words = text.split()
++    return [{"text": w, "start": i * 1.0, "duration": 0.9} for i, w in enumerate(words)]
++
++
++# ---------------------------------------------------------------------------
++# 1. Caption success path
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_process_youtube_url_caption_success():
++    """When YouTubeTranscriptApi.fetch() returns snippets, result is successful and context
++    contains transcript."""
++    expected_text = "Hello world this is a test transcript"
++
++    mock_snippet = MagicMock()
++    mock_snippet.text = expected_text
++    mock_fetched = MagicMock()
++    mock_fetched.__iter__ = MagicMock(return_value=iter([mock_snippet]))
++    mock_api_instance = MagicMock()
++    mock_api_instance.fetch.return_value = mock_fetched
++
++    with (
++        patch(
++            "tools.link_analysis.get_youtube_video_info",
++            return_value={"title": "Test Video", "duration": 120, "is_live": False},
++        ),
++        patch(
++            "youtube_transcript_api.YouTubeTranscriptApi",
++            return_value=mock_api_instance,
++        ),
++    ):
++        from tools.link_analysis import process_youtube_url
++
++        result = await process_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
++
++    assert result["success"] is True
++    assert result["transcript"] == expected_text
++    assert expected_text in result["context"]
++    # Whisper should NOT have been called
++    assert "transcription failed" not in result.get("context", "")
++
++
++@pytest.mark.asyncio
++async def test_process_youtube_url_caption_success_long_transcript():
++    """Transcripts >2000 chars are passed through summarize_transcript."""
++    long_text = "word " * 500  # 2500 chars when joined
++
++    mock_snippet = MagicMock()
++    mock_snippet.text = long_text.strip()
++    mock_fetched = MagicMock()
++    mock_fetched.__iter__ = MagicMock(return_value=iter([mock_snippet]))
++    mock_api_instance = MagicMock()
++    mock_api_instance.fetch.return_value = mock_fetched
++
++    with (
++        patch(
++            "tools.link_analysis.get_youtube_video_info",
++            return_value={"title": "Long Video", "duration": 600, "is_live": False},
++        ),
++        patch(
++            "youtube_transcript_api.YouTubeTranscriptApi",
++            return_value=mock_api_instance,
++        ),
++        patch(
++            "tools.link_analysis.summarize_transcript",
++            new_callable=AsyncMock,
++            return_value="Short summary of the long video",
++        ) as mock_summarize,
++    ):
++        from tools.link_analysis import process_youtube_url
++
++        result = await process_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
++
++    assert result["success"] is True
++    assert mock_summarize.called
++    assert "Short summary" in result["context"]
++
++
++# ---------------------------------------------------------------------------
++# 2. All-fail path (captions disabled + no Whisper key)
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_process_youtube_url_all_fail_path():
++    """When captions are disabled and Whisper is not configured, returns actionable failure
++    context."""
++    from youtube_transcript_api import TranscriptsDisabled
++
++    mock_api_instance = MagicMock()
++    mock_api_instance.fetch.side_effect = TranscriptsDisabled("dQw4w9WgXcQ")
++
++    with (
++        patch(
++            "tools.link_analysis.get_youtube_video_info",
++            return_value={"title": "No Caption Video", "duration": 90, "is_live": False},
++        ),
++        patch(
++            "youtube_transcript_api.YouTubeTranscriptApi",
++            return_value=mock_api_instance,
++        ),
++        patch(
++            "tools.link_analysis.download_youtube_audio_async",
++            new_callable=AsyncMock,
++            return_value=None,
++        ),
++    ):
++        from tools.link_analysis import process_youtube_url
++
++        result = await process_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
++
++    assert result["success"] is False
++    assert "No Caption Video" in result["context"]
++    # Context must be actionable — suggests manual workaround
++    assert "paste" in result["context"].lower() or "transcript" in result["context"].lower()
++    assert "unavailable" in result["context"].lower()
++
++
++@pytest.mark.asyncio
++async def test_process_youtube_url_caption_import_error_fallback():
++    """If youtube-transcript-api is not installed, falls through to Whisper path gracefully."""
++    with (
++        patch(
++            "tools.link_analysis.get_youtube_video_info",
++            return_value={"title": "Test Video", "duration": 60, "is_live": False},
++        ),
++        patch.dict("sys.modules", {"youtube_transcript_api": None}),
++        patch(
++            "tools.link_analysis.download_youtube_audio_async",
++            new_callable=AsyncMock,
++            return_value=None,
++        ),
++    ):
++        from tools.link_analysis import process_youtube_url
++
++        result = await process_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
++
++    # Should fail gracefully without raising
++    assert result["success"] is False
++    assert result.get("context") != ""
++
++
++# ---------------------------------------------------------------------------
++# 3. Enrichment always-apply behavior
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_enrichment_applies_yt_text_even_on_failure():
++    """bridge/enrichment.py sets enriched_text = yt_enriched even when successful == 0."""
++    failure_context = (
++        "[YouTube video: transcript unavailable (captions not found; Whisper API not configured)."
++        " To discuss this video, paste the transcript or a summary directly into the chat.]"
++    )
++    original_text = "Check this out https://www.youtube.com/watch?v=dQw4w9WgXcQ"
++    enriched_with_failure = original_text + "\n\n" + failure_context
++
++    mock_results = [
++        {
++            "success": False,
++            "video_id": "dQw4w9WgXcQ",
++            "context": failure_context,
++            "error": "Transcription failed",
++        }
++    ]
++
++    with patch(
++        "tools.link_analysis.process_youtube_urls_in_text",
++        new_callable=AsyncMock,
++        return_value=(enriched_with_failure, mock_results),
++    ):
++        from bridge.enrichment import enrich_message
++
++        result = await enrich_message(
++            telegram_client=None,
++            message_text=original_text,
++            youtube_urls=json.dumps(
++                [("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ")]
++            ),
++        )
++
++    # The failure context MUST be in the enriched output
++    assert failure_context in result
++    assert "paste" in result.lower() or "transcript" in result.lower()
++
++
++@pytest.mark.asyncio
++async def test_enrichment_applies_yt_text_on_success():
++    """bridge/enrichment.py sets enriched_text = yt_enriched when successful > 0 (existing
++    behavior preserved)."""
++    transcript_context = "[YouTube video - My Video transcript: Great content here]"
++    original_text = "Check this out https://www.youtube.com/watch?v=abc123"
++    enriched_with_transcript = original_text + "\n\n" + transcript_context
++
++    mock_results = [
++        {
++            "success": True,
++            "video_id": "abc123",
++            "context": transcript_context,
++        }
++    ]
++
++    with patch(
++        "tools.link_analysis.process_youtube_urls_in_text",
++        new_callable=AsyncMock,
++        return_value=(enriched_with_transcript, mock_results),
++    ):
++        from bridge.enrichment import enrich_message
++
++        result = await enrich_message(
++            telegram_client=None,
++            message_text=original_text,
++            youtube_urls=json.dumps([("https://www.youtube.com/watch?v=abc123", "abc123")]),
++        )
++
++    assert transcript_context in result
++
++
++# ---------------------------------------------------------------------------
++# 4. Edge cases
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_process_youtube_url_invalid_url():
++    """Non-YouTube URL returns early with success=False."""
++    from tools.link_analysis import process_youtube_url
++
++    result = await process_youtube_url("https://example.com/not-youtube")
++
++    assert result["success"] is False
++    assert result.get("error") == "Not a valid YouTube URL"
++
++
++@pytest.mark.asyncio
++async def test_process_youtube_urls_in_text_no_urls():
++    """Text with no YouTube URLs returns unchanged text and empty results list."""
++    from tools.link_analysis import process_youtube_urls_in_text
++
++    text = "No YouTube links here, just text."
++    result_text, results = await process_youtube_urls_in_text(text)
++
++    assert result_text == text
++    assert results == []
+diff --git a/tools/link_analysis/__init__.py b/tools/link_analysis/__init__.py
+index edd554277..7390fb2be 100644
+--- a/tools/link_analysis/__init__.py
++++ b/tools/link_analysis/__init__.py
+@@ -429,18 +429,51 @@ async def process_youtube_url(url: str) -> dict:
+             )
+             return result
+ 
+-    # Download audio
+-    audio_path = await download_youtube_audio_async(video_id)
+-    if not audio_path:
+-        result["error"] = "Failed to download audio"
+-        result["context"] = f"[YouTube video, could not download: {url}]"
+-        return result
++    # --- Caption-first path (no API key required) ---
++    transcript = None
++    try:
++        from youtube_transcript_api import (
++            NoTranscriptFound,
++            TranscriptsDisabled,
++            VideoUnavailable,
++            YouTubeTranscriptApi,
++        )
++
++        def _fetch_captions(vid_id: str) -> str | None:
++            fetched = YouTubeTranscriptApi().fetch(vid_id)
++            text = " ".join(s.text for s in fetched).strip()
++            return text if text else None
++
++        loop = asyncio.get_event_loop()
++        transcript = await loop.run_in_executor(None, _fetch_captions, video_id)
++        if transcript:
++            logger.info(f"Caption transcript retrieved for {video_id} ({len(transcript)} chars)")
++    except ImportError:
++        logger.warning("youtube-transcript-api not installed; falling through to Whisper path")
++    except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
++        logger.info(f"Captions unavailable for {video_id}: {e}; falling through to Whisper path")
++    except Exception as e:
++        logger.warning(f"Caption fetch failed for {video_id}: {e}; falling through to Whisper path")
+ 
+-    # Transcribe audio
+-    transcript = await transcribe_audio_file(audio_path)
++    # --- Whisper fallback (requires OPENAI_API_KEY) ---
+     if not transcript:
+-        result["error"] = "Failed to transcribe audio"
+-        result["context"] = f"[YouTube video, transcription failed: {url}]"
++        audio_path = await download_youtube_audio_async(video_id)
++        if audio_path:
++            transcript = await transcribe_audio_file(audio_path)
++            if transcript:
++                logger.info(
++                    f"Whisper transcript retrieved for {video_id} ({len(transcript)} chars)"
++                )
++
++    # --- All paths failed ---
++    if not transcript:
++        title_part = f'"{result["title"]}" — ' if result["title"] else ""
++        result["error"] = "Transcription failed: captions unavailable and Whisper not configured"
++        result["context"] = (
++            f"[YouTube video: {title_part}transcript unavailable "
++            f"(captions not found; Whisper API not configured). "
++            f"To discuss this video, paste the transcript or a summary directly into the chat.]"
++        )
+         return result
+ 
+     result["transcript"] = transcript

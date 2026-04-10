@@ -1,0 +1,2233 @@
+diff --git a/.claude/skills/update/SKILL.md b/.claude/skills/update/SKILL.md
+index a367d73fd..e6a5f19b0 100644
+--- a/.claude/skills/update/SKILL.md
++++ b/.claude/skills/update/SKILL.md
+@@ -32,7 +32,7 @@ The orchestrator will:
+ - Verify critical dependency versions
+ - Check/pull Ollama summarizer model
+ - Verify CLI tools and SDK authentication
+-- Install/restart bridge, caffeinate, and reflections services
++- Install/restart bridge, worker, caffeinate, and reflections services
+ - Set up global calendar hook and generate config
+ - Check MCP server configuration
+ 
+@@ -86,6 +86,7 @@ After update, reinstall launchd plists to pick up any template changes:
+ ```bash
+ cd ~/src/ai
+ ./scripts/install_reflections.sh
++./scripts/install_worker.sh
+ ```
+ 
+ The install script substitutes `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
+@@ -131,6 +132,21 @@ tail -50 ~/src/ai/logs/bridge.error.log
+ ~/src/ai/scripts/valor-service.sh status
+ ```
+ 
++### Worker won't start
++```bash
++# Check logs
++tail -50 ~/src/ai/logs/worker_error.log
++
++# Manual restart
++~/src/ai/scripts/valor-service.sh worker-restart
++
++# Check status
++~/src/ai/scripts/valor-service.sh worker-status
++
++# Reinstall plist
++~/src/ai/scripts/install_worker.sh
++```
++
+ ## Module Details
+ 
+ ### Git Operations (`git.py`)
+@@ -190,11 +206,19 @@ config = calendar.generate_calendar_config(project_dir)
+ ```python
+ from scripts.update import service
+ 
+-# Get status
++# Get bridge status
+ status = service.get_service_status(project_dir)
+ # status.running, status.pid, status.uptime, status.memory_mb
+ 
+-# Install/restart
++# Install/restart bridge
+ service.install_service(project_dir)  # Installs bridge + update cron
+ service.restart_service(project_dir)
++
++# Get worker status
++worker = service.get_worker_status(project_dir)
++# worker.running, worker.pid, worker.uptime, worker.memory_mb
++
++# Install/restart worker
++service.install_worker(project_dir)   # Installs standalone worker service
++service.restart_worker(project_dir)
+ ```
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 3707f32d4..03d91991e 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -102,7 +102,10 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+ |---------|-------------|
+ | `./scripts/start_bridge.sh` | Start Telegram bridge |
+ | `./scripts/valor-service.sh status` | Check bridge status |
+-| `./scripts/valor-service.sh restart` | Restart after code changes |
++| `./scripts/valor-service.sh restart` | Restart bridge after code changes |
++| `./scripts/valor-service.sh worker-start` | Start standalone worker service |
++| `./scripts/valor-service.sh worker-restart` | Restart standalone worker |
++| `./scripts/valor-service.sh worker-status` | Check worker service status |
+ | `tail -f logs/bridge.log` | Stream bridge logs |
+ | `pytest tests/` | Run all tests |
+ | `pytest tests/unit/` | Run unit tests only (fast, ~60s) |
+@@ -230,6 +233,11 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
+                                               → Spawns DevSession (full permissions, Dev persona)
+                                                     → Claude Agent SDK → Claude API
+                                                         (agent/sdk_client.py)
++
++Standalone Worker (python -m worker) → Same session execution engine
++              (worker/__main__.py)         → Processes AgentSession records from Redis
++                                           → Uses OutputHandler protocol (agent/output_handler.py)
++                                           → FileOutputHandler fallback when no bridge callbacks
+ ```
+ 
+ **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
+@@ -253,6 +261,8 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
+ - `.claude/commands/` - Slash command skills
+ - `.claude/agents/` - Subagent definitions (including `dev-session`)
+ - `bridge/` - Telegram integration, nudge loop
++- `worker/` - Standalone worker service (`python -m worker`)
++- `agent/` - Session queue, SDK client, output handler protocol, constants
+ - `tools/` - Local Python tools
+ - `config/` - Configuration files
+ 
+@@ -306,6 +316,7 @@ See `docs/features/session-isolation.md` for the full technical design.
+ ### Emergency Recovery
+ 
+ - **Bridge Issues**: `./scripts/valor-service.sh restart`
++- **Worker Issues**: `./scripts/valor-service.sh worker-restart`
+ - **Telegram Auth**: `python scripts/telegram_login.py`
+ - **SDK Issues**: Check SDK configuration in `.env`
+ 
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index 32436ee98..903f68785 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -4,10 +4,17 @@
+ Serializes agent work per project working directory so git operations
+ never conflict. Agent runs directly in the project's working directory.
+ 
++This module has no module-level bridge/ imports and can be used by both
++the Telegram bridge (embedded worker) and the standalone worker
++(python -m worker). Output routing uses the OutputHandler protocol
++defined in agent/output_handler.py, with FileOutputHandler as fallback
++when no bridge callbacks are registered.
++
+ Architecture:
+ - AgentSession: unified popoto Model persisted in Redis
+ - Worker loop: one asyncio.Task per project, processes sessions sequentially
+ - Revival detection: lightweight git state check, no SDK agent call
++- Output: OutputHandler protocol (Telegram callbacks or file logging)
+ """
+ 
+ import asyncio
+@@ -27,9 +34,10 @@
+     get_plan_context,
+     sanitize_branch_name,
+ )
++from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
++from agent.output_handler import OutputHandler
++from agent.session_logs import save_session_snapshot
+ from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+-from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+-from bridge.session_logs import save_session_snapshot
+ from config.enums import ClassificationType, PersonaType, SessionType
+ from models.agent_session import AgentSession
+ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
+@@ -1317,19 +1325,46 @@ def format_duration(seconds) -> str:
+ 
+ def register_callbacks(
+     project_key: str,
+-    send_callback: SendCallback,
+-    reaction_callback: ReactionCallback,
++    send_callback: SendCallback | None = None,
++    reaction_callback: ReactionCallback | None = None,
+     response_callback: ResponseCallback | None = None,
++    *,
++    handler: OutputHandler | None = None,
+ ) -> None:
+     """
+-    Register bridge callbacks for a project.
++    Register output callbacks for a project.
++
++    Accepts either raw callables (backward compatible with bridge) or an
++    OutputHandler instance (for standalone worker and new platform bridges).
+ 
+-    send_callback(chat_id, text, reply_to_msg_id) -> sends a Telegram message
+-    reaction_callback(chat_id, msg_id, emoji) -> sets a reaction on a message
+-    response_callback(event, text, chat_id, msg_id) -> sends response with file handling
++    Args:
++        project_key: Project identifier to register callbacks for.
++        send_callback: Callable (chat_id, text, reply_to_msg_id, session) -> sends output.
++        reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.
++        response_callback: Callable (event, text, chat_id, msg_id) ->
++            sends response with file handling.
++        handler: An OutputHandler instance. If provided, its send() and react()
++                 methods are wrapped as send_callback and reaction_callback.
+     """
+-    _send_callbacks[project_key] = send_callback
+-    _reaction_callbacks[project_key] = reaction_callback
++    if handler is not None:
++        # Wrap OutputHandler methods as raw callbacks for internal use
++        if send_callback is None:
++            _send_callbacks[project_key] = handler.send
++        else:
++            _send_callbacks[project_key] = send_callback
++
++        if reaction_callback is None:
++            _reaction_callbacks[project_key] = handler.react
++        else:
++            _reaction_callbacks[project_key] = reaction_callback
++    else:
++        if send_callback is None:
++            raise ValueError("Either send_callback or handler must be provided")
++        if reaction_callback is None:
++            raise ValueError("Either reaction_callback or handler must be provided")
++        _send_callbacks[project_key] = send_callback
++        _reaction_callbacks[project_key] = reaction_callback
++
+     if response_callback:
+         _response_callbacks[project_key] = response_callback
+ 
+@@ -1990,10 +2025,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
+     # Calendar heartbeat at session start
+     asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
+ 
+-    # Create messenger with bridge callbacks
++    # Create messenger with bridge callbacks, falling back to file output
+     send_cb = _send_callbacks.get(session.project_key)
+     react_cb = _reaction_callbacks.get(session.project_key)
+ 
++    if not send_cb:
++        from agent.output_handler import FileOutputHandler
++
++        _fallback = FileOutputHandler()
++        send_cb = _fallback.send
++        react_cb = react_cb or _fallback.react
++        logger.info(
++            f"[{session.project_key}] No bridge callbacks registered, "
++            f"using FileOutputHandler fallback"
++        )
++
+     # Explicit state object replaces fragile nonlocal closures (_defer_reaction,
+     # _completion_sent, auto_continue_count). State is passed as a mutable object
+     # rather than mutated through shared closure references.
+@@ -2016,9 +2062,6 @@ async def send_to_chat(msg: str) -> None:
+         """
+         nonlocal agent_session  # Re-read from Redis for fresh stage data
+ 
+-        if not send_cb:
+-            return
+-
+         from agent.health_check import is_session_unhealthy
+         from agent.sdk_client import get_stop_reason
+ 
+diff --git a/agent/constants.py b/agent/constants.py
+new file mode 100644
+index 000000000..ed3e56531
+--- /dev/null
++++ b/agent/constants.py
+@@ -0,0 +1,12 @@
++"""
++Shared constants for the agent session system.
++
++These constants were originally defined in bridge/response.py but are used by
++both the bridge and the standalone worker. Canonical definitions live here;
++bridge/response.py re-exports them for backward compatibility.
++"""
++
++# Reaction emoji constants used by the session execution engine
++REACTION_SUCCESS = "\U0001f44d"  # Simple ack, no text reply needed
++REACTION_COMPLETE = "\U0001f3c6"  # Work done, text reply attached
++REACTION_ERROR = "\U0001f631"  # Something went wrong
+diff --git a/agent/output_handler.py b/agent/output_handler.py
+new file mode 100644
+index 000000000..b2716e7d0
+--- /dev/null
++++ b/agent/output_handler.py
+@@ -0,0 +1,150 @@
++"""
++Output handler protocol and implementations for agent session output routing.
++
++Defines the OutputHandler protocol that all output destinations must implement,
++plus built-in implementations for file logging and stderr logging. The bridge
++registers its Telegram-specific handler; standalone workers use FileOutputHandler.
++"""
++
++from __future__ import annotations
++
++import logging
++import time
++from pathlib import Path
++from typing import Any, Protocol, runtime_checkable
++
++logger = logging.getLogger(__name__)
++
++# Default directory for worker output logs
++WORKER_LOGS_DIR = Path(__file__).parent.parent / "logs" / "worker"
++
++
++@runtime_checkable
++class OutputHandler(Protocol):
++    """Protocol for routing agent session output to a destination.
++
++    Implementations must provide send() for text output and react() for
++    emoji reactions. Both methods are async to support I/O-bound destinations
++    (Telegram, email, etc.).
++    """
++
++    async def send(
++        self,
++        chat_id: str,
++        text: str,
++        reply_to_msg_id: int,
++        session: Any = None,
++    ) -> None:
++        """Send text output to the destination.
++
++        Args:
++            chat_id: Target chat/channel identifier.
++            text: Message text to send.
++            reply_to_msg_id: Original message ID to reply to.
++            session: Optional session context object.
++        """
++        ...
++
++    async def react(
++        self,
++        chat_id: str,
++        msg_id: int,
++        emoji: str | None = None,
++    ) -> None:
++        """Set a reaction emoji on a message.
++
++        Args:
++            chat_id: Target chat/channel identifier.
++            msg_id: Message ID to react to.
++            emoji: Emoji string to set, or None to clear.
++        """
++        ...
++
++
++class FileOutputHandler:
++    """Write agent output to log files in logs/worker/.
++
++    Each session gets its own log file at logs/worker/{session_id}.log.
++    Output includes timestamps for human readability.
++    """
++
++    def __init__(self, log_dir: Path | None = None):
++        self.log_dir = log_dir or WORKER_LOGS_DIR
++        self.log_dir.mkdir(parents=True, exist_ok=True)
++
++    async def send(
++        self,
++        chat_id: str,
++        text: str,
++        reply_to_msg_id: int,
++        session: Any = None,
++    ) -> None:
++        """Append text output to the session's log file."""
++        if not text:
++            return
++
++        session_id = getattr(session, "session_id", None) or chat_id
++        log_path = self.log_dir / f"{session_id}.log"
++
++        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
++        entry = f"[{timestamp}] chat={chat_id} reply_to={reply_to_msg_id}\n{text}\n---\n"
++
++        try:
++            with open(log_path, "a") as f:
++                f.write(entry)
++            logger.info(f"Worker output written to {log_path.name} ({len(text)} chars)")
++        except Exception as e:
++            logger.error(f"Failed to write worker output to {log_path}: {e}")
++
++    async def react(
++        self,
++        chat_id: str,
++        msg_id: int,
++        emoji: str | None = None,
++    ) -> None:
++        """Log the reaction (no-op for file output)."""
++        session_id = chat_id  # Best effort
++        log_path = self.log_dir / f"{session_id}.log"
++
++        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
++        entry = f"[{timestamp}] REACTION chat={chat_id} msg={msg_id} emoji={emoji}\n"
++
++        try:
++            with open(log_path, "a") as f:
++                f.write(entry)
++        except Exception:
++            pass  # Reactions are best-effort for file output
++
++
++class LoggingOutputHandler:
++    """Simple stderr/logging fallback for output routing.
++
++    Writes all output to the Python logger at INFO level. Useful for
++    development and debugging when file output is not needed.
++    """
++
++    async def send(
++        self,
++        chat_id: str,
++        text: str,
++        reply_to_msg_id: int,
++        session: Any = None,
++    ) -> None:
++        """Log text output via Python logging."""
++        if not text:
++            return
++
++        session_id = getattr(session, "session_id", None) or "unknown"
++        logger.info(
++            f"[worker:{session_id}] Output ({len(text)} chars): "
++            f"{text[:200]}{'...' if len(text) > 200 else ''}"
++        )
++
++    async def react(
++        self,
++        chat_id: str,
++        msg_id: int,
++        emoji: str | None = None,
++    ) -> None:
++        """Log the reaction via Python logging."""
++        logger.info(f"[worker] Reaction: chat={chat_id} msg={msg_id} emoji={emoji}")
+diff --git a/agent/session_logs.py b/agent/session_logs.py
+new file mode 100644
+index 000000000..ded76b27b
+--- /dev/null
++++ b/agent/session_logs.py
+@@ -0,0 +1,167 @@
++"""
++Per-session log snapshots at key lifecycle transitions.
++
++Canonical location for session snapshot logic. Used by both the standalone
++worker and the Telegram bridge. bridge/session_logs.py re-exports from here
++for backward compatibility.
++
++Saves structured snapshots to logs/sessions/{session_id}/ for debugging.
++Each snapshot captures session state at the moment of a pause, resume, or complete transition.
++"""
++
++import json
++import logging
++import shutil
++import subprocess
++import time
++from pathlib import Path
++
++logger = logging.getLogger(__name__)
++
++SESSION_LOGS_DIR = Path(__file__).parent.parent / "logs" / "sessions"
++SESSION_LOGS_DIR.mkdir(parents=True, exist_ok=True)
++
++
++def _get_git_summary(working_dir: str | None = None) -> str:
++    """Get brief git status for snapshot context.
++
++    Runs `git status --short` and `git log --oneline -3` to capture
++    the current working tree state and recent commit history.
++    Returns a combined string, or an error message on failure.
++    """
++    parts = []
++    cwd = working_dir or str(Path(__file__).parent.parent)
++
++    try:
++        status_result = subprocess.run(
++            ["git", "status", "--short"],
++            cwd=cwd,
++            capture_output=True,
++            text=True,
++            timeout=10,
++        )
++        if status_result.returncode == 0:
++            status_text = status_result.stdout.strip()
++            parts.append(f"Status:\n{status_text}" if status_text else "Status: clean")
++        else:
++            parts.append(f"Status: error ({status_result.stderr.strip()[:100]})")
++    except Exception as e:
++        parts.append(f"Status: unavailable ({e})")
++
++    try:
++        log_result = subprocess.run(
++            ["git", "log", "--oneline", "-3"],
++            cwd=cwd,
++            capture_output=True,
++            text=True,
++            timeout=10,
++        )
++        if log_result.returncode == 0:
++            parts.append(f"Recent commits:\n{log_result.stdout.strip()}")
++    except Exception:
++        pass
++
++    return "\n".join(parts)
++
++
++def save_session_snapshot(
++    session_id: str,
++    event: str,
++    project_key: str = "",
++    branch_name: str = "",
++    messages: list[dict] | None = None,
++    task_summary: str = "",
++    extra_context: dict | None = None,
++    working_dir: str | None = None,
++) -> Path | None:
++    """Save a session snapshot to disk.
++
++    Creates a JSON file at logs/sessions/{session_id}/{timestamp}_{event}.json
++    capturing the session state at a lifecycle transition point.
++
++    Args:
++        session_id: Unique identifier for the session.
++        event: Lifecycle event type ("resume", "complete", "error", "pause").
++        project_key: Project identifier (e.g., "valor").
++        branch_name: Git branch associated with the session.
++        messages: Last N messages in the session conversation.
++        task_summary: Brief summary of task status.
++        extra_context: Additional key-value context data.
++        working_dir: Working directory for git status capture.
++
++    Returns:
++        Path to the snapshot file, or None on failure.
++    """
++    try:
++        session_dir = SESSION_LOGS_DIR / session_id
++        session_dir.mkdir(parents=True, exist_ok=True)
++
++        timestamp = time.time()
++        # Use integer timestamp + event for filename to avoid float formatting issues
++        filename = f"{int(timestamp)}_{event}.json"
++
++        snapshot = {
++            "session_id": session_id,
++            "event": event,
++            "timestamp": timestamp,
++            "project_key": project_key,
++            "branch_name": branch_name,
++            "messages": messages or [],
++            "task_summary": task_summary,
++            "git_status": _get_git_summary(working_dir),
++            "extra_context": extra_context or {},
++        }
++
++        snapshot_path = session_dir / filename
++        snapshot_path.write_text(json.dumps(snapshot, indent=2, default=str))
++
++        logger.info(f"Session snapshot saved: {event} for {session_id} -> {snapshot_path.name}")
++        return snapshot_path
++
++    except Exception as e:
++        logger.warning(f"Failed to save session snapshot ({event}, {session_id}): {e}")
++        return None
++
++
++def cleanup_old_snapshots(max_age_hours: float = 168) -> int:
++    """Remove session log directories older than max_age_hours.
++
++    Checks the modification time of each session directory under
++    logs/sessions/ and removes directories that exceed the age threshold.
++
++    Args:
++        max_age_hours: Maximum age in hours before cleanup. Defaults to 168 (7 days).
++
++    Returns:
++        Count of session directories removed.
++    """
++    if not SESSION_LOGS_DIR.exists():
++        return 0
++
++    removed = 0
++    cutoff = time.time() - (max_age_hours * 3600)
++
++    try:
++        for session_dir in SESSION_LOGS_DIR.iterdir():
++            if not session_dir.is_dir():
++                continue
++
++            # Use the newest file's mtime as the session's last activity
++            try:
++                newest_mtime = max(f.stat().st_mtime for f in session_dir.iterdir() if f.is_file())
++            except ValueError:
++                # Empty directory — treat as old
++                newest_mtime = 0
++
++            if newest_mtime < cutoff:
++                shutil.rmtree(session_dir, ignore_errors=True)
++                removed += 1
++                logger.info(f"Cleaned up old session logs: {session_dir.name}")
++
++    except Exception as e:
++        logger.warning(f"Error during session log cleanup: {e}")
++
++    if removed:
++        logger.info(f"Removed {removed} old session log director(ies)")
++
++    return removed
+diff --git a/bridge/response.py b/bridge/response.py
+index 1d397d0f3..21f49b8ec 100644
+--- a/bridge/response.py
++++ b/bridge/response.py
+@@ -156,9 +156,12 @@
+ # Reaction emojis for different stages (all validated 2026-02-13)
+ REACTION_RECEIVED = "👀"  # Message acknowledged
+ REACTION_PROCESSING = "🤔"  # Default thinking emoji
+-REACTION_SUCCESS = "👍"  # Simple ack, no text reply needed
+-REACTION_COMPLETE = "🏆"  # Work done, text reply attached
+-REACTION_ERROR = "😱"  # Something went wrong
++
++# These three are re-exported from agent.constants (canonical location).
++# Kept here for backward compatibility with existing imports.
++from agent.constants import REACTION_COMPLETE  # noqa: E402, F401
++from agent.constants import REACTION_ERROR  # noqa: E402, F401
++from agent.constants import REACTION_SUCCESS  # noqa: E402, F401
+ 
+ 
+ def filter_tool_logs(response: str) -> str:
+diff --git a/bridge/session_logs.py b/bridge/session_logs.py
+index 9779a07f0..8dd3c6c21 100644
+--- a/bridge/session_logs.py
++++ b/bridge/session_logs.py
+@@ -1,163 +1,13 @@
+ """
+ Per-session log snapshots at key lifecycle transitions.
+ 
+-Saves structured snapshots to logs/sessions/{session_id}/ for debugging.
+-Each snapshot captures session state at the moment of a pause, resume, or complete transition.
++BACKWARD COMPATIBILITY: This module re-exports from agent.session_logs,
++which is the canonical location. Import from agent.session_logs for new code.
+ """
+ 
+-import json
+-import logging
+-import shutil
+-import subprocess
+-import time
+-from pathlib import Path
+-
+-logger = logging.getLogger(__name__)
+-
+-SESSION_LOGS_DIR = Path(__file__).parent.parent / "logs" / "sessions"
+-SESSION_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+-
+-
+-def _get_git_summary(working_dir: str | None = None) -> str:
+-    """Get brief git status for snapshot context.
+-
+-    Runs `git status --short` and `git log --oneline -3` to capture
+-    the current working tree state and recent commit history.
+-    Returns a combined string, or an error message on failure.
+-    """
+-    parts = []
+-    cwd = working_dir or str(Path(__file__).parent.parent)
+-
+-    try:
+-        status_result = subprocess.run(
+-            ["git", "status", "--short"],
+-            cwd=cwd,
+-            capture_output=True,
+-            text=True,
+-            timeout=10,
+-        )
+-        if status_result.returncode == 0:
+-            status_text = status_result.stdout.strip()
+-            parts.append(f"Status:\n{status_text}" if status_text else "Status: clean")
+-        else:
+-            parts.append(f"Status: error ({status_result.stderr.strip()[:100]})")
+-    except Exception as e:
+-        parts.append(f"Status: unavailable ({e})")
+-
+-    try:
+-        log_result = subprocess.run(
+-            ["git", "log", "--oneline", "-3"],
+-            cwd=cwd,
+-            capture_output=True,
+-            text=True,
+-            timeout=10,
+-        )
+-        if log_result.returncode == 0:
+-            parts.append(f"Recent commits:\n{log_result.stdout.strip()}")
+-    except Exception:
+-        pass
+-
+-    return "\n".join(parts)
+-
+-
+-def save_session_snapshot(
+-    session_id: str,
+-    event: str,
+-    project_key: str = "",
+-    branch_name: str = "",
+-    messages: list[dict] | None = None,
+-    task_summary: str = "",
+-    extra_context: dict | None = None,
+-    working_dir: str | None = None,
+-) -> Path | None:
+-    """Save a session snapshot to disk.
+-
+-    Creates a JSON file at logs/sessions/{session_id}/{timestamp}_{event}.json
+-    capturing the session state at a lifecycle transition point.
+-
+-    Args:
+-        session_id: Unique identifier for the session.
+-        event: Lifecycle event type ("resume", "complete", "error", "pause").
+-        project_key: Project identifier (e.g., "valor").
+-        branch_name: Git branch associated with the session.
+-        messages: Last N messages in the session conversation.
+-        task_summary: Brief summary of task status.
+-        extra_context: Additional key-value context data.
+-        working_dir: Working directory for git status capture.
+-
+-    Returns:
+-        Path to the snapshot file, or None on failure.
+-    """
+-    try:
+-        session_dir = SESSION_LOGS_DIR / session_id
+-        session_dir.mkdir(parents=True, exist_ok=True)
+-
+-        timestamp = time.time()
+-        # Use integer timestamp + event for filename to avoid float formatting issues
+-        filename = f"{int(timestamp)}_{event}.json"
+-
+-        snapshot = {
+-            "session_id": session_id,
+-            "event": event,
+-            "timestamp": timestamp,
+-            "project_key": project_key,
+-            "branch_name": branch_name,
+-            "messages": messages or [],
+-            "task_summary": task_summary,
+-            "git_status": _get_git_summary(working_dir),
+-            "extra_context": extra_context or {},
+-        }
+-
+-        snapshot_path = session_dir / filename
+-        snapshot_path.write_text(json.dumps(snapshot, indent=2, default=str))
+-
+-        logger.info(f"Session snapshot saved: {event} for {session_id} -> {snapshot_path.name}")
+-        return snapshot_path
+-
+-    except Exception as e:
+-        logger.warning(f"Failed to save session snapshot ({event}, {session_id}): {e}")
+-        return None
+-
+-
+-def cleanup_old_snapshots(max_age_hours: float = 168) -> int:
+-    """Remove session log directories older than max_age_hours.
+-
+-    Checks the modification time of each session directory under
+-    logs/sessions/ and removes directories that exceed the age threshold.
+-
+-    Args:
+-        max_age_hours: Maximum age in hours before cleanup. Defaults to 168 (7 days).
+-
+-    Returns:
+-        Count of session directories removed.
+-    """
+-    if not SESSION_LOGS_DIR.exists():
+-        return 0
+-
+-    removed = 0
+-    cutoff = time.time() - (max_age_hours * 3600)
+-
+-    try:
+-        for session_dir in SESSION_LOGS_DIR.iterdir():
+-            if not session_dir.is_dir():
+-                continue
+-
+-            # Use the newest file's mtime as the session's last activity
+-            try:
+-                newest_mtime = max(f.stat().st_mtime for f in session_dir.iterdir() if f.is_file())
+-            except ValueError:
+-                # Empty directory — treat as old
+-                newest_mtime = 0
+-
+-            if newest_mtime < cutoff:
+-                shutil.rmtree(session_dir, ignore_errors=True)
+-                removed += 1
+-                logger.info(f"Cleaned up old session logs: {session_dir.name}")
+-
+-    except Exception as e:
+-        logger.warning(f"Error during session log cleanup: {e}")
+-
+-    if removed:
+-        logger.info(f"Removed {removed} old session log director(ies)")
+-
+-    return removed
++# Re-export everything from the canonical location
++from agent.session_logs import (  # noqa: F401
++    SESSION_LOGS_DIR,
++    cleanup_old_snapshots,
++    save_session_snapshot,
++)
+diff --git a/com.valor.worker.plist b/com.valor.worker.plist
+new file mode 100644
+index 000000000..5cadb70f6
+--- /dev/null
++++ b/com.valor.worker.plist
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++    <key>Label</key>
++    <string>com.valor.worker</string>
++    <key>ProgramArguments</key>
++    <array>
++        <string>/bin/bash</string>
++        <string>-c</string>
++        <string>set -a; source __PROJECT_DIR__/.env; set +a; exec __PROJECT_DIR__/.venv/bin/python -m worker</string>
++    </array>
++    <key>WorkingDirectory</key>
++    <string>__PROJECT_DIR__</string>
++    <key>EnvironmentVariables</key>
++    <dict>
++        <key>PATH</key>
++        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
++        <key>HOME</key>
++        <string>__HOME_DIR__</string>
++    </dict>
++    <key>RunAtLoad</key>
++    <true/>
++    <key>KeepAlive</key>
++    <true/>
++    <key>StandardOutPath</key>
++    <string>__PROJECT_DIR__/logs/worker.log</string>
++    <key>StandardErrorPath</key>
++    <string>__PROJECT_DIR__/logs/worker_error.log</string>
++    <key>ThrottleInterval</key>
++    <integer>10</integer>
++</dict>
++</plist>
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 1cb628a03..a3196c78c 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -68,7 +68,6 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Personas](personas.md) | Configurable persona system: base + overlay files replacing monolithic SOUL.md for developer, PM, and teammate roles | Shipped |
+ | [Pipeline Graph](pipeline-graph.md) | Canonical directed graph for SDLC stage routing with cycle support for test-failure and review-feedback loops | Shipped |
+ | [Pipeline State Machine](pipeline-state-machine.md) | Programmatic stage tracking replacing inference-based detection with direct state recording at transition points | Shipped |
+-| [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
+ | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
+ | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
+ | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
+@@ -91,6 +90,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
+ | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
+ | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
++| [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
+ | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
+ | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
+ | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
+@@ -129,6 +129,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC with `bridge/utc.py` utilities; local conversion only at display boundary | Shipped |
+ | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |
+ | [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
++| [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing without Telegram, OutputHandler protocol, FileOutputHandler fallback, launchd service | Shipped |
+ | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
+ | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
+ | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
+diff --git a/docs/features/bridge-module-architecture.md b/docs/features/bridge-module-architecture.md
+index f8086fd96..7f7446ce6 100644
+--- a/docs/features/bridge-module-architecture.md
++++ b/docs/features/bridge-module-architecture.md
+@@ -7,7 +7,7 @@ The Telegram bridge (`bridge/telegram_bridge.py`) is organized into focused sub-
+ | `bridge/media.py` | Media detection, download, transcription, image description |
+ | `bridge/routing.py` | Message routing, project config, mention/response classification |
+ | `bridge/context.py` | Context building, conversation history, reply chains |
+-| `bridge/response.py` | Message formatting, reactions, file extraction, sending |
++| `bridge/response.py` | Message formatting, reactions (re-exports from `agent/constants.py`), file extraction, sending |
+ | `bridge/catchup.py` | Abandoned session revival and re-enqueueing |
+ | `bridge/reconciler.py` | Periodic scan for messages missed during live connection |
+ 
+diff --git a/docs/features/bridge-self-healing.md b/docs/features/bridge-self-healing.md
+index d8523d7cc..6dcc560f1 100644
+--- a/docs/features/bridge-self-healing.md
++++ b/docs/features/bridge-self-healing.md
+@@ -133,10 +133,13 @@ The watchdog is installed alongside the bridge:
+ ./scripts/valor-service.sh install
+ # Installs:
+ # - com.valor.bridge (main bridge, with log rotation on startup)
++# - com.valor.worker (standalone session worker, KeepAlive)
+ # - com.valor.update (polls every 30 minutes)
+ # - com.valor.bridge-watchdog (every 60s)
+ ```
+ 
++The worker can also be installed separately via `./scripts/install_worker.sh`. See [Worker Service](worker-service.md) for details.
++
+ ### 10. Flood-Backoff Persistence (`bridge/telegram_bridge.py`)
+ 
+ **Problem**: When the bridge hits a Telegram `FloodWaitError` with a long duration, launchd restarts compound the problem. Each restart triggers a new connection attempt, which increments Telegram's flood counter, escalating the wait from seconds to hours.
+diff --git a/docs/features/bridge-workflow-gaps.md b/docs/features/bridge-workflow-gaps.md
+index 6723a80a3..77f23524f 100644
+--- a/docs/features/bridge-workflow-gaps.md
++++ b/docs/features/bridge-workflow-gaps.md
+@@ -51,7 +51,7 @@ All output routing decisions are made by the nudge loop in `agent/agent_session_
+ 
+ ## Session Log Snapshots
+ 
+-The `bridge/session_logs.py` module saves structured JSON snapshots of session state at key lifecycle events. These snapshots provide a full audit trail for debugging and session recovery.
++The `agent/session_logs.py` module (canonically; re-exported from `bridge/session_logs.py` for backward compatibility) saves structured JSON snapshots of session state at key lifecycle events. These snapshots provide a full audit trail for debugging and session recovery.
+ 
+ ### Directory Structure
+ 
+@@ -93,7 +93,7 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
+ |---|---|
+ | `agent/agent_session_queue.py` | Nudge loop: output routing decisions (deliver or nudge) |
+ | `bridge/pipeline_state.py` | Pipeline state machine for stage tracking |
+-| `bridge/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` |
++| `agent/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` (canonical location; re-exported from `bridge/session_logs.py`) |
+ | `agent/agent_session_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |
+ | `models/agent_session.py` | `is_sdlc` (property, 2-check: stage_states then classification_type), `has_remaining_stages()`, `has_failed_stage()` (both delegate to PipelineStateMachine), `queued_steering_messages` |
+ | `CLAUDE.md` | Auto-continue rules documentation |
+diff --git a/docs/features/chat-dev-session-architecture.md b/docs/features/chat-dev-session-architecture.md
+index ef0ecb7d9..ef37d8cb7 100644
+--- a/docs/features/chat-dev-session-architecture.md
++++ b/docs/features/chat-dev-session-architecture.md
+@@ -303,8 +303,12 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
+ |------|---------|
+ | `models/agent_session.py` | AgentSession model with session_type discriminator |
+ | `agent/agent_definitions.py` | Agent registry including dev-session |
+-| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers; reads `session.project_config` at execution time |
++| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers; reads `session.project_config` at execution time; zero module-level bridge imports |
++| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `FileOutputHandler` (logs to `logs/worker/`) and `LoggingOutputHandler` implementations |
++| `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
++| `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |
+ | `agent/sdk_client.py` | SDK client; uses `project_key` identity checks for cross-repo detection |
++| `worker/__main__.py` | Standalone worker entry point (`python -m worker`); processes sessions without Telegram bridge |
+ 
+ ## Project Config Propagation
+ 
+diff --git a/docs/features/deployment.md b/docs/features/deployment.md
+index 1a1b64d22..73669d56d 100644
+--- a/docs/features/deployment.md
++++ b/docs/features/deployment.md
+@@ -138,8 +138,42 @@ The Telegram `/update` command remains available as a manual override for immedi
+ 
+ For more details on the update polling mechanism, see [Bridge Self-Healing](bridge-self-healing.md#10-update-polling-comvalorupdate).
+ 
++## Service Topology
++
++Each machine runs a subset of these four services:
++
++| Service | Plist | Purpose | Required On |
++|---------|-------|---------|-------------|
++| Bridge | `com.valor.bridge` | Telegram I/O + embedded worker | Bridge machines |
++| Worker | `com.valor.worker` | Standalone session processing | Dev workstations |
++| Watchdog | `com.valor.bridge-watchdog` | Health monitoring, crash recovery | Bridge machines |
++| Update | `com.valor.update` | Auto-pull from origin/main | All machines |
++
++**Dev workstations** run Worker + Update. Sessions are processed and output is written to `logs/worker/`.
++
++**Bridge machines** run Bridge + Watchdog + Update. The bridge starts an embedded worker and sends output via Telegram.
++
++Do not run both Bridge and standalone Worker on the same machine for the same project -- they would compete for the same session queue without coordination.
++
++### Worker Installation
++
++```bash
++# Install standalone worker (dev workstations)
++./scripts/install_worker.sh
++
++# Manage the worker
++./scripts/valor-service.sh worker-start
++./scripts/valor-service.sh worker-stop
++./scripts/valor-service.sh worker-restart
++./scripts/valor-service.sh worker-status
++./scripts/valor-service.sh worker-logs
++```
++
++See [Worker Service](worker-service.md) for full details.
++
+ ## See Also
+ 
+ - Run `/setup` for full machine configuration
+ - See `config/projects.example.json` for template
+ - Check `bridge/telegram_bridge.py` for routing logic
++- See [Worker Service](worker-service.md) for standalone worker details
+diff --git a/docs/features/reaction-semantics.md b/docs/features/reaction-semantics.md
+index 5b0efa5b1..0aa2e9f8f 100644
+--- a/docs/features/reaction-semantics.md
++++ b/docs/features/reaction-semantics.md
+@@ -8,7 +8,7 @@ The bridge uses Telegram emoji reactions as a signaling protocol for message lif
+ 
+ ## Reaction Constants
+ 
+-All constants are defined in `bridge/response.py`.
++All constants are canonically defined in `agent/constants.py` (re-exported from `bridge/response.py` for backward compatibility).
+ 
+ | Constant | Emoji | Meaning |
+ |----------|-------|---------|
+@@ -92,7 +92,8 @@ Three paths to silent text loss have been identified and guarded:
+ 
+ | File | Role |
+ |------|------|
+-| `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
++| `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` constants |
++| `bridge/response.py` | Re-exports reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
+ | `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
+ | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
+ | `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |
+diff --git a/docs/features/session-transcripts.md b/docs/features/session-transcripts.md
+index b0b6dd045..ff7a49de4 100644
+--- a/docs/features/session-transcripts.md
++++ b/docs/features/session-transcripts.md
+@@ -9,7 +9,7 @@
+ 
+ Session transcripts capture the full content of each agent session — every turn, tool call, and tool result — in append-only `.txt` files on disk. The `AgentSession` Popoto model stores queryable metadata about each session.
+ 
+-This replaces the sparse JSON snapshot approach in `bridge/session_logs.py`.
++This replaces the sparse JSON snapshot approach in `agent/session_logs.py` (previously `bridge/session_logs.py`, which now re-exports for backward compatibility).
+ 
+ ## Architecture
+ 
+diff --git a/docs/features/worker-service.md b/docs/features/worker-service.md
+new file mode 100644
+index 000000000..a4a4c725d
+--- /dev/null
++++ b/docs/features/worker-service.md
+@@ -0,0 +1,141 @@
++# Worker Service
++
++Standalone worker process for processing AgentSession records from Redis without requiring a Telegram connection.
++
++## Overview
++
++The worker extracts the session execution engine from the bridge monolith into an independently runnable service. Developer workstations run just the worker. Bridge machines run bridge + embedded worker (backward compatible). Future platform bridges (email, Slack) become thin I/O adapters that enqueue work to the same shared worker.
++
++## Architecture
++
++```
++                    ┌─────────────────────┐
++                    │   Redis (sessions)   │
++                    └──────┬──────────────┘
++                           │
++              ┌────────────┼────────────┐
++              │            │            │
++    ┌─────────▼──┐  ┌──────▼─────┐  ┌──▼──────────┐
++    │   Bridge    │  │  Standalone │  │  Future      │
++    │  (Telegram  │  │   Worker   │  │  Bridge      │
++    │   + worker) │  │            │  │  (email/etc) │
++    └─────────────┘  └────────────┘  └──────────────┘
++```
++
++### Entry Points
++
++- **Standalone worker**: `python -m worker` -- processes sessions, writes output to log files
++- **Bridge + embedded worker**: `python bridge/telegram_bridge.py` -- processes sessions, sends output via Telegram
++- **Both paths share**: `agent/agent_session_queue.py` for queue logic, `agent/output_handler.py` for output routing
++
++## OutputHandler Protocol
++
++All output destinations implement the `OutputHandler` protocol defined in `agent/output_handler.py`:
++
++```python
++class OutputHandler(Protocol):
++    async def send(self, chat_id: str, text: str, reply_to_msg_id: int, session: Any = None) -> None: ...
++    async def react(self, chat_id: str, msg_id: int, emoji: str | None = None) -> None: ...
++```
++
++### Built-in Implementations
++
++| Handler | Location | Purpose |
++|---------|----------|---------|
++| `FileOutputHandler` | `agent/output_handler.py` | Writes output to `logs/worker/{session_id}.log` |
++| `LoggingOutputHandler` | `agent/output_handler.py` | Logs output via Python logging (stderr) |
++| Telegram callbacks | `bridge/telegram_bridge.py` | Sends output via Telegram (registered at bridge startup) |
++
++### Registration
++
++```python
++from agent.agent_session_queue import register_callbacks
++from agent.output_handler import FileOutputHandler
++
++# New style: pass an OutputHandler instance
++register_callbacks("my-project", handler=FileOutputHandler())
++
++# Old style: pass raw callables (backward compatible)
++register_callbacks("my-project", send_callback=my_send, reaction_callback=my_react)
++```
++
++## CLI Usage
++
++```bash
++# Process all projects from projects.json
++python -m worker
++
++# Process a specific project only
++python -m worker --project valor
++
++# Validate config and exit (no processing)
++python -m worker --dry-run
++```
++
++## Service Management
++
++### Installation
++
++```bash
++./scripts/install_worker.sh
++```
++
++This installs `com.valor.worker` as a launchd service that auto-starts on boot.
++
++### Commands
++
++```bash
++./scripts/valor-service.sh worker-start     # Start the worker
++./scripts/valor-service.sh worker-stop      # Stop the worker
++./scripts/valor-service.sh worker-restart   # Restart the worker
++./scripts/valor-service.sh worker-status    # Check worker status
++./scripts/valor-service.sh worker-logs      # Tail worker logs
++```
++
++### Update Integration
++
++The `/update` command (`scripts/update/run.py`) automatically manages the worker service alongside the bridge:
++
++- **Full update** (`--full`): Installs worker plist, verifies worker starts (polls up to 10s)
++- **Cron update** (`scripts/remote-update.sh`): Bootout old worker, substitute paths, bootstrap new
++- **Python API**: `scripts/update/service.py` exposes `install_worker()`, `restart_worker()`, `get_worker_status()`, `is_worker_running()`
++
++The worker is installed after reflections and before stale session cleanup in the update sequence.
++
++### Logs
++
++| Log | Path | Content |
++|-----|------|---------|
++| Worker log | `logs/worker.log` | Worker lifecycle events, startup, shutdown |
++| Worker errors | `logs/worker_error.log` | Unhandled exceptions |
++| Session output | `logs/worker/{session_id}.log` | Per-session agent output (timestamps, reactions) |
++
++## Deployment Topology
++
++| Machine Type | Services | Output |
++|-------------|----------|--------|
++| Dev workstation | Worker only | File logs |
++| Bridge machine | Bridge + embedded worker | Telegram |
++| Both | Health monitor runs in worker process | Session recovery |
++
++### Constraint
++
++Do not run both the standalone worker and the bridge on the same machine for the same project. They would both start worker loops for the same chat_id without coordination (the `_active_workers` dict is process-local). Bridge machines should use the bridge's embedded worker.
++
++## Import Decoupling
++
++The session execution engine (`agent/agent_session_queue.py`) has zero module-level imports from `bridge/`. Constants and utilities were moved to shared locations:
++
++| What | Canonical Location | Re-export Location |
++|------|-------------------|-------------------|
++| `REACTION_SUCCESS/COMPLETE/ERROR` | `agent/constants.py` | `bridge/response.py` |
++| `save_session_snapshot()` | `agent/session_logs.py` | `bridge/session_logs.py` |
++
++All 7 lazy `bridge/` imports inside functions are guarded with `try/except` for graceful degradation when running without Telegram.
++
++## Related
++
++- [Agent Session Queue Reliability](agent-session-queue.md) -- queue architecture
++- [Agent Session Health Monitor](agent-session-health-monitor.md) -- health check loop
++- [Bridge Self-Healing](bridge-self-healing.md) -- crash recovery patterns
++- [Deployment](deployment.md) -- multi-instance configuration
+diff --git a/scripts/install_worker.sh b/scripts/install_worker.sh
+new file mode 100755
+index 000000000..3a6c9951e
+--- /dev/null
++++ b/scripts/install_worker.sh
+@@ -0,0 +1,74 @@
++#!/bin/bash
++# Install the standalone worker as a launchd service.
++# Usage: ./scripts/install_worker.sh
++#
++# The worker processes AgentSession records from Redis without Telegram.
++# Dev workstations run this instead of the bridge.
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
++PLIST_SRC="$PROJECT_DIR/com.valor.worker.plist"
++PLIST_DST="$HOME/Library/LaunchAgents/com.valor.worker.plist"
++LABEL="com.valor.worker"
++
++# Ensure logs directory exists
++mkdir -p "$PROJECT_DIR/logs"
++mkdir -p "$PROJECT_DIR/logs/worker"
++
++# Check source plist exists
++if [ ! -f "$PLIST_SRC" ]; then
++    echo "ERROR: Plist not found at $PLIST_SRC"
++    exit 1
++fi
++
++# Check .env exists
++if [ ! -f "$PROJECT_DIR/.env" ]; then
++    echo "ERROR: .env file not found. Copy .env.example and configure it."
++    exit 1
++fi
++
++# Check venv exists
++if [ ! -f "$PROJECT_DIR/.venv/bin/python" ]; then
++    echo "ERROR: Virtual environment not found at $PROJECT_DIR/.venv"
++    echo "Run: python3 -m venv $PROJECT_DIR/.venv && $PROJECT_DIR/.venv/bin/pip install -e $PROJECT_DIR"
++    exit 1
++fi
++
++# Verify worker can start (dry-run)
++echo "Verifying worker configuration..."
++if ! "$PROJECT_DIR/.venv/bin/python" -m worker --dry-run 2>&1; then
++    echo "ERROR: Worker dry-run failed. Fix configuration before installing."
++    exit 1
++fi
++
++# Unload current version if present
++if launchctl list | grep -q "$LABEL"; then
++    echo "Unloading existing $LABEL..."
++    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
++fi
++
++# Copy plist to LaunchAgents with path substitution
++echo "Installing plist to $PLIST_DST..."
++sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
++
++# Validate plist
++if ! plutil -lint "$PLIST_DST" > /dev/null; then
++    echo "ERROR: Generated plist is invalid"
++    exit 1
++fi
++
++# Load new version
++echo "Loading $LABEL..."
++launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
++
++echo ""
++echo "Worker service installed successfully."
++echo "  Logs: $PROJECT_DIR/logs/worker.log"
++echo "  Errors: $PROJECT_DIR/logs/worker_error.log"
++echo "  Output: $PROJECT_DIR/logs/worker/ (per-session)"
++echo ""
++echo "To check status: launchctl list | grep worker"
++echo "To stop: launchctl bootout gui/$(id -u)/$LABEL"
++echo "To run manually: python -m worker"
+diff --git a/scripts/remote-update.sh b/scripts/remote-update.sh
+index 5e007a115..4fe3c847f 100755
+--- a/scripts/remote-update.sh
++++ b/scripts/remote-update.sh
+@@ -72,6 +72,18 @@ if [ -f "$REFLECTIONS_PLIST" ]; then
+     fi
+ fi
+ 
++# ── Reload worker plist if present ───────────────────────────────────
++WORKER_PLIST="$PROJECT_DIR/com.valor.worker.plist"
++WORKER_DST="$HOME/Library/LaunchAgents/com.valor.worker.plist"
++WORKER_LABEL="com.valor.worker"
++if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
++    if launchctl list | grep -q "$WORKER_LABEL"; then
++        launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
++    fi
++    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g" "$WORKER_PLIST" > "$WORKER_DST"
++    launchctl bootstrap "gui/$(id -u)" "$WORKER_DST" 2>/dev/null || true
++fi
++
+ # ── Sync newsyslog log rotation config if changed ────────────────────
+ NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
+ NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
+diff --git a/scripts/update/run.py b/scripts/update/run.py
+index c3cb99ce7..d3a4197d3 100644
+--- a/scripts/update/run.py
++++ b/scripts/update/run.py
+@@ -592,6 +592,25 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
+         elif (project_dir / "com.valor.reflections.plist").exists():
+             result.warnings.append("Reflections plist install failed")
+ 
++        # Install/reload standalone worker service
++        if (project_dir / "com.valor.worker.plist").exists():
++            if service.install_worker(project_dir):
++                log("Worker service installed", v)
++                # Verify worker starts
++                import time as _time
++
++                for _ in range(5):
++                    _time.sleep(2)
++                    if service.is_worker_running():
++                        worker_pid = service.get_worker_pid()
++                        log(f"Worker running (PID: {worker_pid})", v)
++                        break
++                else:
++                    log("WARN: Worker not running after install", v, always=True)
++                    result.warnings.append("Worker not running after install")
++            else:
++                result.warnings.append("Worker plist install failed")
++
+     elif result.git_result and result.git_result.commit_count > 0:
+         # Cron mode: set restart flag instead of restarting
+         log("Setting restart flag for graceful restart...", v, always=True)
+diff --git a/scripts/update/service.py b/scripts/update/service.py
+index 53a2d0ac8..76e09c8e7 100644
+--- a/scripts/update/service.py
++++ b/scripts/update/service.py
+@@ -177,6 +177,119 @@ def is_reflections_installed() -> bool:
+         return False
+ 
+ 
++def get_worker_pid() -> int | None:
++    """Get PID of running worker process."""
++    try:
++        result = run_cmd(["pgrep", "-f", "python -m worker"])
++        if result.returncode == 0 and result.stdout.strip():
++            return int(result.stdout.strip().split()[0])
++    except Exception:
++        pass
++    try:
++        result = run_cmd(["pgrep", "-f", "python.*worker/__main__"])
++        if result.returncode == 0 and result.stdout.strip():
++            return int(result.stdout.strip().split()[0])
++    except Exception:
++        pass
++    return None
++
++
++def is_worker_running() -> bool:
++    """Check if standalone worker is running."""
++    return get_worker_pid() is not None
++
++
++def get_worker_status(project_dir: Path) -> ServiceStatus:
++    """Get current worker service status."""
++    pid = get_worker_pid()
++
++    status = ServiceStatus(
++        running=pid is not None,
++        pid=pid,
++    )
++
++    if pid:
++        try:
++            result = run_cmd(["ps", "-o", "etime=", "-p", str(pid)])
++            if result.returncode == 0:
++                status.uptime = result.stdout.strip()
++        except Exception:
++            pass
++
++        try:
++            result = run_cmd(["ps", "-o", "rss=", "-p", str(pid)])
++            if result.returncode == 0:
++                rss_kb = int(result.stdout.strip())
++                status.memory_mb = rss_kb / 1024
++        except Exception:
++            pass
++
++    try:
++        result = run_cmd(["launchctl", "list"])
++        status.launchd_installed = "com.valor.worker" in result.stdout
++    except Exception:
++        pass
++
++    return status
++
++
++def install_worker(project_dir: Path) -> bool:
++    """Install/reload worker plist. Returns True if successful."""
++    plist_src = project_dir / "com.valor.worker.plist"
++    plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.worker.plist"
++    label = "com.valor.worker"
++
++    if not plist_src.exists():
++        return False
++
++    try:
++        uid = os.getuid()
++        result = run_cmd(["launchctl", "list"])
++
++        # Unload current if loaded
++        if label in result.stdout:
++            run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
++
++        # Substitute paths and install
++        plist_dst.parent.mkdir(parents=True, exist_ok=True)
++        plist_text = plist_src.read_text()
++        plist_text = plist_text.replace("__PROJECT_DIR__", str(project_dir))
++        plist_text = plist_text.replace("__HOME_DIR__", str(Path.home()))
++        plist_dst.write_text(plist_text)
++
++        run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
++        return True
++    except Exception:
++        return False
++
++
++def restart_worker(project_dir: Path) -> bool:
++    """Restart worker service. Returns True if successful."""
++    service_script = project_dir / "scripts" / "valor-service.sh"
++
++    if not service_script.exists():
++        return False
++
++    try:
++        result = run_cmd(
++            [str(service_script), "worker-restart"],
++            cwd=project_dir,
++            timeout=60,
++        )
++        return result.returncode == 0
++    except Exception:
++        return False
++
++
++def is_worker_installed() -> bool:
++    """Check if worker service is installed in launchd."""
++    try:
++        result = run_cmd(["launchctl", "list"])
++        return "com.valor.worker" in result.stdout
++    except Exception:
++        return False
++
++
+ def is_update_cron_installed() -> bool:
+     """Check if update cron is installed."""
+     try:
+diff --git a/scripts/valor-service.sh b/scripts/valor-service.sh
+index d5ac5d809..7fc6f7114 100755
+--- a/scripts/valor-service.sh
++++ b/scripts/valor-service.sh
+@@ -14,6 +14,8 @@ UPDATE_PLIST_NAME="com.valor.update"
+ UPDATE_PLIST_PATH="$HOME/Library/LaunchAgents/${UPDATE_PLIST_NAME}.plist"
+ WATCHDOG_PLIST_NAME="com.valor.bridge-watchdog"
+ WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/${WATCHDOG_PLIST_NAME}.plist"
++WORKER_PLIST_NAME="com.valor.worker"
++WORKER_PLIST_PATH="$HOME/Library/LaunchAgents/${WORKER_PLIST_NAME}.plist"
+ LOG_DIR="$PROJECT_DIR/logs"
+ PID_FILE="$PROJECT_DIR/data/bridge.pid"
+ 
+@@ -21,11 +23,11 @@ PID_FILE="$PROJECT_DIR/data/bridge.pid"
+ mkdir -p "$LOG_DIR"
+ 
+ usage() {
+-    echo "Valor Bridge Service Manager"
++    echo "Valor Service Manager"
+     echo ""
+     echo "Usage: $0 <command>"
+     echo ""
+-    echo "Commands:"
++    echo "Bridge commands:"
+     echo "  start       Start the bridge service"
+     echo "  stop        Stop the bridge service"
+     echo "  restart     Restart the bridge service"
+@@ -35,6 +37,13 @@ usage() {
+     echo "  logs        Tail the bridge logs"
+     echo "  health      Check if bridge is healthy and responding"
+     echo ""
++    echo "Worker commands:"
++    echo "  worker-start    Start the standalone worker"
++    echo "  worker-stop     Stop the standalone worker"
++    echo "  worker-restart  Restart the standalone worker"
++    echo "  worker-status   Check worker status"
++    echo "  worker-logs     Tail the worker logs"
++    echo ""
+ }
+ 
+ get_pid() {
+@@ -471,6 +480,137 @@ tail_logs() {
+     tail -f "$LOG_DIR/bridge.log" "$LOG_DIR/bridge.error.log" 2>/dev/null
+ }
+ 
++# === Worker Management ===
++
++get_worker_pid() {
++    pgrep -f "python -m worker" 2>/dev/null || pgrep -f "python.*worker/__main__" 2>/dev/null || true
++}
++
++is_worker_running() {
++    local pid=$(get_worker_pid)
++    [ -n "$pid" ]
++}
++
++is_worker_launchd_loaded() {
++    launchctl list "$WORKER_PLIST_NAME" &>/dev/null
++}
++
++start_worker() {
++    echo "Starting standalone worker..."
++
++    # Rotate worker logs
++    rotate_log "$LOG_DIR/worker.log"
++    rotate_log "$LOG_DIR/worker_error.log"
++
++    mkdir -p "$LOG_DIR/worker"
++
++    if [ -f "$WORKER_PLIST_PATH" ]; then
++        if ! is_worker_launchd_loaded; then
++            launchctl load "$WORKER_PLIST_PATH"
++        else
++            launchctl kickstart "gui/$(id -u)/$WORKER_PLIST_NAME"
++        fi
++    else
++        # Fallback: manual start
++        cd "$PROJECT_DIR"
++        nohup "$VENV/bin/python" -m worker \
++            >> "$LOG_DIR/worker.log" \
++            2>> "$LOG_DIR/worker_error.log" &
++    fi
++
++    sleep 2
++    if is_worker_running; then
++        local pid=$(get_worker_pid)
++        echo "Worker started (PID: $pid)"
++    else
++        echo "Failed to start worker. Check logs: $LOG_DIR/worker_error.log"
++        return 1
++    fi
++}
++
++stop_worker() {
++    local pid=$(get_worker_pid)
++
++    if [ -z "$pid" ]; then
++        echo "Worker is not running"
++        return 0
++    fi
++
++    echo "Stopping worker (PID: $pid)..."
++
++    if is_worker_launchd_loaded; then
++        launchctl unload "$WORKER_PLIST_PATH" 2>/dev/null || true
++        sleep 2
++        if ! is_worker_running; then
++            echo "Worker stopped (via launchd)"
++            return 0
++        fi
++    fi
++
++    kill "$pid" 2>/dev/null || true
++
++    for i in {1..10}; do
++        if ! is_worker_running; then
++            echo "Worker stopped"
++            return 0
++        fi
++        sleep 1
++    done
++
++    echo "Force killing worker..."
++    kill -9 "$pid" 2>/dev/null || true
++    echo "Worker stopped (forced)"
++}
++
++restart_worker() {
++    echo "Restarting worker..."
++
++    if is_worker_launchd_loaded; then
++        launchctl kickstart -k "gui/$(id -u)/$WORKER_PLIST_NAME"
++        sleep 2
++        if is_worker_running; then
++            local pid=$(get_worker_pid)
++            echo "Worker restarted (PID: $pid)"
++        else
++            echo "Worker restart failed. Check logs: $LOG_DIR/worker_error.log"
++            return 1
++        fi
++    else
++        stop_worker
++        sleep 1
++        start_worker
++    fi
++}
++
++status_worker() {
++    local pid=$(get_worker_pid)
++
++    if [ -n "$pid" ]; then
++        echo "Worker Status: RUNNING"
++        echo "PID: $pid"
++        echo "Uptime: $(ps -o etime= -p $pid 2>/dev/null | xargs)"
++        echo "Memory: $(ps -o rss= -p $pid 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')"
++
++        if launchctl list | grep -q "$WORKER_PLIST_NAME"; then
++            echo "Launchd: INSTALLED (auto-start enabled)"
++        else
++            echo "Launchd: NOT INSTALLED (manual start only)"
++        fi
++        return 0
++    else
++        echo "Worker Status: STOPPED"
++        if launchctl list | grep -q "$WORKER_PLIST_NAME"; then
++            echo "Launchd: INSTALLED (will auto-start)"
++        fi
++        return 1
++    fi
++}
++
++tail_worker_logs() {
++    echo "Tailing worker logs (Ctrl+C to stop)..."
++    tail -f "$LOG_DIR/worker.log" "$LOG_DIR/worker_error.log" 2>/dev/null
++}
++
+ # Main
+ case "${1:-}" in
+     start)
+@@ -497,6 +637,21 @@ case "${1:-}" in
+     logs)
+         tail_logs
+         ;;
++    worker-start)
++        start_worker
++        ;;
++    worker-stop)
++        stop_worker
++        ;;
++    worker-restart)
++        restart_worker
++        ;;
++    worker-status)
++        status_worker
++        ;;
++    worker-logs)
++        tail_worker_logs
++        ;;
+     *)
+         usage
+         exit 1
+diff --git a/tests/unit/test_output_handler.py b/tests/unit/test_output_handler.py
+new file mode 100644
+index 000000000..0b9fe1e57
+--- /dev/null
++++ b/tests/unit/test_output_handler.py
+@@ -0,0 +1,188 @@
++"""Tests for agent/output_handler.py.
++
++Tests the OutputHandler protocol, FileOutputHandler, and LoggingOutputHandler
++implementations.
++"""
++
++import asyncio
++import tempfile
++from pathlib import Path
++
++import pytest
++
++from agent.output_handler import (
++    FileOutputHandler,
++    LoggingOutputHandler,
++    OutputHandler,
++)
++
++
++class TestOutputHandlerProtocol:
++    """Test OutputHandler protocol compliance."""
++
++    def test_file_output_handler_is_output_handler(self):
++        """FileOutputHandler must satisfy the OutputHandler protocol."""
++        handler = FileOutputHandler()
++        assert isinstance(handler, OutputHandler)
++
++    def test_logging_output_handler_is_output_handler(self):
++        """LoggingOutputHandler must satisfy the OutputHandler protocol."""
++        handler = LoggingOutputHandler()
++        assert isinstance(handler, OutputHandler)
++
++    def test_protocol_is_runtime_checkable(self):
++        """OutputHandler should be usable with isinstance checks."""
++
++        class BadHandler:
++            pass
++
++        assert not isinstance(BadHandler(), OutputHandler)
++
++    def test_custom_handler_satisfies_protocol(self):
++        """A custom class with send() and react() should satisfy the protocol."""
++
++        class CustomHandler:
++            async def send(self, chat_id, text, reply_to_msg_id, session=None):
++                pass
++
++            async def react(self, chat_id, msg_id, emoji=None):
++                pass
++
++        assert isinstance(CustomHandler(), OutputHandler)
++
++
++class TestFileOutputHandler:
++    """Test FileOutputHandler writes output to files."""
++
++    def test_creates_log_directory(self):
++        """Handler should create the log directory if it doesn't exist."""
++        with tempfile.TemporaryDirectory() as tmp:
++            log_dir = Path(tmp) / "worker_logs"
++            handler = FileOutputHandler(log_dir=log_dir)
++            assert log_dir.exists()
++
++    def test_send_writes_to_file(self):
++        """send() should write text to a session-specific log file."""
++        with tempfile.TemporaryDirectory() as tmp:
++            log_dir = Path(tmp)
++            handler = FileOutputHandler(log_dir=log_dir)
++
++            class FakeSession:
++                session_id = "test-session-123"
++
++            asyncio.run(
++                handler.send(
++                    chat_id="chat-1",
++                    text="Hello from worker",
++                    reply_to_msg_id=42,
++                    session=FakeSession(),
++                )
++            )
++
++            log_file = log_dir / "test-session-123.log"
++            assert log_file.exists()
++            content = log_file.read_text()
++            assert "Hello from worker" in content
++            assert "chat=chat-1" in content
++            assert "reply_to=42" in content
++
++    def test_send_empty_text_noop(self):
++        """send() with empty text should not create a file."""
++        with tempfile.TemporaryDirectory() as tmp:
++            log_dir = Path(tmp)
++            handler = FileOutputHandler(log_dir=log_dir)
++
++            asyncio.run(
++                handler.send(
++                    chat_id="chat-1",
++                    text="",
++                    reply_to_msg_id=42,
++                )
++            )
++
++            # No files should have been created (except the dir itself)
++            assert list(log_dir.glob("*.log")) == []
++
++    def test_send_falls_back_to_chat_id(self):
++        """When session has no session_id, use chat_id as filename."""
++        with tempfile.TemporaryDirectory() as tmp:
++            log_dir = Path(tmp)
++            handler = FileOutputHandler(log_dir=log_dir)
++
++            asyncio.run(
++                handler.send(
++                    chat_id="fallback-chat",
++                    text="Test output",
++                    reply_to_msg_id=1,
++                )
++            )
++
++            log_file = log_dir / "fallback-chat.log"
++            assert log_file.exists()
++
++    def test_send_appends_multiple(self):
++        """Multiple send() calls should append to the same file."""
++        with tempfile.TemporaryDirectory() as tmp:
++            log_dir = Path(tmp)
++            handler = FileOutputHandler(log_dir=log_dir)
++
++            class FakeSession:
++                session_id = "multi-test"
++
++            for msg in ["First", "Second", "Third"]:
++                asyncio.run(
++                    handler.send("chat-1", msg, 1, FakeSession())
++                )
++
++            log_file = log_dir / "multi-test.log"
++            content = log_file.read_text()
++            assert "First" in content
++            assert "Second" in content
++            assert "Third" in content
++
++    def test_send_includes_timestamp(self):
++        """Output should include a human-readable timestamp."""
++        with tempfile.TemporaryDirectory() as tmp:
++            log_dir = Path(tmp)
++            handler = FileOutputHandler(log_dir=log_dir)
++
++            asyncio.run(handler.send("chat-1", "timestamped output", 1))
++
++            log_file = log_dir / "chat-1.log"
++            content = log_file.read_text()
++            # Should contain a UTC timestamp in YYYY-MM-DD HH:MM:SS format
++            import re
++
++            assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", content)
++
++    def test_react_writes_to_file(self):
++        """react() should log the reaction to a file."""
++        with tempfile.TemporaryDirectory() as tmp:
++            log_dir = Path(tmp)
++            handler = FileOutputHandler(log_dir=log_dir)
++
++            asyncio.run(handler.react("chat-1", 42, "\U0001f44d"))
++
++            log_file = log_dir / "chat-1.log"
++            assert log_file.exists()
++            content = log_file.read_text()
++            assert "REACTION" in content
++
++
++class TestLoggingOutputHandler:
++    """Test LoggingOutputHandler logs via Python logging."""
++
++    def test_send_does_not_raise(self):
++        """send() should not raise exceptions."""
++        handler = LoggingOutputHandler()
++        asyncio.run(handler.send("chat-1", "test message", 1))
++
++    def test_send_empty_noop(self):
++        """send() with empty text should be a no-op."""
++        handler = LoggingOutputHandler()
++        asyncio.run(handler.send("chat-1", "", 1))
++
++    def test_react_does_not_raise(self):
++        """react() should not raise exceptions."""
++        handler = LoggingOutputHandler()
++        asyncio.run(handler.react("chat-1", 42, "\U0001f44d"))
+diff --git a/tests/unit/test_worker_entry.py b/tests/unit/test_worker_entry.py
+new file mode 100644
+index 000000000..c34baa406
+--- /dev/null
++++ b/tests/unit/test_worker_entry.py
+@@ -0,0 +1,194 @@
++"""Tests for the standalone worker entry point (worker/__main__.py).
++
++Tests configuration loading, argument parsing, and basic startup logic.
++"""
++
++import subprocess
++import sys
++from pathlib import Path
++from unittest.mock import patch
++
++import pytest
++
++
++class TestWorkerImport:
++    """Test that the worker module can be imported."""
++
++    def test_worker_package_importable(self):
++        """worker package should be importable."""
++        import worker
++
++        assert worker.__doc__ is not None
++
++    def test_worker_main_importable(self):
++        """worker.__main__ should be importable."""
++        from worker.__main__ import main, _parse_args, _load_projects
++
++        assert callable(main)
++        assert callable(_parse_args)
++        assert callable(_load_projects)
++
++
++class TestWorkerArgParsing:
++    """Test CLI argument parsing."""
++
++    def test_default_args(self):
++        """Default args: no project filter, no dry-run."""
++        from worker.__main__ import _parse_args
++
++        with patch("sys.argv", ["worker"]):
++            args = _parse_args()
++        assert args.project is None
++        assert args.dry_run is False
++
++    def test_project_flag(self):
++        """--project flag should set the project filter."""
++        from worker.__main__ import _parse_args
++
++        with patch("sys.argv", ["worker", "--project", "valor"]):
++            args = _parse_args()
++        assert args.project == "valor"
++
++    def test_dry_run_flag(self):
++        """--dry-run flag should enable dry run mode."""
++        from worker.__main__ import _parse_args
++
++        with patch("sys.argv", ["worker", "--dry-run"]):
++            args = _parse_args()
++        assert args.dry_run is True
++
++
++class TestWorkerDryRun:
++    """Test worker dry-run mode via subprocess."""
++
++    def test_dry_run_exits_cleanly(self):
++        """python -m worker --dry-run should exit with code 0 if config is valid."""
++        result = subprocess.run(
++            [sys.executable, "-m", "worker", "--dry-run"],
++            cwd=str(Path(__file__).parent.parent.parent),
++            capture_output=True,
++            text=True,
++            timeout=30,
++        )
++        # May exit 0 (config valid) or 1 (no Redis / no config)
++        # The important thing is it doesn't crash with an unhandled exception
++        assert result.returncode in (0, 1), (
++            f"Unexpected exit code {result.returncode}: {result.stderr}"
++        )
++        # Should contain "worker" in output somewhere
++        combined = result.stdout + result.stderr
++        assert "worker" in combined.lower(), (
++            f"Expected 'worker' in output, got: {combined[:500]}"
++        )
++
++    def test_dry_run_with_bad_project(self):
++        """--project with nonexistent project should exit with error."""
++        result = subprocess.run(
++            [sys.executable, "-m", "worker", "--dry-run", "--project", "nonexistent_project_xyz"],
++            cwd=str(Path(__file__).parent.parent.parent),
++            capture_output=True,
++            text=True,
++            timeout=30,
++        )
++        assert result.returncode != 0
++
++
++class TestRegisterCallbacksWithHandler:
++    """Test that register_callbacks accepts OutputHandler instances."""
++
++    def test_register_with_handler(self):
++        """register_callbacks should accept an OutputHandler via handler kwarg."""
++        from agent.agent_session_queue import register_callbacks, _send_callbacks, _reaction_callbacks
++        from agent.output_handler import FileOutputHandler
++
++        handler = FileOutputHandler()
++        register_callbacks("test-project-handler", handler=handler)
++
++        assert "test-project-handler" in _send_callbacks
++        assert "test-project-handler" in _reaction_callbacks
++
++        # Clean up
++        del _send_callbacks["test-project-handler"]
++        del _reaction_callbacks["test-project-handler"]
++
++    def test_register_with_raw_callables(self):
++        """register_callbacks should still accept raw callables (backward compat)."""
++        from agent.agent_session_queue import register_callbacks, _send_callbacks, _reaction_callbacks
++
++        async def fake_send(chat_id, text, reply_to, session):
++            pass
++
++        async def fake_react(chat_id, msg_id, emoji):
++            pass
++
++        register_callbacks("test-project-raw", fake_send, fake_react)
++
++        assert "test-project-raw" in _send_callbacks
++        assert "test-project-raw" in _reaction_callbacks
++
++        # Clean up
++        del _send_callbacks["test-project-raw"]
++        del _reaction_callbacks["test-project-raw"]
++
++    def test_register_rejects_none_handler_and_none_callbacks(self):
++        """register_callbacks should reject when neither handler nor callbacks provided."""
++        from agent.agent_session_queue import register_callbacks
++
++        with pytest.raises(ValueError, match="send_callback"):
++            register_callbacks("test-project-none")
++
++
++class TestImportDecoupling:
++    """Test that agent_session_queue has no module-level bridge imports."""
++
++    def test_no_module_level_bridge_imports(self):
++        """agent/agent_session_queue.py should not import from bridge/ at module level."""
++        source = (
++            Path(__file__).parent.parent.parent / "agent" / "agent_session_queue.py"
++        ).read_text()
++
++        # Check only the top-level imports (before the first class/function definition)
++        lines = source.split("\n")
++        in_imports = True
++        for line in lines:
++            stripped = line.strip()
++            # Once we hit a function/class def, we're past module-level imports
++            if stripped.startswith("def ") or stripped.startswith("class ") or stripped.startswith("async def "):
++                if not stripped.startswith("def _"):
++                    # Could be a top-level function
++                    pass
++                in_imports = False
++                continue
++
++            if in_imports and stripped.startswith("from bridge."):
++                pytest.fail(
++                    f"Module-level bridge import found: {stripped}"
++                )
++
++    def test_reaction_constants_importable_from_agent(self):
++        """REACTION_* constants should be importable from agent.constants."""
++        from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
++
++        assert REACTION_SUCCESS == "\U0001f44d"
++        assert REACTION_COMPLETE == "\U0001f3c6"
++        assert REACTION_ERROR == "\U0001f631"
++
++    def test_reaction_re_exports_from_bridge(self):
++        """REACTION_* should still be importable from bridge.response (backward compat)."""
++        from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
++
++        assert REACTION_SUCCESS == "\U0001f44d"
++        assert REACTION_COMPLETE == "\U0001f3c6"
++        assert REACTION_ERROR == "\U0001f631"
++
++    def test_session_logs_importable_from_agent(self):
++        """save_session_snapshot should be importable from agent.session_logs."""
++        from agent.session_logs import save_session_snapshot
++
++        assert callable(save_session_snapshot)
++
++    def test_session_logs_re_exports_from_bridge(self):
++        """save_session_snapshot should still be importable from bridge.session_logs."""
++        from bridge.session_logs import save_session_snapshot
++
++        assert callable(save_session_snapshot)
+diff --git a/worker/__init__.py b/worker/__init__.py
+new file mode 100644
+index 000000000..bf4e97c6e
+--- /dev/null
++++ b/worker/__init__.py
+@@ -0,0 +1,6 @@
++"""
++Standalone worker service for processing AgentSession records from Redis.
++
++Run with: python -m worker
++See worker/__main__.py for entry point and CLI options.
++"""
+diff --git a/worker/__main__.py b/worker/__main__.py
+new file mode 100644
+index 000000000..d0f954778
+--- /dev/null
++++ b/worker/__main__.py
+@@ -0,0 +1,219 @@
++"""
++Standalone worker entry point for processing AgentSession records.
++
++Processes sessions from Redis without requiring a Telegram connection.
++Developer workstations run just the worker. Bridge machines run
++bridge + embedded worker (backward compatible).
++
++Usage:
++    python -m worker                    # Process all projects
++    python -m worker --project valor    # Process one project only
++    python -m worker --dry-run          # Validate config and exit
++"""
++
++from __future__ import annotations
++
++import argparse
++import asyncio
++import logging
++import os
++import signal
++import sys
++from pathlib import Path
++
++logger = logging.getLogger("worker")
++
++
++def _configure_logging() -> None:
++    """Set up logging for the standalone worker."""
++    log_dir = Path(__file__).parent.parent / "logs"
++    log_dir.mkdir(parents=True, exist_ok=True)
++
++    log_file = log_dir / "worker.log"
++
++    handlers: list[logging.Handler] = [
++        logging.StreamHandler(sys.stderr),
++        logging.FileHandler(str(log_file)),
++    ]
++
++    logging.basicConfig(
++        level=logging.INFO,
++        format="%(asctime)s %(name)s %(levelname)s %(message)s",
++        handlers=handlers,
++    )
++
++
++def _parse_args() -> argparse.Namespace:
++    """Parse CLI arguments."""
++    parser = argparse.ArgumentParser(
++        prog="worker",
++        description="Standalone worker for processing AgentSession records from Redis.",
++    )
++    parser.add_argument(
++        "--project",
++        type=str,
++        default=None,
++        help="Process only this project key (default: all projects from config).",
++    )
++    parser.add_argument(
++        "--dry-run",
++        action="store_true",
++        help="Load config, verify Redis connection, then exit without processing.",
++    )
++    return parser.parse_args()
++
++
++def _load_projects(project_filter: str | None = None) -> dict:
++    """Load project configurations from projects.json.
++
++    Uses bridge.routing.load_config() which handles path resolution
++    (iCloud, env var override, fallback to config/projects.json).
++
++    Args:
++        project_filter: If set, return only this project. None returns all.
++
++    Returns:
++        Dict of project_key -> project_config.
++    """
++    try:
++        from bridge.routing import load_config
++
++        config = load_config()
++    except ImportError:
++        logger.error(
++            "Could not import bridge.routing.load_config. "
++            "Ensure the project root is on PYTHONPATH."
++        )
++        sys.exit(1)
++
++    all_projects = config.get("projects", {})
++
++    if project_filter:
++        if project_filter not in all_projects:
++            logger.error(
++                f"Project '{project_filter}' not found in config. "
++                f"Available: {', '.join(all_projects.keys())}"
++            )
++            sys.exit(1)
++        return {project_filter: all_projects[project_filter]}
++
++    return all_projects
++
++
++async def _run_worker(projects: dict, dry_run: bool = False) -> None:
++    """Main worker coroutine.
++
++    1. Registers FileOutputHandler for each project
++    2. Recovers interrupted sessions
++    3. Starts worker loops per project
++    4. Starts health monitor
++    5. Waits for shutdown signal
++    """
++    from agent.agent_session_queue import (
++        _agent_session_health_loop,
++        _ensure_worker,
++        _recover_interrupted_agent_sessions_startup,
++        register_callbacks,
++    )
++    from agent.output_handler import FileOutputHandler
++
++    handler = FileOutputHandler()
++
++    # Verify Redis is reachable by attempting to list sessions
++    try:
++        from models.agent_session import AgentSession
++
++        _ = list(AgentSession.query.filter(status="pending"))
++        logger.info("Redis connection verified")
++    except Exception as e:
++        logger.error(f"Redis connection failed: {e}")
++        sys.exit(1)
++
++    if dry_run:
++        logger.info(
++            f"Dry run: config loaded with {len(projects)} project(s): "
++            f"{', '.join(projects.keys())}. Worker ready."
++        )
++        return
++
++    # Register FileOutputHandler for each project
++    for project_key in projects:
++        register_callbacks(project_key, handler=handler)
++        logger.info(f"[{project_key}] Registered FileOutputHandler")
++
++    # Recover any sessions that were running when the previous process died
++    recovered = _recover_interrupted_agent_sessions_startup()
++    if recovered:
++        logger.info(f"Recovered {recovered} interrupted session(s)")
++
++    # Start worker loops -- one per project's known chat_ids
++    # Workers are started on-demand by _ensure_worker when sessions are enqueued.
++    # For startup, we need to kick workers for any pending sessions.
++    from models.agent_session import AgentSession
++
++    pending_sessions = list(AgentSession.query.filter(status="pending"))
++    started_chats: set[str] = set()
++    for session in pending_sessions:
++        chat_id = session.chat_id or session.project_key
++        if chat_id not in started_chats:
++            _ensure_worker(chat_id)
++            started_chats.add(chat_id)
++
++    logger.info(
++        f"Worker started: {len(projects)} project(s), "
++        f"{len(pending_sessions)} pending session(s), "
++        f"{len(started_chats)} worker loop(s)"
++    )
++
++    # Start health monitor as background task
++    health_task = asyncio.create_task(_agent_session_health_loop())
++
++    # Set up graceful shutdown
++    shutdown_event = asyncio.Event()
++
++    def _signal_handler(sig, frame):
++        logger.info(f"Received signal {sig}, shutting down gracefully...")
++        shutdown_event.set()
++
++    signal.signal(signal.SIGTERM, _signal_handler)
++    signal.signal(signal.SIGINT, _signal_handler)
++
++    # Wait for shutdown
++    await shutdown_event.wait()
++
++    # Cancel health monitor
++    health_task.cancel()
++    try:
++        await health_task
++    except asyncio.CancelledError:
++        pass
++
++    logger.info("Worker shutdown complete")
++
++
++def main() -> None:
++    """Entry point for python -m worker."""
++    _configure_logging()
++    args = _parse_args()
++
++    logger.info("Starting standalone worker...")
++
++    # Ensure project root is on path
++    project_root = str(Path(__file__).parent.parent)
++    if project_root not in sys.path:
++        sys.path.insert(0, project_root)
++
++    # Set environment hint that we're running as standalone worker
++    os.environ.setdefault("VALOR_WORKER_MODE", "standalone")
++
++    projects = _load_projects(args.project)
++
++    if not projects:
++        logger.error("No projects found in configuration. Exiting.")
++        sys.exit(1)
++
++    asyncio.run(_run_worker(projects, dry_run=args.dry_run))
++
++
++if __name__ == "__main__":
++    main()

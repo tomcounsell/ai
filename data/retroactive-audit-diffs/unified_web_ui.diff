@@ -1,0 +1,2837 @@
+diff --git a/.gitignore b/.gitignore
+index 567296aad..d23f0a94d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -178,6 +178,7 @@ tests/test_results_*.json
+ # Huey runtime files
+ huey.pid
+ data/
++!ui/data/
+ # Byte-compiled / optimized / DLL files
+ __pycache__/
+ *.py[cod]
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 56d18a774..5643bd90a 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -73,6 +73,7 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
+ | `pytest tests/integration/` | Run integration tests only |
+ | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
+ | `python -m ruff format . && python -m ruff check .` | Format and lint |
++| `python -m ui.app` | Start web UI server on localhost:8500 |
+ | `python scripts/reflections.py` | Run reflections maintenance manually |
+ | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
+ | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 31cf882e2..72c7a0d35 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -63,12 +63,14 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
+ | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage | Shipped |
+ | [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 15-step daily maintenance | Shipped |
++| [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
+ | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
+ | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
+ | [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
+ | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
+ | [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
+ | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
++| [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
+ | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
+ | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
+ | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
+@@ -97,6 +99,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) | Branch-side retry for flaky tests, deterministic junitxml baseline parsing, and completeness validation for test classification | Shipped |
+ | [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
+ | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
++| [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
+ | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
+ | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
+ | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
+diff --git a/docs/features/reflections-dashboard.md b/docs/features/reflections-dashboard.md
+new file mode 100644
+index 000000000..9a3a75628
+--- /dev/null
++++ b/docs/features/reflections-dashboard.md
+@@ -0,0 +1,68 @@
++# Reflections Dashboard
++
++Web dashboard for monitoring the reflection scheduler's execution, history, and ignore patterns.
++
++## Overview
++
++The reflections dashboard at `/reflections/` provides visibility into all registered reflections declared in `config/reflections.yaml`, their execution state from Redis, and historical run data.
++
++## Views
++
++### Overview (`/reflections/`)
++- Grid of all registered reflections with live status from Redis
++- Each row shows: name, description, status badge, last run time, duration, run count, interval, next due
++- Failed runs display error messages inline
++- Auto-refreshes via HTMX every 10 seconds
++- Links to run history for reflections with historical data
++
++### Schedule (`/reflections/schedule/`)
++- All reflections sorted by next-due timestamp (soonest first)
++- Shows overdue reflections highlighted in red
++- Displays relative time until next execution
++
++### Run History (`/reflections/{name}/history/`)
++- Paginated list of historical runs for a specific reflection (newest first)
++- Each run shows: index, status, timestamp, duration, error preview
++- Links to detail view for each run
++
++### Run Detail (`/reflections/{name}/history/{index}/`)
++- Full detail for a single run including error text and log content
++- Log viewer with lazy-load via HTMX partial endpoint
++
++### Ignore Patterns (`/reflections/ignores/`)
++- Active ignore patterns with pattern string, reason, creation date, expiry, and time remaining
++- Sorted by expiry (soonest first)
++
++## Data Sources
++
++- **Registry**: `config/reflections.yaml` - names, descriptions, intervals, execution types
++- **State**: `Reflection` Popoto model in Redis - last_run, next_due, status, run_count, error
++- **History**: `Reflection.run_history` ListField - capped at 200 entries per reflection
++- **Ignores**: `ReflectionIgnore` Popoto model in Redis - active patterns with TTL
++
++## Model Extension
++
++The `Reflection` model was extended with a `run_history` ListField that stores serialized run dicts:
++
++```python
++{
++    "timestamp": 1711000000.0,  # Unix timestamp
++    "status": "success",         # success | error
++    "duration": 1.5,             # seconds
++    "error": None,               # error message or None
++}
++```
++
++`mark_completed()` internally appends to `run_history` on each call. The list is capped at 200 entries (oldest trimmed). The method signature is unchanged -- existing callers require no modification.
++
++## HTMX Endpoints
++
++| Endpoint | Trigger | Purpose |
++|----------|---------|---------|
++| `/_partials/status-grid/` | `every 10s` | Refresh overview grid |
++| `/_partials/log/{name}/{index}/` | Click | Load log content lazily |
++
++## Related
++
++- [Web UI Infrastructure](web-ui.md) - Shared infrastructure
++- [Reflections](reflections.md) - The reflection scheduler itself
+diff --git a/docs/features/sdlc-observer.md b/docs/features/sdlc-observer.md
+new file mode 100644
+index 000000000..11f956e1f
+--- /dev/null
++++ b/docs/features/sdlc-observer.md
+@@ -0,0 +1,69 @@
++# SDLC Observer
++
++Web dashboard for real-time visibility into active development pipelines, stage transitions, and outcomes.
++
++## Overview
++
++The SDLC Observer at `/sdlc/` shows all `AgentSession` instances that have SDLC stage tracking enabled (`stage_states` field set). It provides a visual pipeline view with stage indicators, event timelines, and links to related artifacts.
++
++## Views
++
++### Active Pipelines (`/sdlc/`)
++- Cards for each in-progress pipeline with:
++  - Display name (slug or truncated message)
++  - Status badge
++  - Horizontal stage indicator showing progress through ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
++  - Links to GitHub issue, PR, and detail view
++  - Branch name, start time, running duration
++- Auto-refreshes via HTMX polling every 5 seconds
++- Recent completions table below active pipelines
++
++### Pipeline Detail (`/sdlc/{job_id}/`)
++- Stat boxes: status, current stage, duration, session type
++- Full stage progress indicator
++- Details table: job ID, session ID, project, branch, slug, timestamps
++- Links section: issue URL, plan URL, PR URL
++- Event timeline from session history
++- Original message text
++
++### Completed Pipelines (`/sdlc/completed/`)
++- Table of recently completed/failed pipelines
++- Each row shows: name, status, stage indicator, duration, completion time, links
++
++## Data Layer
++
++### Pydantic Models
++
++- **`StageState`**: Typed representation of a single SDLC stage status (pending, in_progress, completed, failed, skipped)
++- **`PipelineProgress`**: Complete pipeline view with stages, events, links, and computed properties (duration, is_active, display_name)
++- **`PipelineEvent`**: Single event from session history with role and text
++
++### Parsing
++
++The data layer deserializes:
++- `AgentSession.stage_states` (JSON string or dict) into `StageState` objects
++- `AgentSession.history` (list of `[role] text` strings) into `PipelineEvent` objects
++
++Handles gracefully: None values, empty strings, malformed JSON, nested status dicts.
++
++## HTMX Endpoints
++
++| Endpoint | Trigger | Purpose |
++|----------|---------|---------|
++| `/_partials/active/` | `every 5s` | Refresh active pipeline cards |
++| `/_partials/stage-indicator/{job_id}/` | `every 5s` | Refresh single pipeline stage indicator |
++
++## Stage Indicator
++
++The horizontal stage indicator is a pure HTML/CSS component showing all 8 SDLC stages as labeled dots connected by arrows:
++
++- **Completed**: Green background
++- **In progress**: Yellow background with pulse animation
++- **Failed**: Red background
++- **Pending**: Gray background
++
++## Related
++
++- [Web UI Infrastructure](web-ui.md) - Shared infrastructure
++- [Agent Session Model](agent-session-model.md) - The underlying data model
++- [Goal Gates](goal-gates.md) - Stage enforcement in the pipeline
+diff --git a/docs/features/web-ui.md b/docs/features/web-ui.md
+new file mode 100644
+index 000000000..8c6c37a97
+--- /dev/null
++++ b/docs/features/web-ui.md
+@@ -0,0 +1,99 @@
++# Web UI Infrastructure
++
++Localhost web application providing observability dashboards for the Valor AI system.
++
++## Overview
++
++The web UI runs as a standalone FastAPI server on `localhost:8500`, serving HTML dashboards with HTMX for interactivity. It provides read-only visibility into system state without requiring SSH or manual inspection.
++
++## Quick Start
++
++```bash
++# Start the UI server
++python -m ui.app
++
++# Or with a custom port
++UI_PORT=8600 python -m ui.app
++```
++
++Then open `http://localhost:8500/` in a browser.
++
++## Architecture
++
++```
++Browser -> FastAPI (localhost:8500)
++             |-> Jinja2 Templates (server-side HTML)
++             |-> HTMX (client-side interactivity, CDN)
++             |-> Popoto Models (read-only Redis queries)
++```
++
++### Key Design Decisions
++
++- **FastAPI + Jinja2 + HTMX**: Server-side rendered HTML with HTMX for drill-down and polling. No JavaScript framework, no npm, no build step.
++- **Sync route handlers**: All route handlers use `def` (not `async def`) so FastAPI runs them in a threadpool, avoiding event loop blocking from Popoto's synchronous Redis calls.
++- **Read-only**: The UI only reads data. No write operations, no action buttons, no mutations.
++- **Localhost only**: Binds to `127.0.0.1`, never `0.0.0.0`. No authentication needed.
++- **Dark theme**: Terminal-aesthetic CSS with information-dense layouts and monospace typography.
++
++## Directory Structure
++
++```
++ui/
++  __init__.py
++  __main__.py          # python -m ui.app entrypoint
++  app.py               # FastAPI app factory, Jinja2 config, filters
++  routers/
++    __init__.py
++    reflections.py     # Reflections dashboard routes
++    sdlc.py            # SDLC observer routes
++  data/
++    __init__.py
++    reflections.py     # Data access for reflection state
++    sdlc.py            # Data access + Pydantic serializers
++  templates/
++    base.html          # Shared layout: nav, HTMX, CSS
++    index.html         # Dashboard listing
++    error.html         # Error page
++    reflections/       # Reflections dashboard templates
++    sdlc/              # SDLC observer templates
++  static/
++    style.css          # Dark theme CSS
++```
++
++## Available Dashboards
++
++| Dashboard | URL | Description |
++|-----------|-----|-------------|
++| Root | `/` | Dashboard listing with descriptions |
++| [Reflections](reflections-dashboard.md) | `/reflections/` | Scheduled task execution and history |
++| [SDLC Observer](sdlc-observer.md) | `/sdlc/` | Development pipeline tracking |
++
++## Adding a New Dashboard
++
++1. Create a data layer in `ui/data/your_dashboard.py`
++2. Create a router in `ui/routers/your_dashboard.py`
++3. Create templates in `ui/templates/your_dashboard/`
++4. Mount the router in `ui/app.py`:
++   ```python
++   from ui.routers.your_dashboard import router
++   app.include_router(router, prefix="/your-dashboard")
++   ```
++5. Add a card to `ui/templates/index.html`
++
++## Configuration
++
++| Variable | Default | Description |
++|----------|---------|-------------|
++| `UI_PORT` | `8500` | Port to bind the server on |
++
++## Dependencies
++
++- `fastapi` - Web framework
++- `uvicorn[standard]` - ASGI server
++- `jinja2` - Template engine
++- HTMX loaded from CDN (no local install)
++
++## Related
++
++- [Reflections Dashboard](reflections-dashboard.md) - Reflection execution monitoring
++- [SDLC Observer](sdlc-observer.md) - Pipeline stage tracking
+diff --git a/models/reflection.py b/models/reflection.py
+index 2e9c02d01..e43d11669 100644
+--- a/models/reflection.py
++++ b/models/reflection.py
+@@ -14,6 +14,7 @@
+     Field,
+     IntField,
+     KeyField,
++    ListField,
+     Model,
+ )
+ 
+@@ -33,6 +34,8 @@ class Reflection(Model):
+         last_status: Result of last run: 'success', 'error', 'skipped', or 'running'
+         last_error: Error message from last failed run (None if last run succeeded)
+         last_duration: Duration of last run in seconds
++        run_history: Append-only list of recent run dicts (capped at 200).
++            Each dict: {timestamp, status, duration, error, log_path}
+     """
+ 
+     reflection_id = AutoKeyField()
+@@ -43,6 +46,9 @@ class Reflection(Model):
+     last_status = Field(default="pending")  # pending | running | success | error | skipped
+     last_error = Field(null=True, max_length=1000)
+     last_duration = Field(type=float, null=True)
++    run_history = ListField(null=True)  # List of run dicts, capped at 200
++
++    _RUN_HISTORY_CAP = 200
+ 
+     @classmethod
+     def get_or_create(cls, name: str) -> "Reflection":
+@@ -69,18 +75,37 @@ def mark_started(self) -> None:
+     def mark_completed(self, duration: float, error: str | None = None) -> None:
+         """Mark this reflection as completed (success or error).
+ 
++        Internally appends a run record to run_history (capped at 200 entries).
++        The method signature is unchanged -- existing callers in
++        agent/reflection_scheduler.py require no modifications.
++
+         Args:
+             duration: How long the run took in seconds
+             error: Error message if the run failed, None for success
+         """
+         self.last_duration = duration
+         self.run_count = (self.run_count or 0) + 1
++        status = "error" if error else "success"
+         if error:
+             self.last_status = "error"
+             self.last_error = error[:1000] if error else None
+         else:
+             self.last_status = "success"
+             self.last_error = None
++
++        # Append to run_history (capped at RUN_HISTORY_CAP)
++        run_record = {
++            "timestamp": time.time(),
++            "status": status,
++            "duration": duration,
++            "error": error[:500] if error else None,
++        }
++        history = self.run_history if isinstance(self.run_history, list) else []
++        history.append(run_record)
++        if len(history) > self._RUN_HISTORY_CAP:
++            history = history[-self._RUN_HISTORY_CAP :]
++        self.run_history = history
++
+         self.save()
+ 
+     def mark_skipped(self, reason: str = "already running") -> None:
+diff --git a/pyproject.toml b/pyproject.toml
+index 5f6e072d8..98081dd68 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -25,6 +25,9 @@ dependencies = [
+     "pyyaml>=6.0.3",
+     "rich>=13.0.0", # Required by pydantic logfire plugin
+     "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
++    "fastapi>=0.115.0", # Web UI framework
++    "uvicorn[standard]>=0.34.0", # ASGI server for web UI
++    "jinja2>=3.1.0", # Template engine for web UI
+ ]
+ 
+ [project.optional-dependencies]
+@@ -57,7 +60,7 @@ requires = ["hatchling"]
+ build-backend = "hatchling.build"
+ 
+ [tool.hatch.build.targets.wheel]
+-packages = ["bridge", "tools", "scripts", "agent", "utils"]
++packages = ["bridge", "tools", "scripts", "agent", "utils", "ui"]
+ 
+ [tool.ruff]
+ line-length = 100
+@@ -101,4 +104,5 @@ markers = [
+     "sdk: Claude SDK client, permissions, SDLC enforcement",
+     "impact: Code and documentation impact analysis",
+     "models: Redis/Popoto model relationships and persistence",
++    "webui: Web UI dashboards, routes, templates",
+ ]
+diff --git a/tests/unit/test_ui_app.py b/tests/unit/test_ui_app.py
+new file mode 100644
+index 000000000..3836c5104
+--- /dev/null
++++ b/tests/unit/test_ui_app.py
+@@ -0,0 +1,171 @@
++"""Tests for the web UI FastAPI application factory and route handlers.
++
++Tests use FastAPI's TestClient to verify routes return expected status codes
++and content without starting a real server.
++"""
++
++import pytest
++
++pytestmark = [pytest.mark.unit, pytest.mark.webui]
++
++
++@pytest.fixture
++def app():
++    """Create a test app instance."""
++    from ui.app import create_app
++
++    return create_app()
++
++
++@pytest.fixture
++def client(app):
++    """Create a TestClient for the app."""
++    from fastapi.testclient import TestClient
++
++    return TestClient(app)
++
++
++class TestAppFactory:
++    """Tests for the create_app() factory function."""
++
++    def test_create_app_returns_fastapi_instance(self):
++        from ui.app import create_app
++
++        app = create_app()
++        assert app is not None
++        assert app.title == "Valor System Dashboard"
++
++    def test_docs_disabled(self, app):
++        """API docs should be disabled (not a REST API)."""
++        assert app.docs_url is None
++        assert app.redoc_url is None
++
++    def test_jinja2_filters_registered(self, app):
++        """Custom Jinja2 filters should be available."""
++        templates = app.state.templates
++        env = templates.env
++        assert "format_timestamp" in env.filters
++        assert "format_duration" in env.filters
++        assert "format_interval_filter" in env.filters
++        assert "format_relative" in env.filters
++
++
++class TestJinja2Filters:
++    """Tests for custom Jinja2 template filters."""
++
++    def test_format_duration_seconds(self):
++        from ui.app import _filter_format_duration
++
++        assert _filter_format_duration(5.2) == "5.2s"
++        assert _filter_format_duration(59.9) == "59.9s"
++
++    def test_format_duration_minutes(self):
++        from ui.app import _filter_format_duration
++
++        assert _filter_format_duration(120.0) == "2.0m"
++
++    def test_format_duration_hours(self):
++        from ui.app import _filter_format_duration
++
++        assert _filter_format_duration(7200.0) == "2.0h"
++
++    def test_format_duration_none(self):
++        from ui.app import _filter_format_duration
++
++        assert _filter_format_duration(None) == "-"
++
++    def test_format_timestamp_none(self):
++        from ui.app import _filter_format_timestamp
++
++        assert _filter_format_timestamp(None) == "-"
++
++    def test_format_timestamp_value(self):
++        from ui.app import _filter_format_timestamp
++
++        result = _filter_format_timestamp(1711000000.0)
++        assert isinstance(result, str)
++        assert result != "-"
++
++    def test_format_interval(self):
++        from ui.app import _filter_format_interval
++
++        assert _filter_format_interval(300) == "5m"
++        assert _filter_format_interval(3600) == "1h"
++        assert _filter_format_interval(86400) == "1d"
++        assert _filter_format_interval(None) == "-"
++        assert _filter_format_interval(0) == "-"
++
++    def test_format_relative(self):
++        from ui.app import _filter_format_relative
++
++        assert _filter_format_relative(None) == "-"
++        assert "in" in _filter_format_relative(300)
++        assert "overdue" in _filter_format_relative(-300)
++
++
++class TestRootRoute:
++    """Tests for the single-page dashboard."""
++
++    def test_root_returns_200(self, client):
++        r = client.get("/")
++        assert r.status_code == 200
++
++    def test_root_contains_sections(self, client):
++        r = client.get("/")
++        assert "Agent Sessions" in r.text
++        assert "Reflections" in r.text
++
++    def test_root_has_sessions_htmx_polling(self, client):
++        r = client.get("/")
++        assert "/_partials/sessions/" in r.text
++        assert "every 5s" in r.text
++
++    def test_root_contains_htmx(self, client):
++        r = client.get("/")
++        assert "htmx.org" in r.text
++
++    def test_root_contains_css_link(self, client):
++        r = client.get("/")
++        assert "style.css" in r.text
++
++    def test_root_has_no_nav_bar(self, client):
++        r = client.get("/")
++        assert "top-nav" not in r.text
++
++
++class TestSessionsPartial:
++    """Tests for the sessions HTMX partial endpoint."""
++
++    def test_partial_sessions_returns_200(self, client):
++        r = client.get("/_partials/sessions/")
++        assert r.status_code == 200
++
++
++class TestStaticFiles:
++    """Tests for static file serving."""
++
++    def test_css_file_served(self, client):
++        r = client.get("/static/style.css")
++        assert r.status_code == 200
++        assert "text/css" in r.headers.get("content-type", "")
++
++    def test_css_has_dark_theme(self, client):
++        r = client.get("/static/style.css")
++        assert "--bg-primary" in r.text
++        assert "#0d1117" in r.text
++
++
++class TestLocalhostBinding:
++    """Tests to verify the server binds to localhost only."""
++
++    def test_app_factory_does_not_expose_network(self):
++        """Verify the __main__ module uses 127.0.0.1 not 0.0.0.0."""
++        import importlib
++
++        spec = importlib.util.find_spec("ui.__main__")
++        assert spec is not None
++        source = spec.origin
++        with open(source) as f:
++            content = f.read()
++        assert "127.0.0.1" in content
++        assert "0.0.0.0" not in content
+diff --git a/tests/unit/test_ui_reflections_data.py b/tests/unit/test_ui_reflections_data.py
+new file mode 100644
+index 000000000..61b743f88
+--- /dev/null
++++ b/tests/unit/test_ui_reflections_data.py
+@@ -0,0 +1,171 @@
++"""Tests for the reflections data access layer."""
++
++import pytest
++
++pytestmark = [pytest.mark.unit, pytest.mark.webui]
++
++
++class TestReflectionsDataLayer:
++    """Tests for ui.data.reflections query functions."""
++
++    def test_get_all_reflections_returns_list(self):
++        from ui.data.reflections import get_all_reflections
++
++        result = get_all_reflections()
++        assert isinstance(result, list)
++        # Should have entries from config/reflections.yaml
++        assert len(result) > 0
++
++    def test_reflection_entry_has_required_fields(self):
++        from ui.data.reflections import get_all_reflections
++
++        result = get_all_reflections()
++        if result:
++            entry = result[0]
++            assert "name" in entry
++            assert "description" in entry
++            assert "interval" in entry
++            assert "last_status" in entry
++            assert "run_count" in entry
++
++    def test_get_schedule_returns_sorted_list(self):
++        from ui.data.reflections import get_schedule
++
++        result = get_schedule()
++        assert isinstance(result, list)
++
++    def test_get_active_ignores_returns_list(self):
++        from ui.data.reflections import get_active_ignores
++
++        result = get_active_ignores()
++        assert isinstance(result, list)
++
++    def test_get_run_history_empty(self):
++        from ui.data.reflections import get_run_history
++
++        result = get_run_history("nonexistent-reflection")
++        assert result["runs"] == []
++        assert result["total_pages"] == 1
++        assert result["total_runs"] == 0
++
++    def test_get_run_detail_not_found(self):
++        from ui.data.reflections import get_run_detail
++
++        result = get_run_detail("nonexistent-reflection", 0)
++        assert result is None
++
++    def test_get_log_content_not_found(self):
++        from ui.data.reflections import get_log_content
++
++        result = get_log_content("nonexistent-reflection", 0)
++        assert "not found" in result.lower() or "Run not found" in result
++
++
++class TestReflectionFormatters:
++    """Tests for Jinja2 filter formatting functions (canonical location: ui.app)."""
++
++    def test_format_duration(self):
++        from ui.app import _filter_format_duration
++
++        assert _filter_format_duration(None) == "-"
++        assert _filter_format_duration(5.0) == "5.0s"
++        assert _filter_format_duration(120.0) == "2.0m"
++        assert _filter_format_duration(7200.0) == "2.0h"
++
++    def test_format_timestamp(self):
++        from ui.app import _filter_format_timestamp
++
++        assert _filter_format_timestamp(None) == "-"
++        result = _filter_format_timestamp(1711000000.0)
++        assert "2024" in result
++
++    def test_format_interval(self):
++        from ui.app import _filter_format_interval
++
++        assert _filter_format_interval(300) == "5m"
++        assert _filter_format_interval(3600) == "1h"
++        assert _filter_format_interval(86400) == "1d"
++        assert _filter_format_interval(30) == "30s"
++
++    def test_format_relative_time(self):
++        from ui.app import _filter_format_relative
++
++        assert _filter_format_relative(None) == "-"
++        assert "in" in _filter_format_relative(300.0)
++        assert "overdue" in _filter_format_relative(-300.0)
++
++
++class TestReflectionModelExtension:
++    """Tests for the run_history extension on the Reflection model."""
++
++    def test_mark_completed_appends_history(self):
++        """mark_completed() should append to run_history internally."""
++        from models.reflection import Reflection
++
++        ref = Reflection.get_or_create("_test_ui_history")
++        try:
++            initial_count = len(ref.run_history) if isinstance(ref.run_history, list) else 0
++
++            ref.mark_completed(duration=1.5)
++            ref = Reflection.query.filter(name="_test_ui_history")[0]
++
++            history = ref.run_history if isinstance(ref.run_history, list) else []
++            assert len(history) == initial_count + 1
++            latest = history[-1]
++            assert latest["status"] == "success"
++            assert latest["duration"] == 1.5
++            assert latest["error"] is None
++        finally:
++            ref.delete()
++
++    def test_mark_completed_with_error_appends_history(self):
++        """mark_completed() with error should record error in history."""
++        from models.reflection import Reflection
++
++        ref = Reflection.get_or_create("_test_ui_error_history")
++        try:
++            ref.mark_completed(duration=2.0, error="test error")
++            ref = Reflection.query.filter(name="_test_ui_error_history")[0]
++
++            history = ref.run_history if isinstance(ref.run_history, list) else []
++            assert len(history) >= 1
++            latest = history[-1]
++            assert latest["status"] == "error"
++            assert latest["error"] == "test error"
++        finally:
++            ref.delete()
++
++    def test_mark_completed_signature_unchanged(self):
++        """Existing callers pass (duration) and (duration, error=msg)."""
++        from models.reflection import Reflection
++
++        ref = Reflection.get_or_create("_test_ui_compat")
++        try:
++            # Positional arg only (like scheduler does)
++            ref.mark_completed(1.0)
++            # Keyword error arg (like scheduler does)
++            ref.mark_completed(2.0, error="some error")
++            assert ref.run_count >= 2
++        finally:
++            ref.delete()
++
++    def test_run_history_cap(self):
++        """run_history should be capped at _RUN_HISTORY_CAP entries."""
++        from models.reflection import Reflection
++
++        ref = Reflection.get_or_create("_test_ui_cap")
++        try:
++            # Pre-populate with many entries
++            ref.run_history = [
++                {"timestamp": i, "status": "success", "duration": 1.0, "error": None}
++                for i in range(250)
++            ]
++            ref.save()
++
++            ref.mark_completed(duration=1.0)
++            ref = Reflection.query.filter(name="_test_ui_cap")[0]
++
++            history = ref.run_history if isinstance(ref.run_history, list) else []
++            assert len(history) <= 200
++        finally:
++            ref.delete()
+diff --git a/tests/unit/test_ui_sdlc_data.py b/tests/unit/test_ui_sdlc_data.py
+new file mode 100644
+index 000000000..0812a6bdc
+--- /dev/null
++++ b/tests/unit/test_ui_sdlc_data.py
+@@ -0,0 +1,218 @@
++"""Tests for the SDLC data access layer and Pydantic serializers."""
++
++import json
++
++import pytest
++
++pytestmark = [pytest.mark.unit, pytest.mark.webui]
++
++
++class TestStageStateParsing:
++    """Tests for parsing stage_states into typed StageState objects."""
++
++    def test_parse_none(self):
++        from ui.data.sdlc import _parse_stage_states
++
++        result = _parse_stage_states(None)
++        assert len(result) == 0  # Non-SDLC sessions get empty stages
++
++    def test_parse_empty_string(self):
++        from ui.data.sdlc import _parse_stage_states
++
++        result = _parse_stage_states("")
++        assert len(result) == 0  # Non-SDLC sessions get empty stages
++
++    def test_parse_valid_json_string(self):
++        from ui.data.sdlc import _parse_stage_states
++
++        data = json.dumps({"ISSUE": "completed", "PLAN": "in_progress", "BUILD": "pending"})
++        result = _parse_stage_states(data)
++        assert len(result) == 8
++
++        by_name = {s.name: s for s in result}
++        assert by_name["ISSUE"].status == "completed"
++        assert by_name["PLAN"].status == "in_progress"
++        assert by_name["BUILD"].status == "pending"
++
++    def test_parse_dict(self):
++        from ui.data.sdlc import _parse_stage_states
++
++        data = {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "in_progress"}
++        result = _parse_stage_states(data)
++        by_name = {s.name: s for s in result}
++        assert by_name["CRITIQUE"].is_active
++        assert by_name["ISSUE"].is_done
++
++    def test_parse_malformed_json(self):
++        from ui.data.sdlc import _parse_stage_states
++
++        result = _parse_stage_states("not valid json{{{")
++        assert len(result) == 0  # Malformed JSON treated as no stage data
++
++    def test_parse_nested_status_dict(self):
++        """Handle stage_states where values are dicts with a 'status' key."""
++        from ui.data.sdlc import _parse_stage_states
++
++        data = {
++            "ISSUE": {"status": "completed", "started_at": 123},
++            "PLAN": {"status": "in_progress"},
++        }
++        result = _parse_stage_states(data)
++        by_name = {s.name: s for s in result}
++        assert by_name["ISSUE"].status == "completed"
++        assert by_name["PLAN"].status == "in_progress"
++
++
++class TestStageStateModel:
++    """Tests for the StageState Pydantic model."""
++
++    def test_is_active(self):
++        from ui.data.sdlc import StageState
++
++        s = StageState(name="BUILD", status="in_progress")
++        assert s.is_active
++        assert not s.is_done
++        assert not s.is_failed
++
++    def test_is_done(self):
++        from ui.data.sdlc import StageState
++
++        s = StageState(name="ISSUE", status="completed")
++        assert s.is_done
++        assert not s.is_active
++
++    def test_is_failed(self):
++        from ui.data.sdlc import StageState
++
++        s = StageState(name="TEST", status="failed")
++        assert s.is_failed
++        assert not s.is_done
++        assert not s.is_active
++
++    def test_skipped_is_done(self):
++        from ui.data.sdlc import StageState
++
++        s = StageState(name="CRITIQUE", status="skipped")
++        assert s.is_done
++
++
++class TestPipelineProgress:
++    """Tests for the PipelineProgress Pydantic model."""
++
++    def test_display_name_with_slug(self):
++        from ui.data.sdlc import PipelineProgress
++
++        p = PipelineProgress(job_id="123", slug="my-feature")
++        assert p.display_name == "my-feature"
++
++    def test_display_name_with_message(self):
++        from ui.data.sdlc import PipelineProgress
++
++        p = PipelineProgress(job_id="123", message_text="Build the web UI for reflections")
++        assert p.display_name == "Build the web UI for reflections"
++
++    def test_display_name_truncated(self):
++        from ui.data.sdlc import PipelineProgress
++
++        p = PipelineProgress(job_id="123", message_text="A" * 100)
++        assert len(p.display_name) < 100
++        assert "..." in p.display_name
++
++    def test_is_active_states(self):
++        from ui.data.sdlc import PipelineProgress
++
++        for status in ("pending", "running", "active", "waiting_for_children"):
++            p = PipelineProgress(job_id="123", status=status)
++            assert p.is_active, f"Expected {status} to be active"
++
++    def test_is_complete_states(self):
++        from ui.data.sdlc import PipelineProgress
++
++        for status in ("completed", "failed"):
++            p = PipelineProgress(job_id="123", status=status)
++            assert p.is_complete
++
++    def test_duration_calculation(self):
++        import time
++
++        from ui.data.sdlc import PipelineProgress
++
++        now = time.time()
++        p = PipelineProgress(job_id="123", started_at=now - 100, completed_at=now)
++        assert abs(p.duration - 100) < 1
++
++    def test_duration_none_when_no_start(self):
++        from ui.data.sdlc import PipelineProgress
++
++        p = PipelineProgress(job_id="123")
++        assert p.duration is None
++
++
++class TestHistoryParsing:
++    """Tests for parsing AgentSession history into PipelineEvent objects."""
++
++    def test_parse_none(self):
++        from ui.data.sdlc import _parse_history
++
++        assert _parse_history(None) == []
++
++    def test_parse_empty_list(self):
++        from ui.data.sdlc import _parse_history
++
++        assert _parse_history([]) == []
++
++    def test_parse_bracketed_entries(self):
++        from ui.data.sdlc import _parse_history
++
++        history = [
++            "[stage] ISSUE -> PLAN",
++            "[lifecycle] pending->running",
++            "[user] Start building",
++        ]
++        events = _parse_history(history)
++        assert len(events) == 3
++        assert events[0].role == "stage"
++        assert events[0].text == "ISSUE -> PLAN"
++        assert events[1].role == "lifecycle"
++
++    def test_parse_plain_string(self):
++        from ui.data.sdlc import _parse_history
++
++        events = _parse_history(["some plain text"])
++        assert events[0].role == "system"
++        assert events[0].text == "some plain text"
++
++    def test_parse_dict_entries(self):
++        from ui.data.sdlc import _parse_history
++
++        events = _parse_history([{"role": "stage", "text": "BUILD started", "timestamp": 123.0}])
++        assert events[0].role == "stage"
++        assert events[0].timestamp == 123.0
++
++
++class TestSdlcQueryFunctions:
++    """Tests for SDLC query functions against Redis."""
++
++    def test_get_all_sessions_returns_list(self):
++        from ui.data.sdlc import get_all_sessions
++
++        result = get_all_sessions()
++        assert isinstance(result, list)
++
++    def test_get_active_pipelines_returns_list(self):
++        from ui.data.sdlc import get_active_pipelines
++
++        result = get_active_pipelines()
++        assert isinstance(result, list)
++
++    def test_get_recent_completions_returns_list(self):
++        from ui.data.sdlc import get_recent_completions
++
++        result = get_recent_completions()
++        assert isinstance(result, list)
++
++    def test_get_pipeline_detail_not_found(self):
++        from ui.data.sdlc import get_pipeline_detail
++
++        result = get_pipeline_detail("nonexistent-job-id-12345")
++        assert result is None
+diff --git a/ui/__init__.py b/ui/__init__.py
+new file mode 100644
+index 000000000..773fe3b25
+--- /dev/null
++++ b/ui/__init__.py
+@@ -0,0 +1 @@
++"""Unified Web UI for system observability dashboards."""
+diff --git a/ui/__main__.py b/ui/__main__.py
+new file mode 100644
+index 000000000..c4f0051f4
+--- /dev/null
++++ b/ui/__main__.py
+@@ -0,0 +1,14 @@
++"""Allow running the UI server with: python -m ui.app"""
++
++import os
++
++import uvicorn
++
++port = int(os.environ.get("UI_PORT", "8500"))
++uvicorn.run(
++    "ui.app:create_app",
++    factory=True,
++    host="127.0.0.1",
++    port=port,
++    reload=False,
++)
+diff --git a/ui/app.py b/ui/app.py
+new file mode 100644
+index 000000000..1aaf247b1
+--- /dev/null
++++ b/ui/app.py
+@@ -0,0 +1,170 @@
++"""FastAPI application factory for the unified web UI.
++
++Mounts sub-routers for each dashboard, configures Jinja2 templating,
++and serves static files. Binds to localhost only (127.0.0.1).
++
++Start with: python -m ui.app
++"""
++
++import datetime
++import os
++from pathlib import Path
++
++from fastapi import FastAPI, Request
++from fastapi.responses import HTMLResponse
++from fastapi.staticfiles import StaticFiles
++from fastapi.templating import Jinja2Templates
++
++UI_DIR = Path(__file__).parent
++TEMPLATES_DIR = UI_DIR / "templates"
++STATIC_DIR = UI_DIR / "static"
++
++
++def _filter_format_timestamp(ts: float | None) -> str:
++    """Jinja2 filter: format Unix timestamp to humanized relative time."""
++    if ts is None:
++        return "-"
++    dt = datetime.datetime.fromtimestamp(ts)
++    now = datetime.datetime.now()
++    diff = now - dt
++
++    if diff.total_seconds() < 0:
++        return dt.strftime("%H:%M")
++    if diff.total_seconds() < 60:
++        return "just now"
++    if diff.total_seconds() < 3600:
++        mins = int(diff.total_seconds() / 60)
++        return f"{mins}m ago"
++    if diff.total_seconds() < 86400 and dt.date() == now.date():
++        return f"today {dt.strftime('%H:%M')}"
++    if dt.date() == (now - datetime.timedelta(days=1)).date():
++        return f"yesterday {dt.strftime('%H:%M')}"
++    if diff.days < 7:
++        return f"{diff.days}d ago"
++    return dt.strftime("%Y-%m-%d")
++
++
++def _filter_format_duration(seconds: float | None) -> str:
++    """Jinja2 filter: format seconds to human-readable duration."""
++    if seconds is None:
++        return "-"
++    if seconds < 60:
++        return f"{seconds:.1f}s"
++    if seconds < 3600:
++        return f"{seconds / 60:.1f}m"
++    return f"{seconds / 3600:.1f}h"
++
++
++def _filter_format_interval(seconds: int | None) -> str:
++    """Jinja2 filter: format interval in seconds to label."""
++    if not seconds:
++        return "-"
++    if seconds < 60:
++        return f"{seconds}s"
++    if seconds < 3600:
++        return f"{seconds // 60}m"
++    if seconds < 86400:
++        return f"{seconds // 3600}h"
++    return f"{seconds // 86400}d"
++
++
++def _filter_format_relative(seconds: float | None) -> str:
++    """Jinja2 filter: format seconds as relative time."""
++    if seconds is None:
++        return "-"
++    abs_secs = abs(seconds)
++    if abs_secs < 60:
++        label = f"{abs_secs:.0f}s"
++    elif abs_secs < 3600:
++        label = f"{abs_secs / 60:.0f}m"
++    elif abs_secs < 86400:
++        label = f"{abs_secs / 3600:.1f}h"
++    else:
++        label = f"{abs_secs / 86400:.1f}d"
++    if seconds < 0:
++        return f"{label} overdue"
++    return f"in {label}"
++
++
++def create_app() -> FastAPI:
++    """Create and configure the FastAPI application.
++
++    Returns:
++        Configured FastAPI app with all routers mounted.
++    """
++    app = FastAPI(
++        title="Valor System Dashboard",
++        docs_url=None,
++        redoc_url=None,
++    )
++
++    # Mount static files
++    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
++
++    # Configure templates
++    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
++
++    # Register Jinja2 filters for template use
++    templates.env.filters["format_timestamp"] = _filter_format_timestamp
++    templates.env.filters["format_duration"] = _filter_format_duration
++    templates.env.filters["format_interval_filter"] = _filter_format_interval
++    templates.env.filters["format_relative"] = _filter_format_relative
++
++    # Store templates in app state for access by routers
++    app.state.templates = templates
++
++    @app.get("/", response_class=HTMLResponse)
++    def index(request: Request):
++        """Root route: single-page dashboard with all system state."""
++        from ui.data.reflections import get_active_ignores, get_all_reflections, get_schedule
++        from ui.data.sdlc import get_all_sessions
++
++        sessions = get_all_sessions()
++        reflections = get_all_reflections()
++        schedule = get_schedule()
++        ignores = get_active_ignores()
++        return templates.TemplateResponse(
++            request,
++            "index.html",
++            {
++                "sessions": sessions,
++                "reflections": reflections,
++                "schedule": schedule,
++                "ignores": ignores,
++            },
++        )
++
++    @app.get("/_partials/sessions/", response_class=HTMLResponse)
++    def partial_sessions_table(request: Request):
++        """HTMX partial: refreshable sessions table."""
++        from ui.data.sdlc import get_all_sessions
++
++        sessions = get_all_sessions()
++        return templates.TemplateResponse(
++            request,
++            "_partials/sessions_table.html",
++            {"sessions": sessions},
++        )
++
++    # Exception handler for Redis connection failures
++    @app.exception_handler(Exception)
++    async def generic_exception_handler(request: Request, exc: Exception):
++        """Render a user-friendly error page instead of a 500 traceback."""
++        return templates.TemplateResponse(
++            request, "error.html", {"error": str(exc)}, status_code=500
++        )
++
++    return app
++
++
++if __name__ == "__main__":
++    import uvicorn
++
++    port = int(os.environ.get("UI_PORT", "8500"))
++    uvicorn.run(
++        "ui.app:create_app",
++        factory=True,
++        host="127.0.0.1",
++        port=port,
++        reload=False,
++    )
+diff --git a/ui/data/__init__.py b/ui/data/__init__.py
+new file mode 100644
+index 000000000..4f8e8b9f4
+--- /dev/null
++++ b/ui/data/__init__.py
+@@ -0,0 +1 @@
++"""Data access layer for web UI dashboards."""
+diff --git a/ui/data/reflections.py b/ui/data/reflections.py
+new file mode 100644
+index 000000000..ce3c577ae
+--- /dev/null
++++ b/ui/data/reflections.py
+@@ -0,0 +1,243 @@
++"""Data access layer for the Reflections dashboard.
++
++All functions are synchronous (def, not async def) because Popoto uses
++synchronous Redis calls. FastAPI runs sync route handlers in a threadpool,
++which avoids blocking the event loop.
++"""
++
++import logging
++import math
++import time
++from pathlib import Path
++
++import yaml
++
++logger = logging.getLogger(__name__)
++
++REGISTRY_PATH = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
++RUNS_PER_PAGE = 20
++
++
++def _load_registry() -> list[dict]:
++    """Load the reflections registry from config/reflections.yaml."""
++    try:
++        with open(REGISTRY_PATH) as f:
++            data = yaml.safe_load(f)
++        return data.get("reflections", []) if data else []
++    except Exception as e:
++        logger.warning(f"Failed to load reflections registry: {e}")
++        return []
++
++
++def _get_registry_map() -> dict[str, dict]:
++    """Return a dict mapping reflection name -> registry entry."""
++    return {r["name"]: r for r in _load_registry() if "name" in r}
++
++
++def get_all_reflections() -> list[dict]:
++    """Get all registered reflections with their current state from Redis.
++
++    Merges registry config (description, interval, etc.) with live Redis
++    state (last_run, status, run_count, etc.).
++
++    Returns:
++        List of dicts with merged config + state for each reflection.
++    """
++    from models.reflection import Reflection
++
++    registry = _get_registry_map()
++    states = {r.name: r for r in Reflection.get_all_states() if r.name}
++
++    reflections = []
++    for name, config in registry.items():
++        state = states.get(name)
++        reflections.append(
++            {
++                "name": name,
++                "description": config.get("description", ""),
++                "interval": config.get("interval", 0),
++                "priority": config.get("priority", "normal"),
++                "enabled": config.get("enabled", True),
++                "execution_type": config.get("execution_type", "unknown"),
++                "last_run": state.last_run if state else None,
++                "next_due": state.next_due if state else None,
++                "run_count": state.run_count if state else 0,
++                "last_status": state.last_status if state else "pending",
++                "last_error": state.last_error if state else None,
++                "last_duration": state.last_duration if state else None,
++                "has_history": bool(
++                    state and isinstance(state.run_history, list) and state.run_history
++                ),
++            }
++        )
++
++    return reflections
++
++
++def get_schedule() -> list[dict]:
++    """Get reflections ordered by next-due timestamp.
++
++    Returns:
++        List of dicts sorted by next_due (soonest first). Entries
++        with no next_due are placed at the end.
++    """
++    reflections = get_all_reflections()
++    now = time.time()
++
++    for r in reflections:
++        if r["next_due"]:
++            r["due_in_seconds"] = r["next_due"] - now
++            r["overdue"] = r["due_in_seconds"] < 0
++        else:
++            r["due_in_seconds"] = None
++            r["overdue"] = False
++
++    # Sort: entries with next_due first (by time), then entries without
++    with_due = [r for r in reflections if r["next_due"] is not None]
++    without_due = [r for r in reflections if r["next_due"] is None]
++    with_due.sort(key=lambda r: r["next_due"])
++
++    return with_due + without_due
++
++
++def get_active_ignores() -> list[dict]:
++    """Get all active (non-expired) ignore patterns.
++
++    Returns:
++        List of dicts with pattern, reason, created_at, expires_at, and
++        time_remaining fields.
++    """
++    from models.reflections import ReflectionIgnore
++
++    now = time.time()
++    ignores = []
++    for entry in ReflectionIgnore.get_active():
++        ignores.append(
++            {
++                "pattern": entry.pattern,
++                "reason": entry.reason,
++                "created_at": entry.created_at,
++                "expires_at": entry.expires_at,
++                "time_remaining": entry.expires_at - now if entry.expires_at else 0,
++            }
++        )
++
++    # Sort by expiry (soonest first)
++    ignores.sort(key=lambda x: x["expires_at"] or 0)
++    return ignores
++
++
++def get_run_history(name: str, page: int = 1) -> dict:
++    """Get paginated run history for a specific reflection.
++
++    Args:
++        name: Reflection name
++        page: Page number (1-indexed)
++
++    Returns:
++        Dict with 'runs' (list of run dicts, newest first),
++        'total_pages', and 'total_runs'.
++    """
++    from models.reflection import Reflection
++
++    states = Reflection.query.filter(name=name)
++    if not states:
++        return {"runs": [], "total_pages": 1, "total_runs": 0}
++
++    state = states[0]
++    history = state.run_history if isinstance(state.run_history, list) else []
++
++    # Reverse to show newest first
++    history = list(reversed(history))
++    total_runs = len(history)
++    total_pages = max(1, math.ceil(total_runs / RUNS_PER_PAGE))
++
++    # Paginate
++    start = (page - 1) * RUNS_PER_PAGE
++    end = start + RUNS_PER_PAGE
++    page_runs = history[start:end]
++
++    # Add index for detail links (original index in forward order)
++    for i, run in enumerate(page_runs):
++        run["index"] = total_runs - 1 - (start + i)
++
++    return {
++        "runs": page_runs,
++        "total_pages": total_pages,
++        "total_runs": total_runs,
++    }
++
++
++def get_run_detail(name: str, run_index: int) -> dict | None:
++    """Get detail for a specific run by index.
++
++    Args:
++        name: Reflection name
++        run_index: Zero-based index into run_history (forward order)
++
++    Returns:
++        Run dict with full details, or None if not found.
++    """
++    from models.reflection import Reflection
++
++    states = Reflection.query.filter(name=name)
++    if not states:
++        return None
++
++    state = states[0]
++    history = state.run_history if isinstance(state.run_history, list) else []
++
++    if run_index < 0 or run_index >= len(history):
++        return None
++
++    run = dict(history[run_index])
++    run["index"] = run_index
++    run["name"] = name
++
++    # Try to read log content if log_path is set
++    log_path = run.get("log_path")
++    if log_path:
++        run["log_content"] = _read_log_file(log_path)
++    else:
++        run["log_content"] = None
++
++    return run
++
++
++def get_log_content(name: str, run_index: int) -> str:
++    """Get log file content for a specific run.
++
++    Args:
++        name: Reflection name
++        run_index: Zero-based index into run_history
++
++    Returns:
++        Log file content string, or an error/not-found message.
++    """
++    run = get_run_detail(name, run_index)
++    if not run:
++        return "Run not found."
++
++    if run.get("log_content"):
++        return run["log_content"]
++
++    log_path = run.get("log_path")
++    if not log_path:
++        return "No log file associated with this run."
++
++    return _read_log_file(log_path)
++
++
++def _read_log_file(path: str) -> str:
++    """Safely read a log file, returning an error message if unavailable."""
++    try:
++        p = Path(path)
++        if not p.exists():
++            return f"Log file not found: {path}"
++        content = p.read_text(errors="replace")
++        # Cap at 100KB to avoid huge responses
++        if len(content) > 100_000:
++            content = content[:100_000] + "\n\n... (truncated at 100KB)"
++        return content
++    except Exception as e:
++        return f"Error reading log file: {e}"
+diff --git a/ui/data/sdlc.py b/ui/data/sdlc.py
+new file mode 100644
+index 000000000..40ad49718
+--- /dev/null
++++ b/ui/data/sdlc.py
+@@ -0,0 +1,313 @@
++"""Data access layer for the SDLC Observer dashboard.
++
++Provides Pydantic serializers for AgentSession.stage_states and history,
++plus query functions for active/completed pipelines.
++
++All functions are synchronous (def, not async def) because Popoto uses
++synchronous Redis calls. FastAPI runs sync route handlers in a threadpool.
++"""
++
++import json
++import logging
++import time
++
++from pydantic import BaseModel
++
++logger = logging.getLogger(__name__)
++
++# SDLC stages in pipeline order (matches models/agent_session.py)
++SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
++
++
++# === Pydantic models ===
++
++
++class StageState(BaseModel):
++    """Typed representation of a single SDLC stage's status."""
++
++    name: str
++    status: str  # pending | ready | in_progress | completed | failed | skipped
++
++    @property
++    def is_active(self) -> bool:
++        return self.status == "in_progress"
++
++    @property
++    def is_done(self) -> bool:
++        return self.status in ("completed", "skipped")
++
++    @property
++    def is_failed(self) -> bool:
++        return self.status == "failed"
++
++
++class PipelineEvent(BaseModel):
++    """A single event from the session history."""
++
++    role: str  # e.g., 'stage', 'lifecycle', 'user', 'system'
++    text: str
++    timestamp: float | None = None
++
++
++class PipelineProgress(BaseModel):
++    """Complete pipeline view for a single AgentSession."""
++
++    job_id: str
++    session_id: str | None = None
++    session_type: str | None = None
++    status: str | None = None
++    slug: str | None = None
++    message_text: str | None = None
++    project_key: str | None = None
++    branch_name: str | None = None
++    created_at: float | None = None
++    started_at: float | None = None
++    completed_at: float | None = None
++    last_activity: float | None = None
++
++    # SDLC state
++    stages: list[StageState] = []
++    current_stage: str | None = None
++    events: list[PipelineEvent] = []
++
++    # Links
++    issue_url: str | None = None
++    plan_url: str | None = None
++    pr_url: str | None = None
++
++    @property
++    def duration(self) -> float | None:
++        """Total duration in seconds from start to completion or now."""
++        if not self.started_at:
++            return None
++        end = self.completed_at or time.time()
++        return end - self.started_at
++
++    @property
++    def is_active(self) -> bool:
++        return self.status in ("pending", "running", "active", "waiting_for_children")
++
++    @property
++    def is_complete(self) -> bool:
++        return self.status in ("completed", "failed")
++
++    @property
++    def display_name(self) -> str:
++        """Human-friendly name: slug if available, else truncated message."""
++        if self.slug:
++            return self.slug
++        if self.message_text:
++            text = self.message_text[:60]
++            if len(self.message_text) > 60:
++                text += "..."
++            return text
++        return self.job_id or "unknown"
++
++
++# === Parsing helpers ===
++
++
++def _parse_stage_states(raw: str | dict | None) -> list[StageState]:
++    """Parse stage_states field into typed StageState objects.
++
++    Returns an empty list when raw is None/empty (non-SDLC sessions).
++    Only returns stage objects when actual stage data exists.
++    """
++    if not raw:
++        return []
++
++    if isinstance(raw, str):
++        try:
++            raw = json.loads(raw)
++        except (json.JSONDecodeError, TypeError):
++            return []
++
++    if not isinstance(raw, dict):
++        return []
++
++    stages = []
++    for name in SDLC_STAGES:
++        status = raw.get(name, "pending")
++        if isinstance(status, dict):
++            # Handle nested status dict (e.g., {"status": "completed", ...})
++            status = status.get("status", "pending")
++        stages.append(StageState(name=name, status=str(status)))
++
++    return stages
++
++
++def _parse_history(history_list: list | None) -> list[PipelineEvent]:
++    """Parse session history entries into typed PipelineEvent objects."""
++    if not history_list or not isinstance(history_list, list):
++        return []
++
++    events = []
++    for entry in history_list:
++        if isinstance(entry, str):
++            # Format: "[role] text"
++            if entry.startswith("[") and "]" in entry:
++                bracket_end = entry.index("]")
++                role = entry[1:bracket_end]
++                text = entry[bracket_end + 2 :] if bracket_end + 2 < len(entry) else ""
++            else:
++                role = "system"
++                text = entry
++            events.append(PipelineEvent(role=role, text=text))
++        elif isinstance(entry, dict):
++            events.append(
++                PipelineEvent(
++                    role=entry.get("role", "system"),
++                    text=entry.get("text", str(entry)),
++                    timestamp=entry.get("timestamp"),
++                )
++            )
++
++    return events
++
++
++def _session_to_pipeline(session) -> PipelineProgress:
++    """Convert an AgentSession instance to a PipelineProgress model."""
++    stages = _parse_stage_states(session.stage_states)
++    events = _parse_history(session.history if isinstance(session.history, list) else None)
++
++    # Determine current stage
++    current = None
++    for s in stages:
++        if s.is_active:
++            current = s.name
++            break
++
++    return PipelineProgress(
++        job_id=session.job_id or "",
++        session_id=session.session_id,
++        session_type=session.session_type,
++        status=session.status,
++        slug=session.slug or session.work_item_slug,
++        message_text=session.message_text,
++        project_key=session.project_key,
++        branch_name=session.branch_name or (f"session/{session.slug}" if session.slug else None),
++        created_at=session.created_at,
++        started_at=session.started_at,
++        completed_at=session.completed_at,
++        last_activity=session.last_activity,
++        stages=stages,
++        current_stage=current,
++        events=events,
++        issue_url=session.issue_url,
++        plan_url=session.plan_url,
++        pr_url=session.pr_url,
++    )
++
++
++# === Public query functions ===
++
++
++def get_all_sessions(limit: int = 16) -> list[PipelineProgress]:
++    """Get agent sessions sorted by last activity.
++
++    Active sessions always appear (no cap). Inactive sessions are filtered
++    to those within the last 48 hours, capped at `limit` total.
++
++    Args:
++        limit: Maximum number of inactive sessions to show.
++
++    Returns:
++        List of PipelineProgress, newest activity first.
++    """
++    from models.agent_session import AgentSession
++
++    try:
++        all_sessions = AgentSession.query.all()
++    except Exception as e:
++        logger.warning(f"Failed to query AgentSession: {e}")
++        return []
++
++    cutoff = time.time() - 48 * 3600
++    active = []
++    inactive = []
++
++    for session in all_sessions:
++        pipeline = _session_to_pipeline(session)
++        if pipeline.status in ("running", "pending", "in_progress"):
++            active.append(pipeline)
++        else:
++            last_ts = pipeline.last_activity or pipeline.completed_at or pipeline.created_at or 0
++            if last_ts >= cutoff:
++                inactive.append(pipeline)
++
++    active.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
++    inactive.sort(
++        key=lambda p: p.last_activity or p.completed_at or p.created_at or 0,
++        reverse=True,
++    )
++
++    return active + inactive[:limit]
++
++
++def get_active_pipelines() -> list[PipelineProgress]:
++    """Get active SDLC pipelines (sessions with stage_states that aren't completed).
++
++    Filtered version of get_all_sessions() for backward compatibility.
++
++    Returns:
++        List of PipelineProgress for active SDLC pipelines, sorted by last activity.
++    """
++    all_sessions = get_all_sessions()
++    return [p for p in all_sessions if p.stages and p.status not in ("completed", "failed")]
++
++
++def get_pipeline_detail(job_id: str) -> PipelineProgress | None:
++    """Get detailed pipeline information for a specific session.
++
++    Args:
++        job_id: The AgentSession job_id to look up.
++
++    Returns:
++        PipelineProgress with full details, or None if not found.
++    """
++    from models.agent_session import AgentSession
++
++    try:
++        session = AgentSession.query.get(job_id)
++        if not session:
++            return None
++        return _session_to_pipeline(session)
++    except Exception as e:
++        logger.warning(f"Failed to get pipeline detail for {job_id}: {e}")
++        return None
++
++
++def get_recent_completions(limit: int = 25, page: int = 1) -> list[PipelineProgress]:
++    """Get recently completed SDLC pipelines.
++
++    Args:
++        limit: Maximum number of results per page.
++        page: Page number (1-indexed).
++
++    Returns:
++        List of PipelineProgress for completed pipelines, newest first.
++    """
++    from models.agent_session import AgentSession
++
++    try:
++        all_sessions = AgentSession.query.all()
++    except Exception as e:
++        logger.warning(f"Failed to query AgentSession: {e}")
++        return []
++
++    completed = []
++    for session in all_sessions:
++        if not session.stage_states:
++            continue
++        if session.status not in ("completed", "failed"):
++            continue
++        pipeline = _session_to_pipeline(session)
++        completed.append(pipeline)
++
++    # Sort by completed_at descending
++    completed.sort(key=lambda p: p.completed_at or p.created_at or 0, reverse=True)
++
++    # Paginate
++    start = (page - 1) * limit
++    end = start + limit
++    return completed[start:end]
+diff --git a/ui/static/style.css b/ui/static/style.css
+new file mode 100644
+index 000000000..e288d2aa3
+--- /dev/null
++++ b/ui/static/style.css
+@@ -0,0 +1,649 @@
++/* Valor System Dashboard - Dark theme, information-dense, monospace-friendly */
++
++:root {
++    --bg-primary: #0d1117;
++    --bg-secondary: #161b22;
++    --bg-tertiary: #21262d;
++    --bg-hover: #30363d;
++    --border: #30363d;
++    --border-light: #484f58;
++    --text-primary: #e6edf3;
++    --text-secondary: #8b949e;
++    --text-muted: #6e7681;
++    --accent: #58a6ff;
++    --accent-hover: #79c0ff;
++    --green: #3fb950;
++    --green-bg: rgba(63, 185, 80, 0.15);
++    --yellow: #d29922;
++    --yellow-bg: rgba(210, 153, 34, 0.15);
++    --red: #f85149;
++    --red-bg: rgba(248, 81, 73, 0.15);
++    --blue: #58a6ff;
++    --blue-bg: rgba(88, 166, 255, 0.15);
++    --purple: #bc8cff;
++    --purple-bg: rgba(188, 140, 255, 0.15);
++    --font-mono: "SF Mono", "Cascadia Code", "Fira Code", monospace;
++    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
++    --radius: 6px;
++}
++
++*, *::before, *::after {
++    box-sizing: border-box;
++    margin: 0;
++    padding: 0;
++}
++
++body {
++    background: var(--bg-primary);
++    color: var(--text-primary);
++    font-family: var(--font-sans);
++    font-size: 14px;
++    line-height: 1.5;
++    min-height: 100vh;
++}
++
++/* Navigation */
++.top-nav {
++    display: flex;
++    align-items: center;
++    gap: 24px;
++    padding: 12px 24px;
++    background: var(--bg-secondary);
++    border-bottom: 1px solid var(--border);
++    position: sticky;
++    top: 0;
++    z-index: 100;
++}
++
++.nav-brand {
++    font-family: var(--font-mono);
++    font-size: 16px;
++    font-weight: 600;
++    color: var(--text-primary);
++    text-decoration: none;
++}
++
++.nav-links {
++    display: flex;
++    gap: 4px;
++}
++
++.nav-link {
++    padding: 6px 12px;
++    color: var(--text-secondary);
++    text-decoration: none;
++    border-radius: var(--radius);
++    font-size: 14px;
++    transition: color 0.15s, background 0.15s;
++}
++
++.nav-link:hover {
++    color: var(--text-primary);
++    background: var(--bg-tertiary);
++}
++
++.nav-link.active {
++    color: var(--text-primary);
++    background: var(--bg-tertiary);
++}
++
++/* Container */
++.container {
++    max-width: 1200px;
++    margin: 0 auto;
++    padding: 24px;
++}
++
++/* Typography */
++h1 {
++    font-size: 24px;
++    font-weight: 600;
++    margin-bottom: 16px;
++}
++
++h2 {
++    font-size: 18px;
++    font-weight: 600;
++    margin-bottom: 12px;
++}
++
++h3 {
++    font-size: 16px;
++    font-weight: 600;
++    margin-bottom: 8px;
++}
++
++/* Dashboard grid */
++.dashboard-grid {
++    display: grid;
++    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
++    gap: 16px;
++    margin-top: 16px;
++}
++
++.dashboard-card {
++    display: block;
++    background: var(--bg-secondary);
++    border: 1px solid var(--border);
++    border-radius: var(--radius);
++    padding: 24px;
++    text-decoration: none;
++    color: var(--text-primary);
++    transition: border-color 0.15s, background 0.15s;
++    position: relative;
++}
++
++.dashboard-card:hover {
++    border-color: var(--border-light);
++    background: var(--bg-tertiary);
++}
++
++.dashboard-card h2 {
++    color: var(--accent);
++    margin-bottom: 8px;
++}
++
++.dashboard-card p {
++    color: var(--text-secondary);
++    font-size: 14px;
++    line-height: 1.6;
++}
++
++.card-arrow {
++    position: absolute;
++    top: 24px;
++    right: 24px;
++    color: var(--text-muted);
++    font-size: 18px;
++}
++
++/* Status badges */
++.badge {
++    display: inline-block;
++    padding: 2px 8px;
++    border-radius: 12px;
++    font-size: 12px;
++    font-weight: 500;
++    font-family: var(--font-mono);
++    text-transform: lowercase;
++}
++
++.badge-success {
++    color: var(--green);
++    background: var(--green-bg);
++}
++
++.badge-running, .badge-pending, .badge-in-progress {
++    color: var(--yellow);
++    background: var(--yellow-bg);
++}
++
++.badge-error, .badge-failed {
++    color: var(--red);
++    background: var(--red-bg);
++}
++
++.badge-skipped {
++    color: var(--text-muted);
++    background: var(--bg-tertiary);
++}
++
++.badge-completed {
++    color: var(--green);
++    background: var(--green-bg);
++}
++
++.badge-blue {
++    color: var(--blue);
++    background: var(--blue-bg);
++}
++
++.badge-purple {
++    color: var(--purple);
++    background: var(--purple-bg);
++}
++
++.badge-active, .badge-waiting_for_children {
++    color: var(--yellow);
++    background: var(--yellow-bg);
++}
++
++/* Cards and panels */
++.card {
++    background: var(--bg-secondary);
++    border: 1px solid var(--border);
++    border-radius: var(--radius);
++    padding: 16px;
++    margin-bottom: 12px;
++}
++
++.card-header {
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    margin-bottom: 12px;
++}
++
++.card-title {
++    font-family: var(--font-mono);
++    font-size: 14px;
++    font-weight: 600;
++}
++
++/* Tables */
++.data-table {
++    width: 100%;
++    border-collapse: collapse;
++    font-size: 13px;
++}
++
++.data-table th {
++    text-align: left;
++    padding: 8px 12px;
++    color: var(--text-secondary);
++    font-weight: 500;
++    border-bottom: 1px solid var(--border);
++    font-size: 12px;
++    text-transform: uppercase;
++    letter-spacing: 0.5px;
++}
++
++.data-table td {
++    padding: 8px 12px;
++    border-bottom: 1px solid var(--border);
++    vertical-align: top;
++}
++
++.data-table tr:hover td {
++    background: var(--bg-tertiary);
++}
++
++.data-table .mono {
++    font-family: var(--font-mono);
++    font-size: 12px;
++}
++
++/* Stage indicator (horizontal pipeline) */
++.stage-indicator {
++    display: inline-flex;
++    align-items: center;
++    gap: 2px;
++    flex-wrap: nowrap;
++    white-space: nowrap;
++}
++
++.stage-dot {
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    width: 20px;
++    height: 20px;
++    border-radius: 3px;
++    font-size: 10px;
++    font-family: var(--font-mono);
++    font-weight: 600;
++    text-transform: uppercase;
++    background: var(--bg-tertiary);
++    color: var(--text-muted);
++    border: 1px solid transparent;
++}
++
++.stage-dot.completed {
++    color: var(--green);
++    background: var(--green-bg);
++    border-color: rgba(63, 185, 80, 0.3);
++}
++
++.stage-dot.in-progress {
++    color: var(--yellow);
++    background: var(--yellow-bg);
++    border-color: rgba(210, 153, 34, 0.3);
++    animation: pulse 2s infinite;
++}
++
++.stage-dot.failed {
++    color: var(--red);
++    background: var(--red-bg);
++    border-color: rgba(248, 81, 73, 0.3);
++}
++
++.stage-dot.skipped {
++    color: var(--text-muted);
++    background: var(--bg-tertiary);
++    opacity: 0.6;
++}
++
++.stage-arrow {
++    color: var(--text-muted);
++    font-size: 10px;
++    margin: 0 2px;
++}
++
++@keyframes pulse {
++    0%, 100% { opacity: 1; }
++    50% { opacity: 0.6; }
++}
++
++/* Collapsible sections */
++.collapsible {
++    cursor: pointer;
++    user-select: none;
++}
++
++.collapsible::before {
++    content: "\25B6";
++    display: inline-block;
++    margin-right: 8px;
++    font-size: 10px;
++    transition: transform 0.15s;
++}
++
++.collapsible.open::before {
++    transform: rotate(90deg);
++}
++
++.collapse-content {
++    display: none;
++    padding: 12px 0;
++}
++
++.collapse-content.show {
++    display: block;
++}
++
++/* Log viewer */
++.log-viewer {
++    background: var(--bg-primary);
++    border: 1px solid var(--border);
++    border-radius: var(--radius);
++    padding: 12px;
++    font-family: var(--font-mono);
++    font-size: 12px;
++    line-height: 1.7;
++    overflow-x: auto;
++    max-height: 400px;
++    overflow-y: auto;
++    white-space: pre-wrap;
++    word-break: break-all;
++    color: var(--text-secondary);
++}
++
++/* Timeline */
++.timeline {
++    position: relative;
++    padding-left: 24px;
++}
++
++.timeline::before {
++    content: "";
++    position: absolute;
++    left: 8px;
++    top: 4px;
++    bottom: 4px;
++    width: 2px;
++    background: var(--border);
++}
++
++.timeline-item {
++    position: relative;
++    padding-bottom: 16px;
++}
++
++.timeline-item::before {
++    content: "";
++    position: absolute;
++    left: -20px;
++    top: 6px;
++    width: 8px;
++    height: 8px;
++    border-radius: 50%;
++    background: var(--border-light);
++    border: 2px solid var(--bg-secondary);
++}
++
++.timeline-item.success::before {
++    background: var(--green);
++}
++
++.timeline-item.error::before {
++    background: var(--red);
++}
++
++.timeline-item.active::before {
++    background: var(--yellow);
++}
++
++.timeline-time {
++    font-family: var(--font-mono);
++    font-size: 12px;
++    color: var(--text-muted);
++}
++
++.timeline-text {
++    font-size: 14px;
++    color: var(--text-primary);
++}
++
++/* Links */
++a.link {
++    color: var(--accent);
++    text-decoration: none;
++}
++
++a.link:hover {
++    color: var(--accent-hover);
++    text-decoration: underline;
++}
++
++/* Buttons */
++.btn {
++    display: inline-block;
++    padding: 6px 16px;
++    background: var(--bg-tertiary);
++    color: var(--text-primary);
++    border: 1px solid var(--border);
++    border-radius: var(--radius);
++    text-decoration: none;
++    font-size: 13px;
++    cursor: pointer;
++    transition: background 0.15s, border-color 0.15s;
++}
++
++.btn:hover {
++    background: var(--bg-hover);
++    border-color: var(--border-light);
++}
++
++/* Utility */
++.text-muted {
++    color: var(--text-muted);
++}
++
++.text-secondary {
++    color: var(--text-secondary);
++}
++
++.mono {
++    font-family: var(--font-mono);
++}
++
++.mt-4 { margin-top: 16px; }
++.mt-8 { margin-top: 32px; }
++.mb-4 { margin-bottom: 16px; }
++.mb-2 { margin-bottom: 8px; }
++
++.flex {
++    display: flex;
++    align-items: center;
++}
++
++.gap-2 { gap: 8px; }
++.gap-4 { gap: 16px; }
++
++.grid-2 {
++    display: grid;
++    grid-template-columns: 1fr 1fr;
++    gap: 16px;
++}
++
++/* Empty state */
++.empty-state {
++    text-align: center;
++    padding: 48px 24px;
++    color: var(--text-muted);
++}
++
++.empty-state h3 {
++    color: var(--text-secondary);
++    margin-bottom: 8px;
++}
++
++/* Error page */
++.error-page {
++    text-align: center;
++    padding: 48px 24px;
++}
++
++.error-message {
++    color: var(--red);
++    font-family: var(--font-mono);
++    font-size: 13px;
++    background: var(--red-bg);
++    padding: 12px 16px;
++    border-radius: var(--radius);
++    margin: 16px 0;
++    display: inline-block;
++}
++
++/* Pagination */
++.pagination {
++    display: flex;
++    align-items: center;
++    gap: 8px;
++    margin-top: 16px;
++}
++
++.pagination .btn {
++    font-size: 12px;
++    padding: 4px 12px;
++}
++
++.pagination .current {
++    color: var(--text-secondary);
++    font-size: 13px;
++}
++
++/* Section headers */
++.section-header {
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    margin-bottom: 16px;
++    padding-bottom: 8px;
++    border-bottom: 1px solid var(--border);
++}
++
++/* Stat boxes */
++.stat-grid {
++    display: grid;
++    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
++    gap: 12px;
++    margin-bottom: 24px;
++}
++
++.stat-box {
++    background: var(--bg-secondary);
++    border: 1px solid var(--border);
++    border-radius: var(--radius);
++    padding: 12px 16px;
++}
++
++.stat-value {
++    font-family: var(--font-mono);
++    font-size: 24px;
++    font-weight: 600;
++    color: var(--text-primary);
++}
++
++.stat-label {
++    font-size: 12px;
++    color: var(--text-muted);
++    text-transform: uppercase;
++    letter-spacing: 0.5px;
++    margin-top: 2px;
++}
++
++/* HTMX loading indicator */
++.htmx-indicator {
++    display: none;
++}
++
++.htmx-request .htmx-indicator {
++    display: inline-block;
++}
++
++.spinner {
++    display: inline-block;
++    width: 14px;
++    height: 14px;
++    border: 2px solid var(--border);
++    border-top-color: var(--accent);
++    border-radius: 50%;
++    animation: spin 0.6s linear infinite;
++}
++
++@keyframes spin {
++    to { transform: rotate(360deg); }
++}
++
++/* Page title (no nav) */
++.page-title {
++    font-size: 20px;
++    font-weight: 600;
++    color: var(--text-secondary);
++    margin-bottom: 24px;
++    font-family: var(--font-mono);
++}
++
++/* Inline session detail */
++.session-row {
++    transition: background 0.1s;
++}
++
++.session-row:hover td {
++    background: var(--bg-tertiary);
++}
++
++.session-detail-row:empty {
++    display: none;
++}
++
++.session-detail-cell {
++    padding: 0 !important;
++    border-bottom: 1px solid var(--border);
++}
++
++.inline-detail {
++    background: var(--bg-secondary);
++    padding: 16px 24px;
++    border-top: 1px solid var(--border);
++}
++
++.inline-detail h3 {
++    font-size: 13px;
++    text-transform: uppercase;
++    letter-spacing: 0.5px;
++    color: var(--text-secondary);
++    margin-bottom: 8px;
++}
++
++.data-table.compact td {
++    padding: 4px 8px;
++    font-size: 12px;
++}
++
++/* Inline empty state (no padding) */
++.empty-state-inline {
++    padding: 16px 0;
++    color: var(--text-muted);
++}
+diff --git a/ui/templates/_partials/session_detail_inline.html b/ui/templates/_partials/session_detail_inline.html
+new file mode 100644
+index 000000000..3182b6322
+--- /dev/null
++++ b/ui/templates/_partials/session_detail_inline.html
+@@ -0,0 +1,79 @@
++{% if pipeline %}
++<td colspan="8" class="session-detail-cell">
++    <div class="inline-detail">
++        <div class="grid-2 mb-4">
++            <div>
++                <h3>Details</h3>
++                <table class="data-table compact">
++                    <tr><td class="text-secondary">Job ID</td><td class="mono">{{ pipeline.job_id }}</td></tr>
++                    <tr><td class="text-secondary">Session ID</td><td class="mono">{{ pipeline.session_id or '-' }}</td></tr>
++                    <tr><td class="text-secondary">Project</td><td class="mono">{{ pipeline.project_key or '-' }}</td></tr>
++                    <tr><td class="text-secondary">Branch</td><td class="mono">{{ pipeline.branch_name or '-' }}</td></tr>
++                    <tr><td class="text-secondary">Slug</td><td class="mono">{{ pipeline.slug or '-' }}</td></tr>
++                    <tr><td class="text-secondary">Created</td><td class="mono">{{ pipeline.created_at | format_timestamp if pipeline.created_at else '-' }}</td></tr>
++                    <tr><td class="text-secondary">Started</td><td class="mono">{{ pipeline.started_at | format_timestamp if pipeline.started_at else '-' }}</td></tr>
++                    {% if pipeline.completed_at %}
++                    <tr><td class="text-secondary">Completed</td><td class="mono">{{ pipeline.completed_at | format_timestamp }}</td></tr>
++                    {% endif %}
++                </table>
++            </div>
++            <div>
++                <h3>Links</h3>
++                <table class="data-table compact">
++                    {% if pipeline.issue_url %}
++                    <tr><td class="text-secondary">Issue</td><td><a href="{{ pipeline.issue_url }}" class="link" target="_blank">{{ pipeline.issue_url }}</a></td></tr>
++                    {% endif %}
++                    {% if pipeline.plan_url %}
++                    <tr><td class="text-secondary">Plan</td><td><a href="{{ pipeline.plan_url }}" class="link" target="_blank">{{ pipeline.plan_url }}</a></td></tr>
++                    {% endif %}
++                    {% if pipeline.pr_url %}
++                    <tr><td class="text-secondary">PR</td><td><a href="{{ pipeline.pr_url }}" class="link" target="_blank">{{ pipeline.pr_url }}</a></td></tr>
++                    {% endif %}
++                    {% if not pipeline.issue_url and not pipeline.plan_url and not pipeline.pr_url %}
++                    <tr><td class="text-muted" colspan="2">No links</td></tr>
++                    {% endif %}
++                </table>
++
++                {% if pipeline.stages %}
++                <h3 class="mt-4">Stage Progress</h3>
++                <div class="stage-indicator mt-4" style="font-size: 13px;">
++                    {% set p = pipeline %}
++                    {% for stage in p.stages %}
++                    {% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
++                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}">{{ stage.name }}</span>
++                    {% endfor %}
++                </div>
++                {% endif %}
++            </div>
++        </div>
++
++        {% if pipeline.events %}
++        <h3>Timeline</h3>
++        <div class="timeline mt-4">
++            {% for event in pipeline.events %}
++            <div class="timeline-item {{ 'success' if 'completed' in event.text else ('error' if 'failed' in event.text or 'error' in event.text else ('active' if 'in_progress' in event.text else '')) }}">
++                <div class="flex gap-2">
++                    <span class="badge badge-{{ event.role }}">{{ event.role }}</span>
++                    {% if event.timestamp %}
++                    <span class="timeline-time">{{ event.timestamp | format_timestamp }}</span>
++                    {% endif %}
++                </div>
++                <div class="timeline-text">{{ event.text }}</div>
++            </div>
++            {% endfor %}
++        </div>
++        {% endif %}
++
++        {% if pipeline.message_text %}
++        <h3 class="mt-4">Original Message</h3>
++        <div class="log-viewer" style="max-height: 150px;">{{ pipeline.message_text }}</div>
++        {% endif %}
++    </div>
++</td>
++{% else %}
++<td colspan="8" class="session-detail-cell">
++    <div class="inline-detail">
++        <span class="text-muted">Session details not available.</span>
++    </div>
++</td>
++{% endif %}
+diff --git a/ui/templates/_partials/sessions_table.html b/ui/templates/_partials/sessions_table.html
+new file mode 100644
+index 000000000..db3ff22bf
+--- /dev/null
++++ b/ui/templates/_partials/sessions_table.html
+@@ -0,0 +1,73 @@
++{% if sessions %}
++<table class="data-table">
++    <thead>
++        <tr>
++            <th>Name</th>
++            <th>Type</th>
++            <th>Status</th>
++            <th>Project</th>
++            <th>SDLC Stages</th>
++            <th>Started</th>
++            <th>Duration</th>
++            <th></th>
++        </tr>
++    </thead>
++    <tbody>
++        {% for s in sessions %}
++        <tr class="session-row" hx-get="/sdlc/{{ s.job_id }}/_inline/" hx-target="#detail-{{ s.job_id }}" hx-swap="innerHTML" hx-trigger="click" style="cursor: pointer;">
++            <td>
++                <div class="card-title">{{ s.display_name }}</div>
++                {% if s.branch_name %}
++                <div class="text-muted mono" style="font-size: 11px;">{{ s.branch_name }}</div>
++                {% endif %}
++            </td>
++            <td>
++                {% if s.session_type %}
++                <span class="badge badge-{{ 'blue' if s.session_type == 'dev' else 'purple' }}">{{ s.session_type }}</span>
++                {% else %}
++                <span class="text-muted">-</span>
++                {% endif %}
++            </td>
++            <td>
++                {% if s.status %}
++                <span class="badge badge-{{ s.status }}">{{ s.status }}</span>
++                {% else %}
++                <span class="text-muted">-</span>
++                {% endif %}
++            </td>
++            <td class="mono">{{ s.project_key or '-' }}</td>
++            <td>
++                {% if s.stages %}
++                <div class="stage-indicator">
++                    {% for stage in s.stages %}
++                    {% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
++                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}">{{ stage.name }}</span>
++                    {% endfor %}
++                </div>
++                {% else %}
++                <span class="text-muted">-</span>
++                {% endif %}
++            </td>
++            <td class="mono">{{ s.started_at | format_timestamp }}</td>
++            <td class="mono">{{ s.duration | format_duration }}</td>
++            <td>
++                <div class="flex gap-2">
++                    {% if s.issue_url %}
++                    <a href="{{ s.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
++                    {% endif %}
++                    {% if s.pr_url %}
++                    <a href="{{ s.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">PR</a>
++                    {% endif %}
++                </div>
++            </td>
++        </tr>
++        <tr id="detail-{{ s.job_id }}" class="session-detail-row"></tr>
++        {% endfor %}
++    </tbody>
++</table>
++{% else %}
++<div class="empty-state">
++    <h3>No agent sessions</h3>
++    <p>Agent sessions will appear here when work is in progress.</p>
++</div>
++{% endif %}
+diff --git a/ui/templates/base.html b/ui/templates/base.html
+new file mode 100644
+index 000000000..42d1aaba3
+--- /dev/null
++++ b/ui/templates/base.html
+@@ -0,0 +1,16 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++    <meta charset="UTF-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <title>{% block title %}Valor System{% endblock %}</title>
++    <link rel="stylesheet" href="/static/style.css">
++    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
++    {% block head %}{% endblock %}
++</head>
++<body>
++    <main class="container">
++        {% block content %}{% endblock %}
++    </main>
++</body>
++</html>
+diff --git a/ui/templates/error.html b/ui/templates/error.html
+new file mode 100644
+index 000000000..b0f6e3c61
+--- /dev/null
++++ b/ui/templates/error.html
+@@ -0,0 +1,12 @@
++{% extends "base.html" %}
++
++{% block title %}Error - Valor System{% endblock %}
++
++{% block content %}
++<div class="error-page">
++    <h1>Something went wrong</h1>
++    <p class="error-message">{{ error }}</p>
++    <p>This may be a temporary issue. Check that Redis is running and try refreshing the page.</p>
++    <a href="/" class="btn">&larr; Back to Dashboard</a>
++</div>
++{% endblock %}
+diff --git a/ui/templates/index.html b/ui/templates/index.html
+new file mode 100644
+index 000000000..d1d897e75
+--- /dev/null
++++ b/ui/templates/index.html
+@@ -0,0 +1,113 @@
++{% extends "base.html" %}
++{% from "reflections/_macros.html" import format_ts, format_dur, format_interval, status_badge, relative_time %}
++
++{% block title %}Valor System{% endblock %}
++
++{% block content %}
++<h1 class="page-title">Valor System</h1>
++
++{# ── Agent Sessions ── #}
++<section id="sessions">
++    <h2>Agent Sessions</h2>
++    <div id="sessions-table" hx-get="/_partials/sessions/" hx-trigger="every 5s" hx-swap="innerHTML">
++        {% include "_partials/sessions_table.html" %}
++    </div>
++</section>
++
++{# ── Reflections ── #}
++<section id="reflections" class="mt-8">
++    <h2>Reflections</h2>
++    {% if reflections %}
++    <div id="status-grid" hx-get="/reflections/_partials/status-grid/" hx-trigger="every 10s" hx-swap="innerHTML">
++        {% include "reflections/_partials/status_grid.html" %}
++    </div>
++    {% else %}
++    <div class="empty-state">
++        <h3>No reflections registered</h3>
++        <p>Add reflections to <code>config/reflections.yaml</code> to see them here.</p>
++    </div>
++    {% endif %}
++</section>
++
++{# ── Schedule ── #}
++<section id="schedule" class="mt-8">
++    <h2>Schedule</h2>
++    {% if schedule %}
++    <table class="data-table">
++        <thead>
++            <tr>
++                <th>Name</th>
++                <th>Status</th>
++                <th>Next Due</th>
++                <th>Time Until</th>
++                <th>Interval</th>
++                <th>Last Run</th>
++                <th>Priority</th>
++            </tr>
++        </thead>
++        <tbody>
++            {% for r in schedule %}
++            <tr>
++                <td>
++                    <span class="card-title">{{ r.name }}</span>
++                    {% if not r.enabled %}
++                    <span class="badge badge-skipped">disabled</span>
++                    {% endif %}
++                </td>
++                <td>{{ status_badge(r.last_status) }}</td>
++                <td class="mono">{{ format_ts(r.next_due) }}</td>
++                <td class="mono">
++                    {% if r.overdue %}
++                    <span style="color: var(--red);">{{ relative_time(r.due_in_seconds) }}</span>
++                    {% else %}
++                    {{ relative_time(r.due_in_seconds) }}
++                    {% endif %}
++                </td>
++                <td class="mono">{{ format_interval(r.interval) }}</td>
++                <td class="mono">{{ format_ts(r.last_run) }}</td>
++                <td><span class="badge badge-{{ r.priority }}">{{ r.priority }}</span></td>
++            </tr>
++            {% endfor %}
++        </tbody>
++    </table>
++    {% else %}
++    <div class="empty-state">
++        <h3>No reflections scheduled</h3>
++        <p>Add reflections to <code>config/reflections.yaml</code>.</p>
++    </div>
++    {% endif %}
++</section>
++
++{# ── Ignore Patterns ── #}
++<section id="ignores" class="mt-8">
++    <h2>Ignore Patterns</h2>
++    {% if ignores %}
++    <table class="data-table">
++        <thead>
++            <tr>
++                <th>Pattern</th>
++                <th>Reason</th>
++                <th>Created</th>
++                <th>Expires</th>
++                <th>Remaining</th>
++            </tr>
++        </thead>
++        <tbody>
++            {% for entry in ignores %}
++            <tr>
++                <td class="mono">{{ entry.pattern }}</td>
++                <td>{{ entry.reason or '-' }}</td>
++                <td class="mono">{{ format_ts(entry.created_at) }}</td>
++                <td class="mono">{{ format_ts(entry.expires_at) }}</td>
++                <td class="mono">{{ relative_time(entry.time_remaining) }}</td>
++            </tr>
++            {% endfor %}
++        </tbody>
++    </table>
++    {% else %}
++    <div class="empty-state-inline">
++        <span class="text-muted">No active ignore patterns</span>
++    </div>
++    {% endif %}
++</section>
++{% endblock %}
+diff --git a/ui/templates/reflections/_macros.html b/ui/templates/reflections/_macros.html
+new file mode 100644
+index 000000000..fcfbe93d5
+--- /dev/null
++++ b/ui/templates/reflections/_macros.html
+@@ -0,0 +1,35 @@
++{% macro format_ts(ts) %}
++{%- if ts -%}
++{{ ts | format_timestamp }}
++{%- else -%}
++<span class="text-muted">-</span>
++{%- endif -%}
++{% endmacro %}
++
++{% macro format_dur(seconds) %}
++{%- if seconds is not none -%}
++{{ seconds | format_duration }}
++{%- else -%}
++<span class="text-muted">-</span>
++{%- endif -%}
++{% endmacro %}
++
++{% macro format_interval(seconds) %}
++{%- if seconds -%}
++{{ seconds | format_interval_filter }}
++{%- else -%}
++<span class="text-muted">-</span>
++{%- endif -%}
++{% endmacro %}
++
++{% macro status_badge(status) %}
++<span class="badge badge-{{ status or 'pending' }}">{{ status or 'pending' }}</span>
++{% endmacro %}
++
++{% macro relative_time(seconds) %}
++{%- if seconds is not none -%}
++{{ seconds | format_relative }}
++{%- else -%}
++<span class="text-muted">-</span>
++{%- endif -%}
++{% endmacro %}
+diff --git a/ui/templates/reflections/_partials/status_grid.html b/ui/templates/reflections/_partials/status_grid.html
+new file mode 100644
+index 000000000..cdb6be027
+--- /dev/null
++++ b/ui/templates/reflections/_partials/status_grid.html
+@@ -0,0 +1,44 @@
++{% from "reflections/_macros.html" import format_ts, format_dur, format_interval, status_badge %}
++
++<table class="data-table">
++    <thead>
++        <tr>
++            <th>Name</th>
++            <th>Status</th>
++            <th>Last Run</th>
++            <th>Duration</th>
++            <th>Runs</th>
++            <th>Interval</th>
++            <th>Next Due</th>
++            <th></th>
++        </tr>
++    </thead>
++    <tbody>
++        {% for r in reflections %}
++        <tr>
++            <td>
++                <div class="card-title">{{ r.name }}</div>
++                <div class="text-muted" style="font-size: 12px;">{{ r.description }}</div>
++            </td>
++            <td>{{ status_badge(r.last_status) }}</td>
++            <td class="mono">{{ format_ts(r.last_run) }}</td>
++            <td class="mono">{{ format_dur(r.last_duration) }}</td>
++            <td class="mono">{{ r.run_count or 0 }}</td>
++            <td class="mono">{{ format_interval(r.interval) }}</td>
++            <td class="mono">{{ format_ts(r.next_due) }}</td>
++            <td>
++                {% if r.has_history %}
++                <a href="/reflections/{{ r.name }}/history/" class="link">history</a>
++                {% endif %}
++            </td>
++        </tr>
++        {% if r.last_error %}
++        <tr>
++            <td colspan="8" style="padding: 4px 12px 8px;">
++                <div class="log-viewer" style="max-height: 100px; font-size: 11px;">{{ r.last_error }}</div>
++            </td>
++        </tr>
++        {% endif %}
++        {% endfor %}
++    </tbody>
++</table>
+diff --git a/ui/templates/sdlc/_partials/stage_indicator.html b/ui/templates/sdlc/_partials/stage_indicator.html
+new file mode 100644
+index 000000000..78d0cf58c
+--- /dev/null
++++ b/ui/templates/sdlc/_partials/stage_indicator.html
+@@ -0,0 +1,3 @@
++{% for stage in p.stages %}
++<span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
++{% endfor %}

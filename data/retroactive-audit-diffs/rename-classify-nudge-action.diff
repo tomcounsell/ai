@@ -1,0 +1,264 @@
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index 621d30fe3..e1f032229 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -54,7 +54,7 @@ class SendToChatResult:
+     auto_continue_count: int = 0
+ 
+ 
+-def classify_nudge_action(
++def determine_delivery_action(
+     msg: str,
+     stop_reason: str | None,
+     auto_continue_count: int,
+@@ -2041,7 +2041,7 @@ async def send_to_chat(msg: str) -> None:
+ 
+                 _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
+ 
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg=msg,
+             stop_reason=stop_reason,
+             auto_continue_count=chat_state.auto_continue_count,
+diff --git a/docs/features/reaction-semantics.md b/docs/features/reaction-semantics.md
+index d1c55c763..5b0efa5b1 100644
+--- a/docs/features/reaction-semantics.md
++++ b/docs/features/reaction-semantics.md
+@@ -95,7 +95,7 @@ Three paths to silent text loss have been identified and guarded:
+ | `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
+ | `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
+ | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
+-| `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `classify_nudge_action()` |
++| `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |
+ | `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
+ 
+ ## See Also
+diff --git a/docs/features/summarizer-format.md b/docs/features/summarizer-format.md
+index 2cc314b03..73cf47572 100644
+--- a/docs/features/summarizer-format.md
++++ b/docs/features/summarizer-format.md
+@@ -95,7 +95,7 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
+ - `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer with inline stage progress and link footer rendering), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_linkify_references()` (auto-link PR/Issue refs)
+ - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg. `_truncate_at_sentence_boundary()` ensures clean truncation at Telegram's 4096-char limit.
+ - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
+-- `agent/agent_session_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `classify_nudge_action()` for routing decisions and passes `agent_session`
++- `agent/agent_session_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `determine_delivery_action()` for routing decisions and passes `agent_session`
+ - `bridge/markdown.py`: `send_markdown()` with plain-text fallback
+ 
+ ## Session Freshness
+diff --git a/docs/guides/summarizer-integration-audit.md b/docs/guides/summarizer-integration-audit.md
+index dd7826a1b..b998c0547 100644
+--- a/docs/guides/summarizer-integration-audit.md
++++ b/docs/guides/summarizer-integration-audit.md
+@@ -12,7 +12,7 @@
+ Found 28 files across 6 surfaces:
+ 
+ - **Implementation:** 4 files (`bridge/summarizer.py`, `bridge/formatting.py`, `bridge/message_quality.py`, `bridge/response.py`)
+-- **Entry points:** 3 (`bridge/response.py:send_response_with_files`, `agent/hooks/stop.py`, `agent/agent_session_queue.py:classify_nudge_action`)
++- **Entry points:** 3 (`bridge/response.py:send_response_with_files`, `agent/hooks/stop.py`, `agent/agent_session_queue.py:determine_delivery_action`)
+ - **Tests:** 5 files (unit: 3 — `test_summarizer.py` 2,160 lines, `test_cross_wire_fixes.py`, `test_work_request_classifier.py`; integration: 2 — `test_agent_session_lifecycle.py`, `test_connectivity_gaps.py`)
+ - **Documentation:** 4 files (`docs/features/summarizer-format.md`, `docs/guides/summarizer-output-audit.md`, `docs/features/link-summarization.md`, `docs/features/agent-message-delivery.md`)
+ - **Configuration:** 5 keys (`OPENROUTER_API_KEY`, `FILE_ATTACH_THRESHOLD`, `SAFETY_TRUNCATE`, `OPENROUTER_URL`, `CLASSIFICATION_CONFIDENCE_THRESHOLD`)
+@@ -26,7 +26,7 @@ External references found in 12 additional files (docs, plans, config, CLAUDE.md
+ |---------|------|--------|
+ | entry point | `bridge/response.py:512` — `summarize_response()` | connected |
+ | entry point | `agent/hooks/stop.py:93` — `summarize_response()` | connected |
+-| entry point | `agent/agent_session_queue.py:57` — `classify_nudge_action()` | connected (separate classifier, not using `classify_output`) |
++| entry point | `agent/agent_session_queue.py:57` — `determine_delivery_action()` | connected (separate classifier, not using `classify_output`) |
+ | implementation | `bridge/summarizer.py` | connected — core module |
+ | implementation | `bridge/formatting.py` | connected — `linkify_references_from_session` imported by summarizer |
+ | implementation | `bridge/message_quality.py` | connected — `PROCESS_NARRATION_PATTERNS` imported by summarizer |
+@@ -113,12 +113,12 @@ These three constants control summarizer behavior but cannot be overridden via e
+ 
+ #### [inconsistent-interface] Two parallel classifiers with different interfaces
+ 
+-`bridge/summarizer.py:classify_output()` is an async LLM-based classifier returning `ClassificationResult` with `OutputType` enum values. `agent/agent_session_queue.py:classify_nudge_action()` is a sync pure function returning string action names. Both classify agent output for routing, but they use completely different type systems and are called at different points in the pipeline.
++`bridge/summarizer.py:classify_output()` is an async LLM-based classifier returning `ClassificationResult` with `OutputType` enum values. `agent/agent_session_queue.py:determine_delivery_action()` is a sync pure function returning string action names. Both classify agent output for routing, but they use completely different type systems and are called at different points in the pipeline.
+ 
+ This is intentional by design (one classifies content type, the other decides delivery action), but the naming `classify_*` for both can be confusing. The nudge loop does not consume `ClassificationResult` at all -- it has its own independent routing logic.
+ 
+ **File:** `bridge/summarizer.py:702`, `agent/agent_session_queue.py:57`
+-**Recommendation:** Informational. The separation is correct (content classification vs. delivery routing). Consider renaming `classify_nudge_action` to `determine_delivery_action` or similar to reduce naming confusion.
++**Recommendation:** Informational. The separation is correct (content classification vs. delivery routing). The rename from `classify_nudge_action` to `determine_delivery_action` has been completed, resolving the naming confusion.
+ 
+ ### INFO
+ 
+diff --git a/docs/plans/pm-telegram-tool.md b/docs/plans/pm-telegram-tool.md
+index 2e4586bac..db0fb3cd8 100644
+--- a/docs/plans/pm-telegram-tool.md
++++ b/docs/plans/pm-telegram-tool.md
+@@ -48,7 +48,7 @@ ChatSession composes and sends its own Telegram messages via a tool, with full c
+ 1. **Entry point**: Human sends Telegram message
+ 2. **Bridge**: Routes to ChatSession via `_execute_job()` in `agent/job_queue.py`
+ 3. **ChatSession**: Processes message, orchestrates DevSessions, returns text output
+-4. **Nudge loop**: `send_to_chat()` classifies output via `classify_nudge_action()` — decides deliver/nudge
++4. **Nudge loop**: `send_to_chat()` classifies output via `determine_delivery_action()` — decides deliver/nudge
+ 5. **Bridge send callback**: `_send()` in `telegram_bridge.py` L1448 calls `send_response_with_files()`
+ 6. **Summarizer**: `bridge/response.py` L396-429 runs `summarize_response()` which rewrites the text
+ 7. **Telegram**: Summarized text sent via `send_markdown()` to Telegram
+@@ -129,7 +129,7 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
+ ## Test Impact
+ 
+ - [ ] `tests/unit/test_summarizer.py::TestSummarizeResponse` — UPDATE: add test cases for summarizer bypass when `pm_sent_message_ids` is non-empty
+-- [ ] `tests/unit/test_nudge_loop.py` — UPDATE: add test cases for the new "pm already messaged" path in `classify_nudge_action()` or the delivery logic
++- [ ] `tests/unit/test_nudge_loop.py` — UPDATE: add test cases for the new "pm already messaged" path in `determine_delivery_action()` or the delivery logic
+ - [ ] `tests/e2e/test_nudge_loop.py` — UPDATE: verify end-to-end flow with PM self-messaging
+ - [ ] `tests/unit/test_sdk_client.py` — UPDATE: verify `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` env var injection for chat sessions
+ 
+diff --git a/tests/unit/test_duplicate_delivery.py b/tests/unit/test_duplicate_delivery.py
+index a482538dd..520eaa633 100644
+--- a/tests/unit/test_duplicate_delivery.py
++++ b/tests/unit/test_duplicate_delivery.py
+@@ -153,7 +153,7 @@ def test_completed_session_skips_auto_continue(self):
+ 
+         queue_code = Path("agent/agent_session_queue.py").read_text()
+ 
+-        # The guard should check session_status == "completed" (in classify_nudge_action)
++        # The guard should check session_status == "completed" (in determine_delivery_action)
+         assert 'session_status == "completed"' in queue_code
+         # It should deliver to chat without nudge
+         assert "delivering without nudge" in queue_code
+diff --git a/tests/unit/test_nudge_loop.py b/tests/unit/test_nudge_loop.py
+index cd741d29c..79d562e80 100644
+--- a/tests/unit/test_nudge_loop.py
++++ b/tests/unit/test_nudge_loop.py
+@@ -4,7 +4,7 @@
+ backoff, max nudge safety cap, and empty output handling.
+ """
+ 
+-from agent.agent_session_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, classify_nudge_action
++from agent.agent_session_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, determine_delivery_action
+ 
+ 
+ class TestNudgeConstants:
+@@ -91,16 +91,16 @@ def test_no_max_auto_continues_constants(self):
+ 
+ 
+ class TestNonSdlcDelivery:
+-    """Verify non-SDLC Teammate messages deliver via classify_nudge_action without nudging.
++    """Verify non-SDLC Teammate messages deliver via determine_delivery_action without nudging.
+ 
+-    Tests the actual classify_nudge_action function from agent_session_queue.py rather than
++    Tests the actual determine_delivery_action function from agent_session_queue.py rather than
+     replicating send_to_chat logic inline. This ensures tests stay in sync with
+     the real routing decisions.
+     """
+ 
+     def test_end_turn_delivers(self):
+         """Teammate message with stop_reason='end_turn' should deliver, not nudge."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="Here is the answer to your question about Python decorators.",
+             stop_reason="end_turn",
+             auto_continue_count=0,
+@@ -111,7 +111,7 @@ def test_end_turn_delivers(self):
+ 
+     def test_end_turn_does_not_nudge(self):
+         """Teammate completion should return deliver, not any nudge action."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="The answer is 42.",
+             stop_reason="end_turn",
+             auto_continue_count=0,
+@@ -121,7 +121,7 @@ def test_end_turn_does_not_nudge(self):
+ 
+     def test_auto_continue_count_unaffected_by_delivery(self):
+         """Delivery action means auto_continue_count stays at 0 in send_to_chat."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="Django uses the MTV pattern.",
+             stop_reason="end_turn",
+             auto_continue_count=0,
+@@ -132,7 +132,7 @@ def test_auto_continue_count_unaffected_by_delivery(self):
+ 
+     def test_rate_limited_nudges(self):
+         """Rate-limited stop reason should nudge, not deliver."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="partial output",
+             stop_reason="rate_limited",
+             auto_continue_count=0,
+@@ -142,7 +142,7 @@ def test_rate_limited_nudges(self):
+ 
+     def test_empty_output_nudges(self):
+         """Empty output should nudge when under cap."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="",
+             stop_reason="end_turn",
+             auto_continue_count=0,
+@@ -152,7 +152,7 @@ def test_empty_output_nudges(self):
+ 
+     def test_empty_output_at_cap_delivers_fallback(self):
+         """Empty output at nudge cap should deliver fallback."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="",
+             stop_reason="end_turn",
+             auto_continue_count=MAX_NUDGE_COUNT,
+@@ -162,7 +162,7 @@ def test_empty_output_at_cap_delivers_fallback(self):
+ 
+     def test_completed_session_delivers(self):
+         """Already-completed session should deliver without nudge."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="final output",
+             stop_reason="end_turn",
+             auto_continue_count=0,
+@@ -173,7 +173,7 @@ def test_completed_session_delivers(self):
+ 
+     def test_completion_already_sent_drops(self):
+         """If completion was already sent, subsequent output is dropped."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="more output",
+             stop_reason="end_turn",
+             auto_continue_count=0,
+@@ -184,7 +184,7 @@ def test_completion_already_sent_drops(self):
+ 
+     def test_nudge_cap_forces_delivery(self):
+         """At nudge safety cap with content, should deliver."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="substantial output after many nudges",
+             stop_reason="end_turn",
+             auto_continue_count=MAX_NUDGE_COUNT,
+diff --git a/tests/unit/test_qa_nudge_cap.py b/tests/unit/test_qa_nudge_cap.py
+index f46dbb1e6..e13796990 100644
+--- a/tests/unit/test_qa_nudge_cap.py
++++ b/tests/unit/test_qa_nudge_cap.py
+@@ -1,6 +1,6 @@
+ """Tests for Teammate reduced nudge cap in the nudge loop."""
+ 
+-from agent.agent_session_queue import MAX_NUDGE_COUNT, classify_nudge_action
++from agent.agent_session_queue import MAX_NUDGE_COUNT, determine_delivery_action
+ from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
+ 
+ 
+@@ -10,7 +10,7 @@ def test_teammate_cap_is_lower_than_default(self):
+ 
+     def test_empty_output_nudges_within_teammate_cap(self):
+         """Within Teammate cap, empty output should still nudge."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="",
+             stop_reason=None,
+             auto_continue_count=5,
+@@ -20,7 +20,7 @@ def test_empty_output_nudges_within_teammate_cap(self):
+ 
+     def test_empty_output_delivers_at_teammate_cap(self):
+         """At Teammate cap, empty output should deliver fallback."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="",
+             stop_reason=None,
+             auto_continue_count=TEAMMATE_MAX_NUDGE_COUNT,
+@@ -30,7 +30,7 @@ def test_empty_output_delivers_at_teammate_cap(self):
+ 
+     def test_normal_cap_still_allows_more_nudges(self):
+         """At Teammate cap count, normal cap should still allow nudges."""
+-        action = classify_nudge_action(
++        action = determine_delivery_action(
+             msg="",
+             stop_reason=None,
+             auto_continue_count=TEAMMATE_MAX_NUDGE_COUNT,

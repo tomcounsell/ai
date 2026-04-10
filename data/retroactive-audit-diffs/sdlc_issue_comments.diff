@@ -1,0 +1,967 @@
+diff --git a/agent/hooks/subagent_stop.py b/agent/hooks/subagent_stop.py
+index 84c2fbd40..934a59f16 100644
+--- a/agent/hooks/subagent_stop.py
++++ b/agent/hooks/subagent_stop.py
+@@ -1,5 +1,10 @@
+ """SubagentStop hook: logs subagent completion, registers DevSession,
+-and injects SDLC pipeline state back into the PM's context."""
++posts structured stage comments to the tracking GitHub issue, and injects
++SDLC pipeline state back into the PM's context.
++
++Stage comments are posted via utils.issue_comments after each DevSession
++completes, turning the GitHub issue into a living record of stage-by-stage
++progress. See docs/features/sdlc-stage-handoff.md for the full design."""
+ 
+ from __future__ import annotations
+ 
+@@ -127,6 +132,78 @@ def _get_stage_states(session_id: str) -> str | None:
+         return None
+ 
+ 
++def _resolve_tracking_issue() -> int | None:
++    """Resolve tracking issue number from env var or plan frontmatter.
++
++    Checks SDLC_TRACKING_ISSUE first, then SDLC_ISSUE_NUMBER, then falls
++    back to parsing the plan frontmatter if SDLC_SLUG is set.
++
++    Returns:
++        Issue number as int, or None if not found.
++    """
++    # Direct env var (set by sdk_client.py)
++    for env_key in ("SDLC_TRACKING_ISSUE", "SDLC_ISSUE_NUMBER"):
++        value = os.environ.get(env_key)
++        if value and value.isdigit():
++            return int(value)
++
++    # Fallback: parse plan frontmatter
++    slug = os.environ.get("SDLC_SLUG")
++    if not slug:
++        return None
++
++    plan_path = os.environ.get("SDLC_PLAN_PATH")
++    if not plan_path:
++        plan_path = f"docs/plans/{slug}.md"
++
++    try:
++        import re
++
++        # Try both absolute and relative paths
++        for path in [plan_path, os.path.join(os.getcwd(), plan_path)]:
++            if os.path.isfile(path):
++                with open(path) as f:
++                    content = f.read(2000)  # Frontmatter is at the top
++                pattern = r"tracking:\s*https?://github\.com/[^/]+/[^/]+/issues/(\d+)"
++                match = re.search(pattern, content)
++                if match:
++                    return int(match.group(1))
++    except Exception as e:
++        logger.debug(f"[subagent_stop] Failed to parse plan frontmatter: {e}")
++
++    return None
++
++
++def _post_stage_comment_on_completion(input_data: dict, current_stage: str | None) -> None:
++    """Post a structured stage comment to the tracking issue.
++
++    Called after _register_dev_session_completion(). Wraps all logic in
++    try/except so comment posting never crashes the hook.
++    """
++    try:
++        issue_number = _resolve_tracking_issue()
++        if not issue_number:
++            logger.debug("[subagent_stop] No tracking issue found, skipping comment")
++            return
++
++        stage = current_stage or "UNKNOWN"
++        outcome = _extract_outcome_summary(input_data)
++
++        from utils.issue_comments import post_stage_comment
++
++        success = post_stage_comment(
++            issue_number=issue_number,
++            stage=stage,
++            outcome=outcome,
++        )
++        if success:
++            logger.info(f"[subagent_stop] Posted stage comment: {stage} on issue #{issue_number}")
++        else:
++            logger.warning(f"[subagent_stop] Failed to post stage comment on issue #{issue_number}")
++    except Exception as e:
++        logger.warning(f"[subagent_stop] Comment posting failed (non-fatal): {e}")
++
++
+ async def subagent_stop_hook(
+     input_data: SubagentStopHookInput,
+     tool_use_id: str | None,
+@@ -136,7 +213,8 @@ async def subagent_stop_hook(
+ 
+     When agent_type is dev-session:
+     1. Updates DevSession status in Redis
+-    2. Injects current SDLC pipeline state via 'reason' so the PM sees
++    2. Posts a structured stage comment to the tracking issue
++    3. Injects current SDLC pipeline state via 'reason' so the PM sees
+        which stages are actually complete vs still pending
+     """
+     agent_type = input_data.get("agent_type", "unknown")
+@@ -153,8 +231,25 @@ async def subagent_stop_hook(
+     if agent_type == "dev-session":
+         _register_dev_session_completion(agent_id)
+ 
+-        # Inject SDLC stage state and outcome back to PM
++        # Resolve current stage before it gets marked complete
++        current_stage = None
+         session_id = os.environ.get("VALOR_SESSION_ID")
++        if session_id:
++            stages_str = _get_stage_states(session_id)
++            if stages_str:
++                # Find the stage that was just completed (most recent in_progress -> completed)
++                try:
++                    stages_dict = json.loads(stages_str) if isinstance(stages_str, str) else {}
++                    for stage_name, state in stages_dict.items():
++                        if state in ("completed", "done"):
++                            current_stage = stage_name
++                except (json.JSONDecodeError, TypeError):
++                    pass
++
++        # Post stage comment to tracking issue (non-blocking, never crashes)
++        _post_stage_comment_on_completion(input_data, current_stage)
++
++        # Inject SDLC stage state and outcome back to PM
+         if session_id:
+             stages = _get_stage_states(session_id)
+             if stages:
+diff --git a/agent/sdk_client.py b/agent/sdk_client.py
+index e6a0fd056..9c03ddccb 100644
+--- a/agent/sdk_client.py
++++ b/agent/sdk_client.py
+@@ -285,12 +285,14 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
+             else:
+                 env["SDLC_PLAN_PATH"] = plan_url
+ 
+-        # Issue URL -> SDLC_ISSUE_NUMBER
++        # Issue URL -> SDLC_ISSUE_NUMBER and SDLC_TRACKING_ISSUE
+         issue_url = getattr(session, "issue_url", None)
+         if isinstance(issue_url, str) and issue_url:
+             issue_match = _ISSUE_NUMBER_RE.search(issue_url)
+             if issue_match:
+-                env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
++                issue_num = issue_match.group(1)
++                env["SDLC_ISSUE_NUMBER"] = issue_num
++                env["SDLC_TRACKING_ISSUE"] = issue_num
+ 
+         # Repo (complement GH_REPO, don't replace it)
+         if gh_repo:
+@@ -1461,6 +1463,12 @@ async def get_agent_response_sdk(
+             "1. **Assess the current stage** — use read-only Bash commands "
+             "(gh issue view, gh pr view, gh pr list, grep) to determine "
+             "where work stands. You can run Bash for reads freely.\n"
++            "1.5. **Gather prior stage context** — if a tracking issue exists, "
++            "fetch the last few comments with "
++            "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
++            "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
++            "of prior stage findings in the DevSession prompt so the next stage "
++            "has full context from previous stages.\n"
+             "2. **Spawn one dev-session for the next stage** — use the Agent tool "
+             "to dispatch exactly one stage at a time:\n"
+             '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
+diff --git a/docs/features/README.md b/docs/features/README.md
+index c0d57d00f..e1ada3629 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -74,6 +74,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
+ | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
+ | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
++| [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
+ | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
+ | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
+ | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
+diff --git a/docs/features/sdlc-stage-handoff.md b/docs/features/sdlc-stage-handoff.md
+new file mode 100644
+index 000000000..b1fa9f4f5
+--- /dev/null
++++ b/docs/features/sdlc-stage-handoff.md
+@@ -0,0 +1,104 @@
++# SDLC Stage Handoff via GitHub Issue Comments
++
++## Overview
++
++SDLC stages post structured comments to the tracking GitHub issue on completion and read prior stage comments on startup. This turns the GitHub issue into the living record of stage-by-stage progress, giving each stage context about what previous stages discovered.
++
++## Problem
++
++Without stage handoff, each DevSession starts with only the plan document and its task prompt. Discoveries, decisions, and blockers from prior stages are lost between sessions. The Test stage does not know that Build hit a tricky edge case; the Review stage cannot see what Test already validated.
++
++## How It Works
++
++### On Stage Completion (SubagentStop Hook)
++
++When a DevSession completes, the `subagent_stop_hook` in `agent/hooks/subagent_stop.py`:
++
++1. Resolves the tracking issue number from `SDLC_TRACKING_ISSUE` env var, `SDLC_ISSUE_NUMBER` env var, or plan frontmatter (`tracking:` field)
++2. Extracts the current stage name from the PipelineStateMachine stage states
++3. Extracts an outcome summary from the subagent's return value via `_extract_outcome_summary()`
++4. Calls `post_stage_comment()` from `utils/issue_comments.py` to post a structured markdown comment
++5. All of this is wrapped in try/except -- comment posting never crashes the hook
++
++### On Stage Start (ChatSession Prompt Enrichment)
++
++The ChatSession PM instructions in `agent/sdk_client.py` include a step to gather prior stage context before spawning a DevSession:
++
++1. ChatSession fetches issue comments via `gh api repos/{owner}/{repo}/issues/{number}/comments`
++2. Filters for comments matching the structured stage format (identified by `<!-- sdlc-stage-comment -->` marker)
++3. Appends a "Prior stage findings" section to the DevSession prompt
++4. Limited to the last 5 stage comments to prevent context bloat
++
++### Comment Format
++
++Each stage comment follows a standardized markdown template:
++
++```markdown
++<!-- sdlc-stage-comment -->
++## Stage: BUILD
++**Outcome:** All tasks completed, 3 files created
++
++### Key Findings
++- Auth middleware required special handling for token refresh
++- Added retry logic for flaky API calls
++
++### Files Modified
++- `utils/issue_comments.py`
++- `agent/hooks/subagent_stop.py`
++
++### Notes for Next Stage
++Focus testing on error handling paths -- the happy path is straightforward.
++```
++
++The `<!-- sdlc-stage-comment -->` HTML comment marker enables reliable filtering of stage comments from regular human comments on the issue.
++
++## Key Components
++
++### `utils/issue_comments.py`
++
++Utility module with four functions:
++
++- `fetch_stage_comments(issue_number, repo)` -- Fetches and parses stage-formatted comments from a GitHub issue. Returns a list of dicts with `stage`, `outcome`, and `body` keys. Returns empty list on any failure.
++- `post_stage_comment(issue_number, stage, outcome, findings, files, notes, repo)` -- Formats and posts a structured comment. Returns True on success, False on failure. Never raises.
++- `format_stage_comment(stage, outcome, findings, files, notes)` -- Formats the markdown comment body without posting it.
++- `format_prior_context(comments, max_comments)` -- Formats fetched comments into a context string suitable for prompt injection.
++
++All GitHub interactions use the `gh` CLI via subprocess with a 10-second timeout. No new Python dependencies.
++
++### `agent/hooks/subagent_stop.py`
++
++Extended with two new functions:
++
++- `_resolve_tracking_issue()` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or by parsing plan frontmatter. Returns int or None.
++- `_post_stage_comment_on_completion(input_data, current_stage)` -- Called after `_register_dev_session_completion()`. Posts the stage comment, wrapped in try/except so failures are non-fatal.
++
++### `agent/sdk_client.py`
++
++- Propagates `SDLC_TRACKING_ISSUE` environment variable when launching sessions with a tracking issue
++- PM instructions updated to include prior stage context gathering step
++
++## Design Decisions
++
++- **GitHub as single source of truth** -- No dual-write to Redis or any other storage. The issue timeline is the canonical record.
++- **Append-only comments** -- New comments per stage, never edit old ones. Duplicate comments from stage re-runs are informative, not harmful.
++- **Graceful degradation** -- All comment operations fail silently. Missing tracking issue, gh CLI failures, and timeouts all result in logged warnings but never crash the pipeline.
++- **No LLM extraction** -- Uses the existing `_extract_outcome_summary()` pattern for outcome extraction rather than adding LLM-powered extraction.
++
++## Failure Modes
++
++| Scenario | Behavior |
++|----------|----------|
++| No tracking issue configured | Comment posting skipped silently |
++| `gh` CLI not available or not authenticated | Returns False / empty list, logs warning |
++| `gh` API timeout (>10s) | Returns False / empty list, logs warning |
++| Non-existent issue number | `gh` returns error, logged as warning |
++| Empty findings list | Posts comment with "No notable findings" placeholder |
++| Rate limiting | `gh` CLI handles rate limit retries automatically |
++
++## Related
++
++- [Pipeline State Machine](pipeline-state-machine.md) -- Stage tracking that the hook reads from
++- [Observer Agent](observer-agent.md) -- SDLC routing that triggers stage transitions
++- [Skill Context Injection](skill-context-injection.md) -- Environment variable propagation pattern
++- GitHub Issue: [#520](https://github.com/tomcounsell/ai/issues/520)
++- PR: [#523](https://github.com/tomcounsell/ai/pull/523)
+diff --git a/tests/integration/test_stage_comment.py b/tests/integration/test_stage_comment.py
+new file mode 100644
+index 000000000..4f5c71612
+--- /dev/null
++++ b/tests/integration/test_stage_comment.py
+@@ -0,0 +1,87 @@
++"""Integration test for SDLC stage comment posting and reading.
++
++Posts a comment to a real GitHub issue, fetches it back, and verifies
++the format is correct. Uses the actual `gh` CLI.
++"""
++
++import pytest
++
++from utils.issue_comments import (
++    STAGE_COMMENT_MARKER,
++    fetch_stage_comments,
++    format_prior_context,
++    format_stage_comment,
++    post_stage_comment,
++)
++
++# Use the tracking issue for this feature as the test target
++TEST_ISSUE_NUMBER = 520
++TEST_REPO = "tomcounsell/ai"
++
++
++@pytest.mark.integration
++class TestStageCommentIntegration:
++    """Integration tests that post and read real GitHub comments."""
++
++    def test_post_and_fetch_stage_comment(self):
++        """Post a stage comment and verify it can be fetched back."""
++        # Post a test comment
++        success = post_stage_comment(
++            issue_number=TEST_ISSUE_NUMBER,
++            stage="INTEGRATION_TEST",
++            outcome="Automated test verification",
++            findings=["Comment posting works", "Comment fetching works"],
++            files=["utils/issue_comments.py"],
++            notes="This comment was posted by an automated integration test.",
++            repo=TEST_REPO,
++        )
++        assert success, "Failed to post stage comment"
++
++        # Fetch it back
++        comments = fetch_stage_comments(TEST_ISSUE_NUMBER, repo=TEST_REPO)
++        assert len(comments) > 0, "No stage comments found after posting"
++
++        # Find our test comment
++        test_comments = [c for c in comments if c["stage"] == "INTEGRATION_TEST"]
++        assert len(test_comments) > 0, "Test comment not found in fetched comments"
++
++        latest = test_comments[-1]
++        assert latest["stage"] == "INTEGRATION_TEST"
++        assert latest["outcome"] == "Automated test verification"
++
++    def test_format_prior_context_with_real_comments(self):
++        """Verify format_prior_context produces readable output."""
++        comments = fetch_stage_comments(TEST_ISSUE_NUMBER, repo=TEST_REPO)
++        if not comments:
++            pytest.skip("No stage comments on issue to test with")
++
++        context = format_prior_context(comments)
++        assert "Prior Stage Findings" in context
++        assert len(context) > 0
++
++    def test_comment_contains_marker(self):
++        """Verify posted comments contain the machine-readable marker."""
++        comments = fetch_stage_comments(TEST_ISSUE_NUMBER, repo=TEST_REPO)
++        if not comments:
++            pytest.skip("No stage comments on issue")
++
++        for c in comments:
++            assert STAGE_COMMENT_MARKER in c["body"]
++
++    def test_format_stage_comment_is_valid_markdown(self):
++        """Verify the comment format is valid markdown with proper structure."""
++        body = format_stage_comment(
++            stage="BUILD",
++            outcome="PR #123 opened",
++            findings=["Fixed auth middleware", "Added retry logic"],
++            files=["agent/hooks/subagent_stop.py", "utils/issue_comments.py"],
++            notes="Review should check error handling paths.",
++        )
++
++        # Verify structure
++        assert body.startswith(STAGE_COMMENT_MARKER)
++        assert "## Stage: BUILD" in body
++        assert "**Outcome:** PR #123 opened" in body
++        assert "### Key Findings" in body
++        assert "### Files Modified" in body
++        assert "### Notes for Next Stage" in body
+diff --git a/tests/unit/test_issue_comments.py b/tests/unit/test_issue_comments.py
+new file mode 100644
+index 000000000..85e050d2d
+--- /dev/null
++++ b/tests/unit/test_issue_comments.py
+@@ -0,0 +1,197 @@
++"""Unit tests for utils/issue_comments.py."""
++
++import json
++import logging
++import subprocess
++from unittest.mock import patch
++
++from utils.issue_comments import (
++    STAGE_COMMENT_MARKER,
++    fetch_stage_comments,
++    format_prior_context,
++    format_stage_comment,
++    post_stage_comment,
++)
++
++
++class TestFormatStageComment:
++    """Test format_stage_comment output."""
++
++    def test_basic_format(self):
++        body = format_stage_comment("BUILD", "PR opened successfully")
++        assert STAGE_COMMENT_MARKER in body
++        assert "## Stage: BUILD" in body
++        assert "**Outcome:** PR opened successfully" in body
++
++    def test_with_findings(self):
++        body = format_stage_comment(
++            "TEST",
++            "All tests pass",
++            findings=["Edge case in auth middleware", "Coverage at 95%"],
++        )
++        assert "### Key Findings" in body
++        assert "- Edge case in auth middleware" in body
++        assert "- Coverage at 95%" in body
++
++    def test_empty_findings_shows_placeholder(self):
++        body = format_stage_comment("BUILD", "Done")
++        assert "No notable findings" in body
++
++    def test_with_files(self):
++        body = format_stage_comment(
++            "BUILD",
++            "Done",
++            files=["src/main.py", "tests/test_main.py"],
++        )
++        assert "### Files Modified" in body
++        assert "- `src/main.py`" in body
++
++    def test_with_notes(self):
++        body = format_stage_comment(
++            "BUILD",
++            "Done",
++            notes="Watch out for flaky test in CI",
++        )
++        assert "### Notes for Next Stage" in body
++        assert "Watch out for flaky test in CI" in body
++
++
++class TestFetchStageComments:
++    """Test fetch_stage_comments with mocked subprocess."""
++
++    def test_returns_empty_for_no_issue(self):
++        result = fetch_stage_comments(0)
++        assert result == []
++
++    def test_returns_empty_for_none_issue(self):
++        result = fetch_stage_comments(None)
++        assert result == []
++
++    @patch.dict("os.environ", {"GH_REPO": "owner/repo"})
++    @patch("utils.issue_comments.subprocess.run")
++    def test_parses_stage_comments(self, mock_run):
++        stage_body = format_stage_comment("BUILD", "PR created")
++        comments_json = json.dumps(
++            [
++                {"body": "Normal comment without marker"},
++                {"body": stage_body},
++            ]
++        )
++
++        # Single call returns full JSON comment list
++        mock_run.return_value = subprocess.CompletedProcess(
++            args=[], returncode=0, stdout=comments_json, stderr=""
++        )
++
++        result = fetch_stage_comments(42)
++        assert len(result) == 1
++        assert result[0]["stage"] == "BUILD"
++        assert result[0]["outcome"] == "PR created"
++
++    @patch.dict("os.environ", {"GH_REPO": "owner/repo"})
++    @patch("utils.issue_comments.subprocess.run")
++    def test_handles_gh_failure(self, mock_run, caplog):
++        mock_run.return_value = subprocess.CompletedProcess(
++            args=[], returncode=1, stdout="", stderr="auth error"
++        )
++        with caplog.at_level(logging.WARNING):
++            result = fetch_stage_comments(42)
++        assert result == []
++
++    @patch.dict("os.environ", {"GH_REPO": "owner/repo"})
++    @patch("utils.issue_comments.subprocess.run")
++    def test_handles_timeout(self, mock_run):
++        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
++        result = fetch_stage_comments(42)
++        assert result == []
++
++    @patch.dict("os.environ", {}, clear=False)
++    def test_returns_empty_without_repo(self, monkeypatch):
++        monkeypatch.delenv("GH_REPO", raising=False)
++        monkeypatch.delenv("SDLC_REPO", raising=False)
++        result = fetch_stage_comments(42)
++        assert result == []
++
++    @patch.dict("os.environ", {"GH_REPO": "owner/repo"})
++    @patch("utils.issue_comments.subprocess.run")
++    def test_returns_empty_for_no_comments(self, mock_run):
++        mock_run.return_value = subprocess.CompletedProcess(
++            args=[], returncode=0, stdout="", stderr=""
++        )
++        result = fetch_stage_comments(42)
++        assert result == []
++
++
++class TestPostStageComment:
++    """Test post_stage_comment with mocked subprocess."""
++
++    def test_returns_false_for_no_issue(self):
++        assert post_stage_comment(0, "BUILD", "Done") is False
++
++    def test_returns_false_for_none_issue(self):
++        assert post_stage_comment(None, "BUILD", "Done") is False
++
++    @patch.dict("os.environ", {"GH_REPO": "owner/repo"})
++    @patch("utils.issue_comments.subprocess.run")
++    def test_posts_comment_successfully(self, mock_run):
++        mock_run.return_value = subprocess.CompletedProcess(
++            args=[], returncode=0, stdout="", stderr=""
++        )
++        result = post_stage_comment(42, "BUILD", "PR created")
++        assert result is True
++        mock_run.assert_called_once()
++        call_args = mock_run.call_args[0][0]
++        assert "gh" in call_args
++        assert "42" in call_args
++        assert "--repo" in call_args
++
++    @patch.dict("os.environ", {"GH_REPO": "owner/repo"})
++    @patch("utils.issue_comments.subprocess.run")
++    def test_returns_false_on_failure(self, mock_run):
++        mock_run.return_value = subprocess.CompletedProcess(
++            args=[], returncode=1, stdout="", stderr="error"
++        )
++        result = post_stage_comment(42, "BUILD", "Done")
++        assert result is False
++
++    @patch.dict("os.environ", {"GH_REPO": "owner/repo"})
++    @patch("utils.issue_comments.subprocess.run")
++    def test_handles_timeout(self, mock_run):
++        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=10)
++        result = post_stage_comment(42, "BUILD", "Done")
++        assert result is False
++
++    @patch.dict("os.environ", {}, clear=False)
++    def test_returns_false_without_repo(self, monkeypatch):
++        monkeypatch.delenv("GH_REPO", raising=False)
++        monkeypatch.delenv("SDLC_REPO", raising=False)
++        result = post_stage_comment(42, "BUILD", "Done")
++        assert result is False
++
++
++class TestFormatPriorContext:
++    """Test format_prior_context helper."""
++
++    def test_empty_comments(self):
++        assert format_prior_context([]) == ""
++
++    def test_formats_comments(self):
++        comments = [
++            {"stage": "PLAN", "outcome": "Plan created", "body": "..."},
++            {"stage": "BUILD", "outcome": "PR opened", "body": "..."},
++        ]
++        result = format_prior_context(comments)
++        assert "Prior Stage Findings" in result
++        assert "**PLAN**: Plan created" in result
++        assert "**BUILD**: PR opened" in result
++
++    def test_limits_to_max_comments(self):
++        comments = [
++            {"stage": f"STAGE{i}", "outcome": f"Done {i}", "body": "..."} for i in range(10)
++        ]
++        result = format_prior_context(comments, max_comments=3)
++        # Should only include the last 3
++        assert "STAGE7" in result
++        assert "STAGE8" in result
++        assert "STAGE9" in result
++        assert "STAGE0" not in result
+diff --git a/tests/unit/test_subagent_stop_hook.py b/tests/unit/test_subagent_stop_hook.py
+index 57aabad4e..1efcf5ca5 100644
+--- a/tests/unit/test_subagent_stop_hook.py
++++ b/tests/unit/test_subagent_stop_hook.py
+@@ -9,7 +9,9 @@
+ from agent.hooks.subagent_stop import (
+     _extract_outcome_summary,
+     _get_stage_states,
++    _post_stage_comment_on_completion,
+     _register_dev_session_completion,
++    _resolve_tracking_issue,
+     subagent_stop_hook,
+ )
+ 
+@@ -230,6 +232,79 @@ def test_skips_none_values(self):
+         assert "completed" in result
+ 
+ 
++class TestResolveTrackingIssue:
++    """Test _resolve_tracking_issue helper."""
++
++    def test_from_sdlc_tracking_issue_env(self, monkeypatch):
++        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
++        assert _resolve_tracking_issue() == 42
++
++    def test_from_sdlc_issue_number_env(self, monkeypatch):
++        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
++        monkeypatch.setenv("SDLC_ISSUE_NUMBER", "99")
++        assert _resolve_tracking_issue() == 99
++
++    def test_returns_none_when_no_env_vars(self, monkeypatch):
++        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
++        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
++        monkeypatch.delenv("SDLC_SLUG", raising=False)
++        assert _resolve_tracking_issue() is None
++
++    def test_ignores_non_digit_values(self, monkeypatch):
++        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "not-a-number")
++        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
++        monkeypatch.delenv("SDLC_SLUG", raising=False)
++        assert _resolve_tracking_issue() is None
++
++    def test_from_plan_frontmatter(self, monkeypatch, tmp_path):
++        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
++        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
++        monkeypatch.setenv("SDLC_SLUG", "test-slug")
++
++        plan_file = tmp_path / "test-slug.md"
++        plan_file.write_text("---\ntracking: https://github.com/owner/repo/issues/123\n---\n")
++        monkeypatch.setenv("SDLC_PLAN_PATH", str(plan_file))
++
++        assert _resolve_tracking_issue() == 123
++
++
++class TestPostStageCommentOnCompletion:
++    """Test _post_stage_comment_on_completion helper."""
++
++    def test_skips_when_no_tracking_issue(self, monkeypatch, caplog):
++        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
++        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
++        monkeypatch.delenv("SDLC_SLUG", raising=False)
++        with caplog.at_level(logging.DEBUG):
++            _post_stage_comment_on_completion({}, "BUILD")
++        assert "No tracking issue" in caplog.text
++
++    def test_posts_comment_on_success(self, monkeypatch):
++        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
++        with patch("utils.issue_comments.post_stage_comment", return_value=True) as mock_post:
++            _post_stage_comment_on_completion({"result": "Tests passed"}, "TEST")
++        mock_post.assert_called_once()
++        assert mock_post.call_args.kwargs["issue_number"] == 42
++        assert mock_post.call_args.kwargs["stage"] == "TEST"
++
++    def test_handles_post_failure(self, monkeypatch, caplog):
++        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
++        with patch("utils.issue_comments.post_stage_comment", return_value=False):
++            with caplog.at_level(logging.WARNING):
++                _post_stage_comment_on_completion({}, "BUILD")
++        assert "Failed to post stage comment" in caplog.text
++
++    def test_never_crashes_on_exception(self, monkeypatch, caplog):
++        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
++        with patch(
++            "utils.issue_comments.post_stage_comment",
++            side_effect=RuntimeError("unexpected"),
++        ):
++            with caplog.at_level(logging.WARNING):
++                _post_stage_comment_on_completion({}, "BUILD")
++        assert "non-fatal" in caplog.text
++
++
+ class TestSubagentStopHookDevSession:
+     """Test full hook behavior for dev-session agent type."""
+ 
+@@ -243,13 +318,13 @@ async def test_injects_stage_states_for_dev_session(self, monkeypatch):
+             patch(
+                 "agent.hooks.subagent_stop._get_stage_states",
+                 return_value="{'PLAN': 'done', 'BUILD': 'done'}",
+-            ) as mock_stages,
++            ),
++            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
+         ):
+             input_data = {"agent_type": "dev-session", "agent_id": "dev-1"}
+             result = await subagent_stop_hook(input_data, None, None)
+ 
+         mock_reg.assert_called_once_with("dev-1")
+-        mock_stages.assert_called_once_with("pm-session-1")
+         assert "reason" in result
+         assert "Pipeline state" in result["reason"]
+ 
+@@ -258,7 +333,10 @@ async def test_no_injection_when_session_id_not_set(self, monkeypatch):
+         """Should not inject stages when VALOR_SESSION_ID is not set."""
+         monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+ 
+-        with patch("agent.hooks.subagent_stop._register_dev_session_completion"):
++        with (
++            patch("agent.hooks.subagent_stop._register_dev_session_completion"),
++            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
++        ):
+             input_data = {"agent_type": "dev-session", "agent_id": "dev-2"}
+             result = await subagent_stop_hook(input_data, None, None)
+ 
+@@ -272,8 +350,28 @@ async def test_no_injection_when_no_stage_data(self, monkeypatch):
+         with (
+             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
+             patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
++            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
+         ):
+             input_data = {"agent_type": "dev-session", "agent_id": "dev-3"}
+             result = await subagent_stop_hook(input_data, None, None)
+ 
+         assert result == {}
++
++    @pytest.mark.asyncio
++    async def test_posts_stage_comment_on_completion(self, monkeypatch):
++        """Should call _post_stage_comment_on_completion for dev-sessions."""
++        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-3")
++
++        with (
++            patch("agent.hooks.subagent_stop._register_dev_session_completion"),
++            patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
++            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion") as mock_post,
++        ):
++            input_data = {
++                "agent_type": "dev-session",
++                "agent_id": "dev-4",
++                "result": "Build complete",
++            }
++            await subagent_stop_hook(input_data, None, None)
++
++        mock_post.assert_called_once()
+diff --git a/utils/issue_comments.py b/utils/issue_comments.py
+new file mode 100644
+index 000000000..0c40a8f22
+--- /dev/null
++++ b/utils/issue_comments.py
+@@ -0,0 +1,226 @@
++"""Utility for reading and writing SDLC stage comments on GitHub issues.
++
++Uses the `gh` CLI for all GitHub API interactions -- no new Python dependencies.
++Both functions handle errors gracefully (returning empty list / False, never raising).
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import os
++import re
++import subprocess
++
++logger = logging.getLogger(__name__)
++
++# Marker used to identify stage comments posted by this module
++STAGE_COMMENT_MARKER = "<!-- sdlc-stage-comment -->"
++STAGE_HEADER_RE = re.compile(r"## Stage: (\w+)\s*\n\*\*Outcome:\*\*\s*(.+)")
++
++
++def _resolve_gh_repo() -> str | None:
++    """Resolve the GitHub repo from GH_REPO or SDLC_REPO env vars."""
++    return os.environ.get("GH_REPO") or os.environ.get("SDLC_REPO")
++
++
++def fetch_stage_comments(issue_number: int, repo: str | None = None) -> list[dict]:
++    """Fetch prior SDLC stage comments from a GitHub issue.
++
++    Args:
++        issue_number: The GitHub issue number.
++        repo: Optional owner/repo string. Falls back to GH_REPO env var.
++
++    Returns:
++        List of dicts with keys: stage, outcome, body. Empty list on failure.
++    """
++    if not issue_number:
++        return []
++
++    repo = repo or _resolve_gh_repo()
++    if not repo:
++        logger.warning("[issue_comments] No repo configured, cannot fetch comments")
++        return []
++
++    try:
++        cmd = [
++            "gh",
++            "api",
++            f"repos/{repo}/issues/{issue_number}/comments",
++        ]
++        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
++        if result.returncode != 0:
++            logger.warning(
++                f"[issue_comments] gh api failed (rc={result.returncode}): {result.stderr[:200]}"
++            )
++            return []
++
++        try:
++            all_comments = json.loads(result.stdout)
++        except json.JSONDecodeError:
++            logger.warning("[issue_comments] Failed to parse JSON response")
++            return []
++
++        if not all_comments:
++            return []
++
++        comments = []
++        for comment in all_comments:
++            body = comment.get("body", "")
++            if STAGE_COMMENT_MARKER not in body:
++                continue
++
++            match = STAGE_HEADER_RE.search(body)
++            if match:
++                comments.append(
++                    {
++                        "stage": match.group(1),
++                        "outcome": match.group(2).strip(),
++                        "body": body,
++                    }
++                )
++
++        return comments
++
++    except subprocess.TimeoutExpired:
++        logger.warning("[issue_comments] gh api timed out fetching comments")
++        return []
++    except Exception as e:
++        logger.warning(f"[issue_comments] Failed to fetch comments: {e}")
++        return []
++
++
++def format_stage_comment(
++    stage: str,
++    outcome: str,
++    findings: list[str] | None = None,
++    files: list[str] | None = None,
++    notes: str | None = None,
++) -> str:
++    """Format a structured SDLC stage comment body.
++
++    Args:
++        stage: Stage name (e.g., BUILD, TEST, REVIEW).
++        outcome: Brief outcome description.
++        findings: List of key findings/discoveries.
++        files: List of files modified.
++        notes: Notes for the next stage.
++
++    Returns:
++        Formatted markdown comment body.
++    """
++    lines = [
++        STAGE_COMMENT_MARKER,
++        f"## Stage: {stage}",
++        f"**Outcome:** {outcome}",
++        "",
++    ]
++
++    if findings:
++        lines.append("### Key Findings")
++        for finding in findings:
++            lines.append(f"- {finding}")
++        lines.append("")
++    else:
++        lines.append("### Key Findings")
++        lines.append("- No notable findings")
++        lines.append("")
++
++    if files:
++        lines.append("### Files Modified")
++        for f in files:
++            lines.append(f"- `{f}`")
++        lines.append("")
++
++    if notes:
++        lines.append("### Notes for Next Stage")
++        lines.append(notes)
++        lines.append("")
++
++    return "\n".join(lines)
++
++
++def post_stage_comment(
++    issue_number: int,
++    stage: str,
++    outcome: str,
++    findings: list[str] | None = None,
++    files: list[str] | None = None,
++    notes: str | None = None,
++    repo: str | None = None,
++) -> bool:
++    """Post a structured stage summary comment to a GitHub issue.
++
++    Args:
++        issue_number: The GitHub issue number.
++        stage: Stage name (e.g., BUILD, TEST, REVIEW).
++        outcome: Brief outcome description.
++        findings: List of key findings/discoveries.
++        files: List of files modified.
++        notes: Notes for the next stage.
++        repo: Optional owner/repo string. Falls back to GH_REPO env var.
++
++    Returns:
++        True on success, False on failure. Never raises.
++    """
++    if not issue_number:
++        return False
++
++    repo = repo or _resolve_gh_repo()
++    if not repo:
++        logger.warning("[issue_comments] No repo configured, cannot post comment")
++        return False
++
++    body = format_stage_comment(stage, outcome, findings, files, notes)
++
++    try:
++        cmd = [
++            "gh",
++            "issue",
++            "comment",
++            str(issue_number),
++            "--repo",
++            repo,
++            "--body",
++            body,
++        ]
++        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
++        if result.returncode != 0:
++            logger.warning(
++                f"[issue_comments] gh issue comment failed (rc={result.returncode}): "
++                f"{result.stderr[:200]}"
++            )
++            return False
++
++        logger.info(
++            f"[issue_comments] Posted stage comment: {stage} -> {outcome} on issue #{issue_number}"
++        )
++        return True
++
++    except subprocess.TimeoutExpired:
++        logger.warning("[issue_comments] gh issue comment timed out")
++        return False
++    except Exception as e:
++        logger.warning(f"[issue_comments] Failed to post comment: {e}")
++        return False
++
++
++def format_prior_context(comments: list[dict], max_comments: int = 5) -> str:
++    """Format prior stage comments into a context string for prompt injection.
++
++    Args:
++        comments: List of stage comment dicts from fetch_stage_comments().
++        max_comments: Maximum number of recent comments to include.
++
++    Returns:
++        Formatted context string, or empty string if no comments.
++    """
++    if not comments:
++        return ""
++
++    recent = comments[-max_comments:]
++    lines = ["## Prior Stage Findings", ""]
++    for c in recent:
++        lines.append(f"**{c['stage']}**: {c['outcome']}")
++    lines.append("")
++    return "\n".join(lines)

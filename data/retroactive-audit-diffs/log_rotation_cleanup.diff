@@ -1,0 +1,148 @@
+diff --git a/config/newsyslog.valor.conf b/config/newsyslog.valor.conf
+new file mode 100644
+index 000000000..ba42c40c4
+--- /dev/null
++++ b/config/newsyslog.valor.conf
+@@ -0,0 +1,22 @@
++# newsyslog configuration for Valor launchd-managed log files.
++#
++# These log files are written directly by launchd via StandardOutPath/StandardErrorPath
++# and cannot be rotated by Python's RotatingFileHandler. newsyslog (built into macOS)
++# handles rotation for these files.
++#
++# NOTE: launchd holds file descriptors open, so we use the "N" flag (no signal).
++# After rotation, launchd continues writing to the old inode until the service restarts.
++# The valor-service.sh rotate_log function handles active rotation on service start;
++# this newsyslog config provides a safety net for long-running services.
++#
++# Install: sudo cp config/newsyslog.valor.conf /etc/newsyslog.d/valor.conf
++#
++# Format: logfilename [owner:group] mode count size(KB) when flags
++# See newsyslog.conf(5) for details.
++#
++# logfilename                                          mode  count  size    when  flags
++/Users/valorengels/src/ai/logs/bridge.error.log        644   5      10240   *     NJ
++/Users/valorengels/src/ai/logs/issue_poller_error.log  644   5      10240   *     NJ
++/Users/valorengels/src/ai/logs/watchdog.log            644   5      10240   *     NJ
++/Users/valorengels/src/ai/logs/reflections.log         644   5      10240   *     NJ
++/Users/valorengels/src/ai/logs/reflections_error.log   644   5      10240   *     NJ
+diff --git a/docs/features/reflections.md b/docs/features/reflections.md
+index 307f8433c..895074658 100644
+--- a/docs/features/reflections.md
++++ b/docs/features/reflections.md
+@@ -86,7 +86,21 @@ Every reflection execution includes resource monitoring:
+ 
+ ### Log Rotation
+ 
+-`bridge.log` uses `logging.handlers.RotatingFileHandler` with a 10MB max file size and 5 backup files. This prevents unbounded log growth from verbose reflection runs.
++All log files have rotation configured to prevent unbounded growth. Two mechanisms are used depending on who writes the file:
++
++| Log File | Writer | Rotation Mechanism | Max Size | Backups |
++|----------|--------|--------------------|----------|---------|
++| `bridge.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
++| `issue_poller.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
++| `bridge.error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
++| `issue_poller_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
++| `watchdog.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
++| `reflections.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
++| `reflections_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
++
++**Python-rotated files** use `RotatingFileHandler` which rotates automatically during writes. No service restart needed.
++
++**Shell-rotated files** are rotated by the `rotate_log` function in `scripts/valor-service.sh` on every service start/restart. A `newsyslog` config (`config/newsyslog.valor.conf`) provides a safety net for long-running services -- macOS runs newsyslog hourly via launchd. Note: since launchd holds file descriptors open, newsyslog rotation may not be effective until the next service restart. The shell `rotate_log` function is the primary mechanism.
+ 
+ ### Bridge Watchdog (External)
+ 
+diff --git a/scripts/issue_poller.py b/scripts/issue_poller.py
+index e62b1fc98..173eb6baf 100644
+--- a/scripts/issue_poller.py
++++ b/scripts/issue_poller.py
+@@ -15,6 +15,7 @@
+ 
+ import json
+ import logging
++import logging.handlers
+ import os
+ import subprocess
+ import sys
+@@ -563,7 +564,11 @@ def setup_logging() -> None:
+         level=logging.INFO,
+         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+         handlers=[
+-            logging.FileHandler(log_dir / "issue_poller.log"),
++            logging.handlers.RotatingFileHandler(
++                log_dir / "issue_poller.log",
++                maxBytes=10 * 1024 * 1024,  # 10MB
++                backupCount=5,
++            ),
+             logging.StreamHandler(),
+         ],
+     )
+diff --git a/scripts/remote-update.sh b/scripts/remote-update.sh
+index 255d00e4e..5e007a115 100755
+--- a/scripts/remote-update.sh
++++ b/scripts/remote-update.sh
+@@ -71,3 +71,16 @@ if [ -f "$REFLECTIONS_PLIST" ]; then
+         echo "ERROR: Failed to bootstrap $REFLECTIONS_LABEL"
+     fi
+ fi
++
++# ── Sync newsyslog log rotation config if changed ────────────────────
++NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
++NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
++if [ -f "$NEWSYSLOG_SRC" ]; then
++    # Generate machine-specific config by replacing default path
++    NEWSYSLOG_RENDERED=$(sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC")
++    if [ ! -f "$NEWSYSLOG_DST" ] || [ "$(cat "$NEWSYSLOG_DST")" != "$NEWSYSLOG_RENDERED" ]; then
++        echo "$NEWSYSLOG_RENDERED" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1 && \
++            echo "newsyslog config updated at $NEWSYSLOG_DST" || \
++            echo "WARNING: Could not install newsyslog config (sudo required)"
++    fi
++fi
+diff --git a/scripts/valor-service.sh b/scripts/valor-service.sh
+index 86eb74d5a..785bc548d 100755
+--- a/scripts/valor-service.sh
++++ b/scripts/valor-service.sh
+@@ -129,9 +129,17 @@ start_bridge() {
+         cat "$PROJECT_DIR/data/upgrade-pending"
+     fi
+ 
+-    # Rotate oversized log files before starting
++    # Rotate oversized log files before starting.
++    # All launchd-managed logs (StandardOutPath/StandardErrorPath) are rotated here
++    # because launchd holds file descriptors open — newsyslog alone cannot reliably
++    # rotate actively-written files. This runs on every service start/restart.
+     rotate_log "$LOG_DIR/bridge.error.log"
+     rotate_log "$LOG_DIR/bridge.log"
++    rotate_log "$LOG_DIR/issue_poller_error.log"
++    rotate_log "$LOG_DIR/issue_poller.log"
++    rotate_log "$LOG_DIR/watchdog.log"
++    rotate_log "$LOG_DIR/reflections.log"
++    rotate_log "$LOG_DIR/reflections_error.log"
+ 
+     echo "Starting Valor bridge..."
+ 
+@@ -408,6 +416,23 @@ WATCHDOGEOF
+     launchctl load "$WATCHDOG_PLIST_PATH"
+     echo "Bridge watchdog installed (runs every 60 seconds)"
+ 
++    # Install newsyslog config for launchd-managed log rotation.
++    # newsyslog is built into macOS and runs hourly — it provides a safety net
++    # for log files that grow between service restarts. The rotate_log function
++    # in start_bridge() handles rotation on each restart; newsyslog catches
++    # files that grow large during long-running service uptime.
++    echo ""
++    echo "Installing newsyslog log rotation config..."
++    NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
++    NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
++    if [ -f "$NEWSYSLOG_SRC" ]; then
++        # Update paths in the config to match this machine's project directory
++        sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null
++        echo "newsyslog config installed at $NEWSYSLOG_DST"
++    else
++        echo "WARNING: newsyslog config not found at $NEWSYSLOG_SRC"
++    fi
++
+     sleep 2
+     status_bridge
+ }

@@ -1,0 +1,157 @@
+diff --git a/docs/features/session-watchdog.md b/docs/features/session-watchdog.md
+index 658411d8..f0665bc0 100644
+--- a/docs/features/session-watchdog.md
++++ b/docs/features/session-watchdog.md
+@@ -29,7 +29,7 @@ The watchdog fixes problems automatically — marking stuck sessions as abandone
+ ## Detection Heuristics
+ 
+ ### Silence Detection
+-Fires when `time.time() - session.updated_at > SILENCE_THRESHOLD`. Indicates the agent may have stalled. The `updated_at` field (a `DatetimeField` with `auto_now=True`, renamed from `last_activity`) is compared using `_to_timestamp()` which handles both datetime and float values.
++Fires when `time.time() - session.updated_at > SILENCE_THRESHOLD`. Indicates the agent may have stalled. The `updated_at` field (a `DatetimeField` with `auto_now=True`, renamed from `last_activity`) is compared using `_to_timestamp()` which handles both datetime and float values. Naive datetimes (as deserialized from Popoto `SortedField`) are assumed to represent UTC — this prevents a false-stall inflation of one full UTC offset on non-UTC machines (fix: issue #777).
+ 
+ | Setting | Value |
+ |---------|-------|
+diff --git a/docs/features/utc-timestamps.md b/docs/features/utc-timestamps.md
+index b3428e1e..8a8a0c4d 100644
+--- a/docs/features/utc-timestamps.md
++++ b/docs/features/utc-timestamps.md
+@@ -61,7 +61,7 @@ The principle: **store UTC, display local -- never the reverse**.
+ - The deprecated `datetime.utcnow()` (which returns naive datetimes) has been eliminated.
+ - `time.time()` calls are unchanged -- epoch timestamps are timezone-neutral.
+ - Telethon message timestamps were already UTC and are unchanged.
+-- Popoto/Redis model timestamps (`created_at`/`updated_at`) are managed by the ORM and are out of scope.
++- Popoto/Redis model timestamps (`created_at`/`updated_at`) are managed by the ORM and are out of scope for construction-site normalization. However, `SortedField` deserialization returns naive datetimes — code that calls `.timestamp()` on values read from `SortedField` must treat them as UTC. `_to_timestamp()` in `monitoring/session_watchdog.py` handles this with a `val.tzinfo is None` guard (issue #777).
+ 
+ ## Related
+ 
+diff --git a/docs/plans/watchdog-utc-duration.md b/docs/plans/watchdog-utc-duration.md
+index 9174239f..b26cfc7b 100644
+--- a/docs/plans/watchdog-utc-duration.md
++++ b/docs/plans/watchdog-utc-duration.md
+@@ -1,5 +1,5 @@
+ ---
+-status: Ready
++status: docs_complete
+ type: bug
+ appetite: Small
+ owner: Valor
+diff --git a/monitoring/session_watchdog.py b/monitoring/session_watchdog.py
+index fe2c8114..474d1547 100644
+--- a/monitoring/session_watchdog.py
++++ b/monitoring/session_watchdog.py
+@@ -20,7 +20,7 @@
+ import logging
+ import os
+ import time
+-from datetime import datetime
++from datetime import UTC, datetime
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -30,12 +30,21 @@
+ 
+ 
+ def _to_timestamp(val) -> float | None:
+-    """Convert a datetime or float to a Unix timestamp."""
++    """Convert a datetime or float to a Unix timestamp.
++
++    Naive datetimes are assumed to represent UTC (matching how Popoto
++    SortedField stores them). This prevents local-time interpretation
++    on machines running in non-UTC timezones, which would otherwise
++    inflate durations by the UTC offset and trigger false LIFECYCLE_STALL
++    events for newly-created sessions.
++    """
+     if val is None:
+         return None
+     if isinstance(val, datetime):
++        if val.tzinfo is None:
++            val = val.replace(tzinfo=UTC)
+         return val.timestamp()
+-    if isinstance(val, (int, float)):
++    if isinstance(val, int | float):
+         return float(val)
+     return None
+ 
+@@ -189,7 +198,8 @@ async def check_all_sessions() -> None:
+                 # actionable bug reports instead of "empty error summary" issues.
+                 session.summary = f"Watchdog: {type(e).__name__}: {e}"[:500]
+                 finalize_session(
+-                    session, "failed",
++                    session,
++                    "failed",
+                     reason=f"watchdog: stale session ({type(e).__name__})",
+                     skip_auto_tag=True,
+                     skip_checkpoint=True,
+@@ -585,7 +595,8 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
+         from models.session_lifecycle import finalize_session
+ 
+         finalize_session(
+-            session, "abandoned",
++            session,
++            "abandoned",
+             reason=reason,
+             skip_auto_tag=True,
+             skip_checkpoint=True,
+diff --git a/tests/unit/test_stall_detection.py b/tests/unit/test_stall_detection.py
+index 9042a453..b5ee79d8 100644
+--- a/tests/unit/test_stall_detection.py
++++ b/tests/unit/test_stall_detection.py
+@@ -7,6 +7,7 @@
+ """
+ 
+ import time
++from datetime import UTC, datetime
+ from types import SimpleNamespace
+ from unittest.mock import AsyncMock, MagicMock, patch
+ 
+@@ -17,6 +18,7 @@
+     STALL_THRESHOLD_PENDING,
+     STALL_THRESHOLD_RUNNING,
+     STALL_THRESHOLDS,
++    _to_timestamp,
+     check_stalled_sessions,
+     fix_unhealthy_session,
+ )
+@@ -258,3 +260,42 @@ async def test_long_running_session_abandoned(self):
+             result = await fix_unhealthy_session(session, assessment)
+             assert result is True
+             mock_abandon.assert_called_once()
++
++
++# ===================================================================
++# _to_timestamp — UTC fix for naive datetimes (issue #777)
++# ===================================================================
++
++
++class TestToTimestamp:
++    def test_none_returns_none(self):
++        assert _to_timestamp(None) is None
++
++    def test_float_passthrough(self):
++        ts = time.time()
++        assert _to_timestamp(ts) == ts
++
++    def test_int_passthrough(self):
++        assert _to_timestamp(1234567890) == 1234567890.0
++
++    def test_aware_datetime_returns_correct_timestamp(self):
++        aware = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
++        assert _to_timestamp(aware) == aware.timestamp()
++
++    def test_naive_datetime_treated_as_utc(self):
++        """Naive datetime (as returned by Popoto SortedField) must be
++        treated as UTC, not local time.  On a UTC+7 machine, the old code
++        would inflate the timestamp by 25200 seconds; after the fix both
++        forms must agree within 1 second of each other."""
++        naive = datetime.utcnow()
++        aware = datetime.now(tz=UTC)
++        assert abs(_to_timestamp(naive) - _to_timestamp(aware)) < 1.0
++
++    def test_naive_matches_aware_explicit_value(self):
++        """Verify with a fixed timestamp to rule out timing jitter."""
++        naive = datetime(2026, 4, 7, 10, 0, 0)
++        aware = datetime(2026, 4, 7, 10, 0, 0, tzinfo=UTC)
++        assert _to_timestamp(naive) == _to_timestamp(aware)
++
++    def test_unrecognized_type_returns_none(self):
++        assert _to_timestamp("not-a-datetime") is None

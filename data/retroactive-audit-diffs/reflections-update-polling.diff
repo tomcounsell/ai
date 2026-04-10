@@ -1,0 +1,151 @@
+diff --git a/docs/features/bridge-self-healing.md b/docs/features/bridge-self-healing.md
+index f7bad75fe..9a4a193e3 100644
+--- a/docs/features/bridge-self-healing.md
++++ b/docs/features/bridge-self-healing.md
+@@ -125,10 +125,32 @@ The watchdog is installed alongside the bridge:
+ ./scripts/valor-service.sh install
+ # Installs:
+ # - com.valor.bridge (main bridge, with log rotation on startup)
+-# - com.valor.update (cron at 06:00/18:00)
++# - com.valor.update (polls every 30 minutes)
+ # - com.valor.bridge-watchdog (every 60s)
+ ```
+ 
++### 10. Update Polling (`com.valor.update`)
++
++**Problem**: Code pushes to main could take up to 12 hours to propagate to all machines, since the update plist only ran at 6 AM and 6 PM.
++
++**Solution**: The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates frequently. Each invocation runs `scripts/remote-update.sh`, which:
++1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
++2. Runs `git fetch` + `git pull` via `scripts/update/run.py --cron`
++3. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
++4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
++
++**Verify polling is active**:
++```bash
++launchctl list | grep com.valor.update
++```
++
++**Check update logs**:
++```bash
++tail -f logs/update.log
++```
++
++**Manual override**: The Telegram `/update` command continues to work for immediate updates.
++
+ ## Recovery Lock
+ 
+ During recovery, `data/recovery-in-progress` is created to prevent:
+diff --git a/docs/features/deployment.md b/docs/features/deployment.md
+index 33dd87581..03db1ce33 100644
+--- a/docs/features/deployment.md
++++ b/docs/features/deployment.md
+@@ -110,6 +110,34 @@ Multiple machines can monitor different groups, or one machine can monitor all.
+ 1. Sessions are scoped by project - `tg_{project}_{chat_id}`
+ 2. Different projects in same chat create separate sessions
+ 
++## Update Polling
++
++Every machine automatically polls for updates from `origin/main` every 30 minutes via the `com.valor.update` launchd plist. This ensures code changes propagate to all machines without relying on Telegram message delivery.
++
++**How it works:**
++1. `com.valor.update` fires every 1800 seconds (30 minutes) via `StartInterval`
++2. Runs `scripts/remote-update.sh`, which calls the update orchestrator (`scripts/update/run.py --cron`)
++3. If new commits are detected: pulls changes, syncs dependencies (if dep files changed), writes `data/restart-requested`
++4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
++
++**Verify polling is active:**
++```bash
++# Check the update plist is loaded
++launchctl list | grep com.valor.update
++
++# View recent update activity
++tail -20 logs/update.log
++```
++
++**Install or reinstall:**
++```bash
++./scripts/valor-service.sh install
++```
++
++The Telegram `/update` command remains available as a manual override for immediate updates on the receiving machine.
++
++For more details on the update polling mechanism, see [Bridge Self-Healing](bridge-self-healing.md#10-update-polling-comvalorupdate).
++
+ ## See Also
+ 
+ - Run `/setup` for full machine configuration
+diff --git a/scripts/valor-service.sh b/scripts/valor-service.sh
+index 1bbf21911..86eb74d5a 100755
+--- a/scripts/valor-service.sh
++++ b/scripts/valor-service.sh
+@@ -336,9 +336,9 @@ EOF
+     echo "Bridge service installed and started"
+     echo "Bridge will auto-start on boot"
+ 
+-    # Install update cron (runs remote-update.sh every 12 hours)
++    # Install update polling (runs remote-update.sh every 30 minutes)
+     echo ""
+-    echo "Installing update cron..."
++    echo "Installing update polling..."
+     cat > "$UPDATE_PLIST_PATH" << UPDATEEOF
+ <?xml version="1.0" encoding="UTF-8"?>
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+@@ -360,17 +360,8 @@ EOF
+         <key>HOME</key>
+         <string>${HOME}</string>
+     </dict>
+-    <key>StartCalendarInterval</key>
+-    <array>
+-        <dict>
+-            <key>Hour</key>
+-            <integer>6</integer>
+-        </dict>
+-        <dict>
+-            <key>Hour</key>
+-            <integer>18</integer>
+-        </dict>
+-    </array>
++    <key>StartInterval</key>
++    <integer>1800</integer>
+     <key>StandardOutPath</key>
+     <string>${LOG_DIR}/update.log</string>
+     <key>StandardErrorPath</key>
+@@ -379,7 +370,7 @@ EOF
+ </plist>
+ UPDATEEOF
+     launchctl load "$UPDATE_PLIST_PATH"
+-    echo "Update cron installed (runs at 06:00 and 18:00)"
++    echo "Update polling installed (runs every 30 minutes)"
+ 
+     # Install bridge watchdog (runs every 60 seconds)
+     echo ""
+diff --git a/tests/integration/test_remote_update.py b/tests/integration/test_remote_update.py
+index 1a626a70a..95f6657e0 100644
+--- a/tests/integration/test_remote_update.py
++++ b/tests/integration/test_remote_update.py
+@@ -335,17 +335,20 @@ def test_install_creates_both_plists(self):
+         source = Path(self.SERVICE_SCRIPT).read_text()
+         # install_service should reference both bridge and update plists
+         assert "UPDATE_PLIST_PATH" in source
+-        assert "StartCalendarInterval" in source
++        assert "StartInterval" in source
+ 
+     def test_uninstall_removes_both_plists(self):
+         source = Path(self.SERVICE_SCRIPT).read_text()
+         # uninstall should handle update plist
+         assert source.count("UPDATE_PLIST_PATH") >= 2  # defined + used in uninstall
+ 
+-    def test_cron_schedule_06_and_18(self):
++    def test_update_polling_interval_1800(self):
++        """Update plist should use StartInterval of 1800 (30 minutes)."""
+         source = Path(self.SERVICE_SCRIPT).read_text()
+-        assert "<integer>6</integer>" in source
+-        assert "<integer>18</integer>" in source
++        assert "<key>StartInterval</key>" in source
++        assert "<integer>1800</integer>" in source
++        # Should NOT use the old calendar-based schedule
++        assert "StartCalendarInterval" not in source
+ 
+ 
+ # =============================================================================

@@ -1,0 +1,1474 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 03d91991..78451455 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -131,6 +131,12 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+ | `python -m tools.agent_session_scheduler kill --all` | Kill all running and pending sessions |
+ | `python -m tools.agent_session_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
+ | `python -m tools.agent_session_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
++| `python -m tools.valor_session list` | List all sessions |
++| `python -m tools.valor_session status --id <ID>` | Show session status and pending steering messages |
++| `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
++| `python -m tools.valor_session kill --id <ID>` | Kill a session |
++| `python -m tools.valor_session kill --all` | Kill all running sessions |
++| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session |
+ | `python -m tools.memory_search search "query"` | Search memories by query |
+ | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
+ | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
+@@ -245,6 +251,7 @@ Standalone Worker (python -m worker) → Same session execution engine
+ - **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
+ - **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
+ - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
++- **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
+ 
+ **Subconscious Memory** (see `docs/features/subconscious-memory.md`):
+ - Human Telegram messages are saved as Memory records on receipt (importance=6.0)
+@@ -262,7 +269,7 @@ Standalone Worker (python -m worker) → Same session execution engine
+ - `.claude/agents/` - Subagent definitions (including `dev-session`)
+ - `bridge/` - Telegram integration, nudge loop
+ - `worker/` - Standalone worker service (`python -m worker`)
+-- `agent/` - Session queue, SDK client, output handler protocol, constants
++- `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants
+ - `tools/` - Local Python tools
+ - `config/` - Configuration files
+ 
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index 47491015..6c5768e4 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -24,7 +24,6 @@
+ import subprocess
+ import time
+ from collections.abc import Awaitable, Callable
+-from dataclasses import dataclass
+ from datetime import UTC, datetime
+ from pathlib import Path
+ from typing import Any
+@@ -36,6 +35,15 @@
+ )
+ from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+ from agent.output_handler import OutputHandler
++
++# Output routing — decision logic lives in output_router; re-exported here
++# for backward compatibility with callers that import from agent_session_queue.
++from agent.output_router import (
++    MAX_NUDGE_COUNT,  # noqa: F401
++    NUDGE_MESSAGE,
++    SendToChatResult,
++    determine_delivery_action,  # noqa: F401
++)
+ from agent.session_logs import save_session_snapshot
+ from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+ from config.enums import ClassificationType, PersonaType, SessionType
+@@ -48,75 +56,6 @@
+ PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+ 
+ 
+-@dataclass
+-class SendToChatResult:
+-    """Explicit state returned from send_to_chat instead of fragile nonlocal closures.
+-
+-    Replaces the _defer_reaction and _completion_sent nonlocal variables that were
+-    set in send_to_chat() and read in the outer _execute_agent_session() scope. Multiple code
+-    paths previously set these via closure mutation; this dataclass makes the state
+-    explicit and eliminates inconsistency if an exception occurs between set and read.
+-    """
+-
+-    completion_sent: bool = False
+-    defer_reaction: bool = False
+-    auto_continue_count: int = 0
+-
+-
+-def determine_delivery_action(
+-    msg: str,
+-    stop_reason: str | None,
+-    auto_continue_count: int,
+-    max_nudge_count: int,
+-    session_status: str | None = None,
+-    completion_sent: bool = False,
+-    watchdog_unhealthy: str | None = None,
+-    session_type: str | None = None,
+-    classification_type: str | None = None,
+-) -> str:
+-    """Pure function: decide what send_to_chat should do with agent output.
+-
+-    Returns one of:
+-        "deliver"       — send to Telegram
+-        "deliver_fallback" — send fallback message (empty output, cap reached)
+-        "nudge_rate_limited" — backoff then nudge (rate limited)
+-        "nudge_empty"   — nudge (empty output)
+-        "nudge_continue" — nudge (PM/SDLC session, continue pipeline)
+-        "drop"          — drop output (completion already sent)
+-        "deliver_already_completed" — deliver without nudge (session already done)
+-    """
+-    if session_status in _TERMINAL_STATUSES:
+-        return "deliver_already_completed"
+-    if completion_sent:
+-        return "drop"
+-    # Watchdog flagged this session as stuck — deliver instead of nudging
+-    if watchdog_unhealthy:
+-        return "deliver" if msg and msg.strip() else "deliver_fallback"
+-    if stop_reason == "rate_limited":
+-        return "nudge_rate_limited"
+-    if not msg or not msg.strip():
+-        if auto_continue_count + 1 <= max_nudge_count:
+-            return "nudge_empty"
+-        return "deliver_fallback"
+-    if auto_continue_count >= max_nudge_count:
+-        return "deliver"
+-    # PM sessions running SDLC work should continue through pipeline stages
+-    # rather than delivering after the first skill completes.
+-    # The PM decides when to stop; the bridge just keeps it working.
+-    if session_type == "pm" and classification_type == "sdlc":
+-        return "nudge_continue"
+-    if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
+-        return "deliver"
+-    return "deliver"
+-
+-
+-# Nudge loop: single nudge model for bridge output routing.
+-# The bridge has ONE response to any non-completion: nudge.
+-# ChatSession owns all SDLC intelligence; the bridge just keeps it working.
+-MAX_NUDGE_COUNT = 50  # Safety cap — deliver to Telegram after this many nudges
+-NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
+-
+-
+ # Agent session health check constants
+ AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
+ AGENT_SESSION_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard sessions
+@@ -2039,6 +1978,92 @@ async def _enqueue_nudge(
+     )
+ 
+ 
++# ---------------------------------------------------------------------------
++# Public steering API
++# ---------------------------------------------------------------------------
++
++
++async def re_enqueue_session(
++    session: AgentSession,
++    branch_name: str,
++    task_list_id: str,
++    auto_continue_count: int,
++    output_msg: str,
++    nudge_feedback: str = "continue",
++) -> None:
++    """Public wrapper for _enqueue_nudge — re-enqueue a session with a nudge message.
++
++    Encapsulates Redis state management and worker wake-up. Callers outside
++    this module (e.g., output_router, valor-session CLI) should use this
++    instead of _enqueue_nudge directly.
++
++    Args:
++        session: The current AgentSession being re-enqueued.
++        branch_name: Git branch name for the session.
++        task_list_id: Task list ID for sub-agent isolation.
++        auto_continue_count: Current nudge count (already incremented).
++        output_msg: The agent output that triggered the nudge.
++        nudge_feedback: Nudge message sent to the agent.
++    """
++    await _enqueue_nudge(
++        session=session,
++        branch_name=branch_name,
++        task_list_id=task_list_id,
++        auto_continue_count=auto_continue_count,
++        output_msg=output_msg,
++        nudge_feedback=nudge_feedback,
++    )
++
++
++def steer_session(session_id: str, message: str) -> dict:
++    """Write a steering message to a session's queued_steering_messages.
++
++    Any process can call this to inject a message into a running or pending
++    session. The worker checks queued_steering_messages between turns and
++    injects any pending messages as user input for the next SDK turn.
++
++    Args:
++        session_id: The session_id of the target AgentSession.
++        message: The steering message to inject.
++
++    Returns:
++        dict with keys: success (bool), session_id (str), error (str | None)
++    """
++    if not message or not message.strip():
++        return {"success": False, "session_id": session_id, "error": "Empty message rejected"}
++
++    try:
++        sessions = list(AgentSession.query.filter(session_id=session_id))
++        if not sessions:
++            return {
++                "success": False,
++                "session_id": session_id,
++                "error": f"Session not found: {session_id}",
++            }
++
++        session = sessions[0]
++        current_status = getattr(session, "status", None)
++
++        if current_status in _TERMINAL_STATUSES:
++            return {
++                "success": False,
++                "session_id": session_id,
++                "error": f"Session is in terminal status {current_status!r} — steering rejected",
++            }
++
++        session.push_steering_message(message)
++        _ensure_worker(session.chat_id)
++        logger.info(
++            f"[steering] Queued steering message for session {session_id}: "
++            f"{message[:80]!r} (status={current_status})"
++        )
++        return {"success": True, "session_id": session_id, "error": None}
++
++    except Exception as e:
++        logger.error(f"[steering] steer_session failed for {session_id}: {e}")
++        return {"success": False, "session_id": session_id, "error": str(e)}
++
++
+ async def _execute_agent_session(session: AgentSession) -> None:
+     """
+     Execute a single agent session:
+@@ -2205,14 +2230,6 @@ async def send_to_chat(msg: str) -> None:
+                 f"[{session.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
+             )
+ 
+-        # Use reduced nudge cap for Teammate sessions
+-        _effective_nudge_cap = MAX_NUDGE_COUNT
+-        if agent_session:
+-            if getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
+-                from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
+-
+-                _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
+-
+         # Resolve session type and classification for PM auto-continue
+         _session_type = (
+             getattr(agent_session, "session_mode", None)
+@@ -2221,17 +2238,24 @@ async def send_to_chat(msg: str) -> None:
+             else None
+         )
+         _classification = getattr(session, "classification_type", None)
++        _is_teammate = (
++            agent_session is not None
++            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
++        )
++
++        # Delegate routing decision to output_router (call site preserved here)
++        from agent.output_router import route_session_output
+ 
+-        action = determine_delivery_action(
++        action, _effective_nudge_cap = route_session_output(
+             msg=msg,
+             stop_reason=stop_reason,
+             auto_continue_count=chat_state.auto_continue_count,
+-            max_nudge_count=_effective_nudge_cap,
+             session_status=session_status,
+             completion_sent=chat_state.completion_sent,
+             watchdog_unhealthy=unhealthy_reason,
+             session_type=_session_type,
+             classification_type=_classification,
++            is_teammate=_is_teammate,
+         )
+ 
+         if action == "deliver_already_completed":
+@@ -2253,7 +2277,7 @@ async def send_to_chat(msg: str) -> None:
+             chat_state.auto_continue_count += 1
+             logger.warning(
+                 f"[{session.project_key}] Rate limited — backoff then nudge "
+-                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
++                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
+             )
+             await asyncio.sleep(5)
+             await _enqueue_nudge(
+@@ -2271,7 +2295,7 @@ async def send_to_chat(msg: str) -> None:
+             chat_state.auto_continue_count += 1
+             logger.info(
+                 f"[{session.project_key}] Empty output — nudging "
+-                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
++                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
+             )
+             await _enqueue_nudge(
+                 session,
+@@ -2288,7 +2312,7 @@ async def send_to_chat(msg: str) -> None:
+             chat_state.auto_continue_count += 1
+             logger.info(
+                 f"[{session.project_key}] PM/SDLC session — nudging to continue pipeline "
+-                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
++                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
+             )
+             await _enqueue_nudge(
+                 session,
+@@ -2439,9 +2463,32 @@ async def send_to_chat(msg: str) -> None:
+             "name": session.project_key,
+         }
+ 
++    # Check queued_steering_messages before starting this agent turn.
++    # If the session has pending steering messages (written by steer_session()
++    # or the PM), pop the first one and use it as the user input for this turn.
++    # This is the mechanism that replaces hardcoded nudge text — any process
++    # can write to queued_steering_messages to steer the session externally.
++    _turn_input = enriched_text
++    if agent_session:
++        try:
++            steering_msgs = agent_session.pop_steering_messages()
++            if steering_msgs:
++                _turn_input = steering_msgs[0]
++                logger.info(
++                    f"[{session.project_key}] Injecting steering message for session "
++                    f"{session.session_id}: {_turn_input[:80]!r} "
++                    f"({len(steering_msgs)} queued, used first)"
++                )
++                if len(steering_msgs) > 1:
++                    # Re-queue remaining messages for future turns
++                    for _remaining in steering_msgs[1:]:
++                        agent_session.push_steering_message(_remaining)
++        except Exception as _steer_err:
++            logger.debug(f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}")
++
+     async def do_work() -> str:
+         return await get_agent_response_sdk(
+-            enriched_text,
++            _turn_input,
+             session.session_id,
+             session.sender_name,
+             session.chat_title,
+diff --git a/agent/output_router.py b/agent/output_router.py
+new file mode 100644
+index 00000000..540788cc
+--- /dev/null
++++ b/agent/output_router.py
+@@ -0,0 +1,147 @@
++"""Output Router - Externalized session steering decision logic.
++
++Extracted from agent_session_queue.py so that persona-specific routing
++decisions live outside the generic executor. The executor's send_to_chat()
++callback calls route_session_output() and executes the returned action —
++the call site stays inside send_to_chat() to preserve temporal coupling
++with chat_state flag-setting and post-execution cleanup.
++
++Public API:
++    determine_delivery_action()  — pure function, returns action string
++    route_session_output()       — wraps determine_delivery_action with persona context
++    MAX_NUDGE_COUNT              — safety cap constant
++    NUDGE_MESSAGE                — default nudge text
++    SendToChatResult             — state dataclass for send_to_chat
++"""
++
++from __future__ import annotations
++
++import logging
++from dataclasses import dataclass
++
++logger = logging.getLogger(__name__)
++
++# ---------------------------------------------------------------------------
++# Constants
++# ---------------------------------------------------------------------------
++
++# Safety cap — deliver to Telegram after this many nudges
++MAX_NUDGE_COUNT = 50
++
++# Default nudge message sent to the agent for all session types.
++# ChatSession owns SDLC intelligence; the bridge just keeps the agent working.
++NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
++
++
++# ---------------------------------------------------------------------------
++# State dataclass
++# ---------------------------------------------------------------------------
++
++
++@dataclass
++class SendToChatResult:
++    """Explicit state returned from send_to_chat instead of fragile nonlocal closures.
++
++    Replaces the _defer_reaction and _completion_sent nonlocal variables that were
++    set in send_to_chat() and read in the outer _execute_agent_session() scope. Multiple code
++    paths previously set these via closure mutation; this dataclass makes the state
++    explicit and eliminates inconsistency if an exception occurs between set and read.
++    """
++
++    completion_sent: bool = False
++    defer_reaction: bool = False
++    auto_continue_count: int = 0
++
++
++# ---------------------------------------------------------------------------
++# Core routing logic
++# ---------------------------------------------------------------------------
++
++
++def determine_delivery_action(
++    msg: str,
++    stop_reason: str | None,
++    auto_continue_count: int,
++    max_nudge_count: int,
++    session_status: str | None = None,
++    completion_sent: bool = False,
++    watchdog_unhealthy: str | None = None,
++    session_type: str | None = None,
++    classification_type: str | None = None,
++) -> str:
++    """Pure function: decide what send_to_chat should do with agent output.
++
++    Returns one of:
++        "deliver"                  — send to Telegram
++        "deliver_fallback"         — send fallback message (empty output, cap reached)
++        "nudge_rate_limited"       — backoff then nudge (rate limited)
++        "nudge_empty"              — nudge (empty output)
++        "nudge_continue"           — nudge (PM/SDLC session, continue pipeline)
++        "drop"                     — drop output (completion already sent)
++        "deliver_already_completed" — deliver without nudge (session already done)
++    """
++    from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
++
++    if session_status in _TERMINAL_STATUSES:
++        return "deliver_already_completed"
++    if completion_sent:
++        return "drop"
++    # Watchdog flagged this session as stuck — deliver instead of nudging
++    if watchdog_unhealthy:
++        return "deliver" if msg and msg.strip() else "deliver_fallback"
++    if stop_reason == "rate_limited":
++        return "nudge_rate_limited"
++    if not msg or not msg.strip():
++        if auto_continue_count + 1 <= max_nudge_count:
++            return "nudge_empty"
++        return "deliver_fallback"
++    if auto_continue_count >= max_nudge_count:
++        return "deliver"
++    # PM sessions running SDLC work should continue through pipeline stages
++    # rather than delivering after the first skill completes.
++    # The PM decides when to stop; the bridge just keeps it working.
++    if session_type == "pm" and classification_type == "sdlc":
++        return "nudge_continue"
++    if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
++        return "deliver"
++    return "deliver"
++
++
++def route_session_output(
++    msg: str,
++    stop_reason: str | None,
++    auto_continue_count: int,
++    session_status: str | None = None,
++    completion_sent: bool = False,
++    watchdog_unhealthy: str | None = None,
++    session_type: str | None = None,
++    classification_type: str | None = None,
++    is_teammate: bool = False,
++) -> tuple[str, int]:
++    """Determine delivery action with persona-aware nudge cap.
++
++    Wraps determine_delivery_action() to select the correct nudge cap based
++    on session persona (Teammate uses a reduced cap).
++
++    Returns:
++        (action, effective_nudge_cap) — the action string and the nudge cap used
++    """
++    if is_teammate:
++        from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
++
++        effective_cap = TEAMMATE_MAX_NUDGE_COUNT
++    else:
++        effective_cap = MAX_NUDGE_COUNT
++
++    action = determine_delivery_action(
++        msg=msg,
++        stop_reason=stop_reason,
++        auto_continue_count=auto_continue_count,
++        max_nudge_count=effective_cap,
++        session_status=session_status,
++        completion_sent=completion_sent,
++        watchdog_unhealthy=watchdog_unhealthy,
++        session_type=session_type,
++        classification_type=classification_type,
++    )
++    return action, effective_cap
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 013e278c..4d54bfa8 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -96,6 +96,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
+ | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
+ | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
++| [Session Steering](session-steering.md) | Externalized steering via `AgentSession.queued_steering_messages` — any process can steer a running session; worker injects messages at turn boundaries; `valor-session` CLI for create/steer/status/list/kill | Shipped |
+ | [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention, stale cleanup via `_active_workers` liveness check, and Redis re-read in `_complete_agent_session` to capture accumulated `stage_states` | Shipped |
+ | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
+ | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
+diff --git a/docs/features/bridge-workflow-gaps.md b/docs/features/bridge-workflow-gaps.md
+index 77f23524..5c0f5bea 100644
+--- a/docs/features/bridge-workflow-gaps.md
++++ b/docs/features/bridge-workflow-gaps.md
+@@ -21,14 +21,14 @@ The bridge uses a two-path auto-continue strategy based on whether the session i
+ 
+ ### Nudge Loop Routing (Current)
+ 
+-All output routing decisions are made by the nudge loop in `agent/agent_session_queue.py`:
++All output routing decisions are made by `agent/output_router.py` (extracted from `agent/agent_session_queue.py`):
+ 
+ 1. Worker agent produces output
+ 2. **Pipeline State Machine** (`bridge/pipeline_state.py`) tracks stage transitions on `AgentSession.stage_states`
+-3. **Nudge loop** evaluates the output and session state:
++3. **Output router** (`agent/output_router.py`) evaluates the output and session state via `determine_delivery_action()`:
+    - **Nudge**: Re-enqueue with a continuation message to keep the agent working
+    - **Deliver**: Send output to Telegram for human review
+-4. **Hard guard** in `agent_session_queue.py`: nudge cap enforced
++4. **Hard guard**: nudge cap enforced via `MAX_NUDGE_COUNT` in `agent/output_router.py`
+ 
+ ### Decision Matrix
+ 
+diff --git a/docs/features/chatsession-teammate-mode.md b/docs/features/chatsession-teammate-mode.md
+index 33d97dd8..5701f9d9 100644
+--- a/docs/features/chatsession-teammate-mode.md
++++ b/docs/features/chatsession-teammate-mode.md
+@@ -88,11 +88,11 @@ Teammate sessions bypass structured formatting entirely:
+ - `_compose_structured_summary()` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
+ - `SUMMARIZER_SYSTEM_PROMPT` includes a teammate format rule: respond in prose, no bullets, no status emoji
+ 
+-### `agent/agent_session_queue.py`
++### `agent/output_router.py` + `agent/agent_session_queue.py`
+ 
+-In the nudge loop, checks the session's `session_mode` field:
++In the output router (`route_session_output()`), checks the `is_teammate` flag:
+ 
+-- If `PersonaType.TEAMMATE`, uses `TEAMMATE_MAX_NUDGE_COUNT` (10) instead of the default `MAX_NUDGE_COUNT` (50)
++- If `is_teammate=True`, uses `TEAMMATE_MAX_NUDGE_COUNT` (10) instead of the default `MAX_NUDGE_COUNT` (50)
+ - Teammate sessions resolve faster; the reduced cap prevents runaway sessions
+ - On successful completion, teammate sessions clear the processing reaction (set to `None`) instead of setting a completion emoji
+ 
+diff --git a/docs/features/enforce-review-docs-stages.md b/docs/features/enforce-review-docs-stages.md
+index 7eb015ce..80dd0637 100644
+--- a/docs/features/enforce-review-docs-stages.md
++++ b/docs/features/enforce-review-docs-stages.md
+@@ -10,7 +10,7 @@ The pipeline graph defined correct edges (TEST -> REVIEW -> DOCS -> MERGE), but
+ 
+ ### Hard Delivery Gates
+ 
+-> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the nudge loop in `agent/agent_session_queue.py`. The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
++> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the output router (`agent/output_router.py`, called via `agent/agent_session_queue.py`). The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
+ 
+ ### State Machine Stage Transitions (`bridge/pipeline_state.py`)
+ 
+diff --git a/docs/features/reaction-semantics.md b/docs/features/reaction-semantics.md
+index 0aa2e9f8..885803bb 100644
+--- a/docs/features/reaction-semantics.md
++++ b/docs/features/reaction-semantics.md
+@@ -46,7 +46,7 @@ Reactions interact with the auto-continue system. When auto-continue is active,
+ 
+ ### Flow
+ 
+-1. Agent completes a turn. The nudge loop in `agent/agent_session_queue.py` decides whether to **nudge** (auto-continue) or **deliver** (send to Telegram).
++1. Agent completes a turn. The output router (`agent/output_router.py`, called from `agent/agent_session_queue.py`) decides whether to **nudge** (auto-continue) or **deliver** (send to Telegram).
+ 2. If Observer decides **STEER**: suppress the output, re-enqueue with nudge feedback, defer reaction.
+ 3. If Observer decides **DELIVER**: send the response and set the appropriate reaction based on content.
+ 4. The auto-continue counter resets when the human sends a new message.
+diff --git a/docs/features/session-steering.md b/docs/features/session-steering.md
+new file mode 100644
+index 00000000..3f0a591b
+--- /dev/null
++++ b/docs/features/session-steering.md
+@@ -0,0 +1,112 @@
++# Session Steering
++
++External steering for `AgentSession` via `queued_steering_messages`. Any process — the PM, a CLI user, another agent — can write messages to a running session's inbox. The worker injects them at the next turn boundary.
++
++## Problem
++
++Before this feature, the only steering mechanism was the hardcoded nudge loop inside `agent/agent_session_queue.py`. The executor decided whether to continue or stop, PM-specific logic was embedded in the generic executor, and there was no external way to say "stop after this stage."
++
++## Architecture
++
++### Steering Inbox
++
++`AgentSession.queued_steering_messages` (a `ListField`, already on the model) is the canonical steering inbox. Any process can write to it; the worker consumes at turn boundaries.
++
++- **Cap**: `STEERING_QUEUE_MAX = 10` messages per session
++- **Storage**: Popoto `ListField` persisted in Redis
++- **Atomicity**: Write via `push_steering_message()`, read via `pop_steering_messages()`
++
++### Turn Boundary Check
++
++At the start of each agent turn in `_execute_agent_session()`, the worker checks the session's `queued_steering_messages`. If messages are pending, the first is popped and used as the user input for that turn (replacing the original message text). Remaining messages are re-queued for future turns.
++
++```python
++# Inside _execute_agent_session(), before do_work():
++steering_msgs = agent_session.pop_steering_messages()
++if steering_msgs:
++    _turn_input = steering_msgs[0]
++    # Re-queue remaining for future turns
++    for msg in steering_msgs[1:]:
++        agent_session.push_steering_message(msg)
++```
++
++### Output Router
++
++`agent/output_router.py` contains the extracted routing logic:
++
++- `determine_delivery_action()` — pure function, returns action string
++- `route_session_output()` — wraps above with persona-aware nudge cap
++- `MAX_NUDGE_COUNT`, `NUDGE_MESSAGE`, `SendToChatResult` — constants and dataclass
++
++The `send_to_chat()` callback in the executor calls `route_session_output()` and executes the returned action. The call site stays inside `send_to_chat()` to preserve temporal coupling with `chat_state` flag-setting and post-execution cleanup.
++
++### Public Steering API
++
++`agent/agent_session_queue.py` exports:
++
++- `steer_session(session_id, message)` — writes to `queued_steering_messages`, validates non-terminal status, wakes worker
++- `re_enqueue_session(session, ...)` — public wrapper for `_enqueue_nudge`, encapsulates re-enqueue logic
++
++## Data Flow
++
++```
++External caller (CLI, PM, agent)
++  → steer_session(session_id, "Stop after critique")
++    → AgentSession.push_steering_message()  [Redis write]
++    → _ensure_worker()                      [wake worker]
++
++Worker loop
++  → _execute_agent_session()
++    → agent_session.pop_steering_messages() [Redis read]
++    → if messages: use first as turn input
++    → get_agent_response_sdk(_turn_input, ...)
++    → send_to_chat() callback
++      → route_session_output()              [output_router.py]
++        → determine_delivery_action()       [pure function]
++      → execute action (deliver/nudge/drop)
++```
++
++## CLI: valor-session
++
++`tools/valor_session.py` — session management tool modeled after `valor-telegram`.
++
++```bash
++# Create a new session
++valor-session create --role pm --message "Plan issue #735"
++valor-session create --role dev --message "Fix the bug" --parent abc123
++
++# Steer a running session
++valor-session steer --id abc123 --message "Stop after critique stage"
++
++# Inspect session state
++valor-session status --id abc123
++
++# List sessions
++valor-session list
++valor-session list --status running
++valor-session list --role pm
++
++# Kill sessions
++valor-session kill --id abc123
++valor-session kill --all
++```
++
++Add `--json` to any command for machine-readable output.
++
++## Backward Compatibility
++
++All symbols that previously lived only in `agent/agent_session_queue.py` are re-exported from there for backward compatibility:
++
++- `MAX_NUDGE_COUNT`
++- `NUDGE_MESSAGE`
++- `SendToChatResult`
++- `determine_delivery_action`
++
++Existing callers (tests, integrations) that import from `agent.agent_session_queue` continue to work unchanged. The canonical location is now `agent.output_router`.
++
++## No-Gos
++
++- `bridge/summarizer.py` `nudge_feedback` is untouched — separate concept
++- The `send_to_chat()` call site remains mid-execution (not post-execution)
++- `OutputHandler` protocol is unchanged
++- No web UI — CLI only
+diff --git a/docs/features/structured-logging-telemetry.md b/docs/features/structured-logging-telemetry.md
+index fbbbcdd3..7ea3b32c 100644
+--- a/docs/features/structured-logging-telemetry.md
++++ b/docs/features/structured-logging-telemetry.md
+@@ -100,7 +100,7 @@ redis-cli HGETALL telemetry:daily:2026-03-10
+ 
+ | File | Role |
+ |------|------|
+-| `agent/agent_session_queue.py` | Calls record_decision for nudge loop routing |
++| `agent/agent_session_queue.py` | Calls record_decision for routing (delegates to `agent/output_router.py`) |
+ | `bridge/pipeline_state.py` | State machine logs stage transitions |
+ | `models/agent_session.py` | Structured LINK logging in set_link() |
+ | `monitoring/health.py` | Health checks (observer telemetry check removed) |
+diff --git a/docs/plans/extract-nudge-to-pm.md b/docs/plans/extract-nudge-to-pm.md
+index 6cc17fa5..0df491e2 100644
+--- a/docs/plans/extract-nudge-to-pm.md
++++ b/docs/plans/extract-nudge-to-pm.md
+@@ -1,5 +1,5 @@
+ ---
+-status: Ready
++status: docs_complete
+ type: feature
+ appetite: Medium
+ owner: Valor
+diff --git a/docs/tools-reference.md b/docs/tools-reference.md
+index 3e8a61c0..168d6846 100644
+--- a/docs/tools-reference.md
++++ b/docs/tools-reference.md
+@@ -182,6 +182,36 @@ python -m tools.agent_session_scheduler cleanup --age 30              # Delete
+ 
+ See `docs/features/agent-session-scheduling.md` for full documentation.
+ 
++### Session Steering CLI (`tools.valor_session`)
++
++Create, steer, monitor, and kill `AgentSession` records. The primary external interface for session steering — any process can write messages to a running session's inbox.
++
++```bash
++# List all sessions
++python -m tools.valor_session list
++python -m tools.valor_session list --status running
++python -m tools.valor_session list --role pm
++
++# Inspect a session
++python -m tools.valor_session status --id <SESSION_ID>
++
++# Inject a steering message into a running session
++python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"
++
++# Create a new session
++python -m tools.valor_session create --role pm --message "Plan issue #735"
++python -m tools.valor_session create --role dev --message "Fix the bug" --parent <PARENT_ID>
++
++# Kill sessions
++python -m tools.valor_session kill --id <SESSION_ID>
++python -m tools.valor_session kill --all
++
++# JSON output for scripting
++python -m tools.valor_session status --id <SESSION_ID> --json
++```
++
++See `docs/features/session-steering.md` for full documentation.
++
+ ### SDLC Stage Query (`tools.sdlc_stage_query`)
+ 
+ Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.
+diff --git a/tests/unit/test_duplicate_delivery.py b/tests/unit/test_duplicate_delivery.py
+index 38e314ef..d553869d 100644
+--- a/tests/unit/test_duplicate_delivery.py
++++ b/tests/unit/test_duplicate_delivery.py
+@@ -148,31 +148,59 @@ class TestCompletedSessionGuard:
+ 
+     def test_completed_session_skips_auto_continue(self):
+         """When session_status is terminal, output is delivered without nudge."""
+-        # Verify the guard exists in the code
++        # Verify the guard exists in the code — now in output_router.py (extracted from queue)
+         from pathlib import Path
+ 
++        router_code = Path("agent/output_router.py").read_text()
+         queue_code = Path("agent/agent_session_queue.py").read_text()
+ 
+         # The guard should check session_status against all TERMINAL_STATUSES
+         # (was previously just == "completed", now checks all terminal statuses)
+-        assert "session_status in _TERMINAL_STATUSES" in queue_code
+-        # It should deliver to chat without nudge
++        # Guard may be in output_router.py (canonical) or agent_session_queue.py (legacy)
++        assert (
++            "session_status in _TERMINAL_STATUSES" in router_code
++            or "session_status in _TERMINAL_STATUSES" in queue_code
++        )
++        # It should deliver to chat without nudge (this message is in the executor, not the router)
+         assert "delivering without nudge" in queue_code
+ 
+     def test_guard_is_before_nudge_routing(self):
+-        """The completed-session guard must come before the nudge routing logic."""
++        """The completed-session guard must come before the nudge routing logic.
++
++        The guard now lives in output_router.determine_delivery_action() which
++        is called before any _enqueue_nudge() in the send_to_chat() execution path.
++        The test verifies the guard exists and that the nudge call site exists.
++        """
+         from pathlib import Path
+ 
++        router_code = Path("agent/output_router.py").read_text()
+         queue_code = Path("agent/agent_session_queue.py").read_text()
+ 
+-        # Find positions
+-        guard_pos = queue_code.find("Session already completed")
+-        nudge_pos = queue_code.find("await _enqueue_nudge(")
+-
+-        # Guard should be BEFORE the nudge call site
+-        assert guard_pos > 0, "completed-session guard not found in agent_session_queue.py"
+-        assert nudge_pos > 0, "await _enqueue_nudge() call not found in agent_session_queue.py"
+-        assert guard_pos < nudge_pos, "completed-session guard should be before nudge call"
++        # Guard is now in output_router.py — confirm it returns deliver_already_completed
++        assert "deliver_already_completed" in router_code, (
++            "deliver_already_completed guard not found in output_router.py"
++        )
++        # Guard must check session_status against terminal statuses
++        assert "session_status in _TERMINAL_STATUSES" in router_code, (
++            "terminal status guard not found in output_router.py"
++        )
++        # The nudge call site should still exist in the queue executor (inside send_to_chat)
++        # Note: re_enqueue_session() also calls _enqueue_nudge, so find the one in send_to_chat
++        send_to_chat_pos = queue_code.find("async def send_to_chat(")
++        assert send_to_chat_pos > 0, "send_to_chat not found in agent_session_queue.py"
++        nudge_pos = queue_code.find("await _enqueue_nudge(", send_to_chat_pos)
++        assert nudge_pos > 0, "await _enqueue_nudge() call not found in send_to_chat"
++
++        # The executor must check the routing action before calling _enqueue_nudge
++        # i.e. action == "deliver_already_completed" check appears before the nudge call
++        deliver_check_pos = queue_code.find('"deliver_already_completed"', send_to_chat_pos)
++        assert deliver_check_pos > 0, (
++            "deliver_already_completed action check not found in agent_session_queue.py"
++        )
++        assert deliver_check_pos < nudge_pos, (
++            "deliver_already_completed check should appear before "
++            "_enqueue_nudge call in send_to_chat"
++        )
+ 
+ 
+ class TestCatchupCodeStructure:
+diff --git a/tests/unit/test_steering_mechanism.py b/tests/unit/test_steering_mechanism.py
+new file mode 100644
+index 00000000..b1d72ab3
+--- /dev/null
++++ b/tests/unit/test_steering_mechanism.py
+@@ -0,0 +1,205 @@
++"""Tests for the session steering mechanism.
++
++Covers:
++1. steer_session() — happy path, terminal guard, empty message rejection
++2. output_router exports — all expected symbols accessible
++3. queued_steering_messages — turn-boundary injection logic (unit-level)
++4. valor-session CLI — help output and basic argument parsing
++"""
++
++
++class TestOutputRouterExports:
++    """Verify agent.output_router exports all expected symbols."""
++
++    def test_determine_delivery_action_importable(self):
++        from agent.output_router import determine_delivery_action
++
++        assert callable(determine_delivery_action)
++
++    def test_route_session_output_importable(self):
++        from agent.output_router import route_session_output
++
++        assert callable(route_session_output)
++
++    def test_max_nudge_count_importable(self):
++        from agent.output_router import MAX_NUDGE_COUNT
++
++        assert isinstance(MAX_NUDGE_COUNT, int)
++        assert MAX_NUDGE_COUNT > 0
++
++    def test_nudge_message_importable(self):
++        from agent.output_router import NUDGE_MESSAGE
++
++        assert isinstance(NUDGE_MESSAGE, str)
++        assert len(NUDGE_MESSAGE) > 10
++
++    def test_send_to_chat_result_importable(self):
++        from agent.output_router import SendToChatResult
++
++        state = SendToChatResult()
++        assert state.completion_sent is False
++        assert state.defer_reaction is False
++        assert state.auto_continue_count == 0
++
++
++class TestBackwardCompatExports:
++    """Verify symbols are still importable from agent.agent_session_queue for backward compat."""
++
++    def test_max_nudge_count_from_queue(self):
++        from agent.agent_session_queue import MAX_NUDGE_COUNT
++
++        assert isinstance(MAX_NUDGE_COUNT, int)
++
++    def test_nudge_message_from_queue(self):
++        from agent.agent_session_queue import NUDGE_MESSAGE
++
++        assert isinstance(NUDGE_MESSAGE, str)
++
++    def test_determine_delivery_action_from_queue(self):
++        from agent.agent_session_queue import determine_delivery_action
++
++        assert callable(determine_delivery_action)
++
++    def test_send_to_chat_result_from_queue(self):
++        from agent.agent_session_queue import SendToChatResult
++
++        state = SendToChatResult()
++        assert state.completion_sent is False
++
++    def test_steer_session_from_queue(self):
++        from agent.agent_session_queue import steer_session
++
++        assert callable(steer_session)
++
++    def test_re_enqueue_session_from_queue(self):
++        from agent.agent_session_queue import re_enqueue_session
++
++        assert callable(re_enqueue_session)
++
++
++class TestSteerSessionGuards:
++    """Unit tests for steer_session() edge cases (no Redis required)."""
++
++    def test_empty_message_rejected(self):
++        from agent.agent_session_queue import steer_session
++
++        result = steer_session("nonexistent-session", "")
++        assert result["success"] is False
++        assert "Empty message" in result["error"]
++
++    def test_whitespace_only_message_rejected(self):
++        from agent.agent_session_queue import steer_session
++
++        result = steer_session("nonexistent-session", "   ")
++        assert result["success"] is False
++        assert "Empty message" in result["error"]
++
++    def test_nonexistent_session_returns_error(self):
++        """steer_session on a non-existent session returns an error dict."""
++        from agent.agent_session_queue import steer_session
++
++        result = steer_session("definitely-does-not-exist-xyz-123", "hello")
++        assert result["success"] is False
++        assert result["session_id"] == "definitely-does-not-exist-xyz-123"
++        assert result["error"] is not None
++
++
++class TestRouteSessionOutput:
++    """Tests for route_session_output() persona-aware cap selection."""
++
++    def test_teammate_uses_reduced_cap(self):
++        """Teammate sessions use TEAMMATE_MAX_NUDGE_COUNT, not MAX_NUDGE_COUNT."""
++        from agent.output_router import MAX_NUDGE_COUNT, route_session_output
++        from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
++
++        assert TEAMMATE_MAX_NUDGE_COUNT < MAX_NUDGE_COUNT
++
++        _action, cap = route_session_output(
++            msg="some output",
++            stop_reason="end_turn",
++            auto_continue_count=0,
++            is_teammate=True,
++        )
++        assert cap == TEAMMATE_MAX_NUDGE_COUNT
++
++    def test_non_teammate_uses_full_cap(self):
++        from agent.output_router import MAX_NUDGE_COUNT, route_session_output
++
++        _action, cap = route_session_output(
++            msg="some output",
++            stop_reason="end_turn",
++            auto_continue_count=0,
++            is_teammate=False,
++        )
++        assert cap == MAX_NUDGE_COUNT
++
++    def test_pm_sdlc_returns_nudge_continue(self):
++        from agent.output_router import route_session_output
++
++        action, _cap = route_session_output(
++            msg="Stage complete",
++            stop_reason="end_turn",
++            auto_continue_count=0,
++            session_type="pm",
++            classification_type="sdlc",
++        )
++        assert action == "nudge_continue"
++
++    def test_non_pm_returns_deliver(self):
++        from agent.output_router import route_session_output
++
++        action, _cap = route_session_output(
++            msg="Task complete",
++            stop_reason="end_turn",
++            auto_continue_count=0,
++            session_type="dev",
++        )
++        assert action == "deliver"
++
++
++class TestValorSessionCLI:
++    """Tests for the valor-session CLI tool."""
++
++    def test_module_importable(self):
++        import tools.valor_session as vs
++
++        assert hasattr(vs, "main")
++        assert callable(vs.main)
++
++    def test_help_exits_zero(self):
++        """--help should exit with code 0."""
++        import subprocess
++        import sys
++
++        result = subprocess.run(
++            [sys.executable, "-m", "tools.valor_session", "--help"],
++            capture_output=True,
++            text=True,
++        )
++        assert result.returncode == 0
++        assert "valor-session" in result.stdout
++
++    def test_subcommands_present_in_help(self):
++        import subprocess
++        import sys
++
++        result = subprocess.run(
++            [sys.executable, "-m", "tools.valor_session", "--help"],
++            capture_output=True,
++            text=True,
++        )
++        for cmd in ("create", "steer", "status", "list", "kill"):
++            assert cmd in result.stdout, f"Subcommand '{cmd}' missing from help output"
++
++    def test_steer_requires_message(self):
++        """valor-session steer --id X should fail without --message."""
++        import subprocess
++        import sys
++
++        result = subprocess.run(
++            [sys.executable, "-m", "tools.valor_session", "steer", "--id", "abc"],
++            capture_output=True,
++            text=True,
++        )
++        assert result.returncode != 0
++        assert "message" in result.stderr.lower() or "required" in result.stderr.lower()
+diff --git a/tools/valor_session.py b/tools/valor_session.py
+new file mode 100644
+index 00000000..da66157e
+--- /dev/null
++++ b/tools/valor_session.py
+@@ -0,0 +1,432 @@
++#!/usr/bin/env python3
++"""
++Session management CLI for AgentSession — create, steer, monitor, and kill sessions.
++
++Usage:
++    valor-session create --role pm --chat-id 123 --message "Plan issue #735"
++    valor-session create --role dev --message "Fix the bug" --parent abc123
++    valor-session steer --id abc123 --message "Stop after critique stage"
++    valor-session status --id abc123
++    valor-session list
++    valor-session list --status running
++    valor-session list --role pm
++    valor-session kill --id abc123
++    valor-session kill --all
++
++This tool is the external interface for session steering. It writes to
++AgentSession.queued_steering_messages (via steer_session()) and manages
++session lifecycle without requiring bridge access.
++"""
++
++import argparse
++import json
++import sys
++from datetime import UTC, datetime
++from pathlib import Path
++
++# Bootstrap path so this runs as a standalone script from any directory
++_repo_root = Path(__file__).parent.parent
++if str(_repo_root) not in sys.path:
++    sys.path.insert(0, str(_repo_root))
++
++
++def _load_env() -> None:
++    """Load environment variables from .env files."""
++    try:
++        from dotenv import load_dotenv
++
++        load_dotenv(_repo_root / ".env")
++        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
++    except Exception:
++        pass
++
++
++def _format_ts(ts: str | float | None) -> str:
++    """Format a timestamp for display."""
++    if ts is None:
++        return "—"
++    try:
++        if isinstance(ts, float | int):
++            dt = datetime.fromtimestamp(ts, tz=UTC)
++        else:
++            dt = datetime.fromisoformat(str(ts))
++        return dt.strftime("%Y-%m-%d %H:%M:%S")
++    except Exception:
++        return str(ts)[:19]
++
++
++def cmd_create(args: argparse.Namespace) -> int:
++    """Create a new AgentSession and enqueue it."""
++    _load_env()
++    try:
++        import asyncio
++
++        from agent.agent_session_queue import _push_agent_session
++        from bridge.utc import utc_now
++
++        role = args.role or "pm"
++        message = args.message
++        chat_id = args.chat_id or "0"
++        parent_id = getattr(args, "parent", None)
++
++        # Derive a session_id from timestamp + role
++        ts_suffix = str(int(utc_now().timestamp()))
++        session_id = f"{chat_id}_{ts_suffix}"
++
++        working_dir = args.working_dir or str(_repo_root)
++
++        session_type = role  # pm, dev, teammate
++
++        async def _create():
++            await _push_agent_session(
++                project_key="ai",
++                session_id=session_id,
++                working_dir=working_dir,
++                message_text=message,
++                sender_name=f"valor-session ({role})",
++                chat_id=chat_id,
++                telegram_message_id=0,
++                session_type=session_type,
++                parent_agent_session_id=parent_id,
++            )
++            return session_id
++
++        result = asyncio.run(_create())
++
++        if args.json:
++            print(json.dumps({"session_id": result, "status": "created"}, indent=2))
++        else:
++            print(f"Created session: {result}")
++            print(f"  Role:    {role}")
++            print(f"  Message: {message[:80]}")
++            print(f"  Chat ID: {chat_id}")
++        return 0
++
++    except Exception as e:
++        print(f"Error: {e}", file=sys.stderr)
++        return 1
++
++
++def cmd_steer(args: argparse.Namespace) -> int:
++    """Write a steering message to a session's queued_steering_messages."""
++    _load_env()
++    try:
++        from agent.agent_session_queue import steer_session
++
++        result = steer_session(args.id, args.message)
++
++        if args.json:
++            print(json.dumps(result, indent=2))
++            return 0 if result["success"] else 1
++
++        if result["success"]:
++            print(f"Steered session {args.id}: {args.message[:80]!r}")
++            return 0
++        else:
++            print(f"Error: {result['error']}", file=sys.stderr)
++            return 1
++
++    except Exception as e:
++        print(f"Error: {e}", file=sys.stderr)
++        return 1
++
++
++def cmd_status(args: argparse.Namespace) -> int:
++    """Show status of a session."""
++    _load_env()
++    try:
++        from models.agent_session import AgentSession
++
++        sessions = list(AgentSession.query.filter(session_id=args.id))
++        if not sessions:
++            print(f"Session not found: {args.id}", file=sys.stderr)
++            return 1
++
++        session = sessions[0]
++
++        if args.json:
++            data = {
++                "agent_session_id": session.agent_session_id,
++                "session_id": session.session_id,
++                "status": session.status,
++                "session_type": getattr(session, "session_type", None),
++                "role": getattr(session, "role", None),
++                "auto_continue_count": session.auto_continue_count,
++                "created_at": str(session.created_at) if session.created_at else None,
++                "started_at": str(session.started_at) if session.started_at else None,
++                "updated_at": str(session.updated_at) if session.updated_at else None,
++                "message_preview": (session.message_text or "")[:100],
++                "queued_steering_messages": session.queued_steering_messages or [],
++                "slug": getattr(session, "slug", None),
++                "branch_name": getattr(session, "branch_name", None),
++                "issue_url": getattr(session, "issue_url", None),
++                "pr_url": getattr(session, "pr_url", None),
++            }
++            print(json.dumps(data, indent=2, default=str))
++            return 0
++
++        print(f"Session: {session.session_id}")
++        print(f"  Status:        {session.status}")
++        stype = getattr(session, "session_type", "—")
++        srole = getattr(session, "role", "—")
++        print(f"  Type/Role:     {stype} / {srole}")
++        print(f"  Auto-continue: {session.auto_continue_count}")
++        print(f"  Created:       {_format_ts(session.created_at)}")
++        print(f"  Started:       {_format_ts(session.started_at)}")
++        print(f"  Updated:       {_format_ts(session.updated_at)}")
++        print(f"  Message:       {(session.message_text or '')[:80]}")
++
++        steering = session.queued_steering_messages
++        if steering:
++            print(f"  Pending steering messages ({len(steering)}):")
++            for i, msg in enumerate(steering, 1):
++                print(f"    {i}. {str(msg)[:80]}")
++        else:
++            print("  Pending steering messages: none")
++
++        slug = getattr(session, "slug", None)
++        if slug:
++            print(f"  Slug:          {slug}")
++        branch = getattr(session, "branch_name", None)
++        if branch:
++            print(f"  Branch:        {branch}")
++        pr = getattr(session, "pr_url", None)
++        if pr:
++            print(f"  PR:            {pr}")
++
++        return 0
++
++    except Exception as e:
++        print(f"Error: {e}", file=sys.stderr)
++        return 1
++
++
++def cmd_list(args: argparse.Namespace) -> int:
++    """List sessions filtered by status and/or role."""
++    _load_env()
++    try:
++        from models.agent_session import AgentSession
++
++        # Collect all sessions — filter client-side since Popoto filter is limited
++        all_sessions: list[AgentSession] = []
++
++        status_filter = getattr(args, "status", None)
++        role_filter = getattr(args, "role", None)
++
++        if status_filter:
++            for st in status_filter.split(","):
++                st = st.strip()
++                try:
++                    all_sessions.extend(list(AgentSession.query.filter(status=st)))
++                except Exception:
++                    pass
++        else:
++            # Common statuses
++            for st in ("pending", "running", "active", "completed", "failed", "killed"):
++                try:
++                    all_sessions.extend(list(AgentSession.query.filter(status=st)))
++                except Exception:
++                    pass
++
++        # Client-side role filter
++        if role_filter:
++            all_sessions = [
++                s
++                for s in all_sessions
++                if getattr(s, "role", None) == role_filter
++                or getattr(s, "session_type", None) == role_filter
++            ]
++
++        # Sort by created_at descending
++        all_sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
++
++        # Deduplicate by session_id
++        seen = set()
++        unique = []
++        for s in all_sessions:
++            if s.session_id not in seen:
++                seen.add(s.session_id)
++                unique.append(s)
++
++        # Limit
++        limit = getattr(args, "limit", 20) or 20
++        unique = unique[:limit]
++
++        if args.json:
++            data = [
++                {
++                    "session_id": s.session_id,
++                    "status": s.status,
++                    "session_type": getattr(s, "session_type", None),
++                    "role": getattr(s, "role", None),
++                    "auto_continue_count": s.auto_continue_count,
++                    "created_at": str(s.created_at) if s.created_at else None,
++                    "message_preview": (s.message_text or "")[:60],
++                }
++                for s in unique
++            ]
++            print(json.dumps(data, indent=2, default=str))
++            return 0
++
++        if not unique:
++            print("No sessions found.")
++            return 0
++
++        print(f"Sessions ({len(unique)}):")
++        print()
++        hdr = f"{'Session ID':<36} {'Status':<12} {'Type':<10} {'Nudges':>6}"
++        hdr += f" {'Created':<20} {'Message':<40}"
++        print(hdr)
++        print("-" * 128)
++
++        for s in unique:
++            sid = s.session_id or "—"
++            if len(sid) > 34:
++                sid = sid[:31] + "..."
++            status = s.status or "—"
++            stype = getattr(s, "session_type", None) or getattr(s, "role", None) or "—"
++            nudges = s.auto_continue_count or 0
++            created = _format_ts(s.created_at)
++            msg = (s.message_text or "")[:38]
++            print(f"{sid:<36} {status:<12} {stype:<10} {nudges:>6} {created:<20} {msg:<40}")
++
++        return 0
++
++    except Exception as e:
++        print(f"Error: {e}", file=sys.stderr)
++        return 1
++
++
++def cmd_kill(args: argparse.Namespace) -> int:
++    """Kill a session or all running sessions."""
++    _load_env()
++    try:
++        from models.agent_session import AgentSession
++        from models.session_lifecycle import TERMINAL_STATUSES, transition_status
++
++        killed = []
++        errors = []
++
++        if getattr(args, "all", False):
++            # Kill all non-terminal sessions
++            for st in ("pending", "running", "active"):
++                try:
++                    sessions = list(AgentSession.query.filter(status=st))
++                    for s in sessions:
++                        try:
++                            transition_status(s, "killed", reason="valor-session kill --all")
++                            killed.append(s.session_id)
++                        except Exception as e:
++                            errors.append(f"{s.session_id}: {e}")
++                except Exception:
++                    pass
++        else:
++            session_id = args.id
++            sessions = list(AgentSession.query.filter(session_id=session_id))
++            if not sessions:
++                print(f"Session not found: {session_id}", file=sys.stderr)
++                return 1
++
++            session = sessions[0]
++            current_status = getattr(session, "status", None)
++            if current_status in TERMINAL_STATUSES:
++                msg = f"Session {session_id} is already in terminal status {current_status!r}"
++                if args.json:
++                    print(json.dumps({"success": False, "error": msg}))
++                else:
++                    print(f"Warning: {msg}")
++                return 0
++
++            transition_status(session, "killed", reason="valor-session kill")
++            killed.append(session_id)
++
++        if args.json:
++            print(json.dumps({"killed": killed, "errors": errors}, indent=2))
++            return 0 if not errors else 1
++
++        if killed:
++            print(f"Killed {len(killed)} session(s):")
++            for sid in killed:
++                print(f"  {sid}")
++        if errors:
++            print(f"Errors ({len(errors)}):")
++            for err in errors:
++                print(f"  {err}", file=sys.stderr)
++
++        return 0 if not errors else 1
++
++    except Exception as e:
++        print(f"Error: {e}", file=sys.stderr)
++        return 1
++
++
++def main() -> int:
++    """Main entry point."""
++    parser = argparse.ArgumentParser(
++        prog="valor-session",
++        description="Manage AgentSessions — create, steer, monitor, and kill",
++    )
++    parser.add_argument("--json", action="store_true", help="Output JSON")
++
++    subparsers = parser.add_subparsers(dest="command", help="Command to run")
++
++    # create subcommand
++    create_parser = subparsers.add_parser("create", help="Create and enqueue a new session")
++    create_parser.add_argument(
++        "--role",
++        "-r",
++        default="pm",
++        choices=["pm", "dev", "teammate"],
++        help="Session role/type (default: pm)",
++    )
++    create_parser.add_argument(
++        "--message", "-m", required=True, help="Initial message for the session"
++    )
++    create_parser.add_argument("--chat-id", help="Telegram chat ID (default: 0)")
++    create_parser.add_argument("--parent", help="Parent AgentSession ID (for child sessions)")
++    create_parser.add_argument("--working-dir", help="Working directory for the session")
++    create_parser.add_argument("--json", action="store_true", help="Output JSON")
++
++    # steer subcommand
++    steer_parser = subparsers.add_parser("steer", help="Inject a steering message into a session")
++    steer_parser.add_argument("--id", required=True, help="Session ID to steer")
++    steer_parser.add_argument("--message", "-m", required=True, help="Steering message to inject")
++    steer_parser.add_argument("--json", action="store_true", help="Output JSON")
++
++    # status subcommand
++    status_parser = subparsers.add_parser("status", help="Show session status")
++    status_parser.add_argument("--id", required=True, help="Session ID")
++    status_parser.add_argument("--json", action="store_true", help="Output JSON")
++
++    # list subcommand
++    list_parser = subparsers.add_parser("list", help="List sessions")
++    list_parser.add_argument("--status", help="Filter by status (comma-separated)")
++    list_parser.add_argument("--role", help="Filter by role/session_type")
++    list_parser.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
++    list_parser.add_argument("--json", action="store_true", help="Output JSON")
++
++    # kill subcommand
++    kill_parser = subparsers.add_parser("kill", help="Kill a session")
++    kill_parser.add_argument("--id", help="Session ID to kill")
++    kill_parser.add_argument("--all", action="store_true", help="Kill all running sessions")
++    kill_parser.add_argument("--json", action="store_true", help="Output JSON")
++
++    args = parser.parse_args()
++
++    if not args.command:
++        parser.print_help()
++        return 1
++
++    dispatch = {
++        "create": cmd_create,
++        "steer": cmd_steer,
++        "status": cmd_status,
++        "list": cmd_list,
++        "kill": cmd_kill,
++    }
++
++    return dispatch[args.command](args)
++
++
++if __name__ == "__main__":
++    sys.exit(main())

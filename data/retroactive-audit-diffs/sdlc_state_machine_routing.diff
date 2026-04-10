@@ -1,0 +1,604 @@
+diff --git a/.claude/skills/sdlc/SKILL.md b/.claude/skills/sdlc/SKILL.md
+index f619f7f3c..40fd9faf6 100644
+--- a/.claude/skills/sdlc/SKILL.md
++++ b/.claude/skills/sdlc/SKILL.md
+@@ -42,6 +42,31 @@ If NO issue or PR number was provided (just a feature description), invoke `/do-
+ 
+ Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local operations (defaults to `.` for same-repo work). Run ALL of these checks — do not skip any.
+ 
++### Step 2.0: Query stage_states from PipelineStateMachine (primary signal)
++
++Before running artifact checks, query the PM session's `stage_states` for authoritative stage completion data. This is the **primary signal** for routing decisions. Artifact inference (steps 2a-2e) is the **fallback** when stage_states is unavailable.
++
++```bash
++# Query stage_states from the PM session via CLI tool
++STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
++
++# If VALOR_SESSION_ID is not set, try AGENT_SESSION_ID
++if [ -z "$STAGE_STATES" ] || [ "$STAGE_STATES" = "{}" ]; then
++    STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$AGENT_SESSION_ID" 2>/dev/null)
++fi
++
++# Parse the result — if non-empty JSON, use it as primary signal
++# Example output: {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress", ...}
++```
++
++**Decision logic:**
++- If `STAGE_STATES` is non-empty JSON with stage data: use it as the **primary signal** for the dispatch table. A stage is considered complete ONLY if its value is `"completed"` in stage_states. Skip steps 2a-2e.
++- If `STAGE_STATES` is empty `{}` or unavailable (no PM session, local Claude Code): fall through to artifact inference (steps 2a-2e below) as fallback. Log a warning: "stage_states unavailable — falling back to artifact inference."
++
++### Steps 2a-2e: Artifact Inference (fallback)
++
++These checks run ONLY when stage_states is unavailable (empty JSON from step 2.0). When stage_states IS available, skip directly to the dispatch table using stage_states as the source of truth.
++
+ ```bash
+ REPO="${SDLC_TARGET_REPO:-.}"
+ 
+@@ -81,8 +106,9 @@ if [ -n "$PLAN_PATH" ]; then
+     sed -n '/^## Documentation/,/^## /p' "$PLAN_PATH" | grep -c '\- \[ \]' || echo "0"
+ fi
+ 
+-# 3c. Check session_progress for DOCS stage completion (if available)
+-python -m tools.session_progress --session-id "$SESSION_ID" --stage DOCS --check 2>/dev/null || true
++# 3c. Check stage_states for DOCS stage completion (reuse $STAGE_STATES from Step 2.0)
++# NOTE: No re-query needed -- $STAGE_STATES was already fetched in Step 2.0
++echo "$STAGE_STATES" | python -c "import sys,json; s=json.load(sys.stdin); print('DOCS_DONE' if s.get('DOCS')=='completed' else 'DOCS_NOT_DONE')" 2>/dev/null || echo "DOCS_NOT_DONE"
+ ```
+ 
+ **Decision logic for docs**:
+@@ -107,7 +133,9 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
+ | 8 | PR review has findings (blockers, nits, OR tech debt) | `/do-patch` | ALL findings must be addressed |
+ | 8b | Patch applied after review findings | `/do-pr-review {pr_number}` | Re-review is REQUIRED after every patch |
+ | 9 | Review APPROVED with zero findings, docs NOT done (see Step 3) | `/do-docs` | Docs are required before merge |
+-| 10 | Review APPROVED with zero findings, docs done, ready to merge | Report done | PM delivers to human |
++| 10 | Review APPROVED with zero findings, docs done, AND all display stages show `completed` in stage_states (or stage_states unavailable), ready to merge | Report done | PM delivers to human |
++
++**Row 10 merge gate**: When stage_states is available, ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). When stage_states is unavailable (local invocations), fall back to artifact inference as before.
+ 
+ **Row 8/8b is the patch-review cycle**: A "minimum approve" with unresolved nits or tech debt is NOT sufficient. Every finding from the review — blockers, nits, suggestions, and tech debt — must be patched or explicitly annotated with inline comments explaining why the finding was left in place. After patching, a fresh `/do-pr-review` is mandatory to verify all findings were addressed. This cycle repeats until the review returns zero unresolved findings.
+ 
+diff --git a/docs/features/pipeline-state-machine.md b/docs/features/pipeline-state-machine.md
+index 7a07499ea..fb1b01c00 100644
+--- a/docs/features/pipeline-state-machine.md
++++ b/docs/features/pipeline-state-machine.md
+@@ -141,8 +141,35 @@ Stage-specific text patterns in the last ~500 chars of output. Each stage has it
+ 
+ Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to handle.
+ 
++## Router Integration (Read Path)
++
++The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as the **primary signal** for routing decisions. This completes the read/write cycle: hooks write stage transitions (via `start_stage()`/`complete_stage()`/`fail_stage()`), and the router reads the resulting state to determine which sub-skill to dispatch next.
++
++### How the Router Reads stage_states
++
++The router invokes `tools/sdlc_stage_query.py` via bash before artifact checks:
++
++```bash
++STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
++```
++
++The CLI tool loads the PM session from Redis, reads `stage_states`, and returns a JSON dict mapping stage names to statuses.
++
++### Routing Logic
++
++- **stage_states available**: Used as the primary signal. A stage is considered complete only if it shows `"completed"` in stage_states. Artifact inference (plan files, PR existence, review status) is skipped entirely.
++- **stage_states unavailable** (empty JSON `{}`): Falls back to artifact inference -- the same behavior as before this integration. This happens for local Claude Code invocations without a PM session.
++
++### Merge Gate
++
++Row 10 in the dispatch table (merge-ready) requires ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) to show `"completed"` in stage_states. This prevents stages from being silently skipped when a prior stage's work happens to produce artifacts that satisfy a later stage's check (e.g., `/do-build` creating docs does not satisfy the DOCS stage).
++
++When stage_states is unavailable, the merge gate falls back to artifact inference.
++
+ ## Integration Points
+ 
++- **SDLC Router** (`.claude/skills/sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal
++- **Stage Query Tool** (`tools/sdlc_stage_query.py`): CLI interface for reading `stage_states` from a PM session by session ID or issue number
+ - **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` when the PM dispatches a dev-session, marking the stage as `in_progress`
+ - **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Calls `complete_stage()` when the dev-session returns, marking the stage as `completed`
+ - **ChatSession**: Uses state machine for stage queries and outcome classification
+@@ -163,7 +190,10 @@ Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to han
+ | `bridge/pipeline_state.py` | PipelineStateMachine class with artifact-based inference |
+ | `bridge/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) |
+ | `models/agent_session.py` | `stage_states` field on AgentSession |
++| `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router) |
++| `.claude/skills/sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 2.0) |
+ | `agent/hooks/pre_tool_use.py` | `start_stage()` wiring via `_extract_stage_from_prompt()` and `_start_pipeline_stage()` |
+ | `agent/hooks/subagent_stop.py` | `complete_stage()` wiring via `_record_stage_on_parent()` |
+ | `tests/unit/test_pipeline_state_machine.py` | State machine unit tests |
++| `tests/unit/test_sdlc_stage_query.py` | Stage query CLI tool unit tests |
+ | `tests/unit/test_pre_tool_use_start_stage.py` | Stage extraction and start_stage wiring tests |
+diff --git a/docs/tools-reference.md b/docs/tools-reference.md
+index 8dad3ab7c..3e8a61c05 100644
+--- a/docs/tools-reference.md
++++ b/docs/tools-reference.md
+@@ -182,6 +182,32 @@ python -m tools.agent_session_scheduler cleanup --age 30              # Delete
+ 
+ See `docs/features/agent-session-scheduling.md` for full documentation.
+ 
++### SDLC Stage Query (`tools.sdlc_stage_query`)
++
++Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.
++
++```bash
++# Query by session ID
++python -m tools.sdlc_stage_query --session-id tg_project_123_456
++
++# Query by GitHub issue number (finds the PM session tracking that issue)
++python -m tools.sdlc_stage_query --issue-number 704
++
++# No args — falls back to VALOR_SESSION_ID / AGENT_SESSION_ID env vars
++python -m tools.sdlc_stage_query
++```
++
++```python
++from tools.sdlc_stage_query import query_stage_states
++
++states = query_stage_states(session_id="tg_project_123_456")
++# {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress", ...}
++
++states = query_stage_states(issue_number=704)
++```
++
++Always exits 0 and returns `{}` on any error (missing session, Redis down, malformed data). See `docs/features/pipeline-state-machine.md` for how the router uses this tool.
++
+ ## OfficeCLI
+ 
+ Standalone binary at `~/.local/bin/officecli` for creating, reading, and editing Office documents (.docx, .xlsx, .pptx). No dependencies, no Office installation needed. Installed and updated automatically by the update system (`scripts/update/officecli.py`).
+diff --git a/tests/unit/test_sdlc_stage_query.py b/tests/unit/test_sdlc_stage_query.py
+new file mode 100644
+index 000000000..5115f6831
+--- /dev/null
++++ b/tests/unit/test_sdlc_stage_query.py
+@@ -0,0 +1,264 @@
++"""Unit tests for tools.sdlc_stage_query CLI tool.
++
++Tests cover:
++- query_stage_states with valid session data
++- Graceful handling of missing sessions
++- Graceful handling of malformed stage_states
++- CLI argument parsing and output format
++- Fallback to issue number lookup
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import subprocess
++import sys
++from unittest.mock import MagicMock, patch  # noqa: F401 - patch used in tests below
++
++# Resolve the repo root for subprocess cwd
++REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++
++class TestQueryStageStates:
++    """Tests for the query_stage_states function."""
++
++    def test_returns_empty_dict_when_no_args(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        result = query_stage_states()
++        assert result == {}
++
++    def test_returns_empty_dict_when_session_not_found(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=None):
++            result = query_stage_states(session_id="nonexistent")
++        assert result == {}
++
++    def test_returns_stage_states_from_session(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        mock_session = MagicMock()
++        stages = {
++            "ISSUE": "completed",
++            "PLAN": "completed",
++            "CRITIQUE": "completed",
++            "BUILD": "in_progress",
++            "TEST": "pending",
++            "PATCH": "pending",
++            "REVIEW": "pending",
++            "DOCS": "pending",
++            "MERGE": "pending",
++        }
++        mock_session.stage_states = json.dumps(stages)
++
++        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
++            result = query_stage_states(session_id="test-session")
++
++        assert result["ISSUE"] == "completed"
++        assert result["PLAN"] == "completed"
++        assert result["BUILD"] == "in_progress"
++        assert result["TEST"] == "pending"
++
++    def test_filters_out_metadata_keys(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        mock_session = MagicMock()
++        stages = {
++            "ISSUE": "completed",
++            "PLAN": "completed",
++            "_patch_cycle_count": 2,
++            "_critique_cycle_count": 0,
++        }
++        mock_session.stage_states = json.dumps(stages)
++
++        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
++            result = query_stage_states(session_id="test-session")
++
++        assert "_patch_cycle_count" not in result
++        assert "_critique_cycle_count" not in result
++        assert result["ISSUE"] == "completed"
++
++    def test_handles_malformed_json_gracefully(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        mock_session = MagicMock()
++        mock_session.stage_states = "not-valid-json"
++
++        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
++            result = query_stage_states(session_id="test-session")
++
++        assert result == {}
++
++    def test_handles_none_stage_states(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        mock_session = MagicMock()
++        mock_session.stage_states = None
++
++        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
++            result = query_stage_states(session_id="test-session")
++
++        assert result == {}
++
++    def test_issue_number_fallback(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        mock_session = MagicMock()
++        stages = {"ISSUE": "completed", "PLAN": "in_progress"}
++        mock_session.stage_states = json.dumps(stages)
++
++        with (
++            patch("tools.sdlc_stage_query._find_session_by_id", return_value=None),
++            patch("tools.sdlc_stage_query._find_session_by_issue", return_value=mock_session),
++        ):
++            result = query_stage_states(session_id="missing", issue_number=704)
++
++        assert result["ISSUE"] == "completed"
++        assert result["PLAN"] == "in_progress"
++
++    def test_handles_dict_stage_states(self):
++        from tools.sdlc_stage_query import query_stage_states
++
++        mock_session = MagicMock()
++        mock_session.stage_states = {"ISSUE": "completed", "PLAN": "ready"}
++
++        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
++            result = query_stage_states(session_id="test-session")
++
++        assert result["ISSUE"] == "completed"
++        assert result["PLAN"] == "ready"
++
++    def test_only_returns_known_stages(self):
++        """Verify unknown stage names are filtered out."""
++        from tools.sdlc_stage_query import query_stage_states
++
++        mock_session = MagicMock()
++        stages = {
++            "ISSUE": "completed",
++            "UNKNOWN_STAGE": "completed",
++            "BOGUS": "in_progress",
++        }
++        mock_session.stage_states = json.dumps(stages)
++
++        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
++            result = query_stage_states(session_id="test-session")
++
++        assert "ISSUE" in result
++        assert "UNKNOWN_STAGE" not in result
++        assert "BOGUS" not in result
++
++
++class TestFindSessionByIssue:
++    """Tests for _find_session_by_issue."""
++
++    def test_matches_issue_url_suffix(self):
++        from tools.sdlc_stage_query import _find_session_by_issue
++
++        mock_session = MagicMock()
++        mock_session.issue_url = "https://github.com/tomcounsell/ai/issues/704"
++        mock_session.session_type = "pm"
++
++        mock_as = MagicMock()
++        mock_as.query.filter.return_value = [mock_session]
++
++        with patch("models.agent_session.AgentSession", mock_as):
++            result = _find_session_by_issue(704)
++
++        assert result == mock_session
++
++    def test_returns_none_when_no_match(self):
++        from tools.sdlc_stage_query import _find_session_by_issue
++
++        mock_session = MagicMock()
++        mock_session.issue_url = "https://github.com/tomcounsell/ai/issues/999"
++
++        mock_as = MagicMock()
++        mock_as.query.filter.return_value = [mock_session]
++
++        with patch("models.agent_session.AgentSession", mock_as):
++            result = _find_session_by_issue(704)
++
++        assert result is None
++
++    def test_handles_redis_exception_gracefully(self):
++        from tools.sdlc_stage_query import _find_session_by_issue
++
++        mock_as = MagicMock()
++        mock_as.query.filter.side_effect = ConnectionError("Redis down")
++
++        with patch("models.agent_session.AgentSession", mock_as):
++            result = _find_session_by_issue(704)
++
++        assert result is None
++
++
++class TestFindSessionById:
++    """Tests for _find_session_by_id."""
++
++    def test_prefers_pm_session(self):
++        from tools.sdlc_stage_query import _find_session_by_id
++
++        pm_session = MagicMock()
++        pm_session.session_type = "pm"
++        dev_session = MagicMock()
++        dev_session.session_type = "dev"
++
++        mock_as = MagicMock()
++        mock_as.query.filter.return_value = [dev_session, pm_session]
++
++        with patch("models.agent_session.AgentSession", mock_as):
++            result = _find_session_by_id("test-session")
++
++        assert result == pm_session
++
++    def test_returns_first_session_when_no_pm(self):
++        from tools.sdlc_stage_query import _find_session_by_id
++
++        dev_session = MagicMock()
++        dev_session.session_type = "dev"
++
++        mock_as = MagicMock()
++        mock_as.query.filter.return_value = [dev_session]
++
++        with patch("models.agent_session.AgentSession", mock_as):
++            result = _find_session_by_id("test-session")
++
++        assert result == dev_session
++
++    def test_returns_none_for_empty_results(self):
++        from tools.sdlc_stage_query import _find_session_by_id
++
++        mock_as = MagicMock()
++        mock_as.query.filter.return_value = []
++
++        with patch("models.agent_session.AgentSession", mock_as):
++            result = _find_session_by_id("nonexistent")
++
++        assert result is None
++
++
++class TestCLIOutput:
++    """Tests for CLI invocation and output format."""
++
++    def test_no_args_returns_empty_json(self):
++        result = subprocess.run(
++            [sys.executable, "-m", "tools.sdlc_stage_query"],
++            capture_output=True,
++            text=True,
++            cwd=REPO_ROOT,
++        )
++        assert result.returncode == 0
++        assert json.loads(result.stdout.strip()) == {}
++
++    def test_help_flag(self):
++        result = subprocess.run(
++            [sys.executable, "-m", "tools.sdlc_stage_query", "--help"],
++            capture_output=True,
++            text=True,
++            cwd=REPO_ROOT,
++        )
++        assert result.returncode == 0
++        assert "--session-id" in result.stdout
++        assert "--issue-number" in result.stdout
+diff --git a/tools/sdlc_stage_query.py b/tools/sdlc_stage_query.py
+new file mode 100644
+index 000000000..1fe4fb1ec
+--- /dev/null
++++ b/tools/sdlc_stage_query.py
+@@ -0,0 +1,181 @@
++"""CLI tool for querying SDLC stage_states from a PM session.
++
++Invoked by the SDLC router skill (SKILL.md) to read the current pipeline
++state from Redis. Returns JSON mapping stage names to their statuses.
++
++Usage:
++    python -m tools.sdlc_stage_query --session-id <SESSION_ID>
++    python -m tools.sdlc_stage_query --issue-number <ISSUE_NUMBER>
++    python -m tools.sdlc_stage_query --help
++
++Exit codes:
++    0 — always (errors return empty JSON {})
++
++Output:
++    JSON dict, e.g.: {"ISSUE": "completed", "PLAN": "completed", ...}
++    Empty dict {} when no session found or stage_states unavailable.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import logging
++import sys
++
++logger = logging.getLogger(__name__)
++
++
++def _find_session_by_id(session_id: str):
++    """Find an AgentSession by session_id.
++
++    Returns the session object or None.
++    """
++    try:
++        from models.agent_session import AgentSession
++
++        sessions = list(AgentSession.query.filter(session_id=session_id))
++        if not sessions:
++            return None
++        # Prefer PM sessions (they own stage_states)
++        for s in sessions:
++            if getattr(s, "session_type", None) == "pm":
++                return s
++        return sessions[0]
++    except Exception as e:
++        logger.debug(f"_find_session_by_id failed: {e}")
++        return None
++
++
++def _find_session_by_issue(issue_number: int):
++    """Find a PM session tracking the given issue number.
++
++    Scans recent PM sessions for an issue_url containing the issue number.
++    Returns the session object or None.
++    """
++    try:
++        from models.agent_session import AgentSession
++
++        # NOTE: Linear scan of PM sessions — acceptable for current scale (typically
++        # <100 PM sessions). If PM session count grows significantly, consider adding
++        # an indexed lookup by issue_url or caching issue->session mappings.
++        pm_sessions = list(AgentSession.query.filter(session_type="pm"))
++        target_suffix = f"/issues/{issue_number}"
++        for s in pm_sessions:
++            issue_url = getattr(s, "issue_url", None) or ""
++            if issue_url.endswith(target_suffix):
++                return s
++        return None
++    except Exception as e:
++        logger.debug(f"_find_session_by_issue failed: {e}")
++        return None
++
++
++def _get_stage_states(session) -> dict[str, str]:
++    """Extract stage_states from a session, returning a dict.
++
++    Returns an empty dict if stage_states is unavailable or malformed.
++    """
++    try:
++        raw = session.stage_states
++        if not raw:
++            return {}
++        if isinstance(raw, str):
++            data = json.loads(raw)
++        elif isinstance(raw, dict):
++            data = raw
++        else:
++            return {}
++
++        if not isinstance(data, dict):
++            return {}
++
++        # Filter to known stages only, exclude internal metadata keys
++        from bridge.pipeline_state import ALL_STAGES
++
++        return {k: v for k, v in data.items() if k in ALL_STAGES}
++    except Exception as e:
++        logger.debug(f"_get_stage_states failed: {e}")
++        return {}
++
++
++def query_stage_states(
++    session_id: str | None = None,
++    issue_number: int | None = None,
++) -> dict[str, str]:
++    """Query stage_states for a session.
++
++    Args:
++        session_id: Session ID to look up directly.
++        issue_number: Issue number to find the PM session for.
++
++    Returns:
++        Dict mapping stage names to status strings, or empty dict.
++    """
++    session = None
++
++    if session_id:
++        session = _find_session_by_id(session_id)
++
++    if session is None and issue_number is not None:
++        session = _find_session_by_issue(issue_number)
++
++    if session is None:
++        return {}
++
++    return _get_stage_states(session)
++
++
++def main():
++    parser = argparse.ArgumentParser(
++        description="Query SDLC stage_states from a PM session",
++        formatter_class=argparse.RawDescriptionHelpFormatter,
++        epilog="""
++Examples:
++  python -m tools.sdlc_stage_query --session-id tg_project_123_456
++  python -m tools.sdlc_stage_query --issue-number 704
++
++Output:
++  {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress", ...}
++  {} (when no session found or stage_states unavailable)
++""",
++    )
++    parser.add_argument(
++        "--session-id",
++        help="Session ID to look up (e.g., VALOR_SESSION_ID)",
++    )
++    parser.add_argument(
++        "--issue-number",
++        type=int,
++        help="GitHub issue number to find the PM session for",
++    )
++
++    args = parser.parse_args()
++
++    if not args.session_id and args.issue_number is None:
++        # Check environment variables as fallback
++        import os
++
++        session_id = os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
++        if session_id:
++            args.session_id = session_id
++        else:
++            # No args and no env vars — return empty JSON gracefully
++            print("{}")
++            sys.exit(0)
++
++    try:
++        result = query_stage_states(
++            session_id=args.session_id,
++            issue_number=args.issue_number,
++        )
++        print(json.dumps(result))
++    except Exception:
++        # Never crash — always return empty JSON
++        print("{}")
++
++    sys.exit(0)
++
++
++if __name__ == "__main__":
++    main()

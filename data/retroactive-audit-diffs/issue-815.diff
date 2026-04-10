@@ -1,0 +1,405 @@
+diff --git a/.claude/skills/do-plan-critique/SKILL.md b/.claude/skills/do-plan-critique/SKILL.md
+index ed2b2527..727803e0 100644
+--- a/.claude/skills/do-plan-critique/SKILL.md
++++ b/.claude/skills/do-plan-critique/SKILL.md
+@@ -158,8 +158,14 @@ SEVERITY: BLOCKER | CONCERN | NIT
+ LOCATION: Section name or line reference in the plan
+ FINDING: What's wrong (1-2 sentences)
+ SUGGESTION: How to fix it (1-2 sentences)
++IMPLEMENTATION NOTE: [Required for CONCERN and BLOCKER severity. Exempt for NIT.]
++  The specific guard condition, call signature, or gotcha that makes this finding
++  implementable without re-investigation. If you cannot write this note, the finding
++  is not yet specific enough to ship.
+ ```
+ 
++NITs are exempt from the Implementation Note field. For CONCERN and BLOCKER findings, the note must be concrete: a specific guard condition (e.g., `if event: event.set()`), a call signature, or a "why" explanation that prevents naive application of the fix.
++
+ ### Step 4: Aggregate and Deduplicate
+ 
+ After all critics complete:
+@@ -168,6 +174,10 @@ After all critics complete:
+ 2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
+ 3. **Sort by severity**: BLOCKERs first, then CONCERNs, then NITs
+ 4. **Cross-validate**: If the Skeptic and Simplifier both flagged the same component, elevate to BLOCKER if not already
++5. **Structural Implementation Note check** — for each finding with SEVERITY = CONCERN or BLOCKER:
++   - If IMPLEMENTATION NOTE is missing or empty: downgrade the finding to NEEDS_REVISION and report: "Finding [title] missing Implementation Note — returned to critic for revision"
++   - Re-run that critic with the finding and a directive to add a concrete Implementation Note before proceeding
++   - Only issue the final verdict after all CONCERN/BLOCKER findings have a non-empty Implementation Note
+ 
+ ### Step 5: Report
+ 
+@@ -189,11 +199,17 @@ Output the final report in this format:
+ - **Location**: {section reference}
+ - **Finding**: {description}
+ - **Suggestion**: {how to fix}
++- **Implementation Note**: {the specific guard condition, call signature, or gotcha}
+ 
+ ## Concerns
+ 
+ ### {finding title}
+-...
++- **Severity**: CONCERN
++- **Critics**: {which critics flagged this}
++- **Location**: {section reference}
++- **Finding**: {description}
++- **Suggestion**: {how to fix}
++- **Implementation Note**: {the specific guard condition, call signature, or gotcha}
+ 
+ ## Nits
+ 
+@@ -214,7 +230,8 @@ Output the final report in this format:
+ ## Verdict
+ 
+ {One of:}
+-- **READY TO BUILD** — No blockers. Concerns are acknowledged risks, not plan defects.
++- **READY TO BUILD (no concerns)** — No CONCERN or BLOCKER findings (NITs do not trigger this variant). Proceed directly to build.
++- **READY TO BUILD (with concerns)** — No BLOCKERs, but one or more CONCERN findings exist. A revision pass will embed Implementation Notes before build.
+ - **NEEDS REVISION** — {N} blockers must be resolved before build.
+ - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
+ ```
+@@ -225,10 +242,15 @@ The skill returns a structured verdict that the SDLC pipeline can use:
+ 
+ | Verdict | SDLC Action |
+ |---------|-------------|
+-| READY TO BUILD | Proceed to `/do-build` |
+-| NEEDS REVISION | Return to `/do-plan` with findings |
++| READY TO BUILD (no concerns) | Proceed directly to `/do-build` |
++| READY TO BUILD (with concerns) | Trigger revision pass via `/do-plan` before `/do-build` |
++| NEEDS REVISION | Return to `/do-plan` with blocker findings |
+ | MAJOR REWORK | Return to issue discussion |
+ 
++**"READY TO BUILD (with concerns)"** triggers a revision pass. This pass incorporates the Implementation Note from each concern into the plan text. CONCERNs are not reclassified as defects — the revision pass is a plan clarity step, not a rework step. The concern is still acknowledged (not blocking), but its Implementation Note is embedded in the plan so the builder has unambiguous implementation guidance without re-investigation.
++
++Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER findings (NITs do not block and do not trigger revision).
++
+ ## What This Skill Does NOT Do
+ 
+ - **Does not rewrite the plan** — output is findings, not a revised document
+@@ -238,5 +260,6 @@ The skill returns a structured verdict that the SDLC pipeline can use:
+ 
+ ## Version history
+ 
++- v1.2.0 (2026-04-07): Fix Step 5 Verdict template to show both READY TO BUILD variants so critics output the correct form for SDLC routing
+ - v1.1.0 (2026-03-23): Add SOURCE_FILES inline context to prevent critic hallucination (Step 1.5)
+ - v1.0.0 (2026-03-21): Initial — war room critique with six parallel critics + structural checks
+diff --git a/.claude/skills/do-plan/PLAN_TEMPLATE.md b/.claude/skills/do-plan/PLAN_TEMPLATE.md
+index e81a8284..cdff8123 100644
+--- a/.claude/skills/do-plan/PLAN_TEMPLATE.md
++++ b/.claude/skills/do-plan/PLAN_TEMPLATE.md
+@@ -377,7 +377,9 @@ Supported expectations: "exit code N", "output > N", "output contains X".]
+ ## Critique Results
+ 
+ <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
++| Severity | Critic | Finding | Addressed By | Implementation Note |
++|----------|--------|---------|--------------|---------------------|
++| CONCERN | [agent-type] | [The concern raised] | [How/whether addressed] | [Guard condition or gotcha] |
+ 
+ ---
+ 
+diff --git a/.claude/skills/do-plan/SKILL.md b/.claude/skills/do-plan/SKILL.md
+index 3e5438a1..3c79e678 100644
+--- a/.claude/skills/do-plan/SKILL.md
++++ b/.claude/skills/do-plan/SKILL.md
+@@ -282,6 +282,22 @@ fi
+ 
+ After linking or creating: update the plan's `tracking:` field and commit.
+ 
++### Phase 2.6: Propagation Check
++
++After all task steps are written and before committing, verify that task bullets are consistent with the current Technical Approach (or spike findings if no Technical Approach section exists).
++
++1. **Re-read Technical Approach** — or, if the plan has no Technical Approach section, re-read the Spike Results section to get the current implementation findings
++2. **Scan each task bullet** for encoding choices, library selections, function names, and pattern names
++3. **Flag any task bullet that contradicts or predates spike findings** — common signs:
++   - A library name that was ruled out by a spike (e.g., a task still says "msgpack-encoded" after spike-2 confirmed `json.dumps()` is correct)
++   - A function name from a prior design that the spike replaced
++   - A pattern (e.g., `asyncio.to_thread()` vs. direct `await`) that contradicts the current approach
++4. **Update divergent task steps** before committing — the task list must reflect the final spike conclusions, not intermediate assumptions
++
++**Concrete example:** If spike-2 found that `json.dumps()` is the correct encoding method and a task bullet still says "msgpack-encoded payload", update that task bullet to say "json-encoded payload" before committing the plan.
++
++**This step is non-negotiable for plans with spikes.** For plans with no spikes (Small appetite, greenfield), it is a 30-second sanity check — scan once and move on.
++
+ ### Phase 2.7: Sync Issue Comments into Plan
+ 
+ Before finalizing, check the tracking issue for comments that contain feedback, scope changes, or new context that should be incorporated into the plan.
+diff --git a/.claude/skills/sdlc/SKILL.md b/.claude/skills/sdlc/SKILL.md
+index de902978..82dabffd 100644
+--- a/.claude/skills/sdlc/SKILL.md
++++ b/.claude/skills/sdlc/SKILL.md
+@@ -130,7 +130,9 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
+ | 1 | No plan exists | `/do-plan {slug}` | Cannot build without a plan |
+ | 2 | Plan exists, not yet critiqued | `/do-plan-critique` with plan path | Plan must pass critique before build |
+ | 3 | Plan critiqued (NEEDS REVISION) | `/do-plan {slug}` | Revise plan based on critique findings |
+-| 4 | Plan critiqued (READY TO BUILD), no branch/PR | `/do-build` with plan path | Critique passed, implement it |
++| 4a | Plan critiqued (READY TO BUILD, zero concerns), no branch/PR | `/do-build` with plan path | No revision needed — critique passed cleanly |
++| 4b | Plan critiqued (READY TO BUILD, concerns present), `revision_applied` not set in plan frontmatter | `/do-plan {slug}` with directive to apply concern findings | Revision pass before build — embed Implementation Notes into plan text |
++| 4c | Plan critiqued (READY TO BUILD, concerns present), `revision_applied: true` in plan frontmatter | `/do-build` with plan path | Revision pass already complete — proceed to build |
+ | 5 | Branch exists, no PR | `/do-build` with plan path | Build must create the PR — resume build |
+ | 6 | Tests failing | `/do-patch` then `/do-test` | Fix what is broken |
+ | 7 | PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
+@@ -141,6 +143,10 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
+ 
+ **Row 10 merge gate**: ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). If stage_states is unavailable, use conversation dispatch history — if DOCS was never dispatched in this session, dispatch it.
+ 
++**Row 4b/4c is the concern-triggered revision path**: When the critique verdict is "READY TO BUILD (with concerns)", the SDLC router dispatches `/do-plan` with a directive to apply the concern findings — specifically, to embed each concern's Implementation Note into the plan text. This is a plan clarity step, not a defect fix. CONCERNs are not reclassified as blockers; they remain acknowledged risks. After the revision pass, the plan's frontmatter is updated with `revision_applied: true`. The next SDLC invocation then detects this flag and routes to Row 4c (`/do-build`). Detection logic:
++- Row 4b: critique verdict contains "with concerns" AND plan frontmatter does NOT contain `revision_applied: true`
++- Row 4a or 4c: critique verdict contains "no concerns" OR plan frontmatter contains `revision_applied: true`
++
+ **Row 8/8b is the patch-review cycle**: A "minimum approve" with unresolved nits or tech debt is NOT sufficient. Every finding from the review — blockers, nits, suggestions, and tech debt — must be patched or explicitly annotated with inline comments explaining why the finding was left in place. After patching, a fresh `/do-pr-review` is mandatory to verify all findings were addressed. This cycle repeats until the review returns zero unresolved findings.
+ 
+ **Row 9 is the docs gate**: A clean review does NOT mean "all stages complete." You MUST run Step 3's docs check before dispatching row 10. If you cannot confirm docs are done, dispatch `/do-docs`.
+diff --git a/docs/features/README.md b/docs/features/README.md
+index f5428fbe..2860d225 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -87,7 +87,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
+ | [Scale Agent Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
+ | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
+-| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
++| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics, Implementation Note enforcement, concern-triggered revision pass, and propagation check | Shipped |
+ | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
+ | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
+ | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
+diff --git a/docs/features/sdlc-critique-stage.md b/docs/features/sdlc-critique-stage.md
+index 9c717ed7..46198ccf 100644
+--- a/docs/features/sdlc-critique-stage.md
++++ b/docs/features/sdlc-critique-stage.md
+@@ -7,7 +7,9 @@ The CRITIQUE stage sits between PLAN and BUILD in the SDLC pipeline. It validate
+ ```
+ ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
+                     |
+-                    +---(fail)---> PLAN (revision cycle, max 2)
++                    +---(NEEDS REVISION)---> PLAN (revision cycle, max 2)
++                    |
++                    +---(READY TO BUILD, with concerns)---> PLAN (revision pass) -> BUILD
+ ```
+ 
+ ## How It Works
+@@ -22,17 +24,60 @@ When a plan completes, the Observer routes to CRITIQUE instead of BUILD. The `/d
+ 
+ 4. **Aggregation** (Steps 4-5): Findings are deduplicated, sorted by severity, and a verdict is issued.
+ 
++## Finding Format
++
++Each critic finding includes up to five fields:
++
++```
++SEVERITY: BLOCKER | CONCERN | NIT
++LOCATION: Section name or line reference in the plan
++FINDING: What's wrong (1-2 sentences)
++SUGGESTION: How to fix it (1-2 sentences)
++IMPLEMENTATION NOTE: [Required for CONCERN/BLOCKER. Exempt for NIT.]
++  The specific guard condition, call signature, or gotcha that makes this finding
++  implementable without re-investigation.
++```
++
++The **Implementation Note** field is enforced structurally: any CONCERN or BLOCKER finding without a non-empty Implementation Note is flagged and returned to the critic before the verdict is issued. NITs are exempt.
++
++**Why this matters:** Critique findings at headline level are often correct but underdetermined. Example: "add `.add_done_callback()` to log error on task exit" is correct but incomplete. The necessary Implementation Note is: `lambda t: logger.error(..., t.exception()) if not t.cancelled() else None` — calling `t.exception()` on a cancelled task raises `CancelledError`, so the guard is required or the callback crashes on normal shutdown.
++
+ ## Verdicts
+ 
+-| Verdict | Pipeline Action |
+-|---------|----------------|
+-| READY TO BUILD | Proceed to BUILD stage |
+-| NEEDS REVISION | Route back to PLAN for revision |
+-| MAJOR REWORK | Escalate to human (ambiguous outcome) |
++| Verdict | Meaning | Pipeline Action |
++|---------|---------|----------------|
++| READY TO BUILD (no concerns) | Zero BLOCKER or CONCERN findings | Proceed directly to BUILD stage |
++| READY TO BUILD (with concerns) | CONCERN findings exist (no BLOCKERs) | Trigger revision pass via `/do-plan` before BUILD |
++| NEEDS REVISION | BLOCKER findings exist | Route back to PLAN with blocker findings |
++| MAJOR REWORK | Fundamental issues found | Escalate to human (ambiguous outcome) |
++
++## Concern-Triggered Revision Pass
++
++When the verdict is **READY TO BUILD (with concerns)**, the SDLC router dispatches `/do-plan` with a directive to apply the concern findings to the plan text. This is a **plan clarity step**, not a defect fix:
++
++- CONCERNs are not reclassified as blockers — they remain acknowledged risks
++- The revision pass embeds each concern's Implementation Note into the plan so the builder has unambiguous implementation guidance without re-investigation
++- After the revision pass completes, the plan frontmatter is updated with `revision_applied: true`
++
++The `revision_applied` flag is the mechanism for distinguishing "CRITIQUE complete, revision pending" from "CRITIQUE complete, revision done":
++
++| State | `revision_applied` flag | SDLC Router Action |
++|-------|------------------------|-------------------|
++| Critique done, concerns found, no revision yet | absent/false | Row 4b: dispatch `/do-plan` revision pass |
++| Critique done, revision pass complete | `revision_applied: true` | Row 4c: dispatch `/do-build` |
++| Critique done, zero concerns | N/A | Row 4a: dispatch `/do-build` directly |
+ 
+ ## Cycle Limits
+ 
+-The CRITIQUE -> PLAN -> CRITIQUE revision loop is capped at `MAX_CRITIQUE_CYCLES = 2`. After 2 revisions, the pipeline escalates to human review rather than looping indefinitely.
++The CRITIQUE -> PLAN -> CRITIQUE revision loop (for NEEDS REVISION verdicts) is capped at `MAX_CRITIQUE_CYCLES = 2`. After 2 revisions, the pipeline escalates to human review rather than looping indefinitely.
++
++The concern-triggered revision pass (READY TO BUILD with concerns) runs once and does not re-enter CRITIQUE — the `revision_applied` flag ensures it is never repeated.
++
++## Propagation Check (do-plan integration)
++
++The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are written and before the plan is committed. This check cross-references task bullets against the Technical Approach (or spike findings) to catch stale implementation assumptions before they reach the critic stage.
++
++**Common failure pattern:** After spike-2 confirms `json.dumps()` is the correct encoding, a task bullet still says "msgpack-encoded payload". The propagation check flags and corrects this before commit.
+ 
+ ## Source Modules
+ 
+@@ -42,9 +87,11 @@ The CRITIQUE -> PLAN -> CRITIQUE revision loop is capped at `MAX_CRITIQUE_CYCLES
+ | `bridge/pipeline_state.py` | CRITIQUE in ALL_STAGES, classify_outcome patterns, critique_cycle_count |
+ | `models/agent_session.py` | CRITIQUE in SDLC_STAGES |
+ | `agent/build_pipeline.py` | "critique" in STAGES list |
+-| `.claude/skills/do-plan-critique/SKILL.md` | Step 1.5 for SOURCE_FILES extraction |
++| `.claude/skills/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check |
+ | `.claude/skills/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template |
+-| `.claude/skills/sdlc/SKILL.md` | CRITIQUE row in dispatch table |
++| `.claude/skills/sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
++| `.claude/skills/do-plan/SKILL.md` | Phase 2.6 Propagation Check |
++| `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Critique Results table with Implementation Note column |
+ | `config/personas/project-manager.md` | Hard gate rule: CRITIQUE mandatory after PLAN (in-repo fallback) |
+ | `agent/sdk_client.py` line 1611 | Stage list injection includes CRITIQUE: `<PLAN\|CRITIQUE\|BUILD\|...>` |
+ 
+@@ -64,7 +111,7 @@ The CRITIQUE gate is enforced at two levels so it cannot be silently bypassed:
+ ## Outcome Classification
+ 
+ The `classify_outcome("CRITIQUE", ...)` method in `PipelineStateMachine` recognizes:
+-- "ready to build" in output tail -> `"success"`
++- "ready to build" in output tail -> `"success"` (routes to Row 4a, 4b, or 4c based on concern count and revision_applied flag)
+ - "needs revision" in output tail -> `"fail"`
+ - "major rework" in output tail -> `"ambiguous"` (escalate)
+ 
+@@ -72,3 +119,6 @@ The `classify_outcome("CRITIQUE", ...)` method in `PipelineStateMachine` recogni
+ 
+ - Issue #463: SDLC Critique Stage
+ - Issue #469: Hallucination fix for critique agents
++- Issue #472: Add CRITIQUE stage to SDLC pipeline between PLAN and BUILD
++- Issue #802: Enforce CRITIQUE and REVIEW gates in PM persona
++- Issue #779: SDLC Skill Gaps — Propagation Check, Shallow Critique Findings, No Revision Pass
+diff --git a/docs/plans/sdlc-plan-critique-revision.md b/docs/plans/sdlc-plan-critique-revision.md
+index e1c6f12e..1def80bd 100644
+--- a/docs/plans/sdlc-plan-critique-revision.md
++++ b/docs/plans/sdlc-plan-critique-revision.md
+@@ -1,11 +1,12 @@
+ ---
+-status: Planning
++status: docs_complete
+ type: chore
+ appetite: Small
+ owner: Tom Counsell
+ created: 2026-04-07
+ tracking: https://github.com/tomcounsell/ai/issues/779
+ last_comment_id:
++revision_applied: true
+ ---
+ 
+ # SDLC Skill Gaps: Propagation Check, Shallow Critique Findings, No Revision Pass
+@@ -94,6 +95,16 @@ NITs are exempt. Update the critic instructions and the Step 5 report format to
+ 
+ Also update the `## Critique Results` table template in `PLAN_TEMPLATE.md` to include an `Implementation Note` column.
+ 
++**Structural enforcement in aggregation step:** Add a 3-line structural check to the critique aggregation step (Step 5 / war-room synthesis) that validates Implementation Note presence before the verdict is issued:
++
++```
++For each finding with SEVERITY = CONCERN or BLOCKER:
++  If IMPLEMENTATION NOTE is missing or empty → downgrade finding to NEEDS_REVISION
++  Report: "Finding [X] missing Implementation Note — returned to critic for revision"
++```
++
++This check runs inside the skill's aggregation step (no Python code), making it instruction-enforced rather than honor-system-only.
++
+ ### Change 3: `sdlc/SKILL.md` — Concern-Triggered Revision Pass
+ 
+ Update dispatch table Row 4 to distinguish two sub-cases:
+@@ -103,23 +114,19 @@ Update dispatch table Row 4 to distinguish two sub-cases:
+ | 4a | Plan critiqued (READY TO BUILD, zero concerns) | `/do-build` | No revision needed |
+ | 4b | Plan critiqued (READY TO BUILD, concerns present) | `/do-plan {slug}` with directive to apply concern findings | Revision pass before build |
+ 
+-After the revision pass completes, the next SDLC invocation finds Row 4a and dispatches `/do-build`.
++After the revision pass completes, the `revision_applied: true` frontmatter flag in the plan document signals that Row 4b has been satisfied. The next SDLC invocation finds Row 4a and dispatches `/do-build`. This flag is the mechanism for distinguishing "CRITIQUE complete, revision pending" from "CRITIQUE complete, revision done" — without it, both states appear identical in `stage_states`.
++
++**CONCERN definition reconciliation:** The existing `do-plan-critique/SKILL.md` defines CONCERNs as "acknowledged risks" — items the builder should be aware of but that do not block the build. Routing `READY TO BUILD (with concerns)` back to `/do-plan` for a revision pass could appear to reclassify CONCERNs as defects, contradicting this definition.
+ 
+-Alternatively (simpler), update the Outcome Contract table in `do-plan-critique/SKILL.md`:
++This plan takes the following position: CONCERNs remain "acknowledged risks" — they are not reclassified as blockers. The revision pass is about **plan clarity**, not defect correction. The goal is to incorporate the Implementation Note from each concern into the plan text so the builder has unambiguous implementation guidance. The concern is still acknowledged (not blocking), but its Implementation Note is now embedded in the plan for the builder's benefit. Update `do-plan-critique/SKILL.md` to add this clarifying note alongside the Outcome Contract table:
+ 
+-| Verdict | SDLC Action |
+-|---------|-------------|
+-| READY TO BUILD (no concerns) | Proceed to `/do-build` |
+-| READY TO BUILD (with concerns) | Return to `/do-plan` to apply concern findings, then build |
+-| NEEDS REVISION | Return to `/do-plan` with findings |
+-| MAJOR REWORK | Return to issue discussion |
++> "READY TO BUILD (with concerns)" triggers a revision pass. This pass incorporates the Implementation Note from each concern into the plan text. CONCERNs are not reclassified as defects — the revision pass is a plan clarity step, not a rework step.
+ 
+-Both files need updating to be consistent.
++Both `sdlc/SKILL.md` and `do-plan-critique/SKILL.md` must be updated to be consistent on this definition.
+ 
+ ## No-Gos (Out of Scope)
+ 
+ - Changing critic agent prompts or adding new critics — only the finding format changes
+-- Automated validation that Implementation Notes are present (enforcement is the critic's responsibility per instruction)
+ - Changing how NITs are handled — NITs remain advisory only
+ - Modifying `pipeline_graph.py` or any Python code — skill file edits only
+ - Changing the six-critic war-room structure
+@@ -138,18 +145,21 @@ No agent integration changes required. The agent reads skill files directly via
+ 
+ ## Documentation
+ 
+-- [ ] Update `docs/features/sdlc-pipeline.md` to document the `READY TO BUILD (with concerns)` → revision → build path
+-- [ ] Add a note to `docs/features/README.md` if the sdlc-pipeline feature doc entry needs updating
++- [x] Create `docs/features/sdlc-critique-stage.md` documenting the critique stage, verdict types, and the `READY TO BUILD (with concerns)` → revision → build path
++- [x] Add an entry to `docs/features/README.md` for `sdlc-critique-stage.md` in the SDLC section
++
++Note: `docs/features/sdlc-pipeline.md` does not exist — the new file `docs/features/sdlc-critique-stage.md` is the canonical doc for this feature.
+ 
+ ## Success Criteria
+ 
+-- [ ] `do-plan/SKILL.md` includes a Phase 2.6 propagation check step that explicitly cross-references task steps against Technical Approach
+-- [ ] `do-plan-critique/SKILL.md` critic finding format includes `IMPLEMENTATION NOTE` field required for CONCERN and BLOCKER severity
+-- [ ] `do-plan-critique/SKILL.md` Step 5 report format includes Implementation Note in Blockers and Concerns sections
+-- [ ] `sdlc/SKILL.md` dispatch table Row 4 (or equivalent Outcome Contract) distinguishes zero-concern vs. with-concerns `READY TO BUILD` verdicts
+-- [ ] `do-plan/PLAN_TEMPLATE.md` `## Critique Results` table includes an Implementation Note column
+-- [ ] Tests pass (`/do-test`)
+-- [ ] Documentation updated (`/do-docs`)
++- [x] `do-plan/SKILL.md` includes a Phase 2.6 propagation check step that explicitly cross-references task steps against Technical Approach
++- [x] `do-plan-critique/SKILL.md` critic finding format includes `IMPLEMENTATION NOTE` field required for CONCERN and BLOCKER severity
++- [x] `do-plan-critique/SKILL.md` Step 5 report format includes Implementation Note in Blockers and Concerns sections
++- [x] `sdlc/SKILL.md` dispatch table Row 4 (or equivalent Outcome Contract) distinguishes zero-concern vs. with-concerns `READY TO BUILD` verdicts
++- [x] `do-plan/PLAN_TEMPLATE.md` `## Critique Results` table includes an Implementation Note column
++- [x] Tests pass (`/do-test`)
++- [x] `docs/features/sdlc-critique-stage.md` created with critique stage description and revision path
++- [x] Documentation updated (`/do-docs`)
+ 
+ ## Team Orchestration
+ 
+@@ -195,6 +205,7 @@ Tier 1 — Core:
+ - Add `IMPLEMENTATION NOTE` field to critic finding format (after SUGGESTION, required for CONCERN/BLOCKER, exempt for NIT)
+ - Update Step 5 report format: Blockers and Concerns sections each gain an `**Implementation Note**:` bullet
+ - Update Outcome Contract table to distinguish `READY TO BUILD (no concerns)` vs `READY TO BUILD (with concerns)`
++- Add structural check in aggregation step: any CONCERN/BLOCKER finding missing an Implementation Note is flagged and returned to the critic before the verdict is issued (instruction-enforced, not Python code)
+ 
+ ### 3. Edit `sdlc/SKILL.md` — Update Dispatch Table Row 4
+ - **Task ID**: build-sdlc-routing
+@@ -203,7 +214,10 @@ Tier 1 — Core:
+ - **Assigned To**: skill-builder
+ - **Agent Type**: builder
+ - Split Row 4 into Row 4a (zero concerns → do-build) and Row 4b (concerns present → do-plan revision pass)
+-- Add a note explaining that after revision pass, next SDLC invocation routes to Row 4a
++- Row 4b detection: check for `READY TO BUILD (with concerns)` verdict AND absence of `revision_applied: true` in plan frontmatter
++- Row 4a detection: either zero-concern verdict, OR `revision_applied: true` flag present
++- Add a clarifying note that CONCERNs are not reclassified as blockers — the revision pass is a plan clarity step to embed Implementation Notes into the plan text
++- Also update `do-plan-critique/SKILL.md` Outcome Contract table with the same clarification (both files must be consistent)
+ 
+ ### 4. Edit `do-plan/PLAN_TEMPLATE.md` — Add Implementation Note Column
+ - **Task ID**: build-template-column
+@@ -232,8 +246,9 @@ Tier 1 — Core:
+ - **Assigned To**: documentarian
+ - **Agent Type**: documentarian
+ - **Parallel**: false
+-- Update `docs/features/sdlc-pipeline.md` with the new revision pass path
+-- Check `docs/features/README.md` for any entry that needs updating
++- Create `docs/features/sdlc-critique-stage.md` documenting: critique stage overview, verdict types (READY TO BUILD / NEEDS REVISION / MAJOR REWORK), the with-concerns revision path, CONCERN definition (acknowledged risk vs plan clarity step), and the `revision_applied` frontmatter flag
++- Add an entry to `docs/features/README.md` for `sdlc-critique-stage.md` under the SDLC section
++- Note: `docs/features/sdlc-pipeline.md` does not exist — do not create it; use `sdlc-critique-stage.md` as the target
+ 
+ ## Verification
+ 

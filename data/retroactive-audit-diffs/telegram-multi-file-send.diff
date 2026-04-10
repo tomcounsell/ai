@@ -1,0 +1,854 @@
+diff --git a/.claude/skills/telegram/SKILL.md b/.claude/skills/telegram/SKILL.md
+index defa753c4..ed94a5cbb 100644
+--- a/.claude/skills/telegram/SKILL.md
++++ b/.claude/skills/telegram/SKILL.md
+@@ -18,7 +18,23 @@ There are two sending interfaces. Use the correct one for your context:
+ | `python tools/send_telegram.py` | ChatSession (PM) | Queues via Redis, relay sends via Telethon, records msg_id for summarizer bypass |
+ | `valor-telegram send` | DevSession / CLI | Sends directly via Telethon, no Redis queue, no summarizer bypass |
+ 
+-**ChatSession (PM)** should always use `tools/send_telegram.py`. It supports text and file attachments via `--file`. Using `valor-telegram send` from ChatSession would bypass the Redis queue and break `has_pm_messages()` tracking.
++**ChatSession (PM)** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from ChatSession would bypass the Redis queue and break `has_pm_messages()` tracking.
++
++### PM Tool Examples
++
++```bash
++# Text only
++python tools/send_telegram.py "Status update message"
++
++# Single file with caption
++python tools/send_telegram.py "Screenshot attached" --file /path/to/screenshot.png
++
++# Multi-file album (grouped as one Telegram album message)
++python tools/send_telegram.py "PR review screenshots" --file before.png --file during.png --file after.png
++
++# File only (no caption)
++python tools/send_telegram.py --file /path/to/document.pdf
++```
+ 
+ **DevSession** uses `valor-telegram send` for direct CLI sends when needed.
+ 
+diff --git a/agent/sdk_client.py b/agent/sdk_client.py
+index e1e5b6ec8..631273e22 100644
+--- a/agent/sdk_client.py
++++ b/agent/sdk_client.py
+@@ -1627,10 +1627,12 @@ async def get_agent_response_sdk(
+                 '  `python tools/send_telegram.py "Your message here"`\n'
+                 "To attach a file (screenshot, document, image):\n"
+                 '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
++                "Multiple files as an album (max 10):\n"
++                '  `python tools/send_telegram.py "Album caption" --file a.png --file b.png --file c.png`\n'
+                 "File-only (no caption):\n"
+                 "  `python tools/send_telegram.py --file /path/to/file.png`\n"
+                 "Use --file to attach screenshots, images, or documents. "
+-                "Telethon auto-detects the media type.\n"
++                "Repeat --file for albums. Telethon auto-detects the media type.\n"
+                 "Use this tool for:\n"
+                 "- Status updates and progress reports\n"
+                 "- Questions that need human input\n"
+diff --git a/bridge/telegram_relay.py b/bridge/telegram_relay.py
+index bfb901476..2397a26bf 100644
+--- a/bridge/telegram_relay.py
++++ b/bridge/telegram_relay.py
+@@ -6,9 +6,12 @@
+ 
+ Redis queue contract:
+     Key pattern: telegram:outbox:{session_id}
+-    Message format: JSON with {chat_id, reply_to, text, file_path?, session_id, timestamp}
++    Message format: JSON with {chat_id, reply_to, text, file_paths?, session_id, timestamp}
+     TTL: 1 hour (set by the tool, safety net for crashed sessions)
+ 
++    Backward compatibility: legacy payloads with ``file_path`` (string) are
++    normalized to ``file_paths`` (list) at relay time during rolling deployments.
++
+ After successful send, records the Telegram message ID on the AgentSession's
+ pm_sent_message_ids field. This list is checked by the summarizer bypass
+ in bridge/response.py.
+@@ -46,58 +49,82 @@ async def _send_queued_message(
+ ) -> int | None:
+     """Send a single queued message via Telethon.
+ 
++    Supports single files, multi-file albums (via ``file_paths`` list),
++    and backward-compatible ``file_path`` (string) payloads.
++
+     Args:
+         telegram_client: The Telethon TelegramClient instance.
+         message: Parsed message dict with chat_id, reply_to, text,
+-            optional file_path, and session_id.
++            optional file_paths (list) or file_path (string), and session_id.
+ 
+     Returns:
+         The Telegram message ID on success, None on failure.
++        For albums, returns the ID of the first message in the album.
+     """
+     import os
+ 
+     chat_id = message.get("chat_id")
+     reply_to = message.get("reply_to")
+     text = message.get("text", "")
+-    file_path = message.get("file_path")
++
++    # Normalize file_path (string, legacy) and file_paths (list, current)
++    file_paths = message.get("file_paths")
++    legacy_file_path = message.get("file_path")
++    if file_paths is None and legacy_file_path:
++        file_paths = [legacy_file_path]
+ 
+     if not chat_id:
+         logger.warning(f"Relay: skipping malformed message (no chat_id): {message}")
+         return None
+ 
+-    # Must have either text or file_path
+-    if not text and not file_path:
+-        logger.warning(f"Relay: skipping malformed message (no text or file_path): {message}")
++    # Must have either text or files
++    if not text and not file_paths:
++        logger.warning(f"Relay: skipping malformed message (no text or files): {message}")
+         return None
+ 
+     try:
+         reply_to_id = int(reply_to) if reply_to else None
+ 
+         # File send path
+-        if file_path:
+-            if os.path.isfile(file_path):
++        if file_paths:
++            # Filter to files that exist at send time
++            available = [fp for fp in file_paths if os.path.isfile(fp)]
++            missing = [fp for fp in file_paths if not os.path.isfile(fp)]
++
++            if missing:
++                for fp in missing:
++                    logger.warning(f"Relay: file not found at send time: {fp}")
++
++            if available:
++                # Single file or album
++                file_arg = available[0] if len(available) == 1 else available
+                 sent = await telegram_client.send_file(
+                     int(chat_id),
+-                    file_path,
++                    file_arg,
+                     caption=text or None,
+                     reply_to=reply_to_id,
+                 )
+-                msg_id = getattr(sent, "id", None)
++                # Telethon returns a list for albums, single Message for one file
++                if isinstance(sent, list):
++                    msg_id = getattr(sent[0], "id", None) if sent else None
++                else:
++                    msg_id = getattr(sent, "id", None)
++                file_names = [os.path.basename(fp) for fp in available]
+                 logger.info(
+-                    f"Relay: sent PM file to chat {chat_id} "
+-                    f"(file={os.path.basename(file_path)}, "
++                    f"Relay: sent PM file(s) to chat {chat_id} "
++                    f"(files={file_names}, "
+                     f"caption={len(text)} chars, msg_id={msg_id})"
+                 )
+                 return msg_id
+             else:
+-                # File missing at send time -- fall back to text-only
++                # All files missing -- fall back to text-only
+                 logger.warning(
+-                    f"Relay: file not found at send time: {file_path}. "
+-                    f"Falling back to text-only send."
++                    "Relay: all files missing at send time. Falling back to text-only send."
+                 )
+                 if not text:
+                     logger.warning(
+-                        f"Relay: file missing and no text -- skipping message to chat {chat_id}"
++                        f"Relay: all files missing and no text "
++                        f"-- skipping message to chat {chat_id}"
+                     )
+                     return None
+ 
+diff --git a/docs/features/README.md b/docs/features/README.md
+index c1ee6b1c7..0ff0fdedd 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -67,7 +67,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
+ | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
+ | [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
+-| [PM Telegram Tool](pm-telegram-tool.md) | ChatSession composes and sends its own Telegram messages (text and file attachments) via Redis IPC, with summarizer as fallback | Shipped |
++| [PM Telegram Tool](pm-telegram-tool.md) | ChatSession composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |
+ | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
+ | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
+ | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
+diff --git a/docs/features/pm-telegram-tool.md b/docs/features/pm-telegram-tool.md
+index 68dd02ca8..d2467c2ac 100644
+--- a/docs/features/pm-telegram-tool.md
++++ b/docs/features/pm-telegram-tool.md
+@@ -1,6 +1,6 @@
+ # PM Telegram Tool
+ 
+-ChatSession (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports both text messages and file attachments (screenshots, documents, images).
++ChatSession (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports text messages, single file attachments, and multi-file albums (up to 10 files grouped as a Telegram album).
+ 
+ ## Architecture
+ 
+@@ -17,6 +17,7 @@ ChatSession (Claude Code subprocess)
+     |
+     | python tools/send_telegram.py "message text"
+     | python tools/send_telegram.py "caption" --file /path/to/file.png
++    | python tools/send_telegram.py "album" --file a.png --file b.png --file c.png
+     v
+ Redis list: telegram:outbox:{session_id}
+     |
+@@ -29,8 +30,8 @@ Telethon send_markdown() or send_file() -> Telegram
+ 
+ | Component | File | Purpose |
+ |-----------|------|---------|
+-| Send tool | `tools/send_telegram.py` | CLI script called by ChatSession via Bash. Validates input, applies linkification, enforces 4096-char limit, pushes to Redis queue. Supports `--file` for attachments. |
+-| Bridge relay | `bridge/telegram_relay.py` | Async task in the bridge event loop. Polls `telegram:outbox:*` keys, sends via Telethon (`send_markdown` for text, `send_file` for attachments), records message IDs on AgentSession. |
++| Send tool | `tools/send_telegram.py` | CLI script called by ChatSession via Bash. Validates input, applies linkification, enforces 4096-char limit, pushes to Redis queue. Supports `--file` for single attachments and multi-file albums (repeatable, max 10 files). |
++| Bridge relay | `bridge/telegram_relay.py` | Async task in the bridge event loop. Polls `telegram:outbox:*` keys, sends via Telethon (`send_markdown` for text, `send_file` for single files or albums), records message IDs on AgentSession. Normalizes legacy `file_path` payloads to `file_paths` for backward compatibility. |
+ | Formatting | `bridge/formatting.py` | Shared `linkify_references()` utility extracted from the summarizer. Converts `PR #N` and `Issue #N` to markdown links. |
+ | Summarizer bypass | `bridge/response.py` | Before calling the summarizer, checks `session.has_pm_messages()`. If the PM already sent messages, skips summarizer and returns True. |
+ | AgentSession field | `models/agent_session.py` | `pm_sent_message_ids` ListField tracks Telegram message IDs sent by the PM during a session. Helper methods: `record_pm_message()`, `has_pm_messages()`. |
+@@ -38,26 +39,29 @@ Telethon send_markdown() or send_file() -> Telegram
+ 
+ ## File Attachments
+ 
+-The PM tool supports sending file attachments (screenshots, documents, images) alongside or instead of text messages.
++The PM tool supports sending file attachments (screenshots, documents, images) alongside or instead of text messages. Multiple `--file` flags send files as a Telegram album (max 10 files).
+ 
+ ### Usage
+ 
+ ```bash
+-# Text with file attachment
++# Text with single file attachment
+ python tools/send_telegram.py "Caption text" --file /path/to/screenshot.png
+ 
+ # File only (no caption)
+ python tools/send_telegram.py --file /path/to/document.pdf
++
++# Multi-file album (grouped as one Telegram album message)
++python tools/send_telegram.py "PR review screenshots" --file before.png --file during.png --file after.png
+ ```
+ 
+-Telethon's `send_file()` auto-detects the media type, so a single `--file` flag handles images, documents, audio, and video.
++Telethon's `send_file()` auto-detects the media type. When multiple files are provided, Telethon sends them as a native album (grouped media).
+ 
+ ### Flow
+ 
+-1. ChatSession calls `python tools/send_telegram.py "caption" --file /path/to/file`
+-2. `send_telegram.py` validates the file exists, resolves the absolute path, and includes `file_path` in the Redis queue payload
+-3. `telegram_relay.py` detects `file_path` in the payload and uses `client.send_file()` instead of `send_markdown()`
+-4. If the file is missing at relay time (deleted between queue and send), the relay logs a warning and falls back to text-only delivery
++1. ChatSession calls `python tools/send_telegram.py "caption" --file /path/to/file [--file /path/to/file2 ...]`
++2. `send_telegram.py` validates all files exist, resolves absolute paths, enforces the 10-file album limit, and includes `file_paths` (list) in the Redis queue payload
++3. `telegram_relay.py` detects `file_paths` in the payload and uses `client.send_file()` with the file list for album sends or a single file for single attachments
++4. If any files are missing at relay time, the relay filters them out and sends the available files. If no files remain, it falls back to text-only delivery
+ 
+ ### Error Handling for Files
+ 
+@@ -65,7 +69,8 @@ Telethon's `send_file()` auto-detects the media type, so a single `--file` flag
+ |---------|----------|
+ | `--file` with nonexistent path | Tool exits with code 1 and error message |
+ | `--file` with empty string | Tool exits with code 1 and error message |
+-| File deleted between queue and relay | Relay falls back to text-only send, logs warning |
++| More than 10 `--file` flags | Tool exits with code 1, citing the album limit |
++| File deleted between queue and relay | Relay filters missing files, sends available ones; falls back to text-only if none remain |
+ | `send_file()` failure | Message re-pushed to queue tail for retry |
+ 
+ ## IPC Mechanism: Redis Queue
+@@ -79,7 +84,7 @@ ChatSession runs as a Claude Code subprocess and cannot access the bridge's Tele
+   - `chat_id` (string) -- target Telegram chat ID
+   - `reply_to` (int or null) -- message ID to reply to
+   - `text` (string) -- message content, already linkified and length-checked
+-  - `file_path` (string, optional) -- absolute path to a file attachment
++  - `file_paths` (list of strings, optional) -- absolute paths to file attachments (max 10 for album sends). Legacy `file_path` (string) payloads are normalized by the relay for backward compatibility.
+   - `session_id` (string) -- session ID for routing
+   - `timestamp` (float) -- Unix timestamp when queued
+ - **TTL**: 1 hour, set by the tool as a safety net for crashed sessions
+@@ -122,7 +127,8 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
+ | Missing `TELEGRAM_CHAT_ID` | Tool exits with error explaining it is only available in ChatSession context |
+ | Empty message text (no file) | Tool rejects with clear error |
+ | `--file` with nonexistent path | Tool exits with code 1 and descriptive error |
+-| File missing at relay time | Relay falls back to text-only, logs warning |
++| More than 10 `--file` flags | Tool exits with code 1, citing the album limit |
++| File(s) missing at relay time | Relay filters missing files, sends available ones; falls back to text-only if none remain |
+ | Telethon send failure in relay | Message re-pushed to queue tail for retry; logged as error |
+ | AgentSession save failure | Non-fatal warning; message is still delivered to Telegram |
+ | Malformed queue entry | Skipped and logged; relay continues processing |
+@@ -131,6 +137,7 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
+ 
+ - Issue: [#497](https://github.com/tomcounsell/ai/issues/497) (initial text-only PM tool)
+ - Issue: [#641](https://github.com/tomcounsell/ai/issues/641) (file attachment support)
++- Issue: [#644](https://github.com/tomcounsell/ai/issues/644) (multi-file album support)
+ - Plan: `docs/plans/pm-telegram-tool.md`
+ - Prior art on summarizer architecture: PR #275 (semantic session routing), PR #456 (summarizer evidence hardening)
+ - [Summarizer Format](summarizer-format.md) -- the existing summarizer that this feature partially bypasses
+diff --git a/docs/features/telegram-messaging.md b/docs/features/telegram-messaging.md
+index dbce106e6..d2c197e9c 100644
+--- a/docs/features/telegram-messaging.md
++++ b/docs/features/telegram-messaging.md
+@@ -104,10 +104,10 @@ For **ChatSession (PM)** sends, use `tools/send_telegram.py` instead. It routes
+ | Tool | Context | File Support |
+ |------|---------|--------------|
+ | `valor-telegram send` | DevSession / CLI | `--file`, `--image`, `--audio` |
+-| `python tools/send_telegram.py` | ChatSession (PM) | `--file` (auto-detects media type) |
++| `python tools/send_telegram.py` | ChatSession (PM) | `--file` (repeatable, max 10 for albums; auto-detects media type) |
+ 
+ ## Related
+ 
+ - [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
+-- [PM Telegram Tool](pm-telegram-tool.md) — ChatSession self-messaging with file attachments
++- [PM Telegram Tool](pm-telegram-tool.md) — ChatSession self-messaging with file attachments and multi-file albums
+ - `config/SOUL.md` — agent persona references to this tool
+diff --git a/tests/unit/test_bridge_relay.py b/tests/unit/test_bridge_relay.py
+index eca9725da..fb5a163e1 100644
+--- a/tests/unit/test_bridge_relay.py
++++ b/tests/unit/test_bridge_relay.py
+@@ -83,7 +83,7 @@ async def test_returns_none_on_send_failure(self):
+ 
+     @pytest.mark.asyncio
+     async def test_sends_file_via_send_file(self):
+-        """Should use client.send_file() when file_path is present."""
++        """Should use client.send_file() when file_paths list is present."""
+         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+             tmp_path = f.name
+             f.write(b"fake image")
+@@ -98,7 +98,7 @@ async def test_sends_file_via_send_file(self):
+                 "chat_id": "12345",
+                 "reply_to": 67890,
+                 "text": "Check this",
+-                "file_path": tmp_path,
++                "file_paths": [tmp_path],
+                 "session_id": "test-session",
+             }
+ 
+@@ -130,7 +130,7 @@ async def test_file_only_send_no_caption(self):
+             message = {
+                 "chat_id": "12345",
+                 "text": "",
+-                "file_path": tmp_path,
++                "file_paths": [tmp_path],
+                 "session_id": "test-session",
+             }
+ 
+@@ -148,7 +148,7 @@ async def test_file_only_send_no_caption(self):
+ 
+     @pytest.mark.asyncio
+     async def test_missing_file_falls_back_to_text(self):
+-        """Should fall back to text-only when file_path is present but file missing."""
++        """Should fall back to text-only when all files missing but text present."""
+         mock_client = MagicMock()
+         mock_sent = MagicMock()
+         mock_sent.id = 77
+@@ -156,7 +156,7 @@ async def test_missing_file_falls_back_to_text(self):
+         message = {
+             "chat_id": "12345",
+             "text": "The file was here",
+-            "file_path": "/nonexistent/deleted.png",
++            "file_paths": ["/nonexistent/deleted.png"],
+             "session_id": "test-session",
+         }
+ 
+@@ -169,19 +169,121 @@ async def test_missing_file_falls_back_to_text(self):
+ 
+     @pytest.mark.asyncio
+     async def test_missing_file_no_text_returns_none(self):
+-        """Should return None when file is missing and no text to fall back to."""
++        """Should return None when all files missing and no text to fall back to."""
+         mock_client = MagicMock()
+ 
+         message = {
+             "chat_id": "12345",
+             "text": "",
+-            "file_path": "/nonexistent/deleted.png",
++            "file_paths": ["/nonexistent/deleted.png"],
+             "session_id": "test-session",
+         }
+ 
+         result = await _send_queued_message(mock_client, message)
+         assert result is None
+ 
++    @pytest.mark.asyncio
++    async def test_backward_compat_file_path_string(self):
++        """Should handle legacy file_path (string) payloads during rolling deployment."""
++        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
++            tmp_path = f.name
++            f.write(b"fake image")
++
++        try:
++            mock_client = MagicMock()
++            mock_sent = MagicMock()
++            mock_sent.id = 88
++            mock_client.send_file = AsyncMock(return_value=mock_sent)
++
++            # Legacy payload with file_path (string), not file_paths (list)
++            message = {
++                "chat_id": "12345",
++                "text": "Legacy payload",
++                "file_path": tmp_path,
++                "session_id": "test-session",
++            }
++
++            result = await _send_queued_message(mock_client, message)
++
++            assert result == 88
++            mock_client.send_file.assert_called_once_with(
++                12345,
++                tmp_path,
++                caption="Legacy payload",
++                reply_to=None,
++            )
++        finally:
++            os.unlink(tmp_path)
++
++    @pytest.mark.asyncio
++    async def test_multi_file_album_send(self):
++        """Should send multiple files as album via send_file with list."""
++        tmp_files = []
++        try:
++            for suffix in [".png", ".jpg", ".gif"]:
++                f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
++                f.write(b"fake data")
++                f.close()
++                tmp_files.append(f.name)
++
++            mock_client = MagicMock()
++            # Telethon returns list of Messages for albums
++            mock_msgs = [MagicMock(id=101), MagicMock(id=102), MagicMock(id=103)]
++            mock_client.send_file = AsyncMock(return_value=mock_msgs)
++
++            message = {
++                "chat_id": "12345",
++                "text": "Album caption",
++                "file_paths": tmp_files,
++                "session_id": "test-session",
++            }
++
++            result = await _send_queued_message(mock_client, message)
++
++            assert result == 101  # First message ID
++            mock_client.send_file.assert_called_once_with(
++                12345,
++                tmp_files,
++                caption="Album caption",
++                reply_to=None,
++            )
++        finally:
++            for f in tmp_files:
++                os.unlink(f)
++
++    @pytest.mark.asyncio
++    async def test_partial_missing_files_sends_available(self):
++        """Should send available files when some are missing at relay time."""
++        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
++            tmp_path = f.name
++            f.write(b"fake image")
++
++        try:
++            mock_client = MagicMock()
++            mock_sent = MagicMock()
++            mock_sent.id = 99
++            mock_client.send_file = AsyncMock(return_value=mock_sent)
++
++            message = {
++                "chat_id": "12345",
++                "text": "Partial album",
++                "file_paths": [tmp_path, "/nonexistent/missing.png"],
++                "session_id": "test-session",
++            }
++
++            result = await _send_queued_message(mock_client, message)
++
++            assert result == 99
++            # Should only send the available file
++            mock_client.send_file.assert_called_once_with(
++                12345,
++                tmp_path,
++                caption="Partial album",
++                reply_to=None,
++            )
++        finally:
++            os.unlink(tmp_path)
++
+ 
+ class TestRecordSentMessage:
+     """Test recording sent message IDs on AgentSession."""
+diff --git a/tests/unit/test_send_telegram.py b/tests/unit/test_send_telegram.py
+index 2569563f5..d3b447fd1 100644
+--- a/tests/unit/test_send_telegram.py
++++ b/tests/unit/test_send_telegram.py
+@@ -98,7 +98,7 @@ def test_queues_message_to_redis(self):
+         assert payload["text"] == "Hello, stakeholder!"
+         assert payload["session_id"] == "test-session-123"
+         assert "timestamp" in payload
+-        assert "file_path" not in payload
++        assert "file_paths" not in payload
+ 
+         # Verify TTL was set
+         mock_redis.expire.assert_called_once_with("telegram:outbox:test-session-123", 3600)
+@@ -173,7 +173,7 @@ class TestSendTelegramFileSupport:
+     """Test file attachment support."""
+ 
+     def test_queues_file_payload(self):
+-        """Should include file_path in Redis payload when --file is provided."""
++        """Should include file_paths in Redis payload when --file is provided."""
+         env = {
+             "TELEGRAM_CHAT_ID": "12345",
+             "VALOR_SESSION_ID": "test-session",
+@@ -193,11 +193,11 @@ def test_queues_file_payload(self):
+             ):
+                 from tools.send_telegram import send_message
+ 
+-                send_message("Check this screenshot", file_path=tmp_path)
++                send_message("Check this screenshot", file_paths=[tmp_path])
+ 
+             payload = json.loads(mock_redis.rpush.call_args[0][1])
+             assert payload["text"] == "Check this screenshot"
+-            assert payload["file_path"] == tmp_path
++            assert payload["file_paths"] == [tmp_path]
+             assert payload["session_id"] == "test-session"
+         finally:
+             os.unlink(tmp_path)
+@@ -222,11 +222,11 @@ def test_file_only_send(self):
+             ):
+                 from tools.send_telegram import send_message
+ 
+-                send_message("", file_path=tmp_path)
++                send_message("", file_paths=[tmp_path])
+ 
+             payload = json.loads(mock_redis.rpush.call_args[0][1])
+             assert payload["text"] == ""
+-            assert payload["file_path"] == tmp_path
++            assert payload["file_paths"] == [tmp_path]
+         finally:
+             os.unlink(tmp_path)
+ 
+@@ -241,7 +241,7 @@ def test_file_not_found_exits(self):
+             from tools.send_telegram import send_message
+ 
+             with pytest.raises(SystemExit) as exc_info:
+-                send_message("caption", file_path="/nonexistent/file.png")
++                send_message("caption", file_paths=["/nonexistent/file.png"])
+             assert exc_info.value.code == 1
+ 
+     def test_empty_file_path_exits(self):
+@@ -255,11 +255,11 @@ def test_empty_file_path_exits(self):
+             from tools.send_telegram import send_message
+ 
+             with pytest.raises(SystemExit) as exc_info:
+-                send_message("caption", file_path="")
++                send_message("caption", file_paths=[""])
+             assert exc_info.value.code == 1
+ 
+     def test_file_path_normalized_to_absolute(self):
+-        """Should normalize file_path to absolute path."""
++        """Should normalize file paths to absolute paths."""
+         env = {
+             "TELEGRAM_CHAT_ID": "12345",
+             "VALOR_SESSION_ID": "test-session",
+@@ -279,10 +279,89 @@ def test_file_path_normalized_to_absolute(self):
+             ):
+                 from tools.send_telegram import send_message
+ 
+-                send_message("text", file_path=tmp_path)
++                send_message("text", file_paths=[tmp_path])
+ 
+             payload = json.loads(mock_redis.rpush.call_args[0][1])
+-            assert os.path.isabs(payload["file_path"])
++            assert all(os.path.isabs(p) for p in payload["file_paths"])
++        finally:
++            os.unlink(tmp_path)
++
++    def test_multi_file_queues_album(self):
++        """Should queue multiple files as a file_paths list."""
++        env = {
++            "TELEGRAM_CHAT_ID": "12345",
++            "VALOR_SESSION_ID": "test-session",
++        }
++
++        mock_redis = MagicMock()
++        tmp_files = []
++
++        try:
++            for suffix in [".png", ".jpg", ".gif"]:
++                f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
++                f.write(b"fake data")
++                f.close()
++                tmp_files.append(f.name)
++
++            with (
++                patch.dict(os.environ, env, clear=True),
++                patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
++                patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
++            ):
++                from tools.send_telegram import send_message
++
++                send_message("Album caption", file_paths=tmp_files)
++
++            payload = json.loads(mock_redis.rpush.call_args[0][1])
++            assert payload["text"] == "Album caption"
++            assert len(payload["file_paths"]) == 3
++        finally:
++            for f in tmp_files:
++                os.unlink(f)
++
++    def test_too_many_files_exits(self):
++        """Should exit with error when more than 10 files specified."""
++        env = {
++            "TELEGRAM_CHAT_ID": "12345",
++            "VALOR_SESSION_ID": "test-session",
++        }
++
++        tmp_files = []
++        try:
++            for i in range(11):
++                f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
++                f.write(b"fake data")
++                f.close()
++                tmp_files.append(f.name)
++
++            with patch.dict(os.environ, env, clear=True):
++                from tools.send_telegram import send_message
++
++                with pytest.raises(SystemExit) as exc_info:
++                    send_message("caption", file_paths=tmp_files)
++                assert exc_info.value.code == 1
++        finally:
++            for f in tmp_files:
++                os.unlink(f)
++
++    def test_partial_missing_files_exits(self):
++        """Should exit with error listing missing files when some don't exist."""
++        env = {
++            "TELEGRAM_CHAT_ID": "12345",
++            "VALOR_SESSION_ID": "test-session",
++        }
++
++        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
++            tmp_path = f.name
++            f.write(b"fake data")
++
++        try:
++            with patch.dict(os.environ, env, clear=True):
++                from tools.send_telegram import send_message
++
++                with pytest.raises(SystemExit) as exc_info:
++                    send_message("caption", file_paths=[tmp_path, "/nonexistent/file.png"])
++                assert exc_info.value.code == 1
+         finally:
+             os.unlink(tmp_path)
+ 
+@@ -322,7 +401,7 @@ def test_main_no_args_exits(self):
+             assert exc_info.value.code == 2  # argparse exits with code 2
+ 
+     def test_main_with_file_flag(self):
+-        """Should parse --file flag and pass to send_message."""
++        """Should parse --file flag and pass to send_message as list."""
+         env = {
+             "TELEGRAM_CHAT_ID": "12345",
+             "VALOR_SESSION_ID": "test-session",
+@@ -347,10 +426,45 @@ def test_main_with_file_flag(self):
+ 
+             payload = json.loads(mock_redis.rpush.call_args[0][1])
+             assert payload["text"] == "Caption text"
+-            assert payload["file_path"] == tmp_path
++            assert payload["file_paths"] == [tmp_path]
+         finally:
+             os.unlink(tmp_path)
+ 
++    def test_main_with_multiple_file_flags(self):
++        """Should parse multiple --file flags into a list."""
++        env = {
++            "TELEGRAM_CHAT_ID": "12345",
++            "VALOR_SESSION_ID": "test-session",
++        }
++
++        mock_redis = MagicMock()
++        tmp_files = []
++
++        try:
++            for suffix in [".png", ".jpg"]:
++                f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
++                f.write(b"fake data")
++                f.close()
++                tmp_files.append(f.name)
++
++            argv = ["send_telegram.py", "Album", "--file", tmp_files[0], "--file", tmp_files[1]]
++            with (
++                patch.dict(os.environ, env, clear=True),
++                patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
++                patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
++                patch("sys.argv", argv),
++            ):
++                from tools.send_telegram import main
++
++                main()
++
++            payload = json.loads(mock_redis.rpush.call_args[0][1])
++            assert payload["text"] == "Album"
++            assert len(payload["file_paths"]) == 2
++        finally:
++            for f in tmp_files:
++                os.unlink(f)
++
+     def test_main_rejects_unknown_flags(self):
+         """Should reject unknown flags like --photo or --project."""
+         with patch("sys.argv", ["send_telegram.py", "--photo", "foo", "test"]):
+diff --git a/tools/send_telegram.py b/tools/send_telegram.py
+index 91702bb7f..035f49608 100644
+--- a/tools/send_telegram.py
++++ b/tools/send_telegram.py
+@@ -9,6 +9,7 @@
+     python tools/send_telegram.py "Your message text here"
+     python tools/send_telegram.py "Caption for file" --file /path/to/screenshot.png
+     python tools/send_telegram.py --file /path/to/document.pdf
++    python tools/send_telegram.py "Album caption" --file a.png --file b.png --file c.png
+ 
+ Environment variables (injected by sdk_client.py for chat sessions):
+     TELEGRAM_CHAT_ID   - Target Telegram chat ID
+@@ -17,7 +18,7 @@
+ 
+ Redis queue contract:
+     Key pattern: telegram:outbox:{session_id}
+-    Message format: JSON with {chat_id, reply_to, text, file_path, session_id, timestamp}
++    Message format: JSON with {chat_id, reply_to, text, file_paths, session_id, timestamp}
+     TTL: 1 hour (safety net for crashed sessions)
+ """
+ 
+@@ -30,6 +31,9 @@
+ # Telegram message length limit
+ TELEGRAM_MAX_LENGTH = 4096
+ 
++# Telegram album limit (max files per album)
++TELEGRAM_MAX_ALBUM_SIZE = 10
++
+ 
+ def _get_redis_connection():
+     """Get a Redis connection using the project's standard pattern."""
+@@ -56,17 +60,18 @@ def _linkify_text(text: str) -> str:
+         return text
+ 
+ 
+-def send_message(text: str, file_path: str | None = None) -> None:
++def send_message(text: str, file_paths: list[str] | None = None) -> None:
+     """Queue a Telegram message for delivery by the bridge relay.
+ 
+     Args:
+         text: The message text to send. Will be linkified and truncated
+             to Telegram's character limit before queueing. Can be empty
+-            if file_path is provided.
+-        file_path: Optional path to a file to attach. Must exist on disk.
++            if file_paths is provided.
++        file_paths: Optional list of file paths to attach. Each must exist
++            on disk. Multiple files are sent as a Telegram album (max 10).
+ 
+     Raises:
+-        SystemExit: On missing env vars, missing file, or Redis errors.
++        SystemExit: On missing env vars, missing file, >10 files, or Redis errors.
+     """
+     # Validate environment
+     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+@@ -87,19 +92,40 @@ def send_message(text: str, file_path: str | None = None) -> None:
+         )
+         sys.exit(1)
+ 
+-    # Validate file if provided
+-    if file_path is not None:
+-        if not file_path or not file_path.strip():
+-            print("Error: --file path is empty.", file=sys.stderr)
++    # Validate files if provided
++    if file_paths is not None:
++        if len(file_paths) > TELEGRAM_MAX_ALBUM_SIZE:
++            print(
++                f"Error: Too many files ({len(file_paths)}). "
++                f"Telegram albums support at most {TELEGRAM_MAX_ALBUM_SIZE} files.",
++                file=sys.stderr,
++            )
+             sys.exit(1)
+-        file_path = os.path.abspath(file_path)
+-        if not os.path.isfile(file_path):
+-            print(f"Error: File not found: {file_path}", file=sys.stderr)
++
++        validated_paths = []
++        missing = []
++        for fp in file_paths:
++            if not fp or not fp.strip():
++                print("Error: --file path is empty.", file=sys.stderr)
++                sys.exit(1)
++            abs_path = os.path.abspath(fp)
++            if not os.path.isfile(abs_path):
++                missing.append(abs_path)
++            else:
++                validated_paths.append(abs_path)
++
++        if missing:
++            print(
++                "Error: File(s) not found:\n" + "\n".join(f"  {f}" for f in missing),
++                file=sys.stderr,
++            )
+             sys.exit(1)
+ 
+-    # Validate message (text required unless file is provided)
++        file_paths = validated_paths
++
++    # Validate message (text required unless files provided)
+     if not text or not text.strip():
+-        if file_path is None:
++        if not file_paths:
+             print("Error: Message text is empty.", file=sys.stderr)
+             sys.exit(1)
+         # File-only send: text stays empty
+@@ -121,8 +147,8 @@ def send_message(text: str, file_path: str | None = None) -> None:
+         "session_id": session_id,
+         "timestamp": time.time(),
+     }
+-    if file_path:
+-        payload["file_path"] = file_path
++    if file_paths:
++        payload["file_paths"] = file_paths
+ 
+     message_payload = json.dumps(payload)
+ 
+@@ -140,8 +166,11 @@ def send_message(text: str, file_path: str | None = None) -> None:
+     parts = []
+     if text:
+         parts.append(f"{len(text)} chars")
+-    if file_path:
+-        parts.append(f"file: {os.path.basename(file_path)}")
++    if file_paths:
++        if len(file_paths) == 1:
++            parts.append(f"file: {os.path.basename(file_paths[0])}")
++        else:
++            parts.append(f"{len(file_paths)} files")
+     print(f"Message queued ({', '.join(parts)})")
+ 
+ 
+@@ -149,7 +178,7 @@ def main():
+     """CLI entry point."""
+     parser = argparse.ArgumentParser(
+         description="Send a Telegram message via Redis outbox queue.",
+-        usage='python tools/send_telegram.py "message text" [--file PATH]',
++        usage='python tools/send_telegram.py "message text" [--file PATH ...]',
+     )
+     parser.add_argument(
+         "message",
+@@ -159,18 +188,19 @@ def main():
+     )
+     parser.add_argument(
+         "--file",
+-        dest="file_path",
++        dest="file_paths",
++        action="append",
+         default=None,
+-        help="Path to a file to attach (image, document, etc.)",
++        help="Path to a file to attach (repeatable for albums, max 10)",
+     )
+ 
+     args = parser.parse_args()
+     text = " ".join(args.message)
+ 
+-    if not text and not args.file_path:
++    if not text and not args.file_paths:
+         parser.error("Either message text or --file must be provided.")
+ 
+-    send_message(text, file_path=args.file_path)
++    send_message(text, file_paths=args.file_paths)
+ 
+ 
+ if __name__ == "__main__":

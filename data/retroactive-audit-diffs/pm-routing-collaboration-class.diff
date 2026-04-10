@@ -1,0 +1,1430 @@
+diff --git a/agent/intent_classifier.py b/agent/intent_classifier.py
+index 279411dc..bdf09890 100644
+--- a/agent/intent_classifier.py
++++ b/agent/intent_classifier.py
+@@ -1,8 +1,15 @@
+-"""Binary intent classifier for PM session Teammate mode.
++"""Four-way intent classifier for PM session routing.
+ 
+-Uses Haiku to classify incoming messages as informational queries (Teammate)
+-or work requests. Conservative threshold (0.90) ensures ambiguous messages
+-default to the full Dev-session pipeline.
++Uses Haiku to classify incoming messages as informational queries (Teammate),
++direct collaboration tasks, ambiguous discussions (Other), or work requests.
++Conservative threshold (0.90) ensures ambiguous messages default to the full
++Dev-session pipeline.
++
++Intents:
++- teammate: informational query -> Teammate mode (direct response)
++- collaboration: direct task PM can handle without a dev-session
++- other: ambiguous task, discussion, brainstorming -> PM uses judgment
++- work: action/work request -> SDLC pipeline (dev-session)
+ 
+ All operations are async and wrapped in try/except -- classifier failures
+ must never prevent normal Dev-session processing.
+@@ -21,12 +28,20 @@
+ TEAMMATE_CONFIDENCE_THRESHOLD = 0.90
+ 
+ CLASSIFIER_PROMPT = """\
+-You are a binary intent classifier. Classify the user message as either \
+-"teammate" (informational query) or "work" (action/work request).
++You are an intent classifier. Classify the user message as "teammate", \
++"collaboration", "other", or "work".
+ 
+ RULES:
+ - "teammate" = the user wants information, explanation, status, or lookup
+-- "work" = the user wants something created, fixed, changed, deployed, or built
++- "collaboration" = the user wants a direct task done that does NOT require code \
++changes: save to knowledge base, draft an issue, send a message, write a doc, \
++search memory, look something up and act on it
++- "other" = ambiguous task, discussion, brainstorming, or open-ended thinking \
++that does not clearly fit teammate, collaboration, or work
++- "work" = the user wants something created, fixed, changed, deployed, or built \
++in the codebase (code changes, PRs, SDLC pipeline)
++
++If in doubt, classify as collaboration.
+ 
+ EXAMPLES:
+ 
+@@ -44,10 +59,27 @@
+ - "How many open issues do we have?" -> teammate 0.96
+ - "What model does the classifier use?" -> teammate 0.97
+ 
++collaboration examples:
++- "Add this to the knowledge base" -> collaboration 0.97
++- "Draft an issue for X" -> collaboration 0.96
++- "Send a status update to the team" -> collaboration 0.95
++- "Write a summary doc" -> collaboration 0.94
++- "Save this to memory" -> collaboration 0.98
++- "Look up the project priorities and send me a summary" -> collaboration 0.93
++- "Create a Google Doc with meeting notes" -> collaboration 0.95
++- "Check my calendar and tell me what's next" -> collaboration 0.92
++- "File a GitHub issue about the flaky test" -> collaboration 0.96
++
++other examples:
++- "Let's think about this" -> other 0.94
++- "What should we do about the architecture?" -> other 0.92
++- "I have an idea for improving the pipeline" -> other 0.93
++- "We need to discuss the deployment strategy" -> other 0.91
++- "Should we prioritize feature X or bug Y?" -> other 0.95
++
+ work examples:
+ - "Fix the bridge" -> work 0.99
+ - "Add a new endpoint for health checks" -> work 0.98
+-- "Create an issue for the memory leak" -> work 0.97
+ - "Deploy the latest changes" -> work 0.99
+ - "Update the README" -> work 0.96
+ - "The observer prompt has a bug" -> work 0.88
+@@ -62,8 +94,8 @@
+ Respond with EXACTLY one line in the format:
+ INTENT confidence REASONING
+ 
+-Where INTENT is "teammate" or "work", confidence is a float between 0.0 and 1.0, \
+-and REASONING is a brief explanation.
++Where INTENT is "teammate", "collaboration", "other", or "work", confidence \
++is a float between 0.0 and 1.0, and REASONING is a brief explanation.
+ 
+ Example response: teammate 0.97 User is asking for information about system architecture"""
+ 
+@@ -72,7 +104,7 @@
+ class IntentResult:
+     """Result of intent classification."""
+ 
+-    intent: str  # "teammate" or "work"
++    intent: str  # "teammate", "collaboration", "other", or "work"
+     confidence: float
+     reasoning: str
+ 
+@@ -80,13 +112,30 @@ class IntentResult:
+     def is_teammate(self) -> bool:
+         return self.intent == "teammate" and self.confidence >= TEAMMATE_CONFIDENCE_THRESHOLD
+ 
++    @property
++    def is_collaboration(self) -> bool:
++        return self.intent == "collaboration"
++
++    @property
++    def is_other(self) -> bool:
++        return self.intent == "other"
++
++    @property
++    def is_direct_action(self) -> bool:
++        """True for collaboration or other -- PM handles directly without dev-session."""
++        return self.is_collaboration or self.is_other
++
+     @property
+     def is_work(self) -> bool:
+-        return self.intent == "work" or self.confidence < TEAMMATE_CONFIDENCE_THRESHOLD
++        return self.intent == "work"
+ 
+ 
+ def _parse_classifier_response(raw: str) -> IntentResult:
+-    """Parse the classifier's single-line response into an IntentResult."""
++    """Parse the classifier's single-line response into an IntentResult.
++
++    Accepts four intents: teammate, collaboration, other, work.
++    Unknown intents fall through to work with confidence 0.0.
++    """
+     raw = raw.strip()
+     parts = raw.split(None, 2)
+     if len(parts) < 2:
+@@ -94,7 +143,7 @@ def _parse_classifier_response(raw: str) -> IntentResult:
+         return IntentResult(intent="work", confidence=0.0, reasoning="unparseable response")
+ 
+     intent_str = parts[0].lower().strip()
+-    if intent_str not in ("teammate", "work"):
++    if intent_str not in ("teammate", "collaboration", "other", "work"):
+         logger.warning(f"[intent_classifier] Unknown intent: {intent_str!r}")
+         return IntentResult(
+             intent="work", confidence=0.0, reasoning=f"unknown intent: {intent_str}"
+@@ -114,7 +163,11 @@ async def classify_intent(
+     message: str,
+     context: dict | None = None,
+ ) -> IntentResult:
+-    """Classify a message as Teammate or work request using Haiku.
++    """Classify a message into one of four intents using Haiku.
++
++    Returns one of: teammate, collaboration, other, or work.
++    Teammate routes to direct response; collaboration/other route to
++    PM direct-action mode; work routes to SDLC pipeline (dev-session).
+ 
+     Args:
+         message: The incoming user message text.
+diff --git a/agent/sdk_client.py b/agent/sdk_client.py
+index 174875d3..2bd08203 100644
+--- a/agent/sdk_client.py
++++ b/agent/sdk_client.py
+@@ -1516,6 +1516,7 @@ async def get_agent_response_sdk(
+     # PM/Teammate routing: classify intent and choose Teammate or PM dispatch path.
+     # Teammate mode answers informational queries directly without spawning a Dev session.
+     _teammate_mode = False
++    _collaboration_mode = False
+     _classification_context = ""  # Advisory routing context for the agent
+     if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+         # Config-driven persona bypass: skip classifier when persona is already known
+@@ -1541,8 +1542,8 @@ async def get_agent_response_sdk(
+                 )
+             except Exception:
+                 pass  # Best-effort metrics
+-            # Update session mode flag
+-            if session_id:
++            # Update session mode flag (skip PM sessions — they must stay PM)
++            if session_id and _session_type != SessionType.PM:
+                 try:
+                     from models.agent_session import AgentSession as _TMSession
+ 
+@@ -1554,9 +1555,22 @@ async def get_agent_response_sdk(
+                 except Exception:
+                     pass  # Best-effort
+         elif _config_persona in (PersonaType.PROJECT_MANAGER, PersonaType.DEVELOPER):
+-            # PM/Dev persona groups: skip classifier, use PM dispatch (not Teammate)
+-            _classification_context = f"{_config_persona} (config-driven)"
+-            logger.info(f"[{request_id}] Config-driven {_config_persona} mode, skipping classifier")
++            # PM/Dev persona groups: skip intent classifier, but check bridge-level
++            # classification for collaboration/other to avoid unnecessary SDLC overhead
++            if classification in (ClassificationType.COLLABORATION, ClassificationType.OTHER):
++                _collaboration_mode = True
++                _classification_context = (
++                    f"{_config_persona} (config-driven, collaboration via bridge classifier)"
++                )
++                logger.info(
++                    f"[{request_id}] Config-driven {_config_persona} mode, "
++                    f"collaboration detected (bridge={classification})"
++                )
++            else:
++                _classification_context = f"{_config_persona} (config-driven)"
++                logger.info(
++                    f"[{request_id}] Config-driven {_config_persona} mode, skipping classifier"
++                )
+         else:
+             # Unconfigured: fall through to intent classifier
+             try:
+@@ -1577,8 +1591,15 @@ async def get_agent_response_sdk(
+                 if _intent_result.is_teammate:
+                     _teammate_mode = True
+                     logger.info(f"[{request_id}] Routing to Teammate mode (direct response)")
++                elif _intent_result.is_direct_action:
++                    _collaboration_mode = True
++                    logger.info(
++                        f"[{request_id}] Routing to collaboration mode "
++                        f"(direct action, intent={_intent_result.intent})"
++                    )
+                     # Update session mode so nudge loop uses reduced cap
+-                    if session_id:
++                    # (skip PM sessions — they must stay PM)
++                    if session_id and _session_type != SessionType.PM:
+                         try:
+                             from models.agent_session import AgentSession as _TMSession
+ 
+@@ -1598,18 +1619,6 @@ async def get_agent_response_sdk(
+         # session_type is the authoritative permission signal, not chat_title.
+         if _session_type == SessionType.PM:
+             _teammate_mode = False
+-            # Undo any session_mode=TEAMMATE that was set above by config-driven routing
+-            if session_id:
+-                try:
+-                    from models.agent_session import AgentSession as _PMFixSession
+-
+-                    for _s in _PMFixSession.query.filter(session_id=session_id):
+-                        if getattr(_s, "session_mode", None) == PersonaType.TEAMMATE:
+-                            _s.session_mode = PersonaType.PROJECT_MANAGER
+-                            _s.save()
+-                            break
+-                except Exception:
+-                    pass
+ 
+         # Inject classification context as advisory information
+         if _classification_context:
+@@ -1623,6 +1632,41 @@ async def get_agent_response_sdk(
+             from agent.teammate_handler import build_teammate_instructions
+ 
+             enriched_message += build_teammate_instructions()
++        elif _collaboration_mode:
++            # Collaboration mode: PM handles the task directly without a dev-session
++            enriched_message += (
++                "\n\nHandle this task directly using your available tools. "
++                "You have access to Bash, file operations, GitHub CLI (gh), "
++                "Google Workspace (gws), memory search "
++                "(python -m tools.memory_search), Office CLI (officecli), "
++                "and session management (python -m tools.valor_session). "
++                "No dev-session needed unless you determine the task requires "
++                "code changes to the repository.\n\n"
++                "If you determine this task actually requires code changes, "
++                "spawn a dev-session via the Agent tool instead.\n\n"
++                "**Communicating with the stakeholder:**\n"
++                "You can send Telegram messages directly using:\n"
++                '  `python tools/send_telegram.py "Your message here"`\n'
++                "To attach a file (screenshot, document, image):\n"
++                '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
++                "Multiple files as an album (max 10):\n"
++                "  `python tools/send_telegram.py"
++                ' "Album caption" --file a.png --file b.png --file c.png`\n'
++                "File-only (no caption):\n"
++                "  `python tools/send_telegram.py --file /path/to/file.png`\n"
++                "Use --file to attach screenshots, images, or documents. "
++                "Repeat --file for albums. Telethon auto-detects the media type.\n"
++                "Use this tool for:\n"
++                "- Status updates and progress reports\n"
++                "- Questions that need human input\n"
++                "- Final delivery summaries\n"
++                "- Sharing screenshots or files\n"
++                "Write in business terms — never expose SDLC stage names, "
++                "pipeline internals, or implementation details. "
++                "Speak like a project manager updating a stakeholder.\n"
++                "If you don't call this tool, your return text will be "
++                "automatically summarized and sent (fallback behavior)."
++            )
+         else:
+             # PM dispatch: orchestrate SDLC work stage-by-stage
+             enriched_message += (
+diff --git a/bridge/routing.py b/bridge/routing.py
+index 068a797a..afc82457 100644
+--- a/bridge/routing.py
++++ b/bridge/routing.py
+@@ -440,11 +440,13 @@ def _get_anthropic_client():
+ 
+ 
+ def classify_work_request(message: str) -> str:
+-    """Classify if a message is a work request that should go through SDLC.
++    """Classify a message into one of four routing buckets (or passthrough).
+ 
+     Returns:
+-        "sdlc" - Work request -> orchestrator in ai/, prepend SDLC directive
+-        "question" - informational query -> direct in target project, pass through as-is
++        "sdlc" - Work request that could result in code changes or a PR
++        "collaboration" - Direct task the PM can handle without a dev-session
++        "other" - Ambiguous task; PM uses judgment
++        "question" - Informational query, pass through as-is
+         "passthrough" - Already has skill invocation or is conversational
+     """
+     if not message or not message.strip():
+@@ -505,10 +507,12 @@ def _get_principal_priorities_for_classification() -> str:
+ 
+ 
+ def _classify_work_request_llm(text: str) -> str:
+-    """Use LLM to classify whether a message is a work request.
++    """Use LLM to classify a message into sdlc, collaboration, other, or question.
+ 
+-    Tries Ollama first (fast, local), falls back to Haiku (cheap, reliable).
+-    Includes principal context (project priorities) when available.
++    Four-way classification with "collaboration" as the default for ambiguous
++    messages. Tries Ollama first (fast, local), falls back to Haiku (cheap,
++    reliable). Includes principal context (project priorities) when available.
++    Uses first-token extraction with exact match to avoid substring collisions.
+     """
+     # Inject principal context for better classification of project-related messages
+     principal = _get_principal_priorities_for_classification()
+@@ -517,13 +521,18 @@ def _classify_work_request_llm(text: str) -> str:
+         principal_hint = f"\n\nContext — active projects and priorities:\n{principal[:500]}\n\n"
+ 
+     prompt = (
+-        'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
++        "Classify this message. Reply with ONLY one word: "
++        '"sdlc", "collaboration", "other", or "question".\n\n'
+         '- "sdlc" = work request that could result in code changes or a PR:\n'
+         "  fix bug, add feature, implement, refactor, investigate issue,\n"
+         "  create/update codebase, deploy, resolve problem, continue/resume work\n"
++        '- "collaboration" = direct task the PM can handle without coding:\n'
++        "  add this to the knowledge base, draft an issue, send a status update,\n"
++        "  write a doc about Y, save this file, search memory, look up info and act\n"
++        '- "other" = ambiguous task that does not clearly fit sdlc or collaboration\n'
+         '- "question" = purely asking for info, explanation, opinion,\n'
+         "  how does X work, what is Y, conversational/social\n\n"
+-        "If in doubt, classify as sdlc.\n\n"
++        "If in doubt, classify as collaboration.\n\n"
+         f"{principal_hint}"
+         f"Message: {text[:300]}\n\n"
+         "Classification:"
+@@ -538,10 +547,14 @@ def _classify_work_request_llm(text: str) -> str:
+             messages=[{"role": "user", "content": prompt}],
+             options={"temperature": 0, "num_predict": 10},
+         )
+-        result = response["message"]["content"].strip().lower()
+-        if "sdlc" in result:
++        result = response["message"]["content"].strip().lower().split()[0]
++        if result == "sdlc":
+             return ClassificationType.SDLC
+-        if "question" in result:
++        if result == "collaboration":
++            return ClassificationType.COLLABORATION
++        if result == "other":
++            return ClassificationType.OTHER
++        if result == "question":
+             return ClassificationType.QUESTION
+         logger.debug(f"Ollama returned ambiguous classification: {result}")
+     except Exception as e:
+@@ -561,9 +574,13 @@ def _classify_work_request_llm(text: str) -> str:
+             max_tokens=10,
+             messages=[{"role": "user", "content": prompt}],
+         )
+-        result = response.content[0].text.strip().lower()
+-        if "sdlc" in result:
++        result = response.content[0].text.strip().lower().split()[0]
++        if result == "sdlc":
+             return ClassificationType.SDLC
++        if result == "collaboration":
++            return ClassificationType.COLLABORATION
++        if result == "other":
++            return ClassificationType.OTHER
+         return ClassificationType.QUESTION
+     except Exception as e:
+         logger.debug(f"Haiku classification fallback also failed: {e}")
+diff --git a/config/enums.py b/config/enums.py
+index 12b234cf..d75632a8 100644
+--- a/config/enums.py
++++ b/config/enums.py
+@@ -31,7 +31,16 @@ class PersonaType(StrEnum):
+ 
+ 
+ class ClassificationType(StrEnum):
+-    """Intent classification results from the work request classifier."""
++    """Intent classification results from the work request classifier.
++
++    Four-way classification:
++    - SDLC: Work request that could result in code changes or a PR
++    - COLLABORATION: Direct task the PM can handle without a dev-session
++    - OTHER: Ambiguous task — PM uses judgment
++    - QUESTION: Informational query, explanation, or opinion request
++    """
+ 
+     SDLC = "sdlc"
++    COLLABORATION = "collaboration"
++    OTHER = "other"
+     QUESTION = "question"
+diff --git a/config/personas/project-manager.md b/config/personas/project-manager.md
+index 301d326e..5c65d456 100644
+--- a/config/personas/project-manager.md
++++ b/config/personas/project-manager.md
+@@ -66,6 +66,20 @@ Run these checks **before marking each stage done and advancing to the next.**
+ 
+ ---
+ 
++## Available Tools
++
++When handling collaboration tasks directly (without spawning a dev-session), you have access to:
++
++- **Memory search**: `python -m tools.memory_search save/search/inspect/forget` -- knowledge base operations
++- **Work vault**: `~/src/work-vault/` (or `~/Desktop/Valor/` on bridge machines) -- project notes, assets, and business context
++- **Session management**: `python -m tools.valor_session list/status/steer/kill/create` -- manage agent sessions
++- **Google Workspace**: `gws` CLI (pre-authenticated at `~/src/node_modules/.bin/gws`) -- Gmail, Calendar, Docs, Sheets, Drive, Chat
++- **Office CLI**: `officecli` at `~/.local/bin/officecli` -- create/read/edit .docx, .xlsx, .pptx files
++- **GitHub CLI**: `gh` -- issues, PRs, repos, releases, API calls
++- **Telegram**: `python tools/send_telegram.py` -- send messages and files to stakeholders
++
++---
++
+ ## Escalation Policy
+ 
+ Escalate to human when:
+diff --git a/docs/features/README.md b/docs/features/README.md
+index d3eb9425..6dfe3c0e 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -72,6 +72,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
+ | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
+ | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
++| [PM Routing: Collaboration](pm-routing-collaboration.md) | Four-way classification at bridge and intent levels (sdlc/collaboration/other/question) enabling PM to handle direct tasks without SDLC dev-session | Shipped |
+ | [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
+ | [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
+ | [PM Telegram Tool](pm-telegram-tool.md) | PM session composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |
+@@ -116,9 +117,9 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child PM session-to-Dev session steering | Shipped |
+ | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
+ | [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, and category-weighted recall re-ranking | Shipped |
+-| [sustainable-self-healing.md](sustainable-self-healing.md) | Queue governance: circuit-based pause, drip resume, throttle, failure dedup, daily digest | Shipped |
+ | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |
+ | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
++| [sustainable-self-healing.md](sustainable-self-healing.md) | Queue governance: circuit-based pause, drip resume, throttle, failure dedup, daily digest | Shipped |
+ | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
+ | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
+ | [Teammate Conversational Humility](qa-conversational-humility.md) | Direct, honest Teammate responses: brevity, hedged language for uncertain claims, stop-hook review gate for delivery control | Shipped |
+diff --git a/docs/features/pm-dev-session-architecture.md b/docs/features/pm-dev-session-architecture.md
+index 35fa8f36..ce252af4 100644
+--- a/docs/features/pm-dev-session-architecture.md
++++ b/docs/features/pm-dev-session-architecture.md
+@@ -55,7 +55,12 @@ resolve_persona(project, chat_title, is_dm)
+             |-- Read-only, PM persona
+             |
+             v
+-        Intent Classifier (Haiku, binary)
++        Intent Classifier (Haiku, four-way)
++            |
++            |-- Collaboration/Other --> Direct-action mode (PM handles with tools)
++            |                               |
++            |                               v
++            |                           Telegram Response
+             |
+             |-- Work (or low confidence)
+                     |-- Stage-by-stage SDLC orchestration
+diff --git a/docs/features/pm-routing-collaboration.md b/docs/features/pm-routing-collaboration.md
+new file mode 100644
+index 00000000..13613061
+--- /dev/null
++++ b/docs/features/pm-routing-collaboration.md
+@@ -0,0 +1,78 @@
++# PM Routing: Collaboration and Other Classifier Buckets
++
++Extends the PM routing system from a binary classification to a four-way classification at both the bridge and intent classifier levels, enabling the PM to handle direct tasks without spawning a full SDLC dev-session.
++
++## Problem
++
++Previously, the bridge classifier only distinguished "sdlc" and "question", and the intent classifier only distinguished "teammate" and "work". Tasks the PM could handle directly (saving to knowledge base, drafting issues, writing docs) were funneled into the full SDLC pipeline, wasting time on work that should take under a minute.
++
++## Design
++
++### Two-Layer Classification
++
++**Bridge classifier** (`bridge/routing.py::classify_work_request()`):
++- Four outcomes: `sdlc`, `collaboration`, `other`, `question`
++- Uses first-token extraction with exact match (no substring collisions)
++- Default: "If in doubt, classify as collaboration"
++- Result stored as `classification_type` on the AgentSession
++
++**Intent classifier** (`agent/intent_classifier.py::classify_intent()`):
++- Four outcomes: `teammate`, `collaboration`, `other`, `work`
++- `is_collaboration` property (no confidence threshold -- any collaboration intent routes)
++- `is_other` property (no confidence threshold)
++- `is_direct_action` convenience property (True for collaboration or other)
++- `is_teammate` retains the 0.90 confidence threshold
++- `is_work` returns True only when intent is literally "work"
++- Default for unparseable/low-confidence: "work" (fail-safe to dev-session)
++
++### Three-Way PM Dispatch
++
++`agent/sdk_client.py` dispatch logic:
++
++```
++if _teammate_mode:
++    # Teammate instructions (informational response)
++elif _collaboration_mode:
++    # Direct-action instructions (handle with available tools)
++else:
++    # SDLC orchestration (spawn dev-session)
++```
++
++**Config-driven PM groups** check the bridge-level classification for `COLLABORATION` or `OTHER`, since they bypass the intent classifier.
++
++**Unconfigured groups** use the intent classifier result (`is_direct_action`, which covers both collaboration and other).
++
++### ClassificationType Enum
++
++`config/enums.py::ClassificationType` has four members:
++- `SDLC = "sdlc"`
++- `COLLABORATION = "collaboration"`
++- `OTHER = "other"`
++- `QUESTION = "question"`
++
++## Collaboration Mode Instructions
++
++When a PM session enters collaboration mode, it receives direct-action instructions listing available tools (Bash, GitHub CLI, Google Workspace, memory search, Office CLI, session management) with an explicit fallback: "If you determine this task requires code changes, spawn a dev-session via the Agent tool instead."
++
++## Safety
++
++- Bridge classifier default: "If in doubt, classify as collaboration" (cheaper when wrong -- PM tries directly in seconds vs 60-min dev-session timeout)
++- Intent classifier fail-safe: "work" for unparseable/error responses (conservative)
++- Double classification (bridge + intent) provides two chances to catch misroutes
++- PM guard still prevents PM sessions from entering Teammate mode
++- `is_sdlc` property on AgentSession unchanged -- explicit SDLC references (issue/PR numbers) always fast-path to SDLC
++
++## Files Changed
++
++- `config/enums.py` -- COLLABORATION and OTHER enum members
++- `bridge/routing.py` -- Four-outcome prompt, collaboration default, first-token exact match parsing
++- `agent/intent_classifier.py` -- Four-outcome prompt (teammate/collaboration/other/work), `is_collaboration`, `is_other`, `is_direct_action` properties, narrowed `is_work`
++- `agent/sdk_client.py` -- `_collaboration_mode` flag, three-way dispatch, `is_direct_action` check
++- `config/personas/project-manager.md` -- Available Tools section
++
++## Related
++
++- [SDLC-First Routing](sdlc-first-routing.md) -- Original two-way bridge classifier
++- [PM session Teammate Mode](pm-teammate-mode.md) -- Intent classifier for Teammate routing
++- [Config-Driven Chat Mode](config-driven-chat-mode.md) -- Persona-based classifier bypass
++- [PM Channels](pm-channels.md) -- PM channel routing
+diff --git a/docs/features/pm-teammate-mode.md b/docs/features/pm-teammate-mode.md
+index 4f7b0ddc..651e5305 100644
+--- a/docs/features/pm-teammate-mode.md
++++ b/docs/features/pm-teammate-mode.md
+@@ -4,7 +4,7 @@
+ 
+ PM session teammate mode adds a fast path for informational queries. When a user asks a question (e.g., "where is the observer prompt?", "what tests are failing?"), the PM session answers directly using read-only tools instead of spawning a full Dev session. This reduces latency and cost for simple lookups while preserving the full SDLC pipeline for actual work requests.
+ 
+-Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by a binary intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
++Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by an intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
+ 
+ ## Architecture
+ 
+@@ -15,13 +15,18 @@ Telegram Message
+ PM session receives message
+     |
+     v
+-Intent Classifier (Haiku, ~$0.0001/call)
++Intent Classifier (Haiku, four-way, ~$0.0001/call)
+     |
+     |-- Teammate (confidence > 0.90) --> Teammate Handler (read-only tools)
+     |                                       |
+     |                                       v
+     |                                   Direct response to Telegram
+     |
++    |-- Collaboration/Other --> PM direct-action mode (handle with tools)
++    |                               |
++    |                               v
++    |                           Telegram Response
++    |
+     |-- Work request (or low confidence) --> Normal Dev session spawn
+ ```
+ 
+@@ -29,10 +34,11 @@ Intent Classifier (Haiku, ~$0.0001/call)
+ 
+ ### Intent Classifier (`agent/intent_classifier.py`)
+ 
+-A lightweight Haiku-based binary classifier that determines whether a message is an informational query or a work request.
++A lightweight Haiku-based four-way classifier that determines message intent for PM routing.
+ 
+ - **Input**: message text, optional conversation context (last 3 messages)
+-- **Output**: `IntentResult` with `intent` ("teammate" or "work"), `confidence` (0.0-1.0), and `reasoning`
++- **Output**: `IntentResult` with `intent` ("teammate", "collaboration", "other", or "work"), `confidence` (0.0-1.0), and `reasoning`
++- **Collaboration/Other**: direct tasks the PM can handle without a dev-session; see [PM Routing: Collaboration](pm-routing-collaboration.md)
+ - **Threshold**: teammate routing requires confidence above `TEAMMATE_CONFIDENCE_THRESHOLD` (0.90)
+ - **Fail-safe**: any error, timeout, or low confidence defaults to Dev session (current behavior preserved)
+ - **API**: uses the Anthropic API directly (not Claude Code SDK) for low-latency classification via `MODEL_FAST`
+@@ -107,7 +113,7 @@ In the output router (`route_session_output()`), checks the `is_teammate` flag:
+ 
+ | File | Purpose |
+ |------|---------|
+-| `agent/intent_classifier.py` | Haiku-based binary classifier with few-shot prompt |
++| `agent/intent_classifier.py` | Haiku-based four-way classifier (teammate/collaboration/other/work) |
+ | `agent/teammate_handler.py` | Teammate instruction builder (research-first) and nudge cap constant |
+ | `bridge/summarizer.py` | Teammate prose bypass in `_compose_structured_summary()` and prompt context |
+ | `agent/teammate_metrics.py` | Popoto-backed classification and response time counters (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
+diff --git a/docs/features/sdlc-first-routing.md b/docs/features/sdlc-first-routing.md
+index 350f7914..1de55255 100644
+--- a/docs/features/sdlc-first-routing.md
++++ b/docs/features/sdlc-first-routing.md
+@@ -16,7 +16,7 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
+ 
+ ### Classification (`bridge/routing.py`)
+ 
+-`classify_work_request(message, project_slug)` returns `"sdlc"` or `"question"`:
++`classify_work_request(message, project_slug)` returns `"sdlc"`, `"collaboration"`, `"other"`, `"question"`, or `"passthrough"`:
+ 
+ 1. **Fast paths** (no LLM call needed):
+    - Slash commands (`/sdlc`, `/do-build`, `/do-plan`, etc.) → `sdlc`
+@@ -26,7 +26,8 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
+ 2. **LLM classification** (for everything else):
+    - Primary: Ollama (gemma4:e2b, fast, local, free)
+    - Fallback: Anthropic Haiku (when Ollama unavailable)
+-   - Prompt asks for single-word `sdlc` or `question` response
++   - Prompt asks for single-word `sdlc`, `collaboration`, `other`, or `question` response
++   - Default for ambiguous messages: `collaboration` (cheaper when wrong than SDLC)
+    - Any classification failure defaults to `question` (safe fallback)
+ 
+ ### Orchestrator Routing (`agent/sdk_client.py`)
+@@ -36,6 +37,8 @@ Based on classification result:
+ | Classification | Working Directory | Behavior |
+ |---|---|---|
+ | `sdlc` | `ai/` repo root | Full SDLC pipeline access, TARGET_REPO context injected |
++| `collaboration` | `ai/` repo root | PM direct-action mode (handles with available tools, no dev-session) |
++| `other` | `ai/` repo root | PM uses judgment (may handle directly or spawn dev-session) |
+ | `question` | Target project dir | Direct project context, no SDLC overhead |
+ 
+ The SDK client reads `classification_type` from the `AgentSession` stored by the bridge. If not set (e.g., async classifier lost the race with session pickup), a synchronous fast-path regex checks the message for PR/issue references before falling back to `"question"`. This prevents messages like "Complete PR 478" from being misrouted.
+@@ -109,3 +112,4 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
+ - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
+ - [Summarizer Format](summarizer-format.md) -- Process narration stripping added alongside routing
+ - [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- Session routing and orchestration
++- [PM Routing: Collaboration](pm-routing-collaboration.md) -- Four-way classification extending this two-way system
+diff --git a/docs/features/standardized-enums.md b/docs/features/standardized-enums.md
+index 3c2cad49..626dc08c 100644
+--- a/docs/features/standardized-enums.md
++++ b/docs/features/standardized-enums.md
+@@ -35,6 +35,8 @@ Intent classification results from the work request classifier.
+ | Member | Value | Usage |
+ |--------|-------|-------|
+ | `ClassificationType.SDLC` | `"sdlc"` | Work request routed to SDLC pipeline |
++| `ClassificationType.COLLABORATION` | `"collaboration"` | Direct task PM can handle without a dev-session |
++| `ClassificationType.OTHER` | `"other"` | Ambiguous task; PM uses judgment |
+ | `ClassificationType.QUESTION` | `"question"` | Informational query, direct response |
+ 
+ ## Import Pattern
+diff --git a/docs/plans/pm-routing-collaboration-class.md b/docs/plans/pm-routing-collaboration-class.md
+index cd16415a..b7f8c34a 100644
+--- a/docs/plans/pm-routing-collaboration-class.md
++++ b/docs/plans/pm-routing-collaboration-class.md
+@@ -1,11 +1,11 @@
+ ---
+-status: Planning
++status: Complete
+ type: feature
+ appetite: Small
+ owner: Valor
+ created: 2026-04-09
+ tracking: https://github.com/tomcounsell/ai/issues/846
+-last_comment_id: 4212516783
++last_comment_id:
+ ---
+ 
+ # PM Routing: Add Collaboration and Other Classifier Buckets
+@@ -14,17 +14,17 @@ last_comment_id: 4212516783
+ 
+ The PM work-request classifier only distinguishes two LLM outcomes: "sdlc" (code work) and "question" (informational). Tasks the PM could handle directly -- saving to knowledge base, drafting issues, writing docs, sending updates -- get funneled into a full dev-session SDLC pipeline, wasting 30-60 minutes on work that should take under a minute.
+ 
+-**Current behavior:**
++**Two classifiers exist in the dispatch chain:**
++
++1. **Bridge-level classifier** (`bridge/routing.py:classify_work_request()`): Runs at message arrival. Returns `ClassificationType` (sdlc/question/passthrough). Result is stored on `AgentSession.classification_type` and used for `is_sdlc` detection and working directory selection (`sdk_client.py` lines 1420-1468). This classifier does NOT control PM dispatch behavior.
+ 
+-Two classifiers operate in sequence:
+-1. `bridge/routing.py::classify_work_request()` -- bridge-level classifier with two outcomes: "sdlc" and "question". Result stored as `classification_type` on the AgentSession.
+-2. `agent/intent_classifier.py::classify_intent()` -- agent-level classifier with two outcomes: "teammate" (informational) and "work" (action request). This is the **actual PM dispatch decision** in `agent/sdk_client.py` lines 1560-1595.
++2. **Intent classifier** (`agent/intent_classifier.py:classify_intent()`): Runs inside `sdk_client.py` (lines 1560-1596) for unconfigured groups. Returns `IntentResult` with intent "teammate" or "work". Controls the `_teammate_mode` flag which determines whether the PM gets Teammate instructions (direct response) or full SDLC orchestration instructions (lines 1621-1676). Config-driven PM groups (lines 1556-1559) skip this classifier and fall through to the SDLC orchestration block unconditionally.
+ 
+-The bridge-level classification determines working directory (ai/ repo vs project repo) and cross-repo routing. The intent classifier determines whether the PM gets SDLC orchestration instructions or Teammate instructions. Neither classifier has a "collaboration" bucket -- work that the PM should handle directly without spawning a dev-session.
++**Current behavior:**
+ 
+-Additionally, config-driven PM/Dev groups (`resolve_persona()` returning `PersonaType.PROJECT_MANAGER` or `PersonaType.DEVELOPER`) bypass **both** classifiers entirely at `sdk_client.py` lines 1556-1559 and always receive SDLC orchestration instructions.
++For unconfigured groups, `classify_intent()` returns either "teammate" (routed to Teammate handler) or "work" (routed to SDLC orchestration). There is no middle ground. A message like "Add this to the knowledge base and draft an issue" gets classified as "work" with high confidence (~0.97) and the PM spawns a full dev-session that runs for 60 minutes, makes 1 tool call, and times out.
+ 
+-Concrete failure: "Add this to knowledge base and draft an issue" was classified as sdlc (bridge) then as work (intent), triggering a full dev-session. The PM could have done this in two direct tool calls.
++For config-driven PM groups (`resolve_persona()` returns `PersonaType.PROJECT_MANAGER`), the intent classifier is skipped entirely (line 1556-1559). The code falls through to the `else` block at line 1626, which unconditionally injects SDLC orchestration instructions. There is no path to direct-action handling for these groups.
+ 
+ **Desired outcome:**
+ 
+@@ -35,29 +35,57 @@ Concrete failure: "Add this to knowledge base and draft an issue" was classified
+ ## Prior Art
+ 
+ - **PR #387**: Add PM channel mode -- established the PM/Teammate split but left all non-Teammate work routed to full SDLC pipeline
+-- **PR #228**: SDLC-first architecture -- created the bridge classifier with only sdlc/question outcomes
++- **PR #228**: SDLC-first architecture -- created the bridge-level classifier with only sdlc/question outcomes
+ - **PR #602**: Agent-controlled message delivery -- added classification context pass-through but did not expand classification types
+-- **Issue #846 comment (hotfix 370fd895)**: Fixed `session_mode` racing with `session_type` for PM sessions created via `valor-session create`. The root cause -- `session_mode` as a mutable field -- is acknowledged but out of scope for this plan.
++- **PR #541**: Dynamic PM persona -- established intent classifier for Teammate mode routing
+ 
+-No prior attempt to add collaboration/other buckets. This is greenfield within the classifier.
++No prior attempt to add collaboration/other buckets. This is greenfield within the intent classifier.
+ 
+ ## Data Flow
+ 
+-1. **Entry point**: Telegram message arrives at `bridge/telegram_bridge.py`
+-2. **Bridge classification**: `bridge/routing.py::classify_work_request()` runs fast-path checks, then calls `_classify_work_request_llm()` which prompts Ollama/Haiku with two outcomes ("sdlc" or "question"). Result stored as `classification_type` on the AgentSession.
+-3. **SDK client receives message**: `agent/sdk_client.py::send_to_agent()` reads `classification_type` from the session (lines 1429-1441). This determines working directory and cross-repo routing.
+-4. **Persona resolution**: `resolve_persona()` checks config for the chat group (lines 1521-1559):
+-   - If TEAMMATE: skip intent classifier, set `_teammate_mode = True`
+-   - If PROJECT_MANAGER or DEVELOPER: skip intent classifier, fall through to SDLC orchestration **unconditionally** (this is where config-driven groups bypass classification)
+-   - If unconfigured: fall through to intent classifier
+-5. **Intent classification** (unconfigured groups only): `agent/intent_classifier.py::classify_intent()` runs Haiku with two outcomes ("teammate" or "work"). If `is_teammate` (confidence >= 0.90): set `_teammate_mode = True`.
+-6. **PM guard**: Lines 1599-1612 force `_teammate_mode = False` for PM sessions (session_type == "pm"), preventing PM sessions from entering Teammate mode.
+-7. **Dispatch decision** (lines 1621-1676): If `_teammate_mode`: inject Teammate instructions. Else: inject SDLC orchestration instructions unconditionally.
+-
+-**After this change:**
+-- Step 5 gains a third intent: "collaboration". Messages classified as "collaboration" by `classify_intent()` set a `_collaboration_mode` flag.
+-- Step 7 becomes a three-way branch: Teammate instructions, collaboration/direct-action instructions, or SDLC orchestration.
+-- Config-driven PM groups (step 4) also check `classification_type` from the bridge classifier -- if the bridge classified the message as "collaboration", the PM gets direct-action instructions instead of unconditional SDLC.
++### Current flow (showing both classifiers):
++
++```
++Telegram message
++  -> bridge/routing.py:classify_work_request()
++      -> stores ClassificationType on AgentSession.classification_type
++      -> feeds is_sdlc property and working_dir selection (sdk_client.py:1420-1468)
++  -> sdk_client.py session dispatch:
++      -> resolve_persona() checks config
++          -> TEAMMATE persona -> _teammate_mode=True (skip intent classifier)
++          -> PM/DEV persona -> skip intent classifier, fall to SDLC orchestration
++          -> None (unconfigured) -> agent/intent_classifier.py:classify_intent()
++              -> "teammate" (conf >= 0.90) -> _teammate_mode=True
++              -> "work" -> _teammate_mode=False -> SDLC orchestration
++      -> _teammate_mode=True -> Teammate handler (direct response)
++      -> _teammate_mode=False -> SDLC orchestration instructions (lines 1628-1676)
++```
++
++### After this change:
++
++```
++Telegram message
++  -> bridge/routing.py:classify_work_request()
++      -> stores ClassificationType on AgentSession.classification_type  [EXTENDED: +collaboration, +other]
++      -> feeds is_sdlc property and working_dir selection (unchanged)
++  -> sdk_client.py session dispatch:
++      -> resolve_persona() checks config
++          -> TEAMMATE persona -> _teammate_mode=True (unchanged)
++          -> PM/DEV persona -> check AgentSession.classification_type  [NEW]
++              -> COLLABORATION/OTHER -> inject direct-action prompt  [NEW]
++              -> SDLC/None -> SDLC orchestration (unchanged)
++          -> None (unconfigured) -> agent/intent_classifier.py:classify_intent()  [EXTENDED]
++              -> "teammate" (conf >= 0.90) -> Teammate handler (unchanged)
++              -> "collaboration" -> inject direct-action prompt  [NEW]
++              -> "other" -> inject direct-action prompt  [NEW]
++              -> "work" -> SDLC orchestration (unchanged)
++      -> dispatch path selected by _teammate_mode + _collaboration_mode flags
++```
++
++**Key changes in the flow:**
++1. **Intent classifier** (`agent/intent_classifier.py`): PRIMARY change target. Prompt extended from 2 intents to 4. Parser whitelist extended. New `IntentResult` properties added.
++2. **Bridge-level classifier** (`bridge/routing.py`): SECONDARY change. Prompt extended for observability. Result stored on AgentSession but does NOT drive PM dispatch.
++3. **SDK client dispatch** (`agent/sdk_client.py`): Adds a new `_collaboration_mode` flag. For config-driven PM groups, checks `AgentSession.classification_type`. For unconfigured groups, checks intent classifier result. Collaboration/other routes to direct-action prompt.
+ 
+ ## Appetite
+ 
+@@ -69,7 +97,7 @@ No prior attempt to add collaboration/other buckets. This is greenfield within t
+ - PM check-ins: 0
+ - Review rounds: 1
+ 
+-Five files changed (enum, bridge classifier prompt, intent classifier prompt, SDK client conditional, persona template). No new modules, no new dependencies, no architectural changes.
++Five files changed (enum, intent classifier, bridge classifier, SDK client conditional, persona template). No new modules, no new dependencies, no architectural changes.
+ 
+ ## Prerequisites
+ 
+@@ -79,100 +107,138 @@ No prerequisites -- this work has no external dependencies. All changes are to e
+ 
+ ### Key Elements
+ 
+-- **ClassificationType enum extension**: Add COLLABORATION and OTHER members to the existing StrEnum in `config/enums.py`
+-- **Bridge classifier prompt update**: Four-outcome prompt in `bridge/routing.py::_classify_work_request_llm()` with clear examples
+-- **Intent classifier prompt update**: Three-outcome prompt in `agent/intent_classifier.py` adding "collaboration" intent alongside "teammate" and "work"
+-- **Conditional PM dispatch**: `agent/sdk_client.py` checks intent result and bridge classification to branch between SDLC orchestration, collaboration/direct-action, and Teammate instructions
++- **ClassificationType enum extension**: Add COLLABORATION and OTHER members to the existing StrEnum (observability, stored on AgentSession)
++- **Intent classifier prompt update** (PRIMARY): Four-outcome LLM prompt replacing the binary teammate/work split, with "if in doubt, classify as collaboration" default
++- **Intent classifier parser update**: Extend `_parse_classifier_response()` whitelist to accept "collaboration" and "other"; add `is_collaboration` and `is_other` properties to `IntentResult`
++- **Bridge-level classifier prompt update** (SECONDARY): Four-outcome prompt for observability; result stored on AgentSession but does not drive PM dispatch
++- **Conditional PM dispatch**: SDK client adds `_collaboration_mode` flag; for config-driven PM groups, checks `AgentSession.classification_type`; for unconfigured groups, checks intent classifier result
+ - **PM persona tool visibility**: Document memory_search, work-vault, valor_session, gws, officecli in the persona template
+ 
+ ### Flow
+ 
+-**Telegram message** -> bridge `classify_work_request()` -> [sdlc|collaboration|other|question] stored on session -> `sdk_client` reads session classification -> `classify_intent()` -> [teammate|collaboration|work] -> three-way dispatch
++**Telegram message** -> classify_work_request() stores classification on AgentSession -> sdk_client checks intent classifier OR AgentSession.classification_type -> [sdlc|collaboration|other|question|teammate] -> dispatch path selected
+ 
+-For `collaboration` (either classifier): PM gets direct-action prompt, handles task with available tools, no dev-session spawned.
+-For `other` (bridge): PM gets direct-action prompt with judgment discretion -- may spawn dev-session or handle directly.
+-For `sdlc`/`work`: Unchanged behavior -- full SDLC orchestration instructions.
+-For `teammate`: Unchanged behavior -- Teammate instructions.
++For `collaboration`: PM gets direct-action prompt, handles task with available tools, no dev-session spawned.
++For `other`: PM gets direct-action prompt with judgment discretion -- may spawn dev-session or handle directly.
++For `sdlc`: Unchanged behavior -- full SDLC orchestration instructions.
++For `teammate`: Unchanged behavior -- Teammate handler.
+ 
+ ### Technical Approach
+ 
+-1. **Extend `ClassificationType`** in `config/enums.py` with `COLLABORATION = "collaboration"` and `OTHER = "other"`
+-2. **Update bridge classifier** (`bridge/routing.py::_classify_work_request_llm()`):
+-   - Rewrite prompt to request one of four outcomes: sdlc, collaboration, other, question
+-   - Keep default as "If in doubt, classify as sdlc" (unchanged -- see Critique Results for rationale)
+-   - Update result parsing to detect "collaboration" and "other" in LLM responses
+-3. **Update intent classifier** (`agent/intent_classifier.py`):
+-   - Add "collaboration" as a third intent alongside "teammate" and "work"
+-   - Add examples: "Add this to the knowledge base" -> collaboration 0.97, "Draft an issue for X" -> collaboration 0.96, "Send a status update" -> collaboration 0.95
+-   - Add `is_collaboration` property to `IntentResult`
+-   - Keep "work" as default for unparseable/low-confidence responses (fail-safe unchanged)
+-4. **Update SDK client dispatch** (`agent/sdk_client.py`):
+-   - In the unconfigured-group path (lines 1560-1595): after `classify_intent()`, check `_intent_result.is_collaboration` and set `_collaboration_mode = True`
+-   - In the config-driven PM/Dev path (lines 1556-1559): check the bridge-level `classification` variable -- if it equals `ClassificationType.COLLABORATION`, set `_collaboration_mode = True`
+-   - In the dispatch block (lines 1621-1676): add a middle branch: if `_collaboration_mode` (and not `_teammate_mode`), inject direct-action instructions
+-   - The PM guard (lines 1599-1612) does not need changes -- it only affects `_teammate_mode`
+-5. **Update PM persona template** (`config/personas/project-manager.md`) with full tool reference section
++**File 1: `agent/intent_classifier.py` (PRIMARY)**
++- Extend `CLASSIFIER_PROMPT` from 2 intents (teammate/work) to 4 intents (teammate/collaboration/other/work)
++- Add collaboration examples: "Add this to the knowledge base", "Draft an issue for X", "Send a status update", "Write a doc about Y", "Save this file", "Create a summary"
++- Add other examples: "Let's think about this", "What should we do about X?", "I have an idea for Y"
++- Keep work examples focused on code/PR/deploy tasks
++- Change default from "If in doubt, classify as work" to "If in doubt, classify as collaboration"
++- Extend `_parse_classifier_response()` whitelist at line 97 from `("teammate", "work")` to `("teammate", "work", "collaboration", "other")`
++- Add `IntentResult.is_collaboration` property: returns `True` when intent is "collaboration"
++- Add `IntentResult.is_other` property: returns `True` when intent is "other"
++- Update `IntentResult.is_work` property: only return `True` when intent is literally "work" (currently returns True for anything non-teammate; this must narrow to exclude collaboration/other)
++
++**File 2: `config/enums.py`**
++- Add `COLLABORATION = "collaboration"` and `OTHER = "other"` to `ClassificationType`
++
++**File 3: `bridge/routing.py` (SECONDARY)**
++- Extend `_classify_work_request_llm()` prompt to request one of four outcomes: sdlc, collaboration, other, question
++- Add collaboration examples matching intent classifier examples
++- Change default from "If in doubt, classify as sdlc" to "If in doubt, classify as collaboration"
++- Update result parsing to detect "collaboration" and "other", returning `ClassificationType.COLLABORATION` and `ClassificationType.OTHER`
++
++**File 4: `agent/sdk_client.py`**
++- Add `_collaboration_mode = False` flag alongside `_teammate_mode`
++- For config-driven PM/Dev groups (lines 1556-1559): after setting `_classification_context`, read `AgentSession.classification_type` from Redis. If it is COLLABORATION or OTHER, set `_collaboration_mode = True`
++- For unconfigured groups (lines 1560-1596): after `classify_intent()` returns, check `_intent_result.is_collaboration` or `_intent_result.is_other`. If so, set `_collaboration_mode = True`
++- At dispatch (line 1621+): add a third branch: `if _teammate_mode -> Teammate handler; elif _collaboration_mode -> direct-action prompt; else -> SDLC orchestration`
++- The direct-action prompt instructs the PM: "Handle this task directly using your available tools. You have access to Bash, file operations, GitHub CLI (gh), Google Workspace (gws), memory search, and Office CLI. No dev-session needed unless you determine the task requires code changes to the repository."
++- Preserve the Telegram messaging instructions for ALL PM paths (useful for both SDLC and direct work)
++- Note: `_session_type == SessionType.PM` override (line 1599) must NOT force `_collaboration_mode = False`. The PM override only prevents Teammate mode for PM sessions; collaboration mode is valid for PM sessions.
++
++**File 5: `config/personas/project-manager.md`**
++- Add a "## Available Tools" section documenting:
++  - `python -m tools.memory_search save/search/inspect/forget` -- knowledge base operations
++  - Work-vault path: `~/src/work-vault/` (or `~/Desktop/Valor/` on bridge machines)
++  - `python -m tools.valor_session list/status/steer/kill/create` -- session management
++  - `gws` -- Google Workspace CLI (pre-authenticated at `~/src/node_modules/.bin/gws`)
++  - `officecli` -- Office document CLI at `~/.local/bin/officecli`
++  - `gh` -- GitHub CLI for issues, PRs, repos
++- Note: `~/Desktop/Valor/personas/project-manager.md` (private) must be manually updated to match
+ 
+ ## Failure Path Test Strategy
+ 
+ ### Exception Handling Coverage
+-- [ ] `_classify_work_request_llm()` has try/except blocks for Ollama and Haiku fallbacks -- existing tests cover fallback behavior; new tests verify collaboration/other parsing within the same error handling
+-- [ ] `classify_intent()` has try/except around the Anthropic API call -- existing fail-safe returns "work" intent; new "collaboration" intent follows the same error handling (falls back to "work", not "collaboration")
+-- [ ] If LLM returns an unrecognized word in either classifier, the fallback defaults are unchanged (bridge: "question", intent: "work")
++- [x] `_parse_classifier_response()` in `intent_classifier.py` falls through to "work" with confidence 0.0 for unrecognized intents -- after this change, it falls through for intents not in the extended whitelist. Verify with test cases for "unknown 0.5 reason" and "gibberish"
++- [x] `classify_intent()` wraps the entire API call in try/except, returning work intent on failure -- unchanged, conservative default preserved
++- [x] `_classify_work_request_llm()` try/except blocks for Ollama and Haiku fallbacks -- existing fallback behavior preserved; new tests verify collaboration/other parsing within the same error handling
+ 
+ ### Empty/Invalid Input Handling
+-- [ ] `classify_work_request("")` and `classify_work_request(None)` already return "passthrough" -- unchanged by this work
+-- [ ] `classify_intent("")` with empty message still produces a valid IntentResult -- unchanged behavior
+-- [ ] New classification types only apply to the LLM path, which requires non-empty text
++- [x] `classify_work_request("")` and `classify_work_request(None)` already return "passthrough" -- unchanged by this work
++- [x] `classify_intent("")` goes through the API call which handles empty strings naturally
++- [x] New classification types only apply to the LLM paths, which require non-empty text
+ 
+ ### Error State Rendering
+-- [ ] If classification fails entirely, the fallback is "question" (bridge) or "work" (intent) -- no SDLC overhead change
+-- [ ] No user-visible output changes; routing is invisible to the end user
++- [x] If intent classification fails entirely, the fallback is "work" (full SDLC) -- unchanged fail-safe
++- [x] If bridge-level classification fails, the fallback is QUESTION -- unchanged
++- [x] No user-visible output changes; routing is invisible to the end user
+ 
+-## Test Impact
++### Default Behavior Risk Assessment
++- [x] The "if in doubt, classify as collaboration" default shifts failure mode from over-triggering dev-sessions to PM trying tasks directly. This is strictly cheaper when wrong: PM tries directly (seconds) vs. dev-session timeout (60 minutes). The PM retains access to the Agent tool and can spawn a dev-session on demand. Bridge-level `is_sdlc` property and issue/PR fast-path detection are unchanged, so explicit SDLC references always route correctly.
+ 
+-- [ ] `tests/unit/test_enums.py::TestClassificationType::test_all_members` -- UPDATE: change assertion from `len == 2` to `len == 4`
+-- [ ] `tests/unit/test_enums.py::TestClassificationType::test_string_equality` -- UPDATE: add assertions for COLLABORATION and OTHER
+-- [ ] `tests/unit/test_sdlc_mode.py::TestIsSdlcJobClassificationType::test_classification_type_chat_returns_false` -- REVIEW: verify "collaboration" and "other" classification_type values also return `is_sdlc == False`
+-- [ ] `tests/unit/test_sdlc_mode.py` -- UPDATE: add parametrized cases for "collaboration" and "other" classification types confirming they are not SDLC
++## Test Impact
+ 
+-`tests/unit/test_work_request_classifier.py` and `tests/unit/test_intent_classifier.py` already exist and will be updated (not created from scratch). `test_pm_channels.py` and `test_pm_session_factory.py` are new test files to be created.
++- [x] `tests/unit/test_enums.py::TestClassificationType::test_all_members` -- UPDATE: change assertion from `len == 2` to `len == 4`
++- [x] `tests/unit/test_enums.py::TestClassificationType::test_string_equality` -- UPDATE: add assertions for COLLABORATION and OTHER
++- [x] `tests/unit/test_work_request_classifier.py::TestLlmClassification` -- UPDATE: add parametrized test cases for collaboration-type messages
++- [x] `tests/unit/test_intent_classifier.py::TestParseClassifierResponse::test_unknown_intent` -- UPDATE: "collaboration" and "other" are no longer unknown intents; add new test cases for valid parsing of these intents
++- [x] `tests/unit/test_intent_classifier.py::TestIntentResult` -- UPDATE: add tests for `is_collaboration` and `is_other` properties; update `is_work` tests to verify it returns False for collaboration/other intents
++- [x] `tests/unit/test_intent_classifier.py::TestClassifyIntent` -- UPDATE: add mocked API test for collaboration classification
++- [x] `tests/unit/test_intent_classifier.py::TestGoldenExamples` -- UPDATE: add golden examples for collaboration and other intents
++- [x] `tests/unit/test_pm_session_factory.py::TestBridgeSessionTypeRouting` -- REVIEW: tests reference `ClassificationType` members but only check PM/Dev session type routing; may need new test for collaboration classification not changing session_type
++- [x] `tests/unit/test_sdlc_mode.py::TestIsSdlcJobClassificationType` -- UPDATE: add explicit test cases verifying `is_sdlc` returns False for "collaboration" and "other" classification_type values
++- [x] `tests/unit/test_pm_channels.py` -- REVIEW: tests focus on system prompt loading and do not test dispatch logic; likely no changes needed
+ 
+ ## Rabbit Holes
+ 
+ - Fixing the passthrough string/enum inconsistency (passthrough is returned as a raw string, not a ClassificationType member) -- separate cleanup, explicitly out of scope per issue #846
+ - Adding sub-categories within collaboration (e.g., "knowledge-base-write" vs "issue-draft") -- over-engineering for this appetite
+-- Modifying the Teammate mode routing logic -- Teammate mode is a separate persona path, not affected by this work
+-- Updating `tools/classifier.py` (the separate request classifier used by other systems) -- that is a different classification system
+-- Eliminating `session_mode` as a mutable field (per issue #846 comment) -- already hotfixed in 370fd895, root cause fix is separate work
++- Modifying the Teammate mode routing threshold (0.90 confidence) -- separate tuning concern
++- Updating `tools/classifier.py` (the separate request classifier used by other systems) -- different classification system
++- Removing the bridge-level classifier entirely -- it serves a distinct purpose (is_sdlc, working_dir) from the intent classifier
+ 
+ ## Risks
+ 
+ ### Risk 1: LLM misclassifies sdlc work as collaboration
+ **Impact:** PM tries to handle a coding task directly, fails or produces poor results
+-**Mitigation:** The bridge-level default remains "If in doubt, classify as sdlc" (unchanged). The intent classifier default remains "work" for low-confidence/unparseable responses. The direct-action instructions include an explicit fallback: "If you determine this task requires code changes to the repository, spawn a dev-session." Double-classification (bridge + intent) provides two chances to catch misroutes.
++**Mitigation:** The direct-action prompt explicitly tells the PM "No dev-session needed unless you determine the task requires code changes to the repository." The PM retains access to the Agent tool and can spawn a dev-session on demand. The classifier prompt includes clear boundary examples distinguishing code tasks from PM-executable tasks.
++
++### Risk 2: Default bias change from "work"/"sdlc" to "collaboration"
++**Impact:** Ambiguous messages skip dev-sessions instead of over-triggering them. PM may drop real coding tasks.
++**Mitigation:** This is strictly cheaper when wrong -- PM tries directly (seconds) vs. dev-session timeout (60 minutes). The PM can still escalate to a dev-session. Bridge-level `is_sdlc` property and issue/PR fast-path detection are unchanged, so explicit SDLC references always route correctly.
++
++### Risk 3: Config-driven PM groups read stale classification_type
++**Impact:** If the bridge-level classifier has not yet stored the classification when `sdk_client.py` reads it from Redis, the classification_type could be None/missing.
++**Mitigation:** When `classification_type` is None or missing, fall through to SDLC orchestration (unchanged default behavior). Only override when classification_type is explicitly COLLABORATION or OTHER.
+ 
+-### Risk 2: Config-driven PM groups still bypass intent classifier
+-**Impact:** Config-driven PM groups only see bridge-level classification, not intent classification
+-**Mitigation:** The plan explicitly addresses this: config-driven PM/Dev groups check the bridge-level `classification` variable for COLLABORATION. This is a weaker signal than the intent classifier (bridge uses smaller model, shorter prompt), but it catches obvious collaboration requests. For config-driven groups, the PM's own judgment ("use your judgment" advisory) is the final safety net.
++### Risk 4: `is_work` property change breaks callers
++**Impact:** `IntentResult.is_work` currently returns True for any non-teammate intent. Narrowing it to only "work" could break callers that use `is_work` as a catch-all.
++**Mitigation:** Audit all callers of `is_work` in `sdk_client.py`. The only consumer is the implicit `else` branch (not teammate -> SDLC). After the change, this becomes: not teammate AND not collaboration AND not other -> SDLC. Add `is_direct_action` property as a convenience (True for collaboration or other).
+ 
+-### Risk 3: Private PM persona file out of sync
++### Risk 5: Private PM persona file out of sync
+ **Impact:** The private `~/Desktop/Valor/personas/project-manager.md` does not get the tool visibility update on all machines
+-**Mitigation:** The plan includes an explicit step to update the private persona. The public template at `config/personas/project-manager.md` serves as the authoritative reference. The `/update` skill propagates the public template.
++**Mitigation:** The public template at `config/personas/project-manager.md` serves as the authoritative reference. The `/update` skill propagates the public template.
+ 
+ ## Race Conditions
+ 
+-No race conditions identified -- classification is synchronous and single-request scoped. The classification result is passed as a string through the session creation flow with no shared mutable state. The intent classifier runs async but is awaited before dispatch decisions are made.
++No race conditions identified -- classification is synchronous and single-request scoped. The bridge-level classification result is stored on AgentSession before the SDK client reads it (the bridge creates the session, then the worker picks it up). The intent classifier runs synchronously within the SDK client call.
+ 
+ ## No-Gos (Out of Scope)
+ 
+ - Fixing passthrough string/enum inconsistency (separate cleanup)
+ - Sub-categorizing collaboration types
+-- Modifying Teammate mode routing or Teammate persona
+ - Changing `tools/classifier.py` (separate classification system)
+ - Adding new MCP servers or tools -- this only documents existing tools in the persona
+-- Eliminating `session_mode` mutability (acknowledged per issue comment, separate work)
+-- Changing the bridge-level fallback default from "sdlc" (kept as-is for safety)
++- Modifying the Teammate confidence threshold (0.90)
++- Changing the `is_sdlc` property logic on AgentSession
+ 
+ ## Update System
+ 
+@@ -180,28 +246,29 @@ No update system changes required -- this feature modifies existing Python files
+ 
+ ## Agent Integration
+ 
+-No agent integration required -- this is a bridge-internal routing change. The classifiers run inside `bridge/routing.py` and `agent/intent_classifier.py`, and the instruction injection happens in `agent/sdk_client.py`. No new MCP servers, no `.mcp.json` changes, no new tools. The PM persona update documents existing tools that are already available to the agent.
++No agent integration required -- this is a routing/dispatch change internal to the bridge and SDK client. No new MCP servers, no `.mcp.json` changes, no new tools. The PM persona update documents existing tools that are already available to the agent.
+ 
+ ## Documentation
+ 
+-- [ ] Create `docs/features/pm-routing-collaboration.md` describing the four-way bridge classification, three-way intent classification, and conditional dispatch
+-- [ ] Add entry to `docs/features/README.md` index table
+-- [ ] Update inline docstrings for `classify_work_request()`, `_classify_work_request_llm()`, `classify_intent()`, and `IntentResult`
++- [x] Create `docs/features/pm-routing-collaboration.md` describing the four-way classification and conditional dispatch, covering both classifiers
++- [x] Add entry to `docs/features/README.md` index table
++- [x] Update inline docstrings for `classify_intent()`, `_parse_classifier_response()`, `classify_work_request()`, and `_classify_work_request_llm()`
+ 
+ ## Success Criteria
+ 
+-- [ ] `ClassificationType` enum has 4 members: SDLC, QUESTION, COLLABORATION, OTHER
+-- [ ] Bridge classifier LLM prompt requests one of four outcomes with clear examples
+-- [ ] Bridge classifier default remains "If in doubt, classify as sdlc" (unchanged)
+-- [ ] Intent classifier prompt has three outcomes: teammate, collaboration, work
+-- [ ] `IntentResult` has `is_collaboration` property
+-- [ ] PM sessions with collaboration intent get direct-action instructions, not SDLC orchestration
+-- [ ] PM sessions with work intent get unchanged SDLC orchestration instructions
+-- [ ] Config-driven PM groups check bridge-level classification for collaboration
+-- [ ] PM persona template documents: memory_search, work-vault path, valor_session, gws, officecli
+-- [ ] "Add this to knowledge base and draft an issue" classifies as collaboration (intent classifier)
+-- [ ] Tests pass (`/do-test`)
+-- [ ] Documentation updated (`/do-docs`)
++- [x] `ClassificationType` enum has 4 members: SDLC, QUESTION, COLLABORATION, OTHER
++- [x] Intent classifier (`agent/intent_classifier.py`) prompt requests one of four intents with clear examples
++- [x] Intent classifier parser whitelist accepts "collaboration" and "other"
++- [x] `IntentResult` has `is_collaboration` and `is_other` properties; `is_work` returns False for collaboration/other
++- [x] Bridge-level classifier (`bridge/routing.py`) prompt requests one of four outcomes with clear examples
++- [x] "If in doubt, classify as collaboration" replaces "If in doubt, classify as sdlc/work" in BOTH classifiers
++- [x] PM sessions classified as collaboration/other get direct-action instructions, not SDLC orchestration
++- [x] Config-driven PM groups read `AgentSession.classification_type` and route collaboration/other to direct-action
++- [x] PM sessions classified as sdlc/work get unchanged SDLC orchestration instructions
++- [x] PM persona template documents: memory_search, work-vault path, valor_session, gws, officecli
++- [x] "Add this to knowledge base and draft an issue" classifies as collaboration in BOTH `classify_intent()` AND `classify_work_request()`
++- [x] Tests pass (`/do-test`)
++- [x] Documentation updated (`/do-docs`)
+ 
+ ## Team Orchestration
+ 
+@@ -209,7 +276,7 @@ No agent integration required -- this is a bridge-internal routing change. The c
+ 
+ - **Builder (routing)**
+   - Name: routing-builder
+-  - Role: Implement enum extension, both classifier prompts, conditional dispatch, persona update
++  - Role: Implement intent classifier extension, enum extension, bridge classifier update, conditional dispatch, persona update
+   - Agent Type: builder
+   - Resume: true
+ 
+@@ -231,54 +298,62 @@ No agent integration required -- this is a bridge-internal routing change. The c
+ - Add `COLLABORATION = "collaboration"` and `OTHER = "other"` to `ClassificationType` in `config/enums.py`
+ - Update `tests/unit/test_enums.py::TestClassificationType` to assert 4 members and test string equality for new types
+ 
+-### 2. Update Bridge Classifier LLM Prompt
+-- **Task ID**: build-bridge-classifier
++### 2. Update Intent Classifier (PRIMARY)
++- **Task ID**: build-intent-classifier
+ - **Depends On**: build-enum
+-- **Validates**: tests/unit/test_work_request_classifier.py (update)
++- **Validates**: tests/unit/test_intent_classifier.py
+ - **Assigned To**: routing-builder
+ - **Agent Type**: builder
+ - **Parallel**: false
+-- Rewrite prompt in `_classify_work_request_llm()` to request one of four outcomes: sdlc, collaboration, other, question
+-- Add clear examples for collaboration: "Add this to the knowledge base", "Draft an issue for X", "Send a status update", "Write a doc about Y", "Save this file"
+-- Keep default as "If in doubt, classify as sdlc" (unchanged for safety)
+-- Update result parsing to detect "collaboration" and "other" in LLM responses, returning `ClassificationType.COLLABORATION` and `ClassificationType.OTHER`
+-- Create `tests/unit/test_work_request_classifier.py` with parametrized test cases for all four classification outcomes
+-
+-### 3. Update Intent Classifier
+-- **Task ID**: build-intent-classifier
++- Extend `CLASSIFIER_PROMPT` in `agent/intent_classifier.py` from 2 intents to 4:
++  - `teammate` = informational queries (unchanged examples)
++  - `collaboration` = PM-executable tasks: create issue, save file, update doc, send message, knowledge base write, draft summary, organize notes
++  - `other` = ambiguous, discussion, brainstorming: "Let's think about this", "What should we do about X?", "I have an idea"
++  - `work` = code changes, PRs, deploys, bug fixes (unchanged examples)
++- Change default from "If in doubt, classify as work" to "If in doubt, classify as collaboration"
++- Extend `_parse_classifier_response()` whitelist at line 97 from `("teammate", "work")` to `("teammate", "work", "collaboration", "other")`
++- Add `IntentResult.is_collaboration` property: `self.intent == "collaboration"`
++- Add `IntentResult.is_other` property: `self.intent == "other"`
++- Add `IntentResult.is_direct_action` property: `self.is_collaboration or self.is_other`
++- Narrow `IntentResult.is_work`: change to `self.intent == "work"` only (remove the low-confidence-teammate catch-all; dispatch in sdk_client checks `is_teammate`/`is_collaboration`/`is_other` explicitly, then falls through to SDLC)
++- Update tests:
++  - Add `TestIntentResult.test_collaboration_intent` and `test_other_intent`
++  - Update `TestIntentResult.test_work_intent` to verify `is_collaboration` and `is_other` are False
++  - Add `TestParseClassifierResponse.test_valid_collaboration_response` and `test_valid_other_response`
++  - Verify `test_unknown_intent` still works (e.g., "maybe 0.5 unsure" still falls through to work)
++  - Add `TestClassifyIntent.test_collaboration_classification` with mocked API
++  - Add golden examples for collaboration and other intents
++
++### 3. Update Bridge-Level Classifier (SECONDARY)
++- **Task ID**: build-bridge-classifier
+ - **Depends On**: build-enum
+-- **Validates**: tests/unit/test_intent_classifier.py (update)
++- **Validates**: tests/unit/test_work_request_classifier.py
+ - **Assigned To**: routing-builder
+ - **Agent Type**: builder
+-- **Parallel**: true (parallel with build-bridge-classifier)
+-- Add "collaboration" as a third intent in `agent/intent_classifier.py::CLASSIFIER_PROMPT`
+-- Add collaboration examples to the prompt: "Add this to the knowledge base" -> collaboration 0.97, "Draft an issue for X" -> collaboration 0.96, "Send a status update to the team" -> collaboration 0.95, "Write a summary doc" -> collaboration 0.94, "Save this to memory" -> collaboration 0.98
+-- Update `_parse_classifier_response()` to accept "collaboration" as a valid intent (add to the valid set alongside "teammate" and "work")
+-- Add `is_collaboration` property to `IntentResult`: returns `True` when `intent == "collaboration"` and `confidence >= TEAMMATE_CONFIDENCE_THRESHOLD`
+-- Keep "work" as the default for unparseable/unknown intents (fail-safe unchanged)
+-- Create `tests/unit/test_intent_classifier.py` testing: parse of collaboration intent, `is_collaboration` property, unknown intent defaults to work
++- **Parallel**: true (can run in parallel with build-intent-classifier)
++- Extend prompt in `_classify_work_request_llm()` to request one of four outcomes: sdlc, collaboration, other, question
++- Add collaboration examples matching intent classifier examples
++- Change default from "If in doubt, classify as sdlc" to "If in doubt, classify as collaboration"
++- Update result parsing to detect "collaboration" and "other" in LLM responses, returning `ClassificationType.COLLABORATION` and `ClassificationType.OTHER`
++- Add parametrized test cases for collaboration-type messages in `tests/unit/test_work_request_classifier.py`
+ 
+ ### 4. Make PM Dispatch Instructions Conditional
+ - **Task ID**: build-dispatch
+-- **Depends On**: build-bridge-classifier, build-intent-classifier
+-- **Validates**: tests/unit/test_sdlc_mode.py
++- **Depends On**: build-intent-classifier, build-bridge-classifier
++- **Validates**: tests/unit/test_pm_session_factory.py, tests/unit/test_sdlc_mode.py
+ - **Assigned To**: routing-builder
+ - **Agent Type**: builder
+ - **Parallel**: false
+-- **In the unconfigured-group path** (sdk_client.py lines 1560-1595): after `classify_intent()`, check `_intent_result.is_collaboration` and set `_collaboration_mode = True`
+-- **In the config-driven PM/Dev path** (sdk_client.py lines 1556-1559): after setting `_classification_context`, check the bridge-level `classification` variable -- if `classification == ClassificationType.COLLABORATION`, set `_collaboration_mode = True`
+-- **In the dispatch block** (sdk_client.py lines 1621-1676): add a middle branch between the `_teammate_mode` check and the SDLC else block:
+-  ```
+-  if _teammate_mode:
+-      # Teammate instructions (unchanged)
+-  elif _collaboration_mode:
+-      # Direct-action instructions for collaboration
+-  else:
+-      # SDLC orchestration (unchanged)
+-  ```
+-- The direct-action instructions should say: "Handle this task directly using your available tools. You have access to Bash, file operations, GitHub CLI, Google Workspace, memory search, and Office CLI. No dev-session needed unless you determine the task requires code changes to the repository."
+-- Preserve the Telegram messaging instructions for all PM paths (append after the collaboration block too)
+-- Update `tests/unit/test_sdlc_mode.py` to add parametrized cases for "collaboration" and "other" classification types confirming they are not SDLC
++- Add `_collaboration_mode = False` flag in `sdk_client.py` alongside `_teammate_mode`
++- **Config-driven PM/Dev groups** (lines 1556-1559): After the existing `_classification_context` assignment, read `AgentSession.classification_type` from Redis for the current session. If classification_type is COLLABORATION or OTHER, set `_collaboration_mode = True`. If None/missing, leave as False (backward compatible -- falls through to SDLC).
++- **Unconfigured groups** (lines 1560-1596): After `classify_intent()` returns, check `_intent_result.is_collaboration` or `_intent_result.is_other`. If True, set `_collaboration_mode = True`.
++- **PM session override** (line 1599): Do NOT reset `_collaboration_mode` -- the existing override only prevents `_teammate_mode=True` for PM sessions. Collaboration mode is valid and desired for PM sessions.
++- **Dispatch branching** (line 1621+): Change from two branches to three:
++  - `if _teammate_mode:` Teammate handler (unchanged)
++  - `elif _collaboration_mode:` Direct-action prompt (NEW) -- "Handle this task directly using your available tools. You have access to Bash, file operations, GitHub CLI (gh), Google Workspace (gws), memory search, and Office CLI. No dev-session needed unless you determine the task requires code changes to the repository."
++  - `else:` SDLC orchestration (unchanged)
++- Preserve the Telegram messaging instructions for ALL PM paths (append after the dispatch-specific block)
++- Add test cases to `test_sdlc_mode.py` verifying `is_sdlc` returns False for "collaboration" and "other" classification_type values
+ 
+ ### 5. Update PM Persona Template
+ - **Task ID**: build-persona
+@@ -302,11 +377,12 @@ No agent integration required -- this is a bridge-internal routing change. The c
+ - **Assigned To**: routing-validator
+ - **Agent Type**: validator
+ - **Parallel**: false
+-- Run `pytest tests/unit/test_enums.py tests/unit/test_sdlc_mode.py -v`
++- Run `pytest tests/unit/test_enums.py tests/unit/test_intent_classifier.py tests/unit/test_work_request_classifier.py -v`
+ - Verify `ClassificationType` has 4 members
+-- Verify intent classifier prompt contains "collaboration" examples
+-- Verify bridge classifier prompt contains all four outcomes
+-- Verify sdk_client.py three-way dispatch logic (teammate / collaboration / sdlc)
++- Verify intent classifier prompt contains all four intents with examples
++- Verify `_parse_classifier_response()` accepts collaboration and other
++- Verify `IntentResult.is_work` returns False for collaboration/other
++- Verify sdk_client.py has three-way dispatch logic
+ - Run full test suite: `pytest tests/unit/ -x -q`
+ 
+ ### 7. Documentation
+@@ -317,43 +393,39 @@ No agent integration required -- this is a bridge-internal routing change. The c
+ - **Parallel**: false
+ - Create `docs/features/pm-routing-collaboration.md`
+ - Add entry to `docs/features/README.md` index table
+-- Update docstrings in `bridge/routing.py`, `agent/intent_classifier.py`, and `agent/sdk_client.py`
++- Update docstrings in `agent/intent_classifier.py`, `bridge/routing.py`, and `agent/sdk_client.py`
+ 
+ ## Verification
+ 
+ | Check | Command | Expected |
+ |-------|---------|----------|
+-| Tests pass | `pytest tests/unit/test_enums.py tests/unit/test_sdlc_mode.py -v` | exit code 0 |
++| Tests pass | `pytest tests/unit/test_enums.py tests/unit/test_intent_classifier.py tests/unit/test_work_request_classifier.py -v` | exit code 0 |
+ | Enum has 4 members | `python -c "from config.enums import ClassificationType; assert len(list(ClassificationType)) == 4"` | exit code 0 |
+-| Bridge classifier has collaboration | `grep -c 'collaboration' bridge/routing.py` | output > 0 |
+ | Intent classifier has collaboration | `grep -c 'collaboration' agent/intent_classifier.py` | output > 0 |
+-| Conditional dispatch exists | `grep -c 'collaboration_mode' agent/sdk_client.py` | output > 0 |
++| Intent parser whitelist extended | `grep 'collaboration.*other' agent/intent_classifier.py` | matches line with whitelist tuple |
++| Bridge classifier has collaboration | `grep -c 'collaboration' bridge/routing.py` | output > 0 |
++| Conditional dispatch exists | `grep -c '_collaboration_mode' agent/sdk_client.py` | output > 0 |
+ | Persona has tools section | `grep -c 'memory_search' config/personas/project-manager.md` | output > 0 |
+-| Lint clean | `python -m ruff check config/enums.py bridge/routing.py agent/intent_classifier.py agent/sdk_client.py` | exit code 0 |
+-| Format clean | `python -m ruff format --check config/enums.py bridge/routing.py agent/intent_classifier.py agent/sdk_client.py` | exit code 0 |
++| Lint clean | `python -m ruff check config/enums.py agent/intent_classifier.py bridge/routing.py agent/sdk_client.py` | exit code 0 |
++| Format clean | `python -m ruff format --check config/enums.py agent/intent_classifier.py bridge/routing.py agent/sdk_client.py` | exit code 0 |
+ 
+ ## Critique Results
+ 
+-### Round 1 (2026-04-09) -- NEEDS REVISION (2 blockers). Revised 2026-04-09.
+-
++<!-- Populated by /do-plan-critique (war room) on 2026-04-09. Verdict: NEEDS REVISION (2 blockers, 4 concerns, 2 nits). -->
++<!-- REVISION 2: Addressed all blockers and concerns from the first critique. -->
+ | Severity | Critic | Finding | Addressed By | Implementation Note |
+ |----------|--------|---------|--------------|---------------------|
+-| BLOCKER | Skeptic, Archaeologist | Plan targets wrong dispatch mechanism -- two separate classifiers exist. `_classification_context` is a descriptive string, not a `ClassificationType` enum, so the proposed check would never match. The actual PM-vs-Teammate decision is in `agent/intent_classifier.py::classify_intent()` via `_teammate_mode` flag. | **RESOLVED (v2)**: Plan now targets both classifiers. Task 3 adds "collaboration" intent to `intent_classifier.py`. Task 4 checks `_intent_result.is_collaboration` (not `_classification_context` string). | Dispatch uses new `_collaboration_mode` flag set from either intent classifier result or bridge classification. |
+-| BLOCKER | Skeptic, Operator | `agent/intent_classifier.py` missing from touched-files inventory and data flow. This file controls PM dispatch for unconfigured groups. | **RESOLVED (v2)**: `agent/intent_classifier.py` added to Data Flow (step 5), Technical Approach (point 3), Task 3, and Verification table. | File is now a primary modification target alongside bridge/routing.py. |
+-| CONCERN | Operator, Adversary | Config-driven PM/Dev groups (via `resolve_persona()`) bypass both classifiers entirely at sdk_client.py lines 1556-1559. The new classification would be stored but never consulted. | **RESOLVED (v2)**: Task 4 explicitly adds a bridge-level `classification` check inside the config-driven PM/Dev path. If bridge classified as COLLABORATION, `_collaboration_mode = True`. | Weaker signal than intent classifier (bridge uses smaller model) but catches obvious cases. PM judgment is the final safety net. |
+-| CONCERN | Skeptic, Adversary | Fallback default changed from `sdlc` to `collaboration` without safety analysis. Flips failure mode unsafely. | **RESOLVED (v2)**: Bridge default kept as "If in doubt, classify as sdlc" (unchanged). Intent classifier default kept as "work" for unparseable/low-confidence. No default changes. | Added to Success Criteria and No-Gos for explicit tracking. |
+-| NIT | Operator | Test Impact section omits `test_sdlc_mode.py` which is referenced as validation target in Task 3. | **RESOLVED (v2)**: `test_sdlc_mode.py` added to Test Impact with UPDATE disposition. Clarified that `test_work_request_classifier.py`, `test_pm_channels.py`, and `test_pm_session_factory.py` are new files to create, not existing files to update. | All referenced test files now appear in Test Impact with correct dispositions. |
+-
+-### Round 2 (2026-04-09) -- APPROVED (0 blockers, 2 concerns, 1 nit)
+-
+-| Severity | Critic | Finding | Implementation Note |
+-|----------|--------|---------|---------------------|
+-| CONCERN | Adversary, Skeptic | Bridge classifier result parsing order not specified for four outcomes. Substring matching (`if "collaboration" in result`) risks collision when LLM returns multi-word text (e.g., "not collaboration, classify as sdlc"). | **ACCEPT**: In Task 2, use first-token extraction (`result = result.split()[0]`) then exact match (`result == "collaboration"`) instead of substring matching. Apply to both Ollama path (line 541) and Haiku path (line 564). Eliminates substring collision entirely. |
+-| CONCERN | Simplifier | `OTHER` classification type has no distinct behavioral path. Bridge `OTHER` falls through to intent classifier which has no "other" intent, making it meaningless. | **ACCEPT**: In Task 4, treat `OTHER` same as `COLLABORATION` in the config-driven path: `if classification in (ClassificationType.COLLABORATION, ClassificationType.OTHER)`. For unconfigured groups, `OTHER` from bridge is irrelevant since intent classifier makes the dispatch decision. |
+-| NIT | Operator | Test Impact section claims `test_work_request_classifier.py` and `test_intent_classifier.py` are "new files to create" but they already exist with substantive coverage. | **ACCEPT**: Task 2 Validates changed to "tests/unit/test_work_request_classifier.py (update)" and Task 3 Validates changed to "tests/unit/test_intent_classifier.py (update)". |
++| BLOCKER | Skeptic, Archaeologist | Plan targets wrong dispatch mechanism -- two separate classifiers exist. `_classification_context` is a descriptive string, not a `ClassificationType` enum, so the proposed check would never match. The actual PM-vs-Teammate decision is in `agent/intent_classifier.py::classify_intent()` via `_teammate_mode` flag. | FIXED: Plan now targets `agent/intent_classifier.py` as PRIMARY change. SDK client dispatch uses intent classifier result directly, not `_classification_context` string. | Intent classifier prompt extended to 4 intents; parser whitelist extended; IntentResult gets new properties; dispatch uses `_intent_result.is_collaboration` / `_intent_result.is_other`. |
++| BLOCKER | Skeptic, Operator | `agent/intent_classifier.py` missing from touched-files inventory and data flow. | FIXED: `agent/intent_classifier.py` is now the PRIMARY change target (Task 2). Data flow diagram explicitly shows both classifiers. | File is listed in Solution, Technical Approach, Step by Step Tasks, and Verification. |
++| CONCERN | Operator, Adversary | Config-driven PM/Dev groups bypass both classifiers entirely at sdk_client.py lines 1556-1559. The new classification would be stored but never consulted during dispatch. | FIXED: Task 4 adds `AgentSession.classification_type` check inside the config-driven path. When classification_type is COLLABORATION or OTHER, `_collaboration_mode` is set. | Falls back to SDLC when classification_type is None/missing (backward compatible). |
++| CONCERN | Skeptic, Adversary | Fallback default changed from `sdlc`/`work` to `collaboration` without safety analysis. | FIXED: Added explicit "Default Behavior Risk Assessment" in Failure Path Test Strategy. Documented the tradeoff: cheaper when wrong (PM tries directly vs 60-min timeout). PM retains ability to spawn dev-session on demand. | Risk 2 in Risks section also documents this. |
++| CONCERN | Adversary | `_parse_classifier_response()` at line 96-97 hard-rejects unknown intents, defaulting to "work". | FIXED: Task 2 explicitly extends whitelist to `("teammate", "work", "collaboration", "other")`. Also updates `is_work` property to not catch collaboration/other. | Parser and IntentResult properties updated together in Task 2. |
++| CONCERN | Simplifier | Plan extends ClassificationType enum but classify_work_request() is not consumed for PM routing. | FIXED: Plan now clearly distinguishes PRIMARY (intent_classifier) vs SECONDARY (ClassificationType enum for observability). Data flow diagram shows both paths. | ClassificationType extension is for observability and config-driven PM group fallback. |
++| NIT | Operator | Test Impact section references test methods but omits `test_pm_session_factory.py` and `test_sdlc_mode.py`. | FIXED: Both files added to Test Impact section with dispositions. | `test_pm_session_factory.py` REVIEW, `test_sdlc_mode.py` UPDATE with explicit collaboration/other test cases. |
++| NIT | User | Success criterion ambiguous about which classifier returns "collaboration". | FIXED: Success criteria now explicitly name both `classify_intent()` and `classify_work_request()`. | Separate criteria for intent classifier and bridge-level classifier. |
+ 
+ ---
+ 
+ ## Open Questions
+ 
+-No open questions -- all critique blockers resolved in round 1, round 2 concerns accepted with implementation notes. Plan is approved for build.
++No open questions -- the issue provides a complete solution sketch with clear acceptance criteria. The critique blockers and concerns have been addressed in this revision.
+diff --git a/tests/unit/test_enums.py b/tests/unit/test_enums.py
+index a4c87b40..77919ffd 100644
+--- a/tests/unit/test_enums.py
++++ b/tests/unit/test_enums.py
+@@ -73,10 +73,16 @@ def test_all_members(self):
+ class TestClassificationType:
+     def test_string_equality(self):
+         assert ClassificationType.SDLC == "sdlc"
++        assert ClassificationType.COLLABORATION == "collaboration"
++        assert ClassificationType.OTHER == "other"
+         assert ClassificationType.QUESTION == "question"
+ 
+     def test_all_members(self):
+-        assert len(list(ClassificationType)) == 2
++        assert len(list(ClassificationType)) == 4
++
++    def test_construction_from_string(self):
++        assert ClassificationType("collaboration") == ClassificationType.COLLABORATION
++        assert ClassificationType("other") == ClassificationType.OTHER
+ 
+ 
+ class TestEnvVarCompatibility:
+diff --git a/tests/unit/test_intent_classifier.py b/tests/unit/test_intent_classifier.py
+index a4430413..cced8a1f 100644
+--- a/tests/unit/test_intent_classifier.py
++++ b/tests/unit/test_intent_classifier.py
+@@ -1,6 +1,7 @@
+-"""Tests for the intent classifier (Teammate vs work routing).
++"""Tests for the intent classifier (four-way PM routing).
+ 
+-Tests the parsing logic, threshold behavior, and golden examples.
++Tests the parsing logic, threshold behavior, and golden examples
++for teammate, collaboration, other, and work intents.
+ The actual Haiku API call is mocked for unit tests.
+ """
+ 
+@@ -24,16 +25,54 @@ def test_teammate_high_confidence(self):
+         r = IntentResult(intent="teammate", confidence=0.95, reasoning="asking for info")
+         assert r.is_teammate is True
+         assert r.is_work is False
++        assert r.is_collaboration is False
++        assert r.is_other is False
++        assert r.is_direct_action is False
+ 
+-    def test_teammate_low_confidence_defaults_to_work(self):
++    def test_teammate_low_confidence(self):
+         r = IntentResult(intent="teammate", confidence=0.85, reasoning="ambiguous")
+         assert r.is_teammate is False
+-        assert r.is_work is True
++        assert r.is_work is False
++        assert r.is_collaboration is False
++        assert r.is_other is False
+ 
+     def test_work_intent(self):
+         r = IntentResult(intent="work", confidence=0.98, reasoning="action request")
+         assert r.is_teammate is False
++        assert r.is_collaboration is False
++        assert r.is_other is False
+         assert r.is_work is True
++        assert r.is_direct_action is False
++
++    def test_collaboration_high_confidence(self):
++        r = IntentResult(intent="collaboration", confidence=0.95, reasoning="direct task")
++        assert r.is_collaboration is True
++        assert r.is_teammate is False
++        assert r.is_work is False
++        assert r.is_other is False
++        assert r.is_direct_action is True
++
++    def test_collaboration_low_confidence(self):
++        """Collaboration is not gated by confidence threshold (unlike teammate)."""
++        r = IntentResult(intent="collaboration", confidence=0.50, reasoning="low conf")
++        assert r.is_collaboration is True
++        assert r.is_direct_action is True
++        assert r.is_work is False
++
++    def test_other_intent(self):
++        r = IntentResult(intent="other", confidence=0.92, reasoning="ambiguous discussion")
++        assert r.is_other is True
++        assert r.is_direct_action is True
++        assert r.is_teammate is False
++        assert r.is_collaboration is False
++        assert r.is_work is False
++
++    def test_other_low_confidence(self):
++        """Other is not gated by confidence threshold (unlike teammate)."""
++        r = IntentResult(intent="other", confidence=0.50, reasoning="low conf")
++        assert r.is_other is True
++        assert r.is_direct_action is True
++        assert r.is_work is False
+ 
+     def test_threshold_boundary(self):
+         # Exactly at threshold: is teammate (needs to meet or exceed)
+@@ -68,10 +107,26 @@ def test_valid_work_response(self):
+         assert r.intent == "work"
+         assert r.confidence == 0.99
+ 
++    def test_valid_collaboration_response(self):
++        r = _parse_classifier_response("collaboration 0.96 User wants a direct task done")
++        assert r.intent == "collaboration"
++        assert r.confidence == 0.96
++        assert "direct task" in r.reasoning
++
++    def test_valid_other_response(self):
++        r = _parse_classifier_response("other 0.92 Ambiguous discussion topic")
++        assert r.intent == "other"
++        assert r.confidence == 0.92
++        assert "discussion" in r.reasoning
++
+     def test_case_insensitive_intent(self):
+         r = _parse_classifier_response("TEAMMATE 0.95 question about system")
+         assert r.intent == "teammate"
+ 
++    def test_case_insensitive_other(self):
++        r = _parse_classifier_response("OTHER 0.91 brainstorming")
++        assert r.intent == "other"
++
+     def test_no_reasoning(self):
+         r = _parse_classifier_response("work 0.88")
+         assert r.intent == "work"
+@@ -141,6 +196,34 @@ def test_work_classification(self):
+                 assert result.confidence == 0.99
+                 assert result.is_work is True
+ 
++    def test_collaboration_classification(self):
++        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
++            mock_client = MagicMock()
++            mock_client.messages.create.return_value = _make_mock_response(
++                "collaboration 0.96 User wants to draft an issue"
++            )
++            with patch("anthropic.Anthropic", return_value=mock_client):
++                result = asyncio.run(classify_intent("Draft an issue for the flaky test"))
++                assert result.intent == "collaboration"
++                assert result.confidence == 0.96
++                assert result.is_collaboration is True
++                assert result.is_direct_action is True
++                assert result.is_work is False
++
++    def test_other_classification(self):
++        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
++            mock_client = MagicMock()
++            mock_client.messages.create.return_value = _make_mock_response(
++                "other 0.93 User is brainstorming"
++            )
++            with patch("anthropic.Anthropic", return_value=mock_client):
++                result = asyncio.run(classify_intent("What should we do about the architecture?"))
++                assert result.intent == "other"
++                assert result.confidence == 0.93
++                assert result.is_other is True
++                assert result.is_direct_action is True
++                assert result.is_work is False
++
+     def test_no_api_key_defaults_to_work(self):
+         with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
+             result = asyncio.run(classify_intent("What time is it?"))
+@@ -201,6 +284,26 @@ def test_context_passed_to_api(self):
+     ("teammate 0.96", "List the MCP servers"),
+ ]
+ 
++GOLDEN_COLLABORATION_EXAMPLES = [
++    ("collaboration 0.97", "Add this to the knowledge base"),
++    ("collaboration 0.96", "Draft an issue for the flaky test"),
++    ("collaboration 0.95", "Send a status update to the team"),
++    ("collaboration 0.94", "Write a summary doc"),
++    ("collaboration 0.98", "Save this to memory"),
++    ("collaboration 0.93", "Look up the project priorities and send me a summary"),
++    ("collaboration 0.95", "Create a Google Doc with meeting notes"),
++    ("collaboration 0.92", "Check my calendar and tell me what's next"),
++    ("collaboration 0.96", "File a GitHub issue about the flaky test"),
++]
++
++GOLDEN_OTHER_EXAMPLES = [
++    ("other 0.94", "Let's think about this"),
++    ("other 0.92", "What should we do about the architecture?"),
++    ("other 0.93", "I have an idea for improving the pipeline"),
++    ("other 0.91", "We need to discuss the deployment strategy"),
++    ("other 0.95", "Should we prioritize feature X or bug Y?"),
++]
++
+ GOLDEN_WORK_EXAMPLES = [
+     ("work 0.99", "Fix the bridge"),
+     ("work 0.98", "Add a new endpoint for health checks"),
+@@ -227,6 +330,18 @@ def test_teammate_examples_parse_correctly(self, response, description):
+         assert result.intent == "teammate", f"Expected teammate for: {description}"
+         assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
+ 
++    @pytest.mark.parametrize("response,description", GOLDEN_COLLABORATION_EXAMPLES)
++    def test_collaboration_examples_parse_correctly(self, response, description):
++        result = _parse_classifier_response(response)
++        assert result.intent == "collaboration", f"Expected collaboration for: {description}"
++        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
++
++    @pytest.mark.parametrize("response,description", GOLDEN_OTHER_EXAMPLES)
++    def test_other_examples_parse_correctly(self, response, description):
++        result = _parse_classifier_response(response)
++        assert result.intent == "other", f"Expected other for: {description}"
++        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
++
+     @pytest.mark.parametrize("response,description", GOLDEN_WORK_EXAMPLES)
+     def test_work_examples_parse_correctly(self, response, description):
+         result = _parse_classifier_response(response)
+diff --git a/tests/unit/test_sdlc_mode.py b/tests/unit/test_sdlc_mode.py
+index 8e50a5e0..1ca56850 100644
+--- a/tests/unit/test_sdlc_mode.py
++++ b/tests/unit/test_sdlc_mode.py
+@@ -43,6 +43,24 @@ def test_classification_type_chat_returns_false(self):
+         )
+         assert session.is_sdlc is False
+ 
++    def test_classification_type_collaboration_returns_false(self):
++        """Collaboration classification should not be SDLC."""
++        session = AgentSession(
++            session_id="test_collab_846",
++            project_key="test",
++            classification_type="collaboration",
++        )
++        assert session.is_sdlc is False
++
++    def test_classification_type_other_returns_false(self):
++        """Other classification should not be SDLC."""
++        session = AgentSession(
++            session_id="test_other_846",
++            project_key="test",
++            classification_type="other",
++        )
++        assert session.is_sdlc is False
++
+     def test_stage_states_triggers_sdlc(self):
+         """stage_states with active stages should trigger SDLC."""
+         import json

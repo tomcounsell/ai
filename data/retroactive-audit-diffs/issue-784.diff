@@ -1,0 +1,142 @@
+diff --git a/.claude/hooks/hook_utils/memory_bridge.py b/.claude/hooks/hook_utils/memory_bridge.py
+index 7c4348f4f..86cfb7bb4 100644
+--- a/.claude/hooks/hook_utils/memory_bridge.py
++++ b/.claude/hooks/hook_utils/memory_bridge.py
+@@ -249,8 +249,8 @@ def recall(
+         # Multi-query decomposition -- cluster keywords and retrieve via BM25+RRF
+         import time
+ 
+-        from utils.keyword_extraction import _cluster_keywords
+         from agent.memory_retrieval import retrieve_memories
++        from utils.keyword_extraction import _cluster_keywords
+ 
+         project_key = _get_project_key()
+ 
+diff --git a/agent/memory_hook.py b/agent/memory_hook.py
+index b2f0539f3..1423e0e81 100644
+--- a/agent/memory_hook.py
++++ b/agent/memory_hook.py
+@@ -16,9 +16,6 @@
+ import os
+ from typing import Any
+ 
+-from config.memory_defaults import (
+-    NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+-)
+ from config.memory_defaults import (
+     INJECTION_BUFFER_SIZE as BUFFER_SIZE,
+ )
+@@ -28,6 +25,9 @@
+ from config.memory_defaults import (
+     MAX_THOUGHTS_PER_INJECTION as MAX_THOUGHTS,
+ )
++from config.memory_defaults import (
++    NOVEL_TERRITORY_KEYWORD_THRESHOLD,
++)
+ 
+ # Re-export keyword utilities from lightweight module (no agent deps).
+ # Agent-side callers (memory_extraction.py, health_check.py) can still
+diff --git a/bridge/response.py b/bridge/response.py
+index 21f49b8ec..10c043653 100644
+--- a/bridge/response.py
++++ b/bridge/response.py
+@@ -159,9 +159,11 @@
+ 
+ # These three are re-exported from agent.constants (canonical location).
+ # Kept here for backward compatibility with existing imports.
+-from agent.constants import REACTION_COMPLETE  # noqa: E402, F401
+-from agent.constants import REACTION_ERROR  # noqa: E402, F401
+-from agent.constants import REACTION_SUCCESS  # noqa: E402, F401
++from agent.constants import (
++    REACTION_COMPLETE,  # noqa: E402, F401
++    REACTION_ERROR,  # noqa: E402, F401
++    REACTION_SUCCESS,  # noqa: E402, F401
++)
+ 
+ 
+ def filter_tool_logs(response: str) -> str:
+diff --git a/docs/features/agent-session-health-monitor.md b/docs/features/agent-session-health-monitor.md
+index c7ced9291..80b9c0b03 100644
+--- a/docs/features/agent-session-health-monitor.md
++++ b/docs/features/agent-session-health-monitor.md
+@@ -42,10 +42,11 @@ When a stuck session is found:
+ 
+ ### Startup Integration
+ 
+-The health check loop starts automatically with the bridge process, alongside the existing session watchdog. Both run at 5-minute intervals but monitor different concerns:
++The health check loop starts automatically with the **worker process** (`python -m worker`), alongside the session notify listener and session watchdog. Both the health loop and notify listener run as background asyncio tasks in the worker:
+ 
+-- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level
+-- **Agent session health monitor** (`agent/agent_session_queue.py`): Monitors `AgentSession` status at the queue level
++- **Session notify listener** (`_session_notify_listener()` in `agent/agent_session_queue.py`): Subscribes to the `valor:sessions:new` Redis pub/sub channel. Calls `_ensure_worker(chat_id)` immediately when a session is published — ~1s pickup latency. This is the fast path for normal operation.
++- **Agent session health monitor** (`_agent_session_health_loop()` in `agent/agent_session_queue.py`): Runs every 5 minutes. Recovers sessions missed by pub/sub (Redis restart, worker not running at publish time, bypass paths). This is the safety net.
++- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level (separate from queue-level monitoring)
+ 
+ ## CLI Usage
+ 
+diff --git a/docs/features/bridge-worker-architecture.md b/docs/features/bridge-worker-architecture.md
+index 0daa903b4..f96abd1ba 100644
+--- a/docs/features/bridge-worker-architecture.md
++++ b/docs/features/bridge-worker-architecture.md
+@@ -72,7 +72,6 @@ The fast path covers normal operation. The health check catches edge cases: miss
+ **Bridge path**: `enqueue_agent_session()` → `_push_agent_session()` publishes notification → worker receives within ~1s.
+ 
+ **CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
+-
+ ## Redis Communication Contract
+ 
+ The bridge and worker share a single contract: the `AgentSession` Popoto model in Redis.
+diff --git a/scripts/reflections.py b/scripts/reflections.py
+index 59a75bd99..cc8db2b52 100644
+--- a/scripts/reflections.py
++++ b/scripts/reflections.py
+@@ -2072,9 +2072,8 @@ async def step_episode_cycle_close(self) -> None:
+         """
+         import time as _time
+ 
+-        from models.cyclic_episode import CyclicEpisode
+-
+         from models.agent_session import AgentSession
++        from models.cyclic_episode import CyclicEpisode
+         from scripts.fingerprint_classifier import classify_session
+ 
+         cutoff = _time.time() - 86400  # past 24 hours
+diff --git a/tests/unit/test_bridge_api_id_parse.py b/tests/unit/test_bridge_api_id_parse.py
+index 66d4d5cc0..2348a5944 100644
+--- a/tests/unit/test_bridge_api_id_parse.py
++++ b/tests/unit/test_bridge_api_id_parse.py
+@@ -10,8 +10,6 @@
+ """
+ 
+ import sys
+-from io import StringIO
+-from unittest.mock import patch
+ 
+ 
+ def _get_parse_api_id():
+diff --git a/tests/unit/test_output_handler.py b/tests/unit/test_output_handler.py
+index 0b9fe1e57..95b7e9c7c 100644
+--- a/tests/unit/test_output_handler.py
++++ b/tests/unit/test_output_handler.py
+@@ -8,8 +8,6 @@
+ import tempfile
+ from pathlib import Path
+ 
+-import pytest
+-
+ from agent.output_handler import (
+     FileOutputHandler,
+     LoggingOutputHandler,
+diff --git a/tests/unit/test_pm_channels.py b/tests/unit/test_pm_channels.py
+index 228960f76..20af62dac 100644
+--- a/tests/unit/test_pm_channels.py
++++ b/tests/unit/test_pm_channels.py
+@@ -11,8 +11,6 @@
+ 
+ from __future__ import annotations
+ 
+-import json
+-from pathlib import Path
+ from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest

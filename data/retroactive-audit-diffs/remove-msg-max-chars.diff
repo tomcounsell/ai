@@ -1,0 +1,429 @@
+diff --git a/agent/job_queue.py b/agent/job_queue.py
+index 39fc1176c..40e778ef8 100644
+--- a/agent/job_queue.py
++++ b/agent/job_queue.py
+@@ -96,8 +96,6 @@ def classify_nudge_action(
+ # Backward compatibility alias
+ RedisJob = AgentSession
+ 
+-MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
+-
+ # Nudge loop: single nudge model for bridge output routing.
+ # The bridge has ONE response to any non-completion: nudge.
+ # ChatSession owns all SDLC intelligence; the bridge just keeps it working.
+@@ -1495,18 +1493,6 @@ def register_callbacks(
+         _response_callbacks[project_key] = response_callback
+ 
+ 
+-def _truncate_to_limit(text: str, label: str) -> str:
+-    """Truncate text to MSG_MAX_CHARS, keeping the tail (most recent context)."""
+-    if len(text) <= MSG_MAX_CHARS:
+-        return text
+-    original_len = len(text)
+-    text = "...[truncated]\n" + text[-(MSG_MAX_CHARS - 15) :]
+-    logger.warning(
+-        f"Truncated {label}: {original_len} -> {len(text)} chars (kept last {MSG_MAX_CHARS} chars)"
+-    )
+-    return text
+-
+-
+ # === Restart Flag (written by remote-update.sh) ===
+ 
+ _RESTART_FLAG = Path(__file__).parent.parent / "data" / "restart-requested"
+@@ -1579,9 +1565,11 @@ async def enqueue_job(
+     Add a job to Redis and ensure worker is running.
+     Returns queue depth after push.
+     """
+-    message_text = _truncate_to_limit(message_text, "message_text")
++    from tools.field_utils import log_large_field
++
++    log_large_field("message_text", message_text)
+     if revival_context:
+-        revival_context = _truncate_to_limit(revival_context, "revival_context")
++        log_large_field("revival_context", revival_context)
+ 
+     depth = await _push_job(
+         project_key=project_key,
+diff --git a/models/agent_session.py b/models/agent_session.py
+index 958a60017..6e25dfe01 100644
+--- a/models/agent_session.py
++++ b/models/agent_session.py
+@@ -32,7 +32,6 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-MSG_MAX_CHARS = 20_000
+ HISTORY_MAX_ENTRIES = 20
+ STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
+ 
+@@ -80,13 +79,13 @@ class AgentSession(Model):
+     scheduling_depth = Field(type=int, default=0)  # Self-scheduling chain depth (cap at 3)
+     created_at = SortedField(type=float, partition_by="project_key")
+     working_dir = Field()
+-    message_text = Field(max_length=MSG_MAX_CHARS)
++    message_text = Field()
+     sender_name = Field(null=True)
+     sender_id = Field(type=int, null=True)
+     chat_id = KeyField(null=True)
+     telegram_message_id = Field(type=int, null=True)
+     chat_title = Field(null=True)
+-    revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
++    revival_context = Field(null=True)
+     work_item_slug = Field(null=True)
+     task_list_id = Field(null=True)
+     classification_type = Field(null=True)  # Actively used by is_sdlc, session_tags, job_scheduler
+@@ -104,8 +103,8 @@ class AgentSession(Model):
+ 
+     turn_count = IntField(default=0)
+     tool_call_count = IntField(default=0)
+-    log_path = Field(null=True, max_length=1000)
+-    summary = Field(null=True, max_length=50_000)
++    log_path = Field(null=True)
++    summary = Field(null=True)
+     branch_name = Field(null=True)
+     tags = ListField(null=True)
+     classification_confidence = Field(type=float, null=True)  # Paired with classification_type
+@@ -143,15 +142,15 @@ class AgentSession(Model):
+     _qa_mode_legacy = Field(type=bool, null=True)
+ 
+     # === Semantic routing fields ===
+-    context_summary = Field(null=True, max_length=200)  # What this session is about
+-    expectations = Field(null=True, max_length=500)  # What the agent needs from the human
++    context_summary = Field(null=True)  # What this session is about
++    expectations = Field(null=True)  # What the agent needs from the human
+ 
+     # === Steering fields ===
+     # Buffered human replies during active pipelines
+     queued_steering_messages = ListField(null=True)
+ 
+     # === ChatSession delivery field ===
+-    result_text = Field(null=True, max_length=MSG_MAX_CHARS)  # What was delivered to Telegram
++    result_text = Field(null=True)  # What was delivered to Telegram
+ 
+     # === PM self-messaging ===
+     # Telegram message IDs sent by the PM via send_telegram tool during this session.
+diff --git a/models/dead_letter.py b/models/dead_letter.py
+index f410d394d..2fa8cbd37 100644
+--- a/models/dead_letter.py
++++ b/models/dead_letter.py
+@@ -14,6 +14,6 @@ class DeadLetter(Model):
+     chat_id = KeyField()
+     project_key = KeyField(null=True)
+     reply_to = Field(type=int, null=True)
+-    text = Field(max_length=20_000)
++    text = Field()
+     created_at = SortedField(type=float)
+     attempts = IntField(default=0)
+diff --git a/models/link.py b/models/link.py
+index 094a4fe4f..f2fce705d 100644
+--- a/models/link.py
++++ b/models/link.py
+@@ -25,12 +25,12 @@ class Link(Model):
+     sender = KeyField(null=True)
+     status = KeyField(default="unread")  # unread, read, archived
+     timestamp = SortedField(type=float)
+-    final_url = Field(null=True, max_length=2000)
+-    title = Field(null=True, max_length=1000)
+-    description = Field(null=True, max_length=2000)
++    final_url = Field(null=True)
++    title = Field(null=True)
++    description = Field(null=True)
+     tags = ListField(null=True)
+-    notes = Field(null=True, max_length=5000)
+-    ai_summary = Field(null=True, max_length=50_000)
++    notes = Field(null=True)
++    ai_summary = Field(null=True)
+ 
+     @classmethod
+     def cleanup_expired(cls, max_age_days: int = 90) -> int:
+diff --git a/models/reflection.py b/models/reflection.py
+index 7175cdfbd..0fa01ee39 100644
+--- a/models/reflection.py
++++ b/models/reflection.py
+@@ -44,7 +44,7 @@ class Reflection(Model):
+     next_due = Field(type=float, null=True)
+     run_count = IntField(default=0)
+     last_status = Field(default="pending")  # pending | running | success | error | skipped
+-    last_error = Field(null=True, max_length=1000)
++    last_error = Field(null=True)
+     last_duration = Field(type=float, null=True)
+     run_history = ListField(default=[])  # List of run dicts, capped at 200
+ 
+diff --git a/models/reflections.py b/models/reflections.py
+index 90cec2ee8..821706255 100644
+--- a/models/reflections.py
++++ b/models/reflections.py
+@@ -102,7 +102,7 @@ class ReflectionIgnore(Model):
+ 
+     ignore_id = AutoKeyField()
+     pattern = KeyField()  # pattern string to match against
+-    reason = Field(null=True, max_length=500)
++    reason = Field(null=True)
+     created_at = SortedField(type=float)
+     expires_at = SortedField(type=float)  # Unix timestamp when this expires
+ 
+diff --git a/models/telegram.py b/models/telegram.py
+index 807bfc8b5..16bb01233 100644
+--- a/models/telegram.py
++++ b/models/telegram.py
+@@ -8,8 +8,6 @@
+ 
+ from popoto import AutoKeyField, Field, KeyField, Model, SortedField
+ 
+-MSG_MAX_CHARS = 50_000  # Full responses, no artificial cap
+-
+ 
+ class TelegramMessage(Model):
+     """Source of truth for incoming/outgoing Telegram messages in Redis.
+@@ -27,7 +25,7 @@ class TelegramMessage(Model):
+     message_id = KeyField(null=True)  # Telegram's message ID (KeyField enables O(1) filter lookup)
+     direction = KeyField()  # "in" | "out"
+     sender = KeyField()
+-    content = Field(max_length=MSG_MAX_CHARS)
++    content = Field()
+     timestamp = SortedField(type=float, partition_by="chat_id")
+     message_type = KeyField(default="text")  # text, media, response, acknowledgment
+     session_id = Field(null=True)
+diff --git a/models/telemetry.py b/models/telemetry.py
+index fd91d9f5f..74ec13954 100644
+--- a/models/telemetry.py
++++ b/models/telemetry.py
+@@ -28,7 +28,7 @@ class ObserverTelemetry(Model):
+     interjections = IntField(default=0)
+     skips = IntField(default=0)
+     events = ListField(default=list)
+-    last_decision_context = Field(null=True, max_length=500)
++    last_decision_context = Field(null=True)
+ 
+     class Meta:
+         ttl = 604800  # 7 days
+@@ -54,7 +54,7 @@ def record_decision(self, context: str | None = None) -> None:
+         """Record an observer decision."""
+         self.decisions = (self.decisions or 0) + 1
+         if context:
+-            self.last_decision_context = context[:500]
++            self.last_decision_context = context
+         self.save()
+ 
+     def record_interjection(self, description: str) -> None:
+diff --git a/monitoring/bridge_watchdog.py b/monitoring/bridge_watchdog.py
+index 6633c07b8..be33ddd8e 100644
+--- a/monitoring/bridge_watchdog.py
++++ b/monitoring/bridge_watchdog.py
+@@ -437,43 +437,11 @@ def revert_last_commit() -> bool:
+         return False
+ 
+ 
+-def send_telegram_alert(message: str) -> bool:
+-    """Send alert via Telegram (to supervisor DM)."""
+-    try:
+-        # Use the bridge's Telegram session to send a message
+-        # This is a simple approach - spawn a quick script
+-        script = f'''
+-import asyncio
+-from telethon import TelegramClient
+-from dotenv import load_dotenv
+-import os
+-
+-load_dotenv("{PROJECT_DIR}/.env")
+-from pathlib import Path as _P
+-load_dotenv(_P.home() / "Desktop" / "Valor" / ".env")
++def _hostname() -> str:
++    """Return machine hostname for log identification."""
++    import platform
+ 
+-async def send():
+-    client = TelegramClient(
+-        "{DATA_DIR}/valor_bridge",
+-        int(os.getenv("TELEGRAM_API_ID")),
+-        os.getenv("TELEGRAM_API_HASH"),
+-    )
+-    await client.start()
+-    # Send to supervisor (Tom's user ID from whitelist)
+-    await client.send_message(179144806, """{message}""")
+-    await client.disconnect()
+-
+-asyncio.run(send())
+-'''
+-        result = subprocess.run(
+-            [f"{PROJECT_DIR}/.venv/bin/python", "-c", script],
+-            capture_output=True,
+-            timeout=30,
+-        )
+-        return result.returncode == 0
+-    except Exception as e:
+-        logger.error(f"Failed to send Telegram alert: {e}")
+-        return False
++    return platform.node()
+ 
+ 
+ def _kill_detected_zombies() -> int:
+@@ -537,10 +505,10 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
+             clear_lock_files()
+ 
+             if revert_last_commit():
+-                send_telegram_alert(
+-                    f"🔄 Auto-revert triggered\n\n"
+-                    f"Issues: {', '.join(issues)}\n\n"
+-                    f"HEAD reverted to previous commit. Bridge restarting."
++                logger.warning(
++                    "[%s] Auto-revert triggered. Issues: %s. HEAD reverted to previous commit.",
++                    _hostname(),
++                    ", ".join(issues),
+                 )
+                 time.sleep(2)
+                 return restart_bridge()
+@@ -548,15 +516,14 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
+                 return execute_recovery(5, issues)
+ 
+         elif level == 5:
+-            # Alert human
+-            diagnostic = (
+-                "🚨 Bridge Recovery Failed\n\n"
+-                "Issues:\n" + "\n".join(f"• {i}" for i in issues) + "\n\n"
+-                "Recovery levels 1-4 exhausted.\n"
+-                "Manual intervention required."
++            # Log critical failure with hostname for multi-machine debugging
++            logger.critical(
++                "[%s] Bridge recovery failed — levels 1-4 exhausted."
++                " Issues: %s. Manual intervention required.",
++                _hostname(),
++                ", ".join(issues),
+             )
+-            send_telegram_alert(diagnostic)
+-            log_crash("Recovery exhausted - alerting human")
++            log_crash(f"[{_hostname()}] Recovery exhausted")
+             return False
+ 
+     finally:
+diff --git a/tests/unit/test_log_large_field.py b/tests/unit/test_log_large_field.py
+new file mode 100644
+index 000000000..5c396e65b
+--- /dev/null
++++ b/tests/unit/test_log_large_field.py
+@@ -0,0 +1,48 @@
++"""Unit tests for tools/field_utils.py log_large_field utility."""
++
++import logging
++
++from tools.field_utils import log_large_field
++
++
++class TestLogLargeField:
++    """Tests for the log_large_field observability helper."""
++
++    def test_none_input_no_op(self, caplog):
++        """None value should not log anything."""
++        with caplog.at_level(logging.WARNING):
++            log_large_field("test_field", None)
++        assert len(caplog.records) == 0
++
++    def test_empty_string_no_op(self, caplog):
++        """Empty string should not log anything."""
++        with caplog.at_level(logging.WARNING):
++            log_large_field("test_field", "")
++        assert len(caplog.records) == 0
++
++    def test_short_string_no_warning(self, caplog):
++        """String under threshold should not log a warning."""
++        with caplog.at_level(logging.WARNING):
++            log_large_field("test_field", "hello world")
++        assert len(caplog.records) == 0
++
++    def test_over_threshold_logs_warning(self, caplog):
++        """String over threshold should log a warning with field name and length."""
++        with caplog.at_level(logging.WARNING):
++            log_large_field("test_field", "x" * 60_000)
++        assert len(caplog.records) == 1
++        assert "test_field" in caplog.records[0].message
++        assert "60000" in caplog.records[0].message
++
++    def test_custom_threshold(self, caplog):
++        """Custom threshold should be respected."""
++        with caplog.at_level(logging.WARNING):
++            log_large_field("test_field", "x" * 200, threshold=100)
++        assert len(caplog.records) == 1
++        assert "200" in caplog.records[0].message
++
++    def test_at_threshold_no_warning(self, caplog):
++        """String exactly at threshold should not log (only over)."""
++        with caplog.at_level(logging.WARNING):
++            log_large_field("test_field", "x" * 50_000)
++        assert len(caplog.records) == 0
+diff --git a/tests/unit/test_observer_telemetry.py b/tests/unit/test_observer_telemetry.py
+index 3d09a6244..30df98f48 100644
+--- a/tests/unit/test_observer_telemetry.py
++++ b/tests/unit/test_observer_telemetry.py
+@@ -58,13 +58,13 @@ def test_record_decision_with_context(self):
+         reloaded = ObserverTelemetry.get_or_create(self.TEST_DATE)
+         assert reloaded.last_decision_context == "test context string"
+ 
+-    def test_record_decision_truncates_context(self):
+-        """record_decision truncates context to 500 chars."""
++    def test_record_decision_stores_full_context(self):
++        """record_decision stores full context without truncation."""
+         record = ObserverTelemetry.get_or_create(self.TEST_DATE)
+         long_context = "x" * 600
+         record.record_decision(long_context)
+         reloaded = ObserverTelemetry.get_or_create(self.TEST_DATE)
+-        assert len(reloaded.last_decision_context) == 500
++        assert len(reloaded.last_decision_context) == 600
+ 
+     def test_record_interjection_increments(self):
+         """record_interjection increments the interjections counter."""
+diff --git a/tools/field_utils.py b/tools/field_utils.py
+new file mode 100644
+index 000000000..dd872064d
+--- /dev/null
++++ b/tools/field_utils.py
+@@ -0,0 +1,34 @@
++"""Field observability utilities.
++
++Lightweight helpers for monitoring unusually large field values at storage
++boundaries. These are observation-only -- they never truncate or reject data.
++"""
++
++import logging
++
++logger = logging.getLogger(__name__)
++
++
++def log_large_field(
++    field_name: str,
++    value: str | None,
++    threshold: int = 50_000,
++) -> None:
++    """Log a warning when a field value exceeds a soft size threshold.
++
++    This is an observability-only helper. It never truncates, rejects, or
++    modifies the value. Use it at high-traffic storage entry points
++    (e.g., job enqueue, TelegramMessage creation) to surface unexpectedly
++    large values for investigation.
++
++    Args:
++        field_name: Name of the field being checked (for log context).
++        value: The string value to check. None and empty strings are no-ops.
++        threshold: Character count above which a warning is emitted.
++            Defaults to 50,000 (~12k tokens).
++    """
++    if not value:
++        return
++    length = len(value)
++    if length > threshold:
++        logger.warning(f"Large field value: {field_name}={length} chars (threshold={threshold})")
+diff --git a/tools/telegram_history/__init__.py b/tools/telegram_history/__init__.py
+index 556a035b6..896fee546 100644
+--- a/tools/telegram_history/__init__.py
++++ b/tools/telegram_history/__init__.py
+@@ -145,9 +145,11 @@ def store_message(
+         dict with storage result: {"stored": True, "id": msg_id, "chat_id": chat_id}
+     """
+     from models.telegram import TelegramMessage
++    from tools.field_utils import log_large_field
+ 
+     ts = _parse_ts(timestamp)
+     direction = "out" if sender and sender.lower() == "valor" else "in"
++    log_large_field("TelegramMessage.content", content)
+ 
+     try:
+         msg = TelegramMessage.create(

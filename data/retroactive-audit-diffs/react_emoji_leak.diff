@@ -1,0 +1,319 @@
+diff --git a/agent/teammate_handler.py b/agent/teammate_handler.py
+index 3f1a1500b..d2aedc9d9 100644
+--- a/agent/teammate_handler.py
++++ b/agent/teammate_handler.py
+@@ -19,8 +19,8 @@
+ def build_teammate_instructions() -> str:
+     """Build Teammate-specific instructions to replace PM dispatch block.
+ 
+-    These instructions guide the ChatSession to answer with humility,
+-    clarification-first behavior, and brevity, using only read-only tools.
++    These instructions guide the ChatSession to answer directly and briefly,
++    with honest self-identity and no forced engagement patterns.
+ 
+     Returns:
+         Instruction string to inject into the enriched message.
+@@ -33,16 +33,21 @@ def build_teammate_instructions() -> str:
+         '2. Query the memory system: `python -m tools.memory_search search "relevant query"`\n'
+         "3. Consult knowledge base docs in docs/features/ and docs/ directories\n"
+         "4. Cite your findings — file paths, line numbers, memory entries, doc references\n\n"
+-        "CONVERSATIONAL HUMILITY RULES:\n"
+-        "- Restate your understanding of the question before answering. "
+-        "If the question is ambiguous, ask for clarification alongside your answer.\n"
+-        "- Use hedged language: 'I think', 'from what I've seen', 'it looks like' — "
+-        "not definitive declarations.\n"
+-        "- Cover 2-3 angles briefly rather than one exhaustively. "
+-        "Mention alternative interpretations if they exist.\n"
+-        "- Keep responses brief: 2-4 sentences for straightforward questions, "
+-        "one short paragraph for complex ones.\n"
+-        "- End with a follow-up question if you are not confident you understood the ask.\n"
++        "IDENTITY:\n"
++        "- You ARE an AI agent — fully agentic, autonomous, running 24/7. Own that.\n"
++        "- Never project human limitations onto yourself ('we all struggle with...', "
++        "'no one has figured out...'). You are not a human pretending to be relatable.\n"
++        "- Be honest about what you are and what you can do.\n\n"
++        "CONVERSATIONAL RULES:\n"
++        "- Keep responses brief: 1-3 sentences usually. Match the energy of the chat.\n"
++        "- NOT every message needs a question. Most don't. Just respond to what was said.\n"
++        "- Only ask a question when you genuinely need clarification to help — not to "
++        "sound engaged or keep the conversation going.\n"
++        "- Don't try to sound clever or insightful. Just be direct and useful.\n"
++        "- Don't patronize. Avoid 'great question!' or 'that puts you ahead of most.'\n"
++        "- If the question is ambiguous, ask for clarification alongside your answer.\n"
++        "- Use hedged language ('I think', 'from what I've seen') for uncertain claims, "
++        "but be direct about things you know.\n"
+         "- Answer their specific situation first. Only reference internal systems or "
+         "architecture when directly relevant to what they asked — never unprompted.\n\n"
+         "TOOL AND FORMAT RULES:\n"
+@@ -65,5 +70,5 @@ def build_teammate_instructions() -> str:
+         "- REACT: <emoji> — respond with just an emoji (e.g. for banter)\n"
+         "- SILENT — send nothing\n"
+         "- CONTINUE — keep working if you stopped too early\n\n"
+-        "You are a curious colleague who happens to know the codebase."
++        "You are a direct, knowledgeable colleague — not an interviewer."
+     )
+diff --git a/bridge/response.py b/bridge/response.py
+index f8500be93..8c8dfdc66 100644
+--- a/bridge/response.py
++++ b/bridge/response.py
+@@ -176,6 +176,14 @@ def filter_tool_logs(response: str) -> str:
+         r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
+     )
+ 
++    # Delivery-choice prefixes: internal agent control signals that should never
++    # be sent as user-facing text. These are parsed by the stop hook to set
++    # delivery_action on the session, but can leak through the nudge loop's
++    # parallel send path if the stop hook hasn't written to Redis yet.
++    delivery_choice_pattern = re.compile(
++        r"^(REACT:\s*|SEND\s*$|EDIT:\s*|SILENT\s*$|CONTINUE\s*$)", re.IGNORECASE
++    )
++
+     for line in lines:
+         stripped = line.strip()
+ 
+@@ -186,6 +194,11 @@ def filter_tool_logs(response: str) -> str:
+                 filtered.append(line)
+             continue
+ 
++        # Skip delivery-choice control signals (REACT:, SEND, EDIT:, SILENT, CONTINUE)
++        # These are internal protocol between agent and stop hook, never user-facing.
++        if delivery_choice_pattern.match(stripped):
++            continue
++
+         # Skip lines matching explicit tool log patterns
+         if any(pattern.match(stripped) for pattern in TOOL_LOG_PATTERNS):
+             continue
+diff --git a/docs/features/README.md b/docs/features/README.md
+index f639f1fb6..f5e83ca17 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -13,6 +13,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Agent Session Model](agent-session-model.md) | Unified lifecycle model with DatetimeFields, SessionEvent log, consolidated DictFields | Shipped |
+ | [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
+ | [Agent Session Scheduling](agent-session-scheduling.md) | Agent-initiated queue operations: schedule SDLC sessions, deferred execution, 4-tier priority, queue manipulation | Shipped |
++| [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) | Delivery-choice protocol (SEND/EDIT/REACT/SILENT/CONTINUE) with defense-in-depth filtering to prevent control signal text leaking to users | Shipped |
+ | [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
+ | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
+ | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
+@@ -112,7 +113,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
+ | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
+ | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
+-| [Teammate Conversational Humility](qa-conversational-humility.md) | Humility-first Teammate responses: brevity, clarification-first, stop-hook review gate for delivery control | Shipped |
++| [Teammate Conversational Humility](qa-conversational-humility.md) | Direct, honest Teammate responses: brevity, hedged language for uncertain claims, stop-hook review gate for delivery control | Shipped |
+ | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
+ | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
+ | [Telegram PM Guide](telegram-pm-guide.md) | PM-facing guide for Telegram interaction patterns, session resumption, and pipeline signals | Shipped |
+diff --git a/docs/features/agent-controlled-delivery.md b/docs/features/agent-controlled-delivery.md
+new file mode 100644
+index 000000000..c3a3e0ed8
+--- /dev/null
++++ b/docs/features/agent-controlled-delivery.md
+@@ -0,0 +1,32 @@
++# Agent-Controlled Delivery
++
++The agent uses delivery-choice prefixes to control how its output is routed to the user. These are internal protocol signals parsed by the stop hook (`agent/hooks/stop.py`), not user-facing text.
++
++## Delivery Choices
++
++| Prefix | Action | Description |
++|--------|--------|-------------|
++| `SEND` | deliver | Send the message text to the user (default) |
++| `REACT: <emoji>` | react | Apply emoji as a Telegram reaction on the original message |
++| `EDIT: <text>` | edit | Edit a previous message with new text |
++| `SILENT` | silent | Suppress output entirely |
++| `CONTINUE` | continue | Signal the agent should keep working |
++
++## Data Flow
++
++1. Agent outputs text with a delivery-choice prefix (e.g., `REACT: thumbs_up`)
++2. Stop hook (`agent/hooks/stop.py`) parses the prefix and writes `delivery_action` + metadata to `AgentSession` in Redis
++3. Response system (`bridge/response.py`) reads `delivery_action` from the session and executes the appropriate action (send, react, edit, etc.)
++
++## Defense-in-Depth Filtering
++
++Delivery-choice prefixes are also filtered by `filter_tool_logs()` in `bridge/response.py` as a defense-in-depth measure. This prevents a race condition where the nudge loop's parallel send path delivers raw control signal text to the user before the stop hook has written `delivery_action` to Redis.
++
++The filter uses a case-insensitive regex matching delivery-choice prefixes at the start of a line. Lines matching the pattern are stripped from the output. This is stateless and has no timing dependencies.
++
++## Related
++
++- `agent/hooks/stop.py` -- Stop hook that parses delivery choices
++- `bridge/response.py` -- `filter_tool_logs()` with delivery-choice filter, `send_response_with_files()` that executes delivery actions
++- `bridge/telegram_bridge.py` -- Send callback that invokes `filter_tool_logs()`
++- PR #602 -- Original implementation of agent-controlled message delivery
+diff --git a/docs/features/agent-message-delivery.md b/docs/features/agent-message-delivery.md
+index fb7e67c14..7fdb5f826 100644
+--- a/docs/features/agent-message-delivery.md
++++ b/docs/features/agent-message-delivery.md
+@@ -77,4 +77,5 @@ The Teammate persona prompt includes a DELIVERY REVIEW section explaining the ch
+ - [Teammate Conversational Humility](qa-conversational-humility.md) — Teammate prompt design
+ - [Config-Driven Chat Mode](config-driven-chat-mode.md) — Persona routing
+ - [Chat-Dev Session Architecture](chat-dev-session-architecture.md) — Session types
++- [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) — Defense-in-depth filtering preventing delivery-choice text leaking to users
+ - Issue [#589](https://github.com/tomcounsell/ai/issues/589) — Tracking issue
+diff --git a/docs/features/qa-conversational-humility.md b/docs/features/qa-conversational-humility.md
+index a0b891dba..a952bf617 100644
+--- a/docs/features/qa-conversational-humility.md
++++ b/docs/features/qa-conversational-humility.md
+@@ -8,13 +8,13 @@ Controls that make QA responses in teammate group chats conversational rather th
+ 
+ ### Layer 1: Teammate Prompt Overhaul (`agent/teammate_handler.py`)
+ 
+-`build_teammate_instructions()` uses a "curious colleague" framing instead of "knowledgeable teammate who knows the codebase well". Key rules:
++`build_teammate_instructions()` uses a "direct, knowledgeable colleague" framing with honest AI self-identity. Key rules:
+ 
+-- Restate understanding before answering
+-- Ask for clarification when ambiguous
+-- Use hedged language ("I think", "from what I've seen", "it looks like")
+-- Cover 2-3 angles briefly, not one exhaustively
+-- End with a follow-up question when uncertain about the ask
++- Keep responses brief: 1-3 sentences usually, matching the energy of the chat
++- Not every message needs a question -- only ask when genuinely needed for clarification
++- Use hedged language ("I think", "from what I've seen") for uncertain claims, but be direct about known facts
++- No patronizing ("great question!") or forced engagement patterns
++- Own AI identity honestly -- no projecting human limitations
+ - Reference internal systems only when directly asked
+ 
+ ### Layer 2: Agent-Controlled Message Delivery (`agent/hooks/stop.py`)
+@@ -41,7 +41,7 @@ Classification uses a two-stage approach:
+ 
+ ## Test Coverage
+ 
+-- `tests/unit/test_qa_handler.py` -- Humility markers, curious colleague framing, brevity guidance
++- `tests/unit/test_qa_handler.py` -- Hedged language markers, direct colleague framing, brevity guidance
+ - `tests/e2e/test_message_pipeline.py` -- Bool return type for classify_needs_response
+ 
+ ## Related
+diff --git a/tests/unit/test_filter_delivery_choices.py b/tests/unit/test_filter_delivery_choices.py
+new file mode 100644
+index 000000000..974b77086
+--- /dev/null
++++ b/tests/unit/test_filter_delivery_choices.py
+@@ -0,0 +1,96 @@
++"""Tests for delivery-choice filtering in filter_tool_logs().
++
++Delivery-choice prefixes (REACT:, SEND, EDIT:, SILENT, CONTINUE) are internal
++agent control signals that should be filtered from user-facing output. They are
++parsed by the stop hook to set delivery_action, but can leak through the nudge
++loop's parallel send path as literal text.
++"""
++
++from bridge.response import filter_tool_logs
++
++
++class TestDeliveryChoiceFiltering:
++    """Delivery-choice lines are filtered from agent output."""
++
++    def test_react_with_emoji(self):
++        """REACT: followed by emoji is filtered completely."""
++        assert filter_tool_logs("REACT: \U0001f605") == ""
++
++    def test_react_no_emoji(self):
++        """REACT: with no emoji is still filtered."""
++        assert filter_tool_logs("REACT:") == ""
++
++    def test_react_whitespace_only(self):
++        """REACT: with trailing whitespace is filtered."""
++        assert filter_tool_logs("REACT:  ") == ""
++
++    def test_send(self):
++        """Bare SEND is filtered."""
++        assert filter_tool_logs("SEND") == ""
++
++    def test_edit_with_content(self):
++        """EDIT: followed by revised text is filtered."""
++        assert filter_tool_logs("EDIT: revised text here") == ""
++
++    def test_silent(self):
++        """Bare SILENT is filtered."""
++        assert filter_tool_logs("SILENT") == ""
++
++    def test_continue(self):
++        """Bare CONTINUE is filtered."""
++        assert filter_tool_logs("CONTINUE") == ""
++
++    def test_case_insensitive_react(self):
++        """Lowercase react: is also filtered."""
++        assert filter_tool_logs("react: \U0001f605") == ""
++
++    def test_case_insensitive_send(self):
++        """Lowercase send is also filtered."""
++        assert filter_tool_logs("send") == ""
++
++    def test_mixed_content_filters_only_delivery_line(self):
++        """In multi-line text, only the delivery-choice line is removed."""
++        result = filter_tool_logs("Hello\nREACT: \U0001f605")
++        assert "Hello" in result
++        assert "REACT" not in result
++
++    def test_mixed_content_preserves_other_lines(self):
++        """Multi-line text with delivery choice in middle preserves other lines."""
++        result = filter_tool_logs("Line one\nSILENT\nLine three")
++        assert "Line one" in result
++        assert "Line three" in result
++        assert "SILENT" not in result
++
++
++class TestNoFalsePositives:
++    """Normal text containing delivery-choice words is NOT filtered."""
++
++    def test_reacting_in_sentence(self):
++        """Word 'reacting' in normal text is not filtered."""
++        text = "I am reacting to this"
++        assert "reacting" in filter_tool_logs(text)
++
++    def test_send_as_substring(self):
++        """'send' as part of a longer message is not filtered."""
++        text = "Please send the report"
++        assert "send" in filter_tool_logs(text)
++
++    def test_react_in_middle_of_sentence(self):
++        """'react' embedded in a sentence is not filtered."""
++        text = "We should react quickly to this issue"
++        assert "react" in filter_tool_logs(text)
++
++    def test_edit_in_sentence(self):
++        """'edit' in a normal sentence is not filtered."""
++        text = "You can edit the document later"
++        assert "edit" in filter_tool_logs(text)
++
++    def test_continue_in_sentence(self):
++        """'continue' in a normal sentence is not filtered."""
++        text = "Let me continue with the explanation"
++        assert "continue" in filter_tool_logs(text)
++
++    def test_silent_in_sentence(self):
++        """'silent' in a normal sentence is not filtered."""
++        text = "The system was silent for a while"
++        assert "silent" in filter_tool_logs(text)
+diff --git a/tests/unit/test_qa_handler.py b/tests/unit/test_qa_handler.py
+index 43999d1e7..c61b25f77 100644
+--- a/tests/unit/test_qa_handler.py
++++ b/tests/unit/test_qa_handler.py
+@@ -39,19 +39,19 @@ def test_conversational_humility(self):
+         assert "from what I've seen" in result
+         assert "clarif" in result.lower()
+ 
+-    def test_curious_colleague_framing(self):
+-        """Teammate should frame as curious colleague, not authoritative expert."""
++    def test_direct_colleague_framing(self):
++        """Teammate should frame as direct colleague, not an interviewer."""
+         result = build_teammate_instructions()
+-        assert "curious colleague" in result
+-        # Old authoritative framing should be gone
++        assert "direct" in result.lower()
++        assert "colleague" in result
++        # Old framing should be gone
+         assert "knowledgeable teammate" not in result
+         assert "who knows the codebase well" not in result
+ 
+     def test_brevity_guidance(self):
+         """Teammate instructions should include brevity guidance."""
+         result = build_teammate_instructions()
+-        assert "2-4 sentences" in result or "brief" in result.lower()
+-        assert "paragraph" in result.lower()
++        assert "1-3 sentences" in result or "brief" in result.lower()
+ 
+     def test_research_first_behavior(self):
+         """Teammate instructions should emphasize research before answering."""

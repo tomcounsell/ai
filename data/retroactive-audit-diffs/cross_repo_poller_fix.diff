@@ -1,0 +1,255 @@
+diff --git a/docs/features/issue-poller.md b/docs/features/issue-poller.md
+index 0021c5490..4d5f5f0af 100644
+--- a/docs/features/issue-poller.md
++++ b/docs/features/issue-poller.md
+@@ -60,6 +60,25 @@ The poller filters out automated comments from the `/do-docs` cascade (Agent D)
+ - Latest comment ID tracking (for plan freshness gates)
+ - New activity evaluation (to prevent false re-processing)
+ 
++## Cross-Repo Dispatch
++
++When an issue belongs to a project other than the ai repo, the poller correctly targets that project's working directory instead of the ai repo. This prevents foreign-repo branches from being created inside the ai repo (which would wipe out ai files and corrupt git state).
++
++**How it works:**
++
++1. `poll_project()` extracts `working_directory` from the project dict
++2. `process_issue()` forwards it to `dispatch_plan_creation()`
++3. `dispatch_plan_creation()` runs `claude -p` with:
++   - `cwd=working_directory` (target project, not ai repo)
++   - `GH_REPO={org}/{repo}` env var (so the agent targets the right repo)
++   - `SDLC_TARGET_REPO={working_directory}` env var (for cross-repo plan file placement)
++
++For the ai repo itself (`working_directory == _project_root`), no new env vars are injected and behavior is unchanged.
++
++**Fallback:** If `working_directory` is empty or points to a non-existent path, a warning is logged and the ai repo root is used instead.
++
++This mirrors the pattern established in `agent/sdk_client.py` (PR #396) for Telegram-routed SDLC work.
++
+ ## Configuration
+ 
+ Projects are loaded from `~/Desktop/Valor/projects.json`. Only entries with a `github` key are polled:
+@@ -69,12 +88,15 @@ Projects are loaded from `~/Desktop/Valor/projects.json`. Only entries with a `g
+   "projects": {
+     "my-project": {
+       "github": {"org": "myorg", "repo": "myrepo"},
++      "working_directory": "~/src/my-project",
+       "telegram": {"groups": ["Dev: MyProject"]}
+     }
+   }
+ }
+ ```
+ 
++The `working_directory` field is required for cross-repo dispatch to work correctly. If omitted, the poller falls back to the ai repo root and logs a warning.
++
+ ## Installation
+ 
+ ```bash
+diff --git a/scripts/issue_poller.py b/scripts/issue_poller.py
+index 3f314130e..e62b1fc98 100644
+--- a/scripts/issue_poller.py
++++ b/scripts/issue_poller.py
+@@ -15,6 +15,7 @@
+ 
+ import json
+ import logging
++import os
+ import subprocess
+ import sys
+ import time
+@@ -274,11 +275,31 @@ def dispatch_plan_creation(
+     repo: str,
+     issue_number: int,
+     last_comment_id: str | None = None,
++    working_directory: str | None = None,
+ ) -> bool:
+     """Dispatch plan creation via claude -p subprocess.
+ 
+     Invokes the /do-plan skill to create a draft plan for the issue.
++    For foreign repos, sets GH_REPO and SDLC_TARGET_REPO env vars so the
++    spawned agent targets the correct repository instead of the ai repo.
+     """
++    # Resolve cwd: use working_directory if valid, else fall back to _project_root
++    if working_directory and Path(working_directory).exists():
++        cwd = working_directory
++    else:
++        if working_directory and not Path(working_directory).exists():
++            logger.warning(
++                f"working_directory {working_directory!r} does not exist, "
++                f"falling back to _project_root"
++            )
++        cwd = _project_root
++
++    # Build subprocess env: inject cross-repo vars for foreign repos
++    env = os.environ.copy()
++    if cwd != _project_root:
++        env["GH_REPO"] = f"{org}/{repo}"
++        env["SDLC_TARGET_REPO"] = cwd
++
+     prompt = (
+         f"Create a plan for issue #{issue_number} in {org}/{repo}. "
+         f"Use /do-plan to create a draft plan."
+@@ -287,7 +308,7 @@ def dispatch_plan_creation(
+         prompt += f" Initialize last_comment_id in the plan frontmatter to {last_comment_id}."
+ 
+     try:
+-        logger.info(f"Dispatching plan creation for {org}/{repo}#{issue_number}")
++        logger.info(f"Dispatching plan creation for {org}/{repo}#{issue_number} in {cwd}")
+         result = subprocess.run(
+             [
+                 "claude",
+@@ -299,7 +320,8 @@ def dispatch_plan_creation(
+             capture_output=True,
+             text=True,
+             timeout=300,  # 5 minute timeout for plan creation
+-            cwd=_project_root,
++            cwd=cwd,
++            env=env,
+         )
+         if result.returncode != 0:
+             logger.warning(
+@@ -345,6 +367,7 @@ def process_issue(
+     issue: dict,
+     all_open_issues: list[dict],
+     telegram_groups: list[str],
++    working_directory: str | None = None,
+ ) -> str:
+     """Process a single new issue.
+ 
+@@ -421,7 +444,7 @@ def process_issue(
+     last_comment_id = get_latest_comment_id(org, repo, number)
+ 
+     # Dispatch plan creation
+-    success = dispatch_plan_creation(org, repo, number, last_comment_id)
++    success = dispatch_plan_creation(org, repo, number, last_comment_id, working_directory)
+     if success:
+         apply_label(org, repo, number, "auto-planned")
+         send_telegram_notification(
+@@ -451,6 +474,7 @@ def poll_project(
+     org = project["org"]
+     repo = project["repo"]
+     telegram_groups = project.get("telegram_groups", [])
++    working_directory = project.get("working_directory") or None
+ 
+     logger.info(f"Polling {org}/{repo}...")
+ 
+@@ -473,7 +497,7 @@ def poll_project(
+     }
+ 
+     for issue in new_issues:
+-        status = process_issue(org, repo, issue, issues, telegram_groups)
++        status = process_issue(org, repo, issue, issues, telegram_groups, working_directory)
+         results[status] = results.get(status, 0) + 1
+ 
+     return results
+diff --git a/tests/test_issue_poller.py b/tests/test_issue_poller.py
+index 9def9539f..514d36a69 100644
+--- a/tests/test_issue_poller.py
++++ b/tests/test_issue_poller.py
+@@ -13,6 +13,8 @@
+ )
+ from scripts.issue_poller import (
+     AGENT_D_SIGNATURE,
++    _project_root,
++    dispatch_plan_creation,
+     filter_new_issues,
+     has_sufficient_context,
+     load_projects,
+@@ -249,9 +251,10 @@ def test_plans_new_unique_issue(
+             },
+             [],
+             [],
++            working_directory=None,
+         )
+         assert result == "planned"
+-        mock_dispatch.assert_called_once()
++        mock_dispatch.assert_called_once_with("org", "repo", 1, "12345", None)
+         mock_mark_seen.assert_called_with("org", "repo", 1)
+ 
+     @patch("scripts.issue_poller.mark_seen")
+@@ -270,6 +273,7 @@ def test_flags_insufficient_context(
+             {"number": 1, "title": "Bug", "body": "Fix it"},
+             [],
+             [],
++            working_directory=None,
+         )
+         assert result == "needs-review"
+         mock_label.assert_called_with("org", "repo", 1, "needs-review")
+@@ -280,7 +284,12 @@ def test_skips_existing_plan(self, mock_existing, mock_mark_seen):
+         mock_existing.return_value = True
+ 
+         result = process_issue(
+-            "org", "repo", {"number": 1, "title": "Test", "body": "Test body text"}, [], []
++            "org",
++            "repo",
++            {"number": 1, "title": "Test", "body": "Test body text"},
++            [],
++            [],
++            working_directory=None,
+         )
+         assert result == "skipped"
+ 
+@@ -291,3 +300,64 @@ class TestAgentDFiltering:
+     def test_agent_d_signature_constant(self):
+         """Verify the Agent D signature matches expected format."""
+         assert "_Auto-posted by /do-docs cascade_" in AGENT_D_SIGNATURE
++
++
++class TestDispatchPlanCreation:
++    """Test cross-repo dispatch behavior in dispatch_plan_creation()."""
++
++    @patch("scripts.issue_poller.subprocess.run")
++    def test_dispatch_uses_target_working_directory(self, mock_run, tmp_path):
++        """subprocess.run is called with cwd=working_directory for foreign repos."""
++        mock_run.return_value.returncode = 0
++        foreign_dir = str(tmp_path)
++
++        dispatch_plan_creation("myorg", "myrepo", 42, working_directory=foreign_dir)
++
++        call_kwargs = mock_run.call_args[1]
++        assert call_kwargs["cwd"] == foreign_dir
++
++    @patch("scripts.issue_poller.subprocess.run")
++    def test_dispatch_injects_gh_repo_env_for_foreign_repo(self, mock_run, tmp_path):
++        """GH_REPO env var is set to org/repo for foreign repos."""
++        mock_run.return_value.returncode = 0
++        foreign_dir = str(tmp_path)
++
++        dispatch_plan_creation("myorg", "myrepo", 42, working_directory=foreign_dir)
++
++        call_kwargs = mock_run.call_args[1]
++        assert call_kwargs["env"]["GH_REPO"] == "myorg/myrepo"
++
++    @patch("scripts.issue_poller.subprocess.run")
++    def test_dispatch_injects_sdlc_target_repo_for_foreign_repo(self, mock_run, tmp_path):
++        """SDLC_TARGET_REPO env var is set to working_directory for foreign repos."""
++        mock_run.return_value.returncode = 0
++        foreign_dir = str(tmp_path)
++
++        dispatch_plan_creation("myorg", "myrepo", 42, working_directory=foreign_dir)
++
++        call_kwargs = mock_run.call_args[1]
++        assert call_kwargs["env"]["SDLC_TARGET_REPO"] == foreign_dir
++
++    @patch("scripts.issue_poller.subprocess.run")
++    def test_dispatch_no_cross_repo_env_for_ai_repo(self, mock_run):
++        """GH_REPO and SDLC_TARGET_REPO are NOT injected when working_directory is _project_root."""
++        mock_run.return_value.returncode = 0
++
++        dispatch_plan_creation("tomcounsell", "ai", 10, working_directory=_project_root)
++
++        call_kwargs = mock_run.call_args[1]
++        assert "GH_REPO" not in call_kwargs["env"]
++        assert "SDLC_TARGET_REPO" not in call_kwargs["env"]
++        assert call_kwargs["cwd"] == _project_root
++
++    @patch("scripts.issue_poller.subprocess.run")
++    def test_dispatch_falls_back_to_project_root_when_working_dir_empty(self, mock_run):
++        """Empty working_directory falls back to _project_root with no cross-repo env vars."""
++        mock_run.return_value.returncode = 0
++
++        dispatch_plan_creation("myorg", "myrepo", 5, working_directory=None)
++
++        call_kwargs = mock_run.call_args[1]
++        assert call_kwargs["cwd"] == _project_root
++        assert "GH_REPO" not in call_kwargs["env"]
++        assert "SDLC_TARGET_REPO" not in call_kwargs["env"]

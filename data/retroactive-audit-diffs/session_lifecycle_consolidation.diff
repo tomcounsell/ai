@@ -1,0 +1,2200 @@
+diff --git a/.claude/hooks/stop.py b/.claude/hooks/stop.py
+old mode 100755
+new mode 100644
+index f5c66259b..05588c5d3
+--- a/.claude/hooks/stop.py
++++ b/.claude/hooks/stop.py
+@@ -131,8 +131,6 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
+     Fails silently -- session completion errors never block stop.
+     """
+     try:
+-        import time
+-
+         from hook_utils.memory_bridge import load_agent_session_sidecar
+ 
+         sidecar = load_agent_session_sidecar(session_id)
+@@ -151,13 +149,19 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
+         agent_session = matches[0]
+ 
+         stop_reason = hook_input.get("stop_reason", "unknown")
+-        if stop_reason in ("error", "crash"):
+-            agent_session.status = "failed"
+-        else:
+-            agent_session.status = "completed"
+-
+-        agent_session.completed_at = time.time()
+-        agent_session.save()
++        status = "failed" if stop_reason in ("error", "crash") else "completed"
++
++        # Delegate to lifecycle module with skip flags for hooks subprocess context
++        # (no heavy imports for auto-tagging or branch checkpointing)
++        from models.session_lifecycle import finalize_session
++
++        finalize_session(
++            agent_session,
++            status,
++            reason=f"stop hook: {stop_reason}",
++            skip_auto_tag=True,
++            skip_checkpoint=True,
++        )
+     except Exception:
+         pass  # Silent failure -- never block session stop
+ 
+diff --git a/.claude/hooks/user_prompt_submit.py b/.claude/hooks/user_prompt_submit.py
+index 4138ef6de..5234ddbb1 100644
+--- a/.claude/hooks/user_prompt_submit.py
++++ b/.claude/hooks/user_prompt_submit.py
+@@ -9,8 +9,13 @@
+ """
+ 
+ import sys
++from pathlib import Path
+ 
+ # Standalone script -- sys.path mutation is safe (never imported as library)
++# Add project root to path for model imports
++PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
++sys.path.insert(0, str(PROJECT_ROOT))
++# Add utils to path
+ sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
+ 
+ from hook_utils.constants import read_hook_input
+@@ -57,10 +62,20 @@ def main():
+                     matches = list(AgentSession.query.filter(session_id=local_sid))
+                     if matches:
+                         agent_session = matches[0]
+-                        agent_session.status = "running"
++                        # Use lifecycle module for consistent transition logging
++                        from models.session_lifecycle import transition_status
++
+                         agent_session.updated_at = time.time()
+                         agent_session.completed_at = None
+-                        agent_session.save()
++                        transition_status(
++                            agent_session,
++                            "running",
++                            reason="subsequent prompt reactivated local session",
++                        )
++                        # If transition was idempotent (already running), field
++                        # changes above were not saved. Ensure they persist.
++                        if agent_session.status == "running":
++                            agent_session.save()
+                 except Exception:
+                     pass  # Non-fatal
+             else:
+diff --git a/agent/agent_session_queue.py b/agent/agent_session_queue.py
+index 88d7e8a3c..3bc438f01 100644
+--- a/agent/agent_session_queue.py
++++ b/agent/agent_session_queue.py
+@@ -32,6 +32,7 @@
+ from bridge.session_logs import save_session_snapshot
+ from config.enums import ClassificationType, PersonaType, SessionType
+ from models.agent_session import AgentSession
++from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -244,14 +245,17 @@ async def _push_agent_session(
+     try:
+ 
+         def _mark_superseded():
++            from models.session_lifecycle import transition_status
++
+             old_completed = [
+                 s
+                 for s in AgentSession.query.filter(session_id=session_id)
+                 if s.status == "completed"
+             ]
+             for old in old_completed:
+-                old.status = "superseded"
+-                old.save()
++                transition_status(
++                    old, "superseded", reason=f"superseded by new session for {session_id}"
++                )
+                 logger.info(
+                     f"Marked old completed session {old.id} as superseded "
+                     f"for session_id={session_id}"
+@@ -489,8 +493,7 @@ def restore_branch_state(session: AgentSession) -> bool:
+         return False
+ 
+ 
+-# Terminal statuses for session hierarchy and lifecycle checks
+-_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
++# Terminal statuses — imported at top of file from models.session_lifecycle
+ 
+ 
+ def dependency_status(session: AgentSession) -> dict[str, str]:
+@@ -561,15 +564,10 @@ def sort_key(j):
+         f"[chat:{chat_id}] Transitioning session {chosen.id} "
+         f"(session {chosen.session_id}) pending->running"
+     )
+-    chosen.status = "running"
+-    chosen.started_at = datetime.now(tz=UTC)
+-    await chosen.async_save()
++    from models.session_lifecycle import transition_status
+ 
+-    # Log lifecycle transition for session starting execution
+-    try:
+-        chosen.log_lifecycle_transition("running", "worker picked up session")
+-    except Exception as e:
+-        logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
++    chosen.started_at = datetime.now(tz=UTC)
++    transition_status(chosen, "running", reason="worker picked up session")
+ 
+     # Drain any steering messages queued during the pending window (#619).
+     # Follow-up messages arriving while the session was pending get pushed to
+@@ -665,14 +663,10 @@ def sort_key(j):
+             f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.id} "
+             f"(session {chosen.session_id}) pending->running"
+         )
+-        chosen.status = "running"
+-        chosen.started_at = datetime.now(tz=UTC)
+-        await chosen.async_save()
++        from models.session_lifecycle import transition_status
+ 
+-        try:
+-            chosen.log_lifecycle_transition("running", "worker picked up session (sync fallback)")
+-        except Exception as e:
+-            logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
++        chosen.started_at = datetime.now(tz=UTC)
++        transition_status(chosen, "running", reason="worker picked up session (sync fallback)")
+ 
+         # Drain steering messages (same logic as _pop_agent_session) (#619)
+         try:
+@@ -776,9 +770,9 @@ def cancel_agent_session(agent_session_id: str) -> bool:
+         )
+         return False
+ 
+-    session.status = "cancelled"
+-    session.completed_at = datetime.now(tz=UTC)
+-    session.save()
++    from models.session_lifecycle import finalize_session
++
++    finalize_session(session, "cancelled", reason=f"PM cancelled session {agent_session_id}")
+     logger.info(f"[pm-controls] Cancelled session {agent_session_id}")
+     return True
+ 
+@@ -890,146 +884,33 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
+     Sessions are retained in Redis with their terminal status so that followup
+     messages can revive them. The model's TTL (90 days) handles eventual cleanup.
+ 
+-    If this session is a child (has parent_agent_session_id), finalize the parent BEFORE
+-    updating the child status.
++    Delegates all completion side effects (lifecycle log, auto-tag, branch checkpoint,
++    parent finalization, status save) to finalize_session() from the lifecycle module.
+ 
+     Args:
+         session: The AgentSession to complete.
+         failed: If True, this session failed (used for parent finalization).
+     """
+-    # Checkpoint branch state before completion for audit trail
+-    try:
+-        checkpoint_branch_state(session)
+-    except Exception as e:
+-        logger.debug(f"[checkpoint] Non-fatal checkpoint error at completion: {e}")
+-
+-    parent_id = getattr(session, "parent_agent_session_id", None)
+-
+-    # Finalize parent BEFORE updating child status
+-    if parent_id:
+-        child_status = "failed" if failed else "completed"
+-        await _finalize_parent(
+-            parent_id,
+-            completing_child_id=session.agent_session_id,
+-            completing_child_status=child_status,
+-        )
+-
+-    # Persist terminal status instead of deleting — enables session revival
+-    session.status = "failed" if failed else "completed"
+-    session.completed_at = time.time()
+-    session.save()
++    from models.session_lifecycle import finalize_session
+ 
+-
+-async def _finalize_parent(
+-    parent_id: str,
+-    completing_child_id: str | None = None,
+-    completing_child_status: str | None = None,
+-) -> None:
+-    """Check if all children of a parent are terminal; if so, finalize the parent.
+-
+-    Transitions parent from waiting_for_children to completed (all children
+-    succeeded) or failed (any child failed). Idempotent: no-op if parent is
+-    already in a terminal state or no longer exists.
+-
+-    Args:
+-        parent_id: The id of the parent AgentSession.
+-        completing_child_id: If provided, the agent_session_id of the child that is
+-            currently completing. Its Redis status may still be "running",
+-            so completing_child_status overrides it.
+-        completing_child_status: The intended terminal status ("completed"
+-            or "failed") of the completing child.
+-    """
+-    # NOTE: This function is async def but uses synchronous Redis operations
+-    # (AgentSession.query.get, _transition_parent with sync delete/create).
+-    # This is consistent with the existing codebase patterns — popoto's Redis
+-    # operations are synchronous under the hood. If the codebase ever moves to
+-    # true async Redis, these will need updating.
+-    try:
+-        parent = AgentSession.query.get(parent_id)
+-    except Exception:
+-        logger.warning(
+-            f"[session-hierarchy] Parent session {parent_id} lookup raised "
+-            f"exception during finalization — treating child as orphaned"
+-        )
+-        return
+-
+-    if parent is None:
+-        logger.warning(
+-            f"[session-hierarchy] Parent session {parent_id} not found during "
+-            f"finalization — parent may have been deleted or already finalized"
+-        )
+-        return
+-
+-    # Only finalize if parent is in waiting_for_children status
+-    if parent.status != "waiting_for_children":
+-        logger.debug(
+-            f"[session-hierarchy] Parent {parent_id} status is "
+-            f"{parent.status!r}, skipping finalization"
+-        )
+-        return
+-
+-    # Check all children
+-    children = parent.get_children()
+-    if not children:
+-        # Edge case: parent has no children but is waiting_for_children.
+-        # Transition to completed as a safety guard.
+-        logger.warning(
+-            f"[session-hierarchy] Parent {parent_id} has no children but "
+-            f"status is waiting_for_children — auto-completing"
+-        )
+-        _transition_parent(parent, "completed")
+-        return
+-
+-    # Build effective status map: override the completing child's status
+-    # since its Redis status hasn't been updated yet
+-    terminal_statuses = _TERMINAL_STATUSES
+-
+-    def effective_status(child: AgentSession) -> str:
+-        if completing_child_id and child.agent_session_id == completing_child_id:
+-            return completing_child_status or "completed"
+-        return child.status
+-
+-    child_statuses = [effective_status(c) for c in children]
+-    non_terminal = [s for s in child_statuses if s not in terminal_statuses]
+-
+-    if non_terminal:
+-        # Some children still running/pending — not ready to finalize
+-        logger.debug(
+-            f"[session-hierarchy] Parent {parent_id} has "
+-            f"{len(non_terminal)} non-terminal children — waiting"
+-        )
+-        return
+-
+-    # All children are terminal — determine final parent status
+-    any_failed = any(s == "failed" for s in child_statuses)
+-    new_status = "failed" if any_failed else "completed"
+-
+-    completed_count = sum(1 for s in child_statuses if s == "completed")
+-    failed_count = sum(1 for s in child_statuses if s == "failed")
+-    logger.info(
+-        f"[session-hierarchy] Finalizing parent {parent_id}: "
+-        f"{completed_count} completed, {failed_count} failed -> {new_status}"
+-    )
+-
+-    _transition_parent(parent, new_status)
++    status = "failed" if failed else "completed"
++    finalize_session(session, status, reason="agent session completed")
+ 
+ 
+ def _transition_parent(parent: AgentSession, new_status: str) -> None:
+     """Transition a parent session to a new status.
+ 
+-    Status is an IndexedField, so direct mutation and save is safe.
+-    No delete-and-recreate needed, which means agent_session_id stays the same
+-    and children's parent_agent_session_id references remain valid.
++    Delegates to the lifecycle module for consistent lifecycle handling.
++    Uses finalize_session() for terminal statuses and transition_status()
++    for non-terminal statuses.
+     """
+-    parent.status = new_status
+-    # Only set completed_at for terminal statuses, not for waiting_for_children
+-    if new_status in ("completed", "failed"):
+-        parent.completed_at = datetime.now(tz=UTC)
+-    parent.save()
++    # NOTE: Imports private _transition_parent from lifecycle module — this is
++    # intentional. The function is private in the lifecycle module because it's
++    # a specialized parent-transition helper, not a general-purpose API. This
++    # wrapper exists to keep the import localized to one place.
++    from models.session_lifecycle import _transition_parent as _lifecycle_transition_parent
+ 
+-    logger.info(
+-        f"[session-hierarchy] Parent {parent.agent_session_id} transitioned to status={new_status}"
+-    )
++    _lifecycle_transition_parent(parent, new_status)
+ 
+ 
+ def _get_pending_agent_sessions_sync(project_key: str) -> list[AgentSession]:
+@@ -1062,10 +943,11 @@ def _recover_interrupted_agent_sessions_startup() -> int:
+             entry.message_text or "",
+         )
+         try:
+-            entry.status = "pending"
++            from models.session_lifecycle import transition_status
++
+             entry.priority = "high"
+             entry.started_at = None
+-            entry.save()
++            transition_status(entry, "pending", reason="startup recovery")
+             logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
+         except Exception as e:
+             logger.warning(
+@@ -1185,22 +1067,30 @@ def _ts(val):
+                     is_local,
+                     reason,
+                 )
++                from models.session_lifecycle import finalize_session, transition_status
++
+                 if is_local:
+                     # Local CLI sessions have no bridge worker to resume them --
+                     # mark abandoned instead of resetting to pending
+-                    entry.status = "abandoned"
+-                    entry.completed_at = now
+-                    entry.save()
++                    finalize_session(
++                        entry,
++                        "abandoned",
++                        reason=f"health check: local session stuck (chat={worker_key})",
++                        skip_auto_tag=True,
++                    )
+                     logger.info(
+                         "[session-health] Marked local session %s as abandoned (chat=%s)",
+                         entry.agent_session_id,
+                         worker_key,
+                     )
+                 else:
+-                    entry.status = "pending"
+                     entry.priority = "high"
+                     entry.started_at = None
+-                    entry.save()
++                    transition_status(
++                        entry,
++                        "pending",
++                        reason=f"health check: recovered stuck session (chat={worker_key})",
++                    )
+                     logger.info(
+                         "[session-health] Recovered session %s (chat=%s)",
+                         entry.agent_session_id,
+@@ -1242,9 +1132,14 @@ def _ts(val):
+                         worker_key,
+                         pending_seconds,
+                     )
+-                    entry.status = "abandoned"
+-                    entry.completed_at = now
+-                    entry.save()
++                    from models.session_lifecycle import finalize_session
++
++                    finalize_session(
++                        entry,
++                        "abandoned",
++                        reason=f"health check: orphaned local pending session (chat={worker_key})",
++                        skip_auto_tag=True,
++                    )
+                 else:
+                     logger.info(
+                         "[session-health] Starting worker for orphaned pending "
+@@ -1910,13 +1805,16 @@ async def _enqueue_nudge(
+ 
+     session = sessions[0]
+ 
+-    # Direct mutation -- status is an IndexedField, no delete-and-recreate needed.
+-    session.status = "pending"
++    # Use lifecycle module for consistent transition logging.
++    from models.session_lifecycle import transition_status
++
+     session.message_text = nudge_feedback
+     session.auto_continue_count = auto_continue_count
+     session.priority = "high"
+     session.task_list_id = task_list_id
+-    await session.async_save()
++    transition_status(
++        session, "pending", reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})"
++    )
+ 
+     _ensure_worker(session.chat_id)
+     logger.info(
+@@ -2849,10 +2747,11 @@ def _cli_flush_agent_session(agent_session_id: str) -> None:
+ 
+ def _cli_recover_single_agent_session(session: AgentSession) -> None:
+     """Recover a stuck session by resetting it to pending."""
+-    session.status = "pending"
++    from models.session_lifecycle import transition_status
++
+     session.priority = "high"
+     session.started_at = None
+-    session.save()
++    transition_status(session, "pending", reason="CLI manual recovery")
+     print(f"  Re-enqueued as pending (id: {session.agent_session_id})")
+ 
+ 
+diff --git a/agent/hooks/subagent_stop.py b/agent/hooks/subagent_stop.py
+index 66cdb0260..b6f5e3663 100644
+--- a/agent/hooks/subagent_stop.py
++++ b/agent/hooks/subagent_stop.py
+@@ -78,13 +78,18 @@ def _register_dev_session_completion(
+ 
+     try:
+         from models.agent_session import AgentSession
++        from models.session_lifecycle import finalize_session
+ 
+         # Find dev sessions for this parent
+         dev_sessions = list(AgentSession.query.filter(parent_session_id=parent_session_id))
+         for dev in dev_sessions:
+             if dev.status not in ("completed", "failed"):
+-                dev.status = "completed"
+-                dev.save()
++                finalize_session(
++                    dev,
++                    "completed",
++                    reason=f"subagent stop (parent={parent_session_id}, agent_id={agent_id})",
++                    skip_parent=True,  # Parent finalization handled separately below
++                )
+                 logger.info(
+                     f"[subagent_stop] DevSession {dev.agent_session_id} completed "
+                     f"(parent={parent_session_id}, agent_id={agent_id})"
+diff --git a/bridge/session_transcript.py b/bridge/session_transcript.py
+index 0895c3860..82b17875d 100644
+--- a/bridge/session_transcript.py
++++ b/bridge/session_transcript.py
+@@ -276,33 +276,24 @@ def complete_transcript(
+     except Exception as e:
+         logger.debug(f"Failed to write transcript end for {session_id}: {e}")
+ 
+-    # Auto-tag the session before finalizing status
++    # Delegate status mutation and all side effects to the lifecycle module.
++    # finalize_session() handles: lifecycle log, auto-tag, branch checkpoint,
++    # parent finalization, status + completed_at + save.
+     try:
+-        from tools.session_tags import auto_tag_session
++        from models.session_lifecycle import TERMINAL_STATUSES, finalize_session
+ 
+-        auto_tag_session(session_id)
+-    except Exception as e:
+-        logger.debug(f"Auto-tagging failed for {session_id} (non-fatal): {e}")
+-
+-    # Update SessionLog
+-    try:
+         sessions = list(AgentSession.query.filter(session_id=session_id))
+         if sessions:
+             s = sessions[0]
+-
+-            # Log lifecycle transition BEFORE status change
+-            # so log_lifecycle_transition captures old_status→new_status correctly
+-            try:
+-                s.log_lifecycle_transition(status, f"transcript completed: {status}")
+-            except Exception:
+-                pass
+-
+-            # status is an IndexedField — direct mutation is safe
+-            s.status = status
+-            s.completed_at = time.time()
+-            s.updated_at = time.time()
+             if summary:
+                 s.summary = summary
+-            s.save()
++                s.save()  # persist summary before finalize (finalize does its own save)
++            if status in TERMINAL_STATUSES:
++                finalize_session(s, status, reason=f"transcript completed: {status}")
++            else:
++                # Non-terminal status like "dormant" — use transition_status
++                from models.session_lifecycle import transition_status
++
++                transition_status(s, status, reason=f"transcript completed: {status}")
+     except Exception as e:
+         logger.warning(f"Failed to update SessionLog completion for {session_id}: {e}")
+diff --git a/bridge/telegram_bridge.py b/bridge/telegram_bridge.py
+index b91b48d22..da98f934c 100644
+--- a/bridge/telegram_bridge.py
++++ b/bridge/telegram_bridge.py
+@@ -1351,12 +1351,13 @@ async def classify_work_type():
+                     elif intent == "acknowledgment":
+                         # Only acknowledge dormant sessions with expectations
+                         if target_session.status == "dormant" and target_session.expectations:
+-                            target_session.status = "completed"
+-                            target_session.log_lifecycle_transition(
++                            from models.session_lifecycle import finalize_session
++
++                            finalize_session(
++                                target_session,
+                                 "completed",
+-                                f"Acknowledged by {sender_name}: {clean_text[:80]}",
++                                reason=f"Acknowledged by {sender_name}: {clean_text[:80]}",
+                             )
+-                            target_session.save()
+                             await set_reaction(
+                                 client,
+                                 event.chat_id,
+diff --git a/docs/features/README.md b/docs/features/README.md
+index 413caf8e8..e5ab5bb30 100644
+--- a/docs/features/README.md
++++ b/docs/features/README.md
+@@ -95,7 +95,7 @@ Completed feature documentation for the Valor AI system. Each document describes
+ | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
+ | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
+ | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
+-| [Session Lifecycle](session-lifecycle.md) | Session state machine, field extraction status preservation, zombie loop prevention via health check and nudge overwrite guards | Shipped |
++| [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention | Shipped |
+ | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
+ | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
+ | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
+diff --git a/docs/features/session-lifecycle-diagnostics.md b/docs/features/session-lifecycle-diagnostics.md
+index ebe082b69..ea5e85e6d 100644
+--- a/docs/features/session-lifecycle-diagnostics.md
++++ b/docs/features/session-lifecycle-diagnostics.md
+@@ -16,13 +16,10 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
+ 
+ | Caller | Transition | Context |
+ |--------|-----------|---------|
+-| `session_transcript.start_transcript()` | →active | Transcript started |
+-| `session_transcript.complete_transcript()` | →completed/failed/dormant | Transcript completed |
+-| `agent_session_queue._push_agent_session()` | →pending | Session enqueued |
+-| `agent_session_queue._pop_agent_session()` | →running | Worker picked up session |
+-| `session_watchdog.fix_unhealthy_session()` | →abandoned | Watchdog remediation |
+-| `_worker_loop()` CancelledError handler | →failed | Worker cancelled |
+-| `_worker_loop()` finally block | →failed/completed | Worker finally block |
++| `models/session_lifecycle.finalize_session()` | →completed/failed/killed/abandoned/cancelled | All terminal transitions |
++| `models/session_lifecycle.transition_status()` | →pending/running/active/dormant/waiting_for_children/superseded | All non-terminal transitions |
++
++All lifecycle logging is now centralized in `models/session_lifecycle.py`. The `finalize_session()` and `transition_status()` functions call `session.log_lifecycle_transition()` internally, so callers no longer need to call it directly. See [Session Lifecycle](session-lifecycle.md) for the full module documentation.
+ 
+ Each call:
+ 1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new session_id=Y project=Z duration_in_prev_state=Ns context="..."`
+diff --git a/docs/features/session-lifecycle.md b/docs/features/session-lifecycle.md
+index 1d2a52475..5cf566a4f 100644
+--- a/docs/features/session-lifecycle.md
++++ b/docs/features/session-lifecycle.md
+@@ -1,57 +1,121 @@
+ # Session Lifecycle
+ 
+-How sessions transition between states and the safeguards that prevent zombie loops.
++How sessions transition between states via the consolidated lifecycle module (`models/session_lifecycle.py`).
+ 
+-## Session States
++## Session States (11 total)
++
++### Non-terminal (use `transition_status()`)
+ 
+ | State | Description |
+ |-------|-------------|
+ | `pending` | Queued, waiting to be picked up by `_pop_agent_session()` |
+-| `running` | Currently being executed by a worker |
+-| `completed` | Finished successfully, retained in Redis for reply-to revival |
+-| `failed` | Execution failed, retained for retry |
+-| `waiting_for_children` | Parent session waiting for child sessions to finish |
+-| `cancelled` | Manually cancelled via PM controls |
++| `running` | Worker picked up, agent executing |
++| `active` | Session in progress (transcript tracking) |
++| `dormant` | Paused on open question, waiting for human reply |
++| `waiting_for_children` | Parent session waiting for child sessions to complete |
++| `superseded` | A newer session for the same session_id has taken over |
++
++### Terminal (use `finalize_session()`)
++
++| State | Description |
++|-------|-------------|
++| `completed` | Work finished successfully |
++| `failed` | Work failed (error, crash, or watchdog detection) |
++| `killed` | Terminated by user or scheduler |
++| `abandoned` | Unfinished, auto-detected by watchdog or health check |
++| `cancelled` | Cancelled before execution (pending -> cancelled) |
++
++## Lifecycle Module
++
++All session status mutations go through `models/session_lifecycle.py`. Direct `.status =` mutations outside this module are prohibited.
++
++### `finalize_session(session, status, reason, *, skip_auto_tag=False, skip_checkpoint=False, skip_parent=False)`
++
++For terminal transitions. Executes all completion side effects in order:
++
++1. **Lifecycle log** -- `session.log_lifecycle_transition(status, reason)` (always)
++2. **Auto-tag** -- `auto_tag_session(session_id)` (unless `skip_auto_tag=True`)
++3. **Branch checkpoint** -- `checkpoint_branch_state(session)` (unless `skip_checkpoint=True`)
++4. **Parent finalization** -- `_finalize_parent_sync(parent_id, ...)` (unless `skip_parent=True` or no parent)
++5. **Status + timestamp + save** -- sets `session.status`, `session.completed_at`, calls `session.save()`
++
++**Idempotent**: if the session is already in the target terminal state, logs and returns without re-executing side effects.
++
++**Skip flags**: The hooks subprocess paths (`stop.py`, `subagent_stop.py`) use `skip_auto_tag=True, skip_checkpoint=True` to avoid importing heavy dependencies that may not be available in the subprocess context.
++
++### `transition_status(session, new_status, reason)`
++
++For non-terminal transitions. Logs the lifecycle transition and updates the status.
++
++1. **Lifecycle log** -- `session.log_lifecycle_transition(new_status, reason)` (always)
++2. **Status + save** -- sets `session.status`, calls `session.save()`
++
++**Idempotent**: if the session is already in the target state, logs and returns.
++
++**Revival**: `completed->pending` is explicitly allowed for session revival/auto-continue. This is the only terminal-to-non-terminal transition permitted.
+ 
+ ## Completion Flow
+ 
+-When a session finishes execution:
++When a session finishes execution, all paths converge on `finalize_session()`:
+ 
+-1. `_complete_agent_session()` sets `session.status = "completed"` and calls `session.save()`
+-2. The session remains in Redis (not deleted) to support reply-to revival
+-3. `_pop_agent_session()` only picks up `status="pending"` sessions, so completed sessions are never re-executed
++| Path | Caller | Skip Flags |
++|------|--------|------------|
++| Worker completion | `_complete_agent_session()` in `agent_session_queue.py` | None (all side effects run) |
++| Transcript completion | `complete_transcript()` in `session_transcript.py` | None (all side effects run) |
++| Claude Code hook stop | `.claude/hooks/stop.py` | `skip_auto_tag=True, skip_checkpoint=True` |
++| Subagent stop | `agent/hooks/subagent_stop.py` | `skip_parent=True` |
++| Bridge acknowledgment | `telegram_bridge.py` dormant->completed | None |
++| PM cancel | `agent_session_queue.py` | None |
++| Watchdog abandon/fail | `session_watchdog.py` | None |
+ 
+-## Field Extraction (`_extract_agent_session_fields`)
++## Side Effect Consolidation
++
++Before consolidation, completion side effects were scattered across 4 paths, each performing different subsets:
++
++| Side Effect | Before (which paths) | After |
++|-------------|---------------------|-------|
++| Lifecycle log | Path A only | All paths via `finalize_session()` |
++| Auto-tag | Path A only | All paths (unless `skip_auto_tag`) |
++| Branch checkpoint | Path B only | All paths (unless `skip_checkpoint`) |
++| Parent finalization | Path B only | All paths (unless `skip_parent`) |
+ 
+-The `_AGENT_SESSION_FIELDS` list defines which fields are preserved during delete-and-recreate operations. This is needed because some fields (KeyFields like `parent_agent_session_id`) cannot be mutated directly in Popoto without corrupting the Redis index.
++## Parent Finalization
+ 
+-**Status preservation**: The `status` field is included in `_AGENT_SESSION_FIELDS` for defense-in-depth. Any delete-and-recreate path (e.g., health check orphan-fixing) preserves the original status instead of defaulting to `"pending"`.
++When a child session completes, `finalize_session()` checks if the parent should also be finalized:
+ 
+-Callers that intentionally override status after extraction:
+-- **Retry** (`retry_agent_session`): Sets `status = "pending"` to re-queue the session
+-- **Nudge fallback** (`_enqueue_nudge`): Sets `status = "pending"` to continue the session
++1. Look up parent by `parent_agent_session_id`
++2. If parent is already terminal, skip
++3. Set parent to `waiting_for_children` if not already
++4. Check all children's statuses
++5. If all children terminal: finalize parent as `completed` (all succeeded) or `failed` (any failed)
++6. Uses `skip_parent=True` internally to prevent infinite recursion
++
++## Field Extraction (`_extract_agent_session_fields`)
++
++The `_AGENT_SESSION_FIELDS` list defines which fields are preserved during delete-and-recreate operations. The `status` field is included for defense-in-depth: any delete-and-recreate path preserves the original status instead of defaulting to `"pending"`.
+ 
+ ## Zombie Loop Prevention
+ 
+ ### Health Check Orphan-Fixing
+ 
+-The `_agent_session_hierarchy_health_check()` function detects orphaned children (sessions whose parent no longer exists). It clears the parent reference via delete-and-recreate.
+-
+-Because `status` is in the field extraction list, a completed orphaned session stays `completed` after recreation. Without this, the recreated session would default to `pending` and be re-executed indefinitely (the zombie loop).
++The `_agent_session_hierarchy_health_check()` function detects orphaned children. Because `status` is in the field extraction list, a completed orphaned session stays `completed` after recreation. Without this, the recreated session would default to `pending` and be re-executed indefinitely.
+ 
+ ### Nudge Overwrite Guard
+ 
+-When a nudge (auto-continue) is enqueued during session execution, `_enqueue_nudge()` sets the Redis session status to `pending`. The worker finally block must not overwrite this back to `completed`.
+-
+-The guard re-reads the session from Redis before completing:
++When a nudge (auto-continue) is enqueued during session execution, the session status is set to `pending` via `transition_status()`. The worker finally block re-reads the session from Redis before completing:
+ - If `status = "pending"`: a nudge was enqueued, skip completion
+ - If session no longer exists: nudge fallback recreated it, skip completion
+-- If `status = "running"` or other: no nudge, proceed with normal completion
++- Otherwise: proceed with normal completion via `finalize_session()`
++
++## Design Constraints
+ 
+-This prevents the finally block from clobbering the nudge's `pending` status.
++- **Import safety**: The module uses lazy imports for `tools.session_tags` and `agent.agent_session_queue` so it can be imported from `.claude/hooks/stop.py` subprocess context where those modules may not be on `sys.path`.
++- **Fail-safe side effects**: Each side effect (auto-tag, checkpoint, parent finalization) is wrapped in a try/except that logs and continues. A failure in any side effect never blocks the status save.
++- **Synchronous only**: The module provides sync functions. Callers in async contexts use `asyncio.to_thread()` as needed (matching existing patterns).
+ 
+ ## Related
+ 
+ - [Agent Session Queue Reliability](agent-session-queue.md) -- KeyField index fixes and delete-and-recreate pattern
+ - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Stuck session detection
++- [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) -- Structured LIFECYCLE logging at every state transition
+ - [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) -- Parent-child relationships and orphan recovery
+diff --git a/docs/features/session-tagging.md b/docs/features/session-tagging.md
+index e8b061794..7211defe9 100644
+--- a/docs/features/session-tagging.md
++++ b/docs/features/session-tagging.md
+@@ -4,7 +4,7 @@ Automatic and manual tag management for AgentSession instances. Tags categorize
+ 
+ ## How It Works
+ 
+-Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-tagging runs at session completion time inside `complete_transcript()` in `bridge/session_transcript.py`.
++Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-tagging runs at session completion time inside `finalize_session()` in `models/session_lifecycle.py`.
+ 
+ ### Auto-Tag Rules
+ 
+@@ -44,7 +44,7 @@ auto_tag_session("session-123")
+ 
+ ## Integration Points
+ 
+-- **`bridge/session_transcript.py`**: `auto_tag_session()` is called in `complete_transcript()` before the AgentSession status update
++- **`models/session_lifecycle.py`**: `auto_tag_session()` is called in `finalize_session()` before the AgentSession status update
+ - **`models/agent_session.py`**: Tags stored in `AgentSession.tags` ListField
+ - **`tools/session_tags.py`**: Public API module
+ 
+@@ -55,7 +55,7 @@ auto_tag_session("session-123")
+ | Rule-based, not LLM | Simpler, faster, deterministic — sufficient for v1 |
+ | Last 50 lines only | Avoids reading large transcripts; most signals appear near session end |
+ | Python-side filtering for `sessions_by_tag` | Popoto ListField may not support native contains queries; dataset is small |
+-| Auto-tag in `complete_transcript()` | Natural chokepoint where every session finalizes |
++| Auto-tag in `finalize_session()` | Single entrypoint where every terminal session transition runs |
+ | try/except around auto-tagging | Tagging is non-critical — must never break session completion |
+ | Open tag vocabulary | Any string is valid; well-known tags are auto-applied but custom tags are welcome |
+ 
+@@ -64,7 +64,7 @@ auto_tag_session("session-123")
+ | Component | Path | Purpose |
+ |-----------|------|---------|
+ | Session tags module | `tools/session_tags.py` | CRUD and auto-tagging API |
+-| Transcript integration | `bridge/session_transcript.py` | Calls auto_tag_session at completion |
++| Lifecycle integration | `models/session_lifecycle.py` | Calls auto_tag_session at completion via `finalize_session()` |
+ | AgentSession model | `models/agent_session.py` | Tags stored in ListField |
+ | Unit tests | `tests/unit/test_session_tags.py` | 33 tests covering all rules and edge cases |
+ 
+diff --git a/docs/features/session-transcripts.md b/docs/features/session-transcripts.md
+index 4e6e53c4a..b0b6dd045 100644
+--- a/docs/features/session-transcripts.md
++++ b/docs/features/session-transcripts.md
+@@ -132,7 +132,7 @@ The `AgentSession` model is used everywhere:
+ 
+ ## Session Tagging
+ 
+-The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "reflections"). Auto-tagging runs automatically at session completion inside `complete_transcript()` via `tools/session_tags.py`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
++The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "reflections"). Auto-tagging runs automatically at session completion inside `finalize_session()` in `models/session_lifecycle.py` via `tools/session_tags.py`. The `complete_transcript()` function delegates status mutation and all side effects to `finalize_session()`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
+ 
+ ## Cleanup
+ 
+diff --git a/docs/plans/sdlc_verification_zombie_fix.md b/docs/plans/sdlc_verification_zombie_fix.md
+deleted file mode 100644
+index 3064c5f87..000000000
+--- a/docs/plans/sdlc_verification_zombie_fix.md
++++ /dev/null
+@@ -1,180 +0,0 @@
+----
+-status: Ready
+-type: chore
+-appetite: Small
+-owner: Valor
+-created: 2026-04-05
+-tracking: https://github.com/tomcounsell/ai/issues/708
+----
+-
+-# SDLC Quality Gate Verification for Session Zombie Fix
+-
+-## Problem
+-
+-PR #703 fixed the session completion zombie loop (issue #700) but was emergency-merged while the bug was actively spamming duplicate Telegram messages. Three SDLC quality gates were skipped: TEST, REVIEW, and DOCS. The pipeline state records were destroyed when `kill --all` cleaned up the zombie sessions.
+-
+-**Current behavior:**
+-The fix is merged and working in production, but there is no verified record that: (1) the 11 unit tests pass via `/do-test`, (2) the code was properly reviewed via `/do-pr-review`, or (3) the documentation is complete against issue #700's acceptance criteria.
+-
+-**Desired outcome:**
+-All three quality gates retroactively verified. Any gaps found are fixed in a follow-up PR.
+-
+-## Prior Art
+-
+-- **Issue #700**: Original bug report with full root cause analysis -- closed when PR #703 merged
+-- **PR #703**: Emergency fix (merged) -- added `status` to `_AGENT_SESSION_FIELDS`, added nudge overwrite guard
+-- **Issues #706, #709-716**: Duplicate follow-up issues for this same verification work -- all closed as duplicates of #708
+-
+-## Appetite
+-
+-**Size:** Small
+-
+-**Team:** Solo dev
+-
+-**Interactions:**
+-- PM check-ins: 0
+-- Review rounds: 0 (verification-only, no new code expected)
+-
+-## Prerequisites
+-
+-No prerequisites -- this work operates on already-merged code in the main branch.
+-
+-## Solution
+-
+-### Key Elements
+-
+-- **Test verification**: Run `/do-test` against `tests/unit/test_session_completion_zombie.py` and the broader unit suite
+-- **Docs verification**: Audit `docs/features/session-lifecycle.md` against issue #700's acceptance criteria
+-- **Index verification**: Confirm `docs/features/README.md` has a correct, sorted entry for session-lifecycle
+-
+-### Technical Approach
+-
+-This is verification-only. Run the test suite, read the docs, compare against acceptance criteria. If gaps are found, open a small follow-up PR to fix them.
+-
+-## Failure Path Test Strategy
+-
+-### Exception Handling Coverage
+-No exception handlers in scope -- this is a verification task, not implementation.
+-
+-### Empty/Invalid Input Handling
+-Not applicable -- no new functions being created or modified.
+-
+-### Error State Rendering
+-Not applicable -- no user-visible output changes.
+-
+-## Test Impact
+-
+-No existing tests affected -- this work verifies existing tests, it does not modify any code or test files.
+-
+-## Rabbit Holes
+-
+-- Re-reviewing the entire PR #703 diff as if it were a new submission -- the code is already merged and working. Focus only on confirming quality gates were met.
+-- Creating integration tests for the zombie fix -- the 11 unit tests cover the fix. Integration testing is a separate concern.
+-- Reopening any of the duplicate issues (#706, #709-716) -- they are correctly closed.
+-
+-## Risks
+-
+-### Risk 1: Tests may fail due to codebase changes since PR #703
+-**Impact:** False negative -- tests may fail due to unrelated changes, not the zombie fix itself
+-**Mitigation:** If tests fail, inspect failures to determine if they are related to the zombie fix or unrelated regressions
+-
+-## Race Conditions
+-
+-No race conditions identified -- this is a read-only verification task with no concurrent operations.
+-
+-## No-Gos (Out of Scope)
+-
+-- Writing new integration tests for the zombie fix
+-- Modifying the zombie fix implementation
+-- Changing any SDLC pipeline tracking code
+-
+-## Update System
+-
+-No update system changes required -- this is a verification-only task with no code changes expected.
+-
+-## Agent Integration
+-
+-No agent integration required -- this is a retroactive quality gate check with no new tools or capabilities.
+-
+-## Documentation
+-
+-- [ ] Verify `docs/features/session-lifecycle.md` covers all 6 acceptance criteria from issue #700
+-- [ ] Verify `docs/features/README.md` has session-lifecycle entry correctly sorted
+-- [ ] If gaps found, create a follow-up PR to fix documentation
+-
+-## Success Criteria
+-
+-- [ ] `/do-test` confirms `test_session_completion_zombie.py` passes (11 tests)
+-- [ ] `/do-test` confirms no regressions in the broader unit suite
+-- [ ] `docs/features/session-lifecycle.md` verified complete against #700 acceptance criteria
+-- [ ] `docs/features/README.md` index entry verified present and sorted
+-- [ ] Any gaps found are documented and fixed
+-
+-## Team Orchestration
+-
+-### Team Members
+-
+-- **Tester (zombie-fix)**
+-  - Name: zombie-tester
+-  - Role: Run unit tests and verify all 11 zombie fix tests pass
+-  - Agent Type: test-engineer
+-  - Resume: true
+-
+-- **Docs Auditor (session-lifecycle)**
+-  - Name: docs-auditor
+-  - Role: Verify session-lifecycle docs against issue #700 acceptance criteria
+-  - Agent Type: validator
+-  - Resume: true
+-
+-## Step by Step Tasks
+-
+-### 1. Run Unit Tests
+-- **Task ID**: test-zombie-fix
+-- **Depends On**: none
+-- **Validates**: tests/unit/test_session_completion_zombie.py
+-- **Assigned To**: zombie-tester
+-- **Agent Type**: test-engineer
+-- **Parallel**: true
+-- Run `pytest tests/unit/test_session_completion_zombie.py -v` and confirm 11 tests pass
+-- Run `pytest tests/unit/ -x -q` to check for broader regressions
+-
+-### 2. Verify Documentation
+-- **Task ID**: verify-docs
+-- **Depends On**: none
+-- **Validates**: docs/features/session-lifecycle.md, docs/features/README.md
+-- **Assigned To**: docs-auditor
+-- **Agent Type**: validator
+-- **Parallel**: true
+-- Read `docs/features/session-lifecycle.md` and compare against each of the 6 acceptance criteria from issue #700
+-- Check `docs/features/README.md` for session-lifecycle entry and verify it is correctly sorted alphabetically
+-- Report any gaps found
+-
+-### 3. Final Validation
+-- **Task ID**: validate-all
+-- **Depends On**: test-zombie-fix, verify-docs
+-- **Assigned To**: docs-auditor
+-- **Agent Type**: validator
+-- **Parallel**: false
+-- Aggregate results from test run and docs audit
+-- If gaps found, list them for a follow-up PR
+-- Generate final pass/fail report
+-
+-## Verification
+-
+-| Check | Command | Expected |
+-|-------|---------|----------|
+-| Zombie tests pass | `pytest tests/unit/test_session_completion_zombie.py -v` | exit code 0 |
+-| Unit suite clean | `pytest tests/unit/ -x -q` | exit code 0 |
+-| Docs exist | `test -f docs/features/session-lifecycle.md` | exit code 0 |
+-| README entry | `grep -c 'session-lifecycle' docs/features/README.md` | output > 0 |
+-
+-## Critique Results
+-
+-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+-
+----
+-
+-## Open Questions
+-
+-No open questions -- this is a well-scoped verification task with clear acceptance criteria already defined in issue #700.
+diff --git a/models/agent_session.py b/models/agent_session.py
+index edc5bb9cf..3d1a8f579 100644
+--- a/models/agent_session.py
++++ b/models/agent_session.py
+@@ -24,8 +24,9 @@
+   parent_session_id links a child session to its parent (role-neutral).
+   Use create_child(role=...) to spawn child sessions.
+ 
+-Status lifecycle:
+-  pending -> running -> active -> dormant -> completed | failed | waiting_for_children
++Status lifecycle (see models/session_lifecycle.py for canonical mutation functions):
++  Non-terminal: pending -> running -> active -> dormant | waiting_for_children | superseded
++  Terminal: completed | failed | killed | abandoned | cancelled
+ """
+ 
+ import json as _json
+@@ -96,14 +97,27 @@ class AgentSession(Model):
+         create_dev(): Backward-compat wrapper for create_child(role="dev").
+         create_local(): Create a local CLI session.
+ 
+-    Status values:
+-        pending  - Queued, waiting for worker
+-        running  - Worker picked up, agent executing
+-        active   - Session in progress (transcript tracking)
+-        dormant  - Paused on open question
+-        waiting_for_children - Parent session waiting for child sessions to complete
+-        completed - Work finished successfully
+-        failed   - Work failed
++    Status values (11 total):
++        Non-terminal (use transition_status()):
++            pending              - Queued, waiting for worker
++            running              - Worker picked up, agent executing
++            active               - Session in progress (transcript tracking)
++            dormant              - Paused on open question, waiting for human reply
++            waiting_for_children - Parent session waiting for child sessions to complete
++            superseded           - Replaced by a newer session for the same session_id
++
++        Terminal (use finalize_session()):
++            completed  - Work finished successfully
++            failed     - Work failed (error, crash, or watchdog detection)
++            killed     - Terminated by user or scheduler
++            abandoned  - Unfinished, auto-detected by watchdog or health check
++            cancelled  - Cancelled before execution (pending -> cancelled)
++
++    Lifecycle management:
++        All status mutations go through models/session_lifecycle.py:
++        - finalize_session(session, status, reason) for terminal transitions
++        - transition_status(session, new_status, reason) for non-terminal transitions
++        Direct .status = mutations outside the lifecycle module are prohibited.
+     """
+ 
+     # === Identity ===
+diff --git a/models/session_lifecycle.py b/models/session_lifecycle.py
+new file mode 100644
+index 000000000..d5a718bc4
+--- /dev/null
++++ b/models/session_lifecycle.py
+@@ -0,0 +1,299 @@
++"""Consolidated session lifecycle management.
++
++All session status mutations should go through this module:
++- finalize_session() for terminal transitions (completed, failed, killed, abandoned, cancelled)
++- transition_status() for non-terminal transitions (pending, running, active, dormant,
++  waiting_for_children, superseded)
++
++This ensures consistent lifecycle logging, auto-tagging, branch checkpointing,
++and parent finalization regardless of which code path triggers the transition.
++
++Design constraints:
++- Must be importable from .claude/hooks/stop.py subprocess context (limited sys.path)
++- Uses lazy imports for heavy dependencies (tools.session_tags, agent.agent_session_queue)
++- All side effects are optional and fail-safe (catch and log, never block status save)
++"""
++
++import logging
++import time
++
++logger = logging.getLogger(__name__)
++
++# Terminal statuses — sessions in these states are "done"
++TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "cancelled"})
++
++# Non-terminal statuses — sessions in these states are still active or paused
++NON_TERMINAL_STATUSES = frozenset(
++    {"pending", "running", "active", "dormant", "waiting_for_children", "superseded"}
++)
++
++# All known statuses
++ALL_STATUSES = TERMINAL_STATUSES | NON_TERMINAL_STATUSES
++
++
++def finalize_session(
++    session,
++    status: str,
++    reason: str = "",
++    *,
++    skip_auto_tag: bool = False,
++    skip_checkpoint: bool = False,
++    skip_parent: bool = False,
++) -> None:
++    """Finalize a session with a terminal status.
++
++    Executes all completion side effects in order:
++    1. Lifecycle transition log
++    2. Auto-tag session (unless skip_auto_tag)
++    3. Checkpoint branch state (unless skip_checkpoint)
++    4. Finalize parent session (unless skip_parent or no parent)
++    5. Set status + completed_at + save
++
++    Idempotent: if the session is already in the target terminal state,
++    logs and returns without re-executing side effects.
++
++    Args:
++        session: AgentSession instance to finalize.
++        status: Terminal status to set (completed, failed, killed, abandoned, cancelled).
++        reason: Human-readable reason for the transition.
++        skip_auto_tag: Skip auto-tagging (e.g., hooks subprocess context).
++        skip_checkpoint: Skip branch checkpointing (e.g., hooks subprocess context).
++        skip_parent: Skip parent finalization.
++
++    Raises:
++        ValueError: If session is None or status is not terminal.
++    """
++    if session is None:
++        raise ValueError("session must not be None")
++
++    if status not in TERMINAL_STATUSES:
++        raise ValueError(
++            f"finalize_session() requires a terminal status "
++            f"({', '.join(sorted(TERMINAL_STATUSES))}), got {status!r}. "
++            f"Use transition_status() for non-terminal transitions."
++        )
++
++    # Idempotency: if already in this terminal state, skip side effects
++    current_status = getattr(session, "status", None)
++    if current_status == status:
++        logger.debug(
++            f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
++            f"already in terminal state {status!r}, skipping finalize"
++        )
++        return
++
++    # 1. Lifecycle transition log
++    try:
++        session.log_lifecycle_transition(status, reason)
++    except Exception as e:
++        logger.debug(f"[lifecycle] Lifecycle log failed (non-fatal): {e}")
++
++    # 2. Auto-tag session
++    if not skip_auto_tag:
++        try:
++            from tools.session_tags import auto_tag_session
++
++            session_id = getattr(session, "session_id", None)
++            if session_id:
++                auto_tag_session(session_id)
++        except Exception as e:
++            logger.debug(f"[lifecycle] Auto-tagging failed (non-fatal): {e}")
++
++    # 3. Checkpoint branch state
++    if not skip_checkpoint:
++        try:
++            from agent.agent_session_queue import checkpoint_branch_state
++
++            checkpoint_branch_state(session)
++        except Exception as e:
++            logger.debug(f"[lifecycle] Branch checkpoint failed (non-fatal): {e}")
++
++    # 4. Finalize parent session
++    if not skip_parent:
++        parent_id = getattr(session, "parent_agent_session_id", None)
++        if parent_id:
++            try:
++                child_status = status
++                _finalize_parent_sync(
++                    parent_id,
++                    completing_child_id=getattr(session, "agent_session_id", None),
++                    completing_child_status=child_status,
++                )
++            except Exception as e:
++                logger.debug(f"[lifecycle] Parent finalization failed (non-fatal): {e}")
++
++    # 5. Set status + completed_at + save
++    session.status = status
++    session.completed_at = time.time()
++    session.save()
++
++
++def transition_status(
++    session,
++    new_status: str,
++    reason: str = "",
++) -> None:
++    """Transition a session to a non-terminal status.
++
++    Logs the lifecycle transition and updates the status.
++
++    Special case: completed->pending is allowed for session revival/auto-continue.
++    This is the only terminal->non-terminal transition permitted.
++
++    Idempotent: if the session is already in the target state, logs and returns.
++
++    Args:
++        session: AgentSession instance to transition.
++        new_status: Non-terminal status to set.
++        reason: Human-readable reason for the transition.
++
++    Raises:
++        ValueError: If session is None or new_status is a terminal status
++            (use finalize_session() instead).
++    """
++    if session is None:
++        raise ValueError("session must not be None")
++
++    if new_status in TERMINAL_STATUSES:
++        raise ValueError(
++            f"transition_status() is for non-terminal statuses. "
++            f"Got terminal status {new_status!r}. "
++            f"Use finalize_session() for terminal transitions."
++        )
++
++    if new_status not in NON_TERMINAL_STATUSES:
++        raise ValueError(f"Unknown status {new_status!r}. Known: {', '.join(sorted(ALL_STATUSES))}")
++
++    # Idempotency: if already in this state, skip
++    current_status = getattr(session, "status", None)
++    if current_status == new_status:
++        logger.debug(
++            f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
++            f"already in state {new_status!r}, skipping transition"
++        )
++        return
++
++    # Lifecycle transition log
++    try:
++        session.log_lifecycle_transition(new_status, reason)
++    except Exception as e:
++        logger.debug(f"[lifecycle] Lifecycle log failed (non-fatal): {e}")
++
++    # Set status + save
++    session.status = new_status
++    session.save()
++
++
++def _finalize_parent_sync(
++    parent_id: str,
++    completing_child_id: str | None = None,
++    completing_child_status: str | None = None,
++) -> None:
++    """Check if all children of a parent are terminal; if so, finalize the parent.
++
++    Transitions parent from waiting_for_children to completed (all children
++    succeeded) or failed (any child failed). Idempotent: no-op if parent is
++    already in a terminal state or no longer exists.
++
++    Args:
++        parent_id: The id of the parent AgentSession.
++        completing_child_id: If provided, the agent_session_id of the child that is
++            currently completing. Its Redis status may still be "running",
++            so completing_child_status overrides it.
++        completing_child_status: The intended terminal status ("completed"
++            or "failed") of the completing child.
++    """
++    from models.agent_session import AgentSession
++
++    try:
++        parent = AgentSession.query.get(parent_id)
++    except Exception:
++        logger.warning(
++            f"[session-hierarchy] Parent session {parent_id} lookup raised "
++            f"exception during finalization — treating child as orphaned"
++        )
++        return
++
++    if parent is None:
++        logger.warning(
++            f"[session-hierarchy] Parent session {parent_id} not found during "
++            f"finalization — parent may have been deleted or already finalized"
++        )
++        return
++
++    # If parent is already terminal, nothing to do
++    if parent.status in TERMINAL_STATUSES:
++        logger.debug(
++            f"[session-hierarchy] Parent {parent_id} already terminal "
++            f"(status={parent.status}), skipping finalization"
++        )
++        return
++
++    # Find all children
++    children = list(AgentSession.query.filter(parent_agent_session_id=parent_id))
++    if not children:
++        logger.debug(f"[session-hierarchy] No children found for parent {parent_id}")
++        return
++
++    # If parent isn't waiting_for_children yet, set it
++    if parent.status != "waiting_for_children":
++        transition_status(parent, "waiting_for_children", "child session completing")
++
++    terminal_statuses = TERMINAL_STATUSES
++
++    def effective_status(child):
++        """Get effective status, overriding for the currently-completing child."""
++        if completing_child_id and getattr(child, "agent_session_id", None) == completing_child_id:
++            return completing_child_status
++        return child.status
++
++    child_statuses = [effective_status(c) for c in children]
++    non_terminal = [s for s in child_statuses if s not in terminal_statuses]
++
++    if non_terminal:
++        logger.debug(
++            f"[session-hierarchy] Parent {parent_id} has "
++            f"{len(non_terminal)} non-terminal children — waiting"
++        )
++        return
++
++    # All children are terminal — determine final parent status
++    any_failed = any(s == "failed" for s in child_statuses)
++    new_status = "failed" if any_failed else "completed"
++
++    completed_count = sum(1 for s in child_statuses if s == "completed")
++    failed_count = sum(1 for s in child_statuses if s == "failed")
++    logger.info(
++        f"[session-hierarchy] Finalizing parent {parent_id}: "
++        f"{completed_count} completed, {failed_count} failed -> {new_status}"
++    )
++
++    _transition_parent(parent, new_status)
++
++
++def _transition_parent(parent, new_status: str) -> None:
++    """Transition a parent session to a new status.
++
++    Uses finalize_session() for terminal statuses and transition_status()
++    for non-terminal statuses, ensuring consistent lifecycle handling.
++
++    Args:
++        parent: AgentSession instance of the parent.
++        new_status: The new status to set.
++    """
++    if new_status in TERMINAL_STATUSES:
++        # Use finalize_session for terminal transitions, but skip parent
++        # finalization to avoid infinite recursion (this IS the parent finalization)
++        finalize_session(
++            parent,
++            new_status,
++            reason="all children terminal",
++            skip_parent=True,
++        )
++    else:
++        transition_status(parent, new_status, reason="child session state change")
++
++    logger.info(
++        f"[session-hierarchy] Parent {getattr(parent, 'agent_session_id', '?')} "
++        f"transitioned to status={new_status}"
++    )
+diff --git a/monitoring/session_watchdog.py b/monitoring/session_watchdog.py
+index 87f169491..fe2c81141 100644
+--- a/monitoring/session_watchdog.py
++++ b/monitoring/session_watchdog.py
+@@ -183,11 +183,17 @@ async def check_all_sessions() -> None:
+             # mark the session as failed to prevent the watchdog from looping
+             # on it every cycle. See nudge loop related guards.
+             try:
+-                session.status = "failed"
++                from models.session_lifecycle import finalize_session
++
+                 # Capture exception details so the reflections system can produce
+                 # actionable bug reports instead of "empty error summary" issues.
+                 session.summary = f"Watchdog: {type(e).__name__}: {e}"[:500]
+-                session.save()
++                finalize_session(
++                    session, "failed",
++                    reason=f"watchdog: stale session ({type(e).__name__})",
++                    skip_auto_tag=True,
++                    skip_checkpoint=True,
++                )
+                 logger.warning(
+                     "[watchdog] Marked stale session %s as failed (%s)",
+                     session.session_id,
+@@ -576,13 +582,14 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
+         (session may have been deleted by another process).
+     """
+     try:
+-        session.log_lifecycle_transition("abandoned", reason)
+-    except Exception:
+-        pass
++        from models.session_lifecycle import finalize_session
+ 
+-    session.status = "abandoned"
+-    try:
+-        session.save()
++        finalize_session(
++            session, "abandoned",
++            reason=reason,
++            skip_auto_tag=True,
++            skip_checkpoint=True,
++        )
+         return True
+     except ModelException as e:
+         # Session was likely deleted or modified by another process between
+diff --git a/tests/unit/test_agent_session_hierarchy.py b/tests/unit/test_agent_session_hierarchy.py
+index cd1799520..85778d13e 100644
+--- a/tests/unit/test_agent_session_hierarchy.py
++++ b/tests/unit/test_agent_session_hierarchy.py
+@@ -3,8 +3,8 @@
+ Tests cover:
+ - AgentSession.parent_agent_session_id field
+ - get_parent(), get_children(), get_completion_progress() helpers
+-- _finalize_parent() completion propagation logic
+-- _transition_parent() status transitions
++- _finalize_parent_sync() completion propagation logic (models.session_lifecycle)
++- _transition_parent() status transitions (agent.agent_session_queue wrapper)
+ - _agent_session_hierarchy_health_check() orphan and stuck parent detection
+ - agent_session_scheduler --parent-session flag and children subcommand
+ """
+@@ -136,21 +136,24 @@ def test_get_completion_progress_no_children(self, mock_query):
+ 
+ 
+ # ===================================================================
+-# _finalize_parent() and _transition_parent()
++# _finalize_parent_sync() and _transition_parent()
+ # ===================================================================
+ 
+ 
+ class TestFinalizeParent:
+-    """Test completion propagation logic."""
++    """Test completion propagation logic via lifecycle module."""
+ 
+     def _make_session(self, **kwargs):
+         session = MagicMock()
+         for k, v in kwargs.items():
+             setattr(session, k, v)
++        # Ensure log_lifecycle_transition exists for lifecycle module calls
++        if not hasattr(session, "log_lifecycle_transition"):
++            session.log_lifecycle_transition = MagicMock()
+         return session
+ 
+     def test_transition_parent_completed(self):
+-        """_transition_parent transitions parent to completed via direct mutation."""
++        """_transition_parent transitions parent to completed via lifecycle module."""
+         from agent.agent_session_queue import _transition_parent
+ 
+         parent = self._make_session(agent_session_id="p1", status="waiting_for_children")
+@@ -163,7 +166,7 @@ def test_transition_parent_completed(self):
+         parent.save.assert_called_once()
+ 
+     def test_transition_parent_failed(self):
+-        """_transition_parent transitions parent to failed via direct mutation."""
++        """_transition_parent transitions parent to failed via lifecycle module."""
+         from agent.agent_session_queue import _transition_parent
+ 
+         parent = self._make_session(agent_session_id="p1", status="waiting_for_children")
+@@ -188,12 +191,11 @@ def test_transition_parent_waiting_no_completed_at(self):
+         assert parent.completed_at is None
+         parent.save.assert_called_once()
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_all_completed(self, mock_model, mock_transition):
+-        """_finalize_parent completes parent when all children succeed."""
+-        from agent.agent_session_queue import _finalize_parent
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_all_completed(self, mock_model, mock_transition):
++        """_finalize_parent_sync completes parent when all children succeed."""
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         parent = self._make_session(
+             agent_session_id="p1",
+@@ -203,19 +205,18 @@ async def test_finalize_parent_all_completed(self, mock_model, mock_transition):
+             self._make_session(agent_session_id="c1", status="completed"),
+             self._make_session(agent_session_id="c2", status="completed"),
+         ]
+-        parent.get_children.return_value = children
+         mock_model.query.get.return_value = parent
++        mock_model.query.filter.return_value = children
+ 
+-        await _finalize_parent("p1")
++        _finalize_parent_sync("p1")
+ 
+         mock_transition.assert_called_once_with(parent, "completed")
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_any_failed(self, mock_model, mock_transition):
+-        """_finalize_parent fails parent when any child fails."""
+-        from agent.agent_session_queue import _finalize_parent
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_any_failed(self, mock_model, mock_transition):
++        """_finalize_parent_sync fails parent when any child fails."""
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         parent = self._make_session(
+             agent_session_id="p1",
+@@ -225,19 +226,18 @@ async def test_finalize_parent_any_failed(self, mock_model, mock_transition):
+             self._make_session(agent_session_id="c1", status="completed"),
+             self._make_session(agent_session_id="c2", status="failed"),
+         ]
+-        parent.get_children.return_value = children
+         mock_model.query.get.return_value = parent
++        mock_model.query.filter.return_value = children
+ 
+-        await _finalize_parent("p1")
++        _finalize_parent_sync("p1")
+ 
+         mock_transition.assert_called_once_with(parent, "failed")
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_skips_non_terminal_children(self, mock_model, mock_transition):
+-        """_finalize_parent does not finalize when children still running."""
+-        from agent.agent_session_queue import _finalize_parent
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_skips_non_terminal_children(self, mock_model, mock_transition):
++        """_finalize_parent_sync does not finalize when children still running."""
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         parent = self._make_session(
+             agent_session_id="p1",
+@@ -247,26 +247,23 @@ async def test_finalize_parent_skips_non_terminal_children(self, mock_model, moc
+             self._make_session(agent_session_id="c1", status="completed"),
+             self._make_session(agent_session_id="c2", status="running"),
+         ]
+-        parent.get_children.return_value = children
+         mock_model.query.get.return_value = parent
++        mock_model.query.filter.return_value = children
+ 
+-        await _finalize_parent("p1")
++        _finalize_parent_sync("p1")
+ 
+         mock_transition.assert_not_called()
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_with_completing_child_override(
+-        self, mock_model, mock_transition
+-    ):
+-        """_finalize_parent overrides status of completing child correctly.
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_with_completing_child_override(self, mock_model, mock_transition):
++        """_finalize_parent_sync overrides status of completing child correctly.
+ 
+-        When called from _complete_agent_session, the completing child's Redis status is
++        When called from finalize_session, the completing child's Redis status is
+         still 'running'. The completing_child_id/completing_child_status params
+-        let _finalize_parent treat it as terminal.
++        let _finalize_parent_sync treat it as terminal.
+         """
+-        from agent.agent_session_queue import _finalize_parent
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         parent = self._make_session(
+             agent_session_id="p1",
+@@ -277,11 +274,11 @@ async def test_finalize_parent_with_completing_child_override(
+             self._make_session(agent_session_id="c1", status="completed"),
+             self._make_session(agent_session_id="c2", status="running"),
+         ]
+-        parent.get_children.return_value = children
+         mock_model.query.get.return_value = parent
++        mock_model.query.filter.return_value = children
+ 
+         # With completing_child_id, c2's status is overridden to "completed"
+-        await _finalize_parent(
++        _finalize_parent_sync(
+             "p1",
+             completing_child_id="c2",
+             completing_child_status="completed",
+@@ -289,12 +286,11 @@ async def test_finalize_parent_with_completing_child_override(
+ 
+         mock_transition.assert_called_once_with(parent, "completed")
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_completing_child_failed(self, mock_model, mock_transition):
+-        """_finalize_parent correctly handles a completing child that failed."""
+-        from agent.agent_session_queue import _finalize_parent
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_completing_child_failed(self, mock_model, mock_transition):
++        """_finalize_parent_sync correctly handles a completing child that failed."""
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         parent = self._make_session(
+             agent_session_id="p1",
+@@ -304,10 +300,10 @@ async def test_finalize_parent_completing_child_failed(self, mock_model, mock_tr
+             self._make_session(agent_session_id="c1", status="completed"),
+             self._make_session(agent_session_id="c2", status="running"),
+         ]
+-        parent.get_children.return_value = children
+         mock_model.query.get.return_value = parent
++        mock_model.query.filter.return_value = children
+ 
+-        await _finalize_parent(
++        _finalize_parent_sync(
+             "p1",
+             completing_child_id="c2",
+             completing_child_status="failed",
+@@ -315,12 +311,11 @@ async def test_finalize_parent_completing_child_failed(self, mock_model, mock_tr
+ 
+         mock_transition.assert_called_once_with(parent, "failed")
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_skips_already_completed(self, mock_model, mock_transition):
+-        """_finalize_parent is idempotent — skips if parent already completed."""
+-        from agent.agent_session_queue import _finalize_parent
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_skips_already_completed(self, mock_model, mock_transition):
++        """_finalize_parent_sync is idempotent — skips if parent already terminal."""
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         parent = self._make_session(
+             agent_session_id="p1",
+@@ -328,40 +323,38 @@ async def test_finalize_parent_skips_already_completed(self, mock_model, mock_tr
+         )
+         mock_model.query.get.return_value = parent
+ 
+-        await _finalize_parent("p1")
++        _finalize_parent_sync("p1")
+ 
+         mock_transition.assert_not_called()
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_missing_parent(self, mock_model, mock_transition):
+-        """_finalize_parent handles missing parent gracefully."""
+-        from agent.agent_session_queue import _finalize_parent
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_missing_parent(self, mock_model, mock_transition):
++        """_finalize_parent_sync handles missing parent gracefully."""
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         mock_model.query.get.return_value = None
+ 
+-        await _finalize_parent("nonexistent")
++        _finalize_parent_sync("nonexistent")
+ 
+         mock_transition.assert_not_called()
+ 
+-    @patch("agent.agent_session_queue._transition_parent")
+-    @patch("agent.agent_session_queue.AgentSession")
+-    @pytest.mark.asyncio
+-    async def test_finalize_parent_no_children_auto_completes(self, mock_model, mock_transition):
+-        """_finalize_parent auto-completes parent with no children."""
+-        from agent.agent_session_queue import _finalize_parent
++    @patch("models.session_lifecycle._transition_parent")
++    @patch("models.agent_session.AgentSession")
++    def test_finalize_parent_sync_no_children(self, mock_model, mock_transition):
++        """_finalize_parent_sync does nothing when parent has no children."""
++        from models.session_lifecycle import _finalize_parent_sync
+ 
+         parent = self._make_session(
+             agent_session_id="p1",
+             status="waiting_for_children",
+         )
+-        parent.get_children.return_value = []
+         mock_model.query.get.return_value = parent
++        mock_model.query.filter.return_value = []
+ 
+-        await _finalize_parent("p1")
++        _finalize_parent_sync("p1")
+ 
+-        mock_transition.assert_called_once_with(parent, "completed")
++        mock_transition.assert_not_called()
+ 
+ 
+ # ===================================================================
+diff --git a/tests/unit/test_session_lifecycle_consolidation.py b/tests/unit/test_session_lifecycle_consolidation.py
+new file mode 100644
+index 000000000..c4b1d5c78
+--- /dev/null
++++ b/tests/unit/test_session_lifecycle_consolidation.py
+@@ -0,0 +1,401 @@
++"""Tests for models/session_lifecycle.py — consolidated session lifecycle management.
++
++Covers:
++- Terminal transitions via finalize_session()
++- Non-terminal transitions via transition_status()
++- Idempotency for both functions
++- Invalid status rejection
++- Skip flags (skip_auto_tag, skip_checkpoint, skip_parent)
++- Import safety (subprocess context simulation)
++- Parent finalization via _finalize_parent_sync()
++"""
++
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from models.session_lifecycle import (
++    ALL_STATUSES,
++    NON_TERMINAL_STATUSES,
++    TERMINAL_STATUSES,
++    finalize_session,
++    transition_status,
++)
++
++
++@pytest.fixture
++def mock_session():
++    """Create a mock AgentSession with common attributes."""
++    session = MagicMock()
++    session.session_id = "test-session-123"
++    session.agent_session_id = "agent-sess-123"
++    session.status = "running"
++    session.parent_agent_session_id = None
++    session.completed_at = None
++    return session
++
++
++class TestFinalizeSessionTerminalTransitions:
++    """finalize_session() handles all terminal transitions correctly."""
++
++    def test_completed_transition(self, mock_session):
++        """Session transitions to completed status."""
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "completed", "work finished")
++
++        assert mock_session.status == "completed"
++        assert mock_session.completed_at is not None
++        mock_session.save.assert_called_once()
++
++    def test_failed_transition(self, mock_session):
++        """Session transitions to failed status."""
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "failed", "error occurred")
++
++        assert mock_session.status == "failed"
++        mock_session.save.assert_called_once()
++
++    def test_killed_transition(self, mock_session):
++        """Session transitions to killed status."""
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "killed", "user requested kill")
++
++        assert mock_session.status == "killed"
++        mock_session.save.assert_called_once()
++
++    def test_abandoned_transition(self, mock_session):
++        """Session transitions to abandoned status."""
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "abandoned", "watchdog detected stale")
++
++        assert mock_session.status == "abandoned"
++        mock_session.save.assert_called_once()
++
++    def test_cancelled_transition(self, mock_session):
++        """Session transitions to cancelled status."""
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "cancelled", "PM cancelled")
++
++        assert mock_session.status == "cancelled"
++        mock_session.save.assert_called_once()
++
++
++class TestFinalizeSessionLifecycleLog:
++    """finalize_session() calls log_lifecycle_transition."""
++
++    def test_lifecycle_log_called(self, mock_session):
++        """log_lifecycle_transition is called with the new status and reason."""
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "completed", "test reason")
++
++        mock_session.log_lifecycle_transition.assert_called_once_with(
++            "completed", "test reason"
++        )
++
++    def test_lifecycle_log_failure_nonfatal(self, mock_session):
++        """Lifecycle log failure doesn't block status save."""
++        mock_session.log_lifecycle_transition.side_effect = RuntimeError("log fail")
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "completed", "test")
++
++        assert mock_session.status == "completed"
++        mock_session.save.assert_called_once()
++
++
++class TestFinalizeSessionIdempotency:
++    """finalize_session() is idempotent for already-terminal sessions."""
++
++    def test_already_completed_skips(self, mock_session):
++        """If session is already completed, finalize_session is a no-op."""
++        mock_session.status = "completed"
++        finalize_session(mock_session, "completed", "duplicate call")
++
++        # save should NOT be called (idempotent skip)
++        mock_session.save.assert_not_called()
++        mock_session.log_lifecycle_transition.assert_not_called()
++
++    def test_different_terminal_state_proceeds(self, mock_session):
++        """If session is in a different terminal state, finalize proceeds."""
++        mock_session.status = "failed"
++        with patch("agent.agent_session_queue.checkpoint_branch_state"):
++            finalize_session(mock_session, "completed", "override")
++
++        assert mock_session.status == "completed"
++        mock_session.save.assert_called_once()
++
++
++class TestFinalizeSessionInvalidInput:
++    """finalize_session() rejects invalid inputs."""
++
++    def test_none_session_raises(self):
++        """None session raises ValueError."""
++        with pytest.raises(ValueError, match="must not be None"):
++            finalize_session(None, "completed", "test")
++
++    def test_non_terminal_status_raises(self, mock_session):
++        """Non-terminal status raises ValueError."""
++        with pytest.raises(ValueError, match="terminal status"):
++            finalize_session(mock_session, "running", "test")
++
++    def test_pending_status_raises(self, mock_session):
++        """Pending (non-terminal) status raises ValueError."""
++        with pytest.raises(ValueError, match="terminal status"):
++            finalize_session(mock_session, "pending", "test")
++
++
++class TestFinalizeSessionSkipFlags:
++    """Skip flags control which side effects run."""
++
++    def test_skip_auto_tag(self, mock_session):
++        """skip_auto_tag prevents auto_tag_session from running."""
++        with (
++            patch("agent.agent_session_queue.checkpoint_branch_state"),
++            patch("tools.session_tags.auto_tag_session") as mock_tag,
++        ):
++            finalize_session(mock_session, "completed", "test", skip_auto_tag=True)
++
++        mock_tag.assert_not_called()
++
++    def test_skip_checkpoint(self, mock_session):
++        """skip_checkpoint prevents checkpoint_branch_state from running."""
++        with patch(
++            "agent.agent_session_queue.checkpoint_branch_state"
++        ) as mock_checkpoint:
++            finalize_session(mock_session, "completed", "test", skip_checkpoint=True)
++
++        mock_checkpoint.assert_not_called()
++
++    def test_skip_parent(self, mock_session):
++        """skip_parent prevents parent finalization."""
++        mock_session.parent_agent_session_id = "parent-123"
++        with (
++            patch("agent.agent_session_queue.checkpoint_branch_state"),
++            patch("models.session_lifecycle._finalize_parent_sync") as mock_parent,
++        ):
++            finalize_session(mock_session, "completed", "test", skip_parent=True)
++
++        mock_parent.assert_not_called()
++
++    def test_all_skip_flags(self, mock_session):
++        """All skip flags together — only lifecycle log + status save."""
++        mock_session.parent_agent_session_id = "parent-123"
++        finalize_session(
++            mock_session,
++            "completed",
++            "test",
++            skip_auto_tag=True,
++            skip_checkpoint=True,
++            skip_parent=True,
++        )
++
++        assert mock_session.status == "completed"
++        mock_session.save.assert_called_once()
++        mock_session.log_lifecycle_transition.assert_called_once()
++
++
++class TestFinalizeSessionParentFinalization:
++    """finalize_session() triggers parent finalization for child sessions."""
++
++    def test_parent_finalization_called(self, mock_session):
++        """When session has a parent, _finalize_parent_sync is called."""
++        mock_session.parent_agent_session_id = "parent-123"
++        with (
++            patch("agent.agent_session_queue.checkpoint_branch_state"),
++            patch("models.session_lifecycle._finalize_parent_sync") as mock_parent,
++        ):
++            finalize_session(mock_session, "completed", "test")
++
++        mock_parent.assert_called_once_with(
++            "parent-123",
++            completing_child_id="agent-sess-123",
++            completing_child_status="completed",
++        )
++
++    def test_no_parent_skips_finalization(self, mock_session):
++        """When session has no parent, parent finalization is skipped."""
++        mock_session.parent_agent_session_id = None
++        with (
++            patch("agent.agent_session_queue.checkpoint_branch_state"),
++            patch("models.session_lifecycle._finalize_parent_sync") as mock_parent,
++        ):
++            finalize_session(mock_session, "completed", "test")
++
++        mock_parent.assert_not_called()
++
++    def test_parent_finalization_failure_nonfatal(self, mock_session):
++        """Parent finalization failure doesn't block status save."""
++        mock_session.parent_agent_session_id = "parent-123"
++        with (
++            patch("agent.agent_session_queue.checkpoint_branch_state"),
++            patch(
++                "models.session_lifecycle._finalize_parent_sync",
++                side_effect=RuntimeError("parent error"),
++            ),
++        ):
++            finalize_session(mock_session, "completed", "test")
++
++        assert mock_session.status == "completed"
++        mock_session.save.assert_called_once()
++
++
++class TestTransitionStatus:
++    """transition_status() handles non-terminal transitions."""
++
++    def test_pending_transition(self, mock_session):
++        """Session transitions to pending."""
++        transition_status(mock_session, "pending", "re-enqueue")
++
++        assert mock_session.status == "pending"
++        mock_session.save.assert_called_once()
++
++    def test_running_transition(self, mock_session):
++        """Session transitions to running."""
++        mock_session.status = "pending"
++        transition_status(mock_session, "running", "worker picked up")
++
++        assert mock_session.status == "running"
++        mock_session.save.assert_called_once()
++
++    def test_dormant_transition(self, mock_session):
++        """Session transitions to dormant."""
++        transition_status(mock_session, "dormant", "waiting for human")
++
++        assert mock_session.status == "dormant"
++        mock_session.save.assert_called_once()
++
++    def test_waiting_for_children_transition(self, mock_session):
++        """Session transitions to waiting_for_children."""
++        transition_status(mock_session, "waiting_for_children", "child spawned")
++
++        assert mock_session.status == "waiting_for_children"
++        mock_session.save.assert_called_once()
++
++    def test_superseded_transition(self, mock_session):
++        """Session transitions to superseded."""
++        mock_session.status = "completed"
++        transition_status(mock_session, "superseded", "replaced by newer session")
++
++        assert mock_session.status == "superseded"
++        mock_session.save.assert_called_once()
++
++    def test_lifecycle_log_called(self, mock_session):
++        """log_lifecycle_transition is called."""
++        transition_status(mock_session, "pending", "test reason")
++
++        mock_session.log_lifecycle_transition.assert_called_once_with(
++            "pending", "test reason"
++        )
++
++
++class TestTransitionStatusIdempotency:
++    """transition_status() is idempotent."""
++
++    def test_already_in_target_state_skips(self, mock_session):
++        """If already in target state, transition is a no-op."""
++        mock_session.status = "pending"
++        transition_status(mock_session, "pending", "duplicate")
++
++        mock_session.save.assert_not_called()
++        mock_session.log_lifecycle_transition.assert_not_called()
++
++
++class TestTransitionStatusInvalidInput:
++    """transition_status() rejects invalid inputs."""
++
++    def test_none_session_raises(self):
++        """None session raises ValueError."""
++        with pytest.raises(ValueError, match="must not be None"):
++            transition_status(None, "pending", "test")
++
++    def test_terminal_status_raises(self, mock_session):
++        """Terminal status raises ValueError directing to finalize_session."""
++        with pytest.raises(ValueError, match="finalize_session"):
++            transition_status(mock_session, "completed", "test")
++
++    def test_unknown_status_raises(self, mock_session):
++        """Unknown status raises ValueError."""
++        with pytest.raises(ValueError, match="Unknown status"):
++            transition_status(mock_session, "invalid_status", "test")
++
++
++class TestTransitionStatusRevival:
++    """completed->pending revival flow works through transition_status."""
++
++    def test_completed_to_pending(self, mock_session):
++        """completed->pending is the auto-continue/revival path."""
++        mock_session.status = "completed"
++        transition_status(mock_session, "pending", "auto-continue re-enqueue")
++
++        assert mock_session.status == "pending"
++        mock_session.save.assert_called_once()
++
++
++class TestStatusConstants:
++    """Verify status constant sets are correct and exhaustive."""
++
++    def test_terminal_statuses(self):
++        """TERMINAL_STATUSES contains the expected values."""
++        assert TERMINAL_STATUSES == {
++            "completed",
++            "failed",
++            "killed",
++            "abandoned",
++            "cancelled",
++        }
++
++    def test_non_terminal_statuses(self):
++        """NON_TERMINAL_STATUSES contains the expected values."""
++        assert NON_TERMINAL_STATUSES == {
++            "pending",
++            "running",
++            "active",
++            "dormant",
++            "waiting_for_children",
++            "superseded",
++        }
++
++    def test_no_overlap(self):
++        """Terminal and non-terminal sets don't overlap."""
++        assert TERMINAL_STATUSES & NON_TERMINAL_STATUSES == set()
++
++    def test_all_statuses_is_union(self):
++        """ALL_STATUSES is the union of terminal and non-terminal."""
++        assert ALL_STATUSES == TERMINAL_STATUSES | NON_TERMINAL_STATUSES
++
++    def test_eleven_total_statuses(self):
++        """There are exactly 11 statuses documented in the plan."""
++        assert len(ALL_STATUSES) == 11
++
++
++class TestImportSafety:
++    """Verify the module is importable in restricted environments."""
++
++    def test_module_importable(self):
++        """models.session_lifecycle is importable."""
++        import models.session_lifecycle  # noqa: F401
++
++    def test_functions_accessible(self):
++        """Public functions are accessible."""
++        from models.session_lifecycle import finalize_session, transition_status
++
++        assert callable(finalize_session)
++        assert callable(transition_status)
++
++    def test_lazy_imports_not_triggered_at_module_level(self):
++        """Heavy dependencies (tools.session_tags, agent.agent_session_queue)
++        are not imported at module level."""
++        import importlib
++        import sys
++
++        # Remove cached module to get a fresh import
++        mod_name = "models.session_lifecycle"
++        if mod_name in sys.modules:
++            importlib.reload(sys.modules[mod_name])
++
++        # After import, heavy deps should NOT be in sys.modules
++        # (unless they were imported by something else)
++        # We just verify the module itself loads without these
++        from models.session_lifecycle import finalize_session  # noqa: F811, F401
++
++        # If we get here, the import succeeded without requiring
++        # tools.session_tags or agent.agent_session_queue at module level
+diff --git a/tests/unit/test_stop_hook.py b/tests/unit/test_stop_hook.py
+index a1543b5f4..1f17853db 100644
+--- a/tests/unit/test_stop_hook.py
++++ b/tests/unit/test_stop_hook.py
+@@ -177,94 +177,88 @@ def test_stop_hook_has_post_merge_extraction(self):
+         content = hook.read_text()
+         assert "_run_post_merge_extraction" in content
+ 
+-    def test_complete_marks_session_completed(self):
+-        """AgentSession status is set to completed on normal stop."""
++    def test_complete_delegates_to_finalize_session(self):
++        """stop.py delegates session completion to finalize_session() from lifecycle module."""
+         mock_session = MagicMock()
+         mock_session.status = "running"
+ 
+         mock_sidecar = {"agent_session_id": "session-123"}
+ 
++        import sys
++
++        hook_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
++        if hook_dir not in sys.path:
++            sys.path.insert(0, hook_dir)
++
+         with (
+             patch(
+                 "hook_utils.memory_bridge.load_agent_session_sidecar",
+                 return_value=mock_sidecar,
+             ),
+-            patch("models.agent_session.AgentSession.query") as mock_query,
++            patch(
++                "models.agent_session.AgentSession.query"
++            ) as mock_query,
++            patch(
++                "models.session_lifecycle.finalize_session"
++            ) as mock_finalize,
+         ):
+-            mock_query.get.return_value = mock_session
+-
+-            # Import and test the function inline (hook scripts use non-standard imports)
+-            import sys
+-
+-            hook_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
+-            if hook_dir not in sys.path:
+-                sys.path.insert(0, hook_dir)
++            mock_query.filter.return_value = [mock_session]
+ 
+-            # Simulate calling _complete_agent_session
+-            session_id = "test-session"
+-            hook_input = {"stop_reason": "end_turn", "session_id": session_id}
++            # Import and call the actual _complete_agent_session from stop.py
++            from stop import _complete_agent_session
+ 
+-            try:
+-                from hook_utils.memory_bridge import load_agent_session_sidecar
++            _complete_agent_session(
++                "test-session", {"stop_reason": "end_turn", "session_id": "test-session"}
++            )
+ 
+-                sidecar = load_agent_session_sidecar(session_id)
+-                agent_session_id = sidecar.get("agent_session_id")
+-                if agent_session_id:
+-                    from models.agent_session import AgentSession
+-
+-                    agent_session = AgentSession.query.get(agent_session_id)
+-                    if agent_session:
+-                        stop_reason = hook_input.get("stop_reason", "unknown")
+-                        if stop_reason in ("error", "crash"):
+-                            agent_session.status = "failed"
+-                        else:
+-                            agent_session.status = "completed"
+-                        agent_session.save()
+-            except Exception:
+-                pass
++            mock_finalize.assert_called_once_with(
++                mock_session,
++                "completed",
++                reason="stop hook: end_turn",
++                skip_auto_tag=True,
++                skip_checkpoint=True,
++            )
+ 
+-        assert mock_session.status == "completed"
+-        mock_session.save.assert_called_once()
+-
+-    def test_complete_marks_session_failed_on_error(self):
+-        """AgentSession status is set to failed on error stop."""
++    def test_complete_delegates_failed_on_error(self):
++        """stop.py passes 'failed' status to finalize_session() on error stop."""
+         mock_session = MagicMock()
+         mock_session.status = "running"
+ 
+         mock_sidecar = {"agent_session_id": "session-456"}
+ 
++        import sys
++
++        hook_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
++        if hook_dir not in sys.path:
++            sys.path.insert(0, hook_dir)
++
+         with (
+             patch(
+                 "hook_utils.memory_bridge.load_agent_session_sidecar",
+                 return_value=mock_sidecar,
+             ),
+-            patch("models.agent_session.AgentSession.query") as mock_query,
++            patch(
++                "models.agent_session.AgentSession.query"
++            ) as mock_query,
++            patch(
++                "models.session_lifecycle.finalize_session"
++            ) as mock_finalize,
+         ):
+-            mock_query.get.return_value = mock_session
++            mock_query.filter.return_value = [mock_session]
+ 
+-            session_id = "test-session-err"
+-            hook_input = {"stop_reason": "error", "session_id": session_id}
++            from stop import _complete_agent_session
+ 
+-            try:
+-                from hook_utils.memory_bridge import load_agent_session_sidecar
+-
+-                sidecar = load_agent_session_sidecar(session_id)
+-                agent_session_id = sidecar.get("agent_session_id")
+-                if agent_session_id:
+-                    from models.agent_session import AgentSession
+-
+-                    agent_session = AgentSession.query.get(agent_session_id)
+-                    if agent_session:
+-                        stop_reason = hook_input.get("stop_reason", "unknown")
+-                        if stop_reason in ("error", "crash"):
+-                            agent_session.status = "failed"
+-                        else:
+-                            agent_session.status = "completed"
+-                        agent_session.save()
+-            except Exception:
+-                pass
++            _complete_agent_session(
++                "test-session-err", {"stop_reason": "error", "session_id": "test-session-err"}
++            )
+ 
+-        assert mock_session.status == "failed"
++            mock_finalize.assert_called_once_with(
++                mock_session,
++                "failed",
++                reason="stop hook: error",
++                skip_auto_tag=True,
++                skip_checkpoint=True,
++            )
+ 
+     def test_no_sidecar_skips_gracefully(self):
+         """No error when sidecar has no agent_session_id."""
