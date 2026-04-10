@@ -358,6 +358,22 @@ class TestPMBashRestriction:
         result = self._run("python -m tools.sdlc_stage_query", mock_context)
         assert result.get("decision") != "block"
 
+    def test_pm_allowed_check_plan_freshness(self, mock_context, monkeypatch):
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        result = self._run("python scripts/check_plan_freshness.py docs/plans/foo.md", mock_context)
+        assert result.get("decision") != "block"
+
+    def test_pm_allowed_grep_rl_docs_plans(self, mock_context, monkeypatch):
+        """SDLC skill step 2a uses ``grep -rl #881 docs/plans/`` to locate plans."""
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        result = self._run("grep -rl #881 docs/plans/", mock_context)
+        assert result.get("decision") != "block"
+
+    def test_pm_allowed_grep_r_issue_in_plans(self, mock_context, monkeypatch):
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        result = self._run('grep -r "#881" docs/plans/', mock_context)
+        assert result.get("decision") != "block"
+
     # -- Non-PM sessions unrestricted ------------------------------------------
 
     def test_non_pm_session_bash_unrestricted(self, mock_context, monkeypatch):

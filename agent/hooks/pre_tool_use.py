@@ -176,6 +176,14 @@ PM_BASH_ALLOWED_PREFIXES: tuple[str, ...] = (
     "python -m tools.memory_search inspect",
     "python -m tools.sdlc_stage_query",
     "python -m tools.code_impact_finder",
+    # scripts (read-only checks invoked by the SDLC skills)
+    "python scripts/check_plan_freshness.py",
+    # grep (read-only search within docs/ only; used by the SDLC skill
+    # dispatch fallback to locate plan docs by issue number)
+    "grep -r",
+    "grep -rl",
+    "grep -n",
+    "grep -l",
     # pytest collect-only (no execution)
     "pytest --collect-only",
     # curl to localhost dashboard
