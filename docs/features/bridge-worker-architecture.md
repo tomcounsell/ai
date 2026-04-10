@@ -100,9 +100,29 @@ The worker's startup sequence is deterministic:
 | 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records |
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Kill orphaned Claude SDK subprocesses (PPID=1) |
+| 4.5 | `verify_harness_health()` | If `DEV_SESSION_HARNESS` is non-`sdk`, verify CLI binary is available (see [Harness Abstraction](harness-abstraction.md)) |
 | 5 | `_ensure_worker(worker_key)` for each pending session | Kick per-worker-key loops for queued sessions |
 | 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
+
+### Execution Harness Routing
+
+At session execution time, the worker routes dev sessions to one of two execution backends based on the `DEV_SESSION_HARNESS` environment variable:
+
+```
+_execute_agent_session(session)
+    |
+    v
+session_type == "dev" AND DEV_SESSION_HARNESS != "sdk"?
+    |                           |
+   YES                         NO (default)
+    |                           |
+    v                           v
+get_response_via_harness()   get_agent_response_sdk()
+(claude -p subprocess)       (Claude Agent SDK)
+```
+
+PM and teammate sessions always use the SDK path. See [Harness Abstraction](harness-abstraction.md) for full details on streaming, batching, health checks, and configuration.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 
