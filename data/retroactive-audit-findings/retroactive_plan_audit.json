@@ -8,11 +8,12 @@
     {
       "type": "missing_doc",
       "severity": "high",
-      "still_relevant": true,
+      "still_relevant": false,
       "confidence": "high",
       "expected_file": "docs/features/retroactive-plan-audit.md",
       "evidence": "- [ ] Create `docs/features/retroactive-plan-audit.md` describing the audit script, triage workflow, and how to interpret/action results",
-      "description": "Documentation task says 'docs/features/retroactive-plan-audit.md' should exist but it does not at HEAD"
+      "description": "Documentation task says 'docs/features/retroactive-plan-audit.md' should exist but it does not at HEAD",
+      "purge_reason": "deliverable is docs/audits/retroactive-sdlc-audit.md"
     },
     {
       "type": "missing_artifact",

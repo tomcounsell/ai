@@ -8,11 +8,12 @@
     {
       "type": "missing_doc",
       "severity": "high",
-      "still_relevant": true,
+      "still_relevant": false,
       "confidence": "high",
       "expected_file": "docs/features/chat-dev-session-architecture.md",
       "evidence": "- [ ] Update `docs/features/chat-dev-session-architecture.md` with hook-driven lifecycle section and ASCII diagram",
-      "description": "Documentation task says 'docs/features/chat-dev-session-architecture.md' should exist but it does not at HEAD"
+      "description": "Documentation task says 'docs/features/chat-dev-session-architecture.md' should exist but it does not at HEAD",
+      "purge_reason": "superseded by pm-dev-session-architecture.md"
     }
   ],
   "doc_tasks_checked": 1,

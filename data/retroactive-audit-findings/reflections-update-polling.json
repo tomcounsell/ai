@@ -8,12 +8,13 @@
     {
       "type": "missing_doc",
       "severity": "high",
-      "still_relevant": true,
+      "still_relevant": false,
       "confidence": "high",
       "expected_file": "docs/deployment.md",
       "evidence": "- [ ] Add a brief section to `docs/deployment.md` describing the update polling schedule and how to verify it (`launchctl list | grep com.valor.update`)",
       "description": "Documentation task says 'docs/deployment.md' should exist but it does not at HEAD",
-      "note": "A file named 'deployment.md' exists at: ./docs/features/deployment.md"
+      "note": "A file named 'deployment.md' exists at: ./docs/features/deployment.md",
+      "purge_reason": "docs/deployment.md does not exist but docs/features/deployment.md does \u2014 plan used wrong path"
     }
   ],
   "doc_tasks_checked": 2,
