@@ -274,10 +274,14 @@ class TestWorkerStartupSequence:
         )
 
     def test_worker_calls_rebuild_indexes(self):
-        """worker/__main__.py must call AgentSession.rebuild_indexes()."""
+        """worker/__main__.py must use run_cleanup() to rebuild all model indexes."""
         source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
-        assert "rebuild_indexes" in source, (
-            "worker/__main__.py must call AgentSession.rebuild_indexes() at startup"
+        assert "run_cleanup" in source, (
+            "worker/__main__.py must call run_cleanup() at startup"
+            " to rebuild all Popoto model indexes"
+        )
+        assert "popoto_index_cleanup" in source, (
+            "worker/__main__.py must import from scripts.popoto_index_cleanup"
         )
 
     def test_worker_calls_recover_interrupted(self):
@@ -356,13 +360,13 @@ class TestWorkerStartupSequence:
                     return i
             return -1
 
-        line_rebuild = first_call_line(r"\.rebuild_indexes\(\)")
+        line_rebuild = first_call_line(r"run_cleanup\(\)")
         line_cleanup_corrupted = first_call_line(r"cleanup_corrupted_agent_sessions\(\)")
         line_recover = first_call_line(r"_recover_interrupted_agent_sessions_startup\(\)")
         line_cleanup_orphaned = first_call_line(r"_cleanup_orphaned_claude_processes\(\)")
         line_ensure_worker = first_call_line(r"_ensure_worker\(")
 
-        assert line_rebuild >= 0, "AgentSession.rebuild_indexes() call not found"
+        assert line_rebuild >= 0, "run_cleanup() call not found (all-model index rebuild)"
         assert line_cleanup_corrupted >= 0, "cleanup_corrupted_agent_sessions() call not found"
         assert line_recover >= 0, "_recover_interrupted_agent_sessions_startup() call not found"
         assert line_cleanup_orphaned >= 0, "_cleanup_orphaned_claude_processes() call not found"

@@ -683,6 +683,7 @@ class ReflectionRunner:
             ("skills_audit", "Skills Audit", self.step_skills_audit),
             ("hooks_audit", "Hooks Audit", self.step_hooks_audit),
             ("redis_ttl_cleanup", "Redis TTL Cleanup", self.step_redis_cleanup),
+            ("popoto_index_cleanup", "Popoto Index Cleanup", self.step_popoto_index_cleanup),
             ("redis_data_quality", "Redis Data Quality", self.step_redis_data_quality),
             ("branch_plan_cleanup", "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
             ("feature_docs_audit", "Feature Docs Audit", self.step_feature_docs_audit),
@@ -1571,6 +1572,43 @@ class ReflectionRunner:
             self.state.daily_report.append(f"Redis cleanup: {total} expired records removed")
         except Exception as e:
             logger.warning(f"Redis TTL cleanup failed (non-fatal): {e}")
+
+    async def step_popoto_index_cleanup(self) -> None:
+        """Clean up orphaned Popoto index entries across all models.
+
+        Runs after TTL cleanup (which deletes records) to remove any orphaned
+        index entries left behind. Uses the existing run_cleanup() function
+        from scripts/popoto_index_cleanup.py which iterates all Popoto models
+        and calls rebuild_indexes() on each.
+        """
+        try:
+            from scripts.popoto_index_cleanup import run_cleanup
+
+            result = run_cleanup()
+            models_processed = result.get("models_processed", 0)
+            orphans_found = result.get("total_orphans_found", 0)
+            errors = result.get("errors", [])
+
+            if orphans_found > 0:
+                self.state.daily_report.append(
+                    f"Popoto index cleanup: {orphans_found} orphans cleaned "
+                    f"across {models_processed} models"
+                )
+            if errors:
+                for error in errors:
+                    self.state.add_finding("popoto_index_cleanup", f"Cleanup error: {error}")
+
+            logger.info(
+                f"Popoto index cleanup: {models_processed} models, "
+                f"{orphans_found} orphans, {len(errors)} errors"
+            )
+            self.state.step_progress["popoto_index_cleanup"] = {
+                "models_processed": models_processed,
+                "orphans_found": orphans_found,
+                "errors": len(errors),
+            }
+        except Exception as e:
+            logger.warning(f"Popoto index cleanup failed (non-fatal): {e}")
 
     async def step_redis_data_quality(self) -> None:
         """Step 13: Redis data quality checks.

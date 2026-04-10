@@ -385,6 +385,26 @@ class TestPopotoIndexCleanupReflection:
 
         assert callable(run_cleanup)
 
+    def test_runner_step_popoto_index_cleanup_registered(self, tmp_path, monkeypatch):
+        """Verify popoto_index_cleanup is in ReflectionRunner.steps."""
+        config_file = tmp_path / "projects.json"
+        config_file.write_text('{"projects": {}}')
+        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(config_file))
+
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner()
+        step_keys = [s[0] for s in runner.steps]
+        assert "popoto_index_cleanup" in step_keys, (
+            "popoto_index_cleanup must be registered in ReflectionRunner.steps"
+        )
+        # Verify it comes after redis_ttl_cleanup
+        ttl_idx = step_keys.index("redis_ttl_cleanup")
+        popoto_idx = step_keys.index("popoto_index_cleanup")
+        assert popoto_idx == ttl_idx + 1, (
+            "popoto_index_cleanup should come immediately after redis_ttl_cleanup"
+        )
+
 
 class TestRedisDataQuality:
     """Tests for step 14: Redis data quality checks."""
