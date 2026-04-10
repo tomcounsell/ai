@@ -495,7 +495,105 @@ No agent integration required — this is a restriction on the existing Bash too
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique run:** 2026-04-10 (re-run — prior findings were reported but not persisted)
+**Critics:** Structural (automated) + content review against verified source files
+**Findings:** 7 total (2 blockers, 4 concerns, 1 nit)
+**Verdict:** NEEDS REVISION
+
+### Blockers
+
+#### B1. Allowlist does not admit commands used by the PM's own /sdlc skill — the PM will be blocked from orchestrating
+- **Severity:** BLOCKER
+- **Critics:** Operator, Adversary
+- **Location:** Solution → Technical Approach → The allowlist; conflicts with `.claude/skills/sdlc/SKILL.md:51,55,81,104,107`
+- **Finding:** The `/sdlc` skill (the PM's primary orchestration loop) uses `STAGE_STATES=$(python -m tools.sdlc_stage_query ...)` at line 51, `git -C "$REPO" branch -a | grep session/` at line 81, `gh pr diff {pr_number} --name-only | grep -c '^docs/' || echo "0"` at line 104, and `PLAN_PATH=$(grep -rl ... | head -1)` at line 107. Every one of these will be rejected by the metacharacter guard (`|`, `$(`, `||`, `>`) AND by the prefix check (`git -C` is not an allowlisted prefix — only `git status`, `git log`, etc. are). The moment this hook ships, the PM session will be unable to advance past Step 2.0 of its own SDLC assessment loop. The Risk 1 mitigation ("manually enumerate... grep the skill files") catches this only if the auditor knows to expand `|` and `$(...)` patterns, but the plan presents it as a routine checklist item — not a "the core orchestration loop will break" warning.
+- **Suggestion:** Before landing, either (a) rewrite the affected `/sdlc` SKILL.md patterns to be shell-free (one-command-per-line, no pipes or substitutions) AND add `git -C` as a permitted prefix variant OR as a pre-strip normalization (strip `-C <path>` before matching), OR (b) expand the allowlist to accept the specific compound patterns the skill uses. Option (a) is cleaner and keeps the allowlist small. The plan must explicitly list every `.claude/skills/sdlc/SKILL.md` bash block that must be rewritten, and the audit task (task 6) must be done BEFORE task 1 lands, not after.
+- **Implementation Note:** Add a new Task 0 (prerequisite to Task 1) titled "Audit and refactor /sdlc skill bash blocks": grep `.claude/skills/sdlc/SKILL.md`, `.claude/skills/do-build/SKILL.md`, `.claude/skills/do-patch/SKILL.md`, `.claude/skills/do-pr-review/sub-skills/post-review.md` for `\$\(`, `\|`, `&&`, `\|\|`, `>`, `git -C`. For each match, rewrite to either (i) a single pipe-free command with outputs captured via subsequent separate commands, or (ii) a shell script under `scripts/` that is invoked via a single whitelisted `python -m scripts.xxx` entry. Specifically, line 81 becomes `git branch -a` (without `-C`, since PM's cwd is already the target repo — if not, the PM must `cd` first, which itself needs to be allowlisted); line 104 becomes `gh pr diff {pr_number} --name-only` with the docs-count done in Python or elided; line 107 becomes `grep -rl "#{issue_number}" docs/plans/` with the `| head -1` removed (Python script picks the first match). If refactoring `/sdlc` is out of scope, the allowlist MUST add: `python -m tools.sdlc_stage_query`, pattern-permit for plain `grep -rl ... docs/plans/` (but this re-opens the denylist-vs-allowlist question since `grep` is not currently allowlisted), and a documented `git -C <path>` prefix normalization. The plan currently does neither — it will break the orchestration loop on first deploy.
+
+#### B2. `git -C <path>` is the canonical form used throughout SDLC skills and is not accommodated by prefix matching
+- **Severity:** BLOCKER
+- **Critics:** Archaeologist, Operator
+- **Location:** Solution → Technical Approach → The allowlist
+- **Finding:** Seven SDLC skill files use `git -C "$REPO" ...` or `git -C $TARGET_REPO/.worktrees/{slug} ...` (verified: `.claude/skills/sdlc/SKILL.md:81`, `.claude/skills/do-build/SKILL.md:70,77,88,126,189,190,297,411`, `.claude/skills/do-build/PR_AND_CLEANUP.md:49`, `.claude/skills/do-test/SKILL.md:62,72`, `.claude/skills/do-patch/SKILL.md:49`). The allowlist specifies prefixes like `git status`, `git log`, etc., but a command starting with `git -C "/some/path" status` does NOT match any of those prefixes — the literal first-word-and-second-word check fails because `-C` is the second word, not `status`. This is separate from the metacharacter issue in B1: even a single `git -C "$REPO" status` (no pipes) would be rejected. Since the PM operates cross-repo via `SDLC_TARGET_REPO`, this is not an edge case — it is the dominant call form.
+- **Suggestion:** Before the prefix check, normalize the command by stripping a leading `git -C <token>` (where `<token>` is an unquoted word OR a double/single-quoted string). After stripping, the remaining string is checked against the allowlist as if it started with `git`. Or: explicitly list every `git -C ... <verb>` pattern in the allowlist (brittle — 14 combinations × 10+ repos × 10+ worktrees).
+- **Implementation Note:** In `_is_pm_allowed_bash`, after `.strip()` and before prefix matching, apply: `if command.startswith("git -C "): command = re.sub(r'^git -C (?:"[^"]*"|\'[^\']*\'|\S+) ', 'git ', command)`. Then the existing prefix check runs against the normalized command. Add a test `test_pm_allowed_git_dash_c_status` asserting `git -C "/some/path" status` and `git -C $REPO status` are both allowed, and a test `test_git_dash_c_does_not_bypass_mutation` asserting `git -C "/x" commit -m "y"` is still blocked (because after normalization it becomes `git commit`, which is not allowlisted). The metacharacter guard MUST run BEFORE the normalization to prevent shell-injection via the path argument (e.g., `git -C "$(rm -rf /)" status` — the `$(` triggers the guard first).
+
+### Concerns
+
+#### C1. `gh api` on the allowlist with no method check is a silent mutation vector
+- **Severity:** CONCERN
+- **Critics:** Skeptic, Adversary
+- **Location:** Technical Approach → The allowlist (`gh api`); Risks → Risk 2
+- **Finding:** The plan allowlists bare `gh api` with the comment "read-only by the nature of typical PM use" and defers hardening to a follow-up. But `gh api repos/owner/repo/issues/N/comments --method POST --field body="..."` is a perfectly valid `gh api` invocation that starts with the allowlisted prefix and contains no forbidden metacharacters. The plan acknowledges this in Risk 2 and keeps it anyway. The incident that motivated this plan was a PM session doing something it *shouldn't* have been doing but *could*. Leaving a documented bypass in place on day one is the exact failure mode we are fixing.
+- **Suggestion:** Either (a) remove `gh api` from the initial allowlist and require the PM to use `gh issue view`, `gh pr view`, `gh pr list`, `gh run view`, `gh run list` for all orchestration data (which covers nearly all real PM use cases), OR (b) gate `gh api` with a per-command flag check: reject any `gh api` command containing `--method POST`, `--method PATCH`, `--method PUT`, `--method DELETE`, `-X POST`, `-X PATCH`, `-X PUT`, `-X DELETE`.
+- **Implementation Note:** Option (a) is simpler and is the recommended path. If `gh api` is removed from the allowlist, audit `.claude/skills/do-build/SKILL.md:112` (`LATEST_COMMENT_ID=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '.[-1].id // empty' 2>/dev/null)`) and `.claude/skills/do-patch/SKILL.md:52,53` — if any of those paths run inside a PM context (vs. inside a dev session), they must be replaced with `gh issue view ... --json comments`. If Option (b) is chosen, add the method check as a distinct function `_gh_api_is_read_only(command: str) -> bool` and call it from `_is_pm_allowed_bash` when the command starts with `gh api `. Add tests: `test_pm_blocked_gh_api_post`, `test_pm_blocked_gh_api_patch`, `test_pm_blocked_gh_api_dash_X_delete`, `test_pm_allowed_gh_api_get_default`.
+
+#### C2. Check ordering claim is tested ambiguously — PM allowlist would also block `echo x > .env`, making the "sensitive first" assertion unverifiable
+- **Severity:** CONCERN
+- **Critics:** Skeptic
+- **Location:** Test Impact → `test_pm_sensitive_file_check_still_runs`; Solution → Key Elements ("The existing sensitive-file checks continue to run before the PM check")
+- **Finding:** The plan wants to assert that the sensitive-file check runs *before* the PM allowlist for PM sessions, so that the error message says "sensitive file" rather than "PM command not allowlisted". But `echo x > .env` is blocked by the PM allowlist regardless (echo is not allowlisted, `>` is a forbidden metacharacter) AND by the sensitive-file check. The test cannot distinguish which layer blocked it from just the `decision == "block"` result — it must inspect the `reason` string. The plan says the sensitive check reason contains "sensitive" but the PM reason contains "PM session". A test that only asserts `decision == "block"` proves nothing about ordering.
+- **Suggestion:** Make the ordering test explicit: assert that the `reason` string contains `"sensitive"` (and NOT `"PM session"`) when a PM session attempts `echo x > .env`. This pins the ordering contract. Additionally, pick a command that is *allowlisted* but writes to a sensitive file — e.g., `cat .env` is a read but `tee .env < foo` has `<` (metachar blocked). It may be impossible to construct a command that is allowed by the allowlist but blocked by the sensitive check, in which case the ordering test is vacuous and should be dropped in favor of a comment documenting the check order.
+- **Implementation Note:** In the `TestPMBashRestriction` class, change `test_pm_sensitive_file_check_still_runs` to: assert `result["decision"] == "block"` AND `"sensitive" in result["reason"].lower()` AND `"PM session" not in result["reason"]`. This proves the sensitive check fired first. If this assertion fails (because the PM allowlist fires first and returns a PM-branded reason), then the ordering in `pre_tool_use_hook` is wrong OR the test is wrong and must be deleted. Either outcome is informative.
+
+#### C3. Empty-string handling is specified twice with conflicting rationale
+- **Severity:** CONCERN
+- **Critics:** Operator
+- **Location:** Failure Path Test Strategy → Empty/Invalid Input Handling (lines 254-256)
+- **Finding:** Line 254 says: "Test: empty Bash command string returns True from `_is_pm_allowed_bash` — no-op is allowed ... OR test that empty string is blocked; pick one and document. **Decision:** block empty commands too". The plan picks "block" in the decision line but the opening sentence still contains the rejected alternative as a claim. A builder reading this quickly could implement the wrong branch. Compounding this, the helper is documented as "returns True iff the command matches one of the allowed read-only prefixes" — an empty string matches no prefix, so `_is_pm_allowed_bash("")` naturally returns False (blocked), which is consistent with the "block" decision. But the test in line 254 is worded as "returns True from `_is_pm_allowed_bash`" for the empty-string case, contradicting the decision.
+- **Suggestion:** Rewrite lines 254-256 to unambiguously say: `_is_pm_allowed_bash("")` returns False (blocked); `_is_pm_allowed_bash("   ")` returns False (blocked); `_is_pm_allowed_bash(None)` returns False (blocked, via isinstance check or truthy guard). The test names are `test_pm_empty_command_blocked`, `test_pm_whitespace_only_blocked`, and add `test_pm_none_command_handled_gracefully`.
+- **Implementation Note:** Update the Failure Path Test Strategy section to remove the "OR" phrasing. The helper signature should start with `if not command or not command.strip(): return False`. The test input for `None` is tricky because `pre_tool_use_hook` receives `tool_input.get("command", "")` at line 300 — the `.get("command", "")` already defaults to empty string, so None is upstream-impossible. The `None` test for `_is_pm_allowed_bash` is defensive only. Add: `assert _is_pm_allowed_bash(None) is False` AND separately `assert asyncio.run(pre_tool_use_hook({"tool_name": "Bash", "tool_input": {}}, "tu", mock_context))["decision"] == "block"` for a PM session, since a missing `command` key defaults to `""` which must be blocked.
+
+#### C4. Audit task (task 6) runs AFTER build-hook, but its findings can invalidate the hook — ordering is wrong
+- **Severity:** CONCERN
+- **Critics:** Operator, Simplifier
+- **Location:** Step by Step Tasks → Task 6 (audit-allowlist); Depends On: build-hook
+- **Finding:** Task 6 depends on `build-hook` being complete, and its job is to find commands the PM genuinely needs but which aren't on the allowlist. If it finds one (almost certain given Blocker B1), task 1 must be redone. This is rework-by-construction. The audit should be a prerequisite to task 1, not a downstream validation of it. The same applies to the `/sdlc` skill refactoring required by Blocker B1.
+- **Suggestion:** Renumber tasks so the audit runs first as Task 0 with no dependencies, and its output (either "allowlist matches reality" or "the following commands must be added: X, Y, Z") feeds Task 1. Task 6's role becomes a sanity recheck after the hook lands, not the primary audit.
+- **Implementation Note:** New Task 0: "Audit PM-reachable bash commands in skill files and persona prompt. Output: the final allowlist (which Task 1 then implements verbatim) and any required `/sdlc` refactors. No code changes yet — just the audit + allowlist finalization." Task 1's `Depends On` changes from `none` to `audit-allowlist`. Task 6 is deleted or renamed to "verify-audit" and is a no-op if Task 0 was done properly. This is cleaner than the current plan, which has the audit as a post-facto check on a hook that may already be wrong.
+
+### Nits
+
+#### N1. Duplicate `## Test Impact` section
+- **Severity:** NIT
+- **Critics:** Structural
+- **Location:** lines 261 and 342
+- **Finding:** The plan contains two `## Test Impact` sections — one after "Error State Rendering" (line 261) with the detailed ~25-case enumeration, and a second near the doc-related sections (line 342) with `[x]`-checked items that restate the first section in a condensed form. This passes the structural validator (at least one exists and is non-empty) but is confusing for readers and invites the two lists to drift apart over time.
+- **Suggestion:** Delete the second `## Test Impact` block (lines 342-347) or merge its content into the first. Keep the detailed enumeration as the single source of truth.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections present | PASS | Documentation, Update System, Agent Integration, Test Impact all present |
+| Duplicate section | FAIL | `## Test Impact` appears twice (lines 261 and 342) — see N1 |
+| Task numbering | PASS | Tasks 1-7 contiguous, no gaps |
+| Dependencies valid | PASS | All `Depends On` references point to valid task IDs; no circular deps |
+| File paths exist | PASS | All referenced files exist: `agent/hooks/pre_tool_use.py`, `agent/sdk_client.py`, `tests/unit/test_pm_session_permissions.py`, `config/personas/project-manager.md`, `docs/features/pm-dev-session-architecture.md`, `.claude/hooks/pre_tool_use.py`, `agent/hooks/__init__.py` |
+| Line references verified | PASS | `agent/sdk_client.py:1962` = `_permission_mode = "bypassPermissions"` confirmed; `:1964` = `if _session_type == SessionType.PM:` confirmed; `:1965-1966` = stale comment confirmed; `:934` = `env["SESSION_TYPE"] = self.session_type` confirmed; `agent/hooks/pre_tool_use.py:70` = `_is_pm_session()` confirmed; Bash branch at `:299-326` confirmed (plan said 298-327, off by ~1 line — acceptable) |
+| Prerequisites met | PASS | `_is_pm_session` importable; `test_pm_session_permissions.py` exists; `env["SESSION_TYPE"]` injection present at `sdk_client.py:934` |
+| Cross-references | PASS | Each Success Criterion maps to at least one task; No-Gos and Rabbit Holes do not overlap with planned tasks |
+| Baseline commit | PASS | `226fbc1d` resolves on main |
+| Issue state | PASS | #881 is OPEN as of critique time |
+
+### Verdict
+
+**NEEDS REVISION** — 2 blockers must be resolved before build:
+
+1. **Blocker B1** — The allowlist does not admit commands used by the PM's own `/sdlc` skill. On first deploy, the PM session will be unable to run Step 2.0 of its orchestration loop. Either the skill must be refactored to be metacharacter-free AND drop `git -C`, or the allowlist must expand (with documented tradeoffs). The plan currently does neither.
+2. **Blocker B2** — `git -C <path>` is the canonical cross-repo form used by at least 11 sites across SDLC skill files. The prefix matching rejects it. A normalization step (strip `git -C <token>`) is required, OR every `git -C` site in the skills must be refactored away.
+
+Concerns C1-C4 are non-blocking but should be addressed in the revision pass. NIT N1 is cosmetic.
+
+**Recommended path forward:**
+- Add a new **Task 0 — Audit and Refactor** (prerequisite to Task 1) that: (a) grep-audits `.claude/skills/**/*.md` for `\$\(`, `\|`, `&&`, `\|\|`, `>`, `git -C` patterns; (b) produces the finalized allowlist; (c) refactors the skill files where needed; (d) publishes a written audit report that the builder implements verbatim in Task 1.
+- Decide on `gh api` disposition (remove from allowlist OR add method-flag guard) and update the plan to match.
+- Add `git -C` prefix normalization to the helper design in the Technical Approach section.
+- Delete or merge the duplicate `## Test Impact` section.
+- Rewrite the empty-string test spec to be unambiguous.
+- Rewrite the sensitive-file-ordering test to assert `"sensitive" in reason and "PM session" not in reason`.
+
+Once the revision pass lands, re-run critique to confirm the blockers are resolved before proceeding to `/do-build`.
 
 ---
 
