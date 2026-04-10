@@ -186,15 +186,15 @@ class TestEnqueueContinuationAsyncWrapping:
         existing_session.save = MagicMock()
         existing_session.log_lifecycle_transition = MagicMock()
 
-        # Patch get_authoritative_session and update_session at the source module
+        # Patch get_authoritative_session and transition_status at the source module
         # (_enqueue_nudge does a local import from models.session_lifecycle)
         with patch(
             "models.session_lifecycle.get_authoritative_session",
             return_value=existing_session,
         ):
             with patch(
-                "models.session_lifecycle.update_session",
-            ) as mock_update:
+                "models.session_lifecycle.transition_status",
+            ) as mock_transition:
                 with patch(
                     "agent.agent_session_queue.asyncio.to_thread",
                     wraps=asyncio.to_thread,
@@ -212,5 +212,6 @@ class TestEnqueueContinuationAsyncWrapping:
                         )
                         # to_thread should be called for the re-read
                         assert mock_to_thread.called
-                        # update_session should be called for the transition
-                        mock_update.assert_called_once()
+                        # transition_status should be called directly
+                        # (no update_session wrapper — saves a Redis re-read)
+                        mock_transition.assert_called_once()

@@ -1418,7 +1418,7 @@ async def _agent_session_health_check() -> None:
                     is_local,
                     reason,
                 )
-                from models.session_lifecycle import finalize_session, update_session
+                from models.session_lifecycle import finalize_session, transition_status
 
                 if is_local:
                     # Local CLI sessions have no bridge worker to resume them --
@@ -1435,11 +1435,15 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                     )
                 else:
-                    update_session(
-                        entry.session_id,
-                        new_status="pending",
-                        fields={"priority": "high", "started_at": None},
-                        expected_status="running",
+                    # Apply companion fields directly to the already-loaded entry,
+                    # then transition via transition_status() which has its own CAS
+                    # re-read. This avoids the redundant Redis re-read that
+                    # update_session() would do.
+                    entry.priority = "high"
+                    entry.started_at = None
+                    transition_status(
+                        entry,
+                        "pending",
                         reason=f"health check: recovered stuck session (chat={worker_key})",
                     )
                     logger.info(
@@ -2482,7 +2486,7 @@ async def _enqueue_nudge(
     #
     # Uses get_authoritative_session for tie-break re-read (prefers running,
     # then most recent by created_at) instead of blind sessions[0].
-    from models.session_lifecycle import get_authoritative_session, update_session
+    from models.session_lifecycle import get_authoritative_session
 
     orig_session_id = session.session_id
     reread_session = await asyncio.to_thread(get_authoritative_session, orig_session_id)
@@ -2545,16 +2549,18 @@ async def _enqueue_nudge(
         )
         return
 
-    # Use lifecycle module for atomic re-read + field application + transition.
-    update_session(
-        session.session_id,
-        new_status="pending",
-        fields={
-            "message_text": nudge_feedback,
-            "auto_continue_count": auto_continue_count,
-            "priority": "high",
-            "task_list_id": task_list_id,
-        },
+    # Apply companion fields directly to the already-loaded session object,
+    # then transition via transition_status() which has its own CAS re-read.
+    # This avoids the redundant Redis re-read that update_session() would do.
+    from models.session_lifecycle import transition_status
+
+    session.message_text = nudge_feedback
+    session.auto_continue_count = auto_continue_count
+    session.priority = "high"
+    session.task_list_id = task_list_id
+    transition_status(
+        session,
+        "pending",
         reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})",
     )
 
