@@ -201,6 +201,7 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 - [Session Lifecycle](session-lifecycle.md) -- State machine and lifecycle module
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Health check details
 - [Bridge Self-Healing](bridge-self-healing.md) -- Bridge watchdog and crash recovery
+- Issue #875 / PR #885 -- CAS authority upgrade (compare-and-set conflict detection)
 - Issue #723 -- Original audit issue
 - Issue #727 -- Startup recovery timing guard (race condition fix)
 - PR #703 -- Zombie loop fix (hierarchy health check vector)

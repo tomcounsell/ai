@@ -58,6 +58,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
 | [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, companion memories for subconscious recall, and per-chunk embeddings for fine-grained semantic search over long documents | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
+| [Lifecycle CAS Authority](session-lifecycle.md#cas-conflict-detection) | Compare-and-set conflict detection in session lifecycle: `update_session()`, `get_authoritative_session()`, `StatusConflictError` prevent concurrent status mutation stomps | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
