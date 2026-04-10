@@ -1,4 +1,16 @@
-"""PreToolUse hook: blocks sensitive writes, enforces PM limits, registers child Dev sessions."""
+"""PreToolUse hook: blocks sensitive writes, enforces PM limits, registers child Dev sessions.
+
+PM Bash enforcement
+-------------------
+For PM sessions (``SESSION_TYPE=pm``), the Bash branch of ``pre_tool_use_hook``
+restricts tool access to a read-only allowlist defined by
+``_is_pm_allowed_bash``. Any command not on the allowlist -- or any command that
+contains shell metacharacters that could smuggle mutations -- is blocked with a
+``{"decision": "block", "reason": ...}`` response.
+
+The authoritative list of allowed/blocked commands lives in
+``tests/unit/test_pm_session_permissions.py::TestPMBashRestriction``.
+"""
 
 from __future__ import annotations
 
@@ -103,6 +115,144 @@ def _is_sensitive_path(file_path: str) -> bool:
     normalized = file_path.replace("\\", "/")
     for fragment in SENSITIVE_FRAGMENTS:
         if fragment in normalized:
+            return True
+
+    return False
+
+
+# --- PM Bash allowlist ---------------------------------------------------------
+#
+# The PM session is allowed to run only these read-only command prefixes. The
+# entire command string (after stripping whitespace and after ``git -C <token>``
+# normalization) must start with one of these prefixes, optionally followed by
+# a space. ``gh api`` is DELIBERATELY excluded because ``gh api ... --method
+# POST`` is a silent mutation vector that would pass a naive prefix check.
+PM_BASH_ALLOWED_PREFIXES: tuple[str, ...] = (
+    # git (read-only verbs)
+    "git status",
+    "git log",
+    "git diff",
+    "git show",
+    "git branch",
+    "git rev-parse",
+    "git ls-remote",
+    "git stash list",
+    "git config --get",
+    "git remote -v",
+    "git remote show",
+    "git rev-list",
+    "git describe",
+    "git shortlog",
+    # gh CLI (view/list verbs only -- gh api deliberately excluded)
+    "gh issue view",
+    "gh issue list",
+    "gh pr view",
+    "gh pr list",
+    "gh pr diff",
+    "gh pr checks",
+    "gh pr status",
+    "gh run view",
+    "gh run list",
+    "gh repo view",
+    # log/file reading
+    "tail logs/",
+    "tail -n",
+    "tail -f logs/",
+    "cat docs/",
+    "cat config/personas/",
+    "cat CLAUDE.md",
+    "head docs/",
+    "head CLAUDE.md",
+    "ls",
+    "pwd",
+    "wc",
+    "file",
+    # tools (read-only subcommands)
+    "python -m tools.valor_session list",
+    "python -m tools.valor_session status",
+    "python -m tools.agent_session_scheduler status",
+    "python -m tools.agent_session_scheduler list",
+    "python -m tools.memory_search search",
+    "python -m tools.memory_search inspect",
+    "python -m tools.sdlc_stage_query",
+    "python -m tools.code_impact_finder",
+    # pytest collect-only (no execution)
+    "pytest --collect-only",
+    # curl to localhost dashboard
+    "curl -s localhost:8500/dashboard.json",
+    "curl localhost:8500/dashboard.json",
+)
+
+# Shell metacharacters that can smuggle mutations past a prefix check.
+# Any of these in a PM Bash command forces a block, even if the command
+# starts with an allowlisted prefix. ``&`` at any position is also rejected
+# because PM sessions have no legitimate reason to background processes.
+_PM_BASH_FORBIDDEN_METACHARS: tuple[str, ...] = (
+    "|",
+    ">",
+    "<",
+    "&&",
+    "||",
+    ";",
+    "`",
+    "$(",
+    "$((",
+    "&",
+)
+
+# Strip a leading ``git -C <token>`` so cross-repo forms like
+# ``git -C "$REPO" status`` normalize to ``git status`` for allowlist
+# purposes. ``<token>`` may be a double-quoted string, single-quoted string,
+# or a single unquoted word. The metacharacter guard MUST run BEFORE this
+# normalization so an injection like ``git -C "$(rm -rf /)" status`` is
+# caught by the guard (via ``$(``) before the path is stripped.
+_GIT_DASH_C_PATTERN = re.compile(r'^git -C (?:"[^"]*"|\'[^\']*\'|\S+)\s+')
+
+
+def _is_pm_allowed_bash(command: str | None) -> bool:
+    """Return True iff *command* is on the PM session's read-only allowlist.
+
+    Contract:
+      - Empty / whitespace-only / ``None`` commands return ``False``.
+      - A metacharacter guard rejects any command containing pipes, redirects,
+        command substitution, ``&&``/``||``/``;``/``&``/backticks. This runs
+        BEFORE the ``git -C`` normalization so shell-injection via the path
+        argument (``git -C "$(rm -rf /)" status``) is blocked by the guard.
+      - After the metacharacter guard, a leading ``git -C <token>`` is
+        stripped once so cross-repo forms like ``git -C "$REPO" status``
+        are treated as ``git status``.
+      - The normalized command must start with (or exactly match) one of
+        ``PM_BASH_ALLOWED_PREFIXES``. A prefix matches if the command equals
+        it or continues with a space.
+
+    Prefix-matching is deliberately simple; regex parsing is a rabbit hole
+    (see the Rabbit Holes section of docs/plans/pm-bash-discipline.md).
+    """
+    if not command or not command.strip():
+        return False
+
+    stripped = command.strip()
+
+    # 1. Metacharacter guard (runs BEFORE normalization to prevent injection
+    #    via the git -C path argument, e.g. `git -C "$(rm -rf /)" status`).
+    for metachar in _PM_BASH_FORBIDDEN_METACHARS:
+        if metachar in stripped:
+            return False
+
+    # 2. Normalize `git -C <token>` to `git ` so cross-repo invocations
+    #    match the bare `git status` / `git log` / ... prefixes.
+    normalized = _GIT_DASH_C_PATTERN.sub("git ", stripped, count=1)
+
+    # 3. Prefix match: the command must equal an allowlist entry, start with
+    #    one followed by a space, or (for path-style prefixes ending in ``/``)
+    #    start with the prefix directly so entries like ``tail logs/`` match
+    #    ``tail logs/bridge.log`` without requiring a space between them.
+    for prefix in PM_BASH_ALLOWED_PREFIXES:
+        if normalized == prefix:
+            return True
+        if normalized.startswith(prefix + " "):
+            return True
+        if prefix.endswith("/") and normalized.startswith(prefix):
             return True
 
     return False
@@ -324,5 +474,22 @@ async def pre_tool_use_hook(
                             "Sensitive files must be managed manually."
                         ),
                     }
+
+        # PM sessions: restrict Bash to the read-only allowlist. Runs AFTER
+        # the sensitive-file check so sensitive-file violations surface with
+        # their specific error message.
+        if _is_pm_session() and not _is_pm_allowed_bash(command):
+            truncated = (command or "")[:200]
+            logger.warning(f"[pre_tool_use] PM blocked from running Bash command: {truncated!r}")
+            return {
+                "decision": "block",
+                "reason": (
+                    f"Blocked: PM session Bash restricted to a read-only allowlist. "
+                    f"Command: {truncated!r}. "
+                    "PM sessions may only run read-only git/gh/tail/cat/python -m tools "
+                    "commands (see agent/hooks/pre_tool_use.py::PM_BASH_ALLOWED_PREFIXES). "
+                    "Any mutation must be dispatched to a dev-session subagent."
+                ),
+            }
 
     return {}
