@@ -82,20 +82,20 @@ No prerequisites -- Redis is already required and connected by the worker at sta
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `TelegramRelayOutputHandler.send()` catches Redis connection errors and logs them via `logger.error` -- test asserts the error is logged and no exception propagates
-- [ ] `TelegramRelayOutputHandler.react()` same pattern -- Redis failure logged, no crash
+- [x] `TelegramRelayOutputHandler.send()` catches Redis connection errors and logs them via `logger.error` -- test asserts the error is logged and no exception propagates
+- [x] `TelegramRelayOutputHandler.react()` same pattern -- Redis failure logged, no crash
 
 ### Empty/Invalid Input Handling
-- [ ] `send()` with empty text returns immediately (no Redis write, matching `FileOutputHandler` behavior)
-- [ ] `send()` with `None` session falls back to `chat_id` for session_id extraction
+- [x] `send()` with empty text returns immediately (no Redis write, matching `FileOutputHandler` behavior)
+- [x] `send()` with `None` session falls back to `chat_id` for session_id extraction
 
 ### Error State Rendering
-- [ ] Not applicable -- this is a backend delivery handler with no user-visible error rendering
+- [x] Not applicable -- this is a backend delivery handler with no user-visible error rendering
 
 ## Test Impact
 
-- [ ] `tests/unit/test_output_handler.py::TestOutputHandlerProtocol` -- UPDATE: add test that `TelegramRelayOutputHandler` satisfies `OutputHandler` protocol
-- [ ] `tests/unit/test_output_handler.py` -- ADD: new `TestTelegramRelayOutputHandler` class with tests for send/react payloads, Redis write verification, error handling, empty text handling
+- [x] `tests/unit/test_output_handler.py::TestOutputHandlerProtocol` -- UPDATE: add test that `TelegramRelayOutputHandler` satisfies `OutputHandler` protocol
+- [x] `tests/unit/test_output_handler.py` -- ADD: new `TestTelegramRelayOutputHandler` class with tests for send/react payloads, Redis write verification, error handling, empty text handling
 
 No existing tests need to be deleted or replaced. The `FileOutputHandler` tests remain unchanged since that class is unmodified.
 
@@ -137,18 +137,18 @@ No agent integration required -- this is a worker-internal output routing change
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` to document the `TelegramRelayOutputHandler` and the worker's output delivery path
-- [ ] Add inline docstrings to `TelegramRelayOutputHandler` class and methods
+- [x] Update `docs/features/bridge-worker-architecture.md` to document the `TelegramRelayOutputHandler` and the worker's output delivery path
+- [x] Add inline docstrings to `TelegramRelayOutputHandler` class and methods
 
 ## Success Criteria
 
-- [ ] Worker delivers final session output to Telegram for Telegram-originated sessions
-- [ ] `FileOutputHandler` still works as fallback for non-Telegram / dev environments
-- [ ] The misleading `"Delivered to Telegram"` log message is removed or replaced with accurate logging
-- [ ] Stop hook delivery choices (SEND/EDIT/REACT/SILENT) are honored end-to-end
-- [ ] Unit tests verify payload format matches `tools/send_telegram.py` contract
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Worker delivers final session output to Telegram for Telegram-originated sessions
+- [x] `FileOutputHandler` still works as fallback for non-Telegram / dev environments
+- [x] The misleading `"Delivered to Telegram"` log message is removed or replaced with accurate logging
+- [x] Stop hook delivery choices (SEND/EDIT/REACT/SILENT) are honored end-to-end
+- [x] Unit tests verify payload format matches `tools/send_telegram.py` contract
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
