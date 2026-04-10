@@ -100,21 +100,21 @@ No prerequisites -- this work has no external dependencies beyond what's already
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The bare `creds.refresh(Request())` in `get_credentials()` (line 89) currently has no exception handler -- add try/except for `RefreshError` and `TransportError` with tests asserting the custom `GoogleAuthError` is raised with recovery instructions
-- [ ] The `except Exception` in `valor_calendar.py:main()` (line 285) already queues locally on failure -- verify it logs the actionable message from the new error type
+- [x] The bare `creds.refresh(Request())` in `get_credentials()` (line 89) currently has no exception handler -- add try/except for `RefreshError` and `TransportError` with tests asserting the custom `GoogleAuthError` is raised with recovery instructions
+- [x] The `except Exception` in `valor_calendar.py:main()` (line 285) already queues locally on failure -- verify it logs the actionable message from the new error type
 
 ### Empty/Invalid Input Handling
-- [ ] Test `get_credentials()` when token file exists but contains invalid JSON
-- [ ] Test `get_credentials()` when token file exists but is empty
-- [ ] Test `verify_token()` when credentials dir does not exist
+- [x] Test `get_credentials()` when token file exists but contains invalid JSON
+- [x] Test `get_credentials()` when token file exists but is empty
+- [x] Test `verify_token()` when credentials dir does not exist
 
 ### Error State Rendering
-- [ ] Verify `--check` prints clear status for each failure mode (no token, expired, revoked, wrong scopes)
-- [ ] Verify `--reauth` prints success/failure message after completing the flow
+- [x] Verify `--check` prints clear status for each failure mode (no token, expired, revoked, wrong scopes)
+- [x] Verify `--reauth` prints success/failure message after completing the flow
 
 ## Test Impact
 
-- [ ] `tests/unit/test_config_consolidation.py::TestGoogleAuthNoFallback` -- no change needed, these test path hygiene not auth behavior
+- [x] `tests/unit/test_config_consolidation.py::TestGoogleAuthNoFallback` -- no change needed, these test path hygiene not auth behavior
 - No other existing tests touch the auth module directly. All new tests are additive.
 
 No existing tests affected -- the auth module had no behavioral tests; only path/config tests exist in `test_config_consolidation.py` which remain valid.
@@ -165,14 +165,14 @@ No agent integration required -- the auth module is called internally by `valor_
 
 ## Success Criteria
 
-- [ ] `get_credentials()` catches `RefreshError` and `TransportError` with specific error messages including recovery commands
-- [ ] `valor-calendar --reauth` clears token and re-runs OAuth consent flow end-to-end
-- [ ] `valor-calendar --check` prints token health status (valid/expired/revoked/missing)
-- [ ] `verify_token()` returns structured result usable by `/setup` and `/update`
-- [ ] `/setup` skill Step 4 references commands that actually exist
-- [ ] Unit tests cover: successful refresh, revoked token error, missing credentials file, invalid token file, scope mismatch, `--check` output, `--reauth` flow
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `get_credentials()` catches `RefreshError` and `TransportError` with specific error messages including recovery commands
+- [x] `valor-calendar --reauth` clears token and re-runs OAuth consent flow end-to-end
+- [x] `valor-calendar --check` prints token health status (valid/expired/revoked/missing)
+- [x] `verify_token()` returns structured result usable by `/setup` and `/update`
+- [x] `/setup` skill Step 4 references commands that actually exist
+- [x] Unit tests cover: successful refresh, revoked token error, missing credentials file, invalid token file, scope mismatch, `--check` output, `--reauth` flow
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
