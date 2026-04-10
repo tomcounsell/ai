@@ -15,6 +15,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent.hooks.pre_tool_use import pre_tool_use_hook
+
 # --- PreToolUse hook: PM write restriction tests ---
 
 
@@ -203,83 +205,135 @@ class TestPMBashRestriction:
 
     def test_pm_blocked_from_rm_rf(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("rm -rf /Users/valorengels/src/ai", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("rm -rf /Users/valorengels/src/ai"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") == "block"
         assert "PM session" in result.get("reason", "")
         assert "dev-session" in result.get("reason", "")
 
     def test_pm_blocked_from_git_clone(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git clone https://github.com/tomcounsell/ai.git /tmp/ai", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git clone https://github.com/tomcounsell/ai.git /tmp/ai"),
+                "tu-bash",
+                mock_context,
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_from_git_commit(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run('git commit -m "wip"', mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input('git commit -m "wip"'), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_from_git_push(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git push origin main", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git push origin main"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_from_git_reset_hard(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git reset --hard HEAD", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git reset --hard HEAD"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_from_git_checkout(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git checkout main", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("git checkout main"), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_from_pip_install(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("pip install requests", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("pip install requests"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_from_uv_sync(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("uv sync", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("uv sync"), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_from_rm_rf_venv(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("rm -rf .venv", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("rm -rf .venv"), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
 
     # -- Blocked: metacharacter smuggling --------------------------------------
 
     def test_pm_blocked_metachar_pipe_smuggling(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git log | xargs rm -rf .", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git log | xargs rm -rf ."), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_command_substitution(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git status; rm -rf /tmp/x", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git status; rm -rf /tmp/x"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_redirection_and_chain(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git log > /tmp/x && rm -rf /tmp/x", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git log > /tmp/x && rm -rf /tmp/x"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_dollar_parens(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("echo $(rm -rf /)", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("echo $(rm -rf /)"), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_backtick_substitution(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("echo `rm -rf /`", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("echo `rm -rf /`"), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
 
     # -- Blocked: gh api (deliberately excluded from allowlist) ----------------
 
     def test_pm_blocked_gh_api_get(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("gh api repos/tomcounsell/ai/issues/881", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("gh api repos/tomcounsell/ai/issues/881"),
+                "tu-bash",
+                mock_context,
+            )
+        )
         assert result.get("decision") == "block"
 
     def test_pm_blocked_gh_api_post(self, mock_context, monkeypatch):
@@ -294,84 +348,142 @@ class TestPMBashRestriction:
 
     def test_pm_allowed_git_status(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git status", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("git status"), "tu-bash", mock_context)
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_git_log(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git log --oneline -10", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git log --oneline -10"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_git_diff(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git diff main", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("git diff main"), "tu-bash", mock_context)
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_git_show(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("git show HEAD", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("git show HEAD"), "tu-bash", mock_context)
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_git_dash_c_status(self, mock_context, monkeypatch):
         """``git -C <token> status`` is allowed via the normalization step."""
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run('git -C "/Users/v/src/ai" status', mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input('git -C "/Users/v/src/ai" status'), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_git_dash_c_log(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run('git -C "/repo" log --oneline -5', mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input('git -C "/repo" log --oneline -5'), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_gh_issue_view(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("gh issue view 881", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("gh issue view 881"), "tu-bash", mock_context)
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_gh_pr_list(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("gh pr list", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("gh pr list"), "tu-bash", mock_context)
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_gh_pr_view(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("gh pr view 123", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("gh pr view 123"), "tu-bash", mock_context)
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_tail_logs(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("tail logs/bridge.log", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("tail logs/bridge.log"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_cat_docs_plans(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("cat docs/plans/pm-bash-discipline.md", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("cat docs/plans/pm-bash-discipline.md"),
+                "tu-bash",
+                mock_context,
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_valor_session_status(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("python -m tools.valor_session status --id abc", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("python -m tools.valor_session status --id abc"),
+                "tu-bash",
+                mock_context,
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_sdlc_stage_query(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("python -m tools.sdlc_stage_query", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("python -m tools.sdlc_stage_query"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_check_plan_freshness(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("python scripts/check_plan_freshness.py docs/plans/foo.md", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("python scripts/check_plan_freshness.py docs/plans/foo.md"),
+                "tu-bash",
+                mock_context,
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_grep_rl_docs_plans(self, mock_context, monkeypatch):
         """SDLC skill step 2a uses ``grep -rl #881 docs/plans/`` to locate plans."""
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("grep -rl #881 docs/plans/", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("grep -rl #881 docs/plans/"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     def test_pm_allowed_grep_r_issue_in_plans(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run('grep -r "#881" docs/plans/', mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input('grep -r "#881" docs/plans/'), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     # -- Non-PM sessions unrestricted ------------------------------------------
@@ -379,25 +491,33 @@ class TestPMBashRestriction:
     def test_non_pm_session_bash_unrestricted(self, mock_context, monkeypatch):
         """``SESSION_TYPE=dev`` can still run mutating Bash commands."""
         monkeypatch.setenv("SESSION_TYPE", "dev")
-        result = self._run("rm -rf /tmp/x", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("rm -rf /tmp/x"), "tu-bash", mock_context)
+        )
         assert result.get("decision") != "block"
 
     def test_no_session_type_bash_unrestricted(self, mock_context, monkeypatch):
         """No ``SESSION_TYPE`` env var -> no PM restriction."""
         monkeypatch.delenv("SESSION_TYPE", raising=False)
-        result = self._run("git push origin main", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("git push origin main"), "tu-bash", mock_context
+            )
+        )
         assert result.get("decision") != "block"
 
     # -- Edge-case input handling ----------------------------------------------
 
     def test_pm_empty_command_blocked(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("", mock_context)
+        result = asyncio.run(pre_tool_use_hook(self._make_bash_input(""), "tu-bash", mock_context))
         assert result.get("decision") == "block"
 
     def test_pm_whitespace_only_blocked(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("   ", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("   "), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
 
     def test_pm_missing_command_key_blocked(self, mock_context, monkeypatch):
@@ -428,7 +548,9 @@ class TestPMBashRestriction:
         assertion distinguishes the two layers by inspecting the reason string.
         """
         monkeypatch.setenv("SESSION_TYPE", "pm")
-        result = self._run("cp /tmp/fake .env", mock_context)
+        result = asyncio.run(
+            pre_tool_use_hook(self._make_bash_input("cp /tmp/fake .env"), "tu-bash", mock_context)
+        )
         assert result.get("decision") == "block"
         reason = result.get("reason", "")
         assert "sensitive" in reason.lower(), (
