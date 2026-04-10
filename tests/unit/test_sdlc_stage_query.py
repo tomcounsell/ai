@@ -243,11 +243,18 @@ class TestCLIOutput:
     """Tests for CLI invocation and output format."""
 
     def test_no_args_returns_empty_json(self):
+        # Strip session env vars: the tool falls back to VALOR_SESSION_ID /
+        # AGENT_SESSION_ID (tools/sdlc_stage_query.py:159) when no args are
+        # given, so inheriting the parent env would cause a real Redis query
+        # and a non-empty result when this test runs inside an SDLC session.
+        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
+        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
         result = subprocess.run(
             [sys.executable, "-m", "tools.sdlc_stage_query"],
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
+            env=clean_env,
         )
         assert result.returncode == 0
         assert json.loads(result.stdout.strip()) == {}
