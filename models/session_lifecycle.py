@@ -36,6 +36,21 @@ NON_TERMINAL_STATUSES = frozenset(
     }
 )
 
+# Recovery ownership — maps every non-terminal status to the process responsible
+# for detecting stuck sessions in that state and recovering them.
+# This is an informational constant; it is not used for runtime routing.
+# See docs/features/session-recovery-mechanisms.md for the full rationale.
+RECOVERY_OWNERSHIP: dict[str, str] = {
+    "pending": "worker",  # _agent_session_health_check
+    "running": "worker",  # _agent_session_health_check + startup recovery
+    "active": "bridge-watchdog",  # session_watchdog check_all/stalled
+    "dormant": "bridge-watchdog",  # session_watchdog activity check
+    "waiting_for_children": "worker",  # _agent_session_hierarchy_health_check
+    "superseded": "none",  # transitional; finalized immediately
+    "paused_circuit": "bridge-watchdog",  # sustainability.py circuit drip
+    "paused": "bridge-watchdog",  # hibernation.py session-resume-drip
+}
+
 # All known statuses
 ALL_STATUSES = TERMINAL_STATUSES | NON_TERMINAL_STATUSES
 

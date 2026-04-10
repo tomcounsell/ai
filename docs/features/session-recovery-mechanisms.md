@@ -93,6 +93,27 @@ The session system has 8 mechanisms that can revive, recover, or re-enqueue sess
 | Terminal safety | **Safe by design** -- has no `AgentSession` imports, operates at process level only |
 | Guard | N/A (no session awareness) |
 
+## Recovery Ownership
+
+Session recovery is split between two processes: the **worker** and the **bridge-hosted watchdog**. Each non-terminal status has exactly one owner responsible for detecting stuck sessions and recovering them.
+
+The authoritative registry is `RECOVERY_OWNERSHIP` in `models/session_lifecycle.py`. A unit test (`tests/unit/test_recovery_ownership.py`) asserts that every non-terminal status has a registered owner, so adding a new status without declaring ownership breaks CI.
+
+| Status | Owner | Recovery Mechanism |
+|--------|-------|--------------------|
+| `pending` | worker | `_agent_session_health_check` starts a worker for stalled pending sessions |
+| `running` | worker | `_agent_session_health_check` + `_recover_interrupted_agent_sessions_startup` reset to pending |
+| `waiting_for_children` | worker | `_agent_session_hierarchy_health_check` finalizes stuck parents |
+| `active` | bridge-watchdog | `monitoring/session_watchdog.py` `check_all_sessions` + `check_stalled_sessions` |
+| `dormant` | bridge-watchdog | `monitoring/session_watchdog.py` via `check_stalled_sessions` activity check |
+| `paused` | bridge-watchdog | `agent/hibernation.py` session-resume-drip |
+| `paused_circuit` | bridge-watchdog | `agent/sustainability.py` circuit breaker drip |
+| `superseded` | none | Transitional status; superseded sessions are finalized immediately |
+
+**Why the split exists:** The worker process owns execution lifecycle (pending, running, hierarchy). The bridge-hosted watchdog owns monitoring of sessions that are paused or waiting outside the execution loop (active, dormant, paused variants). This split emerged naturally from the bridge/worker separation (PR #826) and is now formally documented here.
+
+**Adding a new non-terminal status:** Add it to `NON_TERMINAL_STATUSES` in `models/session_lifecycle.py`, then add a corresponding entry to `RECOVERY_OWNERSHIP` with the process that will monitor it. The CI test enforces this.
+
 ## Guard Implementation: `transition_status()` `reject_from_terminal`
 
 The `transition_status()` function in `models/session_lifecycle.py` now has a `reject_from_terminal` parameter (default `True`):
