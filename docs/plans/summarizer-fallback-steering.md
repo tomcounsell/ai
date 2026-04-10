@@ -5,6 +5,7 @@ type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/891
 created: 2026-04-10
+last_comment_id: IC_kwDOEYGa0877y3Va
 ---
 
 # Summarizer Fallback: Agent Self-Summary via Session Steering
