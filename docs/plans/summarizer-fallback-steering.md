@@ -310,9 +310,75 @@ No agent integration required -- this is a bridge-internal change. The steering 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-10 -->
+
+### CONCERN: Early return from send_response_with_files drops full_output_file and extracted files
+
+| Field | Value |
+|-------|-------|
+| Severity | CONCERN |
+| Critics | Skeptic, Operator |
+| Location | Solution > Technical Approach, Step 3 |
+| Finding | When `send_response_with_files()` returns early after pushing a steering message, the `full_output_file` (written at summarizer.py:1437-1441) and any extracted files are never sent to Telegram. The agent's self-summary on the next turn will be a new, shorter text that won't trigger `full_output_file` generation. The original full output file is orphaned on disk. |
+| Suggestion | Before returning early, send `full_output_file` (and any image/doc artifacts) to Telegram. Only suppress the text portion. This preserves the file attachment the user expects for long outputs. |
+| Implementation Note | In `bridge/response.py`, after detecting `needs_self_summary=True`, iterate `files` list and send each via `client.send_file()` (same loop at line 570-611) before returning `None`. The `full_output_file` is in `summarized.full_output_file` which was already appended to `files` at line 542-543. |
+
+### CONCERN: Early return from send_response_with_files triggers spurious error log in bridge callback
+
+| Field | Value |
+|-------|-------|
+| Severity | CONCERN |
+| Critics | Operator |
+| Location | Solution > Technical Approach, Step 2 (build-steering) |
+| Finding | The `_send` callback in `bridge/telegram_bridge.py:1796-1818` logs an error when `send_response_with_files` returns `None` and the filtered text is non-empty (`elif filtered: logger.error(...)`). An intentional early return for self-summary will generate spurious "send returned False" errors on every fallback occurrence, polluting logs and potentially triggering false alerts. |
+| Suggestion | Return a sentinel value (e.g., a string constant or a lightweight object) instead of `None` when the self-summary path is taken, so the bridge callback can distinguish "steering injected, message deferred" from "send failed". |
+| Implementation Note | Option A: Have `send_response_with_files` return a `STEERING_DEFERRED` sentinel string constant; the bridge callback checks `if sent == STEERING_DEFERRED: pass` before the `elif filtered:` error branch. Option B: Return `True` (truthy but not a Message) -- but this changes the return type contract. Option A is cleaner. |
+
+### CONCERN: No loop prevention mechanism beyond the "one-shot" assertion
+
+| Field | Value |
+|-------|-------|
+| Severity | CONCERN |
+| Critics | Skeptic, Adversary |
+| Location | Risks > Risk 1 |
+| Finding | The plan claims steering is "one-shot" because `needs_self_summary` is only set when backends fail, not when text is a self-summary. But there is no structural guard -- if the self-summary output happens to also be long enough to trigger summarization (>=200 chars per response.py:535) and both backends fail again, `needs_self_summary=True` fires again, pushing another steering message. The plan's mitigation is an assertion about behavior, not a code guard. |
+| Suggestion | Add an explicit guard: track whether a steering self-summary was already pushed for this session delivery cycle. A simple approach: include a marker in the steering message text (e.g., `[self-summary-request]`), and in `send_response_with_files`, if the incoming text contains that marker, skip the self-summary path. |
+| Implementation Note | Simpler alternative: add a `_self_summary_requested` key to the session (or pass a flag via the steering message metadata `sender="summarizer-fallback"`). In `send_response_with_files`, before pushing the steering message, check if the *most recent* steering message in the queue has `sender="summarizer-fallback"` -- if so, skip and fall through to truncation + narration gate. Use `agent.steering.peek_steering_queue(session_id)` or check `sender` field from `pop_all_steering_messages` without consuming. |
+
+### NIT: is_narration_only() has a 500-char cap that may be too restrictive for last-resort gate
+
+| Field | Value |
+|-------|-------|
+| Severity | NIT |
+| Critics | Adversary |
+| Location | Solution > Technical Approach, Step 4 (build-gate) |
+| Finding | `is_narration_only()` in `bridge/message_quality.py:39` caps at 500 chars (`_MAX_NARRATION_LENGTH`). Agent outputs that fail summarization are typically much longer. After truncation to `SAFETY_TRUNCATE` (4096 chars), the text will exceed 500 chars and `is_narration_only()` will return False, making the narration gate ineffective as a last resort for most real-world cases. |
+| Suggestion | Either raise the cap for the fallback use case or apply `is_narration_only()` to the first 500 chars of the text as a heuristic. |
+
+### NIT: Task 3 condition logic may confuse the builder
+
+| Field | Value |
+|-------|-------|
+| Severity | NIT |
+| Critics | Simplifier |
+| Location | Step by Step Tasks > Task 3 |
+| Finding | Task 3 says to apply the narration gate "when `was_summarized` is False and `needs_self_summary` is False." But the plan also says in Task 1 that when backends fail, `needs_self_summary` is set to True. So the only case where both are False is when the text was short enough to skip summarization entirely (< 200 chars). This is logically correct but the description doesn't make the "short text" scenario explicit, which may confuse the builder. |
+| Suggestion | Add a comment in the task: "This covers the case where text was too short for summarization or the no-session fallback path." |
+
+**Verdict**: READY TO BUILD (with concerns)
+
+Three CONCERN findings exist. None are blockers. A revision pass should embed the Implementation Notes into the plan text so the builder has unambiguous guidance:
+1. Send files before early return (prevent `full_output_file` loss)
+2. Return a sentinel to avoid spurious error logs in the bridge callback
+3. Add an explicit loop prevention guard beyond the behavioral assertion
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic, Operator | Early return drops full_output_file and files | build-steering | Send files before returning; text is suppressed, files are not |
+| CONCERN | Operator | Spurious error log from bridge callback on early return | build-steering | Return STEERING_DEFERRED sentinel instead of None |
+| CONCERN | Skeptic, Adversary | No structural loop prevention guard | build-steering | Check sender="summarizer-fallback" in queue before pushing |
+| NIT | Adversary | is_narration_only 500-char cap limits last-resort effectiveness | build-gate | Consider applying to first 500 chars as heuristic |
+| NIT | Simplifier | Task 3 condition logic implicit about short-text scenario | build-gate | Add clarifying comment |
 
 ---
 
