@@ -120,7 +120,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
     Startup sequence (deterministic):
-    1. Registers FileOutputHandler for each project
+    1. Registers TelegramRelayOutputHandler for each project
     2. Rebuilds AgentSession indexes (idempotent SCAN-based, production-safe)
     3. Cleans up corrupted sessions
     4. Recovers interrupted sessions
@@ -141,7 +141,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         register_callbacks,
         request_shutdown,
     )
-    from agent.output_handler import FileOutputHandler
+    from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
 
     # Initialize global concurrency semaphore BEFORE any worker loops are created.
     # Clamp to minimum 1 to prevent deadlock if MAX_CONCURRENT_SESSIONS=0.
@@ -149,7 +149,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     _queue._global_session_semaphore = asyncio.Semaphore(_max_sessions)
     logger.info(f"Global session semaphore initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
 
-    handler = FileOutputHandler()
+    handler = TelegramRelayOutputHandler(file_handler=FileOutputHandler())
 
     # Verify Redis is reachable by attempting to list sessions
     try:
@@ -168,10 +168,10 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         )
         return
 
-    # Register FileOutputHandler for each project
+    # Register TelegramRelayOutputHandler for each project
     for project_key in projects:
         register_callbacks(project_key, handler=handler)
-        logger.info(f"[{project_key}] Registered FileOutputHandler")
+        logger.info(f"[{project_key}] Registered TelegramRelayOutputHandler")
 
     # Step 1: Rebuild indexes for ALL Popoto models (SCAN-based, production-safe)
     # Cleans up stale/orphaned index entries across all models, not just AgentSession

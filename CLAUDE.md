@@ -248,7 +248,8 @@ Standalone Worker (python -m worker) → Sole session execution engine
                                                    → Claude Agent SDK → Claude API
                                                        (agent/sdk_client.py)
                                            → Uses OutputHandler protocol (agent/output_handler.py)
-                                           → FileOutputHandler fallback when no bridge callbacks
+                                           → TelegramRelayOutputHandler writes to Redis outbox
+                                           → FileOutputHandler fallback for non-Telegram / dev environments
 ```
 See `docs/features/bridge-worker-architecture.md` for the full bridge/worker separation design.
 

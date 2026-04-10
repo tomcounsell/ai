@@ -2889,7 +2889,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
             chat_state.completion_sent = True
             logger.info(
-                f"[{session.project_key}] Delivered to Telegram "
+                f"[{session.project_key}] Output delivered "
                 f"(stop_reason={stop_reason}, {len(msg)} chars)"
             )
 
