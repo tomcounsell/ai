@@ -1,5 +1,5 @@
 ---
-status: Done
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor

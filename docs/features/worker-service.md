@@ -24,7 +24,7 @@ The worker extracts the session execution engine from the bridge monolith into a
 
 ### Entry Points
 
-- **Standalone worker**: `python -m worker` -- processes sessions, writes output to log files (or sends via Telegram when callbacks are registered)
+- **Standalone worker**: `python -m worker` -- processes sessions, delivers output via `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery) with `FileOutputHandler` dual-write for audit logs
 - **Bridge** (I/O only): `python bridge/telegram_bridge.py` -- handles Telegram I/O, registers output callbacks, enqueues sessions; requires a running worker to process them
 - **Both processes share**: `agent/agent_session_queue.py` for queue logic, `agent/output_handler.py` for output routing
 
@@ -42,6 +42,7 @@ class OutputHandler(Protocol):
 
 | Handler | Location | Purpose |
 |---------|----------|---------|
+| `TelegramRelayOutputHandler` | `agent/output_handler.py` | Writes JSON to Redis outbox (`telegram:outbox:{session_id}`) for bridge relay delivery; wraps `FileOutputHandler` for dual-write |
 | `FileOutputHandler` | `agent/output_handler.py` | Writes output to `logs/worker/{session_id}.log` |
 | `LoggingOutputHandler` | `agent/output_handler.py` | Logs output via Python logging (stderr) |
 | Telegram callbacks | `bridge/telegram_bridge.py` | Sends output via Telegram (registered at bridge startup) |
@@ -50,9 +51,12 @@ class OutputHandler(Protocol):
 
 ```python
 from agent.agent_session_queue import register_callbacks
-from agent.output_handler import FileOutputHandler
+from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
 
-# New style: pass an OutputHandler instance
+# Telegram-connected projects: relay to Redis outbox (dual-write to file log)
+register_callbacks("my-project", handler=TelegramRelayOutputHandler(file_handler=FileOutputHandler()))
+
+# Non-Telegram / dev projects: file log only
 register_callbacks("my-project", handler=FileOutputHandler())
 
 # Old style: pass raw callables (backward compatible)
