@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -159,9 +159,9 @@ No agent integration required -- the auth module is called internally by `valor_
 
 ## Documentation
 
-- [ ] Create `docs/features/google-workspace-auth.md` describing the auth module, error handling, and recovery commands
-- [ ] Update `/setup` skill Step 4 to reference `valor-calendar --check` and `valor-calendar --reauth` instead of nonexistent `valor-calendar test`
-- [ ] Add inline docstrings to new `verify_token()`, `GoogleAuthError`, and CLI flag handling
+- [x] Create `docs/features/google-workspace-auth.md` describing the auth module, error handling, and recovery commands
+- [x] Update `/setup` skill Step 4 to reference `valor-calendar --check` and `valor-calendar --reauth` instead of nonexistent `valor-calendar test`
+- [x] Add inline docstrings to new `verify_token()`, `GoogleAuthError`, and CLI flag handling
 
 ## Success Criteria
 

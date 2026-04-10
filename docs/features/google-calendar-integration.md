@@ -83,10 +83,12 @@ Slugs not in the config fall back to the `default` entry (or `primary` if no def
 ### OAuth Credentials
 
 - Credentials: `~/Desktop/Valor/google_credentials.json` (from Google Cloud Console)
-- Token: `~/Desktop/Valor/google_token.json` (auto-generated on first run)
+- Token: `~/Desktop/Valor/google_token.<machine-name>.json` (per-machine, auto-generated on first run)
 - Scopes: `https://www.googleapis.com/auth/calendar`
+
+See `docs/features/google-workspace-auth.md` for error handling, `verify_token()`, and `--reauth`/`--check` CLI flags.
 
 ## Setup & Validation
 
-- `/setup` command (Step 3) walks through OAuth consent and calendar config creation
-- `/update` command (Step 7) validates OAuth connectivity, config file, and per-project calendar accessibility
+- `/setup` command (Step 4) walks through OAuth consent using `valor-calendar --reauth` and validates with `valor-calendar --check`
+- `/update` command validates OAuth connectivity, config file, and per-project calendar accessibility
