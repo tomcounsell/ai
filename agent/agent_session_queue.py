@@ -3712,7 +3712,7 @@ def _cli_show_status() -> None:
     # Summary
     status_counts: dict[str, int] = {}
     for entry in all_sessions:
-        status_counts[session.status] = status_counts.get(session.status, 0) + 1
+        status_counts[entry.status] = status_counts.get(entry.status, 0) + 1
     summary = ", ".join(f"{v} {k}" for k, v in sorted(status_counts.items()))
     print(f"Total: {len(all_sessions)} sessions ({summary})")
 

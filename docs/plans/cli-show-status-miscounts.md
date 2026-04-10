@@ -1,6 +1,6 @@
 ---
 slug: cli-show-status-miscounts
-status: planned
+status: building
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/869
