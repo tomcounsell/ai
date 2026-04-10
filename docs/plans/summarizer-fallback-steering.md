@@ -1,6 +1,6 @@
 ---
 slug: summarizer-fallback-steering
-status: Planning
+status: Shipped
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/891

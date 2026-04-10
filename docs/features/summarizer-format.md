@@ -6,7 +6,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 1. **SDLC: always summarize (even empty responses). Non-SDLC: summarize if >= 200 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Even empty SDK responses render SDLC stage progress if session data is available. Non-SDLC short responses (< 200 chars) pass through raw -- this preserves programmatic skill output like `/update` that's already formatted.
 2. **SDLC template rendering**: Stage progress lines and link footers are rendered in Python code, not by the LLM. The LLM only generates bullet summaries and questions.
-3. **Question extraction (anti-fabrication)**: The LLM can surface questions using a `---` separator and `>> ` prefix, but ONLY questions that are **verbatim present** in the raw agent output. Declarative statements and plans must never be reframed as questions. The `expectations` field is set only when explicit questions exist. Legacy `? ` prefix is accepted and normalized to `>> ` by `_normalize_question_prefix()`.
+3. **Question extraction (anti-fabrication)**: The LLM can surface questions using a `---` separator and `>> ` prefix, but ONLY questions that are **verbatim present** in the raw agent output. Declarative statements and plans must never be reframed as questions. The `expectations` field is set only when explicit questions exist. The `? ` prefix from older formats is accepted and normalized to `>> ` by `_normalize_question_prefix()`.
 
 ## Output Format
 
@@ -92,7 +92,7 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 
 ## Implementation
 
-- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer with inline stage progress and link footer rendering), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_linkify_references()` (auto-link PR/Issue refs)
+- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer with inline stage progress and link footer rendering), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (`?` to `>>` prefix conversion), `_linkify_references()` (auto-link PR/Issue refs), `SELF_SUMMARY_INSTRUCTION` (steering prompt for fallback self-summary), `STEERING_DEFERRED` (sentinel for deferred delivery)
 - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg. `_truncate_at_sentence_boundary()` ensures clean truncation at Telegram's 4096-char limit.
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
 - `agent/agent_session_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `determine_delivery_action()` for routing decisions and passes `agent_session`
@@ -173,9 +173,35 @@ The `expectations` field description explicitly states it should only be set whe
 
 Basic `md` parse mode (not MarkdownV2). Supports bold, inline code, and `[text](url)` links. Falls back to plain text on parse errors.
 
+## Self-Summary Fallback via Session Steering
+
+When both summarizer backends (Haiku and OpenRouter) fail, the system avoids delivering raw truncated text to Telegram. Instead, it uses session steering to ask the agent to self-summarize.
+
+**Flow:**
+
+1. `summarize_response()` returns `SummarizedResponse(needs_self_summary=True, text="")` instead of truncating
+2. `send_response_with_files()` detects `needs_self_summary=True`
+3. If a session is available: pushes `SELF_SUMMARY_INSTRUCTION` to the session's steering queue via `push_steering_message(sender="summarizer-fallback")`
+4. Files (including `full_output_file`) are sent immediately -- only text delivery is deferred
+5. Returns `STEERING_DEFERRED` sentinel so the bridge callback knows this is intentional (not a send failure)
+6. The agent self-summarizes on its next turn, and the output flows through the normal delivery path
+
+**Loop prevention:** Before pushing a steering message, `peek_steering_sender()` checks if a `"summarizer-fallback"` message is already pending. If so, it skips steering and falls through to the narration gate.
+
+**Last-resort narration gate:** When no session is available, or steering fails, or loop prevention triggers:
+- `is_narration_only()` from `bridge/message_quality.py` checks the first 500 chars of the original text
+- If True: delivers `NARRATION_FALLBACK_MESSAGE` instead of raw narration
+- If False: delivers truncated text (existing behavior)
+
+**Key constants:**
+- `SELF_SUMMARY_INSTRUCTION` in `bridge/summarizer.py` -- compact prompt derived from `SUMMARIZER_SYSTEM_PROMPT` quality rules
+- `STEERING_DEFERRED` in `bridge/summarizer.py` -- sentinel return value for deferred delivery
+- `NARRATION_FALLBACK_MESSAGE` in `bridge/message_quality.py` -- user-friendly fallback text
+
 ## Related
 
 - [AgentSession Model](agent-session-model.md) - Unified lifecycle model with stage progress helpers
 - [Bridge Response Improvements](bridge-response-improvements.md) - Response pipeline
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) - Output classification and auto-continue
 - [PM Voice Refinement](pm-voice-refinement.md) - Naturalized SDLC language, crash pool, sentence truncation, milestone-selective emoji
+- [Session Steering](session-steering.md) - Steering infrastructure used by the self-summary fallback

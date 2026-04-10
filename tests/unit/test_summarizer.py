@@ -170,8 +170,8 @@ class TestSummarizeResponse:
         mock_openrouter.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_all_backends_fail_truncates(self):
-        """If all summarization backends fail, truncate."""
+    async def test_all_backends_fail_requests_self_summary(self):
+        """If all summarization backends fail, signal self-summary via steering."""
         long_text = "x" * 5000
 
         mock_haiku = AsyncMock(return_value=None)
@@ -183,8 +183,18 @@ class TestSummarizeResponse:
             result = await summarize_response(long_text)
 
         assert result.was_summarized is False
-        assert len(result.text) <= 4096
-        assert result.text.endswith("...")
+        assert result.needs_self_summary is True
+        assert result.text == ""
+
+    @pytest.mark.asyncio
+    async def test_self_summary_instruction_quality(self):
+        """SELF_SUMMARY_INSTRUCTION contains key quality markers."""
+        from bridge.summarizer import SELF_SUMMARY_INSTRUCTION
+
+        assert "outcome" in SELF_SUMMARY_INSTRUCTION.lower()
+        assert "narration" in SELF_SUMMARY_INSTRUCTION.lower()
+        assert "bullet" in SELF_SUMMARY_INSTRUCTION.lower()
+        assert len(SELF_SUMMARY_INSTRUCTION) < 1000  # compact, not the full system prompt
 
     @pytest.mark.asyncio
     async def test_very_long_response_creates_file(self):

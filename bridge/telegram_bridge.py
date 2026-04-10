@@ -1794,23 +1794,33 @@ async def main():
                             session=session,
                         )
                         if sent:
-                            try:
-                                # Capture the Telegram message_id from the returned Message
-                                # object so outbound TelegramMessage records have message_id
-                                # populated. This enables reverse lookup via
-                                # TelegramMessage.query.filter(chat_id=X, message_id=Y).
-                                sent_msg_id = getattr(sent, "id", None)
-                                store_message(
-                                    chat_id=chat_id,
-                                    content=filtered,  # full content, no truncation
-                                    sender="Valor",
-                                    timestamp=utc_now(),
-                                    message_type="response",
-                                    message_id=sent_msg_id,
-                                    reply_to_msg_id=reply_to_msg_id,
+                            # Check for steering deferral sentinel — message was
+                            # intentionally held back for agent self-summary, not a
+                            # send failure. Don't store or log an error.
+                            from bridge.summarizer import STEERING_DEFERRED
+
+                            if sent == STEERING_DEFERRED:
+                                logger.info(
+                                    f"Session queue delivery deferred to self-summary "
+                                    f"steering for chat {chat_id}"
                                 )
-                            except Exception:
-                                pass
+                            else:
+                                try:
+                                    # Capture the Telegram message_id from the returned
+                                    # Message object so outbound TelegramMessage records
+                                    # have message_id populated.
+                                    sent_msg_id = getattr(sent, "id", None)
+                                    store_message(
+                                        chat_id=chat_id,
+                                        content=filtered,
+                                        sender="Valor",
+                                        timestamp=utc_now(),
+                                        message_type="response",
+                                        message_id=sent_msg_id,
+                                        reply_to_msg_id=reply_to_msg_id,
+                                    )
+                                except Exception:
+                                    pass
                         elif filtered:
                             logger.error(
                                 f"Session queue send returned False for chat {chat_id} "
