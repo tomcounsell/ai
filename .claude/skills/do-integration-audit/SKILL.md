@@ -34,9 +34,36 @@ Takes a feature topic as its argument and maps every integration surface: entry 
 1. **Discover**: Search for all files related to the feature topic — source code, tests, docs, config, migrations, routes, CLI commands. Use the feature name, synonyms, and related terms. Cast a wide net.
 2. **Map surfaces**: For each discovered file, classify it as one of: implementation, entry point, test, documentation, configuration, or migration.
 3. **Check**: Run each of the 12 audit checks against the feature's integration map.
-4. **Filter**: If `--severity` is set, exclude findings below the threshold.
-5. **Report**: Present findings grouped by severity.
-6. **Pause**: Wait for human review — never modify source files.
+4. **Verify**: Re-check each draft finding against the actual code (see Verification pass below). Drop or revise findings that don't survive verification.
+5. **Filter**: If `--severity` is set, exclude findings below the threshold.
+6. **Report**: Present findings grouped by severity.
+7. **Pause**: Wait for human review — never modify source files.
+
+### Verification pass (Step 4) — mandatory before reporting
+
+Audit notes taken early in an investigation go stale. Line numbers shift as you grep around, you form hypotheses before you've read every relevant file, and you reason about dynamic behavior from static reads. Before writing the report, re-verify every draft finding against the actual code. This is a separate pass — not "verify as you go" but "stop, go back, and prove each claim one more time."
+
+For each finding, do all three:
+
+1. **Re-read the exact file:line.** Open the cited location with `Read` (not Grep) and confirm the code at that line still matches your claim. Line numbers drift between greps and writes. If a finding cites multiple lines, re-read each.
+
+2. **For "nothing handles X" claims, grep the whole project.** Claims of the form "no recovery path handles this status", "no test covers this path", "nothing imports this module" require a project-wide search, not just a search inside the file under audit. Sibling systems (watchdogs, monitors, hooks, migration scripts, other services in a multi-process architecture) may handle the concern from outside the feature's directory. If your negative claim is based on a local search, widen it.
+
+3. **For dynamic-behavior claims, trace into the function bodies.** Claims of the form "this runs twice", "this is never called", "this silently drops data" are about runtime behavior, not source structure. "Function A calls function B" does NOT prove B executes — B may early-return on an idempotency check, a guard, a feature flag, or an exception path. Trace through the actual body of every function you're claiming runs/doesn't-run. If you can't prove the dynamic claim from the code alone, mark it "suspected" instead of "confirmed", or drop it.
+
+**If a finding cannot survive verification, drop it.** A smaller correct report is better than a larger report with overstated or false claims. If a finding survives in modified form, note the revision inline ("Original draft claimed X; verification showed Y; corrected claim is Z").
+
+**Optional second-pass subagent for CRITICAL findings.** For any CRITICAL-severity finding that survives self-verification, spawn a fresh subagent via the `Agent` tool with an explicit falsification prompt: "Read {file:line} and try to disprove the following claim: {claim}. Report one of PASS (claim holds), FAIL (claim is wrong, here's why), or REVISE (claim is partially right, here's the correction)." The second agent starts without your investigation notes, so it can only reason from the code. CRITICAL findings that survive both passes are worth reporting loudly.
+
+### Anti-patterns observed in past audits
+
+These are specific failure modes the verification pass is designed to catch. If you recognize yourself doing any of them, stop and re-verify:
+
+- **Stale line numbers.** Citing `file.py:N` when the current line at N is something else. Always `Read` the exact line before writing it into a finding.
+- **Local-scope negatives.** Writing "nothing handles X" after searching only the file under audit. In a multi-process or multi-module architecture, the handler may live in a sibling directory (watchdogs, bridge processes, monitoring, hooks).
+- **Static-to-dynamic reasoning.** Writing "this runs twice" because the source shows two calls to the same function, without tracing into the function body to check for idempotency guards, early-returns, or status-conditional branches.
+- **Contradictory claims within one report.** Writing "saved only by idempotency" in one section and "runs side effects twice" in another — these contradict. Treat internal contradictions as a verification failure and pick the one the code actually supports.
+- **Hypothesis-confirming grep.** Running greps that confirm what you already think and stopping when you find support, instead of running greps that could falsify your hypothesis. For every claim, ask "what search would prove me wrong?" and run that one too.
 
 ### Step 1: Discovery strategy
 
@@ -263,4 +290,5 @@ Findings only. The skill never modifies source files. Next steps are decided by 
 
 ## Version history
 
+- v1.1.0 (2026-04-10): Added mandatory Verification pass (Step 4) and five anti-patterns list. Three audits on the session lifecycle area each shipped findings with stale line numbers, local-scope negatives, or static-to-dynamic reasoning errors. Verification pass is inline for all findings; optional second-pass subagent for CRITICAL findings.
 - v1.0.0 (2026-04-03): Initial — 8 checks, semantic discovery, high-autonomy prompt-only approach
