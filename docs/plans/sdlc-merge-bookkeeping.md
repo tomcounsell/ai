@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -124,15 +124,15 @@ No prerequisites -- this work has no external dependencies.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Bug 3 site 2 (line 84) currently has NO exception handling -- add try/except with informative error message and graceful fallback to manual checks
-- [ ] Bug 3 site 1 (line 20) already has try/except Exception -- no change needed
+- [x] Bug 3 site 2 (line 84) currently has NO exception handling -- add try/except with informative error message and graceful fallback to manual checks
+- [x] Bug 3 site 1 (line 20) already has try/except Exception -- no change needed
 
 ### Empty/Invalid Input Handling
-- [ ] Test `validate_feature_index()` with a feature doc whose filename has no matching README row -- should return (False, error message), not crash
-- [ ] Test the new README-based name extraction when the README has no matching link -- should fail gracefully
+- [x] Test `validate_feature_index()` with a feature doc whose filename has no matching README row -- should return (False, error message), not crash
+- [x] Test the new README-based name extraction when the README has no matching link -- should fail gracefully
 
 ### Error State Rendering
-- [ ] Migration script error messages should name the feature doc and the README row it searched for, not just the mangled title
+- [x] Migration script error messages should name the feature doc and the README row it searched for, not just the mangled title
 
 ## Test Impact
 
@@ -175,21 +175,21 @@ No agent integration required -- the affected files are a slash command prompt t
 
 ## Documentation
 
-- [ ] Update `docs/features/README.md` line 28: fix drifted display text from `Chat Dev Session Architecture` to `PM/Dev Session Architecture`
-- [ ] Update `docs/features/documentation-lifecycle.md` if it references the `.title()` pattern -- verify and correct if needed
-- [ ] No new feature doc needed -- this is a bugfix to existing infrastructure
+- [x] Update `docs/features/README.md` line 28: fix drifted display text from `Chat Dev Session Architecture` to `PM/Dev Session Architecture`
+- [x] Update `docs/features/documentation-lifecycle.md` if it references the `.title()` pattern -- verify and correct if needed
+- [x] No new feature doc needed -- this is a bugfix to existing infrastructure
 
 ## Success Criteria
 
-- [ ] `python scripts/migrate_completed_plan.py` succeeds against a feature doc whose filename contains acronyms (pm-, sdlc-, ai-)
-- [ ] Unit test: `validate_feature_index()` matches features with acronym-heavy names without mangling
-- [ ] Unit test: feature name extraction from README works when display text differs from filename
-- [ ] `/do-merge` plan completion gate reads from `origin/main`, not cwd
-- [ ] `/do-merge` post-merge migration reads from `origin/main`, not cwd
-- [ ] `grep "get_by_slug" .claude/commands/do-merge.md` returns zero matches
-- [ ] `docs/features/README.md:28` display text matches the actual feature doc title
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `python scripts/migrate_completed_plan.py` succeeds against a feature doc whose filename contains acronyms (pm-, sdlc-, ai-)
+- [x] Unit test: `validate_feature_index()` matches features with acronym-heavy names without mangling
+- [x] Unit test: feature name extraction from README works when display text differs from filename
+- [x] `/do-merge` plan completion gate reads from `origin/main`, not cwd
+- [x] `/do-merge` post-merge migration reads from `origin/main`, not cwd
+- [x] `grep "get_by_slug" .claude/commands/do-merge.md` returns zero matches
+- [x] `docs/features/README.md:28` display text matches the actual feature doc title
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
