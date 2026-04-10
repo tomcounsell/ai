@@ -288,7 +288,3 @@ Findings only. The skill never modifies source files. Next steps are decided by 
 - Track info-level findings as improvement opportunities
 - Re-run the audit after fixes to verify resolution
 
-## Version history
-
-- v1.1.0 (2026-04-10): Added mandatory Verification pass (Step 4) and five anti-patterns list. Three audits on the session lifecycle area each shipped findings with stale line numbers, local-scope negatives, or static-to-dynamic reasoning errors. Verification pass is inline for all findings; optional second-pass subagent for CRITICAL findings.
-- v1.0.0 (2026-04-03): Initial — 8 checks, semantic discovery, high-autonomy prompt-only approach
