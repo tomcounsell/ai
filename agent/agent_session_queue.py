@@ -3011,19 +3011,47 @@ async def _execute_agent_session(session: AgentSession) -> None:
         except Exception as _steer_err:
             logger.debug(f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}")
 
-    async def do_work() -> str:
-        return await get_agent_response_sdk(
-            _turn_input,
-            session.session_id,
-            session.sender_name,
-            session.chat_title,
-            project_config,
-            session.chat_id,
-            session.sender_id,
-            task_list_id,
-            cid,
-            session.agent_session_id,
+    # Route dev sessions to CLI harness when DEV_SESSION_HARNESS is set
+    _harness_mode = os.environ.get("DEV_SESSION_HARNESS", "sdk")
+    _use_cli_harness = _session_type == "dev" and _harness_mode != "sdk"
+
+    if _use_cli_harness:
+        from agent.sdk_client import get_response_via_harness
+
+        logger.info(
+            f"{log_prefix} Routing dev session to CLI harness (DEV_SESSION_HARNESS={_harness_mode})"
         )
+
+        # Build a simple send_cb that delivers directly to chat
+        # (bypasses nudge loop for dev sessions)
+        async def _harness_send_cb(text: str) -> None:
+            await send_cb(session.chat_id, text, session.telegram_message_id, agent_session)
+
+        async def do_work() -> str:
+            return await get_response_via_harness(
+                message=_turn_input,
+                send_cb=_harness_send_cb,
+                working_dir=str(working_dir),
+                env={
+                    "AGENT_SESSION_ID": session.agent_session_id or "",
+                    "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
+                },
+            )
+    else:
+
+        async def do_work() -> str:
+            return await get_agent_response_sdk(
+                _turn_input,
+                session.session_id,
+                session.sender_name,
+                session.chat_title,
+                project_config,
+                session.chat_id,
+                session.sender_id,
+                task_list_id,
+                cid,
+                session.agent_session_id,
+            )
 
     task = BackgroundTask(messenger=messenger)
     await task.run(do_work(), send_result=True)
