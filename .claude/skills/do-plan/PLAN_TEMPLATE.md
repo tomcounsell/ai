@@ -20,6 +20,29 @@ last_comment_id: [Latest issue comment ID incorporated into this plan - updated 
 **Desired outcome:**
 [What success looks like]
 
+## Freshness Check
+
+<!-- Phase 0.5 of /do-plan re-verifies the issue's claims against the current state of main
+     before planning. This section records what was re-verified and what (if anything) drifted.
+     Skip only if the issue was filed within the last hour AND no commits have landed on main since. -->
+
+**Baseline commit:** [SHA of `git rev-parse HEAD` at plan time]
+**Issue filed at:** [createdAt from `gh issue view N --json createdAt`]
+**Disposition:** [Unchanged | Minor drift | Major drift | Overlap]
+
+**File:line references re-verified:**
+- `path/to/file.py:NNN` — [what the issue claimed] — [still holds / drifted to line MMM / gone]
+
+**Cited sibling issues/PRs re-checked:**
+- #NNN — [still open / closed at DATE with resolution: ...]
+
+**Commits on main since issue was filed (touching referenced files):**
+- `abc1234` [commit title] — [irrelevant / partially addresses / changed root cause / already fixes]
+
+**Active plans in `docs/plans/` overlapping this area:** [none | list plan slugs and overlap description]
+
+**Notes:** [Any drift that didn't change the plan's premise; any corrected line numbers worth noting inline in Technical Approach.]
+
 ## Prior Art
 
 <!-- Search closed issues and merged PRs for related work before proposing solutions.
