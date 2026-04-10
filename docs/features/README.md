@@ -11,4 +11,5 @@
 | Mirofish Research | [mirofish-research.md](mirofish-research.md) | Mirofish research integration |
 | Perplexity Manual Paste | [perplexity-manual-paste.md](perplexity-manual-paste.md) | Manual paste fallback for when automated Perplexity research is skipped or failed |
 | Podcast Services | [podcast-services.md](podcast-services.md) | Podcast production and publishing services |
+| Stripe Podcast Routing | [stripe-podcast-routing.md](stripe-podcast-routing.md) | Stripe webhook endpoint at `/webhooks/stripe/` — routes subscription events to PodcastSubscription records with podcast metadata support |
 | WebMCP Integration | [webmcp-integration.md](webmcp-integration.md) | AI agent access to site via MCP protocol -- resources and guided mutation tools on all podcast pages |
