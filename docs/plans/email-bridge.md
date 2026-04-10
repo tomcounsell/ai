@@ -387,9 +387,18 @@ Using: builder, test-engineer, validator, documentarian
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). 2026-04-10 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Adversary | `telegram_message_id: int` is required in `enqueue_agent_session()` and `_push_agent_session()` — email has no Telegram message ID | Task 1 or Task 3 | Change param to `origin_message_id: int | str | None = None` with backward-compat alias, or pass `0` and document the convention. The value flows to `send_cb(chat_id, msg, session.telegram_message_id, agent_session)` at line 2864 — `EmailOutputHandler.send()` must tolerate a non-Telegram value as `reply_to_msg_id`. |
+| BLOCKER | Skeptic, Operator | `register_callbacks()` is called once per project (line 194 of `worker/__main__.py`) — plan says email and Telegram handlers coexist per project, but current callback lookup at line 2783 uses `session.project_key` only, not transport | Task 1 | The callback lookup at line 2783 (`_send_callbacks.get(session.project_key)`) and all `send_cb(...)` call sites (lines 2864, 2934, 2965) must be updated to try `(project_key, transport)` first. The plan's Task 1 mentions this but the plan's Data Flow step 6 incorrectly says `agent/agent_session_queue.py` — the lookup is in the same file but inside `send_to_chat()` closure, not a separate function. |
+| CONCERN | Adversary | `enqueue_agent_session()` has `telegram_message_key: str | None` parameter — email bridge needs equivalent for thread continuation but plan stores Message-ID in `extra_context["email_message_id"]` only | Task 3 | For email thread continuation, the `In-Reply-To` lookup needs a reverse mapping from email Message-ID to session_id. Store in Redis: `email:msgid:{message_id} -> session_id`. Without this, replies to Valor's emails cannot resume the correct session. |
+| CONCERN | Operator | No health check or monitoring for the email bridge — plan mentions "health check endpoint" in Risk 1 mitigation but no task implements it | Task 5 | Add `email-health` command to `valor-service.sh` that checks IMAP connection liveness. Mirror the bridge watchdog pattern: check last successful poll timestamp in Redis (`email:last_poll_ts`), alert if stale > 5 minutes. |
+| CONCERN | Operator | Dead letter queue mentioned in Failure Path Test Strategy and Risk 2 but not specified — no Redis key, no replay mechanism, no monitoring | Task 3 | Define Redis key `email:dead_letter:{session_id}` storing the failed SMTP payload. Add `email-dead-letter list` and `email-dead-letter replay` commands to `valor-service.sh` or as a Python script. |
+| CONCERN | Skeptic | Prerequisites check for SMTP/IMAP credentials will fail on all current machines (verified: `.env` has none of these) — no task creates the credentials setup documentation or `.env.example` update | Task 5 or Task 7 | Add IMAP/SMTP credential vars to `.env.example`. Document Gmail App Password setup in `docs/features/email-bridge.md`. |
+| CONCERN | Simplifier | Task 5 (Service Scripts) creates launchd plist and install script — this is premature for v1 when email bridge can run via `python -m bridge.email_bridge` manually | Task 5 | Consider deferring launchd plist to a follow-up. The `valor-service.sh` commands are sufficient for v1. |
+| NIT | Simplifier | Task 4 (Worker Registration) is trivially small — 3 lines of code adding email handler alongside Telegram handler. Could be absorbed into Task 1 or Task 3. | — | — |
+| NIT | User | Success criteria list "Tests pass (`/do-test`)" and "Documentation updated (`/do-docs`)" — these are process gates, not feature acceptance criteria | — | — |
 
 ---
 
