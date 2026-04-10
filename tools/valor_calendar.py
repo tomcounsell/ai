@@ -1,12 +1,17 @@
 """valor-calendar: Log work sessions as Google Calendar events.
 
-Usage: valor-calendar [--project PROJECT] <session-slug>
+Usage: valor-calendar [--project PROJECT] [--reauth] [--check] <session-slug>
 
 Routes to the correct Google Calendar by project name using
 config/calendar_config.json. Falls back to "default" calendar
 when no project is specified or no mapping exists.
 Creates or extends events using 30-minute segment rounding.
 Falls back to offline queue on auth failure.
+
+Flags:
+    --reauth    Clear stored tokens and re-run OAuth consent flow
+    --check     Validate token health and print status (exit 0=valid, 1=invalid)
+    --version   Print version and exit
 """
 
 from __future__ import annotations
@@ -241,12 +246,71 @@ def process_calendar_event(service, calendar_id: str, slug: str, now: datetime) 
     return f"Extended event '{slug}' to {event_start.strftime('%H:%M')}-{seg_end.strftime('%H:%M')}"
 
 
+def _handle_check() -> None:
+    """Handle --check flag: validate token health and print status."""
+    from tools.google_workspace.auth import verify_token
+
+    result = verify_token()
+    status = result["status"]
+
+    if result["valid"]:
+        print(f"Token status: {status}")
+        if result["scopes"]:
+            print(f"Scopes: {', '.join(result['scopes'])}")
+        elif result["scopes"] is None:
+            print("Scopes: unknown (reauth recommended if scope expansion needed)")
+        if result["expired"] and result["has_refresh_token"]:
+            print("Note: Token expired but has refresh token (will auto-refresh)")
+        sys.exit(0)
+    else:
+        print(f"Token status: {status}")
+        if status == "missing":
+            print("No token file found. Run: valor-calendar --reauth")
+        elif status == "invalid":
+            print("Token file is corrupted or unreadable. Run: valor-calendar --reauth")
+        elif status == "expired":
+            print("Token expired with no refresh token. Run: valor-calendar --reauth")
+        elif status == "scope_mismatch":
+            granted = result.get("scopes", [])
+            print(f"Granted scopes: {', '.join(granted) if granted else 'none'}")
+            print("Required scopes not granted. Run: valor-calendar --reauth")
+        elif status == "scopes_unknown":
+            print("Cannot verify scopes. Run: valor-calendar --reauth")
+        sys.exit(1)
+
+
+def _handle_reauth() -> None:
+    """Handle --reauth flag: clear tokens and re-run OAuth consent."""
+    from tools.google_workspace.auth import clear_tokens, get_credentials
+
+    print("Clearing stored tokens...")
+    clear_tokens()
+
+    print("Starting OAuth consent flow (browser will open)...")
+    try:
+        get_credentials()
+        print("Re-authentication successful. Token saved.")
+    except Exception as e:
+        print(f"Re-authentication failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--version":
-        print("valor-calendar 0.1.0")
+        print("valor-calendar 0.2.0")
         return
 
     args = sys.argv[1:]
+
+    # Handle --check and --reauth before other argument parsing
+    if "--check" in args:
+        _handle_check()
+        return
+
+    if "--reauth" in args:
+        _handle_reauth()
+        return
+
     project = None
 
     # Parse --project flag
@@ -257,7 +321,7 @@ def main() -> None:
             args = args[:idx] + args[idx + 2 :]
 
     if not args:
-        print("Usage: valor-calendar [--project PROJECT] <session-slug>")
+        print("Usage: valor-calendar [--project PROJECT] [--reauth] [--check] <session-slug>")
         sys.exit(1)
 
     slug = args[0]
@@ -269,7 +333,7 @@ def main() -> None:
         sys.exit(0)
 
     try:
-        from tools.google_workspace.auth import get_service
+        from tools.google_workspace.auth import GoogleAuthError, get_service
 
         service = get_service("calendar", "v3")
 
@@ -282,6 +346,10 @@ def main() -> None:
         result = process_calendar_event(service, calendar_id, slug, now)
         print(result)
 
+    except GoogleAuthError as e:
+        queue_entry(slug, now, project)
+        print(f"Auth error: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         queue_entry(slug, now, project)
         print(f"Queued locally (auth/network issue): {e}", file=sys.stderr)

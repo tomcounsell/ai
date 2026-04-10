@@ -404,10 +404,13 @@ Located in `tools/google_workspace/`.
 Google Calendar integration for work time tracking.
 
 ```bash
-valor-calendar test                    # Test OAuth connection
-valor-calendar list                    # List upcoming events
-valor-calendar create "Meeting" start end  # Create event
+valor-calendar <session-slug>          # Log time for a work session
+valor-calendar --check                 # Validate token health (exit 0=valid, 1=invalid)
+valor-calendar --reauth                # Clear tokens and re-run OAuth consent flow
+valor-calendar --version               # Print version
 ```
+
+See `docs/features/google-workspace-auth.md` for error handling and token management details.
 
 ## Tool Development
 

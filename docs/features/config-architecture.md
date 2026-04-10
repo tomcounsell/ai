@@ -70,7 +70,7 @@ All Google auth credentials and calendar config live in `~/Desktop/Valor/`:
 | File | Purpose |
 |------|---------|
 | `~/Desktop/Valor/google_credentials.json` | OAuth client credentials (from Google Cloud Console) |
-| `~/Desktop/Valor/google_token.json` | OAuth token (auto-generated) |
+| `~/Desktop/Valor/google_token.<machine>.json` | Per-machine OAuth token (auto-generated) |
 | `~/Desktop/Valor/calendar_config.json` | Calendar project-to-ID mapping |
 
 Note: The DM whitelist is stored in the `dms.whitelist` array within `projects.json`, not as a separate file.
