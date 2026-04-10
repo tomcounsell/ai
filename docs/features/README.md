@@ -54,7 +54,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Hooks Best Practices & Audit](hooks-best-practices.md) | `/audit-hooks` skill, codified hook safety patterns, and daily reflections integration | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
-| [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, and companion memories for subconscious recall | Shipped |
+| [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, companion memories for subconscious recall, and per-chunk embeddings for fine-grained semantic search over long documents | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |

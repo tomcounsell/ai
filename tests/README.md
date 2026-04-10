@@ -198,6 +198,8 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_model_relationships.py` | 30 | Redis model relationships |
+| unit | `test_document_chunk.py` | 7 | DocumentChunk model, import, search behavior |
+| unit | `test_chunking.py` | 15 | Chunking engine: heading-aware, token-count, overlap |
 | unit | `test_memory_model.py` | 151 | Memory model (decay, confidence, write filter, bloom) |
 | unit | `test_memory_hook.py` | 135 | PostToolUse thought injection, sliding window |
 | unit | `test_memory_extraction.py` | 107 | Post-session Haiku extraction, outcome detection |

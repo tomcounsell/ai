@@ -172,10 +172,10 @@ A follow-up could expose `search_chunks()` via an MCP server tool for direct chu
 
 ## Documentation
 
-- [ ] Update `docs/features/knowledge-document-integration.md` to document the chunking system, `DocumentChunk` model, and chunk search
-- [ ] Add entry to `docs/features/README.md` index table if not already present
-- [ ] Code comments on chunking algorithm (heading-aware splitting, overlap logic)
-- [ ] Docstrings for `DocumentChunk` model, `_sync_chunks()`, `search_chunks()`, and chunking utility functions
+- [x] Update `docs/features/knowledge-document-integration.md` to document the chunking system, `DocumentChunk` model, and chunk search
+- [x] Add entry to `docs/features/README.md` index table if not already present
+- [x] Code comments on chunking algorithm (heading-aware splitting, overlap logic)
+- [x] Docstrings for `DocumentChunk` model, `_sync_chunks()`, `search_chunks()`, and chunking utility functions
 
 ## Success Criteria
 

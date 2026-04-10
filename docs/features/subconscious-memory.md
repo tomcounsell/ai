@@ -112,10 +112,13 @@ The knowledge document integration system indexes work-vault files as companion 
 
 1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog
 2. `index_file()` reads content, resolves project scope, upserts `KnowledgeDocument` (Redis + filesystem)
-3. Haiku summarizes the document content (fallback: first 500 chars)
-4. Companion Memory records are created with `source="knowledge"`, `importance=3.0`, and a `reference` JSON pointer to the source file
-5. Companion memories enter the bloom filter and surface as `<thought>` blocks during related work
-6. The agent reads the full file on demand using the reference pointer
+3. After upsert, `_sync_chunks()` splits the content into overlapping `DocumentChunk` records (each with its own embedding) for fine-grained semantic search
+4. Haiku summarizes the document content (fallback: first 500 chars)
+5. Companion Memory records are created with `source="knowledge"`, `importance=3.0`, and a `reference` JSON pointer to the source file
+6. Companion memories enter the bloom filter and surface as `<thought>` blocks during related work
+7. The agent reads the full file on demand using the reference pointer
+
+**Chunk-level search:** `DocumentChunk.search(query_text, project_key)` returns matching chunks with parent document path, chunk index, and similarity score. See [Knowledge Document Integration](knowledge-document-integration.md#5-document-chunking) for chunking strategy and configuration.
 
 **Importance tier:** Knowledge memories sit at 3.0 -- above agent observations (1.0) but below human messages (6.0). Large documents (>2000 words) are split by top-level headings, producing one companion memory per section.
 
@@ -254,7 +257,9 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 | `.claude/hooks/post_tool_use.py` | Claude Code PostToolUse hook with memory recall and AgentSession activity tracking |
 | `.claude/hooks/stop.py` | Claude Code Stop hook with extraction, AgentSession completion, and post-merge learning |
 | `models/knowledge_document.py` | KnowledgeDocument model for indexed work-vault files |
-| `tools/knowledge/indexer.py` | Knowledge indexer pipeline (index, delete, full scan, companion memories) |
+| `models/document_chunk.py` | DocumentChunk model for per-chunk embeddings and chunk-level search |
+| `tools/knowledge/indexer.py` | Knowledge indexer pipeline (index, delete, full scan, chunk sync, companion memories) |
+| `tools/knowledge/chunking.py` | Chunking engine: heading-aware + token-count splitting with overlap |
 | `tools/knowledge/scope_resolver.py` | File path to project scope resolution via projects.json |
 | `bridge/knowledge_watcher.py` | Filesystem watcher for work-vault changes (watchdog + debounce) |
 | `config/personas/_base.md` | Thought priming instruction for agents |
