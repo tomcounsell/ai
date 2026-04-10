@@ -62,6 +62,51 @@ python .claude/hooks/validators/validate_issue_recon.py ISSUE_NUMBER
 
 If this fails, the issue needs a `## Recon Summary` section added via `/do-issue` Step 3 (the reconnaissance routine). Do not proceed with planning until recon is validated — plans built on unverified assumptions produce rework.
 
+### Phase 0.5: Freshness Check (has the world moved since the issue was filed?)
+
+The recon validator in Phase 0 confirms evidence *exists* in the issue. This step confirms the evidence is *still true*. Issues can sit for hours, days, or weeks before being planned. In that window, code refactors, other PRs land, sibling systems change, and referenced file:line pointers drift. A plan built on stale premises will produce rework even if the recon was rigorous when written.
+
+**Skip if:** the issue was filed within the last hour AND no commits have landed on main since then. Otherwise this step is mandatory.
+
+For each **file:line reference** cited in the issue body (including the Recon Summary):
+
+1. `Read` the exact file:line and confirm the code at that location still matches what the issue describes. Line numbers drift under refactors; the symbol may have been renamed, moved, or deleted entirely.
+2. If the reference has drifted to a new location but the claim still holds, note the corrected file:line in the plan's Technical Approach section.
+3. If the reference is gone and the underlying code was removed, flag it — the problem may already be fixed.
+
+For each **cited sibling issue or PR** (e.g., "see #867", "blocked by #743", "related to #825"):
+
+```bash
+gh issue view <N> --json state,closedAt,title
+gh pr view <N> --json state,mergedAt,title 2>/dev/null
+```
+
+1. If a blocker/related issue has closed or merged since filing, read its resolution — the landscape the current issue assumed may have shifted.
+2. If a cited PR merged, `git log` the merge and check whether it changed files the current issue references.
+
+For the **files most relevant to the issue** (the ones cited in the issue body or surfaced by Phase 1's blast-radius analysis):
+
+```bash
+ISSUE_CREATED=$(gh issue view <N> --json createdAt -q .createdAt)
+git log --oneline --since="$ISSUE_CREATED" -- <file1> <file2> ...
+```
+
+1. If any commits touched those files since the issue was filed, read the diffs. Decide whether each change (a) is irrelevant, (b) partially addresses the problem, (c) changed the root cause, or (d) already fixes the problem.
+2. Check `docs/plans/*.md` for active plans touching the same area (`ls -lt docs/plans/` then inspect the most recent few). Overlap with an active plan is a coordination signal, not necessarily a blocker — but it must be surfaced.
+
+**For bug issues specifically**, try to reproduce the bug against current main (or at least read the code path and confirm the defect is still present). If the bug is now unreproducible or the cited symptoms no longer occur, stop and ask the user whether to close the issue rather than plan a fix for a non-bug.
+
+**Produce a `## Freshness Check` section** in the plan document capturing what was re-verified, with one of four dispositions:
+
+| Disposition | Meaning | What to do |
+|---|---|---|
+| **Unchanged** | Nothing relevant has moved. Issue claims still hold. | Proceed to Phase 1. Note the commit SHA used as the baseline in the Freshness Check section. |
+| **Minor drift** | Line numbers moved but claims still hold. A cited PR merged but didn't change the root cause. | Update file:line references in the plan. Proceed to Phase 1. Note drift details in the section. |
+| **Major drift** | Root cause has changed, an adjacent system now handles the concern, or a prior PR already fixes it. | **Stop.** Report findings to the user and ask whether to close the issue, revise its scope, or proceed on a revised premise. Do NOT silently build a plan for a stale problem. |
+| **Overlap** | An active plan in `docs/plans/` is already addressing the same area. | Surface the overlap. Ask whether to merge into the existing plan or coordinate. |
+
+This section stays in the plan document as durable evidence of when and how the freshness check was performed — reviewers during critique and build can tell at a glance whether the plan's premises were verified at plan time.
+
 ### Phase 1: Flesh Out at High Level
 
 1. **Understand the request** - What's being asked?
