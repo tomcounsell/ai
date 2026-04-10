@@ -148,6 +148,11 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.memory_search inspect --id <ID>` | Inspect a specific memory |
 | `python -m tools.memory_search inspect --stats` | Show memory statistics |
 | `python -m tools.memory_search forget --id <ID> --confirm` | Delete a memory |
+| `python -m tools.doctor` | Run all environment and health checks |
+| `python -m tools.doctor --quick` | Skip slow checks (Telegram session, model verification) |
+| `python -m tools.doctor --quality` | Include code quality checks (ruff, pytest) |
+| `python -m tools.doctor --json` | Output health check results as JSON |
+| `python -m tools.doctor --install-hook` | Install git pre-push hook running doctor --quick |
 
 ## Development Principles
 
