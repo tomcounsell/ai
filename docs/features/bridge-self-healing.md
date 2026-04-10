@@ -227,7 +227,7 @@ Without this distinction, auth expiry hits the same 8-attempt retry loop, exits 
 3. Bridge logs: "Bridge hibernating: auth required. Run 'python scripts/telegram_login.py'..."
 4. Bridge exits with **code 2** (distinct from crash exit code 1)
 5. Watchdog detects flag file on next 60s check, logs hibernation state, and **suppresses restart loop**
-6. Worker continues executing queued sessions; `FileOutputHandler` writes output to `logs/worker/{session_id}.log`
+6. Worker continues executing queued sessions; `TelegramRelayOutputHandler` writes to Redis outbox (undeliverable while bridge is down) and dual-writes to `logs/worker/{session_id}.log` via `FileOutputHandler`
 
 **Recovery sequence** (human re-authenticates):
 1. Human runs `python scripts/telegram_login.py` — session file updated
@@ -317,7 +317,7 @@ rm data/auto-revert-enabled
 | `data/flood-backoff` | Flood-backoff expiry (JSON) |
 | `data/last_connected` | Last-connected timestamp (ISO 8601) |
 | `logs/watchdog.log` | Watchdog output |
-| `logs/worker/{session_id}.log` | FileOutputHandler output during bridge downtime |
+| `logs/worker/{session_id}.log` | FileOutputHandler dual-write output (persisted even during bridge downtime) |
 
 ## Design Principles
 
