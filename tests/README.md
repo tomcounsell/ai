@@ -156,6 +156,7 @@ tests/
 | unit | `test_reflections_multi_repo.py` | 21 | Multi-repo reflections |
 | unit | `test_reflections_report.py` | 20 | Reflection reports |
 | unit | `test_reflections_scheduling.py` | 19 | Launchd infrastructure |
+| unit | `test_reflection_model.py` | 12 | Reflection model: mark_completed(), run_history append |
 | integration | `test_reflections_redis.py` | 20 | Reflection persistence |
 
 ### `tools` — Individual tool tests
