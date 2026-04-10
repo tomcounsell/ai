@@ -38,11 +38,11 @@ except ImportError:
 
 
 class GeminiQuotaError(Exception):
-    """Raised when the Gemini API returns HTTP 429 (quota exceeded).
+    """Deprecated: no longer raised by run_gemini_research().
 
-    This typically means the API key is on a free tier or has exhausted its
-    quota.  Callers should catch this to provide actionable error messages
-    directing the user to upgrade billing.
+    Previously raised when the Gemini API returned HTTP 429.  Now the function
+    returns ``(None, {"_error_status": 429, ...})`` instead.  The class is
+    kept to avoid breaking any external callers that import it.
     """
 
 
@@ -66,7 +66,9 @@ def get_api_key() -> str | None:
     return api_key
 
 
-def submit_research(api_key: str, prompt: str, stream: bool = False) -> dict | None:
+def submit_research(
+    api_key: str, prompt: str, stream: bool = False
+) -> tuple[dict | None, dict | None]:
     """
     Submit a research request to Gemini Deep Research API.
 
@@ -76,7 +78,10 @@ def submit_research(api_key: str, prompt: str, stream: bool = False) -> dict | N
         stream: Whether to use streaming mode
 
     Returns:
-        Response JSON or None if failed
+        Tuple of ``(response_json, error_dict)``. On success, returns
+        ``(response_json, None)``. On error, returns ``(None, error_dict)``
+        where ``error_dict`` contains ``_error_status``, ``_error_message``,
+        and ``_error_body`` keys.
     """
     base_url = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
@@ -99,26 +104,42 @@ def submit_research(api_key: str, prompt: str, stream: bool = False) -> dict | N
         response = requests.post(base_url, headers=headers, json=payload, timeout=60)
     except requests.exceptions.RequestException as e:
         print(f"ERROR: Request failed: {e}")
-        return None
+        return None, {
+            "_error_status": None,
+            "_error_message": str(e),
+            "_error_body": None,
+        }
 
     if response.status_code == 429:
         try:
             error_data = response.json()
-            error_msg = error_data.get("error", {}).get("message", "Quota exceeded")
+            error_msg = error_data.get("error", {}).get("message", "quota_exceeded")
         except Exception:
-            error_msg = response.text or "Quota exceeded"
-        raise GeminiQuotaError(f"Gemini API quota exceeded (HTTP 429): {error_msg}")
+            error_data = response.text or "quota_exceeded"
+            error_msg = "quota_exceeded"
+        return None, {
+            "_error_status": 429,
+            "_error_message": error_msg,
+            "_error_body": error_data,
+        }
 
     if response.status_code != 200:
-        print(f"ERROR: API returned status {response.status_code}")
         try:
             error_data = response.json()
-            print(f"Error details: {json.dumps(error_data, indent=2)}")
+            error_msg = error_data.get("error", {}).get("message") or str(
+                response.status_code
+            )
         except Exception:
-            print(f"Response: {response.text}")
-        return None
+            error_data = response.text[:500]
+            error_msg = str(response.status_code)
+        print(f"ERROR: API returned status {response.status_code}")
+        return None, {
+            "_error_status": response.status_code,
+            "_error_message": error_msg,
+            "_error_body": error_data,
+        }
 
-    return response.json()
+    return response.json(), None
 
 
 def check_status(api_key: str, interaction_id: str) -> dict | None:
@@ -165,7 +186,7 @@ def run_gemini_research(
     max_attempts: int = 30,
     verbose: bool = True,
     log_file: str | None = None,
-) -> str | None:
+) -> tuple[str | None, dict]:
     """
     Submit a research request and wait for completion.
 
@@ -176,7 +197,9 @@ def run_gemini_research(
         verbose: Whether to print progress messages
 
     Returns:
-        Research report text or None if failed
+        Tuple of (report_text, error_dict). report_text is None on failure.
+        On API error, error_dict contains ``_error_status``, ``_error_message``,
+        and ``_error_body`` keys. On success, error_dict is empty.
     """
     api_key = get_api_key()
 
@@ -184,7 +207,7 @@ def run_gemini_research(
         print("ERROR: GEMINI_API_KEY not found")
         print("Set it in your environment or .env file")
         print("Get your API key at: https://aistudio.google.com/apikey")
-        return None
+        return None, {}
 
     # Helper to log to both stdout and file
     def log(msg):
@@ -206,18 +229,23 @@ def run_gemini_research(
         log("\nSubmitting research request...")
 
     # Submit the research request
-    result = submit_research(api_key, prompt)
+    submit_result, submit_error = submit_research(api_key, prompt)
 
-    if not result:
-        return None
+    if submit_error is not None:
+        # API returned a structured error (e.g. 429 quota, 500 server error)
+        return None, submit_error
 
+    if not submit_result:
+        return None, {}
+
+    result = submit_result
     interaction_id = result.get("id")
 
     if not interaction_id:
         print("ERROR: No interaction ID returned")
         if verbose:
             print(json.dumps(result, indent=2))
-        return None
+        return None, {}
 
     if verbose or log_file:
         log("\nResearch started successfully!")
@@ -259,17 +287,21 @@ def run_gemini_research(
                     log(f"\n{'=' * 60}")
                     log(f"RESEARCH COMPLETE (took {elapsed}s)")
                     log(f"{'=' * 60}\n")
-                return research_text
+                return research_text, {}
             else:
                 print("WARNING: Research completed but no text output found")
                 if verbose:
                     print(json.dumps(status_result, indent=2))
-                return None
+                return None, {}
 
         elif status == "failed":
             error = status_result.get("error", "Unknown error")
             print(f"ERROR: Research failed: {error}")
-            return None
+            return None, {
+                "_error_status": 500,
+                "_error_message": str(error),
+                "_error_body": status_result,
+            }
 
         else:
             # in_progress - wait and retry
@@ -280,7 +312,7 @@ def run_gemini_research(
 
     elapsed = int(time.time() - start_time)
     print(f"ERROR: Research timed out after {elapsed}s ({max_attempts} attempts)")
-    return None
+    return None, {}
 
 
 def run_streaming_research(prompt: str) -> str | None:
@@ -501,7 +533,7 @@ Environment:
         result = run_streaming_research(prompt)
     else:
         max_attempts = (args.max_wait * 60) // args.poll_interval
-        result = run_gemini_research(
+        result, _err = run_gemini_research(
             prompt,
             poll_interval=args.poll_interval,
             max_attempts=max_attempts,

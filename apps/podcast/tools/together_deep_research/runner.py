@@ -203,12 +203,16 @@ def run_together_research(
                 f" (took {elapsed}s)"
             )
             metadata["error"] = "Empty result returned"
+            metadata["_error_status"] = "EMPTY"
+            metadata["_error_message"] = "research completed but returned empty content"
             return None, metadata
 
     except TimeoutError:
         elapsed = int(time.time() - start_time)
         metadata["elapsed_seconds"] = elapsed
         metadata["error"] = f"Timed out after {elapsed}s"
+        metadata["_error_status"] = "TIMEOUT"
+        metadata["_error_message"] = f"timed out after {elapsed}s"
         log(f"\nERROR: Research timed out after {elapsed}s")
         log("Try reducing --max-search-depth or simplifying the prompt")
         return None, metadata
@@ -217,6 +221,8 @@ def run_together_research(
         elapsed = int(time.time() - start_time)
         metadata["elapsed_seconds"] = elapsed
         metadata["error"] = str(e)
+        metadata["_error_status"] = type(e).__name__
+        metadata["_error_message"] = str(e)
         log(f"\nERROR: Research failed after {elapsed}s: {e}")
         if verbose:
             traceback.print_exc()

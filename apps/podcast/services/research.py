@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from apps.podcast.models import Episode, EpisodeArtifact
@@ -29,6 +30,122 @@ def _get_episode_context(episode: Episode) -> str:
         except EpisodeArtifact.DoesNotExist:
             continue
     return episode.description
+
+
+# ---------------------------------------------------------------------------
+# Grok
+# ---------------------------------------------------------------------------
+
+
+def run_grok_research(episode_id: int, prompt: str) -> EpisodeArtifact:
+    """Call Grok Deep Research API and save results as ``p2-grok``.
+
+    Uses :func:`apps.podcast.tools.grok_deep_research.run_grok_research`.
+
+    If the ``GROK_API_KEY`` environment variable is missing, this function
+    logs a warning and creates a "skipped" artifact. The pipeline continues
+    with other research sources.
+
+    Args:
+        episode_id: Primary key of the target :class:`Episode`.
+        prompt: The research query to send to Grok.
+
+    Returns:
+        The ``p2-grok`` :class:`EpisodeArtifact` (either with research
+        results or a "skipped" / "failed" message).
+
+    NOTE: Service function added per plan issue #231, but not yet wired into
+    ``apps/podcast/tasks.py`` as a ``step_grok_research`` pipeline task. Wiring
+    deferred to follow-up issue #236 to avoid touching fan-in orchestration in
+    the error-surfacing PR. Until then, ``p2-grok`` artifacts are not produced
+    by the automated pipeline; this function can be called directly in shell
+    or tests.
+    """
+    episode = Episode.objects.get(pk=episode_id)
+
+    # Check for API key before attempting research
+    if not os.getenv("GROK_API_KEY"):
+        logger.warning(
+            "GROK_API_KEY not found in environment. Skipping Grok "
+            "research for episode %s. This is optional and the pipeline will "
+            "continue with other research sources.",
+            episode_id,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-grok",
+            defaults={
+                "content": "[SKIPPED: GROK_API_KEY not configured]",
+                "description": "Grok Deep Research (skipped - API key missing).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "API key not configured"},
+            },
+        )
+        return artifact
+
+    context = _get_episode_context(episode)
+    full_prompt = (
+        f"Episode: {episode.title}\n\nContext:\n{context}\n\nResearch query:\n{prompt}"
+    )
+
+    from apps.podcast.tools.grok_deep_research import extract_metadata
+    from apps.podcast.tools.grok_deep_research import run_grok_research as _grok
+
+    content_text, response_data = _grok(prompt=full_prompt, verbose=False)
+
+    if content_text is None or content_text == "":
+        error_status = response_data.get("_error_status") if response_data else None
+        error_message = response_data.get("_error_message") if response_data else None
+        error_body = response_data.get("_error_body") if response_data else None
+
+        if error_status:
+            logger.warning(
+                "Grok research API error %s for episode %s: %s",
+                error_status,
+                episode_id,
+                error_message,
+            )
+            content = f"[FAILED: Grok API {error_status} - {error_message}]"
+            description = f"Grok Deep Research (failed - API returned {error_status})."
+            metadata = {"error": str(error_body or error_message)}
+        else:
+            logger.warning(
+                "Grok research returned no content for episode %s. API response: %s",
+                episode_id,
+                response_data if response_data else "empty",
+            )
+            content = "[FAILED: Grok API returned empty content]"
+            description = "Grok Deep Research (failed - empty content)."
+            metadata = {"error": "API returned no content"}
+
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-grok",
+            defaults={
+                "content": content,
+                "description": description,
+                "workflow_context": "Research Gathering",
+                "metadata": metadata,
+            },
+        )
+        return artifact
+
+    metadata = extract_metadata(response_data) if response_data else {}
+
+    artifact, created = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-grok",
+        defaults={
+            "content": content_text,
+            "description": "Grok Deep Research output.",
+            "workflow_context": "Research Gathering",
+            "metadata": metadata,
+        },
+    )
+
+    action = "Created" if created else "Updated"
+    logger.info("%s p2-grok artifact for episode %s", action, episode_id)
+    return artifact
 
 
 # ---------------------------------------------------------------------------
@@ -184,21 +301,46 @@ def run_gpt_researcher(episode_id: int, prompt: str) -> EpisodeArtifact:
     # Call the existing GPT-Researcher tool (async → sync bridge)
     from apps.podcast.tools.gpt_researcher_run import run_research
 
-    content_text = async_to_sync(run_research)(
+    content_text, response_data = async_to_sync(run_research)(
         prompt=full_prompt,
         verbose=False,
     )
 
     if content_text is None or content_text == "":
-        logger.warning("GPT-Researcher returned no content for episode %s", episode_id)
+        error_message = response_data.get("_error_message") if response_data else None
+        error_type = response_data.get("_error_type") if response_data else None
+
+        if error_message:
+            logger.warning(
+                "GPT-Researcher failed for episode %s: %s (%s)",
+                episode_id,
+                error_message,
+                error_type,
+            )
+            content = (
+                f"[FAILED: GPT-Researcher {error_type or 'Error'} - {error_message}]"
+            )
+            description = "GPT-Researcher (failed - exception during research)."
+            metadata = {
+                "error": error_message,
+                "error_type": error_type,
+            }
+        else:
+            logger.warning(
+                "GPT-Researcher returned no content for episode %s", episode_id
+            )
+            content = "[FAILED: GPT-Researcher returned empty content]"
+            description = "GPT-Researcher (failed - empty content)."
+            metadata = {"error": "No content returned"}
+
         artifact, _ = EpisodeArtifact.objects.update_or_create(
             episode=episode,
             title="p2-chatgpt",
             defaults={
-                "content": "[SKIPPED: GPT-Researcher returned no content]",
-                "description": "GPT-Researcher (skipped - no content returned).",
+                "content": content,
+                "description": description,
                 "workflow_context": "Research Gathering",
-                "metadata": {"skipped": True, "reason": "No content returned"},
+                "metadata": metadata,
             },
         )
         return artifact
@@ -271,52 +413,50 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
         f"Episode: {episode.title}\n\nContext:\n{context}\n\nResearch query:\n{prompt}"
     )
 
-    # Call the existing Gemini tool
-    from apps.podcast.tools.gemini_deep_research import GeminiQuotaError
+    # Call the existing Gemini tool (returns tuple[str | None, dict])
     from apps.podcast.tools.gemini_deep_research import run_gemini_research as _gemini
 
-    try:
-        content_text = _gemini(
-            prompt=full_prompt,
-            verbose=False,
-        )
-    except GeminiQuotaError:
-        logger.warning(
-            "Gemini API quota exceeded for episode %s. Upgrade billing at "
-            "https://aistudio.google.com/apikey",
-            episode_id,
-        )
-        artifact, _ = EpisodeArtifact.objects.update_or_create(
-            episode=episode,
-            title="p2-gemini",
-            defaults={
-                "content": (
-                    "[SKIPPED: Gemini API quota exceeded. "
-                    "Upgrade billing at https://aistudio.google.com/apikey]"
-                ),
-                "description": "Gemini Deep Research (skipped - quota exceeded).",
-                "workflow_context": "Research Gathering",
-                "metadata": {"skipped": True, "reason": "quota_exceeded"},
-            },
-        )
-        return artifact
+    content_text, response_data = _gemini(
+        prompt=full_prompt,
+        verbose=False,
+    )
 
-    # Handle None response (API error, empty content, etc.)
-    if content_text is None:
-        logger.warning(
-            "Gemini research returned no content for episode %s (API error or "
-            "empty response). Skipping Gemini research. This is optional "
-            "and the pipeline will continue with other research sources.",
-            episode_id,
-        )
+    if content_text is None or content_text == "":
+        error_status = response_data.get("_error_status") if response_data else None
+        error_message = response_data.get("_error_message") if response_data else None
+        error_body = response_data.get("_error_body") if response_data else None
+
+        if error_status:
+            logger.warning(
+                "Gemini research API error %s for episode %s: %s",
+                error_status,
+                episode_id,
+                error_message,
+            )
+            content = f"[FAILED: Gemini API {error_status} - {error_message}]"
+            description = (
+                f"Gemini Deep Research (failed - API returned {error_status})."
+            )
+            metadata = {"error": str(error_body or error_message)}
+        else:
+            logger.warning(
+                "Gemini research returned no content for episode %s (API error or "
+                "empty response). This is optional and the pipeline will continue "
+                "with other research sources.",
+                episode_id,
+            )
+            content = "[FAILED: Gemini API returned empty content]"
+            description = "Gemini Deep Research (failed - empty content)."
+            metadata = {"error": "API returned no content"}
+
         artifact, _ = EpisodeArtifact.objects.update_or_create(
             episode=episode,
             title="p2-gemini",
             defaults={
-                "content": "[SKIPPED: Gemini API error or empty response]",
-                "description": "Gemini Deep Research (skipped - API error).",
+                "content": content,
+                "description": description,
                 "workflow_context": "Research Gathering",
-                "metadata": {"skipped": True, "reason": "api_error_or_empty"},
+                "metadata": metadata,
             },
         )
         return artifact
@@ -420,17 +560,38 @@ def run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     )
 
     if content_text is None or content_text == "":
-        logger.warning(
-            "Together research returned no content for episode %s", episode_id
-        )
+        error_status = metadata.get("_error_status") if metadata else None
+        error_message = metadata.get("_error_message") if metadata else None
+
+        if error_status:
+            logger.warning(
+                "Together research failed for episode %s: %s - %s",
+                episode_id,
+                error_status,
+                error_message,
+            )
+            content = f"[FAILED: Together {error_status} - {error_message}]"
+            description = f"Together Open Deep Research (failed - {error_status})."
+            fail_metadata = {
+                "error": metadata.get("error", str(error_message)),
+                **{k: v for k, v in metadata.items() if not k.startswith("_")},
+            }
+        else:
+            logger.warning(
+                "Together research returned no content for episode %s", episode_id
+            )
+            content = "[FAILED: Together returned empty content]"
+            description = "Together Open Deep Research (failed - empty content)."
+            fail_metadata = {"error": "No content returned"}
+
         artifact, _ = EpisodeArtifact.objects.update_or_create(
             episode=episode,
             title="p2-together",
             defaults={
-                "content": "[SKIPPED: Together research returned no content]",
-                "description": "Together Open Deep Research (skipped - no content returned).",
+                "content": content,
+                "description": description,
                 "workflow_context": "Research Gathering",
-                "metadata": {"skipped": True, "reason": "No content returned"},
+                "metadata": fail_metadata,
             },
         )
         return artifact
@@ -544,22 +705,21 @@ def run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact:
 
     except Exception as e:
         logger.warning(
-            "Claude research failed for episode %s: %s. Skipping Claude "
-            "research. This is optional and the pipeline will continue with "
-            "other research sources.",
+            "Claude research failed for episode %s: %s %s. This is optional "
+            "and the pipeline will continue with other research sources.",
             episode_id,
+            type(e).__name__,
             str(e),
         )
         artifact, _ = EpisodeArtifact.objects.update_or_create(
             episode=episode,
             title="p2-claude",
             defaults={
-                "content": f"[SKIPPED: Claude research failed - {str(e)}]",
-                "description": "Claude multi-agent deep research (skipped - error).",
+                "content": f"[FAILED: Claude {type(e).__name__} - {str(e)}]",
+                "description": "Claude multi-agent deep research (failed - error).",
                 "workflow_context": "Research Gathering",
                 "metadata": {
-                    "skipped": True,
-                    "reason": f"Exception raised: {str(e)}",
+                    "error": str(e),
                     "error_type": type(e).__name__,
                 },
             },

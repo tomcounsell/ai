@@ -10,9 +10,9 @@ import pytest
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import gemini_deep_research
-import gpt_researcher_run
-import perplexity_deep_research
+import gemini_deep_research  # noqa: E402
+import gpt_researcher_run  # noqa: E402
+import perplexity_deep_research  # noqa: E402
 
 
 def _perplexity_side_effect(*args, **kwargs):
@@ -32,7 +32,7 @@ def _gemini_side_effect(*args, **kwargs):
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         with open(log_file, "w") as f:
             f.write("Mock log output\n")
-    return "Test research result"
+    return "Test research result", {}
 
 
 class TestPerplexityDeepResearch:
@@ -53,7 +53,7 @@ class TestPerplexityDeepResearch:
 
     def test_cli_help_works(self):
         """Test that --help flag works."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(SystemExit) as exc_info:  # noqa: SIM117
             with patch("sys.argv", ["perplexity_deep_research.py", "--help"]):
                 perplexity_deep_research.main()
         assert exc_info.value.code == 0
@@ -147,14 +147,14 @@ class TestGeminiDeepResearch:
 
     def test_cli_help_works(self):
         """Test that --help flag works."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(SystemExit) as exc_info:  # noqa: SIM117
             with patch("sys.argv", ["gemini_deep_research.py", "--help"]):
                 gemini_deep_research.main()
         assert exc_info.value.code == 0
 
     @patch("gemini_deep_research.run_gemini_research")
     def test_auto_save_creates_files(self, mock_research):
-        """Test that auto-save creates output and log files."""
+        """Test that auto-save creates output and log files (result is tuple now)."""
         mock_research.side_effect = _gemini_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -225,7 +225,7 @@ class TestGPTResearcher:
 
     def test_cli_help_works(self):
         """Test that --help flag works."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(SystemExit) as exc_info:  # noqa: SIM117
             with patch("sys.argv", ["gpt_researcher_run.py", "--help"]):
                 gpt_researcher_run.main()
         assert exc_info.value.code == 0
@@ -263,7 +263,7 @@ class TestLogDirectory:
 
     @patch("gemini_deep_research.run_gemini_research")
     def test_gemini_log_dir_creates_subdirectory(self, mock_research):
-        """Test that --log-dir creates subdirectory for Gemini."""
+        """Test that --log-dir creates subdirectory for Gemini (result is tuple now)."""
         mock_research.side_effect = _gemini_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -324,7 +324,7 @@ class TestFileOutputFormat:
     @patch("gemini_deep_research.run_gemini_research")
     def test_gemini_output_contains_metadata(self, mock_research):
         """Test that Gemini output file contains metadata."""
-        mock_research.return_value = "Research content here"
+        mock_research.return_value = ("Research content here", {})
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_file = Path(tmpdir) / "output.md"

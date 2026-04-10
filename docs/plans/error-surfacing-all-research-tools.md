@@ -130,9 +130,11 @@ def run_grok_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     return artifact
 ```
 
-**Tasks integration:** Wire `run_grok_research` into `tasks.py` as `step_grok_research`
-and add it to the fan-in signal in `signals.py`. (This is a new pipeline step — confirm
-with Tom before merging since it changes workflow phase counts.)
+**Tasks integration (DEFERRED):** `run_grok_research` is intentionally NOT wired into
+`tasks.py` or `signals.py` in this PR. The error-surfacing changes to the tool and
+service layer ship independently of pipeline wiring. Wiring Grok as a live pipeline
+step changes fan-in thresholds and workflow phase counts and requires Tom's sign-off.
+See `docs/plans/grok-deep-research.md` for the dedicated tracking plan for that work.
 
 ---
 

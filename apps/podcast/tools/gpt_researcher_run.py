@@ -131,7 +131,7 @@ async def run_research(
     use_detailed_report: bool = False,
     config_path: str | None = None,
     log_file: str | None = None,
-) -> str | None:
+) -> tuple[str | None, dict]:
     """
     Run GPT-Researcher with specified configuration.
 
@@ -142,7 +142,9 @@ async def run_research(
         verbose: Print progress messages
 
     Returns:
-        Research report text or None if failed
+        Tuple of (report_text, error_dict). report_text is None on failure.
+        On exception, error_dict contains ``_error_message`` and ``_error_type``.
+        On success, error_dict is empty ``{}``.
     """
     try:
         from gpt_researcher import GPTResearcher
@@ -156,7 +158,7 @@ async def run_research(
         print("ERROR: gpt-researcher not installed")
         print("Install with: uv pip install gpt-researcher langchain-openai")
         print("Or ensure you're running with: uv run python gpt_researcher_run.py")
-        return None
+        return None, {}
 
     # Check for API keys - STRICT: require both OpenAI and Tavily
     keys = get_api_keys()
@@ -172,7 +174,7 @@ async def run_research(
             print("  OPENAI_API_KEY=sk-...")
             print("\nGet key at: https://platform.openai.com/api-keys")
             print("=" * 60)
-            return None
+            return None, {}
     elif model_spec.startswith("anthropic:"):
         if not keys.get("anthropic"):
             print("=" * 60)
@@ -184,7 +186,7 @@ async def run_research(
             print("\nFix: Add to ~/.env:")
             print("  ANTHROPIC_API_KEY=sk-ant-...")
             print("=" * 60)
-            return None
+            return None, {}
     elif model_spec.startswith("openrouter"):
         if not keys.get("openrouter"):
             print("=" * 60)
@@ -197,7 +199,7 @@ async def run_research(
             print("  OPENROUTER_API_KEY=sk-or-...")
             print("\nGet key at: https://openrouter.ai/keys")
             print("=" * 60)
-            return None
+            return None, {}
     elif not any(keys.values()):
         print("=" * 60)
         print("ERROR: No API keys found")
@@ -207,7 +209,7 @@ async def run_research(
         print("  ANTHROPIC_API_KEY=sk-ant-...")
         print("  OPENROUTER_API_KEY=sk-or-...")
         print("=" * 60)
-        return None
+        return None, {}
 
     # STRICT: Require Tavily API key - no silent fallback to DuckDuckGo
     if not keys.get("tavily") and not os.getenv("TAVILY_API_KEY"):
@@ -220,7 +222,7 @@ async def run_research(
         print("  TAVILY_API_KEY=tvly-...")
         print("\nGet FREE key at: https://tavily.com/")
         print("=" * 60)
-        return None
+        return None, {}
 
     # Configure model
     fast_llm, smart_llm = configure_model(model_spec)
@@ -314,7 +316,7 @@ async def run_research(
             log("RESEARCH COMPLETE")
             log(f"{'=' * 60}\n")
 
-        return report_text
+        return report_text, {}
 
     except Exception as e:
         print(f"ERROR: Research failed: {e}")
@@ -322,7 +324,10 @@ async def run_research(
 
         if verbose:
             traceback.print_exc()
-        return None
+        return None, {
+            "_error_message": str(e),
+            "_error_type": type(e).__name__,
+        }
 
 
 def main():
@@ -455,7 +460,7 @@ Environment:
             config_path = str(default_config)
 
     # Run the research
-    result = asyncio.run(
+    result, _err = asyncio.run(
         run_research(
             prompt,
             model_spec=args.model,

@@ -1,11 +1,12 @@
 """Tests for Gemini Deep Research error detection and handling.
 
 Tests cover:
-- GeminiQuotaError raised on HTTP 429 in submit_research()
-- submit_research() returns None on other HTTP errors (e.g., 500)
-- submit_research() returns response JSON on success (200)
-- Service layer creates skip artifact with reason "quota_exceeded" on GeminiQuotaError
-- Service layer creates skip artifact with generic reason when tool returns None
+- submit_research() returns (None, error_dict) on HTTP 429 (quota exceeded)
+- submit_research() returns (None, error_dict) on other HTTP errors (e.g., 500)
+- submit_research() returns (response_json, None) on success (200)
+- Service layer creates FAILED artifact with _error_status on quota/API errors
+- Service layer creates FAILED artifact with empty content when no content returned
+- Service layer creates SKIPPED artifact when GEMINI_API_KEY is missing
 """
 
 from unittest.mock import MagicMock, patch
@@ -59,12 +60,9 @@ def episode(podcast):
 class TestSubmitResearch:
     """Unit tests for gemini_deep_research.submit_research()."""
 
-    def test_raises_quota_error_on_429(self):
-        """submit_research raises GeminiQuotaError on HTTP 429."""
-        from apps.podcast.tools.gemini_deep_research import (
-            GeminiQuotaError,
-            submit_research,
-        )
+    def test_returns_error_dict_on_429(self):
+        """submit_research returns (None, error_dict) on HTTP 429."""
+        from apps.podcast.tools.gemini_deep_research import submit_research
 
         mock_response = MagicMock()
         mock_response.status_code = 429
@@ -77,14 +75,16 @@ class TestSubmitResearch:
             }
         }
 
-        with (
-            patch("requests.post", return_value=mock_response),
-            pytest.raises(GeminiQuotaError, match="quota"),
-        ):
-            submit_research("fake-key", "test prompt")
+        with patch("requests.post", return_value=mock_response):
+            result, error = submit_research("fake-key", "test prompt")
 
-    def test_returns_none_on_500(self):
-        """submit_research returns None on HTTP 500 (server error)."""
+        assert result is None
+        assert error["_error_status"] == 429
+        assert "_error_message" in error
+        assert "_error_body" in error
+
+    def test_returns_error_dict_on_500(self):
+        """submit_research returns (None, error_dict) on HTTP 500."""
         from apps.podcast.tools.gemini_deep_research import submit_research
 
         mock_response = MagicMock()
@@ -94,12 +94,14 @@ class TestSubmitResearch:
         }
 
         with patch("requests.post", return_value=mock_response):
-            result = submit_research("fake-key", "test prompt")
+            result, error = submit_research("fake-key", "test prompt")
 
         assert result is None
+        assert error["_error_status"] == 500
+        assert "_error_message" in error
 
-    def test_returns_none_on_403(self):
-        """submit_research returns None on HTTP 403 (non-quota client error)."""
+    def test_returns_error_dict_on_403(self):
+        """submit_research returns (None, error_dict) on HTTP 403."""
         from apps.podcast.tools.gemini_deep_research import submit_research
 
         mock_response = MagicMock()
@@ -107,12 +109,13 @@ class TestSubmitResearch:
         mock_response.json.return_value = {"error": {"message": "Forbidden"}}
 
         with patch("requests.post", return_value=mock_response):
-            result = submit_research("fake-key", "test prompt")
+            result, error = submit_research("fake-key", "test prompt")
 
         assert result is None
+        assert error["_error_status"] == 403
 
     def test_returns_json_on_200(self):
-        """submit_research returns response JSON on HTTP 200."""
+        """submit_research returns (response_json, None) on HTTP 200."""
         from apps.podcast.tools.gemini_deep_research import submit_research
 
         expected = {"id": "interaction-123", "status": "in_progress"}
@@ -121,9 +124,10 @@ class TestSubmitResearch:
         mock_response.json.return_value = expected
 
         with patch("requests.post", return_value=mock_response):
-            result = submit_research("fake-key", "test prompt")
+            result, error = submit_research("fake-key", "test prompt")
 
         assert result == expected
+        assert error is None
 
 
 # ---------------------------------------------------------------------------
@@ -135,15 +139,20 @@ class TestSubmitResearch:
 class TestGeminiResearchService:
     """Integration tests for services/research.py::run_gemini_research."""
 
-    def test_quota_error_creates_skip_artifact(self, episode):
-        """Service creates skip artifact with reason 'quota_exceeded' on GeminiQuotaError."""
-        from apps.podcast.tools.gemini_deep_research import GeminiQuotaError
-
+    def test_quota_429_creates_failed_artifact(self, episode):
+        """Service creates FAILED artifact with API status on 429 quota error."""
         with (
             patch.dict("os.environ", {"GEMINI_API_KEY": "fake-key"}),
             patch(
                 "apps.podcast.tools.gemini_deep_research.run_gemini_research",
-                side_effect=GeminiQuotaError("quota exceeded"),
+                return_value=(
+                    None,
+                    {
+                        "_error_status": 429,
+                        "_error_message": "quota_exceeded",
+                        "_error_body": {"error": {"message": "quota exceeded"}},
+                    },
+                ),
             ),
         ):
             from apps.podcast.services.research import run_gemini_research
@@ -151,18 +160,23 @@ class TestGeminiResearchService:
             artifact = run_gemini_research(episode.id, "test research prompt")
 
         assert artifact.title == "p2-gemini"
-        assert artifact.metadata["skipped"] is True
-        assert artifact.metadata["reason"] == "quota_exceeded"
-        assert "quota" in artifact.content.lower()
-        assert "aistudio.google.com" in artifact.content
+        assert artifact.content.startswith("[FAILED: Gemini API 429 -")
+        assert "error" in artifact.metadata
 
-    def test_none_response_creates_generic_skip_artifact(self, episode):
-        """Service creates skip artifact with reason 'api_error_or_empty' when tool returns None."""
+    def test_api_500_creates_failed_artifact(self, episode):
+        """Service creates FAILED artifact on 500 server error."""
         with (
             patch.dict("os.environ", {"GEMINI_API_KEY": "fake-key"}),
             patch(
                 "apps.podcast.tools.gemini_deep_research.run_gemini_research",
-                return_value=None,
+                return_value=(
+                    None,
+                    {
+                        "_error_status": 500,
+                        "_error_message": "Internal Server Error",
+                        "_error_body": {"error": {"message": "server error"}},
+                    },
+                ),
             ),
         ):
             from apps.podcast.services.research import run_gemini_research
@@ -170,8 +184,23 @@ class TestGeminiResearchService:
             artifact = run_gemini_research(episode.id, "test research prompt")
 
         assert artifact.title == "p2-gemini"
-        assert artifact.metadata["skipped"] is True
-        assert artifact.metadata["reason"] == "api_error_or_empty"
+        assert artifact.content.startswith("[FAILED: Gemini API 500 -")
+
+    def test_empty_content_creates_failed_artifact(self, episode):
+        """Service creates FAILED artifact when tool returns (None, {})."""
+        with (
+            patch.dict("os.environ", {"GEMINI_API_KEY": "fake-key"}),
+            patch(
+                "apps.podcast.tools.gemini_deep_research.run_gemini_research",
+                return_value=(None, {}),
+            ),
+        ):
+            from apps.podcast.services.research import run_gemini_research
+
+            artifact = run_gemini_research(episode.id, "test research prompt")
+
+        assert artifact.title == "p2-gemini"
+        assert artifact.content == "[FAILED: Gemini API returned empty content]"
 
     def test_success_creates_normal_artifact(self, episode):
         """Service creates a normal artifact with research content on success."""
@@ -179,7 +208,7 @@ class TestGeminiResearchService:
             patch.dict("os.environ", {"GEMINI_API_KEY": "fake-key"}),
             patch(
                 "apps.podcast.tools.gemini_deep_research.run_gemini_research",
-                return_value="Research results about quantum computing.",
+                return_value=("Research results about quantum computing.", {}),
             ),
         ):
             from apps.podcast.services.research import run_gemini_research
@@ -188,18 +217,16 @@ class TestGeminiResearchService:
 
         assert artifact.title == "p2-gemini"
         assert artifact.content == "Research results about quantum computing."
-        assert (
-            "skipped" not in artifact.metadata
-            or artifact.metadata.get("skipped") is not True
-        )
+        assert not artifact.content.startswith("[FAILED:")
+        assert not artifact.content.startswith("[SKIPPED:")
 
     def test_missing_api_key_creates_skip_artifact(self, episode):
-        """Service creates skip artifact when GEMINI_API_KEY is missing."""
+        """Service creates SKIPPED artifact when GEMINI_API_KEY is missing."""
         with patch.dict("os.environ", {"GEMINI_API_KEY": ""}, clear=False):
             from apps.podcast.services.research import run_gemini_research
 
             artifact = run_gemini_research(episode.id, "test research prompt")
 
         assert artifact.title == "p2-gemini"
+        assert artifact.content == "[SKIPPED: GEMINI_API_KEY not configured]"
         assert artifact.metadata["skipped"] is True
-        assert "API key" in artifact.metadata["reason"]

@@ -121,7 +121,7 @@ class TestRunGrokResearch:
     @patch("apps.podcast.tools.grok_deep_research.get_api_key")
     @patch("apps.podcast.tools.grok_deep_research.requests.post")
     def test_auth_error_401(self, mock_post, mock_key):
-        """401 response returns (None, {})."""
+        """401 response returns (None, dict with _error_status=401)."""
         mock_key.return_value = "xai-bad-key"
         mock_resp = MagicMock()
         mock_resp.status_code = 401
@@ -130,12 +130,14 @@ class TestRunGrokResearch:
 
         content, result = run_grok_research("test prompt", verbose=False)
         assert content is None
-        assert result == {}
+        assert result["_error_status"] == 401
+        assert "_error_message" in result
+        assert "_error_body" in result
 
     @patch("apps.podcast.tools.grok_deep_research.get_api_key")
     @patch("apps.podcast.tools.grok_deep_research.requests.post")
     def test_rate_limit_429(self, mock_post, mock_key):
-        """429 response returns (None, {})."""
+        """429 response returns (None, dict with _error_status=429)."""
         mock_key.return_value = "xai-test-key"
         mock_resp = MagicMock()
         mock_resp.status_code = 429
@@ -144,12 +146,13 @@ class TestRunGrokResearch:
 
         content, result = run_grok_research("test prompt", verbose=False)
         assert content is None
-        assert result == {}
+        assert result["_error_status"] == 429
+        assert "_error_message" in result
 
     @patch("apps.podcast.tools.grok_deep_research.get_api_key")
     @patch("apps.podcast.tools.grok_deep_research.requests.post")
     def test_server_error_500(self, mock_post, mock_key):
-        """500 response returns (None, {})."""
+        """500 response returns (None, dict with _error_status=500)."""
         mock_key.return_value = "xai-test-key"
         mock_resp = MagicMock()
         mock_resp.status_code = 500
@@ -158,7 +161,8 @@ class TestRunGrokResearch:
 
         content, result = run_grok_research("test prompt", verbose=False)
         assert content is None
-        assert result == {}
+        assert result["_error_status"] == 500
+        assert "_error_message" in result
 
     @patch("apps.podcast.tools.grok_deep_research.get_api_key")
     @patch("apps.podcast.tools.grok_deep_research.requests.post")
