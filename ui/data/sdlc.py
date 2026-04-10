@@ -11,6 +11,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import time
 
 from pydantic import BaseModel
@@ -22,6 +23,64 @@ logger = logging.getLogger(__name__)
 
 # Configurable retention for inactive sessions (default 48h)
 DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))
+
+# Match GitHub issue/PR URLs anywhere in a string.
+# Intentionally permissive on owner/repo to tolerate org-scoped and nested paths.
+_GITHUB_ISSUE_URL_RE = re.compile(r"https://github\.com/[^\s/]+/[^\s/]+/issues/\d+")
+_GITHUB_PR_URL_RE = re.compile(r"https://github\.com/[^\s/]+/[^\s/]+/pull/\d+")
+
+
+def _extract_github_links(events: list) -> tuple[str | None, str | None]:
+    """Scan session events for GitHub issue/PR URLs.
+
+    Used as a render-time fallback when an AgentSession's ``issue_url`` /
+    ``pr_url`` fields are None but the links are mentioned in history (e.g.
+    a lifecycle event like ``"PR opened: https://github.com/..."``). This
+    backfills historical sessions that predate link capture without needing
+    a data migration.
+
+    The first URL found for each kind wins — this matches how ``set_link``
+    behaves for the "set" case (though set_link will overwrite on repeat,
+    the most recent write in history is what an operator wants to see).
+    We iterate from newest to oldest so the most recent URL wins.
+
+    Args:
+        events: List of PipelineEvent objects, any objects with a ``text``
+            attribute, or plain strings.
+
+    Returns:
+        (issue_url, pr_url) — either or both may be None if nothing found.
+    """
+    if not events:
+        return None, None
+
+    issue_url: str | None = None
+    pr_url: str | None = None
+
+    # Walk newest → oldest so the freshest URL wins.
+    for event in reversed(events):
+        if issue_url and pr_url:
+            break
+        if hasattr(event, "text"):
+            text = event.text or ""
+        elif isinstance(event, str):
+            text = event
+        else:
+            continue
+        if not text:
+            continue
+
+        if not issue_url:
+            match = _GITHUB_ISSUE_URL_RE.search(text)
+            if match:
+                issue_url = match.group(0)
+        if not pr_url:
+            match = _GITHUB_PR_URL_RE.search(text)
+            if match:
+                pr_url = match.group(0)
+
+    return issue_url, pr_url
+
 
 # Module-level cache for project configs
 _project_configs_cache: dict | None = None
@@ -148,11 +207,18 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: context_summary, then slug, then truncated message."""
-        if self.context_summary:
-            return self.context_summary
+        """Human-friendly name: slug, then context_summary, then truncated message.
+
+        Slug wins when present because it's a durable, stable identifier that
+        ties together the branch, worktree, plan doc, and GitHub issue — it's
+        the one name by which every touchpoint refers to the work. Falling
+        back to context_summary only when there is no slug keeps ad-hoc
+        sessions readable without drowning planned work in paraphrased text.
+        """
         if self.slug:
             return self.slug
+        if self.context_summary:
+            return self.context_summary
         if self.message_text:
             text = self.message_text[:60]
             if len(self.message_text) > 60:
@@ -419,6 +485,21 @@ def _session_to_pipeline(session) -> PipelineProgress:
         except (ValueError, TypeError):
             tool_call_count = None
 
+    # Resolve issue/PR links with a history fallback. When do-build /
+    # do-issue run, they shell out to `gh` which emits the URL to stdout
+    # but doesn't always make it back onto the AgentSession model fields.
+    # Scanning the already-loaded events list for GitHub URLs backfills
+    # existing sessions without a data migration and is cheap (bounded
+    # regex over in-memory strings).
+    issue_url = _safe_str(session.issue_url)
+    pr_url = _safe_str(session.pr_url)
+    if not issue_url or not pr_url:
+        fallback_issue, fallback_pr = _extract_github_links(events)
+        if not issue_url:
+            issue_url = fallback_issue
+        if not pr_url:
+            pr_url = fallback_pr
+
     return PipelineProgress(
         agent_session_id=_safe_str(session.agent_session_id) or "",
         session_id=_safe_str(session.session_id),
@@ -446,9 +527,9 @@ def _session_to_pipeline(session) -> PipelineProgress:
         stages=stages,
         current_stage=current,
         events=events,
-        issue_url=_safe_str(session.issue_url),
+        issue_url=issue_url,
         plan_url=_safe_str(session.plan_url),
-        pr_url=_safe_str(session.pr_url),
+        pr_url=pr_url,
     )
 
 

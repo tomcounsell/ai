@@ -290,11 +290,59 @@ def _run_memory_recall(hook_input: dict) -> str | None:
         return None
 
 
-def _update_agent_session(hook_input: dict) -> None:
-    """Update AgentSession updated_at and tool_call_count.
+# Match GitHub issue/PR URLs. Permissive on owner/repo to tolerate
+# org-scoped and nested paths.
+_GITHUB_ISSUE_URL_RE = re.compile(r"https://github\.com/[^\s/]+/[^\s/]+/issues/\d+")
+_GITHUB_PR_URL_RE = re.compile(r"https://github\.com/[^\s/]+/[^\s/]+/pull/\d+")
 
-    Reads the agent_session_id from the sidecar file and updates
-    the corresponding AgentSession record in Redis. Fails silently.
+
+def _extract_github_links(command: str, tool_output: str) -> dict[str, str]:
+    """Detect GitHub issue/PR URLs in a Bash tool_output, keyed by link kind.
+
+    Only scrapes when the command looks like a ``gh`` invocation that
+    plausibly emits a URL (``gh issue``/``gh pr`` subcommands). Returns the
+    first URL found of each kind — ``gh`` prints the created or fetched URL
+    on its own line so this is usually the definitive one.
+
+    Args:
+        command: The Bash command string (``tool_input.command``).
+        tool_output: Captured stdout+stderr from the command.
+
+    Returns:
+        Dict with keys ``"issue"`` and/or ``"pr"`` mapped to URLs. Empty
+        when no relevant URL is found.
+    """
+    if not command or not tool_output:
+        return {}
+
+    # Cheap prefilter — avoid regex work on every Bash call.
+    if "gh " not in command or "github.com/" not in tool_output:
+        return {}
+
+    links: dict[str, str] = {}
+    if re.search(r"\bgh\s+issue\b", command):
+        match = _GITHUB_ISSUE_URL_RE.search(tool_output)
+        if match:
+            links["issue"] = match.group(0)
+    if re.search(r"\bgh\s+pr\b", command):
+        match = _GITHUB_PR_URL_RE.search(tool_output)
+        if match:
+            links["pr"] = match.group(0)
+    return links
+
+
+def _update_agent_session(hook_input: dict) -> None:
+    """Update AgentSession updated_at, tool_call_count, and captured links.
+
+    Reads the agent_session_id from the sidecar file and updates the
+    corresponding AgentSession record in Redis. Also scans Bash tool
+    outputs for ``gh issue``/``gh pr`` URLs and stores them via
+    ``AgentSession.set_link()`` — this is the production wire-up that was
+    previously missing (the helper existed on the model but was only ever
+    called by tests, leaving ``issue_url``/``pr_url`` permanently None in
+    real data and the dashboard missing link cells).
+
+    Fails silently.
     """
     try:
         session_id = hook_input.get("session_id", "")
@@ -319,6 +367,15 @@ def _update_agent_session(hook_input: dict) -> None:
         agent_session.updated_at = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
         agent_session.save()
+
+        # Capture GitHub links from gh Bash invocations.
+        if hook_input.get("tool_name") == "Bash":
+            command = hook_input.get("tool_input", {}).get("command", "")
+            tool_output = hook_input.get("tool_output", "")
+            if isinstance(tool_output, str):
+                links = _extract_github_links(command, tool_output)
+                for kind, url in links.items():
+                    agent_session.set_link(kind, url)
     except Exception:
         pass  # Silent failure -- never block tool execution
 
