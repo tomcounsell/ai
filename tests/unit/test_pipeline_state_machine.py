@@ -1,4 +1,4 @@
-"""Tests for bridge.pipeline_state — PipelineStateMachine.
+"""Tests for agent.pipeline_state — PipelineStateMachine.
 
 Tests cover:
 - Initialization (default, from JSON, from dict, from None)
@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bridge.pipeline_state import PipelineStateMachine, StageStates
+from agent.pipeline_state import PipelineStateMachine, StageStates
 
 
 def _make_session(stage_states=None, **kwargs):
@@ -728,21 +728,21 @@ class TestParseOutcomeContract:
 
     def test_none_input(self):
         """None-like input returns None."""
-        from bridge.pipeline_state import _parse_outcome_contract
+        from agent.pipeline_state import _parse_outcome_contract
 
         assert _parse_outcome_contract("") is None
         assert _parse_outcome_contract(None) is None
 
     def test_valid_contract(self):
         """Valid contract is parsed correctly."""
-        from bridge.pipeline_state import _parse_outcome_contract
+        from agent.pipeline_state import _parse_outcome_contract
 
         result = _parse_outcome_contract('<!-- OUTCOME {"status":"success","stage":"BUILD"} -->')
         assert result == {"status": "success", "stage": "BUILD"}
 
     def test_with_artifacts(self):
         """Contract with artifacts field is parsed correctly."""
-        from bridge.pipeline_state import _parse_outcome_contract
+        from agent.pipeline_state import _parse_outcome_contract
 
         result = _parse_outcome_contract(
             '<!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"findings":3}} -->'
@@ -912,7 +912,7 @@ class TestSaveWarningOnFailure:
         sm = PipelineStateMachine(session)
         import logging
 
-        with patch.object(logging.getLogger("bridge.pipeline_state"), "warning") as mock_warn:
+        with patch.object(logging.getLogger("agent.pipeline_state"), "warning") as mock_warn:
             sm._save()
             mock_warn.assert_called_once()
             assert "Failed to save" in mock_warn.call_args[0][0]
@@ -923,6 +923,6 @@ class TestRecordStageCompletionDeleted:
 
     def test_record_stage_completion_not_importable(self):
         """record_stage_completion has been deleted from the module."""
-        import bridge.pipeline_state as mod
+        import agent.pipeline_state as mod
 
         assert not hasattr(mod, "record_stage_completion")

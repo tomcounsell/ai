@@ -555,7 +555,7 @@ class TestRecordStageOnParentWithClassification:
         with (
             patch.dict("sys.modules", {"models.agent_session": mock_module}),
             patch(
-                "bridge.pipeline_state.PipelineStateMachine.classify_outcome",
+                "agent.pipeline_state.PipelineStateMachine.classify_outcome",
                 side_effect=RuntimeError("unexpected"),
             ),
         ):

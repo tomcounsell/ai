@@ -13,8 +13,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bridge.pipeline_graph import DISPLAY_STAGES
-from bridge.pipeline_state import PipelineStateMachine
+from agent.pipeline_graph import DISPLAY_STAGES
+from agent.pipeline_state import PipelineStateMachine
 
 
 def _make_state_machine(stage_states=None):

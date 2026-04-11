@@ -821,7 +821,7 @@ class TestPipelineStateMachineRouting:
             stage_states={"ISSUE": "completed", "PLAN": "pending"},
         )
 
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
+        with patch("agent.pipeline_state.PipelineStateMachine") as mock_psm:
             mock_psm.return_value.get_display_progress.return_value = mock_display
             pipeline = _session_to_pipeline(session)
 
@@ -840,7 +840,7 @@ class TestPipelineStateMachineRouting:
             stage_states=None,
         )
 
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
+        with patch("agent.pipeline_state.PipelineStateMachine") as mock_psm:
             pipeline = _session_to_pipeline(session)
 
         mock_psm.assert_not_called()
@@ -855,7 +855,7 @@ class TestPipelineStateMachineRouting:
             stage_states="",
         )
 
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
+        with patch("agent.pipeline_state.PipelineStateMachine") as mock_psm:
             pipeline = _session_to_pipeline(session)
 
         mock_psm.assert_not_called()
@@ -871,7 +871,7 @@ class TestPipelineStateMachineRouting:
         )
 
         with patch(
-            "bridge.pipeline_state.PipelineStateMachine",
+            "agent.pipeline_state.PipelineStateMachine",
             side_effect=Exception("state machine error"),
         ):
             pipeline = _session_to_pipeline(session)

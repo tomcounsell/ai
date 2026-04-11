@@ -102,7 +102,7 @@ def write_marker(stage: str, status: str, session_id: str | None = None) -> dict
         return {}
 
     try:
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         sm = PipelineStateMachine(session)
 

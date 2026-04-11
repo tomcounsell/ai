@@ -67,7 +67,7 @@ class TestSuccessRoundTrip:
         Child subprocess self-registers via VALOR_PARENT_SESSION_ID env var (issue #808).
         """
         from agent.hooks.session_registry import register_pending, resolve
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         # Walk through prerequisite stages so BUILD can start
         sm = PipelineStateMachine(pm_session)
@@ -118,7 +118,7 @@ class TestSuccessRoundTrip:
         → filter children by UUID (issue #808).
         """
         from agent.hooks.session_registry import register_pending
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         # Walk through prerequisite stages so BUILD can start
         sm = PipelineStateMachine(pm_session)
@@ -135,7 +135,7 @@ class TestSuccessRoundTrip:
         # Simulate: child subprocess registered via VALOR_PARENT_SESSION_ID env var.
         # The parent's agent_session_id UUID is stored in parent_agent_session_id.
         parent_agent_uuid = pm_session.agent_session_id
-        child_session = AgentSession.create_local(
+        AgentSession.create_local(
             session_id="local-child-build-001",
             project_key="test",
             working_dir="/tmp",
@@ -177,7 +177,7 @@ class TestFailureRoundTrip:
         register_pending(pm_session.session_id)
 
         # PreToolUse: start TEST stage (need BUILD completed first)
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         sm = PipelineStateMachine(pm_session)
         # Walk through prerequisite stages to get to TEST
@@ -347,7 +347,7 @@ class TestStageStateInjection:
     async def test_hook_returns_pipeline_state(self, pm_session):
         """subagent_stop_hook returns pipeline state in the reason field."""
         from agent.hooks.session_registry import register_pending
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         # Walk through prerequisite stages so BUILD can start
         sm = PipelineStateMachine(pm_session)
@@ -480,7 +480,7 @@ class TestSubagentStopCompletion:
         correctly resolves: bridge_session_id → agent_session_id UUID → child record.
         """
         from agent.hooks.session_registry import register_pending
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         # Walk through prerequisite stages so BUILD can start
         sm = PipelineStateMachine(pm_session)
@@ -496,7 +496,7 @@ class TestSubagentStopCompletion:
 
         # Child subprocess registered itself with the parent's agent_session_id UUID
         parent_agent_uuid = pm_session.agent_session_id
-        child = AgentSession.create_local(
+        AgentSession.create_local(
             session_id="local-two-lookup-test",
             project_key="test",
             working_dir="/tmp",

@@ -7,7 +7,7 @@ Uses the canonical PIPELINE_EDGES from bridge/pipeline_graph.py.
 
 import pytest
 
-from bridge.pipeline_graph import (
+from agent.pipeline_graph import (
     DISPLAY_STAGES,
     MAX_PATCH_CYCLES,
     PIPELINE_EDGES,

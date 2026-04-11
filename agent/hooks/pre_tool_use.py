@@ -301,7 +301,7 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
     Failures are logged but never raised -- this must not block the Agent tool.
     """
     try:
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
         from models.agent_session import AgentSession
 
         parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))

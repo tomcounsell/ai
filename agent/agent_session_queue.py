@@ -265,7 +265,7 @@ async def _push_agent_session(
         try:
 
             def _init_stage_states():
-                from bridge.pipeline_state import PipelineStateMachine
+                from agent.pipeline_state import PipelineStateMachine
 
                 sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
                 if sessions and not sessions[0].stage_states:

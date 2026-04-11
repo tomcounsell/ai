@@ -16,7 +16,7 @@ import time
 
 from pydantic import BaseModel
 
-from bridge.pipeline_graph import DISPLAY_STAGES
+from agent.pipeline_graph import DISPLAY_STAGES
 from config.enums import PersonaType
 
 logger = logging.getLogger(__name__)
@@ -421,7 +421,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
 
     if session.stage_states:
         try:
-            from bridge.pipeline_state import PipelineStateMachine
+            from agent.pipeline_state import PipelineStateMachine
 
             sm = PipelineStateMachine(session)
             progress = sm.get_display_progress()

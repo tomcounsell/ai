@@ -147,7 +147,7 @@ def _record_stage_on_parent(
         output_tail: Last ~500 chars of worker output for pattern matching.
     """
     try:
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
         from models.agent_session import AgentSession
 
         parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))

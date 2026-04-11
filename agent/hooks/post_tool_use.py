@@ -24,7 +24,7 @@ def _complete_pipeline_stage(session_id: str) -> None:
     Failures are logged but never raised -- this must not block the PM session.
     """
     try:
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
         from models.agent_session import AgentSession
 
         parent_sessions = list(AgentSession.query.filter(session_id=session_id))

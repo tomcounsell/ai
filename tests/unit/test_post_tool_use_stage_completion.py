@@ -41,7 +41,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -61,7 +61,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -82,7 +82,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -103,7 +103,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -125,7 +125,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),

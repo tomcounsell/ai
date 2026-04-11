@@ -1273,7 +1273,7 @@ class AgentSession(Model):
 
     def get_stage_progress(self) -> dict[str, str]:
         """Return SDLC stage completion status via PipelineStateMachine."""
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         sm = PipelineStateMachine(self)
         return sm.get_display_progress()
@@ -1292,14 +1292,14 @@ class AgentSession(Model):
 
     def has_remaining_stages(self) -> bool:
         """Check if any SDLC stages are not yet completed."""
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         sm = PipelineStateMachine(self)
         return sm.has_remaining_stages()
 
     def has_failed_stage(self) -> bool:
         """Check if any SDLC stage has failed."""
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
 
         sm = PipelineStateMachine(self)
         return sm.has_failed_stage()
