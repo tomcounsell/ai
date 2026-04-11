@@ -984,3 +984,68 @@ a:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
 }
+
+/* ── Analytics Trend Chart ── */
+.analytics-trend {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.trend-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.75rem;
+}
+
+.trend-title {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.trend-summary {
+    font-size: 0.75rem;
+}
+
+.trend-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 80px;
+    padding-bottom: 1.2rem;
+    position: relative;
+}
+
+.trend-bar-wrapper {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: flex-end;
+    position: relative;
+}
+
+.trend-bar {
+    width: 100%;
+    min-height: 2px;
+    background: var(--accent);
+    border-radius: 2px 2px 0 0;
+    transition: height 0.3s ease;
+}
+
+.trend-bar-wrapper:hover .trend-bar {
+    background: var(--accent-hover);
+}
+
+.trend-label {
+    position: absolute;
+    bottom: -1.2rem;
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}

@@ -108,6 +108,18 @@ def log_event(event_type: str, reason: str | None = None) -> CrashEvent:
     except Exception as e:
         logger.error(f"Failed to log crash event: {e}")
 
+    # Analytics: record crash/start event
+    try:
+        from analytics.collector import record_metric
+
+        record_metric(
+            f"crash.{event_type}",
+            1,
+            {"commit_sha": sha, "reason": reason},
+        )
+    except Exception:
+        pass
+
     return event
 
 

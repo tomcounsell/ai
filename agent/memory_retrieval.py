@@ -217,6 +217,13 @@ def retrieve_memories(
         )
 
         if not fused:
+            # Analytics: record recall attempt with zero hits
+            try:
+                from analytics.collector import record_metric
+
+                record_metric("memory.recall_attempt", 1, {"hits": 0, "project_key": project_key})
+            except Exception:
+                pass
             return []
 
         # Hydrate Memory instances from fused keys
@@ -230,6 +237,15 @@ def retrieve_memories(
                     records.append(record)
             except Exception:
                 continue
+
+        # Analytics: record recall attempt with hit count
+        try:
+            from analytics.collector import record_metric
+
+            dims = {"hits": len(records), "project_key": project_key}
+            record_metric("memory.recall_attempt", 1, dims)
+        except Exception:
+            pass
 
         return records
 

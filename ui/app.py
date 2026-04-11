@@ -121,6 +121,7 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         """Root route: single-page dashboard with all system state."""
+        from ui.data.analytics import get_analytics_summary
         from ui.data.machine import get_machine_name, get_machine_projects
         from ui.data.reflections import get_all_reflections
         from ui.data.sdlc import get_all_sessions
@@ -128,6 +129,7 @@ def create_app() -> FastAPI:
         sessions = get_all_sessions()
         reflections = get_all_reflections()
         machine_projects = get_machine_projects()
+        analytics = get_analytics_summary()
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -136,7 +138,20 @@ def create_app() -> FastAPI:
                 "reflections": reflections,
                 "machine_name": get_machine_name(),
                 "machine_projects": machine_projects,
+                "analytics": analytics,
             },
+        )
+
+    @app.get("/_partials/analytics/", response_class=HTMLResponse)
+    def partial_analytics_trend(request: Request):
+        """HTMX partial: analytics trend chart."""
+        from ui.data.analytics import get_analytics_summary
+
+        analytics = get_analytics_summary()
+        return templates.TemplateResponse(
+            request,
+            "_partials/analytics_trend.html",
+            {"analytics": analytics},
         )
 
     @app.get("/_partials/sessions/", response_class=HTMLResponse)
@@ -250,6 +265,7 @@ def create_app() -> FastAPI:
         """Full dashboard state as JSON for programmatic consumption."""
         from fastapi.responses import JSONResponse
 
+        from ui.data.analytics import get_analytics_summary
         from ui.data.machine import get_machine_name, get_machine_projects
         from ui.data.reflections import get_all_reflections
         from ui.data.sdlc import get_all_sessions
@@ -258,6 +274,7 @@ def create_app() -> FastAPI:
         worker = _get_worker_health()
         sessions = get_all_sessions()
         reflections = get_all_reflections()
+        analytics = get_analytics_summary()
 
         return JSONResponse(
             {
@@ -274,6 +291,7 @@ def create_app() -> FastAPI:
                     "name": get_machine_name(),
                     "projects": get_machine_projects(),
                 },
+                "analytics": analytics,
             }
         )
 

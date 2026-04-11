@@ -137,6 +137,16 @@ def _parse_outcome_contract(output_tail: str) -> dict | None:
     return parsed
 
 
+def _record_stage_metric(metric_name: str, stage: str) -> None:
+    """Record an analytics metric for a stage transition. Best-effort."""
+    try:
+        from analytics.collector import record_metric
+
+        record_metric(metric_name, 1, {"stage": stage})
+    except Exception:
+        pass
+
+
 class PipelineStateMachine:
     """Manages SDLC pipeline stage transitions with ordering enforcement.
 
@@ -239,6 +249,12 @@ class PipelineStateMachine:
                 predecessors.append(src)
         return predecessors
 
+    def _activate_stage(self, stage: str) -> None:
+        """Set stage to in_progress, save, and record analytics."""
+        self.states[stage] = "in_progress"
+        self._save()
+        _record_stage_metric("sdlc.stage_started", stage)
+
     def start_stage(self, stage: str) -> None:
         """Mark a stage as in_progress.
 
@@ -265,8 +281,7 @@ class PipelineStateMachine:
 
         # ISSUE is always startable (it's the first stage)
         if stage == "ISSUE":
-            self.states[stage] = "in_progress"
-            self._save()
+            self._activate_stage(stage)
             return
 
         # PATCH is startable if TEST or REVIEW is failed/completed
@@ -274,8 +289,7 @@ class PipelineStateMachine:
             test_status = self.states.get("TEST", "pending")
             review_status = self.states.get("REVIEW", "pending")
             if test_status in ("failed", "completed") or review_status in ("failed", "completed"):
-                self.states[stage] = "in_progress"
-                self._save()
+                self._activate_stage(stage)
                 return
             raise ValueError(
                 f"Cannot start PATCH: neither TEST ({test_status}) "
@@ -284,28 +298,24 @@ class PipelineStateMachine:
 
         # For cycle re-entry: PLAN can restart after CRITIQUE fails
         if stage == "PLAN" and self.states.get("CRITIQUE") in ("failed",):
-            self.states[stage] = "in_progress"
-            self._save()
+            self._activate_stage(stage)
             return
 
         # For cycle re-entry: TEST can restart after PATCH completes
         if stage == "TEST" and self.states.get("PATCH") in ("completed", "in_progress"):
-            self.states[stage] = "in_progress"
-            self._save()
+            self._activate_stage(stage)
             return
 
         # Check predecessors
         predecessors = self._get_predecessors(stage)
         if not predecessors:
             # No known predecessors — allow start
-            self.states[stage] = "in_progress"
-            self._save()
+            self._activate_stage(stage)
             return
 
         for pred in predecessors:
             if self.states.get(pred) == "completed":
-                self.states[stage] = "in_progress"
-                self._save()
+                self._activate_stage(stage)
                 return
 
         pred_statuses = {p: self.states.get(p, "pending") for p in predecessors}
@@ -355,6 +365,7 @@ class PipelineStateMachine:
                 self.states[next_stage] = "ready"
 
         self._save()
+        _record_stage_metric("sdlc.stage_completed", stage)
         logger.info(
             f"Stage {stage} completed. "
             f"Patch cycles: {self.patch_cycle_count}. "

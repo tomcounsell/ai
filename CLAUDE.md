@@ -127,6 +127,9 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
+| `python -m tools.analytics export --days 30` | Export analytics metrics as JSON |
+| `python -m tools.analytics summary` | Print human-readable analytics summary |
+| `python -m tools.analytics rollup` | Run analytics daily rollup manually |
 | `python -m tools.agent_session_scheduler status` | Show queue status (pending, running, killed counts) |
 | `python -m tools.agent_session_scheduler list --status killed,abandoned` | List sessions filtered by status |
 | `python -m tools.agent_session_scheduler kill --agent-session-id <ID>` | Kill a running or pending session by ID |

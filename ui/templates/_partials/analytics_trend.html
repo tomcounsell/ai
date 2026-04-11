@@ -1,0 +1,33 @@
+{# Analytics trend: sessions-per-day bar chart (CSS-only, no JS charting lib) #}
+{% if analytics and analytics.daily_sessions %}
+<div class="analytics-trend">
+    <div class="trend-header">
+        <span class="trend-title">Sessions / Day (30d)</span>
+        <span class="trend-summary text-muted">
+            Today: {{ analytics.sessions_today }} &middot;
+            7d: {{ analytics.sessions_7d }} &middot;
+            Cost 7d: ${{ "%.2f"|format(analytics.cost_7d_usd) }}
+        </span>
+    </div>
+    <div class="trend-chart">
+        {% set max_count = analytics.daily_sessions | map(attribute='count') | max %}
+        {% for day in analytics.daily_sessions | reverse %}
+        <div class="trend-bar-wrapper" title="{{ day.date }}: {{ day.count }} sessions">
+            <div class="trend-bar"
+                 style="height: {{ (day.count / max_count * 100) if max_count > 0 else 0 }}%">
+            </div>
+            {% if loop.index % 7 == 1 or loop.last %}
+            <span class="trend-label">{{ day.date[-5:] }}</span>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% else %}
+<div class="analytics-trend">
+    <div class="trend-header">
+        <span class="trend-title">Analytics</span>
+    </div>
+    <p class="text-muted" style="padding: 0.5rem 0;">No analytics data yet. Metrics are collected automatically during system operation.</p>
+</div>
+{% endif %}
