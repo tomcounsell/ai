@@ -13,8 +13,8 @@ cp config/projects.example.json ~/Desktop/Valor/projects.json
 # Edit ~/Desktop/Valor/projects.json with your settings
 ```
 
-### `personas/_base.md` (Shared identity)
-Base persona file that gets prepended to all persona overlays. Contains shared identity, values, communication style, and philosophy. This stays in the repo because it is not private.
+### `personas/segments/` (Composable identity)
+Prompt segments assembled per `manifest.json` by `load_persona_prompt()`. Contains `identity.md` (shared identity and values), `work-patterns.md` (communication style), and `tools.md` (tool guidance). These stay in the repo because they are not private.
 
 Persona overlay files (developer.md, project-manager.md, teammate.md) live in `~/Desktop/Valor/personas/` (iCloud-synced, private).
 
