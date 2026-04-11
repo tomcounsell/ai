@@ -140,9 +140,9 @@ class TestEnqueueContinuationSessionLookupLogging:
         # Use a real AgentSession instance (not persisted) so the fallback
         # _extract_agent_session_fields call sees real field values instead
         # of MagicMock placeholders that crash AgentSession construction.
-        from models.agent_session import AgentSession as _AS
+        from models.agent_session import AgentSession as AgentSessionModel
 
-        mock_session_entry = _AS(
+        mock_session_entry = AgentSessionModel(
             project_key="test-project",
             session_id="nonexistent-session-999",
             working_dir="/tmp/test",

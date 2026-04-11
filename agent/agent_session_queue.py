@@ -2738,15 +2738,15 @@ async def _handle_dev_session_completion(
             from agent.pipeline_state import PipelineStateMachine
 
             psm = PipelineStateMachine(parent)
-            outcome = psm.classify_outcome(result)
+            current_stage = psm.current_stage()
+            outcome = psm.classify_outcome(current_stage, None, result)
             if outcome == "success":
-                psm.complete_stage()
+                psm.complete_stage(current_stage)
             else:
-                psm.fail_stage()
+                psm.fail_stage(current_stage)
             logger.info(
-                f"[harness] Dev session completion: outcome={outcome}, stage={psm.current_stage}"
+                f"[harness] Dev session completion: outcome={outcome}, stage={current_stage}"
             )
-            current_stage = psm.current_stage
         except Exception as psm_err:
             logger.warning(f"[harness] PipelineStateMachine update failed (non-fatal): {psm_err}")
             outcome = "success" if result and len(result) > 10 else "fail"

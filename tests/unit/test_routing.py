@@ -10,13 +10,11 @@ removal of the hardcoded VALOR_USERNAMES constant:
 
 from __future__ import annotations
 
-import pytest
-
 from bridge import routing
 from bridge.routing import (
     get_valor_usernames,
-    is_message_for_valor,
     is_message_for_others,
+    is_message_for_valor,
 )
 
 
