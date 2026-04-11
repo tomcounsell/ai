@@ -142,6 +142,14 @@ When asked about "next meeting" or "today's schedule":
 2. **Download**: Use `gmail.downloadAttachment` with the specific `messageId` and `attachmentId`.
 3. **Absolute Paths**: Always provide an **absolute path** for the `localPath` argument (e.g., `/Users/username/Downloads/file.pdf`). Relative paths will be rejected for security.
 
+### Composing on Behalf of the User
+
+When drafting or replying to email on the user's behalf, apply these three constraints without exception:
+
+- **Async CTAs only** — Never offer calls, meetings, voice/video contact, or any form of synchronous communication. The agent cannot participate in real-time conversations. Use async alternatives instead: "happy to share more over email", "feel free to reply with questions", or leave the closing open with no CTA. Phrases like "let's jump on a call", "schedule a meeting", or "give us a ring" are prohibited.
+- **Draft-first rule** — All outbound composition must produce a draft via `gmail_create_draft`. Never call a send tool without an explicit user instruction to send. This is stricter than the general write-operation safety rule: even if the user says "write a reply", the result is a draft that the user reviews and sends manually.
+- **Honest representation** — When composing outreach about the user's product or service, represent it accurately. If the product or operation is automated or AI-assisted, say so rather than implying a human-run team. Do not overclaim capabilities, team size, or operational structure. Inaccurate representation damages trust and creates expectations that cannot be met.
+
 ## 📄 Docs, Sheets, and Slides
 
 ### Format Selection (Sheets)
