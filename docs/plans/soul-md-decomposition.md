@@ -497,9 +497,91 @@ The only indirect agent integration concern is the `.claude/hooks/post_tool_use.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-11. -->
+
+### Blockers
+
+#### 1. Ghost Segment Reference: `communication.md` Does Not Exist in Plan
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Operator
+- **Location**: Risks (Risk 3, line 264), Agent Integration (line 295), Documentation (line 307), Task 4 (line 427)
+- **Finding**: The plan references `communication.md` as a segment file in four locations, but the Solution section defines exactly three segments: `identity.md`, `work-patterns.md`, and `tools.md`. Communication style is merged into `identity.md` per the resolved Open Question #1. The four `communication.md` references are stale from an earlier draft.
+- **Suggestion**: Replace all `communication.md` references with `identity.md` (since communication/voice is part of the identity segment). Update the summarizer cross-reference comment and hook reminder to point to `config/personas/segments/identity.md`.
+- **Implementation Note**: Four occurrences to fix: (1) Risk 3 mitigation line 265: `communication.md` -> `identity.md`; (2) Agent Integration line 295: `communication.md` -> `identity.md`; (3) Documentation line 307: `config/personas/segments/communication.md` -> `config/personas/segments/identity.md`; (4) Task 4 line 427: `communication.md` -> `identity.md`. The FILE_REMINDERS dict in `.claude/hooks/post_tool_use.py` should key on `identity.md` with the same summarizer alignment reminder.
+
+### Concerns
+
+#### 2. SOUL.md-Only Sections May Be Lost in Decomposition
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Archaeologist
+- **Location**: Solution, Task 2 (line 384-398)
+- **Finding**: SOUL.md contains `Autonomous Execution` (line 49) and `Full System Access` (line 60) sections that do NOT exist in `_base.md`. These are the most operationally critical permissions content (YOLO mode, unrestricted git, unrestricted bash). The plan says it decomposes from `_base.md` AND `SOUL.md`, but the segment descriptions in Task 2 don't explicitly list where these two sections land. If the builder only reads `_base.md` as the primary source, these sections could be silently dropped.
+- **Suggestion**: Explicitly annotate in Task 2 which segment absorbs `Autonomous Execution` and `Full System Access`. Based on the content, `work-patterns.md` (autonomy rules) is the natural home.
+- **Implementation Note**: `Autonomous Execution` (SOUL.md lines 49-58) and `Full System Access` (SOUL.md lines 60-88) need explicit placement. The builder should use SOUL.md as the authoritative source for these sections, not `_base.md` (which lacks them). Suggested placement: `work-patterns.md` alongside the autonomy rules and escalation policy, since "Full System Access" is the permission grant that enables autonomous execution.
+
+#### 3. F-String Substitution in Markdown is Fragile
+- **Severity**: CONCERN
+- **Critics**: Adversary
+- **Location**: Solution, Technical Approach Phase 1 (line 158), Task 2 (line 398)
+- **Finding**: The plan specifies f-string substitution for identity field injection (e.g., `f"name: {identity['name']}"`). However, the segment markdown files will contain curly braces in code blocks (e.g., Python dict literals, JSON examples, bash variable expansions like `${PID}`). A naive `str.format(**identity)` or f-string `eval` would crash on these, and even `str.format_map()` with a defaultdict would silently swallow legitimate template variables.
+- **Suggestion**: Use a simple string replacement approach (e.g., `text.replace("{name}", identity["name"])` for each field) rather than Python's format machinery. This avoids collisions with curly braces in markdown code blocks entirely.
+- **Implementation Note**: The segment files contain code blocks with curly braces. For example, `_base.md` line 397 has `request_human_input(...)` with no braces, but SOUL.md's escape hatch section (lines 472-487) has dict-like `options=["OAuth 2.0", ...]`. The safe approach is `text.replace("{name}", val)` for each identity field, or use a non-brace delimiter like `{{name}}` or `$name`. The builder must test with actual segment content, not toy strings.
+
+#### 4. Tasks 5-8 Missing Validates Field
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Step by Step Tasks, Tasks 5-8 (lines 429-481)
+- **Finding**: Tasks 1-4 all have a `Validates` field specifying how to verify the task completed correctly. Tasks 5 (Validate Prompt Equivalence), 6 (Update Tests), 7 (Documentation), and 8 (Final Validation) lack this field. While Task 8 is itself a validation task, Tasks 5-7 should have explicit validation commands so the builder knows when they're done.
+- **Suggestion**: Add `Validates` fields to Tasks 5-7. Task 5 could validate with `grep -rn "SOUL" --include="*.py" .` returning nothing. Task 6 with `pytest tests/unit/test_persona_loading.py -x -q`. Task 7 with a doc existence check.
+- **Implementation Note**: Task 5 already describes its validation steps inline (grep for SOUL references) but lacks the structured `Validates` field. Task 6 should validate with `pytest tests/unit/test_persona_loading.py tests/unit/test_identity_config.py -x -q`. Task 7 should validate with `test -f docs/features/personas.md && grep -q "segment" docs/features/personas.md`.
+
+### Nits
+
+#### 5. Wisdom Section Disposition Unspecified
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Solution, Task 2 segment descriptions
+- **Finding**: SOUL.md has a `## Wisdom` section (lines 452-468) with quotes. The segment decomposition doesn't mention where this content goes. It's not behavioral, not identity, and not tools. It could be dropped entirely or appended to `work-patterns.md` as motivational framing.
+- **Suggestion**: Explicitly state that Wisdom quotes are dropped (simplest) or appended to `work-patterns.md` as "why" annotations.
+
+#### 6. Test File `tests/unit/test_identity_config.py` Listed as "(create)" but Not in Test Impact
+- **Severity**: NIT
+- **Critics**: Operator
+- **Location**: Task 1 Validates field (line 375) vs Test Impact section (line 234)
+- **Finding**: Task 1 references `tests/unit/test_identity_config.py (create)` in its Validates field, but the Test Impact section only lists modifications to existing files. A new test file is not a "test impact" per se, but it could confuse the builder about which test files are new vs updated.
+- **Suggestion**: Add a note in Test Impact clarifying that `test_identity_config.py` is a new file (not an update to an existing one).
+
+#### 7. `_base.md` Has Sections Not in SOUL.md (Memory Sections)
+- **Severity**: NIT
+- **Critics**: Archaeologist
+- **Location**: Task 2, segment decomposition
+- **Finding**: `_base.md` contains `Subconscious Memory` and `Intentional Memory` sections (lines 424-475) that do NOT exist in SOUL.md. The plan correctly places these in `work-patterns.md`, but the Freshness Check says `_base.md` is "~90% duplicated from SOUL.md" which slightly understates the divergence. Not a functional issue, just an accuracy note.
+- **Suggestion**: No action needed -- the plan's Task 2 already handles these sections. Just noting the duplication percentage is approximate.
+
+## Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-8 sequential, no gaps |
+| Dependencies valid | PASS | All Depends On references (build-identity, build-segments, etc.) point to valid Task IDs |
+| File paths exist | PASS | 35 of 35 referenced files exist on disk |
+| Prerequisites met | PASS | No prerequisites declared (plan states "no external dependencies") |
+| Cross-references | PASS | Success criteria map to tasks; No-Gos do not appear in Solution as planned work |
+
+## Verdict
+
+**READY TO BUILD (with concerns)** -- No BLOCKERs remain after the `communication.md` ghost reference is fixed (a simple text replacement in the plan itself). Three CONCERN findings exist with Implementation Notes. A revision pass will embed these notes before build.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Operator | Ghost `communication.md` references (4 locations) | Plan revision | Replace with `identity.md` in lines 265, 295, 307, 427 |
+| CONCERN | Skeptic, Archaeologist | SOUL.md-only sections (Autonomous Execution, Full System Access) may be lost | Task 2 annotation | Explicitly place in `work-patterns.md`; use SOUL.md as authoritative source |
+| CONCERN | Adversary | F-string substitution fragile with curly braces in markdown | Task 2 implementation | Use `text.replace("{name}", val)` per field, not `str.format()` |
+| CONCERN | Operator | Tasks 5-8 missing Validates fields | Plan revision | Add structured validation commands to Tasks 5-7 |
+| NIT | Simplifier | Wisdom section disposition unspecified | Task 2 | Drop or append to work-patterns.md |
+| NIT | Operator | test_identity_config.py listed as create but not in Test Impact | Test Impact section | Add clarifying note |
+| NIT | Archaeologist | _base.md divergence slightly understated (~90% claim) | N/A | Informational only |
 
 ---
 
