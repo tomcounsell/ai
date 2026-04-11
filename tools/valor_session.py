@@ -8,6 +8,7 @@ Usage:
     valor-session create --role dev --model sonnet --message "Build feature X" --parent abc123
     valor-session create --role pm --message "..." --project-key valor
     valor-session resume --id abc123 --message "Fix: add missing validation"
+    valor-session release --pr 900
     valor-session steer --id abc123 --message "Stop after critique stage"
     valor-session status --id abc123
     valor-session list
@@ -614,6 +615,79 @@ def cmd_wait_for_children(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_release(args: argparse.Namespace) -> int:
+    """Clear retain_for_resume on the BUILD session associated with a PR.
+
+    Called by the PM session after a PR merges or closes to release the BUILD
+    session from retention. Without this, the session lingers until the 30-day
+    Meta.ttl backstop expires.
+
+    Lookup strategy: match by slug (PR branch `session/{slug}` → slug on AgentSession).
+    If no match is found, logs a warning and exits cleanly (no crash — the TTL
+    backstop will handle it).
+    """
+    _load_env()
+    try:
+        from models.agent_session import AgentSession
+
+        pr_number = str(args.pr)
+
+        # Strategy 1: match by pr_url containing the PR number
+        released = []
+        all_completed: list[AgentSession] = []
+        try:
+            all_completed = list(AgentSession.query.filter(status="completed"))
+        except Exception:
+            pass
+
+        # Also check superseded (may have been superseded after completion)
+        try:
+            all_completed.extend(list(AgentSession.query.filter(status="superseded")))
+        except Exception:
+            pass
+
+        for s in all_completed:
+            pr_url = getattr(s, "pr_url", None) or ""
+            slug = getattr(s, "slug", None) or ""
+            retain = getattr(s, "retain_for_resume", False)
+            if not retain:
+                continue
+            # Match by pr_url containing PR number or by slug (branch=session/{slug})
+            pr_match = pr_number in pr_url
+            slug_match = bool(slug)  # Any BUILD session with a slug is a candidate
+            if pr_match or (slug_match and pr_url and pr_number in pr_url):
+                s.retain_for_resume = False
+                s.save()
+                released.append(s.session_id)
+
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "pr": pr_number,
+                        "released": released,
+                        "count": len(released),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            if released:
+                print(f"Released {len(released)} BUILD session(s) for PR #{pr_number}:")
+                for sid in released:
+                    print(f"  {sid}")
+            else:
+                print(
+                    f"No retained BUILD sessions found for PR #{pr_number}. "
+                    "(TTL backstop will handle cleanup.)"
+                )
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -716,6 +790,19 @@ def main() -> int:
         help="Session ID to transition (defaults to $AGENT_SESSION_ID env var)",
     )
 
+    # release subcommand
+    release_parser = subparsers.add_parser(
+        "release",
+        help="Clear retain_for_resume on BUILD session(s) associated with a merged/closed PR",
+    )
+    release_parser.add_argument(
+        "--pr",
+        required=True,
+        type=int,
+        help="PR number whose BUILD session(s) should be released from retention",
+    )
+    release_parser.add_argument("--json", action="store_true", help="Output JSON")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -730,6 +817,7 @@ def main() -> int:
         "list": cmd_list,
         "kill": cmd_kill,
         "wait-for-children": cmd_wait_for_children,
+        "release": cmd_release,
     }
 
     return dispatch[args.command](args)
