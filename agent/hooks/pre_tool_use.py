@@ -1,4 +1,4 @@
-"""PreToolUse hook: blocks sensitive writes, enforces PM limits, registers child Dev sessions.
+"""PreToolUse hook: blocks sensitive writes, enforces PM limits, tracks SDLC stage starts.
 
 PM Bash enforcement
 -------------------
@@ -10,6 +10,21 @@ contains shell metacharacters that could smuggle mutations -- is blocked with a
 
 The authoritative list of allowed/blocked commands lives in
 ``tests/unit/test_pm_session_permissions.py::TestPMBashRestriction``.
+
+Skill tool stage tracking
+-------------------------
+When a PM session calls the Skill tool (e.g., ``Skill(skill="do-build")``),
+``_handle_skill_tool_start()`` maps the skill name to an SDLC stage via
+``_SKILL_TO_STAGE`` and calls ``PipelineStateMachine.start_stage()`` on the
+parent session (resolved via the ``AGENT_SESSION_ID`` env var). This marks
+the stage as ``in_progress`` so the worker post-completion handler can later
+classify the outcome and call ``complete_stage()`` or ``fail_stage()``.
+
+Dev session registration is no longer done in this hook. Dev sessions are
+created as ``AgentSession`` records via ``valor_session create --role dev``
+and self-register their parent linkage via the ``VALOR_PARENT_SESSION_ID``
+env var (see Phase 4+5 of the harness abstraction in
+``docs/features/harness-abstraction.md``).
 """
 
 from __future__ import annotations
