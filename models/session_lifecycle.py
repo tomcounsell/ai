@@ -360,6 +360,18 @@ def finalize_session(
     session.completed_at = time.time()
     session.save()
 
+    # 5.5. Update TaskTypeProfile (after auto_tag sets task_type AND after status is saved)
+    # Runs only for completed sessions — profile is now authoritative after the Redis save above.
+    if not skip_auto_tag and status == "completed":
+        try:
+            from models.task_type_profile import update_task_type_profile
+
+            _profile_session_id = getattr(session, "session_id", None)
+            if _profile_session_id:
+                update_task_type_profile(_profile_session_id)
+        except Exception as e:
+            logger.debug(f"[lifecycle] TaskTypeProfile update failed (non-fatal): {e}")
+
     # Analytics: record session completion
     try:
         from analytics.collector import record_metric

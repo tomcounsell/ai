@@ -150,6 +150,69 @@ def _read_transcript_tail(session_id: str, num_lines: int = TRANSCRIPT_TAIL_LINE
         return ""
 
 
+def _derive_task_type(session, applied_tags: list[str]) -> str | None:
+    """Derive a task_type from session fields using pattern-based rules.
+
+    Priority order:
+    1. rework_triggered=True → "rework-triggered"
+    2. classification_type=="bug" → "bug-fix"
+    3. SDLC stage markers in tags/transcript → "sdlc-{stage}"
+       - "pr-created" in tags → "sdlc-build"
+       - "tested" in tags and SDLC branch → "sdlc-test"
+       - SDLC branch + slug but no PR yet → "sdlc-plan"
+    4. SDLC branch + slug + "pr-created" → "sdlc-build" (already covered above)
+    5. slug set + no PR created → "greenfield-feature"
+    6. SDLC branch without slug → generic SDLC, skip (not specific enough)
+    7. None — do not force classification
+
+    No LLM calls — purely pattern-based.
+
+    Args:
+        session: AgentSession instance (already loaded).
+        applied_tags: Tags just applied in this auto_tag_session() call (may
+            include newly-added tags not yet persisted to session.tags).
+
+    Returns:
+        A task_type string from TASK_TYPE_VOCABULARY, or None if indeterminate.
+    """
+
+    classification = getattr(session, "classification_type", None) or ""
+    branch = getattr(session, "branch_name", None) or ""
+    slug = getattr(session, "slug", None)
+    rework = getattr(session, "rework_triggered", None)
+
+    # Combine persisted tags with newly-applied ones for pattern matching
+    persisted_tags = list(session.tags or [])
+    all_tags = set(persisted_tags) | set(applied_tags)
+
+    is_sdlc_branch = branch.startswith("session/")
+
+    # Priority 1: rework_triggered flag
+    if str(rework).lower() == "true":
+        return "rework-triggered"
+
+    # Priority 2: bug classification
+    if classification == "bug":
+        return "bug-fix"
+
+    # Priority 3: SDLC stage from transcript/tag markers
+    if is_sdlc_branch:
+        if "pr-created" in all_tags:
+            return "sdlc-build"
+        if "tested" in all_tags:
+            return "sdlc-test"
+        if slug and "pr-created" not in all_tags and "tested" not in all_tags:
+            # Has a slug but no PR yet — likely in planning stage
+            return "sdlc-plan"
+
+    # Priority 4: slug set + no SDLC branch markers → greenfield feature
+    if slug and not is_sdlc_branch:
+        return "greenfield-feature"
+
+    # Cannot classify — return None
+    return None
+
+
 def auto_tag_session(session_id: str) -> None:
     """Apply auto-tags to a session based on its metadata and transcript.
 
@@ -206,3 +269,20 @@ def auto_tag_session(session_id: str) -> None:
     # Apply all new tags (add_tags handles deduplication)
     if new_tags:
         add_tags(session_id, new_tags)
+
+    # Rule 7: derive task_type from session fields (idempotent — only set if not already set).
+    # Re-read the session to pick up any tags just written by add_tags() above.
+    if not getattr(session, "task_type", None):
+        derived_type = _derive_task_type(session, new_tags)
+        if derived_type:
+            try:
+                # Re-read from Redis to get the freshest state (add_tags may have saved tags)
+                fresh_session = _get_session(session_id)
+                if fresh_session and not getattr(fresh_session, "task_type", None):
+                    fresh_session.task_type = derived_type
+                    fresh_session.save()
+                    logger.debug(
+                        f"auto_tag_session: set task_type={derived_type!r} for {session_id}"
+                    )
+            except Exception as e:
+                logger.debug(f"auto_tag_session: failed to set task_type for {session_id}: {e}")
