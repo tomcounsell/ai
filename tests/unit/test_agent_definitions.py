@@ -49,17 +49,22 @@ class TestGetAgentDefinitions:
     """Tests for get_agent_definitions()."""
 
     def test_returns_all_agents_when_files_exist(self):
-        """Normal case: all expected agents are returned."""
+        """Normal case: all expected agents are returned.
+
+        Phase 5 note: dev-session was removed from get_agent_definitions().
+        Dev sessions are now created via valor_session create, not Agent tool.
+        """
         defs = get_agent_definitions()
-        for name in ("builder", "validator", "code-reviewer", "dev-session"):
+        for name in ("builder", "validator", "code-reviewer"):
             assert name in defs, f"Missing agent definition: {name}"
+        assert "dev-session" not in defs, "dev-session should be removed (Phase 5)"
 
     def test_returns_complete_dict_when_all_files_missing(self, tmp_path):
         """Even if every agent file is missing, returns a full dict (degraded)."""
         with patch("agent.agent_definitions._AGENTS_DIR", tmp_path):
             defs = get_agent_definitions()
-        # All four agents should still be present with fallback prompts
-        for name in ("builder", "validator", "code-reviewer", "dev-session"):
+        # Three agents (dev-session removed in Phase 5)
+        for name in ("builder", "validator", "code-reviewer"):
             assert name in defs, f"Missing agent definition: {name}"
             assert len(defs[name].prompt) > 0, f"Empty prompt for: {name}"
 
@@ -68,7 +73,7 @@ class TestGetAgentDefinitions:
         # Copy real files to tmp_path except builder.md
         import shutil
 
-        for name in ("validator.md", "code-reviewer.md", "dev-session.md"):
+        for name in ("validator.md", "code-reviewer.md"):
             src = _AGENTS_DIR / name
             if src.exists():
                 shutil.copy(src, tmp_path / name)
@@ -92,14 +97,16 @@ class TestValidateAgentFiles:
         assert missing == [], f"Missing agent files: {missing}"
 
     def test_detects_missing_files(self, tmp_path):
-        """Reports missing files when agents dir is empty."""
+        """Reports missing files when agents dir is empty.
+
+        Phase 5: dev-session.md removed from _EXPECTED_AGENT_FILES.
+        """
         with patch("agent.agent_definitions._AGENTS_DIR", tmp_path):
             missing = validate_agent_files()
-        assert len(missing) == 4
+        assert len(missing) == 3
         assert any("builder.md" in p for p in missing)
         assert any("validator.md" in p for p in missing)
         assert any("code-reviewer.md" in p for p in missing)
-        assert any("dev-session.md" in p for p in missing)
 
     def test_partial_missing(self, tmp_path):
         """Reports only the files that are actually missing."""
@@ -107,7 +114,7 @@ class TestValidateAgentFiles:
         (tmp_path / "builder.md").write_text("---\ndescription: test\n---\nBody")
         with patch("agent.agent_definitions._AGENTS_DIR", tmp_path):
             missing = validate_agent_files()
-        assert len(missing) == 3
+        assert len(missing) == 2
         assert not any("builder.md" in p for p in missing)
 
 
