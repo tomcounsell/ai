@@ -25,7 +25,7 @@ The PM role's skill repertoire is entirely static. Every skill the PM can use mu
 
 **Desired outcome:**
 
-The PM session can autonomously discover, propose, evaluate, and manage skills over time. Specifically: (1) detect repeatable multi-step patterns in session history, (2) propose candidate skills with draft SKILL.md content, (3) track skill effectiveness metrics, (4) flag underperforming skills for review. All generated skills require human approval before entering production use.
+The PM session can autonomously discover, create, evaluate, and manage skills over time. Specifically: (1) detect friction patterns and repeatable multi-step workflows in session history via reflections, (2) generate skills automatically using the existing `/skillify` skill (now agent-invokable), (3) deploy new skills via the standard PR pipeline (PR -> review -> docs -> merge) with no human approval gate, (4) track skill effectiveness metrics, (5) auto-expire unused skills while keeping active ones alive.
 
 ## Freshness Check
 
@@ -59,21 +59,21 @@ No prior issues found related to autonomous skill generation or skill lifecycle 
 
 ## Data Flow
 
-1. **Entry point**: Post-session extraction (`agent/memory_extraction.py`) produces categorized observations from completed sessions
-2. **Pattern detection**: A new `tools/skill_lifecycle.py` module queries Memory records for recurring patterns (category=`pattern`, high frequency, similar file paths / tags across sessions)
-3. **Candidate generation**: When a pattern threshold is met, the PM proposes a candidate skill by generating a draft SKILL.md and writing it to `.claude/skills/_candidates/`
-4. **Validation gate**: The candidate passes through `/do-skills-audit` validation (existing 12-rule checker)
-5. **Human approval**: Candidates remain in `_candidates/` until a human promotes them to the active skills directory
+1. **Entry point**: Reflections (`scripts/reflections.py`) reviews Memory records and session observations for friction patterns -- moments where agents struggled with tool params, repeated multi-step workflows, or worked around missing abstractions
+2. **Friction detection**: A new `tools/skill_lifecycle.py` module queries Memory records for friction signals (category=`correction`, `pattern`; tags indicating tool struggles, repeated workarounds) and recurring workflows
+3. **Skill generation**: When a friction pattern or repeatable workflow is detected, the system invokes `/skillify` (now agent-invokable) to generate a new SKILL.md. The focus is on minimum complexity skills that prevent friction -- e.g., wrapping a tool with commonly-guessed-wrong params
+4. **Deployment**: Generated skills are deployed via the standard PR pipeline: create branch -> PR -> `/do-pr-review` -> `/do-docs` -> `/do-merge`. No human approval gate -- the PR review process is the quality gate
+5. **Validation gate**: Generated skills pass through `/do-skills-audit` validation (existing 12-rule checker) before PR creation
 6. **Effectiveness tracking**: `pre_tool_use.py` Skill hook calls `record_metric("skill.invocation", ...)` with skill name and session context. Post-session extraction records outcome (success/failure/patch-needed) via `record_metric("skill.outcome", ...)`
-7. **Lifecycle management**: `tools/skill_lifecycle.py` queries analytics to compute per-skill effectiveness scores. Skills below threshold are flagged for review in the dashboard.
+7. **Lifecycle management**: Skills have a default expiry (30 days from creation). Each invocation resets the expiry timer. Unused skills expire automatically and are removed. `tools/skill_lifecycle.py` queries analytics to compute per-skill effectiveness scores and manages expiry
 
 ## Architectural Impact
 
 - **New dependencies**: `analytics.collector.record_metric` (already on main), no external deps
 - **Interface changes**: `pre_tool_use.py::_handle_skill_tool_start()` gains a `record_metric` call (additive, no signature change). New `tools/skill_lifecycle.py` CLI module.
-- **Coupling**: Loose coupling via analytics sink -- skill tracking writes to the same analytics pipeline as everything else. Pattern detection reads from the Memory model (existing dependency).
-- **Data ownership**: Skill effectiveness data owned by analytics (SQLite + Redis). Candidate skills owned by filesystem (`.claude/skills/_candidates/`).
-- **Reversibility**: High. Remove `_candidates/` directory, remove `record_metric` calls from `pre_tool_use.py`, delete `tools/skill_lifecycle.py`. No schema migrations.
+- **Coupling**: Loose coupling via analytics sink -- skill tracking writes to the same analytics pipeline as everything else. Friction detection reads from the Memory model (existing dependency). Reflections triggers pattern review (existing scheduling infrastructure).
+- **Data ownership**: Skill effectiveness data owned by analytics (SQLite + Redis). Generated skills live in `.claude/skills/` like all other skills (no separate candidate directory). Expiry metadata in SKILL.md frontmatter.
+- **Reversibility**: High. Remove `record_metric` calls from `pre_tool_use.py`, delete `tools/skill_lifecycle.py`, remove generated skills. No schema migrations.
 
 ## Appetite
 
@@ -82,8 +82,8 @@ No prior issues found related to autonomous skill generation or skill lifecycle 
 **Team:** Solo dev, PM
 
 **Interactions:**
-- PM check-ins: 2-3 (scope alignment on pattern detection thresholds, candidate skill format, dashboard integration)
-- Review rounds: 2+ (effectiveness tracking instrumentation review, pattern detection logic review)
+- PM check-ins: 2-3 (scope alignment on friction detection thresholds, skill expiry policy, dashboard integration)
+- Review rounds: 2+ (effectiveness tracking instrumentation review, friction detection logic review)
 
 ## Prerequisites
 
@@ -94,36 +94,40 @@ No prerequisites -- this work builds on the existing analytics module (`analytic
 ### Key Elements
 
 - **Skill Effectiveness Tracker**: Instruments skill invocations and outcomes in the analytics pipeline, providing per-skill success rate, patch frequency, and human override rate
-- **Pattern Detector**: Analyzes post-session Memory observations to identify repeatable multi-step workflows that appear across sessions
-- **Candidate Skill Generator**: Produces draft SKILL.md files from detected patterns, staged in a `_candidates/` directory for human review
-- **Skill Lifecycle Manager**: CLI tool that queries effectiveness metrics, flags underperforming skills, and provides a queryable skill health report
+- **Friction Detector**: Analyzes Memory observations (via reflections) to identify friction patterns -- agents struggling with tool params, repeated workarounds, and multi-step workflows that should be single-step
+- **Skill Generator**: Invokes `/skillify` (now agent-invokable) to produce SKILL.md files from detected patterns, deployed via standard PR pipeline
+- **Skill Expiry System**: Generated skills have a 30-day default expiry in frontmatter. Each invocation resets the timer. Unused skills are automatically retired
+- **Skill Lifecycle Manager**: CLI tool that queries effectiveness metrics, manages expiry, and triggers skill generation from detected patterns
 
 ### Flow
 
-**Session completes** -> Post-session extraction saves observations -> Pattern detector identifies recurring workflow -> PM proposes candidate skill -> `/do-skills-audit` validates -> Human reviews in `_candidates/` -> Human promotes to active -> Effectiveness tracking measures ongoing performance -> Lifecycle manager flags underperformers
+**Reflections runs** -> Reviews Memory for friction patterns -> Identifies candidate workflows -> Invokes `/skillify` to generate skill -> `/do-skills-audit` validates -> Creates PR with new skill -> PR review validates -> Docs updated -> Merged to main -> Effectiveness tracking measures ongoing performance -> Expiry system retires unused skills
 
 ### Technical Approach
 
 - Instrument `pre_tool_use.py::_handle_skill_tool_start()` to emit `record_metric("skill.invocation", 1, {"skill": name, "session_id": sid})` on every skill invocation
 - Add a `post_tool_use` or post-session hook that records outcome: `record_metric("skill.outcome", 1, {"skill": name, "outcome": "success|failure|patch_needed"})`
-- Pattern detection uses existing Memory model queries: filter by `category="pattern"`, group by `tags` and `file_paths`, identify clusters appearing 3+ times within a sliding window
-- Candidate generation answers the `/skillify` interview questions programmatically from session history, producing a valid SKILL.md with frontmatter
-- `_candidates/` directory uses a naming convention: `_candidates/{skill-name}/SKILL.md` with added frontmatter fields `proposed_at`, `source_sessions`, `pattern_description`
+- **Friction detection** uses Memory model queries: filter by `category="correction"` and `category="pattern"`, identify cases where agents repeatedly guessed wrong tool params, worked around missing abstractions, or performed the same multi-step sequence. Focus on minimum complexity -- a skill wrapping a single tool with correct default params is valuable
+- **No minimum occurrence count** -- complexity and friction severity determine whether to skillify, not raw repetition. A single instance of an agent struggling with a tool's params because they're non-obvious is enough
+- Remove `disable-model-invocation: true` from `/skillify` frontmatter so agents can invoke it directly
+- Generated skills include frontmatter fields: `generated: true`, `generated_at: <date>`, `expires_at: <date+30d>`, `source_pattern: <description>`
+- Expiry system: `tools/skill_lifecycle.py expire` checks all skills with `generated: true` and `expires_at` in the past, removes them via PR. Each skill invocation (tracked via analytics) resets `expires_at` to now+30d
 - The PM's bash allowlist in `pre_tool_use.py` gets `python -m tools.skill_lifecycle` entries for read-only queries
 - Effectiveness query: `python -m tools.skill_lifecycle report` outputs per-skill metrics (invocation count, success rate, avg patches per invocation, last used)
+- Reflections integration: add a skill review step to `scripts/reflections.py` that calls `python -m tools.skill_lifecycle detect-friction` and triggers skillification when warranted
 - Dashboard integration via `dashboard.json` endpoint (existing pattern)
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] `record_metric` in `analytics/collector.py` already wraps in try/except -- verify skill-specific metric names follow the same pattern
-- [ ] Pattern detection in `tools/skill_lifecycle.py` must handle empty Memory result sets gracefully (no observations = no patterns, not a crash)
-- [ ] Candidate SKILL.md generation must handle malformed session history (missing fields, empty observations)
+- [ ] Friction detection in `tools/skill_lifecycle.py` must handle empty Memory result sets gracefully (no observations = no patterns, not a crash)
+- [ ] Skill generation must handle cases where `/skillify` produces invalid output
 
 ### Empty/Invalid Input Handling
 - [ ] `skill_lifecycle report` with no analytics data returns an empty report, not an error
-- [ ] Pattern detection with zero Memory records returns "no patterns detected"
-- [ ] Candidate generation with insufficient session data (fewer than 3 pattern occurrences) declines to generate
+- [ ] Friction detection with zero Memory records returns "no friction detected"
+- [ ] Expiry check with no generated skills returns "no generated skills found"
 
 ### Error State Rendering
 - [ ] CLI `skill_lifecycle report` output clearly distinguishes "no data" from "skill performing poorly"
@@ -136,52 +140,53 @@ No existing tests affected -- this is a greenfield feature with no prior test co
 ## Rabbit Holes
 
 - **Real-time skill hot-loading**: Claude Code discovers skills at session start. Adding skills mid-session is a platform constraint -- do not try to solve it. New skills take effect on the next session.
-- **Automatic skill promotion**: Tempting to auto-promote candidates after N successful test runs, but human approval is a hard requirement. The `_candidates/` directory is the staging area, not a testing ground.
 - **Natural language skill composition**: Composing skills by chaining their SKILL.md instructions sounds powerful but is a rabbit hole. Stick to detecting patterns and generating standalone skills.
-- **Retroactive pattern detection on all historical sessions**: Limit pattern detection to the last 30 days of Memory observations. Full historical analysis is computationally wasteful and produces stale patterns.
+- **Retroactive pattern detection on all historical sessions**: Limit friction detection to the last 30 days of Memory observations. Full historical analysis is computationally wasteful and produces stale patterns.
+- **Complex multi-tool skills**: Focus on minimum complexity skills that wrap friction-prone tool invocations. Resist the urge to generate complex orchestration skills -- those should be human-authored.
 
 ## Risks
 
-### Risk 1: Pattern detection produces too many false positives
-**Impact:** `_candidates/` directory fills with low-quality skill proposals, creating review fatigue for the human
-**Mitigation:** Set a high threshold (5+ occurrences of a pattern within 14 days) before proposing a candidate. Include a `pattern_confidence` score in candidate frontmatter so humans can triage quickly. Rate-limit candidate generation to at most 1 per day.
+### Risk 1: Friction detection produces too many low-value skills
+**Impact:** Skills directory fills with trivial wrappers that don't meaningfully reduce friction
+**Mitigation:** Focus on minimum complexity but meaningful friction reduction. Rate-limit skill generation to at most 1 per day via reflections. The 30-day expiry automatically cleans up skills that never get used.
 
 ### Risk 2: Effectiveness metrics are too coarse to be actionable
 **Impact:** Success/failure binary doesn't capture the nuance of "skill worked but required 3 patches"
 **Mitigation:** Track three distinct outcomes: `success` (no patches needed), `partial` (patches required but eventually passed), `failure` (skill output was abandoned). Also track patch count per invocation as a separate metric.
 
-### Risk 3: PM session's read-only constraints block skill proposal workflow
-**Impact:** The PM cannot write files to `.claude/skills/_candidates/` directly
-**Mitigation:** The PM delegates candidate file creation to a dev-session. The PM's role is proposing and requesting; the dev-session writes the file. This follows the existing pattern for all PM mutations.
+### Risk 3: PM session's read-only constraints block skill generation workflow
+**Impact:** The PM cannot write files to `.claude/skills/` directly
+**Mitigation:** The PM delegates skill file creation to a dev-session via `/skillify`. The PM's role is detecting friction and triggering skillification; the dev-session writes the file and creates the PR. This follows the existing pattern for all PM mutations.
 
 ## Race Conditions
 
-No race conditions identified -- all operations are sequential within a single session. Skill effectiveness metrics use the analytics `record_metric()` API which handles concurrent writes via SQLite WAL mode. Pattern detection is a batch read operation with no write contention.
+No race conditions identified -- all operations are sequential within a single session. Skill effectiveness metrics use the analytics `record_metric()` API which handles concurrent writes via SQLite WAL mode. Friction detection is a batch read operation with no write contention.
 
 ## No-Gos (Out of Scope)
 
-- **Automatic skill deployment** -- generated skills always require human approval before activation
 - **Cross-project skill sharing** -- skills are scoped to this repository; no sync to other machines
 - **Skill versioning** -- no version history for generated skills; use git history
 - **Real-time effectiveness dashboards** -- effectiveness data is queryable via CLI; live dashboard charts are deferred to a future iteration
-- **Modifying existing static skills** -- this feature only creates new candidate skills; it does not modify or deprecate existing skills automatically
+- **Modifying existing static skills** -- this feature only creates new generated skills; it does not modify or deprecate human-authored skills automatically
 
 ## Update System
 
-No update system changes required -- this feature adds new Python modules and a new directory (`_candidates/`) that are handled by the existing `git pull` step in the update script. No new dependencies, config files, or migration steps are needed.
+No update system changes required -- this feature adds new Python modules that are handled by the existing `git pull` step in the update script. No new dependencies, config files, or migration steps are needed.
 
 ## Agent Integration
 
 - **PM bash allowlist**: Add `python -m tools.skill_lifecycle` prefixes to `PM_BASH_ALLOWED_PREFIXES` in `agent/hooks/pre_tool_use.py` so the PM can query skill effectiveness reports
+- **Skillify agent-invokable**: Remove `disable-model-invocation: true` from `.claude/skills/skillify/SKILL.md` so agents can trigger skill generation directly
 - **No MCP server changes needed**: The skill lifecycle tool is a CLI module invoked via Bash, following the same pattern as `python -m tools.memory_search` and `python -m tools.analytics`
 - **Bridge changes**: None. The bridge has no SDLC awareness and does not need to know about skill lifecycle
+- **Reflections integration**: Add a skill review step to `scripts/reflections.py` that calls friction detection
 - **Integration test**: Verify that `python -m tools.skill_lifecycle report` is callable from a PM session (passes the bash allowlist check)
 
 ## Documentation
 
-- [ ] Create `docs/features/pm-autonomous-skills.md` describing the autonomous skill lifecycle (discovery, generation, effectiveness tracking, lifecycle management)
+- [ ] Create `docs/features/pm-autonomous-skills.md` describing the autonomous skill lifecycle (friction detection, generation, effectiveness tracking, expiry)
 - [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `.claude/skills/README.md` to document the `_candidates/` directory and its role in the progressive disclosure hierarchy (L0 should NOT include candidates)
+- [ ] Update `.claude/skills/README.md` to document generated skill frontmatter fields (`generated`, `expires_at`) and their role in progressive disclosure
 - [ ] Add inline docstrings to `tools/skill_lifecycle.py` for all public functions
 - [ ] Update `config/personas/project-manager.md` to reference the skill lifecycle query commands
 
@@ -190,10 +195,13 @@ No update system changes required -- this feature adds new Python modules and a 
 - [ ] `record_metric("skill.invocation", ...)` is emitted on every skill invocation via the pre_tool_use hook
 - [ ] `record_metric("skill.outcome", ...)` is emitted after each skill-bearing session completes
 - [ ] `python -m tools.skill_lifecycle report` outputs per-skill effectiveness metrics (invocation count, success rate, patch frequency)
-- [ ] `python -m tools.skill_lifecycle detect-patterns` identifies repeatable workflows from Memory observations
-- [ ] `python -m tools.skill_lifecycle propose --pattern <id>` generates a valid candidate SKILL.md in `_candidates/`
-- [ ] Generated candidates pass `/do-skills-audit` validation
-- [ ] `.claude/skills/_candidates/` directory exists with a README explaining the approval workflow
+- [ ] `python -m tools.skill_lifecycle detect-friction` identifies friction patterns from Memory observations
+- [ ] `python -m tools.skill_lifecycle expire` removes generated skills past their expiry date via PR
+- [ ] `/skillify` is agent-invokable (`disable-model-invocation` removed from frontmatter)
+- [ ] Generated skills include `generated: true`, `generated_at`, `expires_at` frontmatter fields
+- [ ] Skill invocations reset the `expires_at` timer for generated skills
+- [ ] Reflections includes a skill lifecycle review step
+- [ ] Generated skills pass `/do-skills-audit` validation and deploy via PR pipeline
 - [ ] PM session can run `python -m tools.skill_lifecycle report` (passes bash allowlist)
 - [ ] Existing static skills continue to work unchanged (no regressions in `tests/unit/test_pre_tool_use.py`)
 - [ ] Tests pass (`/do-test`)
@@ -209,21 +217,21 @@ No update system changes required -- this feature adds new Python modules and a 
   - Agent Type: builder
   - Resume: true
 
-- **Builder (pattern-detection)**
-  - Name: pattern-builder
-  - Role: Implement pattern detection from Memory observations and candidate generation
+- **Builder (friction-detection)**
+  - Name: friction-builder
+  - Role: Implement friction detection from Memory observations, skill expiry system, and skillify agent-invocation
   - Agent Type: builder
   - Resume: true
 
 - **Builder (lifecycle-cli)**
   - Name: lifecycle-builder
-  - Role: Build the skill_lifecycle CLI tool with report, detect-patterns, and propose subcommands
+  - Role: Build the skill_lifecycle CLI tool with report, detect-friction, and expire subcommands
   - Agent Type: builder
   - Resume: true
 
 - **Validator (integration)**
   - Name: integration-validator
-  - Role: Verify end-to-end flow from invocation tracking through pattern detection to candidate generation
+  - Role: Verify end-to-end flow from invocation tracking through friction detection to skill generation and expiry
   - Agent Type: validator
   - Resume: true
 
@@ -244,27 +252,29 @@ No update system changes required -- this feature adds new Python modules and a 
 - Add post-session skill outcome recording in `agent/memory_extraction.py::run_post_session_extraction()` -- after extraction completes, emit `record_metric("skill.outcome", 1, {"skill": skill_name, "outcome": outcome})` where outcome is derived from whether patches were needed
 - Create `tests/unit/test_skill_effectiveness.py` with tests for metric emission on skill invocation and outcome recording
 
-### 2. Build Pattern Detection Module
-- **Task ID**: build-pattern-detection
+### 2. Build Friction Detection and Skill Expiry Module
+- **Task ID**: build-friction-detection
 - **Depends On**: none
-- **Validates**: tests/unit/test_skill_pattern_detection.py (create)
-- **Assigned To**: pattern-builder
+- **Validates**: tests/unit/test_skill_friction_detection.py (create)
+- **Assigned To**: friction-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tools/skill_lifecycle.py` with pattern detection logic: query Memory records filtered by `category="pattern"`, group by overlapping `tags` and `file_paths`, identify clusters appearing 3+ times within a 14-day window
-- Implement candidate SKILL.md generation: given a detected pattern, produce a valid SKILL.md with proper frontmatter (name, description, when_to_use, allowed-tools) by analyzing the session observations that formed the pattern
-- Create `.claude/skills/_candidates/README.md` explaining the candidate approval workflow
-- Create `tests/unit/test_skill_pattern_detection.py` with tests for pattern grouping, threshold enforcement, and SKILL.md generation format
+- Create `tools/skill_lifecycle.py` with friction detection logic: query Memory records filtered by `category="correction"` and `category="pattern"`, identify cases where agents struggled with tool params, worked around missing abstractions, or performed repeated multi-step sequences
+- No minimum occurrence count -- friction severity and complexity determine skillification, not repetition. A single correction about wrong tool params is enough
+- Remove `disable-model-invocation: true` from `.claude/skills/skillify/SKILL.md` frontmatter so agents can invoke it
+- Implement skill expiry: generated skills get `generated: true`, `generated_at: <date>`, `expires_at: <date+30d>` in frontmatter. Invocations reset `expires_at`. `expire` subcommand removes expired skills via PR
+- Create `tests/unit/test_skill_friction_detection.py` with tests for friction detection, expiry management, and frontmatter format
 
-### 3. Build Skill Lifecycle CLI
+### 3. Build Skill Lifecycle CLI and Reflections Integration
 - **Task ID**: build-lifecycle-cli
-- **Depends On**: build-effectiveness-tracking, build-pattern-detection
+- **Depends On**: build-effectiveness-tracking, build-friction-detection
 - **Validates**: tests/unit/test_skill_lifecycle_cli.py (create)
 - **Assigned To**: lifecycle-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement CLI subcommands: `report` (query analytics for per-skill metrics), `detect-patterns` (run pattern detection), `propose --pattern <id>` (generate candidate)
+- Implement CLI subcommands: `report` (query analytics for per-skill metrics), `detect-friction` (run friction detection), `expire` (remove expired generated skills)
 - Add `python -m tools.skill_lifecycle` prefixes to `PM_BASH_ALLOWED_PREFIXES` in `pre_tool_use.py`
+- Add skill review step to `scripts/reflections.py` that calls `python -m tools.skill_lifecycle detect-friction` and triggers skillification when friction is found
 - Create `tests/unit/test_skill_lifecycle_cli.py` with tests for CLI argument parsing and output format
 
 ### 4. Validate Integration
@@ -275,7 +285,8 @@ No update system changes required -- this feature adds new Python modules and a 
 - **Parallel**: false
 - Verify `record_metric` calls are wired correctly in pre_tool_use.py
 - Verify PM session can run `python -m tools.skill_lifecycle report` (bash allowlist check)
-- Verify generated candidate SKILL.md files pass `/do-skills-audit` validation
+- Verify `/skillify` frontmatter no longer has `disable-model-invocation: true`
+- Verify generated skill frontmatter includes `generated`, `generated_at`, `expires_at` fields
 - Verify existing tests in `tests/unit/test_pre_tool_use.py` still pass
 - Run `python -m ruff check .` and `python -m ruff format --check .`
 
@@ -287,7 +298,7 @@ No update system changes required -- this feature adds new Python modules and a 
 - **Parallel**: false
 - Create `docs/features/pm-autonomous-skills.md`
 - Add entry to `docs/features/README.md` index table
-- Update `.claude/skills/README.md` with `_candidates/` directory documentation
+- Update `.claude/skills/README.md` with generated skill frontmatter documentation
 - Update `config/personas/project-manager.md` with skill lifecycle query commands
 
 ### 6. Final Validation
@@ -308,7 +319,7 @@ No update system changes required -- this feature adds new Python modules and a 
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Lifecycle CLI runs | `python -m tools.skill_lifecycle report --help` | exit code 0 |
-| Candidates dir exists | `ls .claude/skills/_candidates/README.md` | exit code 0 |
+| Skillify agent-invokable | `grep -c "disable-model-invocation" .claude/skills/skillify/SKILL.md` | output 0 |
 | PM allowlist updated | `grep -c "skill_lifecycle" agent/hooks/pre_tool_use.py` | output > 0 |
 | Feature docs exist | `ls docs/features/pm-autonomous-skills.md` | exit code 0 |
 
@@ -322,6 +333,8 @@ No update system changes required -- this feature adds new Python modules and a 
 
 ## Open Questions
 
-1. What minimum number of pattern occurrences should trigger a candidate skill proposal? (Current plan says 5 within 14 days -- is that too conservative or too aggressive?)
-2. Should the PM be able to request pattern detection on demand (e.g., "check for new skill patterns"), or should it only run as part of post-session extraction?
-3. Should candidate skills include a "trial period" metric where they are tracked separately before promotion, or is the human approval gate sufficient?
+Resolved by PM (2026-04-11):
+
+1. **Minimum occurrences?** No minimum count. Minimum complexity is the bar -- focus on friction prevention. If an agent struggles to do something simple because it wrongly guesses tool params, that's ripe for a simple skill definition.
+2. **On-demand or post-session only?** Post-session only, triggered by reflections reviewing memory.
+3. **Trial period?** No trial period. Fast to create means fast to retire. Default 30-day expiry applied to all generated skills; usage resets the timer.
