@@ -216,6 +216,24 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 
 The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the Dev session bypasses the pipeline. The warning is logged to stderr and is non-fatal.
 
+### Per-Stage Model Selection
+
+PM picks the Claude model at dispatch time using `valor-session create --model <name>`. PM's decision rules (see [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md)) encode which stage gets which model. The full mapping is documented in [pipeline-graph.md](pipeline-graph.md) under "Per-Stage Model Selection."
+
+### Dev Session Resume (Hard PATCH Path)
+
+Normal PATCH dispatch spawns a fresh Dev session that reads the review findings or test failures from their artifacts and applies a targeted fix. When PATCH failures become non-trivial — architectural, cross-cutting, or tangled with implementation assumptions only the original builder knew — PM resumes the BUILD session's Claude Code transcript instead of starting fresh. The resumed session inherits the builder's full context for free.
+
+#### Mechanism
+
+1. BUILD Dev sessions set `retain_for_resume=True` on completion (harness guard in `_handle_dev_session_completion()`).
+2. PM calls `valor-session resume --id <build-session-id> --message "Apply review findings: ..."`.
+3. `cmd_resume` transitions the completed session back to `pending` (with `reject_from_terminal=False`) and appends the message to the steering queue.
+4. Worker picks up the session; `sdk_client._create_options()` sees the stored `claude_session_uuid` and sets `resume=<uuid>` + `continue_conversation=True`.
+5. After PR merge, PM calls `valor-session release --pr <N>` to clear `retain_for_resume`.
+
+See [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md) for when PM chooses resume vs fresh.
+
 ## Worker-Driven Lifecycle
 
 The parent-child session lifecycle is driven by the worker's post-completion handler and two SDK hooks for stage tracking.
