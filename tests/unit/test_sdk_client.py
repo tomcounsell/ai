@@ -16,7 +16,7 @@ from agent.sdk_client import ValorAgent, load_system_prompt
 
 
 def test_load_system_prompt():
-    """Test that SOUL.md can be loaded."""
+    """Test that system prompt can be loaded from persona segments."""
     prompt = load_system_prompt()
     assert prompt is not None
     assert len(prompt) > 100

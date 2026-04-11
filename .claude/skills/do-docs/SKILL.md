@@ -120,7 +120,7 @@ Scan these locations:
 | docs/plans/*.md | Plans that may reference this as prerequisite |
 | .claude/skills/*/SKILL.md | Workflow skill definitions |
 | .claude/commands/*.md | Slash commands |
-| config/SOUL.md | Agent identity and behavior |
+| config/identity.json | Structured identity data |
 | docs/*.md (top-level) | Deployment, tools-reference, etc. |
 | docs/features/README.md | Feature index table |
 
@@ -250,7 +250,7 @@ Using the **Retired terms** from Agent A's summary, grep across ALL docs for old
 
 ```bash
 # For each retired term, search all doc locations
-rg "<retired-term>" docs/ CLAUDE.md config/SOUL.md .claude/commands/ .claude/skills/
+rg "<retired-term>" docs/ CLAUDE.md config/identity.json config/personas/segments/ .claude/commands/ .claude/skills/
 ```
 
 Add any new hits to the affected documents list from Step 2.

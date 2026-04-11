@@ -58,7 +58,10 @@ DOC_PATTERNS = [
     "CLAUDE.md",
     ".claude/skills/*/SKILL.md",
     ".claude/commands/*.md",
-    "config/SOUL.md",
+    "config/identity.json",
+    "config/personas/segments/identity.md",
+    "config/personas/segments/work-patterns.md",
+    "config/personas/segments/tools.md",
 ]
 
 

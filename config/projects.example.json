@@ -2,7 +2,7 @@
   "$schema": "Project configuration for multi-instance Valor deployment",
   "_doc": {
     "overview": "Shared config for all Valor machines (iCloud-synced via ~/Desktop/Valor/). Each machine reads this file and filters projects by the 'machine' field matched against its ComputerName (scutil --get ComputerName).",
-    "personas": "Define soul file paths and permissions for each role. The bridge loads base + persona overlay as the system prompt.",
+    "personas": "Define overlay file paths and permissions for each role. The bridge loads composable segments + persona overlay as the system prompt.",
     "projects.machine": "Must match the machine's ComputerName exactly (case-insensitive). This is how each machine knows which projects to handle.",
     "projects.telegram.groups": "Dict mapping group name to persona. Dev: prefix = developer, PM: prefix = project-manager, no prefix = teammate (mention-only).",
     "projects.telegram.groups.chat_id": "Optional Telegram chat ID. Speeds up group resolution but not required.",
@@ -13,19 +13,19 @@
   "personas": {
     "developer": {
       "name": "Valor",
-      "soul": "~/Desktop/Valor/personas/developer.md",
+      "overlay": "~/Desktop/Valor/personas/developer.md",
       "permissions": ["read", "write", "execute"],
       "description": "Full developer persona — reads code, writes code, runs tests, creates PRs"
     },
     "project-manager": {
       "name": "Valor",
-      "soul": "~/Desktop/Valor/personas/project-manager.md",
+      "overlay": "~/Desktop/Valor/personas/project-manager.md",
       "permissions": ["read"],
       "description": "PM persona — reads code, manages GitHub issues/PRs, drafts communications. No code writes."
     },
     "teammate": {
       "name": "Valor",
-      "soul": "~/Desktop/Valor/personas/teammate.md",
+      "overlay": "~/Desktop/Valor/personas/teammate.md",
       "permissions": ["read"],
       "description": "Casual teammate persona — conversational Q&A, light and helpful. Read-only, no code writes."
     }

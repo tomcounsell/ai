@@ -37,7 +37,8 @@ References where "Valor" is the **persona** that users interact with — the nam
 
 | File | Line(s) | Reference | Notes |
 |------|---------|-----------|-------|
-| `config/SOUL.md` | 1, 7-10, 17 | `# Valor`, name/email/identity fields, `"I am Valor Engels"` | **The** persona definition |
+| `config/identity.json` | all | name, email, timezone, org fields | **The** structured identity data |
+| `config/personas/segments/identity.md` | 1+ | `# Valor`, identity and values | **The** persona definition |
 | `agent/sdk_client.py` | 371, 405 | `"You are Valor, an AI coworker"` | Fallback system prompt |
 | `agent/sdk_client.py` | 1123 | `project.get("name", "Valor")` | Default project name |
 | `agent/sdk_client.py` | 586-591 | `"Valor's Claude Agent SDK wrapper"` | Docstrings |
@@ -47,7 +48,7 @@ References where "Valor" is the **persona** that users interact with — the nam
 | File | Line(s) | Reference | Notes |
 |------|---------|-----------|-------|
 | `config/projects.example.json` | 9 | `"Dev: Valor"` group name | Telegram group |
-| `config/SOUL.md` | 268-274 | `"Dev: Valor"` in CLI examples | Documentation |
+| `config/personas/segments/tools.md` | various | `"Dev: Valor"` in CLI examples | Documentation |
 | `tools/valor_telegram.py` | 6-11 | `"Dev: Valor"` in usage | CLI help text |
 
 **Total Category A: ~35 references across ~15 files**
@@ -193,10 +194,10 @@ References in prose, test fixtures, and examples. Low runtime impact — these f
 
 If the goal is **"keep the Valor brand, but make the active persona configurable"**, only **Category A (~35 references in ~15 files)** needs to change. Categories B and C stay as-is.
 
-The key insight: Category A could be driven by a single config value (e.g., `persona.name` in `~/Desktop/Valor/projects.json` or `SOUL.md` metadata) that flows through ~5 source-of-truth constants:
+The key insight: Category A could be driven by a single config value (e.g., `persona.name` in `~/Desktop/Valor/projects.json` or `config/identity.json`) that flows through ~5 source-of-truth constants:
 
 1. `bridge/routing.py` → `get_valor_usernames()` (now config-only, reads `mention_triggers`)
 2. `bridge/telegram_bridge.py` → mention triggers (already partially configurable via `projects.json`)
 3. `bridge/context.py` → sender attribution string
 4. `agent/sdk_client.py` → fallback prompt name
-5. `config/SOUL.md` → persona definition (already the canonical source)
+5. `config/identity.json` → structured identity data (already the canonical source)

@@ -7,7 +7,7 @@ This guide sets up Valor AI with Telegram integration using the Claude Agent SDK
 ```
 Telegram App → Python Bridge (Telethon) → Claude Agent SDK → Claude API
      ↑                   ↓                        ↓
-     └───────────────────┘                 config/SOUL.md
+     └───────────────────┘                 config/identity.json + segments
            Response
 ```
 

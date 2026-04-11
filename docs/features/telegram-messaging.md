@@ -115,4 +115,4 @@ See [PM Telegram Tool](pm-telegram-tool.md) for details on the PM send path.
 
 - [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
 - [PM Telegram Tool](pm-telegram-tool.md) — PM session self-messaging with file attachments and multi-file albums
-- `config/SOUL.md` — agent persona references to this tool
+- `config/personas/segments/tools.md` -- agent persona references to this tool

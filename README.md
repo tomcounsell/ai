@@ -83,7 +83,7 @@ ai/
 │   ├── skills/          # SDLC and utility skills
 │   ├── commands/        # Slash commands
 │   └── agents/          # Subagent definitions
-├── config/              # SOUL.md persona, projects.json
+├── config/              # identity.json, persona segments, projects.json
 ├── scripts/             # Service management, setup, deployment
 ├── docs/features/       # Feature-level documentation
 └── tests/               # Unit, integration, e2e
@@ -103,5 +103,6 @@ python -m ruff format .        # Format
 |----------|---------|
 | [CLAUDE.md](CLAUDE.md) | Development principles and working guide |
 | [docs/features/README.md](docs/features/README.md) | Feature index — how things work |
-| [config/SOUL.md](config/SOUL.md) | Valor persona and philosophy |
+| [config/identity.json](config/identity.json) | Structured identity data |
+| [config/personas/segments/](config/personas/segments/) | Composable persona segments |
 | [tests/README.md](tests/README.md) | Test suite index and contribution guide |

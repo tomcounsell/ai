@@ -2,7 +2,7 @@
 
 Covers:
 - WORKER_RULES constant exists and contains safety rails (no pipeline orchestration)
-- load_system_prompt() injects WORKER_RULES before SOUL.md and completion criteria
+- load_system_prompt() injects WORKER_RULES before persona segments and completion criteria
 - _check_no_direct_main_push(): code on main -> hard-blocked
 - _check_no_direct_main_push(): docs-only on main -> allowed
 - _check_no_direct_main_push(): code on feature branch -> allowed
@@ -89,23 +89,23 @@ class TestLoadSystemPromptInjection:
     def test_no_pipeline_orchestration_in_worker_rules(self):
         """WORKER_RULES portion of prompt must NOT contain pipeline orchestration.
 
-        Note: SOUL.md and CLAUDE.md may reference /sdlc as part of project
+        Note: Persona segments and CLAUDE.md may reference /sdlc as part of project
         architecture docs -- those are intentionally preserved (see plan No-Gos).
         This test validates only the WORKER_RULES constant itself.
         """
         assert "/sdlc" not in WORKER_RULES
         assert "MANDATORY Development Pipeline" not in WORKER_RULES
 
-    def test_worker_rules_before_soul_and_criteria(self):
-        """WORKER_RULES must appear before SOUL.md and before completion criteria."""
+    def test_worker_rules_before_persona_and_criteria(self):
+        """WORKER_RULES must appear before persona segments and before completion criteria."""
         prompt = load_system_prompt()
         rules_pos = prompt.find("Worker Safety Rails")
         assert rules_pos >= 0, "WORKER_RULES not found in prompt"
 
-        # SOUL.md starts with '# Valor' — check rules precede it
-        soul_pos = prompt.find("# Valor")
-        assert soul_pos >= 0, "SOUL.md content '# Valor' not found in prompt"
-        assert rules_pos < soul_pos, "WORKER_RULES must come before SOUL.md content"
+        # Persona segments start with '# Valor' — check rules precede it
+        persona_pos = prompt.find("# Valor")
+        assert persona_pos >= 0, "Persona content '# Valor' not found in prompt"
+        assert rules_pos < persona_pos, "WORKER_RULES must come before persona segments"
 
         # Completion criteria section starts with 'Work is DONE'
         criteria_pos = prompt.find("Work is DONE")
@@ -114,15 +114,17 @@ class TestLoadSystemPromptInjection:
                 "WORKER_RULES must appear before Work Completion Criteria"
             )
 
-    def test_prompt_contains_separator_between_rules_and_soul(self):
-        """load_system_prompt() must use --- separator between WORKER_RULES and SOUL sections."""
+    def test_prompt_contains_separator_between_rules_and_persona(self):
+        """load_system_prompt() must use --- separator between WORKER_RULES and persona sections."""
         prompt = load_system_prompt()
         rules_pos = prompt.find("Worker Safety Rails")
         assert rules_pos >= 0, "WORKER_RULES not found in prompt"
-        soul_pos = prompt.find("# Valor")
-        assert soul_pos > rules_pos, "SOUL.md must come after WORKER_RULES"
-        between = prompt[rules_pos:soul_pos]
-        assert "---" in between, "Separator '---' must appear between WORKER_RULES and SOUL.md"
+        persona_pos = prompt.find("# Valor")
+        assert persona_pos > rules_pos, "Persona segments must come after WORKER_RULES"
+        between = prompt[rules_pos:persona_pos]
+        assert "---" in between, (
+            "Separator '---' must appear between WORKER_RULES and persona segments"
+        )
 
     def test_safety_rails_in_prompt(self):
         """load_system_prompt() must contain NEVER and main (safety rails)."""

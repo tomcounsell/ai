@@ -23,7 +23,7 @@ The stop-hook review gate gives the agent final say over message delivery. When 
 
 ### Layer 3: Config Cleanup
 
-**Config cleanup** (`config/personas/_base.md`, `config/SOUL.md`): Removed `valor-telegram send` examples from inline code blocks. Added "TOOL USAGE ONLY" warnings making clear the syntax is for programmatic use only. This addresses the root cause of CLI syntax leaking into responses.
+**Config cleanup** (`config/personas/segments/identity.md`, `config/personas/segments/tools.md`): Removed `valor-telegram send` examples from inline code blocks. Added "TOOL USAGE ONLY" warnings making clear the syntax is for programmatic use only. This addresses the root cause of CLI syntax leaking into responses.
 
 ### Social Token Classification (`bridge/routing.py`)
 

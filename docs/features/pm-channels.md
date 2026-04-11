@@ -20,14 +20,14 @@ If the mode field is missing, the project defaults to `"dev"`. Unknown mode valu
 2. `find_project_for_chat()` matches group to project config
 3. `classify_work_request()` determines `sdlc` vs `question` routing
 4. SDLC requests go to ai/ repo orchestrator; questions go to project working directory
-5. Agent spawns with WORKER_RULES + SOUL.md system prompt
+5. Agent spawns with WORKER_RULES + persona segments system prompt
 
 **PM mode (new behavior):**
 1. Message arrives in Telegram group (e.g., "PM: Cuttlefish")
 2. `find_project_for_chat()` matches group to PM project config
 3. `classify_work_request()` is **skipped** -- classification forced to `"question"`
 4. Agent spawns with `cwd` set to the work-vault directory (e.g., `~/work-vault/Cuttlefish/`)
-5. System prompt uses SOUL.md (persona) + work-vault `CLAUDE.md` (PM instructions), no WORKER_RULES
+5. System prompt uses persona segments + work-vault `CLAUDE.md` (PM instructions), no WORKER_RULES
 
 ### System Prompt Composition
 
@@ -35,7 +35,7 @@ PM mode uses `load_pm_system_prompt()` which:
 - Loads the project-manager persona (base + PM overlay via `load_persona_prompt("project-manager")`)
 - Appends the project-specific `CLAUDE.md` from the work-vault directory if it exists
 - Does NOT include WORKER_RULES (no branch safety rails needed for PM work)
-- Falls back to `config/SOUL.md` only if the persona system is not available
+- Raises `FileNotFoundError` if persona segments are missing (no silent fallback)
 
 ### What PM Mode Skips
 
@@ -98,4 +98,4 @@ Template structure:
 1. **Persona preserved in PM mode**: The base persona (Valor's identity/style) is valuable even when operating as a PM. PM mode uses the `project-manager` overlay instead of `developer`, and WORKER_RULES are stripped.
 2. **Classification bypass, not a new classification**: PM mode forces `"question"` rather than adding a third classification type, keeping the routing logic simple.
 3. **No new tools**: PM behavior is driven entirely by routing and instructions, not new MCP tools or servers.
-4. **Work-vault CLAUDE.md is optional**: If a project folder lacks CLAUDE.md, the agent still works with just the SOUL.md persona.
+4. **Work-vault CLAUDE.md is optional**: If a project folder lacks CLAUDE.md, the agent still works with just the persona segments.

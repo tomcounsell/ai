@@ -24,7 +24,7 @@ Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
 - **Python Bridge** (`bridge/telegram_bridge.py`): Handles Telegram user account via Telethon
 - **Claude Agent SDK** (`agent/sdk_client.py`): AI orchestration, calls Claude API
 - **MCP Servers** (`.mcp.json`): Modular capabilities (Sentry, Notion, etc.); GitHub via `gh` CLI
-- **SOUL.md** (`config/SOUL.md`): Valor's persona and philosophy
+- **Identity Config** (`config/identity.json`): Structured identity data + persona segments
 
 ## Directory Layout
 
@@ -33,7 +33,8 @@ ai/                          # This repo
 ├── .claude/skills/          # Claude Code skills (/prime, /pthread, /sdlc)
 ├── agent/                   # Claude Agent SDK integration
 ├── bridge/                  # Telegram bridge
-├── config/SOUL.md           # Persona definition
+├── config/identity.json      # Structured identity data
+├── config/personas/segments/ # Composable prompt segments
 ├── scripts/valor-service.sh # Service management
 ├── docs/                    # Documentation
 └── CLAUDE.md                # Development guide (READ THIS)
@@ -43,7 +44,7 @@ ai/                          # This repo
 
 **In order:**
 1. `CLAUDE.md` - Development principles, commands, architecture
-2. `config/SOUL.md` - Valor's persona and philosophy
+2. `config/personas/segments/` - Valor's identity, work patterns, and tools
 
 ## How to Add Features
 

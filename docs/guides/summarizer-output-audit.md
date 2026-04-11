@@ -25,7 +25,7 @@ From `SUMMARIZER_SYSTEM_PROMPT`:
 6. General: lead with outcome not process, direct, no preamble, no filler
 7. ⚠️ only for genuinely external blockers
 
-From `config/SOUL.md`:
+From `config/personas/segments/identity.md`:
 - Direct, concise, professional
 - State what I did, what I need, or what I found. No preamble.
 - Short messages. Longer explanations only when requested.
@@ -36,7 +36,7 @@ From `config/SOUL.md`:
 
 ### Category 1: VERBOSE PROCESS DUMPS (Primary Issue)
 
-These messages expose intermediate steps, tool invocations, and reasoning — exactly what SOUL.md says to never do.
+These messages expose intermediate steps, tool invocations, and reasoning — exactly what the persona identity segment says to never do.
 
 **Example 1** (10:44, PR 180 review):
 ```

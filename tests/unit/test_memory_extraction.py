@@ -863,14 +863,14 @@ class TestPersonaPromptContainsIntentionalMemory:
     def test_persona_has_intentional_memory_section(self):
         import pathlib
 
-        persona_path = pathlib.Path("config/personas/_base.md")
+        persona_path = pathlib.Path("config/personas/segments/work-patterns.md")
         content = persona_path.read_text()
         assert "## Intentional Memory" in content
 
     def test_persona_has_save_examples(self):
         import pathlib
 
-        persona_path = pathlib.Path("config/personas/_base.md")
+        persona_path = pathlib.Path("config/personas/segments/work-patterns.md")
         content = persona_path.read_text()
         assert "memory_search save" in content
         assert "importance 8.0" in content or "--importance 8.0" in content
@@ -878,7 +878,7 @@ class TestPersonaPromptContainsIntentionalMemory:
     def test_persona_has_trigger_categories(self):
         import pathlib
 
-        persona_path = pathlib.Path("config/personas/_base.md")
+        persona_path = pathlib.Path("config/personas/segments/work-patterns.md")
         content = persona_path.read_text()
         assert "User corrections" in content or "user corrections" in content.lower()
         assert "remember this" in content.lower()
@@ -887,14 +887,14 @@ class TestPersonaPromptContainsIntentionalMemory:
     def test_persona_has_when_not_to_save(self):
         import pathlib
 
-        persona_path = pathlib.Path("config/personas/_base.md")
+        persona_path = pathlib.Path("config/personas/segments/work-patterns.md")
         content = persona_path.read_text()
         assert "When NOT to Save" in content
 
     def test_persona_has_when_to_search(self):
         import pathlib
 
-        persona_path = pathlib.Path("config/personas/_base.md")
+        persona_path = pathlib.Path("config/personas/segments/work-patterns.md")
         content = persona_path.read_text()
         assert "When to Search" in content
         assert "--category correction" in content

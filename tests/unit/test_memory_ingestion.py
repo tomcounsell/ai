@@ -54,20 +54,20 @@ class TestMemoryIngestion:
 
 
 class TestSystemPromptPriming:
-    """Test that thought priming appears in _base.md."""
+    """Test that thought priming appears in work-patterns.md segment."""
 
-    def test_base_md_contains_thought_priming(self):
+    def test_work_patterns_contains_thought_priming(self):
         from pathlib import Path
 
-        base_md = Path("config/personas/_base.md")
-        if not base_md.exists():
+        segment = Path("config/personas/segments/work-patterns.md")
+        if not segment.exists():
             # Try worktree path
             import os
 
             cwd = os.getcwd()
-            base_md = Path(cwd) / "config" / "personas" / "_base.md"
+            segment = Path(cwd) / "config" / "personas" / "segments" / "work-patterns.md"
 
-        content = base_md.read_text()
+        content = segment.read_text()
         assert "## Subconscious Memory" in content
         assert "<thought>" in content
         assert "background context" in content
@@ -76,15 +76,21 @@ class TestSystemPromptPriming:
         """Priming should be clearly delimited, near end of file."""
         from pathlib import Path
 
-        base_md = Path("config/personas/_base.md")
-        if not base_md.exists():
+        segment = Path("config/personas/segments/work-patterns.md")
+        if not segment.exists():
             import os
 
             cwd = os.getcwd()
-            base_md = Path(cwd) / "config" / "personas" / "_base.md"
+            segment = Path(cwd) / "config" / "personas" / "segments" / "work-patterns.md"
 
-        content = base_md.read_text()
-        # Memory sections should be at the end of the file
-        last_section = content[-3500:]
-        assert "Subconscious Memory" in last_section
-        assert "Intentional Memory" in last_section
+        content = segment.read_text()
+        # Memory sections should not be at the very beginning of the file
+        # (they belong with behavioral patterns, not identity)
+        pos = content.find("Subconscious Memory")
+        assert pos > 0, "Subconscious Memory section not found"
+        assert pos > len(content) * 0.3, (
+            f"Subconscious Memory at {pos}/{len(content)} ({pos / len(content) * 100:.0f}%) "
+            "-- should be in the latter portion of work-patterns.md"
+        )
+        int_pos = content.find("Intentional Memory")
+        assert int_pos > 0, "Intentional Memory section not found"

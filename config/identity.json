@@ -1,0 +1,8 @@
+{
+  "_doc": "Structured identity data for Valor. Per-instance overrides: create ~/Desktop/Valor/identity.json with any fields to override (shallow merge, private wins). This file ships with the repo as shared defaults.",
+  "name": "Valor Engels",
+  "email": "valor@yuda.me",
+  "timezone": "UTC+7 (Asia/Bangkok)",
+  "google_workspace": "valor@yuda.me",
+  "organization": "yudame"
+}

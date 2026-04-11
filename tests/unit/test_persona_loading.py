@@ -1,16 +1,17 @@
 """Tests for the persona loading system.
 
 Tests:
-- load_persona_prompt() loads base from config/personas/ + overlay from ~/Desktop/Valor/personas/
+- load_identity() loads from config/identity.json with private override merge
+- load_persona_prompt() assembles segments + overlay
 - Fallback to in-repo overlay when Desktop/Valor overlay is missing
-- Fallback to SOUL.md when both overlay locations are missing
-- Missing _base.md raises FileNotFoundError
+- Missing segments raise FileNotFoundError (no SOUL.md fallback)
 - _resolve_persona() correctly maps project config to persona names
 - load_system_prompt() uses developer persona with WORKER_RULES
 - load_pm_system_prompt() uses project-manager persona
 - _resolve_overlay_path() checks Desktop/Valor first, then config/personas/
 """
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -18,11 +19,13 @@ from unittest.mock import patch
 import pytest
 
 from agent.sdk_client import (
+    IDENTITY_CONFIG_PATH,
     PERSONAS_BASE_DIR,
     PERSONAS_OVERLAY_DIR,
-    SOUL_PATH,
+    PERSONAS_SEGMENTS_DIR,
     _resolve_overlay_path,
     _resolve_persona,
+    load_identity,
     load_persona_prompt,
     load_pm_system_prompt,
     load_system_prompt,
@@ -35,11 +38,9 @@ class TestResolveOverlayPath:
     def test_prefers_desktop_valor_when_exists(self):
         """Should return ~/Desktop/Valor/personas/ path when it exists."""
         path = _resolve_overlay_path("developer")
-        # On this machine, overlays are in ~/Desktop/Valor/personas/
         if PERSONAS_OVERLAY_DIR.exists():
             assert path.parent == PERSONAS_OVERLAY_DIR
         else:
-            # Fallback to in-repo
             assert path.parent == PERSONAS_BASE_DIR
 
     def test_falls_back_to_repo_when_desktop_missing(self):
@@ -55,16 +56,84 @@ class TestResolveOverlayPath:
         assert path.name == "project-manager.md"
 
 
+class TestLoadIdentity:
+    """Tests for load_identity()."""
+
+    def test_loads_identity_from_config(self):
+        """Should load identity fields from config/identity.json."""
+        identity = load_identity()
+        assert "name" in identity
+        assert "email" in identity
+        assert "timezone" in identity
+        assert "organization" in identity
+        assert identity["name"] == "Valor Engels"
+
+    def test_doc_field_excluded(self):
+        """The _doc field should be stripped from identity data."""
+        identity = load_identity()
+        assert "_doc" not in identity
+
+    def test_missing_config_raises_error(self):
+        """Missing identity.json should raise FileNotFoundError."""
+        with patch(
+            "agent.sdk_client.IDENTITY_CONFIG_PATH",
+            Path("/nonexistent/identity.json"),
+        ):
+            with pytest.raises(FileNotFoundError, match="Identity config not found"):
+                load_identity()
+
+    def test_private_override_merge(self, tmp_path):
+        """Private identity override should merge with repo defaults."""
+        private_path = tmp_path / "identity.json"
+        private_path.write_text(
+            json.dumps({"name": "Override Name", "custom_field": "custom"})
+        )
+        with patch("agent.sdk_client.PRIVATE_IDENTITY_PATH", private_path):
+            identity = load_identity()
+            assert identity["name"] == "Override Name"
+            assert identity["custom_field"] == "custom"
+            assert "email" in identity
+
+    def test_missing_private_override_works(self):
+        """Missing private override file should not cause errors."""
+        with patch(
+            "agent.sdk_client.PRIVATE_IDENTITY_PATH",
+            Path("/nonexistent/private.json"),
+        ):
+            identity = load_identity()
+            assert identity["name"] == "Valor Engels"
+
+    def test_malformed_private_override_warns(self, tmp_path):
+        """Malformed private override should log warning and use defaults."""
+        private_path = tmp_path / "identity.json"
+        private_path.write_text("not valid json {{{")
+        with patch("agent.sdk_client.PRIVATE_IDENTITY_PATH", private_path):
+            identity = load_identity()
+            assert identity["name"] == "Valor Engels"
+
+    def test_malformed_config_raises_error(self, tmp_path):
+        """Malformed identity config should raise ValueError."""
+        bad_config = tmp_path / "identity.json"
+        bad_config.write_text("not valid json {{{")
+        with patch("agent.sdk_client.IDENTITY_CONFIG_PATH", bad_config):
+            with pytest.raises(ValueError, match="Malformed identity config"):
+                load_identity()
+
+    def test_empty_config_returns_empty(self, tmp_path):
+        """Empty JSON config should return empty dict."""
+        empty_config = tmp_path / "identity.json"
+        empty_config.write_text("{}")
+        with patch("agent.sdk_client.IDENTITY_CONFIG_PATH", empty_config):
+            identity = load_identity()
+            assert identity == {}
+
+
 class TestLoadPersonaPrompt:
     """Tests for load_persona_prompt()."""
 
     @pytest.fixture(autouse=True)
     def _mock_overlay_dir(self, tmp_path, monkeypatch):
-        """Create mock overlay files so tests work on any machine.
-
-        Overlay files are private (iCloud-synced to ~/Desktop/Valor/personas/)
-        and may not exist on dev machines. This fixture creates them in a temp dir.
-        """
+        """Create mock overlay files so tests work on any machine."""
         import agent.sdk_client as sdk_mod
 
         overlay_dir = tmp_path / "personas"
@@ -90,72 +159,95 @@ class TestLoadPersonaPrompt:
         monkeypatch.setattr(sdk_mod, "PERSONAS_OVERLAY_DIR", overlay_dir)
 
     def test_developer_persona_loads(self):
-        """Developer persona should include base + developer overlay."""
+        """Developer persona should include segments + developer overlay."""
         prompt = load_persona_prompt("developer")
-        assert "Valor" in prompt  # From base
-        assert "Full System Access" in prompt  # From developer overlay
+        assert "Valor" in prompt
+        assert "Full System Access" in prompt
 
     def test_project_manager_persona_loads(self):
-        """Project-manager persona should include base + PM overlay."""
+        """Project-manager persona should include segments + PM overlay."""
         prompt = load_persona_prompt("project-manager")
-        assert "Valor" in prompt  # From base
-        assert "Triage" in prompt  # From PM overlay
+        assert "Valor" in prompt
+        assert "Triage" in prompt
 
     def test_teammate_persona_loads(self):
-        """Teammate persona should include base + teammate overlay."""
+        """Teammate persona should include segments + teammate overlay."""
         prompt = load_persona_prompt("teammate")
-        assert "Valor" in prompt  # From base
-        assert "casual" in prompt.lower()  # From teammate overlay
+        assert "Valor" in prompt
+        assert "casual" in prompt.lower()
 
-    def test_separator_between_base_and_overlay(self):
-        """Base and overlay should be separated by ---."""
+    def test_separator_between_segments_and_overlay(self):
+        """Segments and overlay should be separated by ---."""
         prompt = load_persona_prompt("developer")
         assert "\n\n---\n\n" in prompt
 
-    def test_nonexistent_persona_falls_back(self):
+    def test_nonexistent_persona_falls_back_to_developer(self):
         """Unknown persona name should fall back to developer overlay."""
         prompt = load_persona_prompt("nonexistent")
-        # Should fall back to developer (which includes Full System Access)
         assert "Full System Access" in prompt
 
-    def test_missing_base_raises_error(self):
-        """Missing _base.md should raise FileNotFoundError."""
-        with patch("agent.sdk_client.PERSONAS_BASE_DIR", Path(tempfile.mkdtemp())):
-            with pytest.raises(FileNotFoundError, match="base file not found"):
-                load_persona_prompt("developer")
-
-    def test_missing_overlay_falls_back_to_soul(self):
-        """Missing overlay file should fall back to SOUL.md."""
+    def test_missing_overlay_raises_error(self):
+        """Missing overlay file for known persona should raise FileNotFoundError."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            base_path = Path(tmpdir) / "_base.md"
-            base_path.write_text("# Base persona content")
-
             with (
-                patch("agent.sdk_client.PERSONAS_BASE_DIR", Path(tmpdir)),
                 patch(
                     "agent.sdk_client.PERSONAS_OVERLAY_DIR",
                     Path("/nonexistent/overlay"),
                 ),
+                patch("agent.sdk_client.PERSONAS_BASE_DIR", Path(tmpdir)),
             ):
-                # "developer" overlay doesn't exist anywhere
-                prompt = load_persona_prompt("developer")
-                # Should fall back to SOUL.md
-                assert "Valor" in prompt  # SOUL.md contains Valor
+                with pytest.raises(FileNotFoundError, match="Persona overlay"):
+                    load_persona_prompt("developer")
 
-    def test_base_file_exists_in_repo(self):
-        """The _base.md file should exist in the repo."""
-        base_path = PERSONAS_BASE_DIR / "_base.md"
-        assert base_path.exists(), f"_base.md not found at {base_path}"
-        content = base_path.read_text()
-        assert len(content) > 100, f"_base.md is too short ({len(content)} chars)"
+    def test_segment_files_exist_in_repo(self):
+        """All segment files should exist in config/personas/segments/."""
+        for name in ["identity.md", "work-patterns.md", "tools.md"]:
+            seg_path = PERSONAS_SEGMENTS_DIR / name
+            assert seg_path.exists(), f"Segment {name} not found at {seg_path}"
+            content = seg_path.read_text()
+            assert len(content) > 100, f"{name} is too short ({len(content)} chars)"
+
+    def test_manifest_exists_and_valid(self):
+        """manifest.json should exist and contain all 3 segments."""
+        manifest_path = PERSONAS_SEGMENTS_DIR / "manifest.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text())
+        assert "segments" in manifest
+        assert manifest["segments"] == [
+            "identity.md",
+            "work-patterns.md",
+            "tools.md",
+        ]
+
+    def test_identity_fields_injected(self):
+        """Identity fields should be injected into segment content."""
+        prompt = load_persona_prompt("developer")
+        assert "{{identity." not in prompt
+        assert "Valor Engels" in prompt
+        assert "valor@yuda.me" in prompt
 
     def test_overlay_files_exist(self):
-        """All persona overlay files should exist in ~/Desktop/Valor/personas/."""
+        """All persona overlay files should exist."""
         for name in ["developer.md", "project-manager.md", "teammate.md"]:
             path = _resolve_overlay_path(name.replace(".md", ""))
             assert path.exists(), f"{name} not found at {path}"
             content = path.read_text()
-            assert len(content) > 100, f"{name} is too short ({len(content)} chars)"
+            assert len(content) > 100, f"{name} is too short"
+
+    def test_identity_config_exists(self):
+        """config/identity.json should exist and be valid JSON."""
+        assert IDENTITY_CONFIG_PATH.exists()
+        data = json.loads(IDENTITY_CONFIG_PATH.read_text())
+        assert "name" in data
+        assert "email" in data
+
+    def test_segments_assembled_in_order(self):
+        """Segments should be assembled in manifest order."""
+        prompt = load_persona_prompt("developer")
+        identity_pos = prompt.find("Who I Am")
+        work_pos = prompt.find("How I Work")
+        tools_pos = prompt.find("MCP Servers")
+        assert identity_pos < work_pos < tools_pos
 
 
 class TestResolvePersona:
@@ -182,7 +274,13 @@ class TestResolvePersona:
 
     def test_dev_group_with_persona(self):
         """Dev group with persona config should use that persona."""
-        project = {"telegram": {"groups": {"Dev: Valor": {"chat_id": 123, "persona": "developer"}}}}
+        project = {
+            "telegram": {
+                "groups": {
+                    "Dev: Valor": {"chat_id": 123, "persona": "developer"}
+                }
+            }
+        }
         assert _resolve_persona(project, "Dev: Valor", is_dm=False) == "developer"
 
     def test_group_no_project(self):
@@ -192,7 +290,9 @@ class TestResolvePersona:
     def test_group_no_persona_in_config(self):
         """Group without persona in config should default to developer."""
         project = {"telegram": {"groups": {"Dev: Test": {"chat_id": 123}}}}
-        assert _resolve_persona(project, "Dev: Test", is_dm=False) == "developer"
+        assert (
+            _resolve_persona(project, "Dev: Test", is_dm=False) == "developer"
+        )
 
     def test_dm_default_without_config(self):
         """DM with project but no dm_persona should default to teammate."""
@@ -209,7 +309,7 @@ class TestLoadSystemPromptIntegration:
         assert "Worker Safety Rails" in prompt
 
     def test_load_system_prompt_includes_persona_content(self):
-        """load_system_prompt should include developer persona content."""
+        """load_system_prompt should include persona content from segments."""
         prompt = load_system_prompt()
         assert "Valor" in prompt
 
@@ -217,9 +317,14 @@ class TestLoadSystemPromptIntegration:
         """load_pm_system_prompt should use project-manager persona."""
         prompt = load_pm_system_prompt("/tmp/nonexistent")
         assert "Valor" in prompt
-        # Should NOT include WORKER_RULES
         assert "Worker Safety Rails" not in prompt
 
-    def test_soul_md_still_exists(self):
-        """SOUL.md should still exist as fallback."""
-        assert SOUL_PATH.exists()
+    def test_no_soul_md_fallback(self):
+        """SOUL.md should not exist -- no fallback available."""
+        soul_path = PERSONAS_BASE_DIR.parent / "SOUL.md"
+        assert not soul_path.exists(), "SOUL.md should have been deleted"
+
+    def test_no_base_md_exists(self):
+        """_base.md should not exist -- replaced by segments."""
+        base_path = PERSONAS_BASE_DIR / "_base.md"
+        assert not base_path.exists(), "_base.md should have been deleted"

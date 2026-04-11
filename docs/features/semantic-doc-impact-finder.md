@@ -93,7 +93,7 @@ The finder indexes these patterns (defined in `DOC_PATTERNS`):
 - `CLAUDE.md` -- Primary project guidance
 - `.claude/skills/*/SKILL.md` -- Workflow skill definitions
 - `.claude/commands/*.md` -- Slash command docs
-- `config/SOUL.md` -- Agent identity
+- `config/personas/segments/identity.md` -- Agent identity
 
 ## Storage
 
