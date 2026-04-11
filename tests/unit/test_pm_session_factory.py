@@ -158,5 +158,6 @@ class TestPMPersonaFanoutInstruction:
         sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
         source = sdk_path.read_text()
         assert "--role pm" in source, (
-            "sdk_client.py fan-out instruction must include '--role pm' to create child PM sessions."
+            "sdk_client.py fan-out instruction must include '--role pm' "
+            "to create child PM sessions."
         )

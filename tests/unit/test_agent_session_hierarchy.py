@@ -9,10 +9,21 @@ Tests cover:
 - agent_session_scheduler --parent-session flag and children subcommand
 """
 
+import argparse
+import sys
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+_repo_root = Path(__file__).parent.parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from tools.valor_session import cmd_wait_for_children  # noqa: E402
+
+TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "cancelled"})
 
 # ===================================================================
 # AgentSession hierarchy helpers (unit, no Redis)
@@ -442,20 +453,6 @@ class TestValorAgentSessionIdInjection:
 # ===================================================================
 # cmd_wait_for_children tests (tools/valor_session.py)
 # ===================================================================
-
-
-import argparse
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
-
-_repo_root = Path(__file__).parent.parent.parent
-if str(_repo_root) not in sys.path:
-    sys.path.insert(0, str(_repo_root))
-
-from tools.valor_session import cmd_wait_for_children  # noqa: E402
-
-TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "cancelled"})
 
 
 def _wfc_args(session_id=None):

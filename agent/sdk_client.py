@@ -1961,7 +1961,8 @@ async def get_agent_response_sdk(
                 '    --parent "$AGENT_SESSION_ID" \\\\\n'
                 '    --message "Run SDLC on issue N"\n'
                 "After spawning ALL children, run:\n"
-                '  python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"\n'
+                "  python -m tools.valor_session wait-for-children"
+                ' --session-id "$AGENT_SESSION_ID"\n'
                 "to pause this session. Do NOT process multiple issues in a single session. "
                 "Spawn child sessions sequentially (one create call at a time) then call "
                 "wait-for-children once. Send a Telegram update before pausing so Valor "
