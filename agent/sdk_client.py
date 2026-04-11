@@ -339,11 +339,17 @@ def get_all_active_sessions() -> dict[str, "ClaudeSDKClient"]:
 # Root of the ai/ repository (used as cwd for SDLC-routed requests)
 AI_REPO_ROOT = str(Path(__file__).parent.parent)
 
-# Path to SOUL.md system prompt (legacy fallback)
-SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
-
-# Path to persona base file (stays in repo — not private)
+# Path to persona base directory (stays in repo — not private)
 PERSONAS_BASE_DIR = Path(__file__).parent.parent / "config" / "personas"
+
+# Path to persona segments directory
+PERSONAS_SEGMENTS_DIR = PERSONAS_BASE_DIR / "segments"
+
+# Path to identity config
+IDENTITY_CONFIG_PATH = Path(__file__).parent.parent / "config" / "identity.json"
+
+# Path to private identity override (iCloud-synced)
+PRIVATE_IDENTITY_PATH = Path.home() / "Desktop" / "Valor" / "identity.json"
 
 # Path to persona overlay files (private, iCloud-synced)
 # Overlays live in ~/Desktop/Valor/personas/ — falls back to config/personas/ for dev
@@ -495,6 +501,99 @@ def load_principal_context(condensed: bool = True) -> str:
     return "\n\n".join(extracted)
 
 
+def load_identity() -> dict:
+    """Load structured identity data from config/identity.json.
+
+    Merges with ~/Desktop/Valor/identity.json if present (shallow merge,
+    private values override repo values for matching keys).
+
+    Returns:
+        Dict with identity fields (name, email, timezone, etc.).
+
+    Raises:
+        FileNotFoundError: If config/identity.json does not exist.
+    """
+    if not IDENTITY_CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Identity config not found at {IDENTITY_CONFIG_PATH}. "
+            "The identity.json file is required for the persona system."
+        )
+
+    try:
+        identity = json.loads(IDENTITY_CONFIG_PATH.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Malformed identity config at {IDENTITY_CONFIG_PATH}: {e}") from e
+
+    # Remove doc field from identity data
+    identity.pop("_doc", None)
+
+    # Merge private overrides if available
+    if PRIVATE_IDENTITY_PATH.exists():
+        try:
+            private = json.loads(PRIVATE_IDENTITY_PATH.read_text())
+            private.pop("_doc", None)
+            identity.update(private)  # Shallow merge, private wins
+            logger.info(f"Merged private identity overrides from {PRIVATE_IDENTITY_PATH}")
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Malformed private identity override at {PRIVATE_IDENTITY_PATH}: {e}. "
+                "Using repo defaults only."
+            )
+
+    return identity
+
+
+def _assemble_segments(identity: dict) -> str:
+    """Assemble prompt segments from manifest with identity field injection.
+
+    Reads config/personas/segments/manifest.json for segment order,
+    loads each segment file, and injects identity fields via {{identity.*}}
+    marker substitution.
+
+    Args:
+        identity: Dict of identity fields from load_identity().
+
+    Returns:
+        Combined segment content with identity fields injected.
+
+    Raises:
+        FileNotFoundError: If manifest.json or any segment file is missing.
+    """
+    manifest_path = PERSONAS_SEGMENTS_DIR / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Segment manifest not found at {manifest_path}. "
+            "The manifest.json file is required for segment assembly."
+        )
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Malformed segment manifest at {manifest_path}: {e}") from e
+
+    segment_names = manifest.get("segments", [])
+    if not segment_names:
+        raise ValueError(f"Segment manifest at {manifest_path} has no segments listed.")
+
+    segments = []
+    for seg_name in segment_names:
+        seg_path = PERSONAS_SEGMENTS_DIR / seg_name
+        if not seg_path.exists():
+            raise FileNotFoundError(
+                f"Segment file not found at {seg_path}. "
+                f"Listed in manifest but missing from {PERSONAS_SEGMENTS_DIR}."
+            )
+        content = seg_path.read_text()
+
+        # Inject identity fields via {{identity.*}} marker substitution
+        for key, value in identity.items():
+            content = content.replace(f"{{{{identity.{key}}}}}", str(value))
+
+        segments.append(content)
+
+    return "\n\n---\n\n".join(segments)
+
+
 def _resolve_overlay_path(persona: str) -> Path:
     """Resolve persona overlay file path.
 
@@ -510,37 +609,30 @@ def _resolve_overlay_path(persona: str) -> Path:
 
 
 def load_persona_prompt(persona: str = "developer") -> str:
-    """Load persona prompt from base + overlay files.
+    """Load persona prompt from composable segments + overlay.
 
-    Base is read from config/personas/_base.md (in-repo, shared).
-    Overlays are read from ~/Desktop/Valor/personas/{persona}.md (private, iCloud-synced).
-    Falls back to config/SOUL.md if persona files are missing.
+    Segments are assembled from config/personas/segments/ per manifest.json,
+    with identity fields injected from config/identity.json.
+    Overlays are read from ~/Desktop/Valor/personas/{persona}.md (private, iCloud-synced),
+    falling back to config/personas/{persona}.md (in-repo, for development).
 
     Args:
         persona: Persona name — one of "developer", "project-manager", "teammate".
             Defaults to "developer".
 
     Returns:
-        Combined persona prompt (base + overlay).
+        Combined persona prompt (assembled segments + overlay).
 
     Raises:
-        FileNotFoundError: If _base.md is missing (base is required).
+        FileNotFoundError: If identity config, segments, or overlay files are missing.
     """
-    base_path = PERSONAS_BASE_DIR / "_base.md"
-
-    # Base is required — fail loudly if missing
-    if not base_path.exists():
-        raise FileNotFoundError(
-            f"Persona base file not found at {base_path}. "
-            "The _base.md file is required for the persona system."
-        )
-
-    base_content = base_path.read_text()
+    # Load identity and assemble segments
+    identity = load_identity()
+    base_content = _assemble_segments(identity)
 
     # Resolve overlay: ~/Desktop/Valor/personas/ first, then config/personas/
     overlay_path = _resolve_overlay_path(persona)
 
-    # Overlay is optional — fall back to SOUL.md if missing
     if overlay_path.exists():
         overlay_content = overlay_path.read_text()
         if persona == "project-manager" and "CRITIQUE" not in overlay_content:
@@ -558,15 +650,11 @@ def load_persona_prompt(persona: str = "developer") -> str:
         if developer_path.exists():
             return f"{base_content}\n\n---\n\n{developer_path.read_text()}"
 
-    # Persona overlay missing — fall back to SOUL.md
-    logger.warning(
-        f"Persona overlay '{persona}' not found at {overlay_path}, falling back to SOUL.md"
+    # Persona overlay missing — fail loudly (no SOUL.md fallback)
+    raise FileNotFoundError(
+        f"Persona overlay '{persona}' not found at {overlay_path}. "
+        "All persona overlays must exist — no fallback available."
     )
-    if SOUL_PATH.exists():
-        return SOUL_PATH.read_text()
-
-    logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
-    return "You are Valor, an AI coworker. Be direct, concise, and helpful."
 
 
 def load_system_prompt() -> str:
@@ -587,15 +675,7 @@ def load_system_prompt() -> str:
     The PM session handles pipeline orchestration via nudge loop.
     The worker only receives safety rails — no pipeline stages or /sdlc references.
     """
-    try:
-        persona_prompt = load_persona_prompt("developer")
-    except FileNotFoundError:
-        # Fallback to legacy SOUL.md if persona system not set up
-        logger.warning("Persona system not available, falling back to SOUL.md")
-        if SOUL_PATH.exists():
-            persona_prompt = SOUL_PATH.read_text()
-        else:
-            persona_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+    persona_prompt = load_persona_prompt("developer")
 
     # Append completion criteria
     criteria = load_completion_criteria()
@@ -627,15 +707,7 @@ def load_pm_system_prompt(working_directory: str) -> str:
     Returns:
         Combined system prompt for PM mode.
     """
-    try:
-        persona_prompt = load_persona_prompt("project-manager")
-    except FileNotFoundError:
-        # Fallback to legacy SOUL.md if persona system not set up
-        logger.warning("Persona system not available for PM, falling back to SOUL.md")
-        if SOUL_PATH.exists():
-            persona_prompt = SOUL_PATH.read_text()
-        else:
-            persona_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+    persona_prompt = load_persona_prompt("project-manager")
 
     # Try to load project-specific CLAUDE.md from work-vault directory
     project_claude_path = Path(working_directory) / "CLAUDE.md"
@@ -844,7 +916,7 @@ class ValorAgent:
 
         Args:
             working_dir: Working directory for the agent. Defaults to ai/ repo root.
-            system_prompt: Custom system prompt. Defaults to SOUL.md contents.
+            system_prompt: Custom system prompt. Defaults to persona segments.
             permission_mode: Permission mode for tool use. Default: "bypassPermissions".
             task_list_id: Optional task list ID to scope sub-agent Task storage
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.

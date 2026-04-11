@@ -22,9 +22,9 @@ from hook_utils.constants import (
 
 # File-specific reminders: when these files are modified, print a reminder
 FILE_REMINDERS = {
-    "SOUL.md": (
-        "REMINDER: SOUL.md was modified. Review bridge/summarizer.py to ensure "
-        "SUMMARIZER_SYSTEM_PROMPT still matches Valor's voice (senior dev → PM style)."
+    "identity.md": (
+        "REMINDER: identity.md (persona segment) was modified. Review bridge/summarizer.py "
+        "to ensure SUMMARIZER_SYSTEM_PROMPT still matches Valor's voice (senior dev -> PM style)."
     ),
 }
 

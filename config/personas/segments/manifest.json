@@ -1,0 +1,8 @@
+{
+  "_doc": "Universal segment order. All personas render all segments -- no skipping. Segments are composable prompt building blocks assembled by load_persona_prompt().",
+  "segments": [
+    "identity.md",
+    "work-patterns.md",
+    "tools.md"
+  ]
+}
