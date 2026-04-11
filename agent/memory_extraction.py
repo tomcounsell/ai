@@ -679,6 +679,27 @@ async def run_post_session_extraction(
         if injected:
             await detect_outcomes_async(injected, response_text)
 
+        # Record skill outcomes for all skills invoked during this session
+        try:
+            from agent.hooks.pre_tool_use import _SESSION_SKILLS
+
+            skills_invoked = _SESSION_SKILLS.pop(session_id, [])
+            if skills_invoked:
+                from analytics.collector import record_metric
+
+                for skill_name in set(skills_invoked):  # dedupe
+                    record_metric(
+                        "skill.outcome",
+                        1,
+                        {
+                            "skill": skill_name,
+                            "outcome": "success",
+                            "session_id": session_id,
+                        },
+                    )
+        except Exception:
+            pass  # Analytics must never block session cleanup
+
     except Exception as e:
         logger.warning(f"[memory_extraction] Post-session extraction failed (non-fatal): {e}")
     finally:

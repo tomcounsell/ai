@@ -21,9 +21,14 @@ from typing import Any
 
 from claude_agent_sdk import HookContext, PreToolUseHookInput
 
+from analytics.collector import record_metric
 from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
+
+# Session-scoped skill invocation registry: maps session_id -> list of skill names.
+# Populated by _handle_skill_tool_start, consumed and cleaned up by post-session extraction.
+_SESSION_SKILLS: dict[str, list[str]] = {}
 
 # Known SDLC stages for extraction from dev-session prompts
 _SDLC_STAGE_NAMES = frozenset(
@@ -324,30 +329,42 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
 
 
 def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None) -> None:
-    """Handle Skill tool invocations by starting the corresponding pipeline stage.
+    """Handle Skill tool invocations by recording metrics and starting pipeline stages.
 
-    Called from pre_tool_use_hook when tool_name == "Skill". Looks up the skill
-    name in _SKILL_TO_STAGE and calls _start_pipeline_stage if a mapping exists.
-    Silently ignores unknown skills and missing session IDs.
+    Called from pre_tool_use_hook when tool_name == "Skill". Records analytics
+    for ALL skill invocations, then looks up the skill name in _SKILL_TO_STAGE
+    and calls _start_pipeline_stage if a mapping exists.
+    Silently ignores empty skills and missing session IDs.
     """
     skill_name = tool_input.get("skill", "")
     if not skill_name:
         logger.debug("[pre_tool_use] Skill tool called with empty skill name, skipping")
         return
 
-    stage = _SKILL_TO_STAGE.get(skill_name)
-    if not stage:
-        logger.debug(
-            f"[pre_tool_use] Skill '{skill_name}' not in _SKILL_TO_STAGE, skipping stage tracking"
-        )
-        return
-
+    # Resolve session ID first -- needed for both analytics and stage tracking
     from agent.hooks.session_registry import resolve
 
     session_id = resolve(claude_uuid)
     if not session_id:
         logger.debug(
-            f"[pre_tool_use] No session ID resolved for Skill '{skill_name}', skipping start_stage"
+            f"[pre_tool_use] No session ID resolved for Skill '{skill_name}', skipping tracking"
+        )
+        return
+
+    # Record metric for ALL skill invocations (not just those in _SKILL_TO_STAGE)
+    try:
+        record_metric("skill.invocation", 1, {"skill": skill_name, "session_id": session_id})
+    except Exception:
+        pass  # Analytics must never block tool execution
+
+    # Track in session-scoped registry
+    _SESSION_SKILLS.setdefault(session_id, []).append(skill_name)
+
+    # Start pipeline stage if this is a known SDLC skill
+    stage = _SKILL_TO_STAGE.get(skill_name)
+    if not stage:
+        logger.debug(
+            f"[pre_tool_use] Skill '{skill_name}' not in _SKILL_TO_STAGE, skipping stage tracking"
         )
         return
 
