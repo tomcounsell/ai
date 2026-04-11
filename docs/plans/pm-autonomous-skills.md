@@ -325,9 +325,16 @@ No update system changes required -- this feature adds new Python modules that a
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-11 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Outcome tracking in `run_post_session_extraction` lacks access to which skills were invoked -- no mechanism to map session to skill names | Task 1 | `_handle_skill_tool_start` should write skill name to a session-scoped registry (e.g., `_SESSION_SKILLS[session_id].append(skill_name)`); post-session extraction reads this registry to emit per-skill outcome metrics |
+| CONCERN | Skeptic | Resetting `expires_at` in frontmatter during pre_tool_use hook is a write side-effect in a read path -- file I/O in a synchronous hook risks latency | Task 2 | Decouple: pre_tool_use emits `record_metric("skill.invocation", ...)` only; a separate `skill_lifecycle refresh` CLI step (run by reflections or post-session) queries analytics for recent invocations and batch-updates `expires_at` in frontmatter |
+| CONCERN | Adversary | Race between `expire` removing a skill via PR and a concurrent session resetting `expires_at` -- skill could be deleted despite active use | Task 2 | `expire` subcommand must check last invocation timestamp from analytics (not just frontmatter `expires_at`) immediately before creating the removal PR; if invoked within last 48h, skip removal |
+| CONCERN | Simplifier | Friction detection from Memory is underspecified -- "query Memory for corrections and patterns" requires LLM classification to distinguish genuine tool-param friction from normal corrections | Task 2 | Scope initial implementation to exact-match heuristics: Memory records with `category=correction` AND `tags` containing tool-related keywords (e.g., `tool`, `params`, `flags`). Defer LLM-based classification to a follow-up iteration |
+| NIT | Archaeologist | Issue #853 specifies human approval gate for generated skills; plan removes it without explicit acknowledgment of the design decision change | N/A | |
+| NIT | User | All 14 success criteria are technical (metrics, CLI, tests). No user-facing validation that generated skills actually reduce friction or get used | N/A | |
+| NIT | Structural | `tests/unit/test_pre_tool_use.py` referenced in Test Impact and Success Criteria does not exist; the actual test file is `tests/unit/test_pm_session_permissions.py` | Task 4 | |
 
 ---
 
