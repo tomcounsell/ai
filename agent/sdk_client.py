@@ -1103,15 +1103,6 @@ class ValorAgent:
 
             reset_session_count(session_id)
 
-        # Issue #597: Pre-register bridge session ID in the hook-side registry
-        # so hooks (which run in this parent process) can resolve the correct
-        # session ID instead of relying on os.environ (which is subprocess-only).
-        claude_uuid_for_cleanup: str | None = None
-        if session_id:
-            from agent.hooks.session_registry import register_pending
-
-            register_pending(session_id)
-
         # Log resources before SDK initialization
         init_start = time.time()
         logger.info(f"[SDK-init] Starting SDK initialization for session {session_id}")
@@ -1158,8 +1149,6 @@ class ValorAgent:
                                 # so continuation sessions resume the correct transcript.
                                 if msg.session_id and session_id:
                                     _store_claude_session_uuid(session_id, msg.session_id)
-                                    # Issue #597: Track UUID for registry cleanup in finally
-                                    claude_uuid_for_cleanup = msg.session_id
                                 # Capture stop_reason for nudge loop routing decisions
                                 if msg.stop_reason and session_id:
                                     _session_stop_reasons[session_id] = msg.stop_reason
@@ -1323,12 +1312,7 @@ class ValorAgent:
                 # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
 
-            # Issue #597: Clean up session registry entry
-            if claude_uuid_for_cleanup:
-                from agent.hooks.session_registry import cleanup_stale, unregister
-
-                unregister(claude_uuid_for_cleanup)
-                cleanup_stale()  # Safety net for leaked entries
+            # (Phase 5: session_registry removed; no cleanup needed)
 
         return "\n".join(response_parts) if response_parts else ""
 

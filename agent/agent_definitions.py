@@ -118,23 +118,6 @@ def get_agent_definitions() -> dict[str, AgentDefinition]:
         model=None,  # Inherits model from parent
     )
 
-    # --- dev-session ---
-    # Full-permission developer session for code changes.
-    # Spawned by a PM-role AgentSession to do actual work.
-    # tools=None means all tools available — full write permissions.
-    #
-    # NOTE (Phase 4): The PM persona now creates dev sessions via
-    # `python -m tools.valor_session create --role dev` (Bash tool),
-    # NOT via Agent(subagent_type="dev-session"). The definition is kept
-    # here for backward compatibility until Phase 5 cleanup is gated on
-    # successful production runs with DEV_SESSION_HARNESS=claude-cli.
-    definitions["dev-session"] = AgentDefinition(
-        description="Full-permission developer session for code changes",
-        prompt=_load_dev_session_prompt(),
-        tools=None,  # All tools — full permissions
-        model=None,  # Inherit from parent
-    )
-
     return definitions
 
 
@@ -162,34 +145,15 @@ def get_definition(subagent_type: str) -> AgentDefinition | None:
     return None
 
 
-def _load_dev_session_prompt() -> str:
-    """Load the dev-session agent prompt.
-
-    Falls back to a minimal prompt if the markdown file doesn't exist yet.
-    """
-    dev_session_md = _AGENTS_DIR / "dev-session.md"
-    if dev_session_md.exists():
-        try:
-            data = _parse_agent_markdown(dev_session_md)
-            return str(data["body"])
-        except (ValueError, KeyError):
-            pass
-
-    return (
-        "You are a Developer agent with full permissions to read, write, and execute code.\n\n"
-        "You are spawned by a PM-role AgentSession to do the actual coding work.\n"
-        "Follow the SDLC pipeline stages as directed by your parent PM session.\n"
-        "Commit at logical checkpoints as you work.\n"
-    )
-
-
 # Agent files referenced by get_agent_definitions(). Used by validate_agent_files()
 # to check that all expected files exist on disk at bridge startup.
+# Note: dev-session.md is intentionally excluded (Phase 5 cleanup: dev sessions
+# are now created via `python -m tools.valor_session create --role dev`, not via
+# Agent tool dispatch).
 _EXPECTED_AGENT_FILES = [
     "builder.md",
     "validator.md",
     "code-reviewer.md",
-    "dev-session.md",
 ]
 
 

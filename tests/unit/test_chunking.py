@@ -121,9 +121,7 @@ This is the third section."""
             current_words = set(chunks[i]["text"].split())
             next_words = set(chunks[i + 1]["text"].split())
             overlap = current_words & next_words
-            assert len(overlap) > 0, (
-                f"No overlap between chunk {i} and chunk {i + 1}"
-            )
+            assert len(overlap) > 0, f"No overlap between chunk {i} and chunk {i + 1}"
 
     def test_chunk_output_format(self):
         """Each chunk has the expected dict structure."""

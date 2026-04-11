@@ -85,9 +85,7 @@ class TestLoadIdentity:
     def test_private_override_merge(self, tmp_path):
         """Private identity override should merge with repo defaults."""
         private_path = tmp_path / "identity.json"
-        private_path.write_text(
-            json.dumps({"name": "Override Name", "custom_field": "custom"})
-        )
+        private_path.write_text(json.dumps({"name": "Override Name", "custom_field": "custom"}))
         with patch("agent.sdk_client.PRIVATE_IDENTITY_PATH", private_path):
             identity = load_identity()
             assert identity["name"] == "Override Name"
@@ -274,13 +272,7 @@ class TestResolvePersona:
 
     def test_dev_group_with_persona(self):
         """Dev group with persona config should use that persona."""
-        project = {
-            "telegram": {
-                "groups": {
-                    "Dev: Valor": {"chat_id": 123, "persona": "developer"}
-                }
-            }
-        }
+        project = {"telegram": {"groups": {"Dev: Valor": {"chat_id": 123, "persona": "developer"}}}}
         assert _resolve_persona(project, "Dev: Valor", is_dm=False) == "developer"
 
     def test_group_no_project(self):
@@ -290,9 +282,7 @@ class TestResolvePersona:
     def test_group_no_persona_in_config(self):
         """Group without persona in config should default to developer."""
         project = {"telegram": {"groups": {"Dev: Test": {"chat_id": 123}}}}
-        assert (
-            _resolve_persona(project, "Dev: Test", is_dm=False) == "developer"
-        )
+        assert _resolve_persona(project, "Dev: Test", is_dm=False) == "developer"
 
     def test_dm_default_without_config(self):
         """DM with project but no dm_persona should default to teammate."""

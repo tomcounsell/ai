@@ -2262,9 +2262,6 @@ async def _worker_loop(
                     # Fix 3: Always save diagnostic snapshot before deleting Redis record
                     try:
                         _event = "crash" if session_failed else "complete"
-                        from agent.hooks.session_registry import get_activity
-
-                        activity = get_activity(session.session_id)
                         save_session_snapshot(
                             session_id=session.session_id,
                             event=_event,
@@ -2276,7 +2273,6 @@ async def _worker_loop(
                             ),
                             extra_context={
                                 "agent_session_id": session.agent_session_id,
-                                "tool_count": activity.get("tool_count", 0),
                                 "trigger": "finally_block",
                             },
                             working_dir=str(
