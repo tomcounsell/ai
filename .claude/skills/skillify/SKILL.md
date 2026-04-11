@@ -11,7 +11,6 @@ allowed-tools:
   - AskUserQuestion
   - Bash(mkdir:*)
 user-invocable: true
-disable-model-invocation: true
 argument-hint: "[description of the process you want to capture]"
 arguments:
   - description
