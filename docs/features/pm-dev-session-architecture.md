@@ -216,6 +216,85 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 
 The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the Dev session bypasses the pipeline. The warning is logged to stderr and is non-fatal.
 
+### Per-Stage Model Selection
+
+PM picks the Claude model at dispatch time. The `Agent` tool accepts a `model` parameter (`sonnet`, `opus`, `haiku`) that overrides the `dev-session` agent definition's `model=None` default. PM's decision rules (see [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md)) encode which stage gets which model. The full mapping is documented in [pipeline-graph.md](pipeline-graph.md) under "Per-Stage Model Selection."
+
+No code change is required on the dispatch side beyond PM using the `model` parameter — the Agent tool and Claude Code CLI already pass the override through. The only change is PM's dispatch instructions, which name the model for each stage.
+
+### Dev Session Resume (Hard PATCH Path)
+
+Normal PATCH dispatch spawns a fresh Dev session that reads the review findings or test failures from their artifacts and applies a targeted fix. When PATCH failures become non-trivial — architectural, cross-cutting, or tangled with implementation assumptions only the original builder knew — PM resumes the BUILD session's Claude Code transcript instead of starting fresh. The resumed session inherits the builder's full context for free.
+
+#### Why resume instead of a fresh session
+
+A fresh PATCH session reads the diff, the plan, and the review comments cold. That's usually enough for targeted fixes. But for hard patches, the valuable context is the builder's accumulated reasoning: which assumptions were made, which edge cases were considered and dismissed, which files were explored but not touched, why the implementation took the shape it did. None of that is written into artifacts. Resuming the builder's transcript is the only way to get it.
+
+#### Mechanism
+
+The infrastructure for resume already exists in `agent/sdk_client.py`:
+
+1. Every child Dev session stores its Claude Code transcript UUID in `claude_session_uuid` on its `local-*` AgentSession record (see `models/agent_session.py:175`).
+2. `sdk_client._create_options()` looks up the prior UUID via `_get_prior_session_uuid(session_id)` and sets `resume=prior_uuid` + `continue_conversation=True` on `ClaudeAgentOptions`. This mechanism is used today for PM session continuity across Telegram messages; the same path works for any AgentSession with a stored UUID.
+3. Completed Dev sessions are not deleted by the cleanup scheduler (`tools/agent_session_scheduler.py` targets `killed/abandoned/failed` only). BUILD sessions survive their stage completion and remain resumable until an explicit retention policy expires them.
+
+The missing piece is a **reactivation path**: the Agent tool spawns fresh subagents and does not support `resume=`. To continue a completed Dev session, PM must step out of Agent-tool dispatch and enqueue a new message against the existing `session_id` via `valor-session` (or an equivalent CLI), which routes through the worker's SDK client path where resume is supported.
+
+Concretely, the flow is:
+
+```
+PM decides: this PATCH needs the builder's context
+    |
+    v
+PM reads the BUILD session_id from its stage_states (or a new stored pointer)
+    |
+    v
+PM invokes: valor-session resume --id <build-session-id> --message "Apply review findings: ..."
+    |
+    v
+valor-session transitions the completed BUILD session back to pending
+    |-- Appends the new message
+    |-- Re-enqueues through _push_agent_session
+    |
+    v
+Worker picks up the BUILD session_id
+    |-- sdk_client._create_options() sees stored claude_session_uuid
+    |-- Sets resume=<uuid>, continue_conversation=True
+    |-- Claude Code resumes the original transcript with the new message
+    |
+    v
+Builder executes the patch with full prior context
+    |-- Commits fix
+    |-- Returns, session marks completed
+    |
+    v
+PM routes to re-TEST (fresh session, per graph) to verify the fix
+```
+
+#### PM decision: when to resume vs fresh
+
+PM decides difficulty per patch. Signals PM uses:
+
+- Prior PATCH attempt failed on the same blocker
+- Multiple blockers span interacting areas of the code
+- Failure involves race conditions, state management, or architecture decisions
+- Review findings reference implementation rationale the reviewer couldn't infer from the diff
+
+A fresh PATCH session is the default. Resume is the escalation path when the signal above is strong. See [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md) for the exact decision rules.
+
+#### Model on resume
+
+On first implementation, resume uses the BUILD session's original model (typically Sonnet). Whether the SDK honors a model swap during resume — e.g., `ClaudeAgentOptions(model="claude-opus-4-6", resume=<sonnet-uuid>)` running Opus over a Sonnet transcript — is an open question that gates any "escalate to Opus on resume" design. Until verified, the resume path preserves the original model and relies on PM's Opus-authored instructions in the new message to drive the fix.
+
+#### Retention
+
+Completed Dev sessions survive indefinitely today because the cleanup scheduler skips `status="completed"`. This is workable short-term but unbounded. A retention policy ties the BUILD session's useful lifetime to the PR lifecycle:
+
+- **Default**: retain completed BUILD sessions until the corresponding PR merges or closes, then mark for cleanup
+- **TTL backstop**: Popoto's `Meta.ttl` on dev sessions provides a hard ceiling (e.g., 30 days) in case PR lifecycle tracking fails
+
+Non-BUILD stages (TEST, REVIEW, DOCS, etc.) have no resume use case and can be cleaned up sooner. A future change may add a `retain_for_resume` flag that cleanup respects.
+
 ## Hook-Driven Lifecycle
 
 The parent-child session lifecycle is driven by two SDK hooks: **PreToolUse** and **SubagentStop**. These hooks automatically register child Dev sessions in Redis, start pipeline stages, and record stage outcomes when the child completes.
@@ -389,7 +468,7 @@ Teammate message -> session_type="teammate" on AgentSession
 
 The `dev-session` agent is defined in `agent/agent_definitions.py`:
 - `tools=None` (all tools, full write permissions)
-- `model=None` (inherits from parent session)
+- `model=None` (default: PM can override per dispatch via the Agent tool's `model` parameter — see "Per-Stage Model Selection" above)
 - Single-stage executor: receives a stage assignment from the PM, executes it, reports result
 - Spawned by PM session via the Agent tool
 
