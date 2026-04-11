@@ -1,6 +1,6 @@
 ---
 slug: soul-md-decomposition
-status: Building
+status: Shipped
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -216,31 +216,31 @@ No prerequisites -- this work has no external dependencies. All required files a
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `load_persona_prompt()` currently catches `FileNotFoundError` for base -- verify segment loading raises loudly for missing segments
-- [ ] `load_identity()` must handle missing `identity.json` gracefully with sensible defaults
-- [ ] `load_identity()` must handle malformed JSON (corrupted private override file)
-- [ ] Verify private identity override merge does not silently swallow parse errors
+- [x] `load_persona_prompt()` currently catches `FileNotFoundError` for base -- verify segment loading raises loudly for missing segments
+- [x] `load_identity()` must handle missing `identity.json` gracefully with sensible defaults
+- [x] `load_identity()` must handle malformed JSON (corrupted private override file)
+- [x] Verify private identity override merge does not silently swallow parse errors
 
 ### Empty/Invalid Input Handling
-- [ ] Test `load_identity()` with empty JSON file (`{}`)
-- [ ] Test segment assembly when segment directory exists but is empty
-- [ ] Test identity template substitution with missing fields (should use defaults, not crash)
-- [ ] Test `load_persona_prompt()` with empty string persona name
+- [x] Test `load_identity()` with empty JSON file (`{}`)
+- [x] Test segment assembly when segment directory exists but is empty
+- [x] Test identity template substitution with missing fields (should use defaults, not crash)
+- [x] Test `load_persona_prompt()` with empty string persona name
 
 ### Error State Rendering
-- [ ] Verify error messages from missing segments include the segment path for debugging
-- [ ] Verify error messages from malformed identity JSON include the parse error
+- [x] Verify error messages from missing segments include the segment path for debugging
+- [x] Verify error messages from malformed identity JSON include the parse error
 
 ## Test Impact
 
-- [ ] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_missing_overlay_falls_back_to_soul` -- REPLACE: rewrite to assert FileNotFoundError instead of SOUL.md fallback
-- [ ] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_nonexistent_persona_falls_back` -- UPDATE: may still fall back to developer, verify behavior
-- [ ] `tests/unit/test_persona_loading.py::TestLoadSystemPromptIntegration::test_soul_md_still_exists` -- DELETE: SOUL.md will no longer exist
-- [ ] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_base_file_exists_in_repo` -- REPLACE: test segment files exist instead of `_base.md`
-- [ ] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_separator_between_base_and_overlay` -- UPDATE: verify segments are assembled with separators
-- [ ] `tests/unit/test_sdk_client.py` -- UPDATE: remove any `SOUL_PATH` import references
-- [ ] `tests/unit/test_pm_channels.py` -- UPDATE: remove SOUL.md fallback assertions if any
-- [ ] `tests/integration/test_doc_impact_finder_sdk.py` -- UPDATE: change `config/SOUL.md` to new identity config path in important files
+- [x] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_missing_overlay_falls_back_to_soul` -- REPLACE: rewrite to assert FileNotFoundError instead of SOUL.md fallback
+- [x] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_nonexistent_persona_falls_back` -- UPDATE: may still fall back to developer, verify behavior
+- [x] `tests/unit/test_persona_loading.py::TestLoadSystemPromptIntegration::test_soul_md_still_exists` -- DELETE: SOUL.md will no longer exist
+- [x] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_base_file_exists_in_repo` -- REPLACE: test segment files exist instead of `_base.md`
+- [x] `tests/unit/test_persona_loading.py::TestLoadPersonaPrompt::test_separator_between_base_and_overlay` -- UPDATE: verify segments are assembled with separators
+- [x] `tests/unit/test_sdk_client.py` -- UPDATE: remove any `SOUL_PATH` import references
+- [x] `tests/unit/test_pm_channels.py` -- UPDATE: remove SOUL.md fallback assertions if any
+- [x] `tests/integration/test_doc_impact_finder_sdk.py` -- UPDATE: change `config/SOUL.md` to new identity config path in important files
 
 ## Rabbit Holes
 
@@ -297,35 +297,35 @@ The only indirect agent integration concern is the `.claude/hooks/post_tool_use.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/personas.md` to document the new segment-based architecture, identity config, and removal of SOUL.md fallback
-- [ ] Update `docs/features/README.md` index table entry for personas
-- [ ] Update `docs/features/pm-channels.md` prompt composition description
+- [x] Update `docs/features/personas.md` to document the new segment-based architecture, identity config, and removal of SOUL.md fallback
+- [x] Update `docs/features/README.md` index table entry for personas
+- [x] Update `docs/features/pm-channels.md` prompt composition description
 
 ### Inline Documentation
-- [ ] Docstrings on `load_identity()`, updated `load_persona_prompt()` docstring
-- [ ] Comments in `config/identity.json` (via `_doc` field, following `projects.example.json` pattern)
-- [ ] Cross-reference comment in `config/personas/segments/identity.md` (communication style section) pointing to `bridge/summarizer.py`
+- [x] Docstrings on `load_identity()`, updated `load_persona_prompt()` docstring
+- [x] Comments in `config/identity.json` (via `_doc` field, following `projects.example.json` pattern)
+- [x] Cross-reference comment in `config/personas/segments/identity.md` (communication style section) pointing to `bridge/summarizer.py`
 
 ## Success Criteria
 
-- [ ] `config/identity.json` exists with name, email, timezone, org fields
-- [ ] `load_identity()` function in `agent/sdk_client.py` loads identity from JSON
-- [ ] Per-instance identity overrides work via `~/Desktop/Valor/identity.json`
-- [ ] Shared behavioral content is split into exactly 3 composable segments (identity.md, work-patterns.md, tools.md) in `config/personas/segments/`
-- [ ] `_base.md` is deleted -- no more duplication
-- [ ] `config/SOUL.md` is deleted
-- [ ] `SOUL_PATH` constant is removed from `agent/sdk_client.py`
-- [ ] All three SOUL.md fallback branches are removed
-- [ ] `load_persona_prompt()` assembles prompts from segments + overlay
-- [ ] `load_system_prompt()` and `load_pm_system_prompt()` no longer reference SOUL.md
-- [ ] All 34 file references are updated or removed
-- [ ] `PersonaType` enum is unchanged
-- [ ] `projects.example.json` updated to reflect new architecture
-- [ ] `tests/unit/test_persona_loading.py` updated for new loading logic
-- [ ] Existing persona behavior preserved -- equivalent system prompts produced
-- [ ] `bridge/summarizer.py` alignment verified (communication style preserved)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `config/identity.json` exists with name, email, timezone, org fields
+- [x] `load_identity()` function in `agent/sdk_client.py` loads identity from JSON
+- [x] Per-instance identity overrides work via `~/Desktop/Valor/identity.json`
+- [x] Shared behavioral content is split into exactly 3 composable segments (identity.md, work-patterns.md, tools.md) in `config/personas/segments/`
+- [x] `_base.md` is deleted -- no more duplication
+- [x] `config/SOUL.md` is deleted
+- [x] `SOUL_PATH` constant is removed from `agent/sdk_client.py`
+- [x] All three SOUL.md fallback branches are removed
+- [x] `load_persona_prompt()` assembles prompts from segments + overlay
+- [x] `load_system_prompt()` and `load_pm_system_prompt()` no longer reference SOUL.md
+- [x] All 34 file references are updated or removed
+- [x] `PersonaType` enum is unchanged
+- [x] `projects.example.json` updated to reflect new architecture
+- [x] `tests/unit/test_persona_loading.py` updated for new loading logic
+- [x] Existing persona behavior preserved -- equivalent system prompts produced
+- [x] `bridge/summarizer.py` alignment verified (communication style preserved)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -599,4 +599,4 @@ The only indirect agent integration concern is the `.claude/hooks/post_tool_use.
 
 ### Future Work
 
-- [ ] Draft GitHub issue: Cached/compiled per-context variable substitution for persona segments (upgrade from f-strings when dynamic context needs grow)
+- [x] Draft GitHub issue: Cached/compiled per-context variable substitution for persona segments (upgrade from f-strings when dynamic context needs grow)
