@@ -5,7 +5,9 @@ Session management CLI for AgentSession — create, steer, monitor, and kill ses
 Usage:
     valor-session create --role pm --chat-id 123 --message "Plan issue #735"
     valor-session create --role dev --message "Fix the bug" --parent abc123
+    valor-session create --role dev --model sonnet --message "Build feature X" --parent abc123
     valor-session create --role pm --message "..." --project-key valor
+    valor-session resume --id abc123 --message "Fix: add missing validation"
     valor-session steer --id abc123 --message "Stop after critique stage"
     valor-session status --id abc123
     valor-session list
@@ -144,6 +146,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         message = args.message
         chat_id = args.chat_id or "0"
         parent_id = getattr(args, "parent", None)
+        model = getattr(args, "model", None)
 
         # Derive a session_id from timestamp + role
         ts_suffix = str(int(utc_now().timestamp() * 1000))
@@ -182,6 +185,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 session_type=session_type,
                 parent_agent_session_id=parent_id,
                 slug=slug,
+                model=model,
             )
             return session_id
 
@@ -190,7 +194,12 @@ def cmd_create(args: argparse.Namespace) -> int:
         if args.json:
             print(
                 json.dumps(
-                    {"session_id": result, "status": "created", "project_key": project_key},
+                    {
+                        "session_id": result,
+                        "status": "created",
+                        "project_key": project_key,
+                        "model": model,
+                    },
                     indent=2,
                 )
             )
@@ -198,8 +207,104 @@ def cmd_create(args: argparse.Namespace) -> int:
             print(f"Created session: {result}")
             print(f"  Role:        {role}")
             print(f"  Project key: {project_key}")
+            if model:
+                print(f"  Model:       {model}")
             print(f"  Message: {message[:80]}")
             print(f"  Chat ID: {chat_id}")
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Resume a completed BUILD session by re-enqueuing it with a new message.
+
+    Validates the session is in 'completed' status, transitions it back to
+    'pending', appends the new message to the steering queue, so the worker
+    delivers it as the first message in the resumed conversation.
+
+    This enables hard-PATCH resume: the worker picks up the session and calls
+    `claude -p --resume <uuid>` to continue the original BUILD transcript.
+    """
+    _load_env()
+    try:
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import transition_status
+
+        session_id = args.id
+        new_message = args.message
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            print(f"Error: Session not found: {session_id}", file=sys.stderr)
+            return 1
+
+        # Pick the most recent record for this session_id
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        session = sessions[0]
+
+        current_status = getattr(session, "status", None)
+        if current_status == "pending":
+            print(
+                f"Error: Session {session_id} is already pending — cannot resume.",
+                file=sys.stderr,
+            )
+            return 1
+        if current_status == "running":
+            print(
+                f"Error: Session {session_id} is currently running — cannot resume.",
+                file=sys.stderr,
+            )
+            return 1
+        if current_status != "completed":
+            print(
+                f"Error: Session {session_id} has status '{current_status}'. "
+                "Only completed sessions can be resumed.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Transition back to pending (atomic — fails if another process raced us)
+        try:
+            transition_status(session, "pending", reason="valor-session resume")
+        except Exception as e:
+            print(
+                f"Error: Could not transition session {session_id} to pending: {e}",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Append the new message to the session's steering queue so the worker
+        # delivers it as the first message in the resumed conversation.
+        existing_steering = list(session.queued_steering_messages or [])
+        existing_steering.append(new_message)
+        session.queued_steering_messages = existing_steering
+        session.save()
+
+        model = getattr(session, "model", None)
+        uuid = getattr(session, "claude_session_uuid", None)
+
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "status": "resumed",
+                        "model": model,
+                        "claude_session_uuid": uuid,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"Resumed session: {session_id}")
+            if model:
+                print(f"  Model:               {model}")
+            if uuid:
+                print(f"  Claude session UUID: {uuid}")
+            print(f"  Message: {new_message[:80]}")
         return 0
 
     except Exception as e:
@@ -550,7 +655,31 @@ def main() -> int:
             "This ensures the session runs in an isolated directory (issue #887)."
         ),
     )
+    create_parser.add_argument(
+        "--model",
+        help=(
+            "Claude model to use for this session (e.g. 'sonnet', 'opus'). "
+            "When set, overrides the environment/CLI default. "
+            "Enables per-SDLC-stage model selection."
+        ),
+    )
     create_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # resume subcommand
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="Resume a completed BUILD session with a new message (hard-PATCH resume)",
+    )
+    resume_parser.add_argument(
+        "--id", required=True, help="Session ID of the completed BUILD session to resume"
+    )
+    resume_parser.add_argument(
+        "--message",
+        "-m",
+        required=True,
+        help="New message to inject into the resumed session",
+    )
+    resume_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     # steer subcommand
     steer_parser = subparsers.add_parser("steer", help="Inject a steering message into a session")
@@ -595,6 +724,7 @@ def main() -> int:
 
     dispatch = {
         "create": cmd_create,
+        "resume": cmd_resume,
         "steer": cmd_steer,
         "status": cmd_status,
         "list": cmd_list,

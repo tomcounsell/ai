@@ -1005,7 +1005,11 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
     """Delete stale sessions older than --age minutes in terminal statuses."""
+    import logging as _logging
+
     from models.agent_session import AgentSession
+
+    _cleanup_logger = _logging.getLogger(__name__)
 
     project_key = args.project
     terminal_statuses = ["killed", "abandoned", "failed"]
@@ -1020,6 +1024,15 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             else:
                 sessions = list(AgentSession.query.filter(status=status))
             for s in sessions:
+                # Retain_for_resume guard: never delete completed BUILD sessions that
+                # the PM may still want to resume via `valor-session resume`.
+                # The Meta.ttl backstop (30 days) will expire them automatically.
+                if s.status == "completed" and getattr(s, "retain_for_resume", False):
+                    _cleanup_logger.info(
+                        f"[cleanup] Skipping retained session {s.session_id} "
+                        f"(retain_for_resume=True, status=completed)"
+                    )
+                    continue
                 age_sec = (now - _to_ts(s.created_at)) if s.created_at else 0
                 if age_sec > age_threshold:
                     targets.append(s)

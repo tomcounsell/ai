@@ -177,6 +177,7 @@ async def _push_agent_session(
     depends_on: list[str] | None = None,  # ignored, removed
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
+    model: str | None = None,
     **_kwargs,
 ) -> int:
     """Create an agent session in Redis and return the pending queue depth for this chat.
@@ -192,6 +193,8 @@ async def _push_agent_session(
         extra_context_overrides: Additional key/value pairs merged into extra_context
             before saving. Use for transport-specific metadata (e.g., transport="email",
             email_message_id=...). Keys in overrides take precedence over derived values.
+        model: Optional Claude model name (e.g. "sonnet", "opus"). When set, overrides
+            the environment-level default for this session. None inherits the default.
     """
     # Convert float timestamps to datetime (backward compat)
     if isinstance(scheduled_at, int | float):
@@ -265,6 +268,7 @@ async def _push_agent_session(
         parent_agent_session_id=parent_agent_session_id,
         telegram_message_key=telegram_message_key,
         project_config=project_config or None,
+        model=model or None,
     )
 
     # Initialize stage_states for SDLC sessions so the dashboard shows
@@ -2832,8 +2836,26 @@ async def _handle_dev_session_completion(
             )
         except Exception as psm_err:
             logger.warning(f"[harness] PipelineStateMachine update failed (non-fatal): {psm_err}")
-            outcome = "success" if result and len(result) > 10 else "fail"
             current_stage = None
+
+        # Set retain_for_resume=True on BUILD dev sessions so the PM can hard-PATCH
+        # resume them via `valor-session resume --id <id>`. The 30-day Meta.ttl acts
+        # as the backstop; `valor-session release --pr <N>` clears it on merge.
+        try:
+            if agent_session and current_stage in ("implement", "build", "test"):
+                agent_session.retain_for_resume = True
+                agent_session.save()
+                logger.info(
+                    f"[harness] Set retain_for_resume=True on dev session "
+                    f"{getattr(agent_session, 'session_id', '?')} (stage={current_stage})"
+                )
+        except Exception as retain_err:
+            logger.warning(
+                f"[harness] retain_for_resume update failed (non-fatal): {retain_err}"
+            )
+
+        if current_stage is None:
+            outcome = "success" if result and len(result) > 10 else "fail"
 
         # Post stage comment to GitHub issue
         try:

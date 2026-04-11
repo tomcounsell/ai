@@ -919,6 +919,7 @@ class ValorAgent:
         gh_repo: str | None = None,
         target_repo: str | None = None,
         session_type: str | None = None,
+        model: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -942,6 +943,9 @@ class ValorAgent:
                 orchestrator). Defaults to working_dir when not specified.
             session_type: Session type ("pm", "teammate", or "dev"). Injected as
                 SESSION_TYPE env var so hooks can enforce write restrictions.
+            model: Optional Claude model name (e.g. "sonnet", "opus"). When set,
+                overrides the environment-level model for this session. None inherits
+                the CLI default. Used for per-SDLC-stage model selection.
         """
         default_dir = Path(__file__).parent.parent
         allowed_root = Path.home() / "src"
@@ -958,6 +962,7 @@ class ValorAgent:
         self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.target_repo = target_repo
         self.session_type = session_type
+        self.model = model or None  # Normalize empty string to None
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
         """Create ClaudeAgentOptions configured for Valor with full permissions.
@@ -1052,7 +1057,7 @@ class ValorAgent:
         prior_uuid = _get_prior_session_uuid(session_id) if session_id else None
         should_continue = prior_uuid is not None
 
-        return ClaudeAgentOptions(
+        options_kwargs: dict = dict(
             system_prompt=system_prompt,
             cwd=str(self.working_dir),
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
@@ -1063,6 +1068,11 @@ class ValorAgent:
             hooks=build_hooks_config(),
             agents=get_agent_definitions(),
         )
+        # Per-session model override: set only when explicitly specified so that
+        # sessions without a model use the SDK/CLI default (e.g. max-quality).
+        if self.model:
+            options_kwargs["model"] = self.model
+        return ClaudeAgentOptions(**options_kwargs)
 
     async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
         """
@@ -1756,6 +1766,7 @@ async def get_agent_response_sdk(
     # PM session (session_type="pm") gets full pipeline instructions.
     # PM sessions orchestrate via dev-session subagent
     _session_type = None
+    _session_model = None
     if session_id:
         try:
             from models.agent_session import AgentSession as _AgentSession
@@ -1763,6 +1774,7 @@ async def get_agent_response_sdk(
             _sessions = list(_AgentSession.query.filter(session_id=session_id))
             if _sessions:
                 _session_type = getattr(_sessions[0], "session_type", None)
+                _session_model = getattr(_sessions[0], "model", None)
         except Exception:
             pass
 
@@ -2105,6 +2117,7 @@ async def get_agent_response_sdk(
             gh_repo=_gh_repo,
             target_repo=project_working_dir,
             session_type=_session_type,
+            model=_session_model,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 
