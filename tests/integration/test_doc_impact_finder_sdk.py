@@ -215,7 +215,7 @@ class TestLiveHaikuReranking:
                 ),
             },
             {
-                "path": "config/SOUL.md",
+                "path": "config/personas/segments/identity.md",
                 "section": "## Communication Style",
                 "content_preview": (
                     "## Communication Style\n\nDirect, no fluff. "
@@ -242,10 +242,10 @@ class TestLiveHaikuReranking:
                 if r is not None:
                     results.append(r)
 
-        # At least the bridge doc should be relevant, SOUL.md should not
+        # At least the bridge doc should be relevant, identity segment should not
         scored_paths = {r[2]["path"] for r in results}
-        assert "config/SOUL.md" not in scored_paths, (
-            "SOUL.md shouldn't be flagged for a CLI flag change"
+        assert "config/personas/segments/identity.md" not in scored_paths, (
+            "identity.md shouldn't be flagged for a CLI flag change"
         )
 
     def test_json_fence_stripping(self):

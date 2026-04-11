@@ -33,10 +33,10 @@ class TestLoadPmSystemPrompt:
         prompt = load_pm_system_prompt(str(tmp_path))
         assert "Worker Safety Rails" not in prompt
 
-    def test_pm_prompt_includes_soul(self, tmp_path):
-        """PM system prompt must include SOUL.md persona content."""
+    def test_pm_prompt_includes_persona(self, tmp_path):
+        """PM system prompt must include persona segment content."""
         prompt = load_pm_system_prompt(str(tmp_path))
-        # SOUL.md starts with "# Valor" - verify persona is loaded
+        # Persona segments include "# Valor" - verify persona is loaded
         assert "Valor" in prompt
 
     def test_pm_prompt_loads_project_claude_md(self, tmp_path):
@@ -47,15 +47,15 @@ class TestLoadPmSystemPrompt:
         assert "PM Instructions" in prompt
         assert "project manager" in prompt
 
-    def test_pm_prompt_without_claude_md_falls_back_to_soul(self, tmp_path):
-        """If no CLAUDE.md in work-vault, PM prompt uses SOUL.md only."""
+    def test_pm_prompt_without_claude_md_uses_persona_only(self, tmp_path):
+        """If no CLAUDE.md in work-vault, PM prompt uses persona segments only."""
         prompt = load_pm_system_prompt(str(tmp_path))
-        # Should still work - just SOUL.md without project instructions
+        # Should still work - just persona segments without project instructions
         assert len(prompt) > 0
         assert "Worker Safety Rails" not in prompt
 
-    def test_pm_prompt_has_separator_between_soul_and_project(self, tmp_path):
-        """SOUL.md and project CLAUDE.md should be separated by ---."""
+    def test_pm_prompt_has_separator_between_persona_and_project(self, tmp_path):
+        """Persona segments and project CLAUDE.md should be separated by ---."""
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# PM Instructions")
         prompt = load_pm_system_prompt(str(tmp_path))
