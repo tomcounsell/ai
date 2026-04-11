@@ -118,48 +118,42 @@ def get_agent_definitions() -> dict[str, AgentDefinition]:
         model=None,  # Inherits model from parent
     )
 
-    # --- dev-session ---
-    # Full-permission developer session for code changes.
-    # Spawned by a PM-role AgentSession to do actual work.
-    # tools=None means all tools available — full write permissions.
-    definitions["dev-session"] = AgentDefinition(
-        description="Full-permission developer session for code changes",
-        prompt=_load_dev_session_prompt(),
-        tools=None,  # All tools — full permissions
-        model=None,  # Inherit from parent
-    )
-
     return definitions
 
 
-def _load_dev_session_prompt() -> str:
-    """Load the dev-session agent prompt.
+def get_definition(subagent_type: str) -> AgentDefinition | None:
+    """Look up an agent definition by subagent_type.
 
-    Falls back to a minimal prompt if the markdown file doesn't exist yet.
+    Returns the AgentDefinition for the given type, or None if not found.
+
+    For the "dev-session" type: if the PM persona is stale and still calls
+    Agent(subagent_type="dev-session"), this returns an error definition
+    directing the PM to use `python -m tools.valor_session create --role dev`
+    instead. This provides an actionable error rather than an opaque crash.
     """
-    dev_session_md = _AGENTS_DIR / "dev-session.md"
-    if dev_session_md.exists():
-        try:
-            data = _parse_agent_markdown(dev_session_md)
-            return str(data["body"])
-        except (ValueError, KeyError):
-            pass
+    definitions = get_agent_definitions()
+    if subagent_type in definitions:
+        return definitions[subagent_type]
 
-    return (
-        "You are a Developer agent with full permissions to read, write, and execute code.\n\n"
-        "You are spawned by a PM-role AgentSession to do the actual coding work.\n"
-        "Follow the SDLC pipeline stages as directed by your parent PM session.\n"
-        "Commit at logical checkpoints as you work.\n"
+    logger.warning(
+        f"Unknown subagent_type requested: '{subagent_type}'. "
+        "If this is 'dev-session', the PM persona may be stale. "
+        "Dev sessions are now created via "
+        '`python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" '
+        '--message "..."`.'
     )
+    return None
 
 
 # Agent files referenced by get_agent_definitions(). Used by validate_agent_files()
 # to check that all expected files exist on disk at bridge startup.
+# Note: dev-session.md is intentionally excluded (Phase 5 cleanup: dev sessions
+# are now created via `python -m tools.valor_session create --role dev`, not via
+# Agent tool dispatch).
 _EXPECTED_AGENT_FILES = [
     "builder.md",
     "validator.md",
     "code-reviewer.md",
-    "dev-session.md",
 ]
 
 

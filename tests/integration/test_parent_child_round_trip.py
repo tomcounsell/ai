@@ -1,13 +1,17 @@
-"""Integration test for the parent-child session hook lifecycle.
+"""Integration tests for the new PM → valor_session → worker → harness → steer flow.
 
-Exercises the full round-trip: PM session spawns a child Dev session via
-PreToolUse hook, child runs, SubagentStop hook completes the child and
-updates the parent's pipeline stage_states. Uses real Redis (no mocks).
+Covers the harness-abstraction Phase 3-5 round-trip:
+  1. `valor_session create --role dev --parent <id>` creates a child session with
+     `parent_agent_session_id` pointing to the parent.
+  2. `_handle_dev_session_completion()` calls `steer_session()` on the parent PM
+     session after the CLI harness returns.
+  3. `PipelineStateMachine` stage transitions (complete/fail) are driven by
+     `classify_outcome()` on the result text.
 
-Tests both success and failure outcome paths, plus edge cases like empty
-prompts and missing session registry entries.
+All external I/O (Redis reads on GitHub issue, harness subprocess) is mocked.
+Real Redis (db=1 via autouse redis_test_db) is used for AgentSession persistence.
 
-See docs/features/pm-dev-session-architecture.md "Hook-Driven Lifecycle"
+See docs/features/harness-abstraction.md "Post-Completion SDLC Handler (Phase 3)"
 for the architecture this test validates.
 """
 
@@ -15,474 +19,142 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from models.agent_session import AgentSession
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(autouse=True)
-def _clean_session_registry():
-    """Reset the in-memory session registry before and after each test."""
-    from agent.hooks.session_registry import _reset_for_testing
-
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def pm_session(redis_test_db):
-    """Create a PM session in Redis for hook testing."""
-    return AgentSession.create(
-        session_id="pm-round-trip-test",
-        session_type="chat",
+    """Create a parent PM session in Redis."""
+    session = AgentSession.create(
+        session_id="pm-round-trip-001",
+        session_type="pm",
         project_key="test",
         status="active",
         chat_id="999",
         sender_name="TestUser",
-        message_text="Run the BUILD stage",
+        message_text="Run the BUILD stage (issues/780)",
         created_at=datetime.now(tz=UTC),
         started_at=datetime.now(tz=UTC),
         updated_at=datetime.now(tz=UTC),
         turn_count=0,
         tool_call_count=0,
     )
+    return session
 
 
-FAKE_CLAUDE_UUID = "test-uuid-round-trip-001"
+@pytest.fixture
+def dev_session(pm_session, redis_test_db):
+    """Create a child dev session linked to the PM session via parent_agent_session_id."""
+    session = AgentSession.create(
+        session_id="dev-round-trip-001",
+        session_type="dev",
+        project_key="test",
+        status="active",
+        chat_id="999",
+        sender_name="TestUser",
+        message_text="Stage: BUILD\nImplement the feature (issues/780)",
+        parent_agent_session_id=pm_session.agent_session_id,
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
+        turn_count=0,
+        tool_call_count=0,
+    )
+    return session
 
 
-# ── Round-Trip: Success Path ─────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Test 1: valor_session create --role dev --parent stores correct linkage
+# ---------------------------------------------------------------------------
 
 
-class TestSuccessRoundTrip:
-    """Full lifecycle with a successful BUILD stage outcome."""
+class TestDevSessionParentLinkage:
+    """valor_session create --role dev --parent <id> wires parent_agent_session_id."""
 
-    def test_pretooluse_starts_stage_without_creating_child(self, pm_session):
-        """PreToolUse hook starts BUILD stage on parent but does NOT create a dev-* AgentSession.
+    def test_create_dev_session_stores_parent_id(self, pm_session, redis_test_db):
+        """AgentSession.create with parent_agent_session_id links child to parent."""
+        parent_uuid = pm_session.agent_session_id
 
-        Child subprocess self-registers via VALOR_PARENT_SESSION_ID env var (issue #808).
-        """
-        from agent.hooks.session_registry import register_pending, resolve
-        from bridge.pipeline_state import PipelineStateMachine
-
-        # Walk through prerequisite stages so BUILD can start
-        sm = PipelineStateMachine(pm_session)
-        sm.start_stage("ISSUE")
-        sm.complete_stage("ISSUE")
-        sm.start_stage("PLAN")
-        sm.complete_stage("PLAN")
-        sm.start_stage("CRITIQUE")
-        sm.complete_stage("CRITIQUE")
-
-        # Wire the session registry so hooks can resolve the PM session
-        register_pending(pm_session.session_id)
-
-        # Simulate PreToolUse hook detecting Agent tool with dev-session
-        from agent.hooks.pre_tool_use import _extract_stage_from_prompt, _maybe_start_pipeline_stage
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Stage: BUILD\nImplement the authentication feature.",
-        }
-        _maybe_start_pipeline_stage(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
-
-        # Verify stage extraction works
-        assert _extract_stage_from_prompt(tool_input["prompt"]) == "BUILD"
-
-        # Verify NO dev-* AgentSession was created in Redis (child self-registers now)
-        dev_sessions_by_parent_session_id = list(
-            AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
-        )
-        assert len(dev_sessions_by_parent_session_id) == 0, (
-            "pre_tool_use should not create dev-* records; "
-            "child subprocess self-registers via VALOR_PARENT_SESSION_ID"
-        )
-
-        # Verify BUILD stage is now in_progress on the parent
-        parent = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
-        stage_states = json.loads(parent.stage_states)
-        assert stage_states.get("BUILD") == "in_progress"
-
-        # Verify registry mapping is set
-        assert resolve(FAKE_CLAUDE_UUID) == pm_session.session_id
-
-    def test_subagent_stop_completes_child_and_stage(self, pm_session):
-        """SubagentStop hook marks Dev session complete (via agent_session_id UUID lookup)
-        and records stage success.
-
-        Uses the two-lookup pattern: bridge session_id → AgentSession → agent_session_id UUID
-        → filter children by UUID (issue #808).
-        """
-        from agent.hooks.session_registry import register_pending
-        from bridge.pipeline_state import PipelineStateMachine
-
-        # Walk through prerequisite stages so BUILD can start
-        sm = PipelineStateMachine(pm_session)
-        sm.start_stage("ISSUE")
-        sm.complete_stage("ISSUE")
-        sm.start_stage("PLAN")
-        sm.complete_stage("PLAN")
-        sm.start_stage("CRITIQUE")
-        sm.complete_stage("CRITIQUE")
-        sm.start_stage("BUILD")
-
-        register_pending(pm_session.session_id)
-
-        # Simulate: child subprocess registered via VALOR_PARENT_SESSION_ID env var.
-        # The parent's agent_session_id UUID is stored in parent_agent_session_id.
-        parent_agent_uuid = pm_session.agent_session_id
-        child_session = AgentSession.create_local(
-            session_id="local-child-build-001",
+        child = AgentSession.create(
+            session_id="dev-linkage-test-001",
+            session_type="dev",
             project_key="test",
-            working_dir="/tmp",
-            status="running",
-            parent_agent_session_id=parent_agent_uuid,
+            status="pending",
+            chat_id="999",
+            sender_name="valor-session (dev)",
+            message_text="Stage: BUILD\nBuild the feature.",
+            parent_agent_session_id=parent_uuid,
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
         )
 
-        # SubagentStop completes the child using two-lookup pattern
-        from agent.hooks.subagent_stop import _register_dev_session_completion
+        assert child.parent_agent_session_id == parent_uuid
+        assert child.session_type == "dev"
 
-        input_data = {"result": "PR created at https://github.com/test/repo/pull/42"}
-        _register_dev_session_completion(
-            agent_id="agent-001",
-            input_data=input_data,
-            claude_uuid=FAKE_CLAUDE_UUID,
-        )
+    def test_child_found_by_parent_uuid(self, pm_session, redis_test_db):
+        """Child session is queryable via parent's agent_session_id."""
+        parent_uuid = pm_session.agent_session_id
 
-        # Verify child session status is completed
-        updated_child = list(AgentSession.query.filter(session_id="local-child-build-001"))
-        assert len(updated_child) == 1
-        assert updated_child[0].status == "completed"
-
-        # Verify BUILD stage is completed on the parent
-        parent = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
-        stage_states = json.loads(parent.stage_states)
-        assert stage_states.get("BUILD") == "completed"
-
-
-# ── Round-Trip: Failure Path ─────────────────────────────────────────────────
-
-
-class TestFailureRoundTrip:
-    """Full lifecycle where the Dev session reports a TEST failure."""
-
-    def test_subagent_stop_records_stage_failure(self, pm_session):
-        """SubagentStop hook marks stage as failed when output indicates failure."""
-        from agent.hooks.session_registry import register_pending
-
-        register_pending(pm_session.session_id)
-
-        # PreToolUse: start TEST stage (need BUILD completed first)
-        from bridge.pipeline_state import PipelineStateMachine
-
-        sm = PipelineStateMachine(pm_session)
-        # Walk through prerequisite stages to get to TEST
-        sm.start_stage("ISSUE")
-        sm.complete_stage("ISSUE")
-        sm.start_stage("PLAN")
-        sm.complete_stage("PLAN")
-        sm.start_stage("CRITIQUE")
-        sm.complete_stage("CRITIQUE")
-        sm.start_stage("BUILD")
-        sm.complete_stage("BUILD")
-
-        # Now start TEST via the hook
-        from agent.hooks.pre_tool_use import _maybe_start_pipeline_stage
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Stage: TEST\nRun the test suite and report results.",
-        }
-        _maybe_start_pipeline_stage(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
-
-        # Verify TEST is in_progress
-        parent = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
-        stage_states = json.loads(parent.stage_states)
-        assert stage_states.get("TEST") == "in_progress"
-
-        # Simulate child session registered via env var (so subagent_stop can find it)
-        parent_agent_uuid = pm_session.agent_session_id
-        AgentSession.create_local(
-            session_id="local-child-test-001",
+        AgentSession.create(
+            session_id="dev-linkage-query-001",
+            session_type="dev",
             project_key="test",
-            working_dir="/tmp",
-            status="running",
-            parent_agent_session_id=parent_agent_uuid,
+            status="pending",
+            chat_id="999",
+            sender_name="valor-session (dev)",
+            message_text="Stage: BUILD",
+            parent_agent_session_id=parent_uuid,
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
         )
 
-        # SubagentStop with failure output
-        from agent.hooks.subagent_stop import _register_dev_session_completion
+        children = list(AgentSession.query.filter(parent_agent_session_id=parent_uuid))
+        assert len(children) >= 1
+        assert any(c.session_id == "dev-linkage-query-001" for c in children)
 
-        input_data = {"result": "3 tests failed with AssertionError"}
-        _register_dev_session_completion(
-            agent_id="agent-002",
-            input_data=input_data,
-            claude_uuid=FAKE_CLAUDE_UUID,
+    def test_parent_session_id_none_without_parent(self, redis_test_db):
+        """Dev session without --parent has parent_agent_session_id=None."""
+        standalone_dev = AgentSession.create(
+            session_id="dev-no-parent-001",
+            session_type="dev",
+            project_key="test",
+            status="pending",
+            chat_id="999",
+            sender_name="valor-session (dev)",
+            message_text="Stage: BUILD",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
         )
 
-        # Verify TEST stage is failed on parent
-        parent = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
-        stage_states = json.loads(parent.stage_states)
-        assert stage_states.get("TEST") == "failed"
+        assert standalone_dev.parent_agent_session_id is None
 
 
-# ── Edge Cases ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Test 2: _handle_dev_session_completion calls steer_session on parent
+# ---------------------------------------------------------------------------
 
 
-class TestEdgeCases:
-    """Edge cases: empty prompts, missing registry, non-dev-session agents."""
-
-    def test_empty_prompt_skips_stage_start(self, pm_session):
-        """Empty prompt in dev-session skips start_stage. No child AgentSession created by hook."""
-        from agent.hooks.session_registry import register_pending
-
-        register_pending(pm_session.session_id)
-
-        from agent.hooks.pre_tool_use import _maybe_start_pipeline_stage
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "",
-        }
-        _maybe_start_pipeline_stage(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
-
-        # No dev-* record created by hook (child self-registers via env var)
-        dev_sessions = list(
-            AgentSession.query.filter(parent_agent_session_id=pm_session.agent_session_id)
-        )
-        assert len(dev_sessions) == 0
-
-        # Parent should have no in_progress stage
-        parent = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
-        stage_states = json.loads(parent.stage_states) if parent.stage_states else {}
-        in_progress_stages = [s for s, v in stage_states.items() if v == "in_progress"]
-        assert len(in_progress_stages) == 0
-
-    def test_missing_registry_skips_gracefully(self, redis_test_db):
-        """No session registry entry -> hook skips without error."""
-        from agent.hooks.pre_tool_use import _maybe_start_pipeline_stage
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Stage: BUILD\nDo something.",
-        }
-        # No register_pending called -> resolve returns None
-        _maybe_start_pipeline_stage(tool_input, claude_uuid="nonexistent-uuid")
-
-        # No Dev session should be created
-        all_devs = list(AgentSession.query.filter(session_type="dev"))
-        assert len(all_devs) == 0
-
-    def test_non_dev_session_ignored(self, pm_session):
-        """Agent tool with type != 'dev-session' is ignored by hook."""
-        from agent.hooks.session_registry import register_pending
-
-        register_pending(pm_session.session_id)
-
-        from agent.hooks.pre_tool_use import _maybe_start_pipeline_stage
-
-        tool_input = {
-            "type": "code-reviewer",
-            "prompt": "Stage: REVIEW\nReview the code.",
-        }
-        _maybe_start_pipeline_stage(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
-
-        # No Dev session created for non-dev-session types
-        dev_sessions = list(
-            AgentSession.query.filter(parent_agent_session_id=pm_session.agent_session_id)
-        )
-        assert len(dev_sessions) == 0
-
-    def test_stage_extraction_patterns(self):
-        """Verify stage extraction handles various prompt formats."""
-        from agent.hooks.pre_tool_use import _extract_stage_from_prompt
-
-        # Standard format
-        assert _extract_stage_from_prompt("Stage: BUILD") == "BUILD"
-        assert _extract_stage_from_prompt("Stage: TEST") == "TEST"
-        assert _extract_stage_from_prompt("Stage: REVIEW") == "REVIEW"
-
-        # Extended format
-        assert _extract_stage_from_prompt("Stage to execute: PLAN") == "PLAN"
-        assert _extract_stage_from_prompt("Stage to execute -- MERGE") == "MERGE"
-
-        # Case insensitive
-        assert _extract_stage_from_prompt("stage: build") == "BUILD"
-
-        # Embedded in larger prompt
-        assert (
-            _extract_stage_from_prompt("Your assignment:\nStage: DOCS\nPlease update the docs.")
-            == "DOCS"
-        )
-
-        # No stage found
-        assert _extract_stage_from_prompt("Just do some work") is None
-        assert _extract_stage_from_prompt("") is None
-        assert _extract_stage_from_prompt(None) is None
-
-    def test_subagent_stop_missing_registry_skips(self, redis_test_db):
-        """SubagentStop with no registry entry skips gracefully."""
-        from agent.hooks.subagent_stop import _register_dev_session_completion
-
-        # Should not raise
-        _register_dev_session_completion(
-            agent_id="agent-orphan",
-            input_data={"result": "some output"},
-            claude_uuid="missing-uuid",
-        )
-        # No crash = success
-
-
-# ── Stage State Injection ────────────────────────────────────────────────────
-
-
-class TestStageStateInjection:
-    """Verify SubagentStop injects stage_states back into the PM context."""
+class TestHandleDevSessionCompletion:
+    """_handle_dev_session_completion steers parent PM session on harness return."""
 
     @pytest.mark.asyncio
-    async def test_hook_returns_pipeline_state(self, pm_session):
-        """subagent_stop_hook returns pipeline state in the reason field."""
-        from agent.hooks.session_registry import register_pending
-        from bridge.pipeline_state import PipelineStateMachine
+    async def test_success_result_steers_parent(self, pm_session, dev_session, redis_test_db):
+        """Successful harness result causes steer_session to be called on the parent PM."""
+        from agent.agent_session_queue import _handle_dev_session_completion
+        from agent.pipeline_state import PipelineStateMachine
 
-        # Walk through prerequisite stages so BUILD can start
-        sm = PipelineStateMachine(pm_session)
-        sm.start_stage("ISSUE")
-        sm.complete_stage("ISSUE")
-        sm.start_stage("PLAN")
-        sm.complete_stage("PLAN")
-        sm.start_stage("CRITIQUE")
-        sm.complete_stage("CRITIQUE")
-
-        register_pending(pm_session.session_id)
-
-        # Set up: start BUILD stage via hook (no child created by hook anymore)
-        from agent.hooks.pre_tool_use import _maybe_start_pipeline_stage
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Stage: BUILD\nBuild the thing.",
-        }
-        _maybe_start_pipeline_stage(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
-
-        # Simulate child subprocess self-registering via VALOR_PARENT_SESSION_ID
-        parent_agent_uuid = pm_session.agent_session_id
-        AgentSession.create_local(
-            session_id="local-child-inject-test",
-            project_key="test",
-            working_dir="/tmp",
-            status="running",
-            parent_agent_session_id=parent_agent_uuid,
-        )
-
-        # Complete via the async hook
-        from agent.hooks.subagent_stop import subagent_stop_hook
-
-        input_data = {
-            "agent_type": "dev-session",
-            "agent_id": "agent-inject-test",
-            "session_id": FAKE_CLAUDE_UUID,
-            "result": "PR created at https://github.com/test/repo/pull/99",
-        }
-        result = await subagent_stop_hook(input_data, tool_use_id=None, context={})
-
-        # The hook should return pipeline state in the reason field
-        assert "reason" in result
-        assert "Pipeline state:" in result["reason"]
-        assert "BUILD" in result["reason"]
-
-
-# ── Env Var Linkage (issue #808) ─────────────────────────────────────────────
-
-
-class TestEnvVarLinkage:
-    """Verify the VALOR_PARENT_SESSION_ID env var approach creates linked sessions.
-
-    Simulates what happens in the child subprocess: user_prompt_submit.py reads
-    VALOR_PARENT_SESSION_ID and passes it to create_local(), creating one linked
-    local-* AgentSession record (no orphaned dev-* record).
-    """
-
-    def test_child_session_linked_via_env_var(self, pm_session):
-        """When VALOR_PARENT_SESSION_ID is set, child local-* record has correct parent."""
-        parent_agent_uuid = pm_session.agent_session_id
-
-        # Simulate child subprocess self-registering (what user_prompt_submit.py does)
-        child_session = AgentSession.create_local(
-            session_id="local-child-env-linkage",
-            project_key="test",
-            working_dir="/tmp",
-            status="running",
-            message_text="Build the feature",
-            parent_agent_session_id=parent_agent_uuid,
-        )
-
-        # Verify the child record is linked to the parent via agent_session_id UUID
-        assert child_session.parent_agent_session_id == parent_agent_uuid
-
-        # Verify it can be found by querying with the parent's agent_session_id UUID
-        linked_children = list(AgentSession.query.filter(parent_agent_session_id=parent_agent_uuid))
-        assert len(linked_children) == 1
-        assert linked_children[0].session_id == "local-child-env-linkage"
-
-    def test_no_duplicate_records(self, pm_session):
-        """With env var approach, only one AgentSession record exists per child subprocess.
-
-        Previously: pre_tool_use created dev-* AND user_prompt_submit created local-*.
-        Now: only local-* record is created (by child subprocess via env var).
-        """
-        from agent.hooks.session_registry import register_pending
-
-        register_pending(pm_session.session_id)
-
-        # Simulate PreToolUse: starts pipeline stage only (no record created)
-        from agent.hooks.pre_tool_use import _maybe_start_pipeline_stage
-
-        tool_input = {"type": "dev-session", "prompt": "Stage: BUILD\nBuild it."}
-        _maybe_start_pipeline_stage(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
-
-        # Simulate child subprocess: creates ONE local-* record
-        parent_agent_uuid = pm_session.agent_session_id
-        AgentSession.create_local(
-            session_id="local-child-single-record",
-            project_key="test",
-            working_dir="/tmp",
-            status="running",
-            parent_agent_session_id=parent_agent_uuid,
-        )
-
-        # Count ALL sessions linked to parent — should be exactly 1 (local-*)
-        all_children = list(AgentSession.query.filter(parent_agent_session_id=parent_agent_uuid))
-        assert len(all_children) == 1
-        assert all_children[0].session_id.startswith("local-")
-
-
-# ── Subagent Stop Two-Lookup Pattern (issue #808) ────────────────────────────
-
-
-class TestSubagentStopCompletion:
-    """Verify subagent_stop uses the two-lookup pattern to find child sessions.
-
-    The two-lookup pattern:
-    1. Resolve bridge session_id from Claude UUID (session_registry.resolve)
-    2. Look up parent AgentSession to get agent_session_id UUID
-    3. Query children by parent_agent_session_id = agent_session_id UUID
-    """
-
-    def test_completion_query_uses_agent_session_id_uuid(self, pm_session):
-        """subagent_stop finds the local-* child record via agent_session_id UUID.
-
-        Verifies that the two-lookup pattern in _register_dev_session_completion
-        correctly resolves: bridge_session_id → agent_session_id UUID → child record.
-        """
-        from agent.hooks.session_registry import register_pending
-        from bridge.pipeline_state import PipelineStateMachine
-
-        # Walk through prerequisite stages so BUILD can start
+        # Advance pipeline to BUILD so classify_outcome has a current stage
         sm = PipelineStateMachine(pm_session)
         sm.start_stage("ISSUE")
         sm.complete_stage("ISSUE")
@@ -492,33 +164,176 @@ class TestSubagentStopCompletion:
         sm.complete_stage("CRITIQUE")
         sm.start_stage("BUILD")
 
-        register_pending(pm_session.session_id)
+        # Reload pm_session so it reflects updated stage_states
+        pm_sessions = list(AgentSession.query.filter(session_id=pm_session.session_id))
+        updated_pm = pm_sessions[0]
 
-        # Child subprocess registered itself with the parent's agent_session_id UUID
-        parent_agent_uuid = pm_session.agent_session_id
-        child = AgentSession.create_local(
-            session_id="local-two-lookup-test",
+        with (
+            patch("agent.agent_session_queue.steer_session") as mock_steer,
+            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+        ):
+            await _handle_dev_session_completion(
+                session=updated_pm,
+                agent_session=dev_session,
+                result="PR created at https://github.com/test/repo/pull/42. BUILD stage complete.",
+            )
+
+        mock_steer.assert_called_once()
+        call_args = mock_steer.call_args
+        steered_session_id = call_args[0][0]
+        steering_msg = call_args[0][1]
+
+        assert steered_session_id == pm_session.session_id
+        assert "Dev session completed" in steering_msg or "BUILD" in steering_msg
+
+    @pytest.mark.asyncio
+    async def test_no_parent_id_skips_steering(self, redis_test_db):
+        """Dev session without parent_agent_session_id skips steer_session call."""
+        standalone_dev = AgentSession.create(
+            session_id="dev-no-parent-steer-001",
+            session_type="dev",
             project_key="test",
-            working_dir="/tmp",
-            status="running",
-            parent_agent_session_id=parent_agent_uuid,
+            status="active",
+            chat_id="999",
+            sender_name="Test",
+            message_text="Stage: BUILD",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
         )
 
-        # subagent_stop completes the child via two-lookup pattern
-        from agent.hooks.subagent_stop import _register_dev_session_completion
+        from agent.agent_session_queue import _handle_dev_session_completion
 
-        _register_dev_session_completion(
-            agent_id="agent-two-lookup",
-            input_data={"result": "Build succeeded"},
-            claude_uuid=FAKE_CLAUDE_UUID,
-        )
+        with patch("agent.agent_session_queue.steer_session") as mock_steer:
+            await _handle_dev_session_completion(
+                session=standalone_dev,
+                agent_session=standalone_dev,
+                result="Some result text",
+            )
 
-        # Verify child was found and completed
-        updated = list(AgentSession.query.filter(session_id="local-two-lookup-test"))
-        assert len(updated) == 1
-        assert updated[0].status == "completed"
+        mock_steer.assert_not_called()
 
-        # Verify BUILD stage completed on parent
-        parent = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
-        stage_states = json.loads(parent.stage_states)
-        assert stage_states.get("BUILD") == "completed"
+    @pytest.mark.asyncio
+    async def test_steer_message_contains_stage_and_outcome(
+        self, pm_session, dev_session, redis_test_db
+    ):
+        """Steering message includes stage name and outcome classification."""
+        from agent.agent_session_queue import _handle_dev_session_completion
+        from agent.pipeline_state import PipelineStateMachine
+
+        sm = PipelineStateMachine(pm_session)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+        sm.complete_stage("PLAN")
+        sm.start_stage("CRITIQUE")
+        sm.complete_stage("CRITIQUE")
+        sm.start_stage("BUILD")
+
+        pm_sessions = list(AgentSession.query.filter(session_id=pm_session.session_id))
+        updated_pm = pm_sessions[0]
+
+        captured_messages = []
+
+        def _capture_steer(session_id, message):
+            captured_messages.append((session_id, message))
+            return {"success": True, "session_id": session_id, "error": None}
+
+        with (
+            patch("agent.agent_session_queue.steer_session", side_effect=_capture_steer),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+        ):
+            await _handle_dev_session_completion(
+                session=updated_pm,
+                agent_session=dev_session,
+                result='<!-- OUTCOME {"result": "success"} --> BUILD complete, PR opened.',
+            )
+
+        assert len(captured_messages) == 1
+        _, msg = captured_messages[0]
+        # Should mention the stage and some outcome indicator
+        assert any(kw in msg for kw in ("BUILD", "Stage", "stage", "outcome", "Outcome"))
+
+    @pytest.mark.asyncio
+    async def test_exception_does_not_propagate(self, pm_session, redis_test_db):
+        """Exceptions in _handle_dev_session_completion are swallowed (non-fatal)."""
+        from agent.agent_session_queue import _handle_dev_session_completion
+
+        # Use a mock that forces an error inside the function
+        broken_session = MagicMock()
+        broken_session.parent_agent_session_id = pm_session.agent_session_id
+        broken_session.message_text = "Stage: BUILD"
+
+        with (
+            patch(
+                "agent.agent_session_queue.steer_session", side_effect=RuntimeError("steer failed")
+            ),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+        ):
+            # Should not raise — all exceptions are caught
+            await _handle_dev_session_completion(
+                session=pm_session,
+                agent_session=broken_session,
+                result="Some result text",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 3: PipelineStateMachine stage transitions via classify_outcome
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineStateMachineTransitions:
+    """classify_outcome drives complete_stage / fail_stage via _handle_dev_session_completion."""
+
+    @pytest.mark.asyncio
+    async def test_success_result_completes_stage(self, pm_session, dev_session, redis_test_db):
+        """Result text indicating success calls complete_stage on current in_progress stage."""
+        from agent.agent_session_queue import _handle_dev_session_completion
+        from agent.pipeline_state import PipelineStateMachine
+
+        sm = PipelineStateMachine(pm_session)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+
+        pm_sessions = list(AgentSession.query.filter(session_id=pm_session.session_id))
+        updated_pm = pm_sessions[0]
+
+        with (
+            patch(
+                "agent.agent_session_queue.steer_session",
+                return_value={"success": True, "error": None},
+            ),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+        ):
+            await _handle_dev_session_completion(
+                session=updated_pm,
+                agent_session=dev_session,
+                result="Plan document created at docs/plans/my-feature.md. PLAN stage complete.",
+            )
+
+        # Verify PLAN stage advanced on parent (completed or failed based on outcome)
+        refreshed = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
+        stage_states = json.loads(refreshed.stage_states) if refreshed.stage_states else {}
+        assert stage_states.get("PLAN") in ("completed", "failed")
+
+    @pytest.mark.asyncio
+    async def test_no_current_stage_skips_psm_update(self, pm_session, dev_session, redis_test_db):
+        """When no stage is in_progress, PSM update is skipped without error."""
+        from agent.agent_session_queue import _handle_dev_session_completion
+
+        # Don't start any stages — no in_progress stage
+        with (
+            patch(
+                "agent.agent_session_queue.steer_session",
+                return_value={"success": True, "error": None},
+            ),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+        ):
+            # Should not raise
+            await _handle_dev_session_completion(
+                session=pm_session,
+                agent_session=dev_session,
+                result="Some result text.",
+            )

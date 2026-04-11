@@ -192,29 +192,12 @@ class BackgroundTask:
                 elapsed += heartbeat_interval
                 if self._task and not self._task.done():
                     communicated = self.messenger.has_communicated()
-                    # Issue #597: Enrich heartbeat with tool activity from session registry
-                    try:
-                        from agent.hooks.session_registry import get_activity
-
-                        activity = get_activity(self.messenger.session_id)
-                        tool_count = activity.get("tool_count", 0)
-                        last_tools = activity.get("last_tools", [])
-                        last_tools_str = ",".join(last_tools) if last_tools else "none"
-                        logger.info(
-                            "[%s] SDK heartbeat: running %ds, communicated=%s, tools=%d, last=%s",
-                            self.messenger.session_id,
-                            elapsed,
-                            communicated,
-                            tool_count,
-                            last_tools_str,
-                        )
-                    except Exception:
-                        logger.info(
-                            "[%s] SDK heartbeat: running %ds, communicated=%s",
-                            self.messenger.session_id,
-                            elapsed,
-                            communicated,
-                        )
+                    logger.info(
+                        "[%s] SDK heartbeat: running %ds, communicated=%s",
+                        self.messenger.session_id,
+                        elapsed,
+                        communicated,
+                    )
         except asyncio.CancelledError:
             # Normal cancellation when task completes
             pass

@@ -62,9 +62,7 @@ PM session attempts a mutating operation. Three layers of enforcement apply:
    the PM from trying in the first place.
 
 Any mutation (building, testing, committing, installing, recovering) must be
-dispatched to a Dev session via `Agent(subagent_type="dev-session", ...)`. The
-Dev session's hook check does not apply the PM allowlist (it inspects
-`SESSION_TYPE=pm` specifically), so Dev sessions retain full tool access.
+dispatched to a Dev session via `python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "..."`. The worker creates and routes the Dev session with full tool access. The PM's hook allowlist only blocks PM sessions (`SESSION_TYPE=pm`), so Dev sessions retain full tool access.
 
 ## Architecture
 
@@ -105,9 +103,10 @@ resolve_persona(project, chat_title, is_dm)
                     |
                     v
                 PM assesses current stage
-                    |-- Spawns one Dev session per stage
-                    |-- Verifies result before progressing
-                    |-- Repeats until pipeline complete
+                    |-- Creates Dev session via valor_session CLI
+                    |-- Worker executes Dev session (SDK or CLI harness)
+                    |-- Worker steers PM with completion status
+                    |-- PM verifies and repeats until pipeline complete
                     |
                     v
                 PM composes delivery
@@ -200,10 +199,11 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 ### Flow
 
 1. **PM assesses current stage** -- uses read-only Bash commands (gh, grep) to check what exists (issue, plan, PR, test status, review state)
-2. **PM spawns one Dev session** -- dispatches a single-stage assignment with the Agent tool, including stage name, issue/PR URLs, current state, and acceptance criteria
-3. **Dev session executes the assigned stage** -- runs the appropriate skill (/do-plan, /do-build, /do-test, etc.) and reports the result
-4. **PM verifies the result** -- checks that the stage completed successfully
-5. **PM repeats** -- assesses the next stage, spawns another Dev session, until the pipeline is complete or human input is needed
+2. **PM creates one Dev session** -- calls `python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "..."` with the stage assignment (stage name, issue/PR URLs, current state, acceptance criteria)
+3. **Worker executes the Dev session** -- routes to SDK or CLI harness based on `DEV_SESSION_HARNESS`; runs the appropriate skill (/do-plan, /do-build, /do-test, etc.)
+4. **Worker steers PM with result** -- `_handle_dev_session_completion()` classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers the parent PM session
+5. **PM verifies the result** -- receives steering message with completion status and stage outcome
+6. **PM repeats** -- assesses the next stage, creates another Dev session, until the pipeline is complete or human input is needed
 
 ### Why Stage-by-Stage
 
@@ -216,121 +216,84 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 
 The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the Dev session bypasses the pipeline. The warning is logged to stderr and is non-fatal.
 
-## Hook-Driven Lifecycle
+## Worker-Driven Lifecycle
 
-The parent-child session lifecycle is driven by two SDK hooks: **PreToolUse** and **SubagentStop**. These hooks automatically register child Dev sessions in Redis, start pipeline stages, and record stage outcomes when the child completes.
+The parent-child session lifecycle is driven by the worker's post-completion handler and two SDK hooks for stage tracking.
 
-### Child Session Self-Registration (VALOR_PARENT_SESSION_ID)
+### Dev Session Creation (PM → valor_session CLI)
 
-Before spawning the child subprocess, `sdk_client.py._create_options()` injects the parent's `agent_session_id` UUID as `VALOR_PARENT_SESSION_ID` into the child's subprocess environment. This is how the child subprocess knows which parent to link to:
+The PM session creates Dev sessions by calling:
 
-```python
-# In sdk_client.py._create_options()
-if self.agent_session_id and self.session_type in (SessionType.PM, SessionType.TEAMMATE):
-    env["VALOR_PARENT_SESSION_ID"] = self.agent_session_id
+```bash
+python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."
 ```
 
-When the child Claude Code CLI starts, `user_prompt_submit.py` fires on the first prompt. It reads `VALOR_PARENT_SESSION_ID` and passes it to `create_local()`:
-
-```python
-# In user_prompt_submit.py
-parent_agent_session_id = os.environ.get("VALOR_PARENT_SESSION_ID")
-agent_session = AgentSession.create_local(
-    session_id=local_session_id,
-    ...
-    **({"parent_agent_session_id": parent_agent_session_id} if parent_agent_session_id else {}),
-)
-```
-
-This creates **one** `local-*` AgentSession record with `parent_agent_session_id` correctly set to the parent's `agent_session_id` UUID.
-
-**Key**: `VALOR_PARENT_SESSION_ID` carries the `agent_session_id` UUID (e.g., `agt_xxx`), not the bridge `session_id` (e.g., `tg_valor_...`). This is the canonical FK stored in `parent_agent_session_id` on the child's AgentSession record.
-
-**Edge cases**:
-- `VALOR_PARENT_SESSION_ID` absent (non-child sessions, Dev sessions): `os.environ.get()` returns `None`, `create_local()` behaves identically to before.
-- `VALOR_PARENT_SESSION_ID` present but parent record deleted: child session saves fine, `parent_agent_session_id` points to a non-existent record (pre-existing risk, not introduced by this approach).
+This enqueues a new `AgentSession` record with `session_type="dev"` and `parent_agent_session_id` set to the PM's `agent_session_id`. The worker then picks up and executes the session.
 
 ### Spawn-Execute-Return Flow
 
 ```
-sdk_client._create_options() injects VALOR_PARENT_SESSION_ID=<agent_session_id>
+PM session calls valor_session create --role dev --parent <agent_session_id>
     |
     v
-PM (PM session) calls Agent tool with type="dev-session"
+AgentSession created (session_type="dev", parent_agent_session_id=<pm_id>)
     |
     v
-PreToolUse hook fires (agent/hooks/pre_tool_use.py)
-    |-- Detects tool_name == "Agent", type == "dev-session"
-    |-- session_registry.resolve(claude_uuid) -> bridge session_id
-    |-- _extract_stage_from_prompt(prompt) -> e.g. "BUILD"
-    |-- PipelineStateMachine(parent).start_stage("BUILD")
-    |       -> marks stage as "in_progress" in parent's stage_states
-    |   NOTE: create_child() is NOT called here (issue #808).
-    |         The child subprocess self-registers (see below).
+Worker picks up Dev session from Redis queue
     |
     v
-Child subprocess starts (Claude Code CLI)
-    |
-    v
-user_prompt_submit.py fires on first prompt
-    |-- Reads VALOR_PARENT_SESSION_ID from env -> parent agent_session_id UUID
-    |-- AgentSession.create_local(session_id="local-*", parent_agent_session_id=...)
-    |       -> Creates ONE linked AgentSession record (no orphaned dev-* record)
+_execute_agent_session() routes by DEV_SESSION_HARNESS
+    |-- sdk (default): get_agent_response_sdk()
+    |-- claude-cli: get_response_via_harness()  <- CLI subprocess
     |
     v
 Dev session executes assigned work
     |-- Runs the appropriate skill (/do-build, /do-test, etc.)
-    |-- Commits code, runs tests, produces output
+    |-- Commits code, runs tests, streams output
     |
     v
-SubagentStop hook fires (agent/hooks/subagent_stop.py)
-    |-- Detects agent_type == "dev-session"
-    |-- session_registry.resolve(claude_uuid) -> bridge session_id
-    |-- Two-lookup: session_id -> AgentSession -> agent_session_id UUID
-    |-- AgentSession.query.filter(parent_agent_session_id=agent_session_id_uuid)
-    |       -> Finds local-* child record
-    |-- Marks Dev session status = "completed" in Redis
-    |-- _extract_output_tail(input_data) -> last ~500 chars
-    |-- PipelineStateMachine(parent).classify_outcome(stage, ..., output_tail)
+_handle_dev_session_completion() (agent/agent_session_queue.py)
+    |-- Looks up parent PM session via parent_agent_session_id
+    |-- PipelineStateMachine(parent).classify_outcome(stage, result)
     |       |
     |       |-- "success" or "ambiguous" -> complete_stage(stage)
     |       |-- "fail" or "partial"      -> fail_stage(stage)
-    |
-    v
-Hook returns {"reason": "Pipeline state: {stage_states}"}
-    -> Injected into PM's context so it sees current pipeline state
+    |-- post_stage_comment() -> GitHub issue comment
+    |-- steer_session(parent.session_id, completion_summary)
+    |       -> PM receives steering message with stage outcome
 ```
+
+### SDK Hook Path (PM Sessions Using Skill Tool)
+
+When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), the pre/post hooks track stage transitions:
+
+- **PreToolUse** (`agent/hooks/pre_tool_use.py`): Detects Skill tool, looks up stage in `_SKILL_TO_STAGE`, calls `PipelineStateMachine(parent).start_stage()`. Session ID from `AGENT_SESSION_ID` env var.
+- **PostToolUse** (`agent/hooks/post_tool_use.py`): Detects Skill completion, calls `_complete_pipeline_stage()`. Reads current in_progress stage from Redis directly.
 
 ### Key Components
 
 | Component | File | Role |
 |-----------|------|------|
-| `_create_options()` | `agent/sdk_client.py` | Injects `VALOR_PARENT_SESSION_ID` into child subprocess env (PM/Teammate sessions only) |
-| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Starts pipeline stage on dev-session Agent tool call (Skill path also handled) |
-| `_maybe_start_pipeline_stage()` | `agent/hooks/pre_tool_use.py` | Starts the SDLC pipeline stage; does NOT create child AgentSession (child self-registers) |
-| `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path; always runs watchdog health check |
-| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Completes Dev session, classifies outcome, records stage result (dev-session path) |
-| `_register_dev_session_completion()` | `agent/hooks/subagent_stop.py` | Two-lookup pattern: bridge session_id → agent_session_id UUID → find child local-* records |
-| `session_registry` | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs (see [Session Isolation](session-isolation.md)) |
-| `PipelineStateMachine` | `bridge/pipeline_state.py` | Manages stage_states on the parent AgentSession |
-| `_extract_stage_from_prompt()` | `agent/hooks/pre_tool_use.py` | Parses "Stage: BUILD" patterns from dev-session prompts |
-| `classify_outcome()` | `bridge/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
-| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, creates the `local-*` AgentSession record; reads `SESSION_TYPE` and `VALOR_PARENT_SESSION_ID` env vars to register persona and parent linkage |
-
-### Stage Extraction
-
-The PreToolUse hook extracts the SDLC stage name from the dev-session prompt using pattern matching. It recognizes patterns like `Stage: BUILD`, `Stage to execute -- PLAN`, and falls back to scanning for standalone stage names near the "stage" keyword. Recognized stages: ISSUE, PLAN, CRITIQUE, BUILD, TEST, PATCH, REVIEW, DOCS, MERGE.
+| `_handle_dev_session_completion()` | `agent/agent_session_queue.py` | Worker post-completion: classifies outcome, posts GitHub comment, steers parent PM |
+| `_extract_issue_number()` | `agent/agent_session_queue.py` | Resolves tracking issue from env vars or session message_text |
+| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Starts pipeline stage on Skill tool calls (PM Skill path) |
+| `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path |
+| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Logs Dev session completion (SDLC tracking moved to worker) |
+| `PipelineStateMachine` | `agent/pipeline_state.py` | Manages stage_states on the parent AgentSession (moved from `bridge/` in Phase 3) |
+| `classify_outcome()` | `agent/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
+| `get_definition()` | `agent/agent_definitions.py` | Returns actionable error for stale callers requesting `"dev-session"` Agent tool dispatch |
+| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, creates the `local-*` AgentSession record; reads `SESSION_TYPE` and `VALOR_PARENT_SESSION_ID` env vars |
 
 ### Outcome Classification
 
-When a Dev session completes, the SubagentStop hook extracts the last ~500 characters of output (from the agent transcript file or fallback summary) and passes them to `PipelineStateMachine.classify_outcome()`. Classification uses three tiers: Tier 0 parses structured `<!-- OUTCOME {...} -->` contracts emitted by skills, Tier 1 checks SDK stop_reason, and Tier 2 falls back to text pattern matching. The outcome determines whether the stage is marked as completed or failed on the parent session:
+After the worker's harness completes, `_handle_dev_session_completion()` passes the result text to `PipelineStateMachine.classify_outcome()`. Classification uses three tiers: Tier 0 parses structured `<!-- OUTCOME {...} -->` contracts emitted by skills, Tier 1 checks SDK stop_reason, and Tier 2 falls back to text pattern matching. The outcome determines whether the stage is marked completed or failed on the parent session:
 
 - **success** or **ambiguous** -> `complete_stage()` (safe default for ambiguous)
 - **fail** or **partial** -> `fail_stage()`
 
 ### Error Handling
 
-Both hooks wrap all operations in try/except blocks. Failures are logged as warnings but never raised -- the hooks must not crash the Agent tool or block the PM from continuing. If stage extraction fails (e.g., empty prompt), the hook skips the `start_stage()` call gracefully. If the session registry has no mapping (e.g., running outside the bridge), the hook skips Dev session registration entirely.
+`_handle_dev_session_completion()` wraps all operations in try/except. Failures are logged as warnings but never raised — the worker must not crash on completion handling failures. The PM session still receives the steering message even if GitHub comment posting fails.
 
 ## Parent-Child Steering
 
@@ -387,19 +350,15 @@ Teammate message -> session_type="teammate" on AgentSession
 
 ## Agent Definitions
 
-The `dev-session` agent is defined in `agent/agent_definitions.py`:
-- `tools=None` (all tools, full write permissions)
-- `model=None` (inherits from parent session)
-- Single-stage executor: receives a stage assignment from the PM, executes it, reports result
-- Spawned by PM session via the Agent tool
+The `dev-session` Agent tool entry has been removed from `agent/agent_definitions.py` (Phase 5 cleanup). Dev sessions are now created as `AgentSession` records via `python -m tools.valor_session create --role dev`, not via the Agent tool. `get_definition()` returns an actionable error if a stale PM persona still calls `Agent(subagent_type="dev-session")`.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
-| `agent/agent_definitions.py` | Agent registry including dev-session |
-| `agent/agent_session_queue.py` | Queue with nudge loop and per-worker-key serialization; reads `session.project_config` at execution time; zero module-level bridge imports |
+| `agent/agent_definitions.py` | Agent registry; `get_definition()` provides actionable error for stale dev-session callers |
+| `agent/agent_session_queue.py` | Queue with nudge loop and per-worker-key serialization; `_handle_dev_session_completion()` for post-harness SDLC lifecycle |
 | `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery), `FileOutputHandler` (logs to `logs/worker/`), and `LoggingOutputHandler` implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
 | `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |

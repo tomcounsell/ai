@@ -163,10 +163,6 @@ class TestPersistentMode:
                 return_value=mock_fresh,
                 create=True,
             ),
-            patch(
-                "agent.hooks.session_registry.get_activity",
-                return_value={"tool_count": 0},
-            ),
         ):
             # Register event so request_shutdown can wake us
             _active_events[chat_id] = event
@@ -256,10 +252,6 @@ class TestGracefulShutdown:
                 "get",
                 return_value=mock_fresh,
                 create=True,
-            ),
-            patch(
-                "agent.hooks.session_registry.get_activity",
-                return_value={"tool_count": 0},
             ),
         ):
             await _worker_loop(chat_id, event)

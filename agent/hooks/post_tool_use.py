@@ -24,7 +24,7 @@ def _complete_pipeline_stage(session_id: str) -> None:
     Failures are logged but never raised -- this must not block the PM session.
     """
     try:
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
         from models.agent_session import AgentSession
 
         parent_sessions = list(AgentSession.query.filter(session_id=session_id))
@@ -76,16 +76,15 @@ async def post_tool_use_hook(
         skill_name = tool_input.get("skill", "")
         # Only process SDLC skills to avoid noise from non-pipeline skills
         if skill_name in _SKILL_TO_STAGE:
-            claude_uuid = input_data.get("session_id")
             try:
-                from agent.hooks.session_registry import resolve
+                import os
 
-                session_id = resolve(claude_uuid)
+                session_id = os.environ.get("AGENT_SESSION_ID")
                 if session_id:
                     _complete_pipeline_stage(session_id)
                 else:
                     logger.debug(
-                        f"[post_tool_use] No session ID for Skill '{skill_name}', "
+                        f"[post_tool_use] AGENT_SESSION_ID not set for Skill '{skill_name}', "
                         "skipping complete_stage"
                     )
             except Exception as e:

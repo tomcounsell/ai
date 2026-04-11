@@ -201,12 +201,12 @@ class TestMergeStageTracking:
     """Test MERGE stage is properly tracked across modules."""
 
     def test_merge_in_display_stages(self):
-        from bridge.pipeline_graph import DISPLAY_STAGES
+        from agent.pipeline_graph import DISPLAY_STAGES
 
         assert "MERGE" in DISPLAY_STAGES
 
     def test_merge_in_stage_to_skill(self):
-        from bridge.pipeline_graph import STAGE_TO_SKILL
+        from agent.pipeline_graph import STAGE_TO_SKILL
 
         assert "MERGE" in STAGE_TO_SKILL
         assert STAGE_TO_SKILL["MERGE"] == "/do-merge"
@@ -217,12 +217,12 @@ class TestMergeStageTracking:
         assert "MERGE" in SDLC_STAGES
 
     def test_docs_routes_to_merge(self):
-        from bridge.pipeline_graph import get_next_stage
+        from agent.pipeline_graph import get_next_stage
 
         result = get_next_stage("DOCS", "success")
         assert result == ("MERGE", "/do-merge")
 
     def test_merge_skill_mapped(self):
-        from bridge.pipeline_graph import STAGE_TO_SKILL
+        from agent.pipeline_graph import STAGE_TO_SKILL
 
         assert STAGE_TO_SKILL["MERGE"] == "/do-merge"

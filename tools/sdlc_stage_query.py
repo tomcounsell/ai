@@ -91,7 +91,7 @@ def _get_stage_states(session) -> dict[str, str]:
             return {}
 
         # Filter to known stages only, exclude internal metadata keys
-        from bridge.pipeline_state import ALL_STAGES
+        from agent.pipeline_state import ALL_STAGES
 
         return {k: v for k, v in data.items() if k in ALL_STAGES}
     except Exception as e:

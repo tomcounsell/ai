@@ -1,4 +1,4 @@
-"""PreToolUse hook: blocks sensitive writes, enforces PM limits, registers child Dev sessions.
+"""PreToolUse hook: blocks sensitive writes, enforces PM limits, tracks SDLC stage starts.
 
 PM Bash enforcement
 -------------------
@@ -10,6 +10,21 @@ contains shell metacharacters that could smuggle mutations -- is blocked with a
 
 The authoritative list of allowed/blocked commands lives in
 ``tests/unit/test_pm_session_permissions.py::TestPMBashRestriction``.
+
+Skill tool stage tracking
+-------------------------
+When a PM session calls the Skill tool (e.g., ``Skill(skill="do-build")``),
+``_handle_skill_tool_start()`` maps the skill name to an SDLC stage via
+``_SKILL_TO_STAGE`` and calls ``PipelineStateMachine.start_stage()`` on the
+parent session (resolved via the ``AGENT_SESSION_ID`` env var). This marks
+the stage as ``in_progress`` so the worker post-completion handler can later
+classify the outcome and call ``complete_stage()`` or ``fail_stage()``.
+
+Dev session registration is no longer done in this hook. Dev sessions are
+created as ``AgentSession`` records via ``valor_session create --role dev``
+and self-register their parent linkage via the ``VALOR_PARENT_SESSION_ID``
+env var (see Phase 4+5 of the harness abstraction in
+``docs/features/harness-abstraction.md``).
 """
 
 from __future__ import annotations
@@ -301,7 +316,7 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
     Failures are logged but never raised -- this must not block the Agent tool.
     """
     try:
-        from bridge.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import PipelineStateMachine
         from models.agent_session import AgentSession
 
         parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))
@@ -329,6 +344,10 @@ def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None
     Called from pre_tool_use_hook when tool_name == "Skill". Looks up the skill
     name in _SKILL_TO_STAGE and calls _start_pipeline_stage if a mapping exists.
     Silently ignores unknown skills and missing session IDs.
+
+    Session ID resolution uses AGENT_SESSION_ID env var (set by the worker when
+    spawning the session). This replaces the previous session_registry.resolve()
+    approach (Phase 5 cleanup).
     """
     skill_name = tool_input.get("skill", "")
     if not skill_name:
@@ -342,58 +361,17 @@ def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None
         )
         return
 
-    from agent.hooks.session_registry import resolve
+    import os
 
-    session_id = resolve(claude_uuid)
+    session_id = os.environ.get("AGENT_SESSION_ID")
     if not session_id:
         logger.debug(
-            f"[pre_tool_use] No session ID resolved for Skill '{skill_name}', skipping start_stage"
+            f"[pre_tool_use] AGENT_SESSION_ID not set for Skill '{skill_name}', "
+            "skipping start_stage"
         )
         return
 
     _start_pipeline_stage(session_id, stage)
-
-
-def _maybe_start_pipeline_stage(tool_input: dict[str, Any], claude_uuid: str | None = None) -> None:
-    """Start an SDLC pipeline stage when the Agent tool spawns a dev-session.
-
-    The child subprocess now self-registers its AgentSession via user_prompt_submit.py
-    reading VALOR_PARENT_SESSION_ID (issue #808). This function no longer creates a
-    dev-* AgentSession record — it only wires PipelineStateMachine.start_stage() so
-    subagent_stop can later find the in_progress stage and mark it completed.
-
-    Uses the session registry to resolve the bridge session ID from the
-    Claude Code UUID (issue #597). Falls back gracefully if not found.
-    """
-    from agent.hooks.session_registry import resolve
-
-    subagent_type = tool_input.get("type", "")
-    if subagent_type != "dev-session":
-        return
-
-    parent_session_id = resolve(claude_uuid)
-    if not parent_session_id:
-        logger.debug("[pre_tool_use] No bridge session in registry, skipping pipeline stage start")
-        return
-
-    # Wire PipelineStateMachine.start_stage() so subagent_stop can later
-    # find the in_progress stage and mark it completed.
-    try:
-        full_prompt = tool_input.get("prompt", "")
-        stage = _extract_stage_from_prompt(full_prompt)
-        if stage:
-            _start_pipeline_stage(parent_session_id, stage)
-        else:
-            logger.debug(
-                f"[pre_tool_use] No SDLC stage found in dev-session prompt, "
-                f"skipping start_stage (prompt[:100]={full_prompt[:100]!r})"
-            )
-    except Exception as e:
-        logger.warning(f"[pre_tool_use] Failed to start pipeline stage: {e}")
-
-
-# Backward-compatible alias so existing callers and tests can use either name.
-_maybe_register_dev_session = _maybe_start_pipeline_stage
 
 
 async def pre_tool_use_hook(
@@ -401,20 +379,14 @@ async def pre_tool_use_hook(
     tool_use_id: str | None,
     context: HookContext,
 ) -> dict[str, Any]:
-    """Block writes to sensitive files and register child Dev sessions on Agent tool calls.
+    """Block writes to sensitive files and track pipeline stage starts on Skill tool calls.
 
     Inspects Write and Edit tool calls for sensitive file paths
-    and blocks them before execution. Also detects when the Agent tool
-    spawns a dev-session and registers it in Redis with parent linkage.
+    and blocks them before execution. Detects Skill tool invocations to
+    wire PipelineStateMachine.start_stage() for PM session stage tracking.
     """
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
-
-    # Detect Agent tool spawning a dev-session
-    if tool_name == "Agent":
-        claude_uuid = input_data.get("session_id")
-        _maybe_start_pipeline_stage(tool_input, claude_uuid=claude_uuid)
-        return {}
 
     # Detect Skill tool invocations and map to pipeline stage start
     if tool_name == "Skill":

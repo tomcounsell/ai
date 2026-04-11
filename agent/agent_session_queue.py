@@ -265,7 +265,7 @@ async def _push_agent_session(
         try:
 
             def _init_stage_states():
-                from bridge.pipeline_state import PipelineStateMachine
+                from agent.pipeline_state import PipelineStateMachine
 
                 sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
                 if sessions and not sessions[0].stage_states:
@@ -2262,9 +2262,6 @@ async def _worker_loop(
                     # Fix 3: Always save diagnostic snapshot before deleting Redis record
                     try:
                         _event = "crash" if session_failed else "complete"
-                        from agent.hooks.session_registry import get_activity
-
-                        activity = get_activity(session.session_id)
                         save_session_snapshot(
                             session_id=session.session_id,
                             event=_event,
@@ -2276,7 +2273,6 @@ async def _worker_loop(
                             ),
                             extra_context={
                                 "agent_session_id": session.agent_session_id,
-                                "tool_count": activity.get("tool_count", 0),
                                 "trigger": "finally_block",
                             },
                             working_dir=str(
@@ -2662,6 +2658,134 @@ def steer_session(session_id: str, message: str) -> dict:
     except Exception as e:
         logger.error(f"[steering] steer_session failed for {session_id}: {e}")
         return {"success": False, "session_id": session_id, "error": str(e)}
+
+
+def _extract_issue_number(session: Any, agent_session: Any) -> int | None:
+    """Extract tracking issue number from session message text or env vars.
+
+    Looks for GitHub issue URL pattern "issues/NNN" in the session message_text
+    and in SDLC_TRACKING_ISSUE / SDLC_ISSUE_NUMBER env vars.
+
+    Returns:
+        Issue number as int, or None if not found.
+    """
+    import re as _re
+
+    # Check env vars first (most authoritative)
+    for env_key in ("SDLC_TRACKING_ISSUE", "SDLC_ISSUE_NUMBER"):
+        val = os.environ.get(env_key)
+        if val:
+            try:
+                return int(val)
+            except ValueError:
+                pass
+
+    # Search in session message text for "issues/NNN"
+    text = ""
+    if hasattr(session, "message_text") and session.message_text:
+        text = session.message_text
+    elif agent_session and hasattr(agent_session, "message_text") and agent_session.message_text:
+        text = agent_session.message_text
+
+    if text:
+        match = _re.search(r"issues/(\d+)", text)
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
+async def _handle_dev_session_completion(
+    session: Any,
+    agent_session: Any,
+    result: str,
+) -> None:
+    """Handle SDLC post-completion for dev role sessions run via CLI harness.
+
+    Called after _get_response_via_harness() returns. Classifies the outcome,
+    updates PipelineStateMachine, posts a stage comment to the tracking issue,
+    and steers the parent PM session with the completion status.
+
+    All operations are wrapped in try/except -- failures never crash the worker.
+
+    Args:
+        session: The lightweight session record (from _send_callbacks key).
+        agent_session: The AgentSession popoto model instance (may be None).
+        result: Final result text from the harness.
+    """
+    try:
+        # Get parent PM session
+        parent_id = (
+            getattr(agent_session, "parent_agent_session_id", None) if agent_session else None
+        )
+        if not parent_id:
+            logger.debug(
+                "[harness] No parent_agent_session_id on dev session, skipping PM steering"
+            )
+            return
+
+        from models.agent_session import AgentSession as ParentAgentSession
+
+        parent = ParentAgentSession.get_by_id(parent_id)
+        if not parent:
+            logger.warning(f"[harness] Parent session {parent_id} not found, skipping PM steering")
+            return
+
+        # Classify outcome and update pipeline state
+        try:
+            from agent.pipeline_state import PipelineStateMachine
+
+            psm = PipelineStateMachine(parent)
+            current_stage = psm.current_stage()
+            outcome = psm.classify_outcome(current_stage, None, result)
+            if outcome == "success":
+                psm.complete_stage(current_stage)
+            else:
+                psm.fail_stage(current_stage)
+            logger.info(
+                f"[harness] Dev session completion: outcome={outcome}, stage={current_stage}"
+            )
+        except Exception as psm_err:
+            logger.warning(f"[harness] PipelineStateMachine update failed (non-fatal): {psm_err}")
+            outcome = "success" if result and len(result) > 10 else "fail"
+            current_stage = None
+
+        # Post stage comment to GitHub issue
+        try:
+            issue_number = _extract_issue_number(session, agent_session)
+            if issue_number and current_stage:
+                from utils.issue_comments import post_stage_comment
+
+                success = post_stage_comment(
+                    issue_number=issue_number,
+                    stage=current_stage,
+                    outcome=outcome,
+                )
+                if success:
+                    logger.info(
+                        f"[harness] Posted stage comment: {current_stage} on issue #{issue_number}"
+                    )
+                else:
+                    logger.warning(
+                        f"[harness] Failed to post stage comment on issue #{issue_number}"
+                    )
+        except Exception as comment_err:
+            logger.warning(f"[harness] Stage comment posting failed (non-fatal): {comment_err}")
+
+        # Steer parent PM session with pipeline state update
+        try:
+            result_preview = result[:500] if result else "(no result)"
+            steering_msg = (
+                f"Dev session completed. Stage: {current_stage or 'unknown'}. "
+                f"Outcome: {outcome}. Result preview: {result_preview}"
+            )
+            steer_session(parent.session_id, steering_msg)
+            logger.info(f"[harness] Steered parent PM session {parent.session_id}")
+        except Exception as steer_err:
+            logger.warning(f"[harness] PM session steering failed (non-fatal): {steer_err}")
+
+    except Exception as e:
+        logger.warning(f"[harness] _handle_dev_session_completion failed (non-fatal): {e}")
 
 
 async def _execute_agent_session(session: AgentSession) -> None:
@@ -3216,6 +3340,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
             )
     finally:
         heartbeat.cancel()
+
+    # Post-completion SDLC handling for dev sessions run via CLI harness (Phase 3)
+    if _use_cli_harness and not task.error:
+        await _handle_dev_session_completion(
+            session=session,
+            agent_session=agent_session,
+            result=task._result or "",
+        )
 
     # Update session status in Redis via AgentSession
     # When auto-continue deferred, session is still active (not completed)

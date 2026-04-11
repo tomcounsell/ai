@@ -1,6 +1,6 @@
-"""Tests for bridge.pipeline_graph — canonical SDLC pipeline routing."""
+"""Tests for agent.pipeline_graph — canonical SDLC pipeline routing."""
 
-from bridge.pipeline_graph import (
+from agent.pipeline_graph import (
     DISPLAY_STAGES,
     MAX_CRITIQUE_CYCLES,
     MAX_PATCH_CYCLES,

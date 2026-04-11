@@ -146,25 +146,32 @@ class TestWatchdogHook:
         _tool_counts.clear()
 
     @pytest.fixture(autouse=True)
-    def _no_env_session(self, monkeypatch):
-        """Ensure VALOR_SESSION_ID env var doesn't override test session IDs."""
-        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+    def _set_agent_session_id(self, monkeypatch):
+        """Set AGENT_SESSION_ID env var for session counting in watchdog_hook.
+
+        Phase 5 update: session_registry.resolve() removed; AGENT_SESSION_ID
+        env var is now the source of truth for session identification in hooks.
+        """
+        # Will be overridden per-test as needed
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
     @pytest.mark.asyncio
-    async def test_skips_before_interval(self):
+    async def test_skips_before_interval(self, monkeypatch):
         """Hook should return continue=True without calling judge before interval."""
-        input_data = {"session_id": "test-1", "transcript_path": ""}
+        monkeypatch.setenv("AGENT_SESSION_ID", "test-1")
+        input_data = {"session_id": "claude-uuid-1", "transcript_path": ""}
         result = await watchdog_hook(input_data, None, None)
         assert result["continue_"] is True
         assert _tool_counts["test-1"] == 1
 
     @pytest.mark.asyncio
-    async def test_fires_at_interval(self):
+    async def test_fires_at_interval(self, monkeypatch):
         """Hook should call judge at CHECK_INTERVAL."""
+        monkeypatch.setenv("AGENT_SESSION_ID", "test-2")
         transcript = _make_transcript(
             [("Bash", {"command": f"cmd-{i}"}) for i in range(CHECK_INTERVAL)]
         )
-        input_data = {"session_id": "test-2", "transcript_path": str(transcript)}
+        input_data = {"session_id": "claude-uuid-2", "transcript_path": str(transcript)}
 
         # Fast-forward counter to CHECK_INTERVAL - 1
         _tool_counts["test-2"] = CHECK_INTERVAL - 1
@@ -178,12 +185,13 @@ class TestWatchdogHook:
         transcript.unlink()
 
     @pytest.mark.asyncio
-    async def test_blocks_on_unhealthy(self):
+    async def test_blocks_on_unhealthy(self, monkeypatch):
         """Hook should inject stop directive and set unhealthy flag when judge says unhealthy."""
+        monkeypatch.setenv("AGENT_SESSION_ID", "test-3")
         transcript = _make_transcript(
             [("Bash", {"command": "git status"}) for _ in range(CHECK_INTERVAL)]
         )
-        input_data = {"session_id": "test-3", "transcript_path": str(transcript)}
+        input_data = {"session_id": "claude-uuid-3", "transcript_path": str(transcript)}
         _tool_counts["test-3"] = CHECK_INTERVAL - 1
 
         with (
@@ -202,9 +210,10 @@ class TestWatchdogHook:
         transcript.unlink()
 
     @pytest.mark.asyncio
-    async def test_continues_on_judge_error(self):
+    async def test_continues_on_judge_error(self, monkeypatch):
         """Hook should never block due to its own errors."""
-        input_data = {"session_id": "test-4", "transcript_path": "/nonexistent"}
+        monkeypatch.setenv("AGENT_SESSION_ID", "test-4")
+        input_data = {"session_id": "claude-uuid-4", "transcript_path": "/nonexistent"}
         _tool_counts["test-4"] = CHECK_INTERVAL - 1
 
         with patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge:

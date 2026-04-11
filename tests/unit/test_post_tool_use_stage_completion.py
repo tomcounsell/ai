@@ -41,7 +41,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -61,7 +61,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -82,7 +82,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -103,7 +103,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -125,7 +125,7 @@ class TestCompletePipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -137,12 +137,17 @@ class TestCompletePipelineStage:
 
 
 class TestPostToolUseHookSkillCompletion:
-    """Test that post_tool_use_hook calls _complete_pipeline_stage on Skill tool completions."""
+    """Test that post_tool_use_hook calls _complete_pipeline_stage on Skill tool completions.
+
+    Phase 5 update: Session resolution uses AGENT_SESSION_ID env var instead of
+    session_registry.resolve().
+    """
 
     @pytest.mark.asyncio
-    async def test_skill_tool_triggers_complete_stage(self):
+    async def test_skill_tool_triggers_complete_stage(self, monkeypatch):
         """A known SDLC Skill tool call invokes _complete_pipeline_stage."""
         mock_watchdog = AsyncMock(return_value={})
+        monkeypatch.setenv("AGENT_SESSION_ID", "bridge-session-1")
         input_data = {
             "tool_name": "Skill",
             "tool_input": {"skill": "do-build"},
@@ -151,7 +156,6 @@ class TestPostToolUseHookSkillCompletion:
 
         with (
             patch("agent.health_check.watchdog_hook", mock_watchdog),
-            patch("agent.hooks.session_registry.resolve", return_value="bridge-session-1"),
             patch("agent.hooks.post_tool_use._complete_pipeline_stage") as mock_complete,
         ):
             from agent.hooks.post_tool_use import post_tool_use_hook
@@ -161,9 +165,10 @@ class TestPostToolUseHookSkillCompletion:
         mock_complete.assert_called_once_with("bridge-session-1")
 
     @pytest.mark.asyncio
-    async def test_unknown_skill_does_not_trigger_complete_stage(self):
+    async def test_unknown_skill_does_not_trigger_complete_stage(self, monkeypatch):
         """A non-SDLC skill (e.g., do-discover-paths) does not call _complete_pipeline_stage."""
         mock_watchdog = AsyncMock(return_value={})
+        monkeypatch.setenv("AGENT_SESSION_ID", "bridge-session-2")
         input_data = {
             "tool_name": "Skill",
             "tool_input": {"skill": "do-discover-paths"},
@@ -172,7 +177,6 @@ class TestPostToolUseHookSkillCompletion:
 
         with (
             patch("agent.health_check.watchdog_hook", mock_watchdog),
-            patch("agent.hooks.session_registry.resolve", return_value="bridge-session-2"),
             patch("agent.hooks.post_tool_use._complete_pipeline_stage") as mock_complete,
         ):
             from agent.hooks.post_tool_use import post_tool_use_hook
@@ -182,9 +186,10 @@ class TestPostToolUseHookSkillCompletion:
         mock_complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_non_skill_tool_does_not_trigger_complete_stage(self):
+    async def test_non_skill_tool_does_not_trigger_complete_stage(self, monkeypatch):
         """Non-Skill tools (e.g., Bash) do not call _complete_pipeline_stage."""
         mock_watchdog = AsyncMock(return_value={})
+        monkeypatch.setenv("AGENT_SESSION_ID", "bridge-session-3")
         input_data = {
             "tool_name": "Bash",
             "tool_input": {"command": "pytest tests/"},
@@ -202,9 +207,10 @@ class TestPostToolUseHookSkillCompletion:
         mock_complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_missing_session_skips_complete_stage(self):
-        """When session registry returns None, _complete_pipeline_stage is not called."""
+    async def test_missing_session_skips_complete_stage(self, monkeypatch):
+        """When AGENT_SESSION_ID is not set, _complete_pipeline_stage is not called."""
         mock_watchdog = AsyncMock(return_value={})
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
         input_data = {
             "tool_name": "Skill",
             "tool_input": {"skill": "do-plan"},
@@ -213,7 +219,6 @@ class TestPostToolUseHookSkillCompletion:
 
         with (
             patch("agent.health_check.watchdog_hook", mock_watchdog),
-            patch("agent.hooks.session_registry.resolve", return_value=None),
             patch("agent.hooks.post_tool_use._complete_pipeline_stage") as mock_complete,
         ):
             from agent.hooks.post_tool_use import post_tool_use_hook
@@ -223,9 +228,10 @@ class TestPostToolUseHookSkillCompletion:
         mock_complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_complete_stage_exception_does_not_propagate(self):
+    async def test_complete_stage_exception_does_not_propagate(self, monkeypatch):
         """Exceptions from _complete_pipeline_stage are swallowed."""
         mock_watchdog = AsyncMock(return_value={})
+        monkeypatch.setenv("AGENT_SESSION_ID", "bridge-session-5")
         input_data = {
             "tool_name": "Skill",
             "tool_input": {"skill": "do-build"},
@@ -234,7 +240,6 @@ class TestPostToolUseHookSkillCompletion:
 
         with (
             patch("agent.health_check.watchdog_hook", mock_watchdog),
-            patch("agent.hooks.session_registry.resolve", return_value="bridge-session-5"),
             patch(
                 "agent.hooks.post_tool_use._complete_pipeline_stage",
                 side_effect=RuntimeError("unexpected failure"),

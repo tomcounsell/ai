@@ -486,15 +486,13 @@ async def watchdog_hook(
     2. Update session tracking in Redis (every call)
     3. Run health check via Haiku judge (every CHECK_INTERVAL calls)
     """
-    # Bug 2 fix (issue #374): Use bridge session ID for count tracking instead
-    # of Claude Code's internal session ID. This prevents stale counts from a
-    # prior unrelated session from triggering the watchdog prematurely.
-    # Issue #597: Use hook-side registry instead of os.environ (env var is only
-    # set on the subprocess, not visible to hooks in the parent process).
-    from agent.hooks.session_registry import record_tool_use, resolve
+    # Use AGENT_SESSION_ID env var to identify the session for count tracking.
+    # This is set by the worker when spawning the session and is available
+    # in the hook context (Phase 5 cleanup: removed session_registry.resolve()).
+    import os
 
     claude_uuid = input_data.get("session_id", "unknown")
-    valor_session_id = resolve(claude_uuid)
+    valor_session_id = os.environ.get("AGENT_SESSION_ID")
     session_id = valor_session_id or claude_uuid
     transcript_path = input_data.get("transcript_path", "")
 
@@ -508,9 +506,6 @@ async def watchdog_hook(
     tool_input = input_data.get("tool_input", {})
     key_args = _summarize_input(tool_name, tool_input) if isinstance(tool_input, dict) else ""
     _write_activity_stream(session_id, tool_name, key_args, count)
-
-    # Issue #597: Record tool use in the session registry for heartbeat enrichment
-    record_tool_use(claude_uuid, tool_name)
 
     # Update session tracking in Redis (best-effort, every call)
     try:

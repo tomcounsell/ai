@@ -120,9 +120,18 @@ session_type == "dev" AND DEV_SESSION_HARNESS != "sdk"?
     v                           v
 get_response_via_harness()   get_agent_response_sdk()
 (claude -p subprocess)       (Claude Agent SDK)
+    |                           |
+    +---------------------------+
+    |
+    v
+_handle_dev_session_completion()  [dev sessions only]
+    |-- PipelineStateMachine.classify_outcome()
+    |-- complete_stage() or fail_stage()
+    |-- post_stage_comment() -> GitHub issue
+    |-- steer_session(parent_pm_session)
 ```
 
-PM and teammate sessions always use the SDK path. See [Harness Abstraction](harness-abstraction.md) for full details on streaming, batching, health checks, and configuration.
+PM and teammate sessions always use the SDK path and skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for full details on streaming, batching, health checks, and configuration.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 

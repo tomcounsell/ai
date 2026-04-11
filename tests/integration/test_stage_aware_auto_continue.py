@@ -16,7 +16,7 @@ from models.agent_session import AgentSession
 
 def _make_stages(**overrides):
     """Build a stage_states JSON string with defaults as pending."""
-    from bridge.pipeline_state import ALL_STAGES
+    from agent.pipeline_state import ALL_STAGES
 
     states = {s: "pending" for s in ALL_STAGES}
     states["ISSUE"] = "ready"

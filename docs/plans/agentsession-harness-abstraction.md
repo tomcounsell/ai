@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: docs_complete Progress
 type: refactor
 appetite: Large
 owner: Valor

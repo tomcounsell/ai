@@ -1,8 +1,11 @@
 """Unit tests for pipeline stage wiring in agent/hooks/pre_tool_use.py.
 
 Tests _extract_stage_from_prompt(), _start_pipeline_stage(), and the
-integration of start_stage() into _maybe_register_dev_session() and
-_handle_skill_tool_start().
+integration of start_stage() into _handle_skill_tool_start().
+
+Phase 5 update: Removed tests for _maybe_register_dev_session (Agent tool
+dev-session interception removed). Updated _handle_skill_tool_start tests
+to use AGENT_SESSION_ID env var instead of session_registry.resolve().
 """
 
 import logging
@@ -12,7 +15,6 @@ from agent.hooks.pre_tool_use import (
     _SKILL_TO_STAGE,
     _extract_stage_from_prompt,
     _handle_skill_tool_start,
-    _maybe_register_dev_session,
     _start_pipeline_stage,
 )
 
@@ -105,7 +107,7 @@ class TestStartPipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -126,7 +128,7 @@ class TestStartPipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -144,7 +146,7 @@ class TestStartPipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -164,7 +166,7 @@ class TestStartPipelineStage:
             patch.dict(
                 "sys.modules",
                 {
-                    "bridge.pipeline_state": mock_psm_mod,
+                    "agent.pipeline_state": mock_psm_mod,
                     "models.agent_session": mock_as_mod,
                 },
             ),
@@ -175,148 +177,43 @@ class TestStartPipelineStage:
         assert "Failed to start pipeline stage BUILD" in caplog.text
 
 
-class TestMaybeRegisterDevStartStage:
-    """Test that _maybe_register_dev_session calls start_stage wiring."""
-
-    def test_calls_start_stage_for_sdlc_prompt(self, monkeypatch, caplog):
-        mock_dev = MagicMock()
-        mock_dev.agent_session_id = "session-99"
-        mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_child.return_value = mock_dev
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Stage: BUILD\nIssue: https://github.com/example/repo/issues/1",
-        }
-
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="parent-session-10"),
-            patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-            caplog.at_level(logging.INFO),
-        ):
-            _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
-
-        mock_start.assert_called_once_with("parent-session-10", "BUILD")
-
-    def test_skips_start_stage_when_no_stage_in_prompt(self, monkeypatch, caplog):
-        mock_dev = MagicMock()
-        mock_dev.agent_session_id = "session-100"
-        mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_child.return_value = mock_dev
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Just do some general work",
-        }
-
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="parent-session-11"),
-            patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-            caplog.at_level(logging.DEBUG),
-        ):
-            _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
-
-        mock_start.assert_not_called()
-        assert "No SDLC stage found" in caplog.text
-
-    def test_start_stage_failure_does_not_raise(self, monkeypatch, caplog):
-        """start_stage failure is caught and logged; the hook always returns normally.
-
-        With issue #808, _maybe_register_dev_session/_maybe_start_pipeline_stage no longer
-        calls create_child(). It only starts the pipeline stage. A _start_pipeline_stage
-        error is wrapped in try/except and logged as a warning — it never propagates.
-        """
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Stage: BUILD\nDo the build",
-        }
-
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="parent-session-12"),
-            patch(
-                "agent.hooks.pre_tool_use._start_pipeline_stage",
-                side_effect=RuntimeError("unexpected"),
-            ),
-            caplog.at_level(logging.WARNING),
-        ):
-            # Should not raise — start_stage errors are caught in the try/except block
-            _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
-
-        # Warning should have been logged
-        assert "Failed to start pipeline stage" in caplog.text
-
-    def test_skips_entirely_for_non_dev_session(self, monkeypatch):
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-13")
-
-        tool_input = {
-            "type": "chat-session",
-            "prompt": "Stage: BUILD",
-        }
-
-        with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
-            _maybe_register_dev_session(tool_input)
-
-        mock_start.assert_not_called()
-
-    def test_skips_when_no_valor_session_id(self, monkeypatch):
-        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
-
-        tool_input = {
-            "type": "dev-session",
-            "prompt": "Stage: BUILD",
-        }
-
-        with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
-            _maybe_register_dev_session(tool_input)
-
-        mock_start.assert_not_called()
-
-
 class TestSkillToolStartStage:
     """Test _handle_skill_tool_start: maps Skill tool calls to pipeline stage starts."""
 
-    def test_known_skill_triggers_start_stage(self):
+    def test_known_skill_triggers_start_stage(self, monkeypatch):
         """A known SDLC skill calls _start_pipeline_stage with the mapped stage."""
         tool_input = {"skill": "do-build"}
+        monkeypatch.setenv("AGENT_SESSION_ID", "session-abc")
 
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="session-abc"),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-        ):
+        with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
             _handle_skill_tool_start(tool_input, claude_uuid="uuid-1")
 
         mock_start.assert_called_once_with("session-abc", "BUILD")
 
-    def test_all_mapped_skills_trigger_correct_stage(self):
+    def test_all_mapped_skills_trigger_correct_stage(self, monkeypatch):
         """Every entry in _SKILL_TO_STAGE maps to the correct stage."""
+        monkeypatch.setenv("AGENT_SESSION_ID", "session-xyz")
         for skill_name, expected_stage in _SKILL_TO_STAGE.items():
-            with (
-                patch("agent.hooks.session_registry.resolve", return_value="session-xyz"),
-                patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-            ):
+            with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
                 _handle_skill_tool_start({"skill": skill_name}, claude_uuid="uuid-2")
             mock_start.assert_called_once_with("session-xyz", expected_stage)
 
-    def test_unknown_skill_name_is_ignored(self):
+    def test_unknown_skill_name_is_ignored(self, monkeypatch):
         """A skill not in _SKILL_TO_STAGE silently no-ops."""
         tool_input = {"skill": "do-discover-paths"}
+        monkeypatch.setenv("AGENT_SESSION_ID", "session-def")
 
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="session-def"),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-        ):
+        with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
             _handle_skill_tool_start(tool_input, claude_uuid="uuid-3")
 
         mock_start.assert_not_called()
 
-    def test_missing_skill_key_is_ignored(self, caplog):
+    def test_missing_skill_key_is_ignored(self, monkeypatch, caplog):
         """Empty skill name silently no-ops."""
         tool_input = {}
+        monkeypatch.setenv("AGENT_SESSION_ID", "session-ghi")
 
         with (
-            patch("agent.hooks.session_registry.resolve", return_value="session-ghi"),
             patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
             caplog.at_level(logging.DEBUG),
         ):
@@ -325,19 +222,19 @@ class TestSkillToolStartStage:
         mock_start.assert_not_called()
         assert "empty skill name" in caplog.text
 
-    def test_no_session_id_skips_gracefully(self, caplog):
-        """When session registry returns None, _start_pipeline_stage is not called."""
+    def test_no_session_id_skips_gracefully(self, monkeypatch, caplog):
+        """When AGENT_SESSION_ID is not set, _start_pipeline_stage is not called."""
         tool_input = {"skill": "do-build"}
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
         with (
-            patch("agent.hooks.session_registry.resolve", return_value=None),
             patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
             caplog.at_level(logging.DEBUG),
         ):
             _handle_skill_tool_start(tool_input, claude_uuid="uuid-5")
 
         mock_start.assert_not_called()
-        assert "No session ID resolved" in caplog.text
+        assert "AGENT_SESSION_ID not set" in caplog.text
 
     def test_skill_to_stage_mapping_is_complete(self):
         """Verify all expected SDLC skills are present in _SKILL_TO_STAGE."""
