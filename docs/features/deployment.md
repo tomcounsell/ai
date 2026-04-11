@@ -159,6 +159,39 @@ All plist labels below use the `${SERVICE_LABEL_PREFIX}` configured in `.env`
 
 Both Bridge and Worker must run on bridge machines. The bridge is I/O only and does not process sessions on its own.
 
+### Email Bridge
+
+The email bridge runs as an optional service on bridge machines. It polls IMAP every 30 seconds and routes inbound emails to agent sessions via sender-based project matching.
+
+**Prerequisites:** Add `email.contacts` to `projects.json` and set IMAP/SMTP credentials in `.env`:
+
+```bash
+IMAP_HOST=imap.gmail.com
+IMAP_PORT=993
+IMAP_USER=valor@yuda.me
+IMAP_PASSWORD=<gmail-app-password>
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=valor@yuda.me
+SMTP_PASSWORD=<gmail-app-password>
+```
+
+```bash
+# Lifecycle
+./scripts/valor-service.sh email-start
+./scripts/valor-service.sh email-stop
+./scripts/valor-service.sh email-restart
+
+# Status (warns if last poll is > 5 minutes ago)
+./scripts/valor-service.sh email-status
+
+# Dead letter queue (failed SMTP sends)
+./scripts/valor-service.sh email-dead-letter list
+./scripts/valor-service.sh email-dead-letter replay --all
+```
+
+See [Email Bridge](email-bridge.md) for full architecture and configuration details.
+
 ### Worker Installation
 
 ```bash

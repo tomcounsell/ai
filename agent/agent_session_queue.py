@@ -176,6 +176,7 @@ async def _push_agent_session(
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
     project_config: dict | None = None,
+    extra_context_overrides: dict | None = None,
     **_kwargs,
 ) -> int:
     """Create an agent session in Redis and return the pending queue depth for this chat.
@@ -186,6 +187,11 @@ async def _push_agent_session(
     Bug 3 fix (issue #374): When creating a new record for a continuation
     (reply-to-resume), mark old completed records with the same session_id
     as 'superseded' to prevent ambiguity in later record selection.
+
+    Args:
+        extra_context_overrides: Additional key/value pairs merged into extra_context
+            before saving. Use for transport-specific metadata (e.g., transport="email",
+            email_message_id=...). Keys in overrides take precedence over derived values.
     """
     # Convert float timestamps to datetime (backward compat)
     if isinstance(scheduled_at, int | float):
@@ -207,6 +213,8 @@ async def _push_agent_session(
         extra_context["revival_context"] = revival_context
     if classification_type:
         extra_context["classification_type"] = classification_type
+    if extra_context_overrides:
+        extra_context.update(extra_context_overrides)
 
     # Mark old completed records as superseded to prevent duplicate-record ambiguity
     try:
@@ -1806,9 +1814,9 @@ SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
 ResponseCallback = Callable[[object, str, str, int], Awaitable[None]]
 
-_send_callbacks: dict[str, SendCallback] = {}
-_reaction_callbacks: dict[str, ReactionCallback] = {}
-_response_callbacks: dict[str, ResponseCallback] = {}
+_send_callbacks: dict[str | tuple[str, str], SendCallback] = {}
+_reaction_callbacks: dict[str | tuple[str, str], ReactionCallback] = {}
+_response_callbacks: dict[str | tuple[str, str], ResponseCallback] = {}
 
 
 def register_callbacks(
@@ -1817,6 +1825,7 @@ def register_callbacks(
     reaction_callback: ReactionCallback | None = None,
     response_callback: ResponseCallback | None = None,
     *,
+    transport: str | None = None,
     handler: OutputHandler | None = None,
 ) -> None:
     """
@@ -1831,30 +1840,38 @@ def register_callbacks(
         reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.
         response_callback: Callable (event, text, chat_id, msg_id) ->
             sends response with file handling.
+        transport: Optional transport name (e.g. "email", "telegram"). When provided,
+                   callbacks are stored under a (project_key, transport) composite key,
+                   allowing multiple transports to coexist for the same project.
+                   When None (default), callbacks are stored under the plain project_key
+                   string key for backward compatibility.
         handler: An OutputHandler instance. If provided, its send() and react()
                  methods are wrapped as send_callback and reaction_callback.
     """
+    # Use composite key when transport is specified, else plain project_key
+    key: str | tuple[str, str] = (project_key, transport) if transport else project_key
+
     if handler is not None:
         # Wrap OutputHandler methods as raw callbacks for internal use
         if send_callback is None:
-            _send_callbacks[project_key] = handler.send
+            _send_callbacks[key] = handler.send
         else:
-            _send_callbacks[project_key] = send_callback
+            _send_callbacks[key] = send_callback
 
         if reaction_callback is None:
-            _reaction_callbacks[project_key] = handler.react
+            _reaction_callbacks[key] = handler.react
         else:
-            _reaction_callbacks[project_key] = reaction_callback
+            _reaction_callbacks[key] = reaction_callback
     else:
         if send_callback is None:
             raise ValueError("Either send_callback or handler must be provided")
         if reaction_callback is None:
             raise ValueError("Either reaction_callback or handler must be provided")
-        _send_callbacks[project_key] = send_callback
-        _reaction_callbacks[project_key] = reaction_callback
+        _send_callbacks[key] = send_callback
+        _reaction_callbacks[key] = reaction_callback
 
     if response_callback:
-        _response_callbacks[project_key] = response_callback
+        _response_callbacks[key] = response_callback
 
 
 # === Restart Flag (written by remote-update.sh) ===
@@ -1898,6 +1915,27 @@ def clear_restart_flag() -> bool:
     return False
 
 
+def _resolve_callbacks(
+    project_key: str,
+    transport: str | None,
+) -> tuple[SendCallback | None, ReactionCallback | None]:
+    """Resolve send and reaction callbacks for a project+transport combination.
+
+    Lookup order:
+    1. (project_key, transport) composite key — transport-specific handler
+    2. project_key string key — transport-agnostic handler (backward compat)
+    3. None — falls through to FileOutputHandler in caller
+    """
+    if transport:
+        composite_key = (project_key, transport)
+        send_cb = _send_callbacks.get(composite_key) or _send_callbacks.get(project_key)
+        react_cb = _reaction_callbacks.get(composite_key) or _reaction_callbacks.get(project_key)
+    else:
+        send_cb = _send_callbacks.get(project_key)
+        react_cb = _reaction_callbacks.get(project_key)
+    return send_cb, react_cb
+
+
 async def enqueue_agent_session(
     project_key: str,
     session_id: str,
@@ -1921,6 +1959,7 @@ async def enqueue_agent_session(
     session_type: str = SessionType.PM,
     scheduling_depth: int = 0,  # ignored, now derived
     project_config: dict | None = None,
+    extra_context_overrides: dict | None = None,
 ) -> int:
     """
     Add a session to Redis and ensure worker is running.
@@ -1930,6 +1969,8 @@ async def enqueue_agent_session(
             AgentSession so downstream code can read project properties without
             re-deriving from a parallel registry. Pass None for backward compat
             (legacy callers); the worker will fall back to loading from projects.json.
+        extra_context_overrides: Additional key/value pairs merged into extra_context.
+            Use for transport-specific metadata, e.g. transport="email".
 
     Returns queue depth after push.
     """
@@ -1961,6 +2002,7 @@ async def enqueue_agent_session(
         telegram_message_key=telegram_message_key,
         session_type=session_type,
         project_config=project_config,
+        extra_context_overrides=extra_context_overrides,
     )
     # Compute worker_key from the same inputs the property uses, without re-querying Redis
     if session_type == SessionType.TEAMMATE:
@@ -2953,8 +2995,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
     asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
 
     # Create messenger with bridge callbacks, falling back to file output
-    send_cb = _send_callbacks.get(session.project_key)
-    react_cb = _reaction_callbacks.get(session.project_key)
+    # Find the transport from extra_context to support multiple transports per project
+    _transport = None
+    if agent_session:
+        _extra = getattr(agent_session, "extra_context", None) or {}
+        _transport = _extra.get("transport")
+
+    send_cb, react_cb = _resolve_callbacks(session.project_key, _transport)
 
     if not send_cb:
         from agent.output_handler import FileOutputHandler

@@ -72,6 +72,15 @@ usage() {
     echo "  worker-status   Check worker status"
     echo "  worker-logs     Tail the worker logs"
     echo ""
+    echo "Email bridge commands:"
+    echo "  email-start     Start the email bridge (IMAP polling)"
+    echo "  email-stop      Stop the email bridge"
+    echo "  email-restart   Restart the email bridge"
+    echo "  email-status    Check email bridge status and last poll age"
+    echo "  email-dead-letter list    List failed SMTP sends"
+    echo "  email-dead-letter replay --all    Replay all dead-lettered emails"
+    echo "  email-dead-letter replay --session-id <id>    Replay one email"
+    echo ""
 }
 
 get_pid() {
@@ -654,6 +663,110 @@ tail_worker_logs() {
     tail -f "$LOG_DIR/worker.log" "$LOG_DIR/worker_error.log" 2>/dev/null
 }
 
+# =============================================================================
+# Email bridge functions
+# =============================================================================
+
+get_email_pid() {
+    pgrep -f "bridge.email_bridge" 2>/dev/null || true
+}
+
+is_email_running() {
+    local pid=$(get_email_pid)
+    [ -n "$pid" ]
+}
+
+start_email() {
+    echo "Starting email bridge..."
+
+    if is_email_running; then
+        local pid=$(get_email_pid)
+        echo "Email bridge is already running (PID: $pid)"
+        return 0
+    fi
+
+    ensure_setup
+    cd "$PROJECT_DIR"
+    nohup "$VENV/bin/python" -m bridge.email_bridge \
+        >> "$LOG_DIR/email_bridge.log" \
+        2>> "$LOG_DIR/email_bridge.error.log" &
+
+    sleep 2
+    if is_email_running; then
+        local pid=$(get_email_pid)
+        echo "Email bridge started (PID: $pid)"
+    else
+        echo "Failed to start email bridge. Check logs: $LOG_DIR/email_bridge.error.log"
+        return 1
+    fi
+}
+
+stop_email() {
+    local pid=$(get_email_pid)
+
+    if [ -z "$pid" ]; then
+        echo "Email bridge is not running"
+        return 0
+    fi
+
+    echo "Stopping email bridge (PID: $pid)..."
+    kill "$pid" 2>/dev/null || true
+
+    for i in {1..10}; do
+        if ! is_email_running; then
+            echo "Email bridge stopped"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Force killing email bridge..."
+    kill -9 "$pid" 2>/dev/null || true
+    echo "Email bridge stopped (forced)"
+}
+
+restart_email() {
+    echo "Restarting email bridge..."
+    stop_email
+    sleep 1
+    start_email
+}
+
+status_email() {
+    local pid=$(get_email_pid)
+
+    if [ -n "$pid" ]; then
+        echo "Email Bridge Status: RUNNING"
+        echo "PID: $pid"
+        echo "Uptime: $(ps -o etime= -p $pid 2>/dev/null | xargs)"
+        echo "Memory: $(ps -o rss= -p $pid 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')"
+    else
+        echo "Email Bridge Status: STOPPED"
+    fi
+
+    # Check last poll timestamp from Redis
+    local last_poll
+    last_poll=$(cd "$PROJECT_DIR" && "$VENV/bin/python" -c "
+import os, redis, time
+r = redis.Redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379/0'), decode_responses=True)
+ts = r.get('email:last_poll_ts')
+if ts:
+    age = time.time() - float(ts)
+    print(f'Last poll: {age:.0f}s ago')
+    if age > 300:
+        print('WARNING: Last poll was more than 5 minutes ago — bridge may be stuck')
+else:
+    print('Last poll: never (bridge not started or no polls completed)')
+" 2>/dev/null || echo "Last poll: unknown (Redis unavailable)")
+    echo "$last_poll"
+}
+
+email_dead_letter() {
+    cd "$PROJECT_DIR"
+    "$VENV/bin/python" -m bridge.email_dead_letter "$@"
+}
+
+# =============================================================================
 # Main
 case "${1:-}" in
     start)
@@ -695,6 +808,22 @@ case "${1:-}" in
         ;;
     worker-logs)
         tail_worker_logs
+        ;;
+    email-start)
+        start_email
+        ;;
+    email-stop)
+        stop_email
+        ;;
+    email-restart)
+        restart_email
+        ;;
+    email-status)
+        status_email
+        ;;
+    email-dead-letter)
+        shift
+        email_dead_letter "$@"
         ;;
     *)
         usage
