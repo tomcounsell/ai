@@ -119,3 +119,45 @@ class TestBridgeNoClassifyWorkRequest:
             "Bridge handler should not reference simple session type. "
             "All messages route to PM, Teammate, or Dev sessions."
         )
+
+
+class TestPMPersonaFanoutInstruction:
+    """Verify fan-out instruction is present in PM persona enriched prompt."""
+
+    def test_pm_persona_sdk_client_contains_fanout_instruction(self):
+        """sdk_client.py PM dispatch block must contain MULTI-ISSUE FAN-OUT text."""
+        sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
+        source = sdk_path.read_text()
+        assert "MULTI-ISSUE FAN-OUT" in source, (
+            "sdk_client.py PM dispatch block must contain 'MULTI-ISSUE FAN-OUT' instruction. "
+            "This triggers child PM session spawning for multi-issue requests."
+        )
+
+    def test_pm_persona_overlay_contains_fanout_section(self):
+        """config/personas/project-manager.md must contain Multi-Issue Fan-out section."""
+        persona_path = (
+            Path(__file__).parent.parent.parent / "config" / "personas" / "project-manager.md"
+        )
+        source = persona_path.read_text()
+        assert "Multi-Issue Fan-out" in source, (
+            "config/personas/project-manager.md must include a 'Multi-Issue Fan-out' section "
+            "describing when and how to spawn child PM sessions."
+        )
+
+    def test_sdk_client_fanout_references_wait_for_children(self):
+        """sdk_client.py fan-out instruction must reference the wait-for-children subcommand."""
+        sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
+        source = sdk_path.read_text()
+        assert "wait-for-children" in source, (
+            "sdk_client.py fan-out instruction must reference "
+            "'wait-for-children' subcommand so the PM knows how to pause."
+        )
+
+    def test_sdk_client_fanout_references_child_pm_role(self):
+        """sdk_client.py fan-out instruction must reference --role pm for child sessions."""
+        sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
+        source = sdk_path.read_text()
+        assert "--role pm" in source, (
+            "sdk_client.py fan-out instruction must include '--role pm' "
+            "to create child PM sessions."
+        )

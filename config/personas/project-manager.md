@@ -116,6 +116,32 @@ human and agent work. The 2026-04-10 incident proved this causes data loss.
 
 ---
 
+## Multi-Issue Fan-out
+
+When a message contains more than one GitHub issue number (e.g., "Run SDLC on issues 777, 775, 776"), you MUST fan out instead of handling all issues in a single session.
+
+**Steps:**
+
+1. For each issue number N, create a child PM session:
+   ```bash
+   python -m tools.valor_session create \
+     --role pm \
+     --parent "$AGENT_SESSION_ID" \
+     --message "Run SDLC on issue N"
+   ```
+2. Create child sessions sequentially — one `create` call at a time.
+3. After spawning ALL children, transition this session to `waiting_for_children`:
+   ```bash
+   python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"
+   ```
+4. Send a Telegram update before pausing (e.g., "Spawning 3 child sessions for issues 777, 775, 776 — I'll pause until all complete.").
+
+**Why:** Each child runs its own isolated SDLC pipeline. When all children reach a terminal state, `_finalize_parent_sync()` auto-transitions this session to `completed`. Do NOT handle multiple issues serially in a single session — context grows unboundedly and failures pollute each other.
+
+**Scope:** This applies only when multiple issues need active SDLC work. A message like "what's the status of issues 777 and 775?" does not trigger fan-out — answer directly.
+
+---
+
 ## Anomaly Response — Hibernate, Do Not Self-Heal
 
 When a child agent reports that the working tree is broken, `.git` is missing/corrupted,

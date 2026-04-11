@@ -9,10 +9,21 @@ Tests cover:
 - agent_session_scheduler --parent-session flag and children subcommand
 """
 
+import argparse
+import sys
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+_repo_root = Path(__file__).parent.parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from tools.valor_session import cmd_wait_for_children  # noqa: E402
+
+TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "cancelled"})
 
 # ===================================================================
 # AgentSession hierarchy helpers (unit, no Redis)
@@ -437,3 +448,136 @@ class TestValorAgentSessionIdInjection:
         agent = ValorAgent(working_dir="/tmp/test")
         options = agent._create_options(session_id="test-session")
         assert "AGENT_SESSION_ID" not in options.env
+
+
+# ===================================================================
+# cmd_wait_for_children tests (tools/valor_session.py)
+# ===================================================================
+
+
+def _wfc_args(session_id=None):
+    return argparse.Namespace(session_id=session_id)
+
+
+def _make_mock_session(session_id="sess-1", status="running"):
+    s = MagicMock()
+    s.session_id = session_id
+    s.status = status
+    return s
+
+
+class TestCmdWaitForChildren:
+    """Tests for cmd_wait_for_children in tools/valor_session.py."""
+
+    def test_transitions_status_to_waiting_for_children(self, capsys):
+        """wait-for-children calls transition_status with 'waiting_for_children'."""
+        session = _make_mock_session("sess-pm", "running")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+        mock_transition = MagicMock()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(
+                        TERMINAL_STATUSES=TERMINAL_STATUSES,
+                        transition_status=mock_transition,
+                    ),
+                },
+            ),
+        ):
+            result = cmd_wait_for_children(_wfc_args(session_id="sess-pm"))
+
+        assert result == 0
+        mock_transition.assert_called_once_with(session, "waiting_for_children")
+
+    def test_missing_session_exits_1(self, capsys):
+        """wait-for-children with unknown session ID returns 1."""
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(
+                        TERMINAL_STATUSES=TERMINAL_STATUSES,
+                        transition_status=MagicMock(),
+                    ),
+                },
+            ),
+        ):
+            result = cmd_wait_for_children(_wfc_args(session_id="nonexistent"))
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower() or "error" in captured.err.lower()
+
+    def test_no_session_id_no_env_exits_1(self, capsys, monkeypatch):
+        """wait-for-children with no --session-id and no AGENT_SESSION_ID env var exits 1."""
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        with patch("tools.valor_session._load_env"):
+            result = cmd_wait_for_children(_wfc_args(session_id=None))
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "no session id" in captured.err.lower() or "error" in captured.err.lower()
+
+    def test_uses_env_var_when_no_session_id_arg(self, capsys, monkeypatch):
+        """wait-for-children reads AGENT_SESSION_ID env var when --session-id is omitted."""
+        monkeypatch.setenv("AGENT_SESSION_ID", "env-sess-123")
+        session = _make_mock_session("env-sess-123", "running")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+        mock_transition = MagicMock()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(
+                        TERMINAL_STATUSES=TERMINAL_STATUSES,
+                        transition_status=mock_transition,
+                    ),
+                },
+            ),
+        ):
+            result = cmd_wait_for_children(_wfc_args(session_id=None))
+
+        assert result == 0
+        mock_transition.assert_called_once_with(session, "waiting_for_children")
+
+    def test_already_terminal_exits_1(self, capsys):
+        """wait-for-children on a terminal session returns 1 without calling transition_status."""
+        session = _make_mock_session("sess-done", "completed")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+        mock_transition = MagicMock()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(
+                        TERMINAL_STATUSES=TERMINAL_STATUSES,
+                        transition_status=mock_transition,
+                    ),
+                },
+            ),
+        ):
+            result = cmd_wait_for_children(_wfc_args(session_id="sess-done"))
+
+        assert result == 1
+        mock_transition.assert_not_called()
+        captured = capsys.readouterr()
+        assert "terminal" in captured.err.lower() or "error" in captured.err.lower()

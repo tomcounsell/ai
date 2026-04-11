@@ -4,7 +4,7 @@
 
 The AgentSession model uses a **session_type discriminator** (`SessionType` enum from `config/enums.py`) to distinguish between three session roles:
 
-- **PM Session** (`session_type=SessionType.PM`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns Dev sessions.
+- **PM Session** (`session_type=SessionType.PM`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns Dev sessions. For multi-issue requests, a parent PM session can also spawn child PM sessions (see [PM Session Child Fan-out](pm-session-child-fanout.md)).
 - **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational Agent SDK session with Teammate persona. Handles informational queries directly without spawning Dev sessions.
 - **Dev session** (`session_type=SessionType.DEV`): Full-permission Agent SDK session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
 

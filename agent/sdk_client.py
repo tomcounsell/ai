@@ -1953,7 +1953,21 @@ async def get_agent_response_sdk(
         else:
             # PM dispatch: orchestrate SDLC work stage-by-stage
             enriched_message += (
-                "\n\nYou are the PM. Orchestrate SDLC work stage-by-stage:\n"
+                "\n\nMULTI-ISSUE FAN-OUT: If the message contains more than one GitHub "
+                "issue number (e.g., 'Run SDLC on issues 777, 775, 776'), you MUST fan out. "
+                "For each issue number N, run:\n"
+                "  python -m tools.valor_session create \\\\\n"
+                "    --role pm \\\\\n"
+                '    --parent "$AGENT_SESSION_ID" \\\\\n'
+                '    --message "Run SDLC on issue N"\n'
+                "After spawning ALL children, run:\n"
+                "  python -m tools.valor_session wait-for-children"
+                ' --session-id "$AGENT_SESSION_ID"\n'
+                "to pause this session. Do NOT process multiple issues in a single session. "
+                "Spawn child sessions sequentially (one create call at a time) then call "
+                "wait-for-children once. Send a Telegram update before pausing so Valor "
+                "knows fan-out happened.\n\n"
+                "You are the PM. Orchestrate SDLC work stage-by-stage:\n"
                 "1. **Assess the current stage** — use read-only Bash commands "
                 "(gh issue view, gh pr view, gh pr list, grep) to determine "
                 "where work stands. You can run Bash for reads freely.\n"
