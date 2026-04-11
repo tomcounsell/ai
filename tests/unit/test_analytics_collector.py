@@ -10,10 +10,13 @@ import pytest
 
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
-    """Redirect analytics to a temp directory."""
+    """Redirect analytics to a temp directory and reset cached connection."""
     db_path = tmp_path / "analytics.db"
     monkeypatch.setattr("analytics.collector._DB_DIR", tmp_path)
     monkeypatch.setattr("analytics.collector._DB_PATH", db_path)
+    # Reset module-level cached connection so it picks up the new path
+    monkeypatch.setattr("analytics.collector._sqlite_conn", None)
+    monkeypatch.setattr("analytics.collector._db_initialized", False)
     return db_path
 
 

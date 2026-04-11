@@ -27,6 +27,10 @@ _SQLITE_TIMEOUT = 5
 # TTL for daily Redis keys (30 days in seconds)
 _DAILY_TTL = 30 * 86400
 
+# Module-level SQLite connection (reused across writes)
+_sqlite_conn: sqlite3.Connection | None = None
+_db_initialized: bool = False
+
 
 def _get_db_path() -> Path:
     """Return the SQLite database path, creating the directory if needed."""
@@ -35,7 +39,10 @@ def _get_db_path() -> Path:
 
 
 def _init_db(conn: sqlite3.Connection) -> None:
-    """Initialize the database schema if it does not exist."""
+    """Initialize the database schema (runs once per process)."""
+    global _db_initialized
+    if _db_initialized:
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS metrics (
@@ -55,24 +62,34 @@ def _init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("PRAGMA journal_mode=WAL")
     conn.commit()
+    _db_initialized = True
+
+
+def _get_connection() -> sqlite3.Connection:
+    """Return the module-level SQLite connection, creating it if needed."""
+    global _sqlite_conn
+    if _sqlite_conn is None:
+        db_path = _get_db_path()
+        _sqlite_conn = sqlite3.connect(str(db_path), timeout=_SQLITE_TIMEOUT)
+        _init_db(_sqlite_conn)
+    return _sqlite_conn
 
 
 def _write_sqlite(name: str, value: float, dimensions: dict[str, Any] | None, ts: float) -> None:
     """Write a metric event to SQLite. Best-effort."""
     try:
-        db_path = _get_db_path()
-        conn = sqlite3.connect(str(db_path), timeout=_SQLITE_TIMEOUT)
-        try:
-            _init_db(conn)
-            dims_json = json.dumps(dimensions) if dimensions else None
-            conn.execute(
-                "INSERT INTO metrics (timestamp, name, value, dimensions) VALUES (?, ?, ?, ?)",
-                (ts, name, value, dims_json),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        conn = _get_connection()
+        dims_json = json.dumps(dimensions) if dimensions else None
+        conn.execute(
+            "INSERT INTO metrics (timestamp, name, value, dimensions) VALUES (?, ?, ?, ?)",
+            (ts, name, value, dims_json),
+        )
+        conn.commit()
     except Exception as e:
+        # Connection may be stale/corrupt -- reset so next call retries
+        global _sqlite_conn, _db_initialized
+        _sqlite_conn = None
+        _db_initialized = False
         logger.warning("[analytics] SQLite write failed for %s: %s", name, e)
 
 
