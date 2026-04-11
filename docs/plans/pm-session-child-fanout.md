@@ -5,6 +5,7 @@ appetite: Medium
 owner: valorengels
 created: 2026-04-11
 tracking: https://github.com/tomcounsell/ai/issues/786
+plan_url: https://github.com/tomcounsell/ai/blob/main/docs/plans/pm-session-child-fanout.md
 last_comment_id: IC_kwDOEYGa0876XmEv
 ---
 
