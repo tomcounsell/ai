@@ -6,6 +6,7 @@ appetite: Large
 tracking: https://github.com/tomcounsell/ai/issues/853
 created: 2026-04-11
 last_comment_id:
+revision_applied: true
 ---
 
 # PM Autonomous Skill Lifecycle
@@ -64,8 +65,8 @@ No prior issues found related to autonomous skill generation or skill lifecycle 
 3. **Skill generation**: When a friction pattern or repeatable workflow is detected, the system invokes `/skillify` (now agent-invokable) to generate a new SKILL.md. The focus is on minimum complexity skills that prevent friction -- e.g., wrapping a tool with commonly-guessed-wrong params
 4. **Deployment**: Generated skills are deployed via the standard PR pipeline: create branch -> PR -> `/do-pr-review` -> `/do-docs` -> `/do-merge`. No human approval gate -- the PR review process is the quality gate
 5. **Validation gate**: Generated skills pass through `/do-skills-audit` validation (existing 12-rule checker) before PR creation
-6. **Effectiveness tracking**: `pre_tool_use.py` Skill hook calls `record_metric("skill.invocation", ...)` with skill name and session context. Post-session extraction records outcome (success/failure/patch-needed) via `record_metric("skill.outcome", ...)`
-7. **Lifecycle management**: Skills have a default expiry (30 days from creation). Each invocation resets the expiry timer. Unused skills expire automatically and are removed. `tools/skill_lifecycle.py` queries analytics to compute per-skill effectiveness scores and manages expiry
+6. **Effectiveness tracking**: `pre_tool_use.py` Skill hook calls `record_metric("skill.invocation", ...)` with skill name and session context, and writes the skill name to a session-scoped registry (`_SESSION_SKILLS`). Post-session extraction reads this registry to emit `record_metric("skill.outcome", ...)` per skill
+7. **Lifecycle management**: Skills have a default expiry (30 days from creation). A `skill_lifecycle refresh` CLI step (run by reflections or post-session) queries analytics for recent invocations and batch-updates `expires_at` in frontmatter. The `expire` subcommand checks both frontmatter and analytics (48h safety window) before removing unused skills via PR
 
 ## Architectural Impact
 
@@ -106,12 +107,12 @@ No prerequisites -- this work builds on the existing analytics module (`analytic
 ### Technical Approach
 
 - Instrument `pre_tool_use.py::_handle_skill_tool_start()` to emit `record_metric("skill.invocation", 1, {"skill": name, "session_id": sid})` on every skill invocation
-- Add a `post_tool_use` or post-session hook that records outcome: `record_metric("skill.outcome", 1, {"skill": name, "outcome": "success|failure|patch_needed"})`
-- **Friction detection** uses Memory model queries: filter by `category="correction"` and `category="pattern"`, identify cases where agents repeatedly guessed wrong tool params, worked around missing abstractions, or performed the same multi-step sequence. Focus on minimum complexity -- a skill wrapping a single tool with correct default params is valuable
+- `_handle_skill_tool_start` also writes skill name to a session-scoped registry (`_SESSION_SKILLS[session_id]`). Post-session extraction in `memory_extraction.py` reads this registry and emits `record_metric("skill.outcome", 1, {"skill": name, "outcome": "success|failure|patch_needed"})` for each skill
+- **Friction detection** uses Memory model queries with exact-match heuristics: filter by `category="correction"` AND `tags` containing tool-related keywords (`tool`, `params`, `flags`, `cli`). Identify cases where agents guessed wrong tool params, worked around missing abstractions, or performed repeated multi-step sequences. Focus on minimum complexity -- a skill wrapping a single tool with correct default params is valuable. LLM-based classification deferred to follow-up
 - **No minimum occurrence count** -- complexity and friction severity determine whether to skillify, not raw repetition. A single instance of an agent struggling with a tool's params because they're non-obvious is enough
 - Remove `disable-model-invocation: true` from `/skillify` frontmatter so agents can invoke it directly
 - Generated skills include frontmatter fields: `generated: true`, `generated_at: <date>`, `expires_at: <date+30d>`, `source_pattern: <description>`
-- Expiry system: `tools/skill_lifecycle.py expire` checks all skills with `generated: true` and `expires_at` in the past, removes them via PR. Each skill invocation (tracked via analytics) resets `expires_at` to now+30d
+- Expiry system: `tools/skill_lifecycle.py expire` checks all skills with `generated: true` and `expires_at` in the past, confirms no invocations within the last 48h via analytics, then removes via PR. Expiry reset is decoupled from hooks: `skill_lifecycle refresh` queries analytics for recent invocations and batch-updates `expires_at` in frontmatter (run by reflections or post-session, not by pre_tool_use)
 - The PM's bash allowlist in `pre_tool_use.py` gets `python -m tools.skill_lifecycle` entries for read-only queries
 - Effectiveness query: `python -m tools.skill_lifecycle report` outputs per-skill metrics (invocation count, success rate, avg patches per invocation, last used)
 - Reflections integration: add a skill review step to `scripts/reflections.py` that calls `python -m tools.skill_lifecycle detect-friction` and triggers skillification when warranted
@@ -135,7 +136,7 @@ No prerequisites -- this work builds on the existing analytics module (`analytic
 
 ## Test Impact
 
-No existing tests affected -- this is a greenfield feature with no prior test coverage for skill lifecycle management. The only touched existing file is `agent/hooks/pre_tool_use.py` (adding a `record_metric` call), but the existing tests in `tests/unit/test_pm_session_permissions.py` and `tests/unit/test_pre_tool_use.py` test permission enforcement, not metric emission, so they will not break.
+No existing tests affected -- this is a greenfield feature with no prior test coverage for skill lifecycle management. The only touched existing file is `agent/hooks/pre_tool_use.py` (adding a `record_metric` call), but the existing tests in `tests/unit/test_pm_session_permissions.py` and `tests/unit/test_pm_session_permissions.py` test permission enforcement, not metric emission, so they will not break.
 
 ## Rabbit Holes
 
@@ -160,7 +161,8 @@ No existing tests affected -- this is a greenfield feature with no prior test co
 
 ## Race Conditions
 
-No race conditions identified -- all operations are sequential within a single session. Skill effectiveness metrics use the analytics `record_metric()` API which handles concurrent writes via SQLite WAL mode. Friction detection is a batch read operation with no write contention.
+- **Expiry vs active use**: The `expire` subcommand could remove a skill via PR while a concurrent session is actively using it. Mitigated by checking last invocation timestamp from analytics immediately before creating the removal PR -- if invoked within the last 48 hours, skip removal. This provides a safety window that covers typical session durations.
+- Skill effectiveness metrics use the analytics `record_metric()` API which handles concurrent writes via SQLite WAL mode. Friction detection is a batch read operation with no write contention.
 
 ## No-Gos (Out of Scope)
 
@@ -203,7 +205,7 @@ No update system changes required -- this feature adds new Python modules that a
 - [ ] Reflections includes a skill lifecycle review step
 - [ ] Generated skills pass `/do-skills-audit` validation and deploy via PR pipeline
 - [ ] PM session can run `python -m tools.skill_lifecycle report` (passes bash allowlist)
-- [ ] Existing static skills continue to work unchanged (no regressions in `tests/unit/test_pre_tool_use.py`)
+- [ ] Existing static skills continue to work unchanged (no regressions in `tests/unit/test_pm_session_permissions.py`)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -249,8 +251,9 @@ No update system changes required -- this feature adds new Python modules that a
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `record_metric("skill.invocation", 1, {"skill": skill_name, "session_id": session_id})` call in `pre_tool_use.py::_handle_skill_tool_start()` after the existing `_start_pipeline_stage` call
-- Add post-session skill outcome recording in `agent/memory_extraction.py::run_post_session_extraction()` -- after extraction completes, emit `record_metric("skill.outcome", 1, {"skill": skill_name, "outcome": outcome})` where outcome is derived from whether patches were needed
-- Create `tests/unit/test_skill_effectiveness.py` with tests for metric emission on skill invocation and outcome recording
+- **[Critique concern #1 — skill-session mapping]**: `_handle_skill_tool_start` must also write the skill name to a session-scoped registry (e.g., a module-level `_SESSION_SKILLS: dict[str, list[str]]` where key=session_id, value=list of skill names invoked). This registry is the bridge between invocation-time and post-session extraction
+- Add post-session skill outcome recording in `agent/memory_extraction.py::run_post_session_extraction()` -- after extraction completes, read `_SESSION_SKILLS[session_id]` from `pre_tool_use` to get the list of skills invoked during the session, then emit `record_metric("skill.outcome", 1, {"skill": skill_name, "outcome": outcome})` for each. Outcome is derived from whether patches were needed
+- Create `tests/unit/test_skill_effectiveness.py` with tests for metric emission on skill invocation, session-scoped skill registry population, and outcome recording
 
 ### 2. Build Friction Detection and Skill Expiry Module
 - **Task ID**: build-friction-detection
@@ -260,10 +263,13 @@ No update system changes required -- this feature adds new Python modules that a
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tools/skill_lifecycle.py` with friction detection logic: query Memory records filtered by `category="correction"` and `category="pattern"`, identify cases where agents struggled with tool params, worked around missing abstractions, or performed repeated multi-step sequences
+- **[Critique concern #4 — friction detection scope]**: Initial friction detection implementation must use exact-match heuristics only: Memory records with `category=correction` AND `tags` containing tool-related keywords (e.g., `tool`, `params`, `flags`, `cli`). Do NOT use LLM-based classification in this iteration — defer to a follow-up
 - No minimum occurrence count -- friction severity and complexity determine skillification, not repetition. A single correction about wrong tool params is enough
 - Remove `disable-model-invocation: true` from `.claude/skills/skillify/SKILL.md` frontmatter so agents can invoke it
-- Implement skill expiry: generated skills get `generated: true`, `generated_at: <date>`, `expires_at: <date+30d>` in frontmatter. Invocations reset `expires_at`. `expire` subcommand removes expired skills via PR
-- Create `tests/unit/test_skill_friction_detection.py` with tests for friction detection, expiry management, and frontmatter format
+- Implement skill expiry: generated skills get `generated: true`, `generated_at: <date>`, `expires_at: <date+30d>` in frontmatter
+- **[Critique concern #2 — decouple expiry reset from hook]**: `pre_tool_use` must NOT write to SKILL.md frontmatter. It only emits `record_metric("skill.invocation", ...)`. A separate `skill_lifecycle refresh` CLI subcommand (run by reflections or post-session) queries analytics for recent invocations and batch-updates `expires_at` in frontmatter for all generated skills that were invoked since last refresh
+- **[Critique concern #3 — race condition on expiry]**: The `expire` subcommand must check the last invocation timestamp from analytics (not just frontmatter `expires_at`) immediately before creating the removal PR. If the skill was invoked within the last 48 hours, skip removal — a concurrent session may be actively using it
+- Create `tests/unit/test_skill_friction_detection.py` with tests for friction detection (exact-match heuristic), expiry management (including 48h safety window), refresh batch-update logic, and frontmatter format
 
 ### 3. Build Skill Lifecycle CLI and Reflections Integration
 - **Task ID**: build-lifecycle-cli
@@ -272,7 +278,7 @@ No update system changes required -- this feature adds new Python modules that a
 - **Assigned To**: lifecycle-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement CLI subcommands: `report` (query analytics for per-skill metrics), `detect-friction` (run friction detection), `expire` (remove expired generated skills)
+- Implement CLI subcommands: `report` (query analytics for per-skill metrics), `detect-friction` (run friction detection), `expire` (remove expired generated skills with 48h safety window), `refresh` (batch-update `expires_at` frontmatter from analytics invocation data)
 - Add `python -m tools.skill_lifecycle` prefixes to `PM_BASH_ALLOWED_PREFIXES` in `pre_tool_use.py`
 - Add skill review step to `scripts/reflections.py` that calls `python -m tools.skill_lifecycle detect-friction` and triggers skillification when friction is found
 - Create `tests/unit/test_skill_lifecycle_cli.py` with tests for CLI argument parsing and output format
@@ -287,7 +293,7 @@ No update system changes required -- this feature adds new Python modules that a
 - Verify PM session can run `python -m tools.skill_lifecycle report` (bash allowlist check)
 - Verify `/skillify` frontmatter no longer has `disable-model-invocation: true`
 - Verify generated skill frontmatter includes `generated`, `generated_at`, `expires_at` fields
-- Verify existing tests in `tests/unit/test_pre_tool_use.py` still pass
+- Verify existing tests in `tests/unit/test_pm_session_permissions.py` still pass
 - Run `python -m ruff check .` and `python -m ruff format --check .`
 
 ### 5. Documentation
@@ -334,7 +340,7 @@ No update system changes required -- this feature adds new Python modules that a
 | CONCERN | Simplifier | Friction detection from Memory is underspecified -- "query Memory for corrections and patterns" requires LLM classification to distinguish genuine tool-param friction from normal corrections | Task 2 | Scope initial implementation to exact-match heuristics: Memory records with `category=correction` AND `tags` containing tool-related keywords (e.g., `tool`, `params`, `flags`). Defer LLM-based classification to a follow-up iteration |
 | NIT | Archaeologist | Issue #853 specifies human approval gate for generated skills; plan removes it without explicit acknowledgment of the design decision change | N/A | |
 | NIT | User | All 14 success criteria are technical (metrics, CLI, tests). No user-facing validation that generated skills actually reduce friction or get used | N/A | |
-| NIT | Structural | `tests/unit/test_pre_tool_use.py` referenced in Test Impact and Success Criteria does not exist; the actual test file is `tests/unit/test_pm_session_permissions.py` | Task 4 | |
+| NIT | Structural | `tests/unit/test_pm_session_permissions.py` referenced in Test Impact and Success Criteria does not exist; the actual test file is `tests/unit/test_pm_session_permissions.py` | Task 4 | |
 
 ---
 
