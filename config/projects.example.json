@@ -56,6 +56,13 @@
       "context": {
         "tech_stack": ["Python", "Framework"],
         "description": "Focus areas for this project"
+      },
+      "email": {
+        "_doc": "Optional. When present, the email bridge routes inbound emails from these addresses to this project.",
+        "contacts": {
+          "alice@example.com": {"name": "Alice", "persona": "teammate"},
+          "bob@corp.com": {"name": "Bob", "persona": "project-manager"}
+        }
       }
     }
   },

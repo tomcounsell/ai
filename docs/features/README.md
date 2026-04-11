@@ -43,6 +43,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
+| [Email Bridge](email-bridge.md) | IMAP/SMTP second transport alongside Telegram: sender-to-project routing, EmailOutputHandler, thread continuation via Message-ID, dead letter queue, transport-keyed callback registration | Shipped |
 | [Emoji Embedding Reactions](emoji-embedding-reactions.md) | Embedding-based emoji reaction selection with standard and Premium custom emoji support, EmojiResult type, send_telegram --react and --emoji flags, and graceful degradation | Shipped |
 | [Enforce REVIEW/DOCS Stages](enforce-review-docs-stages.md) | Hard delivery gates in Observer preventing SDLC pipeline from skipping REVIEW and DOCS stages | Shipped |
 | [Enhanced Planning](enhanced-planning.md) | Spike Resolution (Phase 1.5), RFC Review (Phase 2.8), Infrastructure Documentation, and task validation fields for /do-plan | Shipped |

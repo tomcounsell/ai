@@ -675,6 +675,18 @@ class AgentSession(Model):
         self.extra_context = ec
 
     @property
+    def transport(self) -> str:
+        """Extract transport from extra_context (default: 'telegram').
+
+        Returns the transport identifier for this session's origin.
+        Email sessions store 'email' here; Telegram sessions default to 'telegram'.
+        """
+        ec = self.extra_context
+        if isinstance(ec, dict):
+            return ec.get("transport", "telegram")
+        return "telegram"
+
+    @property
     def work_item_slug(self) -> str | None:
         """Backward-compatible alias for slug."""
         return self.slug

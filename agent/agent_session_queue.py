@@ -1806,9 +1806,33 @@ SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
 ResponseCallback = Callable[[object, str, str, int], Awaitable[None]]
 
-_send_callbacks: dict[str, SendCallback] = {}
-_reaction_callbacks: dict[str, ReactionCallback] = {}
-_response_callbacks: dict[str, ResponseCallback] = {}
+_send_callbacks: dict[str | tuple[str, str], SendCallback] = {}
+_reaction_callbacks: dict[str | tuple[str, str], ReactionCallback] = {}
+_response_callbacks: dict[str | tuple[str, str], ResponseCallback] = {}
+
+
+def _resolve_send_callback(project_key: str, transport: str | None) -> SendCallback | None:
+    """Resolve send callback with transport-keyed lookup and project_key fallback.
+
+    Lookup order:
+    1. (project_key, transport) composite key — transport-specific handler
+    2. project_key string key — default handler (backward compat for Telegram)
+    3. None — caller should fall back to FileOutputHandler
+    """
+    if transport:
+        cb = _send_callbacks.get((project_key, transport))
+        if cb is not None:
+            return cb
+    return _send_callbacks.get(project_key)
+
+
+def _resolve_reaction_callback(project_key: str, transport: str | None) -> ReactionCallback | None:
+    """Resolve reaction callback with transport-keyed lookup and project_key fallback."""
+    if transport:
+        cb = _reaction_callbacks.get((project_key, transport))
+        if cb is not None:
+            return cb
+    return _reaction_callbacks.get(project_key)
 
 
 def register_callbacks(
@@ -1818,6 +1842,7 @@ def register_callbacks(
     response_callback: ResponseCallback | None = None,
     *,
     handler: OutputHandler | None = None,
+    transport: str | None = None,
 ) -> None:
     """
     Register output callbacks for a project.
@@ -1833,28 +1858,35 @@ def register_callbacks(
             sends response with file handling.
         handler: An OutputHandler instance. If provided, its send() and react()
                  methods are wrapped as send_callback and reaction_callback.
+        transport: Optional transport identifier (e.g. "email"). When provided,
+                   callbacks are stored under (project_key, transport) composite key
+                   so multiple transports can coexist for the same project. When None,
+                   uses plain project_key string key (backward compatible).
     """
+    # Determine storage key: composite tuple for transport-keyed, plain str for default
+    key: str | tuple[str, str] = (project_key, transport) if transport else project_key
+
     if handler is not None:
         # Wrap OutputHandler methods as raw callbacks for internal use
         if send_callback is None:
-            _send_callbacks[project_key] = handler.send
+            _send_callbacks[key] = handler.send
         else:
-            _send_callbacks[project_key] = send_callback
+            _send_callbacks[key] = send_callback
 
         if reaction_callback is None:
-            _reaction_callbacks[project_key] = handler.react
+            _reaction_callbacks[key] = handler.react
         else:
-            _reaction_callbacks[project_key] = reaction_callback
+            _reaction_callbacks[key] = reaction_callback
     else:
         if send_callback is None:
             raise ValueError("Either send_callback or handler must be provided")
         if reaction_callback is None:
             raise ValueError("Either reaction_callback or handler must be provided")
-        _send_callbacks[project_key] = send_callback
-        _reaction_callbacks[project_key] = reaction_callback
+        _send_callbacks[key] = send_callback
+        _reaction_callbacks[key] = reaction_callback
 
     if response_callback:
-        _response_callbacks[project_key] = response_callback
+        _response_callbacks[key] = response_callback
 
 
 # === Restart Flag (written by remote-update.sh) ===
@@ -2953,8 +2985,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
     asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
 
     # Create messenger with bridge callbacks, falling back to file output
-    send_cb = _send_callbacks.get(session.project_key)
-    react_cb = _reaction_callbacks.get(session.project_key)
+    # Transport-keyed lookup: try (project_key, transport) first, fall back to project_key
+    _ec = session.extra_context if session.extra_context else {}
+    _session_transport = _ec.get("transport")
+    send_cb = _resolve_send_callback(session.project_key, _session_transport)
+    react_cb = _resolve_reaction_callback(session.project_key, _session_transport)
 
     if not send_cb:
         from agent.output_handler import FileOutputHandler

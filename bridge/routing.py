@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 CONFIG = {}
 DEFAULTS = {}
 GROUP_TO_PROJECT = {}
+EMAIL_TO_PROJECT: dict[str, dict] = {}
 ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
 RESPOND_TO_DMS = True
@@ -154,6 +155,75 @@ def build_group_to_project_map(config: dict) -> dict:
 # =============================================================================
 # Project and Chat Mapping
 # =============================================================================
+
+
+def load_email_contacts(config: dict) -> dict[str, dict]:
+    """Build a mapping from email address (lowercase) to project config.
+
+    Reads the ``email.contacts`` section from each project in projects.json.
+    Each contact entry maps an email address to a project key.
+
+    Example projects.json email section::
+
+        "email": {
+            "contacts": {
+                "alice@example.com": {"name": "Alice", "persona": "teammate"},
+                "bob@corp.com": {"name": "Bob", "persona": "project-manager"}
+            }
+        }
+
+    Args:
+        config: Full projects.json dict (as returned by load_config()).
+
+    Returns:
+        Dict mapping lowercase email address -> project dict (with ``_key`` set).
+    """
+    email_map: dict[str, dict] = {}
+    projects = config.get("projects", {})
+
+    for project_key in ACTIVE_PROJECTS:
+        if project_key not in projects:
+            continue
+        project = projects[project_key]
+        email_config = project.get("email", {})
+        contacts = email_config.get("contacts", {})
+        for email_addr, _contact_info in contacts.items():
+            email_lower = email_addr.lower().strip()
+            if not email_lower:
+                continue
+            if email_lower in email_map:
+                logger.warning(f"Email '{email_addr}' is mapped to multiple projects, using first")
+                continue
+            project_copy = dict(project)
+            project_copy["_key"] = project_key
+            email_map[email_lower] = project_copy
+            logger.info(
+                f"Mapping email '{email_addr}' -> project '{project.get('name', project_key)}'"
+            )
+
+    return email_map
+
+
+def find_project_for_email(sender_email: str | None) -> dict | None:
+    """Find which project a sender email address belongs to.
+
+    Uses exact-match lookup (case-insensitive) against the EMAIL_TO_PROJECT map
+    populated at bridge startup from projects.json email.contacts sections.
+
+    Args:
+        sender_email: Sender email address string, or None.
+
+    Returns:
+        Project config dict (with ``_key`` set), or None if not found.
+    """
+    if not sender_email:
+        return None
+
+    email_lower = sender_email.lower().strip()
+    if not email_lower:
+        return None
+
+    return EMAIL_TO_PROJECT.get(email_lower)
 
 
 def find_project_for_chat(chat_title: str | None) -> dict | None:

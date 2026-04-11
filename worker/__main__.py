@@ -195,6 +195,21 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         register_callbacks(project_key, handler=handler)
         logger.info(f"[{project_key}] Registered TelegramRelayOutputHandler")
 
+    # Register EmailOutputHandler for each project that has email contacts configured
+    try:
+        from bridge.email_bridge import EmailOutputHandler, is_email_configured
+
+        if is_email_configured():
+            email_handler = EmailOutputHandler()
+            for project_key, project_config in projects.items():
+                if project_config.get("email", {}).get("contacts"):
+                    register_callbacks(project_key, handler=email_handler, transport="email")
+                    logger.info(f"[{project_key}] Registered EmailOutputHandler (transport=email)")
+        else:
+            logger.debug("Email not configured — skipping EmailOutputHandler registration")
+    except Exception as e:
+        logger.warning(f"EmailOutputHandler registration failed (non-fatal): {e}")
+
     # Step 1: Rebuild indexes for ALL Popoto models (SCAN-based, production-safe)
     # Cleans up stale/orphaned index entries across all models, not just AgentSession
     try:

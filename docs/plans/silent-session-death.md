@@ -248,3 +248,12 @@ New tests to create:
 
 - [ ] Update `docs/features/session-lifecycle-diagnostics.md` to document the crash snapshot behavior and tool count fallback
 - [ ] Add a troubleshooting entry for "heartbeat shows stale tool count" pointing to the fallback mechanism
+
+## Success Criteria
+
+- [ ] `get_activity()` returns a non-stale tool count when the session registry reverse lookup fails (Fix 1)
+- [ ] `BackgroundTask.run()` propagates exceptions from the task future to `task.error` rather than swallowing them (Fix 2)
+- [ ] A crash snapshot file is written to disk in the finally block when `session_failed=True` (Fix 3)
+- [ ] `log_lifecycle_transition()` is called before `_complete_agent_session()` in both normal and exception paths (Fix 4)
+- [ ] All existing tests pass unchanged — no regressions in session lifecycle or stall detection
+- [ ] New unit tests cover all four fallback/fix paths

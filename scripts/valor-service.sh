@@ -72,6 +72,15 @@ usage() {
     echo "  worker-status   Check worker status"
     echo "  worker-logs     Tail the worker logs"
     echo ""
+    echo "Email bridge commands:"
+    echo "  email-start     Start the email bridge (IMAP poller)"
+    echo "  email-stop      Stop the email bridge"
+    echo "  email-restart   Restart the email bridge"
+    echo "  email-status    Check email bridge health (includes last poll age)"
+    echo "  email-dead-letter list           List dead-lettered emails"
+    echo "  email-dead-letter replay <id>    Replay a specific dead-lettered email"
+    echo "  email-dead-letter replay --all   Replay all dead-lettered emails"
+    echo ""
 }
 
 get_pid() {
@@ -654,6 +663,113 @@ tail_worker_logs() {
     tail -f "$LOG_DIR/worker.log" "$LOG_DIR/worker_error.log" 2>/dev/null
 }
 
+# === Email Bridge Management ===
+
+get_email_pid() {
+    pgrep -fi "bridge.email_bridge" 2>/dev/null || pgrep -fi "bridge/email_bridge" 2>/dev/null || true
+}
+
+is_email_running() {
+    local pid=$(get_email_pid)
+    [ -n "$pid" ]
+}
+
+EMAIL_PID_FILE="$PROJECT_DIR/data/email_bridge.pid"
+
+start_email() {
+    if is_email_running; then
+        local pid=$(get_email_pid)
+        echo "Email bridge is already running (PID: $pid)"
+        return 0
+    fi
+
+    echo "Starting email bridge..."
+
+    # Rotate email bridge logs
+    rotate_log "$LOG_DIR/email_bridge.log"
+    rotate_log "$LOG_DIR/email_bridge.error.log"
+
+    cd "$PROJECT_DIR"
+    nohup "$VENV/bin/python" -m bridge.email_bridge \
+        >> "$LOG_DIR/email_bridge.log" \
+        2>> "$LOG_DIR/email_bridge.error.log" &
+    echo $! > "$EMAIL_PID_FILE"
+
+    sleep 2
+    if is_email_running; then
+        local pid=$(get_email_pid)
+        echo "Email bridge started (PID: $pid)"
+    else
+        echo "Failed to start email bridge. Check logs: $LOG_DIR/email_bridge.error.log"
+        return 1
+    fi
+}
+
+stop_email() {
+    local pid=$(get_email_pid)
+
+    if [ -z "$pid" ]; then
+        echo "Email bridge is not running"
+        rm -f "$EMAIL_PID_FILE"
+        return 0
+    fi
+
+    echo "Stopping email bridge (PID: $pid)..."
+    kill "$pid" 2>/dev/null || true
+
+    for i in {1..10}; do
+        if ! is_email_running; then
+            echo "Email bridge stopped"
+            rm -f "$EMAIL_PID_FILE"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Force killing email bridge..."
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$EMAIL_PID_FILE"
+    echo "Email bridge stopped (forced)"
+}
+
+restart_email() {
+    stop_email
+    sleep 1
+    start_email
+}
+
+status_email() {
+    local pid=$(get_email_pid)
+
+    if [ -n "$pid" ]; then
+        echo "Email Bridge Status: RUNNING"
+        echo "PID: $pid"
+        echo "Uptime: $(ps -o etime= -p $pid 2>/dev/null | xargs)"
+        echo "Memory: $(ps -o rss= -p $pid 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')"
+    else
+        echo "Email Bridge Status: STOPPED"
+    fi
+
+    # Health check: last poll age
+    local last_poll_age
+    last_poll_age=$("$VENV/bin/python" -c "
+from bridge.email_bridge import get_last_poll_age
+age = get_last_poll_age()
+if age is None:
+    print('Never polled')
+elif age > 300:
+    print(f'STALE: last poll {age:.0f}s ago (>5 min)')
+else:
+    print(f'OK: last poll {age:.0f}s ago')
+" 2>/dev/null || echo "Unknown (bridge module not importable)")
+    echo "Last IMAP poll: $last_poll_age"
+}
+
+email_dead_letter() {
+    cd "$PROJECT_DIR"
+    "$VENV/bin/python" -m bridge.email_dead_letter "$@"
+}
+
 # Main
 case "${1:-}" in
     start)
@@ -695,6 +811,22 @@ case "${1:-}" in
         ;;
     worker-logs)
         tail_worker_logs
+        ;;
+    email-start)
+        start_email
+        ;;
+    email-stop)
+        stop_email
+        ;;
+    email-restart)
+        restart_email
+        ;;
+    email-status)
+        status_email
+        ;;
+    email-dead-letter)
+        shift
+        email_dead_letter "$@"
         ;;
     *)
         usage
