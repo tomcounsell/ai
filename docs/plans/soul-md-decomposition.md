@@ -132,29 +132,30 @@ No prerequisites -- this work has no external dependencies. All required files a
 ### Key Elements
 
 - **Identity config** (`config/identity.json`): Structured key-value data -- name, email, timezone, org, machine description. Per-instance overrides via `~/Desktop/Valor/identity.json`.
-- **Composable segments** (`config/personas/segments/`): Behavioral content split by concern -- communication style, work patterns, escalation policy, philosophy, tools reference, machine access. Each segment is a standalone markdown file.
-- **Segment manifest**: Each persona defines which segments it includes and in what order, embedded in the persona overlay or as a simple list.
+- **Three composable segments** (`config/personas/segments/`): All behavioral content decomposed into exactly three segments, each a standalone markdown file:
+  1. **`identity.md`** -- Who I Am, values, voice, communication style, response summarization. For a text agent, voice *is* identity -- these are inseparable.
+  2. **`work-patterns.md`** -- Autonomy rules, escalation policy, decision heuristics, philosophy-as-actionable-rules. Each pattern includes an inline "why" annotation explaining the reasoning. Abstract frameworks are translated into concrete behavioral guidance.
+  3. **`tools.md`** -- MCP servers, development tools, browser automation, CLI references, local Python tools, machine self-management commands. Unified reference catalog.
+- **Segment manifest**: A simple JSON list defining segment order. All personas render all segments -- no segment skipping. The manifest is universal.
+- **F-string substitution**: Identity fields injected via Python f-strings (e.g., `f"name: {identity['name']}"`). Simple and sufficient for current needs. A future issue will add cached/compiled per-context variable support.
+- **Output format**: Assembled segments render to JSON or markdown for context priming.
 - **Retired SOUL.md**: All fallback references removed. SOUL.md deleted. `_base.md` replaced by segment assembly.
 
 ### Flow
 
-**load_persona_prompt("developer")** call -> Load `config/identity.json` + private overrides -> Assemble segments from `config/personas/segments/*.md` -> Inject identity fields -> Append persona overlay from `~/Desktop/Valor/personas/developer.md` -> Return combined prompt
+**load_persona_prompt("developer")** call -> Load `config/identity.json` + private overrides -> Assemble all 3 segments from `config/personas/segments/*.md` per manifest -> Inject identity fields via f-string substitution -> Append persona overlay from `~/Desktop/Valor/personas/developer.md` -> Return combined prompt
 
 ### Technical Approach
 
 **Phase 1: Create identity config and segments (additive)**
 
 - Create `config/identity.json` with fields extracted from SOUL.md lines 5-12
-- Create `config/personas/segments/` directory with content decomposed from `_base.md`:
-  - `identity.md` -- "Who I Am" section (background, values, professional standards)
-  - `work-patterns.md` -- "How I Work", escalation policy, decision heuristics, autonomous execution
-  - `communication.md` -- communication style, response summarization, Telegram patterns
-  - `machine.md` -- system access, self-management, health checks
-  - `tools.md` -- MCP servers, development tools, browser automation, local Python tools, SMS reader
-  - `philosophy.md` -- agentic engineering, thread types, scaling principles, wisdom quotes
-  - `escape-hatch.md` -- escape hatch for genuine uncertainty
-  - `memory.md` -- subconscious memory, intentional memory sections
-- Create `config/personas/segments/manifest.json` defining the default segment ordering
+- Create `config/personas/segments/` directory with content decomposed from `_base.md` and SOUL.md into 3 segments:
+  - `identity.md` -- Who I Am, As an AI Coworker, Professional Standards, Values, Communication Style, Response Summarization, When I Reach Out, What I Do Not Do. Voice and identity are unified because for a text agent, communication style *is* identity.
+  - `work-patterns.md` -- How I Work, Autonomous Execution, When I Escalate, What I Do NOT Ask About, Decision Heuristic, Escape Hatch, Subconscious Memory, Intentional Memory, Agentic Engineering Philosophy (translated to actionable patterns with inline "why" annotations). Merges behavioral rules with philosophy-as-action and memory guidance.
+  - `tools.md` -- MCP Servers, Development Tools, Browser Automation, Local Python Tools (SMS, Telegram, Link Analysis), Machine Self-Management (restart, health, logs), Daily Operations. Unified reference catalog including former machine/tools/escape-hatch content.
+- Create `config/personas/segments/manifest.json` defining the universal segment order (all personas render all segments)
+- Use f-string substitution for identity field injection in segment templates
 
 **Phase 2: Update load functions (swap implementation)**
 
@@ -244,7 +245,7 @@ No prerequisites -- this work has no external dependencies. All required files a
 ## Rabbit Holes
 
 - **Dynamic persona switching mid-session** -- changing persona after session start requires session-level state management changes. Out of scope per issue.
-- **Jinja2 or advanced templating** -- simple string substitution (`{name}`, `{email}`) is sufficient for identity field injection. Do not introduce a template engine dependency.
+- **Jinja2 or advanced templating** -- f-string substitution is sufficient for identity field injection. A future issue will add cached/compiled per-context variable support. Do not introduce a template engine dependency now.
 - **YAML instead of JSON for identity config** -- JSON is simpler, has no external dependency, and is already used throughout the project (`.mcp.json`, `projects.json`). Do not debate format.
 - **Migrating private overlay content** -- the private overlay files in `~/Desktop/Valor/personas/` are out of scope. They continue to work as-is; only the base/shared content changes.
 - **Automated content migration tool** -- do not build a tool to programmatically split SOUL.md. The decomposition is a one-time manual operation guided by clear section boundaries.
@@ -310,7 +311,7 @@ The only indirect agent integration concern is the `.claude/hooks/post_tool_use.
 - [ ] `config/identity.json` exists with name, email, timezone, org fields
 - [ ] `load_identity()` function in `agent/sdk_client.py` loads identity from JSON
 - [ ] Per-instance identity overrides work via `~/Desktop/Valor/identity.json`
-- [ ] Shared behavioral content is split into composable segments in `config/personas/segments/`
+- [ ] Shared behavioral content is split into exactly 3 composable segments (identity.md, work-patterns.md, tools.md) in `config/personas/segments/`
 - [ ] `_base.md` is deleted -- no more duplication
 - [ ] `config/SOUL.md` is deleted
 - [ ] `SOUL_PATH` constant is removed from `agent/sdk_client.py`
@@ -388,18 +389,13 @@ The only indirect agent integration concern is the `.claude/hooks/post_tool_use.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `config/personas/segments/` directory
-- Split `config/personas/_base.md` content into segment files:
-  - `identity.md` -- Who I Am, As an AI Coworker, Professional Standards, Values (~lines 15-37)
-  - `work-patterns.md` -- How I Work, Autonomous Execution, When I Escalate, What I Do NOT Ask About, Decision Heuristic (~lines 39-115)
-  - `communication.md` -- Communication Style, Response Summarization, When I Reach Out, What I Do Not Do (~lines 117-280). Add cross-reference comment to `bridge/summarizer.py`
-  - `machine.md` -- My Machine, Self-Management, Daily Operations (~lines 154-358 in SOUL.md, not all in _base.md)
-  - `tools.md` -- Tools I Use: MCP Servers, Development Tools, Browser Automation, Local Python Tools (~lines 169-275)
-  - `philosophy.md` -- Agentic Engineering Philosophy, Thread-Based Engineering, Scaling Compute, ADWs, Validation Loops, System Prompt is Everything, Fork and Parallelize, Tool Bloat, Z-Thread, Wisdom (~lines 282-390)
-  - `escape-hatch.md` -- Escape Hatch for Genuine Uncertainty (~lines 392-423 in _base.md)
-  - `memory.md` -- Subconscious Memory, Intentional Memory (~lines 424-475 in _base.md)
-- Create `config/personas/segments/manifest.json` listing default segment order
+- Split `_base.md` and SOUL.md content into exactly 3 segment files:
+  - `identity.md` -- Who I Am, As an AI Coworker, Professional Standards, Values, Communication Style, Response Summarization, When I Reach Out, What I Do Not Do. Add cross-reference comment to `bridge/summarizer.py` for voice alignment.
+  - `work-patterns.md` -- How I Work, Autonomous Execution, When I Escalate, What I Do NOT Ask About, Decision Heuristic, Escape Hatch for Genuine Uncertainty, Subconscious Memory, Intentional Memory, Agentic Engineering Philosophy (rewritten as actionable patterns with inline "why" annotations preserving the inspirational framing as rationale).
+  - `tools.md` -- MCP Servers, Development Tools, Browser Automation, Local Python Tools (SMS, Telegram, Link Analysis), Machine Self-Management (restart, health, logs, after reboot), Daily Operations, Issue Polling, Job Scheduler.
+- Create `config/personas/segments/manifest.json` listing universal segment order (all personas render all 3 segments, no skipping)
 - Update `load_persona_prompt()` to read segments from manifest and assemble, replacing `_base.md` read
-- Inject identity fields from `load_identity()` into the identity segment (template substitution)
+- Inject identity fields from `load_identity()` into segments via f-string substitution
 
 ### 3. Remove SOUL.md Fallbacks
 - **Task ID**: build-remove-fallbacks
@@ -494,7 +490,7 @@ The only indirect agent integration concern is the `.claude/hooks/post_tool_use.
 | SOUL.md deleted | `test ! -f config/SOUL.md` | exit code 0 |
 | _base.md deleted | `test ! -f config/personas/_base.md` | exit code 0 |
 | Identity config exists | `python -c "import json; json.load(open('config/identity.json'))"` | exit code 0 |
-| Segments exist | `ls config/personas/segments/*.md` | exit code 0 |
+| 3 segments exist | `ls config/personas/segments/{identity,work-patterns,tools}.md` | exit code 0 |
 | No SOUL.md in Python | `grep -rn "SOUL\.md" --include="*.py" .` | exit code 1 |
 | No SOUL_PATH in code | `grep -rn "SOUL_PATH" --include="*.py" .` | exit code 1 |
 | Persona loads | `python -c "from agent.sdk_client import load_persona_prompt; p = load_persona_prompt('developer'); assert 'Valor' in p"` | exit code 0 |
@@ -509,8 +505,16 @@ The only indirect agent integration concern is the `.claude/hooks/post_tool_use.
 
 ## Open Questions
 
-1. **Segment granularity**: The plan proposes 8 segments (identity, work-patterns, communication, machine, tools, philosophy, escape-hatch, memory). Is this the right decomposition, or should some be merged (e.g., machine + tools)?
+*All resolved — decisions documented below.*
 
-2. **Identity field injection mechanism**: Simple string substitution (`content.replace("{name}", identity["name"])`) vs. a marker-based approach (e.g., `<!-- identity:name -->`)? The plan assumes simple string substitution is sufficient.
+### Resolved
 
-3. **Manifest format**: Should the segment manifest be a simple JSON list of filenames, or should it support per-persona segment selection (e.g., teammate skips philosophy and tools segments)?
+1. **Segment granularity**: ✅ **3 segments** — Identity (name, role, values, voice/communication), Work Patterns (autonomy, escalation, philosophy-as-actionable-rules with inline "why"), Tools (unified reference catalog including machine self-management). Rationale: for a text agent, voice *is* identity (merge communication into identity); philosophy without behavioral mapping adds no value (merge into work-patterns as "why" annotations); machine access is discoverable by the agent, operational commands belong with tools (merge machine into tools).
+
+2. **Identity field injection mechanism**: ✅ **F-strings** — Python f-string substitution is good enough for now. A future issue will be drafted to add cached/compiled per-context variable support as dynamism needs grow.
+
+3. **Manifest format**: ✅ **Universal manifest, no skipping** — Simple JSON list of filenames. All personas render all segments because segments are context priming and no persona should skip context. Output renders to JSON or markdown.
+
+### Future Work
+
+- [ ] Draft GitHub issue: Cached/compiled per-context variable substitution for persona segments (upgrade from f-strings when dynamic context needs grow)
