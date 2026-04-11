@@ -123,6 +123,36 @@ class TestLogLifecycleTransition:
         assert len(lifecycle_logs) == 1
         assert "context=" not in lifecycle_logs[0].message
 
+    def test_append_event_dict_uses_partial_save(self, redis_test_db):
+        """_append_event_dict must call save(update_fields=...) not a full save.
+
+        This is the Layer 2 defense from #898: partial save prevents stale-object
+        callers from clobbering status/auto_continue_count/message_text.
+        """
+        from unittest.mock import patch
+
+        s = AgentSession.create(
+            session_id="llt-partial-save-1",
+            project_key="test",
+            status="running",
+            created_at=datetime.now(tz=UTC),
+        )
+
+        with patch.object(s, "save") as mock_save:
+            s._append_event_dict({"event_type": "lifecycle", "text": "test event", "data": None})
+
+        mock_save.assert_called_once()
+        call_kwargs = mock_save.call_args.kwargs
+        assert "update_fields" in call_kwargs, (
+            "_append_event_dict must use partial save to protect status field (#898)"
+        )
+        assert "session_events" in call_kwargs["update_fields"]
+        assert "updated_at" in call_kwargs["update_fields"]
+        # Critically: status must NOT be in update_fields
+        assert "status" not in call_kwargs["update_fields"], (
+            "status must not be in update_fields — stale callers must not clobber it"
+        )
+
 
 # ── session_transcript.py instrumentation ────────────────────────────────────
 

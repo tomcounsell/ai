@@ -125,6 +125,60 @@ When a nudge (auto-continue) is enqueued during session execution, the session s
 - If session no longer exists: nudge fallback recreated it, skip completion
 - Otherwise: proceed with normal completion via `finalize_session()`
 
+## Stale Object Hazard and the `finalized_by_execute` Gate
+
+### Three-Object Pattern
+
+The worker loop creates multiple Python instances that all refer to the same Redis record:
+
+1. **Outer session** — created by `_pop_agent_session()` in `_worker_loop`. This object is held across the entire session execution lifecycle.
+2. **Inner `agent_session`** — fetched inside `_execute_agent_session()` after the outer `await`. This is the object used for most execution-time state mutations.
+3. **Nudge fresh re-read** — created by `get_authoritative_session()` inside `_enqueue_nudge()`. This is the authoritative object that writes `status=pending, auto_continue_count` when a nudge is triggered.
+
+When a nudge fires, objects #1 and #2 become stale snapshots: their in-memory fields no longer match Redis. Any `.save()` call on either of them would clobber the authoritative nudge state.
+
+### The `finalized_by_execute` Gate (#898)
+
+The `finalized_by_execute` flag (in `_worker_loop`, `agent/agent_session_queue.py`) prevents the outer finally block from firing on the happy path:
+
+```python
+finalized_by_execute = False
+try:
+    await _execute_agent_session(session)
+    finalized_by_execute = True  # only reached on clean return
+except asyncio.CancelledError:
+    ...  # finalized_by_execute stays False
+except Exception:
+    ...  # finalized_by_execute stays False
+finally:
+    if not session_completed and not finalized_by_execute:
+        # Crash/cancel path only. On the happy path, _execute_agent_session
+        # has already finalized (via complete_transcript or _enqueue_nudge).
+        session.log_lifecycle_transition(target, "worker finally block")
+        ...
+```
+
+**Happy path (nudge)**: `_execute_agent_session` returns cleanly. `finalized_by_execute=True`. The finally block is a complete no-op. The nudge state (`status=pending, auto_continue_count=N`) written by object #3 is preserved exactly as `_enqueue_nudge` left it.
+
+**Happy path (completion)**: `_execute_agent_session` returns cleanly. `finalized_by_execute=True`. Same result — the finally block is a no-op. `complete_transcript` already ran inside `_execute_agent_session` on a fresh re-read.
+
+**Crash path**: `_execute_agent_session` raises. `finalized_by_execute=False`. The finally block runs as designed: `log_lifecycle_transition`, snapshot, nudge guard, `_complete_agent_session`. Since the SDK aborted before `end_turn`, `_enqueue_nudge` could not have fired, so the outer session's stale state is still the only authoritative state.
+
+### Layer 2: Partial Save in `_append_event_dict`
+
+Even when `finalized_by_execute` gates off the finally block, `log_lifecycle_transition` (called from other paths) triggers `append_event → _append_event_dict`. Without protection, this would do a full `self.save()` on the stale object, clobbering `status`, `auto_continue_count`, and `message_text`.
+
+`_append_event_dict` uses `save(update_fields=["session_events", "updated_at"])` — a Popoto partial save that:
+- Writes only the listed fields to Redis HSET
+- Calls `on_save` hooks only for listed fields (the `status` IndexedField hook is NOT called)
+- Cannot clobber any field not in the list
+
+A stale caller can at worst append a spurious `session_events` entry. It cannot clobber `status`, `auto_continue_count`, or `message_text`. This makes stale-object saves non-destructive by construction.
+
+### Regression Detection
+
+`scripts/reflections.py` scans bridge logs daily for `"Stale index entry"` warnings. A non-zero count triggers a finding tagged `(regression marker for #898)`. The `finalized_by_execute` fix should eliminate all such warnings; a reappearance indicates a regression.
+
 ## Stale Session Cleanup
 
 `_cleanup_stale_sessions()` in `scripts/update/run.py` runs during every `/update` deploy and terminates `running` or `pending` sessions that have no live process. It is a safety net for sessions that were never finalized due to a crash or abrupt restart.

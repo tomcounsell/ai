@@ -12,6 +12,8 @@ last_comment_id:
 
 > Sessions can die silently -- no error logged, no snapshot saved, tool counts diverge. Four targeted fixes across three files to ensure every session termination is visible and diagnosed.
 
+> **REGRESSION NOTE (2026-04-11):** Fix 4's `log_lifecycle_transition("worker finally block")` call regressed as [#898](https://github.com/tomcounsell/ai/issues/898) — the `append_event → self.save()` chain clobbered the nudge re-enqueue when called on a stale session object. The fix was to add a `finalized_by_execute` gate that prevents Fix 4 from firing on the happy path, and to change `_append_event_dict` to use `save(update_fields=["session_events", "updated_at"])` as a defense-in-depth. Follow-up fix in [`docs/plans/nudge-stomp-append-event-bypass.md`](nudge-stomp-append-event-bypass.md).
+
 ## Problem
 
 **Current behavior:**

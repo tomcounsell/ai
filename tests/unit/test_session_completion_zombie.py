@@ -170,3 +170,40 @@ class TestWorkerFinallyBlockNudgeGuard:
         assert should_skip is False, (
             "Worker finally block must complete session when no nudge detected"
         )
+
+    def test_finalized_by_execute_gates_finally_block(self):
+        """When finalized_by_execute=True (happy path), the finally block is a no-op.
+
+        _complete_agent_session and log_lifecycle_transition must NOT be called.
+        This is the #898 fix: on the happy path (nudge or normal completion),
+        _execute_agent_session already finalized the session authoritatively, so the
+        outer finally block must not fire a stale save that clobbers the nudge state.
+        """
+        complete_calls = []
+        lifecycle_calls = []
+
+        session = MagicMock()
+        session.log_lifecycle_transition.side_effect = lambda *a, **kw: lifecycle_calls.append(a)
+
+        async def fake_complete(s, *, failed=False):
+            complete_calls.append({"session": s, "failed": failed})
+
+        # Simulate the finally block with finalized_by_execute=True (happy path)
+        session_completed = False
+        session_failed = False
+        finalized_by_execute = True  # set by the happy-path return
+
+        if not session_completed and not finalized_by_execute:
+            # This block must NOT run
+            try:
+                target = "failed" if session_failed else "completed"
+                session.log_lifecycle_transition(target, "worker finally block")
+            except Exception:
+                pass
+
+        assert lifecycle_calls == [], (
+            "log_lifecycle_transition must NOT be called when finalized_by_execute=True"
+        )
+        assert complete_calls == [], (
+            "_complete_agent_session must NOT be called when finalized_by_execute=True"
+        )

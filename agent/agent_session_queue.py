@@ -2166,8 +2166,15 @@ async def _worker_loop(
 
             session_failed = False
             session_completed = False
+            # finalized_by_execute: True after _execute_agent_session returns normally
+            # (happy path — nudge or completion). Prevents the outer finally block from
+            # firing its stale lifecycle log / _complete_agent_session on a session
+            # that was already finalized inside _execute_agent_session. See #898.
+            # On crash or CancelledError, this stays False so the finally block runs.
+            finalized_by_execute = False
             try:
                 await _execute_agent_session(session)
+                finalized_by_execute = True  # reached only on non-exceptional return
             except asyncio.CancelledError:
                 logger.warning(
                     "[worker:%s] Worker cancelled during session %s — session interrupted, "
@@ -2252,8 +2259,11 @@ async def _worker_loop(
                     )
                     session_failed = True
             finally:
-                if not session_completed:
-                    # Fix 4: Log lifecycle transition before completing
+                if not session_completed and not finalized_by_execute:
+                    # Crash/cancel path only. On the happy path (nudge or completion),
+                    # finalized_by_execute=True keeps this block from firing on a stale
+                    # session object and clobbering _enqueue_nudge's authoritative write.
+                    # Fix 4: Log lifecycle transition before completing (crash path only)
                     try:
                         target = "failed" if session_failed else "completed"
                         session.log_lifecycle_transition(target, "worker finally block")
@@ -3362,9 +3372,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
             )
             if not chat_state.defer_reaction:
                 complete_transcript(session.session_id, status=final_status)
-            else:
-                agent_session.updated_at = datetime.now(tz=UTC)
-                agent_session.save()
+            # else: nudge path — _enqueue_nudge already wrote the authoritative
+            # post-nudge state (status=pending, auto_continue_count, nudge event,
+            # new message_text). Do NOT save the stale `agent_session` local here;
+            # it would clobber the nudge. updated_at is refreshed on the next
+            # worker pop. See #898 for the regression history.
         except Exception as e:
             logger.warning(
                 f"AgentSession update failed for session {session.agent_session_id} "
