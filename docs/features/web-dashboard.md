@@ -44,7 +44,7 @@ Each session row displays a horizontal strip of SDLC stage indicators. The eight
 
 `_session_to_pipeline()` routes stage reads through `PipelineStateMachine.get_display_progress()` (PR #747, issue #735) when `stage_states` are present. This makes the dashboard a direct consumer of the same canonical path used by the merge gate and the SDLC pipeline.
 
-The `AgentSession.stage_states` field (populated by the PipelineStateMachine since issue #492) is the authoritative source. `get_display_progress()` returns a dict mapping `DISPLAY_STAGES` (from `bridge.pipeline_graph`) to their stored status strings. `_parse_stage_states()` is retained as a private fallback utility used when `PipelineStateMachine` construction fails.
+The `AgentSession.stage_states` field (populated by the PipelineStateMachine since issue #492) is the authoritative source. `get_display_progress()` returns a dict mapping `DISPLAY_STAGES` (from `agent.pipeline_graph`) to their stored status strings. `_parse_stage_states()` is retained as a private fallback utility used when `PipelineStateMachine` construction fails.
 
 Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are safely ignored — `get_display_progress()` iterates over the canonical `DISPLAY_STAGES` list only.
 

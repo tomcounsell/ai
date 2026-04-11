@@ -10,7 +10,7 @@ Without stage handoff, each Dev session starts with only the plan document and i
 
 ## How It Works
 
-Two execution paths write stage tracking records: the **dev-session path** (for DevSession Agent tool calls) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
+Two execution paths write stage tracking records: the **worker post-completion path** (for Dev sessions created via `valor_session create --role dev`) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
 
 ### Skill Tool Path (PM Sessions)
 
@@ -19,13 +19,13 @@ When a PM session invokes `Skill(skill="do-build")` (or any other SDLC skill), t
 **On skill start (`pre_tool_use.py`):**
 1. Detects `tool_name == "Skill"` in the hook input
 2. Looks up the skill name in `_SKILL_TO_STAGE` (e.g., `"do-build"` → `"BUILD"`)
-3. Resolves the bridge session ID via `session_registry.resolve(claude_uuid)`
+3. Reads session ID from `AGENT_SESSION_ID` env var (set by the worker at spawn time)
 4. Calls `_start_pipeline_stage(session_id, stage)` to mark the stage `in_progress`
 5. Silently no-ops for unknown skills (non-SDLC skills like `do-discover-paths`)
 
 **On skill completion (`post_tool_use.py`):**
 1. Detects `tool_name == "Skill"` and checks if the skill is in `_SKILL_TO_STAGE`
-2. Resolves the session ID the same way
+2. Reads session ID from `AGENT_SESSION_ID` env var
 3. Calls `_complete_pipeline_stage(session_id)` which reads `current_stage()` from Redis and calls `complete_stage()`
 4. Avoids storing state between pre and post hooks — reads the in_progress stage from Redis directly
 
@@ -46,17 +46,19 @@ _SKILL_TO_STAGE = {
 
 All errors are swallowed with `logger.warning` — hooks never crash the PM session.
 
-### On Stage Completion (SubagentStop Hook — Dev-Session Path)
+### On Stage Completion (Worker Post-Completion Handler — Dev-Session Path)
 
-When a Dev session completes, the `subagent_stop_hook` in `agent/hooks/subagent_stop.py`:
+When a Dev session completes (via SDK or CLI harness), the worker calls `_handle_dev_session_completion()` in `agent/agent_session_queue.py`:
 
-1. Resolves the tracking issue number from `SDLC_TRACKING_ISSUE` env var, `SDLC_ISSUE_NUMBER` env var, or plan frontmatter (`tracking:` field)
-2. Extracts the current stage name from the PipelineStateMachine stage states
-3. Extracts an output tail (last ~500 chars) via `_extract_output_tail()` for outcome classification
-4. Calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine to determine success/fail/ambiguous
-5. Routes to `complete_stage()` (success or ambiguous) or `fail_stage()` (fail or partial) based on the classification
-6. Calls `post_stage_comment()` from `utils/issue_comments.py` to post a structured markdown comment
-7. All of this is wrapped in try/except -- classification and comment posting never crash the hook
+1. Looks up the parent PM session via `parent_agent_session_id`
+2. Resolves the tracking issue number from `SDLC_TRACKING_ISSUE` env var, `SDLC_ISSUE_NUMBER` env var, or `issues/NNN` pattern in the session message text
+3. Calls `classify_outcome(stage, None, result)` on the PipelineStateMachine to determine success/fail/ambiguous
+4. Routes to `complete_stage()` (success or ambiguous) or `fail_stage()` (fail or partial) based on the classification
+5. Calls `post_stage_comment()` from `utils/issue_comments.py` to post a structured markdown comment
+6. Steers the parent PM session via `steer_session()` with stage name and outcome summary
+7. All operations are wrapped in try/except -- failures never crash the worker
+
+The `subagent_stop_hook` in `agent/hooks/subagent_stop.py` now only logs completion (SDLC tracking logic removed in Phase 5 cleanup).
 
 ### On Stage Start (PM session Prompt Enrichment)
 
@@ -114,7 +116,7 @@ Tier 0 parses structured OUTCOME contracts that skills emit (e.g., `/do-pr-revie
 
 ### Failure Routing via Pipeline Graph
 
-When `fail_stage()` fires, the pipeline graph (`PIPELINE_EDGES` in `bridge/pipeline_graph.py`) determines the next stage. Key failure edges:
+When `fail_stage()` fires, the pipeline graph (`PIPELINE_EDGES` in `agent/pipeline_graph.py`) determines the next stage. Key failure edges:
 
 | Current Stage | Outcome | Next Stage |
 |---------------|---------|------------|
@@ -145,14 +147,16 @@ Utility module with four functions:
 
 All GitHub interactions use the `gh` CLI via subprocess with a 10-second timeout. No new Python dependencies.
 
+### `agent/agent_session_queue.py`
+
+Extended with these functions for worker post-completion SDLC handling:
+
+- `_extract_issue_number(session, agent_session)` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or `issues/NNN` pattern in session message text. Returns int or None.
+- `_handle_dev_session_completion(session, agent_session, result)` -- Called after `get_response_via_harness()` (or SDK path) returns. Classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers parent PM session. All operations non-fatal.
+
 ### `agent/hooks/subagent_stop.py`
 
-Extended with these functions:
-
-- `_resolve_tracking_issue()` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or by parsing plan frontmatter. Returns int or None.
-- `_extract_output_tail(input_data, max_chars=500)` -- Reads the last ~500 chars from the agent transcript file for outcome classification. Falls back to `_extract_outcome_summary()` if the transcript is unavailable.
-- `_record_stage_on_parent(parent_session_id, stop_reason, output_tail)` -- Loads the parent PM session, calls `classify_outcome()` on its PipelineStateMachine, and routes to `complete_stage()` or `fail_stage()` based on the result. Errors default to `complete_stage()`.
-- `_post_stage_comment_on_completion(input_data, current_stage)` -- Called after `_register_dev_session_completion()`. Posts the stage comment, wrapped in try/except so failures are non-fatal.
+Now only logs session completion. All SDLC stage tracking logic (`_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion`) was moved to the worker post-completion handler in Phase 5 cleanup.
 
 ### `agent/sdk_client.py`
 

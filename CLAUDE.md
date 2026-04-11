@@ -252,10 +252,12 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
 
 Standalone Worker (python -m worker) → Sole session execution engine
               (worker/__main__.py)         → Startup: index rebuild → recovery → orphan cleanup
-                                           → Spawns PM session (AgentSession role=pm, read-only)
-                                               → Spawns Dev session (AgentSession role=dev, full permissions)
-                                                   → Claude Agent SDK → Claude API
-                                                       (agent/sdk_client.py)
+                                           → Executes PM session (AgentSession role=pm, read-only)
+                                               → PM creates Dev session via valor_session CLI
+                                                   → Worker routes Dev session by DEV_SESSION_HARNESS:
+                                                       sdk (default): Claude Agent SDK → Claude API
+                                                       claude-cli: claude -p subprocess → Claude API
+                                                   → _handle_dev_session_completion() → steers PM
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → TelegramRelayOutputHandler writes to Redis outbox
                                            → FileOutputHandler fallback for non-Telegram / dev environments
@@ -282,7 +284,7 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 
 **Key Directories:**
 - `.claude/commands/` - Slash command skills
-- `.claude/agents/` - Subagent definitions (including `dev-session`)
+- `.claude/agents/` - Subagent definitions (builder, validator, code-reviewer; dev-session removed — dev sessions created via valor_session CLI)
 - `bridge/` - Telegram integration, nudge loop
 - `worker/` - Standalone worker service (`python -m worker`)
 - `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants

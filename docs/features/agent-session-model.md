@@ -55,7 +55,7 @@ Several fields that were previously stored as independent model fields are now d
 
 ## SDLC Stage Tracking
 
-Pipeline stage state is stored in `session_events` (as `stage` type events) on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. The `stage_states` property reads the latest stage event's data and returns the stages dict. The state machine provides:
+Pipeline stage state is stored in `session_events` (as `stage` type events) on AgentSession, managed by the `PipelineStateMachine` in `agent/pipeline_state.py`. The `stage_states` property reads the latest stage event's data and returns the stages dict. The state machine provides:
 
 | Method | Returns | Purpose |
 |---|---|---|
@@ -73,7 +73,7 @@ String fields like `session_type`, `classification_type`, and `session_mode` use
 
 ## Stage Tracking
 
-Stage transitions are managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. Stage status is set programmatically at transition points (`start_stage()`, `complete_stage()`, `fail_stage()`) rather than via a CLI tool.
+Stage transitions are managed by the `PipelineStateMachine` in `agent/pipeline_state.py`. Stage status is set programmatically at transition points (`start_stage()`, `complete_stage()`, `fail_stage()`) rather than via a CLI tool.
 
 | Skill | Stage | Transitions | Links Set |
 |-------|-------|-------------|-----------|

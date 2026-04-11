@@ -8,9 +8,7 @@ Dev role sessions can now execute via a CLI harness (`claude -p --output-format 
 
 PM and teammate sessions remain on the SDK path. Only dev sessions are routed through the harness abstraction.
 
-**Phase 6 (end-to-end validation)** is pending. It will validate the full SDLC pipeline running dev sessions via the CLI harness in production.
-
-**Phases 3-5** shipped in PR #902: PM persona migration to `valor_session create --role dev`, removal of legacy hook wiring (`session_registry`, `SubagentStop` SDLC logic, `PreToolUse` dev registration), and worker post-completion handler for SDLC stage transitions and GitHub comments.
+**Phase 6 (end-to-end validation)** remains pending — production validation with `DEV_SESSION_HARNESS=claude-cli` running a full SDLC pipeline.
 
 ## How It Works
 
@@ -108,12 +106,48 @@ No changes to the `AgentSession` model are needed. Harness selection is purely a
 | `agent/__init__.py` | Exports `get_response_via_harness` and `verify_harness_health` |
 | `tests/unit/test_harness_streaming.py` | 18 unit tests covering streaming, batching, error paths, health checks |
 
-## Shipped Phases (3-5, PR #902)
+## Post-Completion SDLC Handler (Phase 3)
 
-- **Phase 3**: PM persona migration -- PM now uses `valor_session create --role dev` instead of Agent tool dispatch
-- **Phase 4**: Remove legacy wiring -- deleted `session_registry`, removed `SubagentStop` SDLC logic, removed `PreToolUse` dev registration
-- **Phase 5**: Worker post-completion handler -- `_handle_dev_session_completion()` in `agent_session_queue.py` classifies outcome via `PipelineStateMachine`, posts GitHub stage comments, and steers the parent PM session
+After `get_response_via_harness()` returns, the worker calls `_handle_dev_session_completion()` in `agent/agent_session_queue.py` to handle SDLC lifecycle:
+
+1. Looks up the parent PM session via `parent_agent_session_id`
+2. Calls `PipelineStateMachine(parent).classify_outcome()` on the result text
+3. Routes to `complete_stage()` or `fail_stage()` based on outcome
+4. Posts a structured stage comment to the tracking GitHub issue via `utils.issue_comments.post_stage_comment`
+5. Steers the parent PM session with a completion summary via `steer_session()`
+
+All operations are wrapped in try/except — failures never crash the worker.
+
+### Issue Number Resolution
+
+`_extract_issue_number()` finds the tracking issue from (in priority order):
+1. `SDLC_TRACKING_ISSUE` or `SDLC_ISSUE_NUMBER` env vars
+2. `issues/NNN` pattern in the dev session's `message_text`
+
+## PM Persona Dispatch (Phase 4)
+
+The PM persona at `~/Desktop/Valor/personas/project-manager.md` now dispatches dev sessions via:
+
+```bash
+python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "..."
+```
+
+instead of `Agent(subagent_type="dev-session", ...)`. The Agent tool dispatch path for dev sessions has been removed.
+
+`sdk_client.py` contains a startup validation in `load_persona_prompt()` that warns if the PM persona still contains Agent tool dispatch (backward-compat guard).
+
+`get_definition()` in `agent_definitions.py` returns an actionable error for stale callers that still request `"dev-session"` from the Agent tool.
+
+## Legacy Hook Cleanup (Phase 5)
+
+The following are removed in PR #902:
+
+- **`agent/hooks/session_registry.py`** deleted (250 lines) — UUID-to-bridge-session mapping no longer needed; hooks now use `AGENT_SESSION_ID` env var directly
+- **`subagent_stop.py`** stripped to logging only — `_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion` removed; SDLC tracking moved to worker post-completion handler
+- **`pre_tool_use.py`** — `_maybe_start_pipeline_stage` and Agent tool interception removed; `_handle_skill_tool_start()` now uses `AGENT_SESSION_ID` env var instead of `session_registry.resolve()`
+- **`dev-session` entry removed** from `agent_definitions.py` — dev sessions are created as AgentSession records, not via the Agent tool
+- `bridge/pipeline_state.py` and `bridge/pipeline_graph.py` are now shims that re-export from `agent/pipeline_state.py` and `agent/pipeline_graph.py` (canonical locations after Phase 3 move)
 
 ## Pending Work (Phase 6)
 
-- **Phase 6**: End-to-end validation -- full SDLC pipeline running dev sessions via CLI harness in production (set `DEV_SESSION_HARNESS=claude-cli` and verify PM receives steering message after dev session completion)
+- **Phase 6**: End-to-end validation — production validation with `DEV_SESSION_HARNESS=claude-cli` running a full SDLC pipeline end-to-end
