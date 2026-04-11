@@ -1,6 +1,6 @@
 ---
 slug: unified-analytics
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 tracking: https://github.com/tomcounsell/ai/issues/854
@@ -427,8 +427,10 @@ No agent integration required -- this is an infrastructure-internal change. The 
 
 ## Open Questions
 
-1. **Rollup frequency**: Should the daily rollup run as a new reflections unit (extending the existing 17 units to 18), or as a separate scheduled job via launchd? Running it within reflections keeps scheduling simple but couples analytics to the reflections cycle.
+_All resolved by PM on 2026-04-11:_
 
-2. **Metric naming convention**: The plan uses dotted names (`session.cost_usd`, `sdlc.stage_started`). Should we follow the deleted telemetry's colon-separated convention (`telemetry:observer:decisions`) for the Redis keys only, or use dotted names consistently across both SQLite and Redis?
+1. **Rollup frequency**: Run as a new reflections unit (unit 18). Keeps scheduling centralized — no separate launchd job.
 
-3. **Dashboard trend view scope**: The plan proposes sessions-per-day as the first trend chart. Should the initial dashboard view also include cost-per-day, or is sessions-per-day sufficient for v1?
+2. **Metric naming convention**: Use dotted names consistently (`session.cost_usd`, `sdlc.stage_started`) across both SQLite and Redis. Do not reuse the deleted colon-separated convention.
+
+3. **Dashboard trend view scope**: Sessions-per-day is sufficient for v1. Cost-per-day can be added in a follow-up.
