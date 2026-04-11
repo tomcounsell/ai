@@ -2850,9 +2850,7 @@ async def _handle_dev_session_completion(
                     f"{getattr(agent_session, 'session_id', '?')} (stage={current_stage})"
                 )
         except Exception as retain_err:
-            logger.warning(
-                f"[harness] retain_for_resume update failed (non-fatal): {retain_err}"
-            )
+            logger.warning(f"[harness] retain_for_resume update failed (non-fatal): {retain_err}")
 
         if current_stage is None:
             outcome = "success" if result and len(result) > 10 else "fail"
