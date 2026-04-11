@@ -49,7 +49,7 @@ Based on analysis of Cursor's 2026 architecture and user workflows, adapted for 
 
 ### 5. ✅ **Static System Prompt for Caching**
 **Cursor:** Maximize prompt caching
-**Valor:** Already using SOUL.md + project context
+**Valor:** Already using persona segments + project context
 **Status:** Already optimized
 
 ### 6. ✅ **Rules System (.cursorrules)**
@@ -88,7 +88,7 @@ Edit(file_path="bridge.py",
 ```
 
 **Implementation:**
-Add to SOUL.md:
+Add to persona segments:
 ```markdown
 ## File Editing Best Practices
 
@@ -113,7 +113,7 @@ Add to SOUL.md:
 
 ### **Feature 2: Per-Project `.valorrules` Files** (Priority: Medium)
 
-**Problem:** All projects use same generic coding standards from SOUL.md
+**Problem:** All projects use same generic coding standards from persona segments
 
 **Solution:** Let each project define specific standards
 
@@ -188,7 +188,7 @@ git:
 1. Add SQLite with vector extension (or pgvector)
 2. Create indexing script (runs post-commit)
 3. Add `semantic_search` tool to agent's toolset
-4. Update SOUL.md: "Prefer semantic_search over grep for concept queries"
+4. Update persona segments: "Prefer semantic_search over grep for concept queries"
 
 **Effort:** 1-2 days
 **Impact:** High (agent effectiveness)
@@ -258,7 +258,7 @@ keywords = ["auth", "telegram_bridge"]
 
 # Pre-load related files:
 - bridge/telegram_bridge.py (name match)
-- config/SOUL.md (always include)
+- config/persona segments (always include)
 - Recent git log (for context)
 - Any file with "auth" in recent commits
 ```
@@ -362,7 +362,7 @@ These Cursor features don't map to Valor's autonomous model:
 
 ## Next Steps
 
-1. ✅ **Feature 1** - Add "prefer Edit" to SOUL.md (30 min)
+1. ✅ **Feature 1** - Add "prefer Edit" to persona segments (30 min)
 2. ✅ **Feature 2** - Implement `.valorrules` parsing (2-3 hours)
 3. ✅ **Feature 4** - Add model selection routing (2-3 hours)
 4. ⏸️ **Feature 5** - Intelligent context pre-loading (4-6 hours) - await approval

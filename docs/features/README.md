@@ -70,7 +70,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [OfficeCLI Integration](officecli-integration.md) | OfficeCLI binary install/update via update system, CLAUDE.md documentation, and agent skill file for .docx/.xlsx/.pptx manipulation | Shipped |
 | [OOP Audit](do-oop-audit.md) | Prompt-only audit skill scanning Python classes for 14 structural anti-patterns with framework detection and severity grouping | Shipped |
 | [Operational Logging](operational-logging.md) | Consistent INFO-level prefix-tagged logging at every decision point for end-to-end message tracing | Shipped |
-| [Personas](personas.md) | Configurable persona system: base + overlay files replacing monolithic SOUL.md for developer, PM, and teammate roles | Shipped |
+| [Personas](personas.md) | Configurable persona system: structured identity config + composable segments + overlays for developer, PM, and teammate roles | Shipped |
 | [Pipeline Graph](pipeline-graph.md) | Canonical directed graph for SDLC stage routing with cycle support for test-failure and review-feedback loops | Shipped |
 | [Pipeline State Machine](pipeline-state-machine.md) | Programmatic stage tracking replacing inference-based detection with direct state recording at transition points | Shipped |
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |

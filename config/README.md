@@ -21,8 +21,11 @@ Persona overlay files (developer.md, project-manager.md, teammate.md) live in `~
 ### `secrets/` (Git-ignored)
 Directory for sensitive credentials (Google OAuth tokens, etc.). Created automatically by the settings system.
 
-### `SOUL.md`
-Base persona definition (fallback when persona overlay files are missing).
+### `identity.json`
+Structured identity data (name, email, timezone, org). Per-instance overrides via `~/Desktop/Valor/identity.json`.
+
+### `personas/segments/`
+Composable prompt segments: `identity.md`, `work-patterns.md`, `tools.md`. Assembled by `load_persona_prompt()` per `manifest.json`.
 
 ## Private Configuration (~/Desktop/Valor/)
 

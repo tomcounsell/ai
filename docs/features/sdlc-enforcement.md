@@ -144,7 +144,7 @@ A second layer of SDLC enforcement operates at the Claude Agent SDK level, indep
 
 ### System Prompt Injection (SDLC_WORKFLOW)
 
-Every agent session started by `ValorAgent` receives the mandatory pipeline rules injected into the system prompt. The rules are hardcoded in `agent/sdk_client.py` as the `SDLC_WORKFLOW` constant — not in `config/SOUL.md` or any config file. This prevents accidental removal via persona doc edits.
+Every agent session started by `ValorAgent` receives the mandatory pipeline rules injected into the system prompt. The rules are hardcoded in `agent/sdk_client.py` as the `SDLC_WORKFLOW` constant -- not in persona segment files or any config file. This prevents accidental removal via persona doc edits.
 
 The system prompt structure assembled by `load_system_prompt()`:
 
@@ -194,9 +194,9 @@ if violation:
 
 Sessions on `session/{slug}` branches — all `/do-build` builder agents — always pass the branch check. The check exclusively targets direct-to-main code pushes from ad-hoc sessions.
 
-### SOUL.md Cleanup
+### Persona Segment Cleanup
 
-`config/SOUL.md` no longer contains SDLC workflow instructions. The "Orchestration Instructions" section (Task Classification, SDLC Pattern, Parallel Execution, Validation Loop, Response Pattern blocks) has been removed. SOUL.md is now pure persona — who Valor is, communication style, values, machine setup. Pipeline rules live in `agent/sdk_client.py`.
+The persona segments (`config/personas/segments/`) contain only behavioral content -- identity, work patterns, and tool references. SDLC workflow instructions were previously stripped from the monolithic SOUL.md (now retired). Pipeline rules live exclusively in `agent/sdk_client.py`.
 
 ### Two-Layer Summary
 

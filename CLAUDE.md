@@ -437,7 +437,8 @@ No existing tests affected — this is a greenfield feature with no prior test c
 | `/sdlc` | Single-stage router: assess state, invoke one sub-skill, return |
 | `docs/deployment.md` | Multi-instance deployment |
 | `docs/tools-reference.md` | Complete tool documentation |
-| `config/SOUL.md` | Valor persona and philosophy |
+| `config/identity.json` | Structured identity data (name, email, timezone, org) |
+| `config/personas/segments/` | Composable persona segments (identity, work-patterns, tools) |
 | `docs/features/README.md` | Feature index — look up how things work |
 | `tests/README.md` | Test suite index — feature markers, blind spots, contribution guide |
 

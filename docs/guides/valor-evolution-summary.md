@@ -54,7 +54,7 @@ _Abandoned: Custom subagent framework, Module Builder auto-generation_
 
 - **Skills-based tool management** - modular capability system
 - **PR #9: Complete migration** - removed old implementation entirely
-- **SOUL.md persona** - formalized Valor's identity and operating principles
+- **Persona system** - formalized Valor's identity and operating principles (now identity.json + composable segments)
 - **Ollama** - local LLM for intent classification (llama3.2, llava for vision)
 
 _Technologies adopted: Ollama for lightweight tasks_

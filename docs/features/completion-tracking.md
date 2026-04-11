@@ -70,7 +70,7 @@ When work requires multiple steps:
 The agent receives completion criteria and branch context via system prompt:
 
 ```
-[SOUL.md content]
+[Persona segments content]
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: new-valor-skill
-description: Use when creating a Valor-specific tool that integrates with the Telegram bridge, uses SOUL.md persona, or needs CLAUDE.md documentation. Also use when the user says 'create a valor tool', 'new valor skill', or 'build a tool for this project'. Handles tool directory structure, CLI registration, bridge integration, and validation hooks.
+description: Use when creating a Valor-specific tool that integrates with the Telegram bridge, uses persona segments, or needs CLAUDE.md documentation. Also use when the user says 'create a valor tool', 'new valor skill', or 'build a tool for this project'. Handles tool directory structure, CLI registration, bridge integration, and validation hooks.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
 disable-model-invocation: true
 hooks:
@@ -20,7 +20,7 @@ hooks:
 
 ## What this skill does
 
-Creates a new tool specifically for Valor's AI system, following established project patterns. This wraps the generic [new-skill](../new-skill/SKILL.md) with Valor-specific conventions: Telegram bridge integration, SOUL.md persona, `tools/` directory layout, CLAUDE.md documentation, pyproject.toml CLI registration, and automatic validation hooks.
+Creates a new tool specifically for Valor's AI system, following established project patterns. This wraps the generic [new-skill](../new-skill/SKILL.md) with Valor-specific conventions: Telegram bridge integration, persona segments, `tools/` directory layout, CLAUDE.md documentation, pyproject.toml CLI registration, and automatic validation hooks.
 
 ## When to load sub-files
 
@@ -31,7 +31,7 @@ Creates a new tool specifically for Valor's AI system, following established pro
 
 | Valor-Specific (use this skill) | Shared/Generic (use new-skill instead) |
 |---------------------------------|----------------------------------------|
-| Uses SOUL.md persona | Works in any Claude Code context |
+| Uses persona segments | Works in any Claude Code context |
 | Integrates with Telegram bridge | Standalone utility |
 | Lives in `tools/` directory | No Valor dependencies |
 | Registered in `pyproject.toml` | Self-contained package |

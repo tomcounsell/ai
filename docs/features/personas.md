@@ -2,31 +2,39 @@
 
 > **Business context:** See [Persona Teamwork](~/work-vault/AI Valor Engels System/Personas/Persona Teamwork.md) in the work vault for the original leadership structure and role definitions (Pullman, Wells, Verne).
 
-Configurable persona system that replaces the monolithic `config/SOUL.md` with layered base + overlay files. Each persona defines role-specific behavior on top of a shared identity.
+Configurable persona system using composable segments and overlays. Identity data lives in structured JSON (`config/identity.json`), behavioral content is split into three composable segments (`config/personas/segments/`), and role-specific overlays define per-persona behavior.
 
 ## How It Works
 
-### Base + Overlay Architecture
+### Segment + Overlay Architecture
 
-The persona system splits files between the repo (shared) and private storage (iCloud-synced):
+The persona system splits content between the repo (shared) and private storage (iCloud-synced):
 
-**In repo** (`config/personas/`):
+**In repo** (`config/personas/segments/` and `config/identity.json`):
 ```
-config/personas/
-  _base.md           # Shared identity, values, communication style, tools, philosophy
-```
-
-**Private** (`~/Desktop/Valor/personas/`):
-```
-~/Desktop/Valor/personas/
-  developer.md       # Full system access, autonomous execution, self-management
-  project-manager.md # Triage, routing, GitHub management, communications
-  teammate.md        # Casual conversation, Q&A, helpful and encouraging
+config/
+  identity.json                  # Structured identity data (name, email, timezone, org)
+  personas/
+    segments/
+      manifest.json              # Universal segment order (all personas render all segments)
+      identity.md                # Who I Am, values, voice, communication style
+      work-patterns.md           # Autonomy, permissions, escalation, philosophy, memory
+      tools.md                   # MCP servers, dev tools, browser automation, CLI tools
 ```
 
-The base file stays in the repo because it contains general-purpose identity and philosophy (not private). Overlay files contain role-specific strategic context and capabilities, so they live in `~/Desktop/Valor/` (iCloud-synced, not committed to git).
+**Private** (`~/Desktop/Valor/personas/` and `~/Desktop/Valor/identity.json`):
+```
+~/Desktop/Valor/
+  identity.json                  # Per-instance identity overrides (shallow merge)
+  personas/
+    developer.md                 # Full system access, autonomous execution, self-management
+    project-manager.md           # Triage, routing, GitHub management, communications
+    teammate.md                  # Casual conversation, Q&A, helpful and encouraging
+```
 
-At load time, `load_persona_prompt(persona)` reads `_base.md` from the repo and concatenates the named overlay (`{persona}.md`) from `~/Desktop/Valor/personas/`. The result is a complete system prompt.
+Segments stay in the repo because they contain general-purpose identity and behavioral content (not private). Identity data is structured JSON, queryable by code, with per-instance overrides via `~/Desktop/Valor/identity.json`. Overlay files contain role-specific strategic context and capabilities, so they live in `~/Desktop/Valor/` (iCloud-synced, not committed to git).
+
+At load time, `load_persona_prompt(persona)` reads `config/identity.json`, assembles all 3 segments from `config/personas/segments/` per `manifest.json`, injects identity fields via `{{identity.*}}` marker substitution, and concatenates the named overlay (`{persona}.md`) from `~/Desktop/Valor/personas/`. The result is a complete system prompt.
 
 ### Persona Selection
 
@@ -66,9 +74,9 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 ```json
 {
   "personas": {
-    "developer": {"name": "Valor", "soul": "~/Desktop/Valor/personas/developer.md"},
-    "project-manager": {"name": "Valor", "soul": "~/Desktop/Valor/personas/project-manager.md"},
-    "teammate": {"name": "Valor", "soul": "~/Desktop/Valor/personas/teammate.md"}
+    "developer": {"name": "Valor"},
+    "project-manager": {"name": "Valor"},
+    "teammate": {"name": "Valor"}
   },
   "projects": {
     "valor": {
@@ -88,8 +96,10 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 
 | File | Location | Why |
 |------|----------|-----|
-| `_base.md` | `config/personas/_base.md` (in repo) | Shared identity, not private |
-| `project-manager.md` | `config/personas/project-manager.md` (in repo) | In-repo fallback with hard CRITIQUE/REVIEW gate rules — loaded when private overlay is absent |
+| `identity.json` | `config/identity.json` (in repo) | Structured identity data, shared defaults |
+| `identity.json` | `~/Desktop/Valor/identity.json` (iCloud) | Per-instance identity overrides |
+| Segments | `config/personas/segments/` (in repo) | Composable behavioral content, shared |
+| `project-manager.md` | `config/personas/project-manager.md` (in repo) | In-repo fallback with hard CRITIQUE/REVIEW gate rules -- loaded when private overlay is absent |
 | Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context (preferred over in-repo fallbacks) |
 | `projects.json` | `~/Desktop/Valor/projects.json` (iCloud) | Contains chat IDs, machine names |
 | `projects.example.json` | `config/projects.example.json` (in repo) | Sanitized schema for new setups |
@@ -99,36 +109,40 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 1. Create `~/Desktop/Valor/personas/{persona-name}.md` with role-specific instructions
 2. Add the persona entry to `~/Desktop/Valor/projects.json` under `personas`
 3. Reference it in the appropriate group or DM config
-4. The `_base.md` content is automatically prepended -- no need to duplicate shared content
+4. The segment content is automatically assembled and prepended -- no need to duplicate shared content
 
 ## Fallback Behavior
 
 | Scenario | Fallback |
 |----------|----------|
 | Overlay in `~/Desktop/Valor/personas/` missing | Falls back to `config/personas/{persona}.md` (in-repo) |
-| Both overlay locations missing | Falls back to `config/SOUL.md` with warning log |
-| `_base.md` missing | Raises `FileNotFoundError` (base is required) |
+| Both overlay locations missing | Raises `FileNotFoundError` (no silent fallback) |
+| Segment file missing | Raises `FileNotFoundError` with segment path for debugging |
 | Unknown persona name | Falls back to `developer` persona with warning |
-| Entire persona system missing | `load_system_prompt()` catches `FileNotFoundError` and falls back to `SOUL.md` |
+| Identity config missing | Raises `FileNotFoundError` (identity.json is required) |
 
 ## API
 
 ```python
-from agent.sdk_client import load_persona_prompt, load_system_prompt, load_pm_system_prompt
+from agent.sdk_client import load_identity, load_persona_prompt, load_system_prompt, load_pm_system_prompt
+
+# Load identity data
+identity = load_identity()                    # dict with name, email, timezone, etc.
 
 # Load specific persona
-prompt = load_persona_prompt("developer")     # base + developer overlay
-prompt = load_persona_prompt("teammate")      # base + teammate overlay
+prompt = load_persona_prompt("developer")     # segments + developer overlay
+prompt = load_persona_prompt("teammate")      # segments + teammate overlay
 
-# Legacy wrappers (still work)
+# System prompt wrappers
 prompt = load_system_prompt()                 # developer persona + WORKER_RULES
 prompt = load_pm_system_prompt("/path")       # PM persona + work-vault CLAUDE.md
 ```
 
 ## Related
 
-- `config/SOUL.md` -- Original monolithic prompt (used as fallback when persona files are missing)
+- `config/identity.json` -- Structured identity data (name, email, timezone, org)
+- `config/personas/segments/` -- Composable prompt segments (identity, work-patterns, tools)
 - `docs/features/config-architecture.md` -- Unified config system
 - `docs/features/pm-channels.md` -- PM mode channel routing
-- `agent/sdk_client.py` -- `load_persona_prompt()`, `_resolve_persona()`
+- `agent/sdk_client.py` -- `load_identity()`, `load_persona_prompt()`, `_resolve_persona()`
 - `tests/unit/test_persona_loading.py` -- Test coverage

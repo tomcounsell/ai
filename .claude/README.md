@@ -159,4 +159,4 @@ This creates closed-loop systems that self-correct.
 
 *"Build the system that builds the system."*
 
-See `config/SOUL.md` for Valor's full philosophy and `docs/CONSOLIDATED_DOCUMENTATION.md` for architecture.
+See `config/personas/segments/` for Valor's identity, work patterns, and tools, and `docs/CONSOLIDATED_DOCUMENTATION.md` for architecture.

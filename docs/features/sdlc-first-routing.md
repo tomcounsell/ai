@@ -50,7 +50,7 @@ For SDLC-routed requests, a `TARGET_REPO` context block is injected into the sys
 The system prompt was reordered to prioritize SDLC workflow instructions:
 
 1. SDLC workflow rules (MUST language, negative examples)
-2. SOUL.md (persona and values)
+2. Persona segments (identity, work-patterns, tools)
 3. Project-specific context
 
 This ensures the agent defaults to SDLC pipeline behavior for work requests rather than acting directly.
@@ -104,7 +104,7 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 |------|---------|
 | `bridge/routing.py` | `classify_work_request()`, `_classify_work_request_llm()`, `_get_anthropic_client()` |
 | `agent/sdk_client.py` | Orchestrator routing logic, system prompt ordering, TARGET_REPO injection |
-| `config/SOUL.md` | Professional Standards section (SDLC-first defaults) |
+| `config/personas/segments/identity.md` | Professional Standards section (SDLC-first defaults) |
 | `tests/test_work_request_classifier.py` | 44 tests covering fast paths, LLM classification, narration stripping |
 
 ## Related

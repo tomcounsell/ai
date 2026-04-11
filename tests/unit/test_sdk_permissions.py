@@ -37,7 +37,7 @@ class TestValorAgentConfig:
         assert agent.permission_mode == "acceptEdits"
 
     def test_system_prompt_loaded(self):
-        """Test that system prompt is loaded from SOUL.md."""
+        """Test that system prompt is loaded from persona segments."""
         agent = ValorAgent()
         assert agent.system_prompt is not None
         assert len(agent.system_prompt) > 100
