@@ -15,7 +15,6 @@ class TestCLIArgumentParsing:
     """Verify all subcommands are recognized and parse correctly."""
 
     def test_detect_friction_subcommand(self):
-
         # Patch sys.argv and verify it dispatches without error
         # We test the parser directly instead
         parser = self._build_parser()
@@ -84,10 +83,13 @@ class TestReportNoData:
 
     def test_report_no_analytics_db(self, capsys):
         """Report prints a message and returns when no DB exists."""
+        from unittest.mock import patch
+
         from tools.skill_lifecycle import cmd_report
 
         args = argparse.Namespace()
-        cmd_report(args)
+        with patch("tools.skill_lifecycle.get_skill_report", return_value=[]):
+            cmd_report(args)
         captured = capsys.readouterr()
         assert "No skill invocation data" in captured.out
 
