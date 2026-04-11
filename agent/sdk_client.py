@@ -640,6 +640,15 @@ def load_persona_prompt(persona: str = "developer") -> str:
                 f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
                 "— pipeline integrity may be compromised"
             )
+        if persona == "project-manager" and 'subagent_type="dev-session"' in overlay_content:
+            logger.warning(
+                f"PM persona overlay '{overlay_path}' still contains Agent tool dispatch "
+                'instructions (subagent_type="dev-session"). '
+                "Dev sessions are now created via "
+                "`python -m tools.valor_session create --role dev`. "
+                "Update ~/Desktop/Valor/personas/project-manager.md to remove the Agent tool "
+                "dispatch pattern."
+            )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         return f"{base_content}\n\n---\n\n{overlay_content}"
 
@@ -1932,7 +1941,8 @@ async def get_agent_response_sdk(
                 "No dev-session needed unless you determine the task requires "
                 "code changes to the repository.\n\n"
                 "If you determine this task actually requires code changes, "
-                "spawn a dev-session via the Agent tool instead.\n\n"
+                "create a dev session via `python -m tools.valor_session create "
+                '--role dev --parent "$AGENT_SESSION_ID" --message "..."` instead.\n\n'
                 "**Communicating with the stakeholder:**\n"
                 "You can send Telegram messages directly using:\n"
                 '  `python tools/send_telegram.py "Your message here"`\n'
@@ -1969,20 +1979,25 @@ async def get_agent_response_sdk(
                 "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
                 "of prior stage findings in the dev-session prompt so the next stage "
                 "has full context from previous stages.\n"
-                "2. **Spawn one dev-session for the next stage** — use the Agent tool "
-                "to dispatch exactly one stage at a time:\n"
-                '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
-                'prompt="Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
+                "2. **Spawn one dev-session for the next stage** — use Bash to create "
+                "a dev session via `python -m tools.valor_session create`:\n"
+                "   python -m tools.valor_session create \\\\\n"
+                "     --role dev \\\\\n"
+                '     --parent "$AGENT_SESSION_ID" \\\\\n'
+                '     --message "Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
                 "Issue: <URL>\\nPR: <URL if exists>\\n"
                 "Current state: <what's already done>\\n"
-                'Acceptance criteria: <what done looks like>")\n'
+                'Acceptance criteria: <what done looks like>"\n'
+                "   The --parent flag uses $AGENT_SESSION_ID (the AgentSession model ID "
+                "for this PM session). The worker steers you back when the dev session "
+                "finishes — wait for that steering message.\n"
                 "3. **Verify the result** — check that the stage completed successfully "
                 "before progressing to the next one.\n"
                 "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
                 "or you need human input.\n\n"
                 "For trivial or docs-only work, use your judgment on whether the full "
                 "pipeline is warranted.\n"
-                "Use the Agent tool for all coding work — slash commands like /do-build "
+                "Dev sessions are created via Bash — slash commands like /do-build "
                 "and /do-test are the dev-session's internal tools.\n\n"
                 "**Communicating with the stakeholder:**\n"
                 "You can send Telegram messages directly using:\n"

@@ -122,6 +122,12 @@ def get_agent_definitions() -> dict[str, AgentDefinition]:
     # Full-permission developer session for code changes.
     # Spawned by a PM-role AgentSession to do actual work.
     # tools=None means all tools available — full write permissions.
+    #
+    # NOTE (Phase 4): The PM persona now creates dev sessions via
+    # `python -m tools.valor_session create --role dev` (Bash tool),
+    # NOT via Agent(subagent_type="dev-session"). The definition is kept
+    # here for backward compatibility until Phase 5 cleanup is gated on
+    # successful production runs with DEV_SESSION_HARNESS=claude-cli.
     definitions["dev-session"] = AgentDefinition(
         description="Full-permission developer session for code changes",
         prompt=_load_dev_session_prompt(),
@@ -130,6 +136,30 @@ def get_agent_definitions() -> dict[str, AgentDefinition]:
     )
 
     return definitions
+
+
+def get_definition(subagent_type: str) -> AgentDefinition | None:
+    """Look up an agent definition by subagent_type.
+
+    Returns the AgentDefinition for the given type, or None if not found.
+
+    For the "dev-session" type: if the PM persona is stale and still calls
+    Agent(subagent_type="dev-session"), this returns an error definition
+    directing the PM to use `python -m tools.valor_session create --role dev`
+    instead. This provides an actionable error rather than an opaque crash.
+    """
+    definitions = get_agent_definitions()
+    if subagent_type in definitions:
+        return definitions[subagent_type]
+
+    logger.warning(
+        f"Unknown subagent_type requested: '{subagent_type}'. "
+        "If this is 'dev-session', the PM persona may be stale. "
+        "Dev sessions are now created via "
+        '`python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" '
+        '--message "..."`.'
+    )
+    return None
 
 
 def _load_dev_session_prompt() -> str:
