@@ -105,8 +105,20 @@ redis-cli HGETALL telemetry:daily:2026-03-10
 | `models/agent_session.py` | Structured LINK logging in set_link() |
 | `monitoring/health.py` | Health checks (observer telemetry check removed) |
 
+## Successor: Unified Analytics
+
+The telemetry implementation described above was deleted in #753 as dead code. It has been replaced by the [Unified Analytics](unified-analytics.md) system (#854), which provides:
+
+- SQLite-backed historical time-series (replacing the never-used Redis counters)
+- Instrumentation at all event points (SDK client, session lifecycle, pipeline state, memory ops, crash tracker, health checks)
+- Query API, CLI export, and dashboard integration
+- Daily rollup via the reflections scheduler
+
+The structured log formats documented above remain valid and unchanged.
+
 ## Related
 
 - Issue: [#319](https://github.com/tomcounsell/ai/issues/319)
 - Plan: `docs/plans/structured_logging_telemetry.md`
 - [Correlation IDs](correlation-ids.md) -- the tracing layer that telemetry builds on
+- [Unified Analytics](unified-analytics.md) -- the successor implementation (#854)
