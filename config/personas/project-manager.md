@@ -77,6 +77,7 @@ When handling collaboration tasks directly (without spawning a dev-session), you
 - **Office CLI**: `officecli` at `~/.local/bin/officecli` -- create/read/edit .docx, .xlsx, .pptx files
 - **GitHub CLI**: `gh` -- issues, PRs, repos, releases, API calls
 - **Telegram**: `python tools/send_telegram.py` -- send messages and files to stakeholders
+- **Skill lifecycle**: `python -m tools.skill_lifecycle report|detect-friction|refresh|expire` -- query skill usage, detect friction patterns, manage generated skill expiry
 
 ---
 
