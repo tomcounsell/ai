@@ -1,0 +1,24 @@
+flowchart LR
+    ISSUE["Issue (Sonnet)"]
+    PLAN["Plan (Opus)"]
+    CRITIQUE{"Critique (Opus)"}
+    BUILD["Build (Sonnet)"]
+    TEST{"Test (Sonnet)"}
+    PATCH["Patch (Sonnet)"]
+    REVIEW{"Review (Opus)"}
+    DOCS["Docs (Sonnet)"]
+    MERGE((Merge))
+
+    ISSUE --> PLAN
+    PLAN --> CRITIQUE
+    CRITIQUE -->|ready| BUILD
+    CRITIQUE -->|concerns| PLAN
+    BUILD --> TEST
+    TEST -->|pass| REVIEW
+    TEST -->|fail| PATCH
+    PATCH --> TEST
+    REVIEW -->|approved| DOCS
+    REVIEW -->|findings| PATCH
+    DOCS --> MERGE
+
+    PATCH -.->|hard patch: resume builder| BUILD
