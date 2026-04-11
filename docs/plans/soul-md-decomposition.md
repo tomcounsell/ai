@@ -1,6 +1,6 @@
 ---
 slug: soul-md-decomposition
-status: Planning
+status: Building
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -261,7 +261,7 @@ No prerequisites -- this work has no external dependencies. All required files a
 **Mitigation:** Simple shallow merge: private values override repo values for matching keys. No deep merge. Document the merge behavior.
 
 ### Risk 3: Summarizer Voice Drift
-**Impact:** The `SUMMARIZER_SYSTEM_PROMPT` in `bridge/summarizer.py` was written to match SOUL.md's communication style. If communication.md diverges, the summarizer voice may drift.
+**Impact:** The `SUMMARIZER_SYSTEM_PROMPT` in `bridge/summarizer.py` was written to match SOUL.md's communication style. If identity.md diverges, the summarizer voice may drift.
 **Mitigation:** The summarizer prompt is self-contained (does not import from SOUL.md). Add a cross-reference comment in `identity.md` (which contains communication style) pointing to the summarizer. Include a test that verifies key communication phrases exist in both.
 
 ## Race Conditions
