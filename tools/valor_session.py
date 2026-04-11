@@ -464,6 +464,51 @@ def cmd_kill(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_wait_for_children(args: argparse.Namespace) -> int:
+    """Transition the calling session to waiting_for_children status.
+
+    Used by PM sessions after spawning child PM sessions via fan-out.
+    The parent session will auto-transition to completed when all children
+    finish via _finalize_parent_sync() in models.session_lifecycle.
+    """
+    _load_env()
+    try:
+        import os
+
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import TERMINAL_STATUSES, transition_status
+
+        session_id = getattr(args, "session_id", None) or os.environ.get("AGENT_SESSION_ID")
+        if not session_id:
+            print(
+                "Error: No session ID provided. Use --session-id or set $AGENT_SESSION_ID.",
+                file=sys.stderr,
+            )
+            return 1
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            print(f"Error: Session not found: {session_id}", file=sys.stderr)
+            return 1
+
+        session = sessions[0]
+        current_status = getattr(session, "status", None)
+        if current_status in TERMINAL_STATUSES:
+            print(
+                f"Error: Session {session_id} is already in terminal status {current_status!r}.",
+                file=sys.stderr,
+            )
+            return 1
+
+        transition_status(session, "waiting_for_children")
+        print(f"Session {session_id} transitioned to waiting_for_children.")
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -531,6 +576,17 @@ def main() -> int:
     kill_parser.add_argument("--all", action="store_true", help="Kill all running sessions")
     kill_parser.add_argument("--json", action="store_true", help="Output JSON")
 
+    # wait-for-children subcommand
+    wfc_parser = subparsers.add_parser(
+        "wait-for-children",
+        help="Transition session to waiting_for_children (called by PM after fan-out)",
+    )
+    wfc_parser.add_argument(
+        "--session-id",
+        dest="session_id",
+        help="Session ID to transition (defaults to $AGENT_SESSION_ID env var)",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -543,6 +599,7 @@ def main() -> int:
         "status": cmd_status,
         "list": cmd_list,
         "kill": cmd_kill,
+        "wait-for-children": cmd_wait_for_children,
     }
 
     return dispatch[args.command](args)
