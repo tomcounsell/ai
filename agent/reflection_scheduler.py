@@ -331,41 +331,52 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
 
 
 async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
-    """Execute an agent-type reflection by running its command as a subprocess.
+    """Enqueue an agent-type reflection as a PM session in the session queue.
 
-    Agent-type reflections run shell commands (e.g., scripts that need a full
-    Claude session). They run in a subprocess to avoid blocking the scheduler.
+    Agent-type reflections use the `command` field as a natural-language prompt
+    sent to a PM session. The session runs asynchronously; this function returns
+    once the session is enqueued (not when it completes).
 
     Args:
-        entry: The registry entry with the command to run.
+        entry: The registry entry with the command (prompt) to enqueue.
     """
-    import subprocess
-    from pathlib import Path
+    import os
+
+    from agent.agent_session_queue import _push_agent_session
+    from bridge.utc import utc_now
 
     if not entry.command:
         logger.error("[reflection] Agent reflection '%s' has no command", entry.name)
         return
 
-    # Run from the project root
     project_root = Path(__file__).parent.parent
 
+    # Resolve project key from the repo root
     try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                entry.command,
-                shell=True,
-                cwd=project_root,
-                capture_output=True,
-                text=True,
-                timeout=3600,  # 1 hour max for agent reflections
-            ),
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Command exited {result.returncode}: {result.stderr[:500]}")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Agent reflection '{entry.name}' timed out after 1 hour")
+        from tools.valor_session import resolve_project_key
+
+        project_key = resolve_project_key(str(project_root))
+    except Exception:
+        project_key = os.environ.get("PROJECT_KEY", "valor")
+
+    ts_suffix = str(int(utc_now().timestamp() * 1000))
+    session_id = f"0_{ts_suffix}"
+
+    await _push_agent_session(
+        project_key=project_key,
+        session_id=session_id,
+        working_dir=str(project_root),
+        message_text=entry.command.strip(),
+        sender_name=f"reflection ({entry.name})",
+        chat_id="0",
+        telegram_message_id=0,
+        session_type="pm",
+    )
+    logger.info(
+        "[reflection] Enqueued agent reflection '%s' as session %s",
+        entry.name,
+        session_id,
+    )
 
 
 class ReflectionScheduler:
