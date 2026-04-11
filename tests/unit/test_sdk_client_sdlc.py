@@ -122,7 +122,9 @@ class TestLoadSystemPromptInjection:
         persona_pos = prompt.find("# Valor")
         assert persona_pos > rules_pos, "Persona segments must come after WORKER_RULES"
         between = prompt[rules_pos:persona_pos]
-        assert "---" in between, "Separator '---' must appear between WORKER_RULES and persona segments"
+        assert "---" in between, (
+            "Separator '---' must appear between WORKER_RULES and persona segments"
+        )
 
     def test_safety_rails_in_prompt(self):
         """load_system_prompt() must contain NEVER and main (safety rails)."""
