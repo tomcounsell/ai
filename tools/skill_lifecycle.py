@@ -409,6 +409,12 @@ def cmd_report(args: argparse.Namespace) -> None:
 def cmd_detect_friction(args: argparse.Namespace) -> None:
     """Print detected friction patterns."""
     results = detect_friction()
+    use_json = getattr(args, "json", False)
+
+    if use_json:
+        print(json.dumps(results))
+        return
+
     if not results:
         print("No friction patterns detected.")
         return
@@ -436,9 +442,10 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # detect-friction
-    subparsers.add_parser(
+    df_parser = subparsers.add_parser(
         "detect-friction", help="Detect friction patterns from Memory corrections"
     )
+    df_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # expire
     expire_parser = subparsers.add_parser(

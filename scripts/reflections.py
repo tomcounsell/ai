@@ -3,7 +3,7 @@
 Reflections - Autonomous Daily Maintenance System
 
 A long-running process that performs daily self-directed maintenance tasks.
-18 units: 15 independent items + 3 merged pipelines.
+19 units: 16 independent items + 3 merged pipelines.
 
 Independent units:
 1. legacy_code_scan — Clean Up Stale Code
@@ -11,21 +11,22 @@ Independent units:
 3. task_management      — Clean Up Task Management
 4. documentation_audit  — Audit Documentation
 5. skills_audit        — Skills Audit
-6. hooks_audit         — Hooks Audit
-7. redis_ttl_cleanup   — Redis TTL Cleanup
-8. redis_data_quality  — Redis Data Quality
-9. branch_plan_cleanup — Branch and Plan Cleanup
-10. feature_docs_audit — Feature Docs Audit
-11. principal_staleness — Principal Context Staleness
-12. disk_space_check    — Disk Space Check
-13. pr_review_audit     — PR Review Audit
-14. linkedin_messages   — Check & Reply to LinkedIn Messages
-15. analytics_rollup    — Analytics Daily Rollup
+6. skill_lifecycle     — Skill Lifecycle Review
+7. hooks_audit         — Hooks Audit
+8. redis_ttl_cleanup   — Redis TTL Cleanup
+9. redis_data_quality  — Redis Data Quality
+10. branch_plan_cleanup — Branch and Plan Cleanup
+11. feature_docs_audit — Feature Docs Audit
+12. principal_staleness — Principal Context Staleness
+13. disk_space_check    — Disk Space Check
+14. pr_review_audit     — PR Review Audit
+15. linkedin_messages   — Check & Reply to LinkedIn Messages
+16. analytics_rollup    — Analytics Daily Rollup
 
 Merged pipelines (sub-steps run internally, one checkpoint per pipeline):
-16. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
-17. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
-18. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
+17. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
+18. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
+19. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -682,6 +683,7 @@ class ReflectionRunner:
             ("task_management", "Clean Up Task Management", self.step_clean_tasks),
             ("documentation_audit", "Audit Documentation", self.step_audit_docs),
             ("skills_audit", "Skills Audit", self.step_skills_audit),
+            ("skill_lifecycle", "Skill Lifecycle Review", self.step_skill_lifecycle),
             ("hooks_audit", "Hooks Audit", self.step_hooks_audit),
             ("redis_ttl_cleanup", "Redis TTL Cleanup", self.step_redis_cleanup),
             ("popoto_index_cleanup", "Popoto Index Cleanup", self.step_popoto_index_cleanup),
@@ -1444,6 +1446,62 @@ class ReflectionRunner:
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
             logger.error(f"Skills audit failed: {e}")
             self.state.step_progress["skills_audit"] = {"error": str(e)}
+
+    async def step_skill_lifecycle(self) -> None:
+        """Review skill lifecycle: detect friction, refresh expiry, expire stale skills."""
+        friction_count = 0
+        try:
+            # Run friction detection
+            result = subprocess.run(
+                [sys.executable, "-m", "tools.skill_lifecycle", "detect-friction", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(PROJECT_ROOT),
+            )
+            if result.returncode == 0:
+                try:
+                    friction_data = json.loads(result.stdout)
+                    friction_count = len(friction_data) if isinstance(friction_data, list) else 0
+                    self.state.add_finding(
+                        "skill_lifecycle", f"Detected {friction_count} friction patterns"
+                    )
+                except json.JSONDecodeError:
+                    self.state.add_finding(
+                        "skill_lifecycle",
+                        f"Friction detection output: {result.stdout[:200]}",
+                    )
+
+            # Run refresh (updates expiry for recently used skills)
+            refresh_result = subprocess.run(
+                [sys.executable, "-m", "tools.skill_lifecycle", "refresh"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(PROJECT_ROOT),
+            )
+
+            # Run expire (removes stale generated skills)
+            expire_result = subprocess.run(
+                [sys.executable, "-m", "tools.skill_lifecycle", "expire", "--dry-run"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(PROJECT_ROOT),
+            )
+            if expire_result.returncode == 0 and expire_result.stdout.strip():
+                self.state.add_finding(
+                    "skill_lifecycle", f"Expiry check: {expire_result.stdout[:200]}"
+                )
+
+            self.state.step_progress["skill_lifecycle"] = {
+                "friction_detected": friction_count,
+                "refresh_ran": refresh_result.returncode == 0,
+                "expire_ran": expire_result.returncode == 0,
+            }
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.error(f"Skill lifecycle review failed: {e}")
+            self.state.step_progress["skill_lifecycle"] = {"error": str(e)}
 
     async def step_hooks_audit(self) -> None:
         """Audit Claude Code hooks for safety and configuration issues.

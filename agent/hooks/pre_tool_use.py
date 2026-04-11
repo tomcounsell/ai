@@ -189,6 +189,11 @@ PM_BASH_ALLOWED_PREFIXES: tuple[str, ...] = (
     "grep -rl",
     "grep -n",
     "grep -l",
+    # skill lifecycle (read-only reports and dry-run operations)
+    "python -m tools.skill_lifecycle report",
+    "python -m tools.skill_lifecycle detect-friction",
+    "python -m tools.skill_lifecycle refresh",
+    "python -m tools.skill_lifecycle expire",
     # pytest collect-only (no execution)
     "pytest --collect-only",
     # curl to localhost dashboard
