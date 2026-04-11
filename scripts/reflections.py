@@ -933,6 +933,19 @@ class ReflectionRunner:
                     if warning_count > 10:
                         findings.append(f"{log_file.name}: {warning_count} warnings in recent logs")
 
+                    # Detect nudge-stomp regressions (#898). The finalized_by_execute
+                    # fix should eliminate all "Stale index entry" warnings. Non-zero
+                    # count here means the fix regressed and stale saves are clobbering
+                    # the nudge's status field again.
+                    with open(log_file) as f:
+                        log_content = f.read()
+                    stale_index_count = log_content.count("Stale index entry")
+                    if stale_index_count > 0:
+                        findings.append(
+                            f"{log_file.name}: {stale_index_count} 'Stale index entry' warnings "
+                            f"(regression marker for #898 — investigate finalized_by_execute gate)"
+                        )
+
                 except Exception as e:
                     findings.append(f"Could not analyze {log_file.name}: {str(e)}")
 

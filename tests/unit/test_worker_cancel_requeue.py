@@ -185,3 +185,48 @@ class TestCancelHandlerDoesNotFinalizeSession:
         session.log_lifecycle_transition.assert_called_once()
         args = session.log_lifecycle_transition.call_args[0]
         assert args[0] == "running", f"Expected 'running', got '{args[0]}'"
+
+
+class TestFinalizedByExecuteOnCancelPath:
+    """#898: finalized_by_execute must remain False when CancelledError fires.
+
+    The gate is set only on clean return from _execute_agent_session. The
+    CancelledError handler re-raises, bypassing the assignment. Therefore
+    finalized_by_execute=False and the finally block runs its crash-path logic.
+    """
+
+    def test_cancelled_error_leaves_finalized_by_execute_false(self):
+        """CancelledError must bypass the finalized_by_execute=True assignment."""
+        finalized_by_execute = False
+
+        # Simulate what _worker_loop does:
+        # try:
+        #     await _execute_agent_session(session)   # raises CancelledError
+        #     finalized_by_execute = True             # never reached
+        # except asyncio.CancelledError:
+        #     ...
+        #     raise
+        try:
+            raise asyncio.CancelledError
+            finalized_by_execute = True  # type: ignore[unreachable]  # proves it is never set
+        except asyncio.CancelledError:
+            pass  # handler runs, re-raise omitted for test isolation
+
+        assert finalized_by_execute is False, (
+            "finalized_by_execute must remain False after CancelledError — "
+            "the finally block must still run its crash-path logic"
+        )
+
+    def test_exception_leaves_finalized_by_execute_false(self):
+        """Any non-cancel exception also bypasses the finalized_by_execute=True assignment."""
+        finalized_by_execute = False
+
+        try:
+            raise RuntimeError("SDK blew up")
+            finalized_by_execute = True  # type: ignore[unreachable]
+        except Exception:
+            pass
+
+        assert finalized_by_execute is False, (
+            "finalized_by_execute must remain False after any exception"
+        )

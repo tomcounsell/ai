@@ -462,3 +462,17 @@ No agent integration required -- this is an internal refactor of the session lif
 ## Open Questions
 
 No open questions -- all design decisions resolved by spikes and issue analysis.
+
+## Related Work: Remaining Save Bypass (Closed by #898)
+
+PR #885 (this plan) hardened the lifecycle module's `finalize_session()` and `transition_status()` with CAS, but a save path existed that bypassed both:
+
+- `log_lifecycle_transition → append_event → _append_event_dict → self.save()` — a plain full-state save with no CAS fence
+- `agent_session.save()` in `_execute_agent_session`'s nudge branch (lines 3234–3235) — a direct cosmetic heartbeat save on the stale local
+
+These paths operated on stale in-memory objects that pre-dated `_enqueue_nudge`'s authoritative write, clobbering `status=pending` back to `running`. CAS in `finalize_session()` and `transition_status()` could not catch them because by the time CAS ran, the stale saves had already aligned on-disk and in-memory status (both showed `running`), so CAS detected no conflict and proceeded to finalize.
+
+Follow-up fix in [`docs/plans/nudge-stomp-append-event-bypass.md`](nudge-stomp-append-event-bypass.md) ([#898](https://github.com/tomcounsell/ai/issues/898)):
+- `finalized_by_execute` gate: prevents the outer finally block from running on the happy path at all
+- Delete the nudge-branch inner save (lines 3234–3235): eliminates the third stomp site
+- `_append_event_dict` partial save (`update_fields=["session_events", "updated_at"]`): makes any remaining stale save non-destructive for `status`, `auto_continue_count`, and `message_text`

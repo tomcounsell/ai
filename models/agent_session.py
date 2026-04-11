@@ -1175,6 +1175,12 @@ class AgentSession(Model):
             event_type: Event type (lifecycle, summary, delivery, stage, checkpoint, etc.)
             text: Event description
             data: Optional structured payload
+
+        **Stale-object hazard**: This method saves via _append_event_dict, which uses a
+        partial save (update_fields=["session_events", "updated_at"]) to protect against
+        callers operating on a stale in-memory snapshot. A stale caller can at worst
+        append a spurious event; it cannot clobber status, auto_continue_count, or
+        message_text. See #898 and docs/features/session-lifecycle.md.
         """
         event = SessionEvent(event_type=event_type, text=text, data=data)
         self._append_event_dict(event.model_dump())
@@ -1195,7 +1201,12 @@ class AgentSession(Model):
             current = current[-HISTORY_MAX_ENTRIES:]
         self.session_events = current
         try:
-            self.save()
+            # Partial save: only persist session_events + updated_at. This prevents
+            # stale-object callers from clobbering status/auto_continue_count/
+            # message_text when they call append_event / append_history /
+            # log_lifecycle_transition on a local that has already been superseded
+            # by a fresh authoritative write (e.g. _enqueue_nudge). See #898.
+            self.save(update_fields=["session_events", "updated_at"])
         except Exception as e:
             logger.warning(
                 f"append_event save failed for session {self.session_id} "
@@ -1232,7 +1243,13 @@ class AgentSession(Model):
                 )
 
     def log_lifecycle_transition(self, new_status: str, context: str = "") -> None:
-        """Log a structured lifecycle transition and append event."""
+        """Log a structured lifecycle transition and append event.
+
+        **Implicit save**: This method calls append_event, which triggers a partial
+        Redis save (session_events + updated_at only). If called on a stale object,
+        it appends a lifecycle entry but does NOT clobber status or other fields.
+        See #898 and the finalized_by_execute gate in agent_session_queue._worker_loop.
+        """
         old_status = self.status or "none"
         now = datetime.now(tz=UTC)
 

@@ -32,18 +32,20 @@ def _make_session(
     )
 
 
-def _run_finally_block(session, session_completed, session_failed):
+def _run_finally_block(session, session_completed, session_failed, finalized_by_execute=False):
     """Simulate the finally block logic from _worker_loop.
 
     Returns (snapshot_calls, lifecycle_calls) for assertion.
+    The finalized_by_execute parameter mirrors the #898 gate that prevents the
+    finally block from firing on the happy path.
     """
     snapshot_calls = []
 
     def mock_snapshot(**kwargs):
         snapshot_calls.append(kwargs)
 
-    if not session_completed:
-        # Fix 4: Log lifecycle transition before completing
+    if not session_completed and not finalized_by_execute:
+        # Fix 4: Log lifecycle transition before completing (crash path only)
         try:
             target = "failed" if session_failed else "completed"
             session.log_lifecycle_transition(target, "worker finally block")
@@ -153,3 +155,37 @@ class TestFinallyBlockSnapshot:
 
         assert fail_calls[0]["event"] == "crash"
         assert ok_calls[0]["event"] == "complete"
+
+    def test_finalized_by_execute_gates_finally_block(self):
+        """When finalized_by_execute=True, neither snapshot nor lifecycle log fires.
+
+        On the happy path, _execute_agent_session already handled finalization
+        (via complete_transcript or _enqueue_nudge). The finally block must be a
+        complete no-op to preserve the nudge's authoritative Redis state. See #898.
+        """
+        session = _make_session()
+        snapshot_calls = _run_finally_block(
+            session,
+            session_completed=False,
+            session_failed=False,
+            finalized_by_execute=True,
+        )
+
+        assert len(snapshot_calls) == 0, (
+            "No snapshot should be saved when finalized_by_execute=True"
+        )
+        session.log_lifecycle_transition.assert_not_called()
+
+    def test_finalized_by_execute_false_still_saves_on_crash(self):
+        """When finalized_by_execute=False (crash path), snapshot is still saved."""
+        session = _make_session()
+        snapshot_calls = _run_finally_block(
+            session,
+            session_completed=False,
+            session_failed=True,
+            finalized_by_execute=False,
+        )
+
+        assert len(snapshot_calls) == 1
+        assert snapshot_calls[0]["event"] == "crash"
+        session.log_lifecycle_transition.assert_called_once_with("failed", "worker finally block")
