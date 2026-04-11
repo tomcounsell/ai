@@ -253,6 +253,19 @@ class HealthChecker:
         else:
             status = HealthStatus.HEALTHY
 
+        # Analytics: record health check results
+        try:
+            from analytics.collector import record_metric
+
+            for check in checks:
+                record_metric(
+                    "health.check",
+                    1,
+                    {"component": check.component, "status": check.status.value},
+                )
+        except Exception:
+            pass
+
         return OverallHealth(
             status=status,
             score=score,

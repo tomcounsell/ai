@@ -360,6 +360,21 @@ def finalize_session(
     session.completed_at = time.time()
     session.save()
 
+    # Analytics: record session completion
+    try:
+        from analytics.collector import record_metric
+
+        record_metric(
+            "session.completed",
+            1,
+            {
+                "session_type": getattr(session, "session_type", None),
+                "status": status,
+            },
+        )
+    except Exception:
+        pass
+
 
 def transition_status(
     session,
@@ -482,6 +497,22 @@ def transition_status(
         session._saved_field_values["status"] = current_status
     session.status = new_status
     session.save()
+
+    # Analytics: record session start when transitioning to running
+    if new_status == "running" and current_status != "running":
+        try:
+            from analytics.collector import record_metric
+
+            record_metric(
+                "session.started",
+                1,
+                {
+                    "session_type": getattr(session, "session_type", None),
+                    "project_key": getattr(session, "project_key", None),
+                },
+            )
+        except Exception:
+            pass
 
 
 def _finalize_parent_sync(

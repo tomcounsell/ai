@@ -3,7 +3,7 @@
 Reflections - Autonomous Daily Maintenance System
 
 A long-running process that performs daily self-directed maintenance tasks.
-17 units: 14 independent items + 3 merged pipelines.
+18 units: 15 independent items + 3 merged pipelines.
 
 Independent units:
 1. legacy_code_scan — Clean Up Stale Code
@@ -20,11 +20,12 @@ Independent units:
 12. disk_space_check    — Disk Space Check
 13. pr_review_audit     — PR Review Audit
 14. linkedin_messages   — Check & Reply to LinkedIn Messages
+15. analytics_rollup    — Analytics Daily Rollup
 
 Merged pipelines (sub-steps run internally, one checkpoint per pipeline):
-15. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
-16. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
-17. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
+16. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
+17. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
+18. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -691,6 +692,7 @@ class ReflectionRunner:
             ("disk_space_check", "Disk Space Check", self.step_disk_space_check),
             ("pr_review_audit", "PR Review Audit", self.step_pr_review_audit),
             ("linkedin_messages", "LinkedIn Messages", self.step_linkedin_messages),
+            ("analytics_rollup", "Analytics Rollup", self.step_analytics_rollup),
             ("session_intelligence", "Session Intelligence", self.step_session_intelligence),
             ("behavioral_learning", "Behavioral Learning", self.step_behavioral_learning),
             ("daily_report_and_notify", "Daily Report & Notify", self.step_daily_report_and_notify),
@@ -2865,6 +2867,22 @@ class ReflectionRunner:
         self.state.step_progress["linkedin_messages"] = {
             "findings": len(findings),
         }
+
+    async def step_analytics_rollup(self) -> None:
+        """Run analytics daily rollup: aggregate metrics and purge old data."""
+        try:
+            from analytics.rollup import rollup_daily
+
+            result = rollup_daily()
+            self.state.add_finding(
+                "analytics_rollup",
+                f"Aggregated {result['aggregated_days']} days, purged {result['purged_rows']} rows",
+            )
+            self.state.step_progress["analytics_rollup"] = result
+        except Exception as e:
+            logger.warning(f"[reflections] Analytics rollup failed: {e}")
+            self.state.add_finding("analytics_rollup", f"Failed: {e}")
+            self.state.step_progress["analytics_rollup"] = {"error": str(e)}
 
     async def step_session_intelligence(self) -> None:
         """Pipeline: Session Analysis → LLM Reflection → Bug Filing.

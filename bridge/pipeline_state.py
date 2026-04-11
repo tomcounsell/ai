@@ -267,6 +267,12 @@ class PipelineStateMachine:
         if stage == "ISSUE":
             self.states[stage] = "in_progress"
             self._save()
+            try:
+                from analytics.collector import record_metric
+
+                record_metric("sdlc.stage_started", 1, {"stage": stage})
+            except Exception:
+                pass
             return
 
         # PATCH is startable if TEST or REVIEW is failed/completed
@@ -276,6 +282,12 @@ class PipelineStateMachine:
             if test_status in ("failed", "completed") or review_status in ("failed", "completed"):
                 self.states[stage] = "in_progress"
                 self._save()
+                try:
+                    from analytics.collector import record_metric
+
+                    record_metric("sdlc.stage_started", 1, {"stage": stage})
+                except Exception:
+                    pass
                 return
             raise ValueError(
                 f"Cannot start PATCH: neither TEST ({test_status}) "
@@ -286,12 +298,24 @@ class PipelineStateMachine:
         if stage == "PLAN" and self.states.get("CRITIQUE") in ("failed",):
             self.states[stage] = "in_progress"
             self._save()
+            try:
+                from analytics.collector import record_metric
+
+                record_metric("sdlc.stage_started", 1, {"stage": stage})
+            except Exception:
+                pass
             return
 
         # For cycle re-entry: TEST can restart after PATCH completes
         if stage == "TEST" and self.states.get("PATCH") in ("completed", "in_progress"):
             self.states[stage] = "in_progress"
             self._save()
+            try:
+                from analytics.collector import record_metric
+
+                record_metric("sdlc.stage_started", 1, {"stage": stage})
+            except Exception:
+                pass
             return
 
         # Check predecessors
@@ -300,12 +324,25 @@ class PipelineStateMachine:
             # No known predecessors — allow start
             self.states[stage] = "in_progress"
             self._save()
+            try:
+                from analytics.collector import record_metric
+
+                record_metric("sdlc.stage_started", 1, {"stage": stage})
+            except Exception:
+                pass
             return
 
         for pred in predecessors:
             if self.states.get(pred) == "completed":
                 self.states[stage] = "in_progress"
                 self._save()
+                # Analytics: record stage start
+                try:
+                    from analytics.collector import record_metric
+
+                    record_metric("sdlc.stage_started", 1, {"stage": stage})
+                except Exception:
+                    pass
                 return
 
         pred_statuses = {p: self.states.get(p, "pending") for p in predecessors}
@@ -355,6 +392,13 @@ class PipelineStateMachine:
                 self.states[next_stage] = "ready"
 
         self._save()
+        # Analytics: record stage completion
+        try:
+            from analytics.collector import record_metric
+
+            record_metric("sdlc.stage_completed", 1, {"stage": stage})
+        except Exception:
+            pass
         logger.info(
             f"Stage {stage} completed. "
             f"Patch cycles: {self.patch_cycle_count}. "

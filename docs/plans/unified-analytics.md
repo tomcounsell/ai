@@ -1,6 +1,6 @@
 ---
 slug: unified-analytics
-status: Ready
+status: Building
 type: feature
 appetite: Large
 tracking: https://github.com/tomcounsell/ai/issues/854

@@ -154,6 +154,19 @@ async def extract_observations_async(
         logger.info(
             f"[memory_extraction] Extracted {len(saved)} observations from session {session_id}"
         )
+
+        # Analytics: record extraction count
+        try:
+            from analytics.collector import record_metric
+
+            record_metric(
+                "memory.extraction",
+                float(len(saved)),
+                {"session_id": session_id, "project_key": project_key},
+            )
+        except Exception:
+            pass
+
         return saved
 
     except Exception as e:

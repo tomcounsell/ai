@@ -1101,6 +1101,16 @@ class ValorAgent:
                                         f"{duration}ms"
                                     )
                                     logger.info(summary)
+                                    # Analytics: record token cost and turn count
+                                    try:
+                                        from analytics.collector import record_metric
+
+                                        dims = {"session_id": session_id} if session_id else {}
+                                        record_metric("session.cost_usd", cost, dims)
+                                        if turns is not None:
+                                            record_metric("session.turns", float(turns), dims)
+                                    except Exception:
+                                        pass
                                 if msg.is_error and retries < max_retries:
                                     retries += 1
                                     error_text = msg.result or "(empty)"
