@@ -1,6 +1,6 @@
 # Harness Abstraction
 
-**Status**: Shipped (Phases 1-2 of issue #780, PR #868)
+**Status**: Shipped (Phases 1-5 of issue #780, PRs #868 and #902)
 
 ## Overview
 
@@ -8,7 +8,9 @@ Dev role sessions can now execute via a CLI harness (`claude -p --output-format 
 
 PM and teammate sessions remain on the SDK path. Only dev sessions are routed through the harness abstraction.
 
-**Phases 3-6 are pending** in follow-up PRs. They will remove legacy hook wiring (`session_registry`, `SubagentStop` SDLC logic, `PreToolUse` dev registration), migrate PM persona to use `valor_session create --role dev`, and validate end-to-end SDLC pipeline execution via the CLI harness.
+**Phase 6 (end-to-end validation)** is pending. It will validate the full SDLC pipeline running dev sessions via the CLI harness in production.
+
+**Phases 3-5** shipped in PR #902: PM persona migration to `valor_session create --role dev`, removal of legacy hook wiring (`session_registry`, `SubagentStop` SDLC logic, `PreToolUse` dev registration), and worker post-completion handler for SDLC stage transitions and GitHub comments.
 
 ## How It Works
 
@@ -106,11 +108,12 @@ No changes to the `AgentSession` model are needed. Harness selection is purely a
 | `agent/__init__.py` | Exports `get_response_via_harness` and `verify_harness_health` |
 | `tests/unit/test_harness_streaming.py` | 18 unit tests covering streaming, batching, error paths, health checks |
 
-## Pending Work (Phases 3-6)
+## Shipped Phases (3-5, PR #902)
 
-The following phases from issue #780 are not yet implemented:
+- **Phase 3**: PM persona migration -- PM now uses `valor_session create --role dev` instead of Agent tool dispatch
+- **Phase 4**: Remove legacy wiring -- deleted `session_registry`, removed `SubagentStop` SDLC logic, removed `PreToolUse` dev registration
+- **Phase 5**: Worker post-completion handler -- `_handle_dev_session_completion()` in `agent_session_queue.py` classifies outcome via `PipelineStateMachine`, posts GitHub stage comments, and steers the parent PM session
 
-- **Phase 3**: PM persona migration -- PM uses `valor_session create --role dev` instead of Agent tool
-- **Phase 4**: Remove legacy wiring -- delete `session_registry`, `SubagentStop` SDLC logic, `PreToolUse` dev registration
-- **Phase 5**: Worker post-completion handler -- SDLC stage transitions and GitHub comments after harness completion
-- **Phase 6**: End-to-end validation -- full SDLC pipeline running dev sessions via CLI harness
+## Pending Work (Phase 6)
+
+- **Phase 6**: End-to-end validation -- full SDLC pipeline running dev sessions via CLI harness in production (set `DEV_SESSION_HARNESS=claude-cli` and verify PM receives steering message after dev session completion)

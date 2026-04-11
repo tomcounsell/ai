@@ -2726,12 +2726,10 @@ async def _handle_dev_session_completion(
 
         from models.agent_session import AgentSession as ParentAgentSession
 
-        parent_sessions = list(ParentAgentSession.query.filter(agent_session_id=parent_id))
-        if not parent_sessions:
+        parent = ParentAgentSession.get_by_id(parent_id)
+        if not parent:
             logger.warning(f"[harness] Parent session {parent_id} not found, skipping PM steering")
             return
-
-        parent = parent_sessions[0]
 
         # Classify outcome and update pipeline state
         try:
