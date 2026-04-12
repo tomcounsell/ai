@@ -109,6 +109,12 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `./scripts/valor-service.sh worker-start` | Start standalone worker service |
 | `./scripts/valor-service.sh worker-restart` | Restart standalone worker |
 | `./scripts/valor-service.sh worker-status` | Check worker service status |
+| `./scripts/valor-service.sh email-start` | Start the email bridge (IMAP polling) |
+| `./scripts/valor-service.sh email-stop` | Stop the email bridge |
+| `./scripts/valor-service.sh email-restart` | Restart the email bridge |
+| `./scripts/valor-service.sh email-status` | Check email bridge status and last poll age |
+| `./scripts/valor-service.sh email-dead-letter list` | List failed SMTP sends in dead-letter queue |
+| `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
 | `tail -f logs/bridge.log` | Stream bridge logs |
 | `pytest tests/` | Run all tests |
 | `pytest tests/unit/` | Run unit tests only (fast, ~60s) |

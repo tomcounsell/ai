@@ -241,6 +241,7 @@ class EmailOutputHandler:
             msg["Subject"] = f"Re: {subject}"
         else:
             msg["Subject"] = subject or "Re: (no subject)"
+        msg["Message-ID"] = email.utils.make_msgid(domain=from_addr.split("@")[-1])
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
         if references:
