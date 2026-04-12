@@ -373,3 +373,105 @@ class TestPopAgentSessionThrottleGuard:
             "_pop_agent_session must return None when throttle='moderate' "
             "and only low-priority sessions are available"
         )
+
+
+class TestHealthCheckDeliveryGuard:
+    """Tests for the response_delivered_at guard in _agent_session_health_check.
+
+    When a session has response_delivered_at set, the health check should
+    finalize it as completed instead of resetting it to pending (which would
+    cause duplicate message delivery -- issue #918).
+    """
+
+    @pytest.mark.asyncio
+    async def test_delivered_session_finalized_not_requeued(self):
+        """Session WITH response_delivered_at should be marked completed,
+        not reset to pending."""
+        # Use session_type="teammate" + chat_id so worker_key = chat_id
+        delivered_session = _make_session(
+            status="running",
+            started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            session_type="teammate",
+            chat_id="chat-123",
+        )
+        delivered_session.agent_session_id = "delivered-test-1"
+        delivered_session.response_delivered_at = datetime(2020, 1, 1, 0, 30, tzinfo=UTC)
+
+        mock_finalize = MagicMock()
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch(
+                "agent.agent_session_queue._active_workers",
+                {"chat-123": MagicMock(done=MagicMock(return_value=True))},
+            ),
+        ):
+            mock_cls.query.filter.return_value = [delivered_session]
+            # The health check does a local import of finalize_session
+            with patch("agent.agent_session_queue.finalize_session", mock_finalize, create=True):
+                # Patch at the import target inside the function
+                import models.session_lifecycle as lifecycle_mod
+
+                original_finalize = lifecycle_mod.finalize_session
+                original_transition = lifecycle_mod.transition_status
+                lifecycle_mod.finalize_session = mock_finalize
+                mock_transition = MagicMock()
+                lifecycle_mod.transition_status = mock_transition
+                try:
+                    from agent.agent_session_queue import _agent_session_health_check
+
+                    await _agent_session_health_check()
+                finally:
+                    lifecycle_mod.finalize_session = original_finalize
+                    lifecycle_mod.transition_status = original_transition
+
+            # Should finalize as completed, NOT transition to pending
+            mock_finalize.assert_called_once()
+            call_args = mock_finalize.call_args
+            assert call_args[0][1] == "completed"
+            mock_transition.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_undelivered_session_recovered_to_pending(self):
+        """Session WITHOUT response_delivered_at should be recovered to
+        pending as before (existing behavior preserved)."""
+        # Use session_type="teammate" + chat_id so worker_key = chat_id
+        undelivered_session = _make_session(
+            status="running",
+            started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            session_type="teammate",
+            chat_id="chat-456",
+        )
+        undelivered_session.agent_session_id = "undelivered-test-1"
+        # Ensure response_delivered_at is None (not set)
+
+        mock_transition = MagicMock()
+        mock_finalize = MagicMock()
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch(
+                "agent.agent_session_queue._active_workers",
+                {"chat-456": MagicMock(done=MagicMock(return_value=True))},
+            ),
+            patch("agent.agent_session_queue._ensure_worker"),
+        ):
+            mock_cls.query.filter.return_value = [undelivered_session]
+            import models.session_lifecycle as lifecycle_mod
+
+            original_finalize = lifecycle_mod.finalize_session
+            original_transition = lifecycle_mod.transition_status
+            lifecycle_mod.finalize_session = mock_finalize
+            lifecycle_mod.transition_status = mock_transition
+            try:
+                from agent.agent_session_queue import _agent_session_health_check
+
+                await _agent_session_health_check()
+            finally:
+                lifecycle_mod.finalize_session = original_finalize
+                lifecycle_mod.transition_status = original_transition
+
+            # Should transition to pending, NOT finalize
+            mock_transition.assert_called_once()
+            assert mock_transition.call_args[0][1] == "pending"
+            mock_finalize.assert_not_called()
