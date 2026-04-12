@@ -1995,9 +1995,7 @@ async def get_agent_response_sdk(
         else:
             # PM dispatch: orchestrate SDLC work stage-by-stage.
             # Consult TaskTypeProfile (TRM) to determine delegation style.
-            _pm_project_key = (
-                project.get("name", "valor").lower().replace(" ", "-") if project else "unknown"
-            )
+            _pm_project_key = project.get("_key", "valor") if project else "unknown"
             _trm_task_type = _infer_task_type_from_message(message, classification)
             _delegation = "structured"  # safe default
             try:
@@ -2007,11 +2005,29 @@ async def get_agent_response_sdk(
             except Exception:
                 pass  # Always fall back to structured
 
+            # MULTI-ISSUE FAN-OUT applies to all delegation paths.
+            enriched_message += (
+                "\n\nMULTI-ISSUE FAN-OUT: If the message contains more than one GitHub "
+                "issue number (e.g., 'Run SDLC on issues 777, 775, 776'), you MUST fan out. "
+                "For each issue number N, run:\n"
+                "  python -m tools.valor_session create \\\\\n"
+                "    --role pm \\\\\n"
+                '    --parent "$AGENT_SESSION_ID" \\\\\n'
+                '    --message "Run SDLC on issue N"\n'
+                "After spawning ALL children, run:\n"
+                "  python -m tools.valor_session wait-for-children"
+                ' --session-id "$AGENT_SESSION_ID"\n'
+                "to pause this session. Do NOT process multiple issues in a single session. "
+                "Spawn child sessions sequentially (one create call at a time) then call "
+                "wait-for-children once. Send a Telegram update before pausing so Valor "
+                "knows fan-out happened.\n\n"
+            )
+
             if _delegation == "autonomous":
                 # Autonomous handoff: proven task type — objective + constraints only.
                 # Skip step-by-step SDLC scaffolding; trust the dev session.
                 enriched_message += (
-                    "\n\nYou are the PM. This task type is well-proven — delegate efficiently.\n"
+                    "You are the PM. This task type is well-proven — delegate efficiently.\n"
                     "Spawn a dev session with the objective and constraints. "
                     "No step-by-step scaffolding needed.\n\n"
                     "  python -m tools.valor_session create \\\\\n"
@@ -2034,20 +2050,6 @@ async def get_agent_response_sdk(
             else:
                 # Structured handoff: novel or error-prone task type — full SDLC guidance.
                 enriched_message += (
-                    "\n\nMULTI-ISSUE FAN-OUT: If the message contains more than one GitHub "
-                    "issue number (e.g., 'Run SDLC on issues 777, 775, 776'), you MUST fan out. "
-                    "For each issue number N, run:\n"
-                    "  python -m tools.valor_session create \\\\\n"
-                    "    --role pm \\\\\n"
-                    '    --parent "$AGENT_SESSION_ID" \\\\\n'
-                    '    --message "Run SDLC on issue N"\n'
-                    "After spawning ALL children, run:\n"
-                    "  python -m tools.valor_session wait-for-children"
-                    ' --session-id "$AGENT_SESSION_ID"\n'
-                    "to pause this session. Do NOT process multiple issues in a single session. "
-                    "Spawn child sessions sequentially (one create call at a time) then call "
-                    "wait-for-children once. Send a Telegram update before pausing so Valor "
-                    "knows fan-out happened.\n\n"
                     "You are the PM. Orchestrate SDLC work stage-by-stage:\n"
                     "1. **Assess the current stage** — use read-only Bash commands "
                     "(gh issue view, gh pr view, gh pr list, grep) to determine "
@@ -2126,7 +2128,7 @@ async def get_agent_response_sdk(
 
     try:
         # Extract project_key from config for env var injection
-        _project_key = project.get("name", "valor").lower().replace(" ", "-") if project else None
+        _project_key = project.get("_key", "valor") if project else None
         # Extract message_id from the session context (passed through _execute_agent_session)
         _message_id = None  # message_id not available at this layer
 
