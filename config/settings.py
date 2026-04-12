@@ -25,16 +25,6 @@ class LogLevel(StrEnum):
     CRITICAL = "CRITICAL"
 
 
-class DatabaseSettings(BaseModel):
-    """Database configuration settings."""
-
-    path: Path = Field(
-        default=Path("data/valor_bridge.db"), description="Path to SQLite database file"
-    )
-    echo: bool = Field(default=False, description="Enable SQL query logging")
-    pool_size: int = Field(default=20, description="Database connection pool size", ge=1, le=100)
-
-
 class APISettings(BaseModel):
     """API service configuration settings."""
 
@@ -225,7 +215,6 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False, description="Enable debug mode")
 
     # Component settings
-    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     api: APISettings = Field(default_factory=APISettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
@@ -274,7 +263,6 @@ class Settings(BaseSettings):
     def create_directories(self) -> None:
         """Create necessary directories if they don't exist."""
         directories = [
-            self.database.path.parent,
             self.workspace.data_dir,
             self.workspace.temp_dir,
             self.google_auth.credentials_dir,
@@ -285,10 +273,6 @@ class Settings(BaseSettings):
 
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
-
-    def get_database_url(self) -> str:
-        """Get the database connection URL."""
-        return f"sqlite:///{self.database.path}"
 
     def is_production(self) -> bool:
         """Check if running in production environment."""
