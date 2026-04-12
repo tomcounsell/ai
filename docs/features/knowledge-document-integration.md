@@ -195,10 +195,6 @@ The watcher is designed to never take down the bridge:
 - KnowledgeDocument upsert failures return None (non-fatal)
 - The watcher thread is a daemon -- it does not prevent bridge shutdown
 
-## Relationship to Existing `tools/knowledge_search/`
-
-The existing `tools/knowledge_search/` is a standalone SQLite-based knowledge search tool. The new KnowledgeDocument system supersedes it by using Popoto (consistent with the rest of the codebase), providing project-scoped isolation, and integrating with the subconscious memory system. The old tool is preserved during v1; a follow-up task will migrate any indexed data and remove it.
-
 ## Configuration
 
 | Setting | Value | Location |

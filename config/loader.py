@@ -64,7 +64,6 @@ class ConfigLoader:
                 self.settings.logging.file_path.parent if self.settings.logging.file_path else None
             ),
             "config": self.settings.paths.config_dir,
-            "database": self.settings.database.path.parent,
         }
 
         for name, path in directories.items():
@@ -97,7 +96,6 @@ class ConfigLoader:
             "debug": self.settings.debug,
             "api_keys": self.validate_api_keys(),
             "directories": self.validate_directories(),
-            "database_path": str(self.settings.database.path),
             "log_level": self.settings.logging.level.value,
             "server": {
                 "host": self.settings.server.host,

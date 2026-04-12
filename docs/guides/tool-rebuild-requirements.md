@@ -12,7 +12,7 @@ All tools are available in `tools/`:
 
 ### Original 12 Tools (Rebuilt)
 - search, image_analysis, code_execution, test_judge (High Priority)
-- knowledge_search, link_analysis, doc_summary, documentation (Medium Priority)
+- link_analysis, doc_summary, documentation (Medium Priority)
 - telegram_history, image_tagging, test_params, test_scheduler (Lower Priority)
 
 ### New Tools (Added 2026-01-19)

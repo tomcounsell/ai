@@ -97,9 +97,8 @@ The OpenRouter API URL `https://openrouter.ai/api/v1/chat/completions` is hardco
 - `scripts/autoexperiment.py:40`
 - `tools/doc_summary/__init__.py:16`
 - `tools/image_analysis/__init__.py:18`
-- `tools/knowledge_search/__init__.py:16`
 
-If the URL changes, all 5 files must be updated independently. No env var override exists.
+If the URL changes, all 4 files must be updated independently. No env var override exists.
 
 **File:** Multiple (see above)
 **Recommendation:** Extract to a shared config constant (e.g., `config/models.py:OPENROUTER_URL`) or read from `OPENROUTER_URL` env var with the current URL as default.

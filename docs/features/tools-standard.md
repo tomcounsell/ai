@@ -52,7 +52,7 @@ Critical findings:
 - `google_workspace` was a placeholder (empty `__init__.py`, only `auth.py`)
 - `web` and `selfie` had real implementations but zero docs or tests
 - `transcribe` manifest claimed `insanely-fast-whisper` CLI but code used OpenAI Whisper API
-- Three tools (`sms_reader`, `image_tagging`, `knowledge_search`) had no CLI registration
+- Two tools (`sms_reader`, `image_tagging`) had no CLI registration
 - `telegram_history` test failed due to Redis state leak
 
 ### Remediation (PR #504, issue #480)
@@ -66,7 +66,7 @@ Work was organized in three phases:
 
 **Phase 2 -- Fixes:**
 - Fixed `transcribe` manifest to reflect OpenAI Whisper API (not `insanely-fast-whisper` CLI)
-- Registered 3 missing CLIs in `pyproject.toml`: `valor-sms-reader`, `valor-image-tagging`, `valor-knowledge-search`
+- Registered 2 missing CLIs in `pyproject.toml`: `valor-sms-reader`, `valor-image-tagging`
 - Confirmed `telegram_history` test isolation via autouse fixture
 
 **Phase 3 -- Additions:**
@@ -95,7 +95,7 @@ Current tools after remediation (18 tools, down from 20 after deleting duplicate
 | `image_analysis` | api | stable | analyze, classify |
 | `image_gen` | api | stable | generate |
 | `image_tagging` | api | stable | classify |
-| `knowledge_search` | api | stable | search, embed |
+| ~~`knowledge_search`~~ | -- | removed | *(deleted — superseded by KnowledgeDocument/Popoto)* |
 | `link_analysis` | api | stable | analyze |
 | `selfie` | api | stable | generate |
 | `sms_reader` | library | stable | read |

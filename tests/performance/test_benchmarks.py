@@ -321,7 +321,6 @@ class TestToolPerformance:
             "image_analysis",
             "code_execution",
             "test_judge",
-            "knowledge_search",
         ]
 
         for tool_name in tools_to_test:

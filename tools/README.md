@@ -4,7 +4,7 @@ Tools that extend Valor's capabilities. Each tool follows the standard defined i
 
 ## Naming Convention
 
-All tool directories use `snake_case` naming (e.g., `image_gen`, `knowledge_search`).
+All tool directories use `snake_case` naming (e.g., `image_gen`, `image_analysis`).
 
 ## Available Tools
 
@@ -22,7 +22,6 @@ All tool directories use `snake_case` naming (e.g., `image_gen`, `knowledge_sear
 | Tool | Description | API Required |
 |------|-------------|--------------|
 | [web](web/) | Unified web search and URL fetch with provider fallback | PERPLEXITY_API_KEY |
-| [knowledge_search](knowledge_search/) | Local semantic search with embeddings | OPENROUTER_API_KEY |
 | [link_analysis](link_analysis/) | URL extraction, validation, content analysis | PERPLEXITY_API_KEY* |
 
 ### Vision & Media
@@ -99,7 +98,6 @@ print(f"Pass: {result['pass_fail']}")
 
 ### Information Retrieval
 - **Web Search**: Real-time information via Perplexity/Tavily with provider fallback
-- **Knowledge Search**: Semantic search across local documents
 - **Link Analysis**: Extract and analyze URLs from text
 
 ### Vision & Understanding
@@ -127,7 +125,7 @@ print(f"Pass: {result['pass_fail']}")
 API keys are stored in the shared location `~/src/.env`. Tools automatically load from this file.
 
 Required keys:
-- `OPENROUTER_API_KEY` - For vision, tagging, embeddings, image generation
+- `OPENROUTER_API_KEY` - For vision, tagging, image generation
 - `PERPLEXITY_API_KEY` - For web search
 - `ANTHROPIC_API_KEY` - For test judging, documentation, summaries
 - `OPENAI_API_KEY` - For transcription, selfies

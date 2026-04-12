@@ -315,7 +315,6 @@ FEATURE_MAP = {
     "link_analysis": "tools",
     "doc_summary": "tools",
     "image_analysis": "tools",
-    "knowledge_search": "tools",
     "search": "tools",
     "test_judge": "tools",
     "ai_judge": "tools",

@@ -169,7 +169,6 @@ tests/
 | tools | `test_test_judge.py` | 16 | AI judge validation |
 | tools | `test_doc_summary.py` | 14 | Document summarization |
 | tools | `test_image_analysis.py` | 12 | Image analysis |
-| tools | `test_knowledge_search.py` | 11 | Knowledge base search |
 | tools | `test_search.py` | 11 | Web search |
 | ai_judge | `test_ai_judge.py` | 24 | AI judge prompts, evaluation |
 

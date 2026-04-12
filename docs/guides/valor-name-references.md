@@ -30,7 +30,7 @@ References where "Valor" is the **persona** that users interact with — the nam
 | `bridge/catchup.py` | 214 | `"reply from us (Valor)"` | Comment |
 | `bridge/telegram_bridge.py` | 1339, 1482 | `sender="Valor"` | Message attribution |
 | `tools/telegram_history/__init__.py` | 150 | `sender.lower() == "valor"` | Direction detection |
-| `scripts/migrate_sqlite_to_redis.py` | 73 | `sender.lower() == "valor"` | Legacy migration |
+| ~~`scripts/migrate_sqlite_to_redis.py`~~ | -- | *(removed)* | Legacy migration deleted |
 | `agent/branch_manager.py` | 548 | `"Reply to any Valor message"` | User-facing help text |
 
 ### A3. System Prompt & Persona Definition
@@ -96,9 +96,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 
 | Path | Used By |
 |------|---------|
-| `~/.valor/knowledge.db` | `tools/knowledge_search/__init__.py` |
 | `~/.valor/test_results/` | `tools/test_scheduler/__init__.py` |
-| `~/.valor/telegram_history.db` | `scripts/migrate_sqlite_to_redis.py` (legacy) |
 | `data/valor.session` | `scripts/reflections.py` (Telegram session) |
 
 ### B5. Scripts (branded filenames & strings)

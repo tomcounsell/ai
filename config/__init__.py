@@ -14,7 +14,6 @@ from .loader import (
 from .paths import CONFIG_DIR, DATA_DIR, HOME_DIR, LOGS_DIR, PROJECT_ROOT, SRC_DIR, VALOR_DIR
 from .settings import (
     APISettings,
-    DatabaseSettings,
     GoogleAuthSettings,
     LoggingSettings,
     LogLevel,
@@ -33,7 +32,6 @@ from .settings import (
 __all__ = [
     # Settings classes
     "Settings",
-    "DatabaseSettings",
     "APISettings",
     "TelegramSettings",
     "ServerSettings",

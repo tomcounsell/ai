@@ -45,7 +45,6 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 | Google Auth | `GoogleAuthSettings` | `credentials_dir` (default: `~/Desktop/Valor/`) | `GOOGLE_CREDENTIALS_DIR` |
 | Models | `ModelSettings` | `ollama_vision_model` (default: `llama3.2-vision:11b`) | `OLLAMA_VISION_MODEL` |
 | Paths | `PathSettings` | `project_root`, `data_dir`, `logs_dir`, `config_dir` | -- |
-| Database | `DatabaseSettings` | `path`, `echo`, `pool_size` | -- |
 | API | `APISettings` | `claude_api_key`, `openai_api_key`, etc. | `CLAUDE_API_KEY`, etc. |
 
 ### Config Files

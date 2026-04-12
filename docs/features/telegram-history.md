@@ -186,18 +186,6 @@ The Telegram bridge (`bridge/telegram_bridge.py`) automatically:
 3. **Registers chats** - `register_chat()` called on each message to maintain the chat registry
 4. **Stores full responses** - Valor's responses stored with no character cap
 
-## Migration from SQLite (2026-02-24)
-
-The SQLite backend was replaced with Redis/Popoto. To migrate existing data:
-
-```bash
-python scripts/migrate_sqlite_to_redis.py --dry-run  # preview
-python scripts/migrate_sqlite_to_redis.py            # migrate
-python scripts/migrate_sqlite_to_redis.py --verify   # verify counts
-```
-
-The SQLite database at `~/.valor/telegram_history.db` can be deleted after 30 days post-migration.
-
 ## Testing
 
 Run the tests:
