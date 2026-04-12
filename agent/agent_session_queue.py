@@ -2838,11 +2838,13 @@ async def _handle_dev_session_completion(
             logger.warning(f"[harness] PipelineStateMachine update failed (non-fatal): {psm_err}")
             current_stage = None
 
-        # Set retain_for_resume=True on BUILD dev sessions so the PM can hard-PATCH
-        # resume them via `valor-session resume --id <id>`. The 30-day Meta.ttl acts
-        # as the backstop; `valor-session release --pr <N>` clears it on merge.
+        # Set retain_for_resume=True only on BUILD-stage dev sessions so the PM can
+        # hard-PATCH resume them via `valor-session resume --id <id>`. BUILD is the only
+        # stage where retaining the session transcript is meaningful — it holds the builder
+        # reasoning context. The 30-day Meta.ttl acts as the backstop;
+        # `valor-session release --pr <N>` clears it on merge.
         try:
-            if agent_session and current_stage in ("implement", "build", "test"):
+            if agent_session and current_stage == "build":
                 agent_session.retain_for_resume = True
                 agent_session.save()
                 logger.info(
