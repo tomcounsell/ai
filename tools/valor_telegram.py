@@ -92,7 +92,7 @@ def _telethon_client():
     from dotenv import load_dotenv
 
     load_dotenv()
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
 
     try:
         api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))

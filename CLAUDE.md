@@ -360,9 +360,17 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 
 ### Configuration Files
 
-- `.env` - Environment variables and API keys
+- `.env` - Symlink → `~/Desktop/Valor/.env` (do not write secrets here directly)
 - `~/Desktop/Valor/projects.json` - Multi-project configuration (iCloud-synced, private)
 - `.claude/settings.local.json` - Claude Code settings
+
+## Secrets
+
+All secrets go in **`~/Desktop/Valor/.env`**. Never write secrets to `repo/.env`.
+
+The repo `.env` is a symlink — writing to it writes to the vault, but the canonical workflow is to edit `~/Desktop/Valor/.env` directly. The symlink is created automatically by `scripts/remote-update.sh` and `scripts/update/env_sync.py` on each machine after iCloud syncs.
+
+**Adding a new secret:** add it to `~/Desktop/Valor/.env`, add a placeholder to `.env.example`, add a field to `config/settings.py`. That's it — no sync step needed.
 
 ## Plan Requirements (This Repo Only)
 

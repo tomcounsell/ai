@@ -323,17 +323,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"WARN: Failed to link {action.dst}: {action.error}", v)
                 result.warnings.append(f"Hardlink failed: {action.dst}")
 
-    # Step 1.6: Sync env vars from vault
-    log("Syncing env vars from vault...", v)
+    # Step 1.6: Verify .env symlink
+    log("Verifying .env symlink...", v)
     result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
     env_r = result.env_sync_result
-    if env_r.added:
-        log(f"Added env vars: {', '.join(env_r.added)}", v, always=True)
-    if env_r.updated:
-        log(f"Updated env vars: {', '.join(env_r.updated)}", v, always=True)
+    if env_r.created:
+        log(".env symlink created → ~/Desktop/Valor/.env", v, always=True)
     if env_r.error:
-        log(f"WARN: Env sync: {env_r.error}", v)
-        result.warnings.append(f"Env sync: {env_r.error}")
+        log(f"WARN: Env symlink: {env_r.error}", v)
+        result.warnings.append(f"Env symlink: {env_r.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)

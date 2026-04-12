@@ -47,7 +47,7 @@ def _load_env() -> None:
         from dotenv import load_dotenv
 
         load_dotenv(_repo_root / ".env")
-        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
     except Exception:
         pass
 
