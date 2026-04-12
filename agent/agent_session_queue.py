@@ -1356,6 +1356,13 @@ async def _agent_session_health_check() -> None:
     4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
+    **Delivery guard (#918):** Before recovering a running session to pending,
+    the health check inspects ``response_delivered_at``. If the field is set,
+    the session already delivered its final response to Telegram — re-queuing
+    would cause a duplicate reply. Instead, the session is finalized as
+    ``completed`` via ``finalize_session()``. This prevents the crash-recover
+    loop that previously produced 6+ duplicate messages per session.
+
     Recovery resets status to 'pending' via direct mutation and save.
     Status is an IndexedField, so no delete-and-recreate is needed.
     Only sessions whose worker is confirmed dead are touched.
@@ -1408,6 +1415,32 @@ async def _agent_session_health_check() -> None:
                     reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
 
             if should_recover:
+                # Guard: if response was already delivered, finalize instead
+                # of recovering to pending (prevents duplicate delivery, #918)
+                if getattr(entry, "response_delivered_at", None) is not None:
+                    try:
+                        from models.session_lifecycle import finalize_session
+
+                        logger.info(
+                            "[session-health] Session %s already delivered response at %s, "
+                            "finalizing instead of recovering",
+                            entry.agent_session_id,
+                            entry.response_delivered_at,
+                        )
+                        finalize_session(
+                            entry,
+                            "completed",
+                            reason="health check: already delivered",
+                        )
+                        recovered += 1
+                    except Exception as e:
+                        logger.error(
+                            "[session-health] Failed to finalize already-delivered session %s: %s",
+                            entry.agent_session_id,
+                            e,
+                        )
+                    continue
+
                 is_local = worker_key.startswith("local")
                 logger.warning(
                     "[session-health] Recovering stuck session %s "
@@ -3141,6 +3174,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"[{session.project_key}] Output delivered "
                 f"(stop_reason={stop_reason}, {len(msg)} chars)"
             )
+            # Stamp response_delivered_at so health check won't re-queue (#918)
+            try:
+                if agent_session is not None:
+                    agent_session.response_delivered_at = datetime.now(UTC)
+                    agent_session.save()
+                    logger.info(f"Stamped response_delivered_at for session {session.session_id}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to stamp response_delivered_at for {session.session_id}: {e}"
+                )
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,

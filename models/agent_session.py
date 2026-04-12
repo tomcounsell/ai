@@ -139,6 +139,7 @@ class AgentSession(Model):
     started_at = DatetimeField(null=True)  # Cannot be SortedField because it starts as None
     updated_at = DatetimeField(auto_now=True, null=True)  # Renamed from last_activity
     completed_at = DatetimeField(null=True)
+    response_delivered_at = DatetimeField(null=True)
     working_dir = Field()
 
     # === Telegram origin (consolidated) ===
@@ -249,7 +250,13 @@ class AgentSession(Model):
     # === Backward-compatible field name mapping ===
 
     # DatetimeField names that should auto-convert float timestamps
-    _DATETIME_FIELDS = {"scheduled_at", "started_at", "updated_at", "completed_at"}
+    _DATETIME_FIELDS = {
+        "scheduled_at",
+        "started_at",
+        "updated_at",
+        "completed_at",
+        "response_delivered_at",
+    }
 
     # Known roles for validation
     _KNOWN_ROLES = {"pm", "dev"}
@@ -416,6 +423,12 @@ class AgentSession(Model):
             kwargs["completed_at"] = datetime.fromtimestamp(kwargs["completed_at"], tz=UTC)
         if "updated_at" in kwargs and isinstance(kwargs["updated_at"], int | float):
             kwargs["updated_at"] = datetime.fromtimestamp(kwargs["updated_at"], tz=UTC)
+        if "response_delivered_at" in kwargs and isinstance(
+            kwargs["response_delivered_at"], int | float
+        ):
+            kwargs["response_delivered_at"] = datetime.fromtimestamp(
+                kwargs["response_delivered_at"], tz=UTC
+            )
 
         return kwargs
 

@@ -128,13 +128,25 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 **Solution**: `cleanup_corrupted_agent_sessions()` runs at worker startup (before recovery), during `/update` (before stale cleanup), and hourly as the `agent-session-cleanup` reflection. It detects unsaveable sessions, deletes them (with fallback to direct Redis key deletion), and rebuilds indexes to clear orphaned `$IndexF`/`$KeyF`/`$SortF` entries. See also [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated index rebuild that supplements this.
 
-### 8. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
+### 8. Health-Check Delivery Guard (`agent/agent_session_queue.py`)
+
+**Problem**: When a worker crashes or is cancelled mid-execution, the session stays in `running` state for startup recovery. After `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s), the health check resets it to `pending` and the worker re-runs the session from scratch — including delivering a duplicate response. If each re-run also fails to complete cleanly, this repeats indefinitely, producing 6+ duplicate Telegram messages per session (#918).
+
+**Solution**: `send_to_chat` now stamps `response_delivered_at` (a `DatetimeField` on `AgentSession`) when a response is successfully delivered to Telegram. The `_agent_session_health_check` inspects this field before recovering a session: if `response_delivered_at` is set, the session already delivered its final response and re-queuing would cause a duplicate. Instead, it calls `finalize_session(entry, "completed")` to mark it done.
+
+Both the delivery stamp and the health-check guard are wrapped in `try/except` so that failures are logged but never crash the worker or health-check loop.
+
+**Key fields**:
+- `AgentSession.response_delivered_at` — nullable `DatetimeField`, set once on successful delivery
+- Health-check path: `_agent_session_health_check()` → `should_recover` → delivery guard → `finalize_session()`
+
+### 9. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
 
 **Problem**: The Perplexity search provider had a bare `except Exception` that silently swallowed all errors, including 401 Unauthorized responses from expired API keys.
 
 **Solution**: Added explicit `httpx.HTTPStatusError` handling before the generic catch. 401 errors now log a clear warning message directing the operator to refresh credentials in `.env`. Other HTTP errors are also logged with their status code.
 
-### 9. Service Installation
+### 10. Service Installation
 
 The watchdog is installed alongside the bridge:
 ```bash
@@ -148,7 +160,7 @@ The watchdog is installed alongside the bridge:
 
 The worker can also be installed separately via `./scripts/install_worker.sh`. See [Worker Service](worker-service.md) for details.
 
-### 10. Flood-Backoff Persistence (`bridge/telegram_bridge.py`)
+### 11. Flood-Backoff Persistence (`bridge/telegram_bridge.py`)
 
 **Problem**: When the bridge hits a Telegram `FloodWaitError` with a long duration, launchd restarts compound the problem. Each restart triggers a new connection attempt, which increments Telegram's flood counter, escalating the wait from seconds to hours.
 
@@ -166,7 +178,7 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 - The file is deleted on successful connect
 - All writes use atomic temp-file + `os.replace` to prevent corruption
 
-### 11. Dynamic Catchup Lookback (`bridge/catchup.py`)
+### 12. Dynamic Catchup Lookback (`bridge/catchup.py`)
 
 **Problem**: The fixed 60-minute `CATCHUP_LOOKBACK_MINUTES` means that after a multi-hour outage, messages older than 60 minutes are silently missed forever.
 
@@ -183,7 +195,7 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 
 **Logger handler guard**: `telegram_bridge.py` may execute its module-level setup twice in some launch configurations (once as `__main__`, once as `bridge.telegram_bridge`). This would add a second `RotatingFileHandler` to the root logger, doubling every log line. A guard checks for an existing handler with the same log file path before adding a new one.
 
-### 12. Update Polling (`com.valor.update`)
+### 13. Update Polling (`com.valor.update`)
 
 **Problem**: Code pushes to main could take up to 12 hours to propagate to all machines, since the update plist only ran at 6 AM and 6 PM.
 
@@ -205,7 +217,7 @@ tail -f logs/update.log
 
 **Manual override**: The Telegram `/update` command continues to work for immediate updates.
 
-### 13. Bridge Hibernation (`bridge/hibernation.py`)
+### 14. Bridge Hibernation (`bridge/hibernation.py`)
 
 **Problem**: The bridge has no distinction between two fundamentally different failure modes:
 1. **Auth expiry** — Telegram session token expired or revoked; requires human intervention (`python scripts/telegram_login.py`). The bridge cannot self-recover.
