@@ -14,12 +14,9 @@
     </div>
 </div>
 
-{# ── Analytics ── #}
-<section id="analytics" class="mt-8">
-    <div id="analytics-trend" hx-get="/_partials/analytics/" hx-trigger="load, every 30s" hx-swap="innerHTML">
-        {% include "_partials/analytics_trend.html" %}
-    </div>
-</section>
+<div id="stats-panel" style="display:none"
+     hx-get="/_partials/analytics/" hx-trigger="revealed, every 30s" hx-swap="innerHTML">
+</div>
 
 {# ── Agent Sessions ── #}
 <section id="sessions">
@@ -45,6 +42,19 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
         });
     }
 });
+</script>
+<script>
+function toggleStats() {
+    var panel = document.getElementById('stats-panel');
+    var btn = document.querySelector('.stats-toggle');
+    if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        if (btn) btn.classList.add('active');
+    } else {
+        panel.style.display = 'none';
+        if (btn) btn.classList.remove('active');
+    }
+}
 </script>
 
 {# ── Reflections ── #}
