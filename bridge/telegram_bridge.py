@@ -1233,6 +1233,53 @@ async def main():
                             f"pending session {session_id} (age={age:.1f}s)"
                         )
                         return
+
+                    # Check for completed session — re-enqueue with prior context
+                    completed_sessions = AgentSession.query.filter(
+                        session_id=session_id, status="completed"
+                    )
+                    if completed_sessions:
+                        completed = completed_sessions[0]
+                        summary = (
+                            getattr(completed, "context_summary", None)
+                            or "This continues a previously completed session."
+                        )
+                        augmented_text = f"[Prior session context: {summary}]\n\n{clean_text}"
+                        # Compute working_dir inline (not yet defined at this point in the handler)
+                        _completed_working_dir = ""
+                        if project:
+                            _completed_working_dir = project.get(
+                                "working_directory",
+                                DEFAULTS.get("working_directory", ""),
+                            )
+                        if not _completed_working_dir:
+                            _completed_working_dir = str(Path(__file__).parent.parent)
+                        await enqueue_agent_session(
+                            project_key=project_key,
+                            session_id=session_id,
+                            working_dir=_completed_working_dir,
+                            message_text=augmented_text,
+                            sender_name=sender_name,
+                            chat_id=telegram_chat_id,
+                            telegram_message_id=message.id,
+                            chat_title=chat_title,
+                            priority="normal",
+                            sender_id=sender_id,
+                            project_config=project,
+                        )
+                        from bridge.markdown import send_markdown
+
+                        await send_markdown(
+                            client,
+                            event.chat_id,
+                            "Resuming from prior session.",
+                            reply_to=message.id,
+                        )
+                        logger.info(
+                            f"[{project_name}] Resumed completed session "
+                            f"{session_id} with prior context"
+                        )
+                        return
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback
                 logger.error(

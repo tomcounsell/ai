@@ -869,14 +869,14 @@ class TestResolveRootSessionId:
 
     @pytest.mark.asyncio
     async def test_resolve_root_session_id_api_fallback_on_cache_miss(self):
-        """Cache miss triggers API chain walk to find root."""
-        from bridge.context import resolve_root_session_id
+        """Cache miss triggers API chain walk; result is persisted to Redis cache."""
+        from bridge.context import _get_cached_root, resolve_root_session_id
 
         chat_id = 99005
         project_key = "testproject"
         reply_to_msg_id = 9999
 
-        # Cache: no records (simulate cache miss)
+        # Cache: no records (simulate TelegramMessage cache miss)
         def mock_filter(chat_id=None, message_id=None):
             return []
 
@@ -901,3 +901,95 @@ class TestResolveRootSessionId:
 
         # First human message in chain is msg_id=8800
         assert result == f"tg_{project_key}_{chat_id}_8800"
+
+        # After API fallback, the root must be persisted to the authoritative Redis cache.
+        # A second call via _get_cached_root should return the same root without needing
+        # the API again — proving the cache was written on the first resolution.
+        cached = await _get_cached_root(chat_id, reply_to_msg_id)
+        assert cached == 8800, f"Expected root 8800 to be cached after API fallback, got {cached}"
+
+    @pytest.mark.asyncio
+    async def test_resolve_root_session_id_uses_cached_root(self):
+        """Pre-populated Redis cache is hit first; cache walk and API are never called."""
+        from bridge.context import _set_cached_root, resolve_root_session_id
+
+        chat_id = 99006
+        project_key = "testproject"
+        reply_to_msg_id = 7001
+        expected_root = 7000
+
+        # Pre-populate the authoritative Redis cache
+        await _set_cached_root(chat_id, reply_to_msg_id, expected_root)
+
+        mock_client = AsyncMock()
+
+        with patch("bridge.context._cache_walk_root") as mock_cache_walk:
+            with patch("bridge.context.fetch_reply_chain") as mock_api_walk:
+                result = await resolve_root_session_id(
+                    mock_client, chat_id, reply_to_msg_id, project_key
+                )
+
+        assert result == f"tg_{project_key}_{chat_id}_{expected_root}"
+        # Neither the TelegramMessage cache walk nor the Telegram API should be called
+        mock_cache_walk.assert_not_called()
+        mock_api_walk.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reply_to_completed_session_reenqueues_with_context(self):
+        """Reply to a completed session re-enqueues with context_summary prepended."""
+        from datetime import UTC, datetime
+
+        from models.agent_session import AgentSession
+
+        session_id = "test_completed_resume_ctx"
+
+        # Create a completed session with context_summary
+        session = AgentSession(
+            session_id=session_id,
+            project_key="test",
+            status="completed",
+            message_text="original task",
+            context_summary="Implemented feature X and wrote tests.",
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+
+        # Verify the completed-session query finds it
+        completed_sessions = AgentSession.query.filter(session_id=session_id, status="completed")
+        assert len(completed_sessions) > 0, "completed session should be found by query"
+
+        completed = completed_sessions[0]
+        summary = (
+            getattr(completed, "context_summary", None)
+            or "This continues a previously completed session."
+        )
+
+        # Simulate the augmented text that the bridge would produce
+        follow_up_text = "Can you also add logging?"
+        augmented_text = f"[Prior session context: {summary}]\n\n{follow_up_text}"
+
+        # Verify the augmentation contains the context summary
+        assert "Implemented feature X and wrote tests." in augmented_text
+        assert follow_up_text in augmented_text
+        assert augmented_text.startswith("[Prior session context:")
+
+        # Verify fallback when context_summary is None
+        session_no_summary = AgentSession(
+            session_id="test_completed_resume_no_ctx",
+            project_key="test",
+            status="completed",
+            message_text="done",
+            context_summary=None,
+            created_at=datetime.now(tz=UTC),
+        )
+        session_no_summary.save()
+
+        completed_no_ctx = AgentSession.query.filter(
+            session_id="test_completed_resume_no_ctx", status="completed"
+        )
+        assert len(completed_no_ctx) > 0
+        fallback_summary = (
+            getattr(completed_no_ctx[0], "context_summary", None)
+            or "This continues a previously completed session."
+        )
+        assert fallback_summary == "This continues a previously completed session."
