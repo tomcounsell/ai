@@ -151,8 +151,8 @@ Message arrives → Session runs → Response delivered → `response_delivered_
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add test class `TestHealthCheckDeliveryGuard` covering (a) session with `response_delivered_at` is completed not re-queued, (b) session without `response_delivered_at` is recovered to pending as before
-- [ ] `tests/unit/test_dedup.py` — UPDATE: add note/comment that `DedupRecord` handles intake dedup; this new field handles delivery dedup (no test change needed, but document distinction)
+- [x] `tests/unit/test_agent_session_queue.py` — UPDATE: add test class `TestHealthCheckDeliveryGuard` covering (a) session with `response_delivered_at` is completed not re-queued, (b) session without `response_delivered_at` is recovered to pending as before
+- [x] `tests/unit/test_dedup.py` — UPDATE: add note/comment that `DedupRecord` handles intake dedup; this new field handles delivery dedup (no test change needed, but document distinction)
 
 ## Rabbit Holes
 
@@ -201,18 +201,18 @@ No agent integration required — this is a worker/health-check internal change.
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-self-healing.md` to mention the `response_delivered_at` delivery guard as part of the health check recovery logic
-- [ ] Add inline docstring to `_agent_session_health_check` explaining the delivery guard
+- [x] Update `docs/features/bridge-self-healing.md` to mention the `response_delivered_at` delivery guard as part of the health check recovery logic
+- [x] Add inline docstring to `_agent_session_health_check` explaining the delivery guard
 
 ## Success Criteria
 
-- [ ] `response_delivered_at` field exists on `AgentSession` model
-- [ ] `send_to_chat`'s `deliver` action stamps `response_delivered_at` on the session
-- [ ] Only `send_to_chat`'s `deliver` action stamps `response_delivered_at` (relay NOT modified)
-- [ ] `_agent_session_health_check` completes sessions with `response_delivered_at` set instead of recovering to pending
-- [ ] Unit tests cover both branches: session with and without `response_delivered_at`
-- [ ] Simulated recovery scenario: session delivered + crashed → health check marks completed (not re-queued)
-- [ ] Tests pass (`pytest tests/unit/test_agent_session_queue.py tests/unit/test_dedup.py -x -q`)
+- [x] `response_delivered_at` field exists on `AgentSession` model
+- [x] `send_to_chat`'s `deliver` action stamps `response_delivered_at` on the session
+- [x] Only `send_to_chat`'s `deliver` action stamps `response_delivered_at` (relay NOT modified)
+- [x] `_agent_session_health_check` completes sessions with `response_delivered_at` set instead of recovering to pending
+- [x] Unit tests cover both branches: session with and without `response_delivered_at`
+- [x] Simulated recovery scenario: session delivered + crashed → health check marks completed (not re-queued)
+- [x] Tests pass (`pytest tests/unit/test_agent_session_queue.py tests/unit/test_dedup.py -x -q`)
 
 ## Team Orchestration
 
