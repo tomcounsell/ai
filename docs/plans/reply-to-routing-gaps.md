@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Approved
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -131,7 +131,7 @@ Reply to completed session → steering check running/active (miss) → pending 
 **Bug 1 implementation:**
 
 1. Add a new async helper `_get_cached_root(chat_id, msg_id) -> int | None` that reads from Redis key `session_root:{chat_id}:{msg_id}` (TTL: 7 days — chains are stable)
-2. Add `_set_cached_root(chat_id, msg_id, root_id)` that writes the resolved root for *every message in the chain* (not just the queried one) to maximize future hit rate
+2. Add `_set_cached_root(chat_id, msg_id, root_id)` that writes the resolved root using `SET NX EX 604800` (set-if-not-exists with 7-day TTL) — first writer wins, preventing concurrent race conditions
 3. In `resolve_root_session_id`, check `_get_cached_root` first (before `_cache_walk_root`). On any successful resolution (cache walk or API walk), call `_set_cached_root` before returning
 4. Use the existing Redis connection from `bridge/context.py` (already imports redis client)
 
@@ -144,8 +144,8 @@ Reply to completed session → steering check running/active (miss) → pending 
        completed = completed_sessions[0]
        summary = getattr(completed, "context_summary", None) or "This continues a previously completed session."
        augmented_text = f"[Prior session context: {summary}]\n\n{clean_text}"
-       # Enqueue fresh session with prior context prepended
-       enqueue_agent_session(..., message=augmented_text, ...)
+       # Enqueue fresh session with the same session_id for thread continuity
+       enqueue_agent_session(..., session_id=session_id, message=augmented_text, ...)
        await send_markdown(client, event.chat_id, "Resuming from prior session.", reply_to=message.id)
        logger.info(f"[{project_name}] Resumed completed session {session_id} with prior context")
        return
@@ -234,7 +234,7 @@ No agent integration changes required — the fix is in bridge routing logic, wh
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_get_cached_root(chat_id, msg_id) -> int | None` helper in `bridge/context.py` using Redis key `session_root:{chat_id}:{msg_id}` with 7-day TTL
-- Add `_set_cached_root(chat_id, msg_id, root_id)` helper that writes the resolved root; call it from `resolve_root_session_id` on every successful resolution (both cache walk and API walk paths)
+- Add `_set_cached_root(chat_id, msg_id, root_id)` helper using `SET NX EX 604800` — first writer wins; call it from `resolve_root_session_id` on every successful resolution (both cache walk and API walk paths)
 - Check `_get_cached_root` at the top of `resolve_root_session_id` before `_cache_walk_root`; return immediately if hit
 - Both helpers must be inside the existing `try/except` block — fail silently on Redis errors
 
@@ -246,7 +246,7 @@ No agent integration changes required — the fix is in bridge routing logic, wh
 - **Agent Type**: builder
 - **Parallel**: true
 - In `bridge/telegram_bridge.py`, after the `pending_sessions` block (around L1235), add a completed-session check: `AgentSession.query.filter(session_id=session_id, status="completed")`
-- If found, prepend `context_summary` (or generic fallback string) to `clean_text` and call `enqueue_agent_session` with the augmented message
+- If found, prepend `context_summary` (or generic fallback string) to `clean_text` and call `enqueue_agent_session` with the augmented message — pass `session_id` explicitly for thread continuity
 - Send ack: "Resuming from prior session." via `send_markdown`
 - Log at INFO and return — do not fall through to the main enqueue path
 
@@ -303,9 +303,11 @@ No agent integration changes required — the fix is in bridge routing logic, wh
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Medium | plan-reviewer | Bug 1 write path needs `SET NX` semantics — two concurrent cache misses on the same thread can race and write different roots | Task 1 (build-root-cache) | Updated `_set_cached_root` spec to use `SET NX EX 604800`; first writer wins, subsequent writes are no-ops |
+| Medium | plan-reviewer | Bug 2 enqueue must pass `session_id` explicitly — not passing it risks re-deriving session_id from the current message ID, splitting the thread | Task 2 (build-completed-resume) | Added explicit note: "pass `session_id` explicitly for thread continuity" to Task 2 implementation |
+| Low | plan-reviewer | "Write every message in chain to Redis" in Solution section conflicts with Rabbit Holes section which recommends writing only `start_msg_id` | Task 1 (build-root-cache) | Rabbit Holes section is authoritative; Task 1 implementation writes only `start_msg_id` entry, not full chain |
 
 ## Open Questions
 
