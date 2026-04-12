@@ -1024,15 +1024,9 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             else:
                 sessions = list(AgentSession.query.filter(status=status))
             for s in sessions:
-                # Retain_for_resume guard: never delete completed BUILD sessions that
-                # the PM may still want to resume via `valor-session resume`.
-                # The Meta.ttl backstop (30 days) will expire them automatically.
-                if s.status == "completed" and getattr(s, "retain_for_resume", False):
-                    _cleanup_logger.info(
-                        f"[cleanup] Skipping retained session {s.session_id} "
-                        f"(retain_for_resume=True, status=completed)"
-                    )
-                    continue
+                # Note: completed sessions are protected implicitly — "completed" is not
+                # in terminal_statuses, so they never appear in this loop. The
+                # retain_for_resume TTL backstop (30 days via Meta.ttl) handles expiry.
                 age_sec = (now - _to_ts(s.created_at)) if s.created_at else 0
                 if age_sec > age_threshold:
                     targets.append(s)

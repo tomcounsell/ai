@@ -267,7 +267,15 @@ def cmd_resume(args: argparse.Namespace) -> int:
             )
             return 1
 
-        # Transition back to pending (atomic — fails if another process raced us)
+        # Stage steering message BEFORE transitioning to pending so the worker
+        # always sees it — eliminates the two-write race (transition then save).
+        existing_steering = list(session.queued_steering_messages or [])
+        existing_steering.append(new_message)
+        session.queued_steering_messages = existing_steering
+        session.save()
+
+        # Transition to pending (atomic — fails if another process raced us).
+        # Steering message is already persisted above, so no race window.
         try:
             transition_status(session, "pending", reason="valor-session resume")
         except Exception as e:
@@ -276,13 +284,6 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-
-        # Append the new message to the session's steering queue so the worker
-        # delivers it as the first message in the resumed conversation.
-        existing_steering = list(session.queued_steering_messages or [])
-        existing_steering.append(new_message)
-        session.queued_steering_messages = existing_steering
-        session.save()
 
         model = getattr(session, "model", None)
         uuid = getattr(session, "claude_session_uuid", None)
@@ -646,16 +647,34 @@ def cmd_release(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
+        # Strategy 2: match by slug via PR branch name (session/{slug})
+        # Fetched once up-front so we don't shell out per-session.
+        pr_branch = ""
+        try:
+            import subprocess as _subprocess
+
+            _gh_result = _subprocess.run(
+                ["gh", "pr", "view", pr_number, "--json", "headRefName", "--jq", ".headRefName"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if _gh_result.returncode == 0:
+                pr_branch = _gh_result.stdout.strip()
+        except Exception:
+            pass  # gh unavailable — fall back to pr_url matching only
+
         for s in all_completed:
             pr_url = getattr(s, "pr_url", None) or ""
             slug = getattr(s, "slug", None) or ""
             retain = getattr(s, "retain_for_resume", False)
             if not retain:
                 continue
-            # Match by pr_url containing PR number or by slug (branch=session/{slug})
+            # Match by pr_url containing PR number
             pr_match = pr_number in pr_url
-            slug_match = bool(slug)  # Any BUILD session with a slug is a candidate
-            if pr_match or (slug_match and pr_url and pr_number in pr_url):
+            # Or match by slug appearing in the PR's branch name (e.g. session/{slug})
+            branch_match = bool(slug) and bool(pr_branch) and slug in pr_branch
+            if pr_match or branch_match:
                 s.retain_for_resume = False
                 s.save()
                 released.append(s.session_id)
