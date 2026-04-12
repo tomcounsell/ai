@@ -1,5 +1,5 @@
 ---
-status: Building
+status: docs_complete
 type: chore
 appetite: Small
 owner: Valor Engels

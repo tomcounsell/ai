@@ -58,8 +58,8 @@ fi
 # Check for required config files
 if [ ! -f ".env" ]; then
     echo "ERROR: .env file not found."
-    echo "  cp .env.example .env"
-    echo "  # Then edit .env with your credentials"
+    echo "  ln -sf ~/Desktop/Valor/.env ~/src/ai/.env"
+    echo "  # .env must be a symlink to the vault at ~/Desktop/Valor/.env"
     exit 1
 fi
 
