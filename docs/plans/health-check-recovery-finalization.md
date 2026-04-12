@@ -2,7 +2,7 @@
 title: "Bug: health-check-recovered sessions not finalized — causes duplicate Telegram delivery"
 slug: health-check-recovery-finalization
 type: bug
-status: Planning
+status: Critique Complete
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/917
 last_comment_id: null
@@ -100,15 +100,25 @@ else:
     # agent_session lookup returned None (race on status="running" filter, e.g.
     # after health-check recovery). Finalize using outer `session` param directly
     # to prevent session from staying in `running` state permanently.
+    # Uses complete_transcript() (not finalize_session() directly) to ensure
+    # the SESSION_END transcript marker is written — complete_transcript queries
+    # by session_id alone (no status filter), so it works here.
     if not chat_state.defer_reaction:
         try:
+            from bridge.session_transcript import complete_transcript
+
             final_status = "completed" if not task.error else "failed"
-            from models.session_lifecycle import finalize_session
-            finalize_session(session, final_status, reason="agent_session lookup miss — fallback finalization")
+            complete_transcript(session.session_id, status=final_status)
             logger.info(
                 "Fallback finalization: session %s → %s (agent_session was None)",
                 session.agent_session_id,
                 final_status,
+            )
+        except StatusConflictError:
+            # CAS conflict = another process already finalized. This is success.
+            logger.info(
+                "Fallback finalization skipped: session %s already transitioned (CAS conflict — expected)",
+                session.agent_session_id,
             )
         except Exception as e:
             logger.warning(
@@ -120,8 +130,10 @@ else:
 
 **Why this is safe:**
 - `session` (outer param) is always the `AgentSession` object passed to `_execute_agent_session()` — it is always non-None
-- `finalize_session()` is idempotent: if the session is already in the target terminal state, it logs and returns without re-executing side effects
-- `finalize_session()` has CAS protection: if a concurrent write changed the status, it raises `StatusConflictError`, which is caught by the outer `except Exception`
+- `complete_transcript()` queries by `session_id` alone (L285: `AgentSession.query.filter(session_id=session_id)`), not by `status="running"` — so it succeeds even when the inner `agent_session` lookup failed
+- `complete_transcript()` calls `finalize_session()` internally, which is idempotent and CAS-protected
+- `StatusConflictError` is caught separately (CAS conflict = another process already finalized = success case, logged at `info` level)
+- Unexpected exceptions caught separately at `warning` level (preserves signal-to-noise)
 - Nudge path is preserved: the `if not chat_state.defer_reaction` guard prevents premature finalization when `_enqueue_nudge` is in control
 
 ### Files to modify
@@ -135,15 +147,17 @@ else:
 ## Step-by-Step Tasks
 
 - [ ] Read `_execute_agent_session()` from L3360–3390 in `agent/agent_session_queue.py` to confirm exact location of the `if agent_session:` finalization block
-- [ ] Add `else` branch after the `if agent_session:` block calling `finalize_session(session, final_status, reason="agent_session lookup miss — fallback finalization")` guarded by `if not chat_state.defer_reaction`
-- [ ] Wrap the fallback in try/except with a `logger.warning` on failure (mirrors existing pattern)
+- [ ] Add `else` branch after the `if agent_session:` block calling `complete_transcript(session.session_id, status=final_status)` guarded by `if not chat_state.defer_reaction` — this writes the SESSION_END transcript marker AND calls `finalize_session()` internally
+- [ ] Add `from models.session_lifecycle import StatusConflictError` import and catch `StatusConflictError` separately at `info` level (CAS conflict = success case, another process already finalized)
+- [ ] Catch remaining exceptions at `warning` level (preserves signal-to-noise ratio)
 - [ ] Add `logger.info` on successful fallback finalization (for observability)
 - [ ] Write `tests/unit/test_health_check_recovery_finalization.py`:
-  - Test 1: `agent_session = None` + `task.error = None` + `defer_reaction = False` → `finalize_session` called with `"completed"`
-  - Test 2: `agent_session = None` + `task.error = "some error"` + `defer_reaction = False` → `finalize_session` called with `"failed"`
-  - Test 3: `agent_session = None` + `defer_reaction = True` → `finalize_session` NOT called (nudge path preserved)
+  - Test 1: `agent_session = None` + `task.error = None` + `defer_reaction = False` → `complete_transcript` called with `"completed"`
+  - Test 2: `agent_session = None` + `task.error = "some error"` + `defer_reaction = False` → `complete_transcript` called with `"failed"`
+  - Test 3: `agent_session = None` + `defer_reaction = True` → `complete_transcript` NOT called (nudge path preserved)
   - Test 4: `agent_session` is non-None → existing `complete_transcript` path used (regression guard)
-  - Test 5: `finalize_session` raises `StatusConflictError` → warning logged, no exception propagated
+  - Test 5: Fallback `complete_transcript` raises `StatusConflictError` → info logged, no exception propagated
+  - Test 6: Fallback `complete_transcript` raises unexpected exception → warning logged, no exception propagated
 - [ ] Run `pytest tests/unit/test_health_check_recovery_finalization.py -v` — all pass
 - [ ] Run `pytest tests/unit/test_recovery_respawn_safety.py -v` — all pass (regression check for #898)
 - [ ] Run `python -m ruff check agent/agent_session_queue.py` — clean
@@ -168,9 +182,9 @@ else:
 
 | Failure | Behavior |
 |---------|----------|
-| `finalize_session()` raises `StatusConflictError` (concurrent write) | Caught by outer `except Exception` → warning logged → session may be in correct terminal state already |
-| `finalize_session()` raises other exception | Caught → warning logged → session remains in `running` → health check will recover again (same as today) |
-| `session` param is `None` | `finalize_session()` raises `ValueError("session must not be None")` — caught → warning → no crash |
+| `complete_transcript()` raises `StatusConflictError` (CAS conflict) | Caught separately → `info` logged → session already in terminal state (success case) |
+| `complete_transcript()` raises other exception | Caught → `warning` logged → session remains in `running` → health check will recover again (same as today) |
+| `session` param is `None` | `complete_transcript()` queries by `session_id` — if session has no `session_id`, caught → warning → no crash |
 | `chat_state` not available | Not possible — `chat_state` is always initialized before this code path |
 
 ## Test Impact
