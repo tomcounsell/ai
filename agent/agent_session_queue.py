@@ -1356,6 +1356,13 @@ async def _agent_session_health_check() -> None:
     4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
+    **Delivery guard (#918):** Before recovering a running session to pending,
+    the health check inspects ``response_delivered_at``. If the field is set,
+    the session already delivered its final response to Telegram — re-queuing
+    would cause a duplicate reply. Instead, the session is finalized as
+    ``completed`` via ``finalize_session()``. This prevents the crash-recover
+    loop that previously produced 6+ duplicate messages per session.
+
     Recovery resets status to 'pending' via direct mutation and save.
     Status is an IndexedField, so no delete-and-recreate is needed.
     Only sessions whose worker is confirmed dead are touched.
