@@ -1,33 +1,83 @@
-{# Analytics trend: sessions-per-day bar chart (CSS-only, no JS charting lib) #}
-{% if analytics and analytics.daily_sessions %}
-<div class="analytics-trend">
-    <div class="trend-header">
-        <span class="trend-title">Sessions / Day (30d)</span>
-        <span class="trend-summary text-muted">
-            Today: {{ analytics.sessions_today }} &middot;
-            7d: {{ analytics.sessions_7d }} &middot;
-            Cost 7d: ${{ "%.2f"|format(analytics.cost_7d_usd) }}
-        </span>
-    </div>
-    <div class="trend-chart">
-        {% set max_count = analytics.daily_sessions | map(attribute='count') | max %}
-        {% for day in analytics.daily_sessions | reverse %}
-        <div class="trend-bar-wrapper" title="{{ day.date }}: {{ day.count }} sessions">
-            <div class="trend-bar"
-                 style="height: {{ (day.count / max_count * 100) if max_count > 0 else 0 }}%">
+{# Analytics stats grid — compact stat cards grouped by category #}
+{% if analytics %}
+<div class="stats-grid">
+    <div class="stats-group">
+        <div class="stats-group-label">Sessions</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Started today</span>
+                <span class="stat-card-value">{{ analytics.sessions_started_today }}</span>
             </div>
-            {% if loop.index % 7 == 1 or loop.last %}
-            <span class="trend-label">{{ day.date[-5:] }}</span>
-            {% endif %}
+            <div class="stat-card">
+                <span class="stat-card-label">Started 7d</span>
+                <span class="stat-card-value">{{ analytics.sessions_started_7d }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Completed today</span>
+                <span class="stat-card-value">{{ analytics.sessions_completed_today }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Completed 7d</span>
+                <span class="stat-card-value">{{ analytics.sessions_completed_7d }}</span>
+            </div>
         </div>
-        {% endfor %}
+    </div>
+    <div class="stats-group">
+        <div class="stats-group-label">Cost</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Today</span>
+                <span class="stat-card-value">${{ "%.2f"|format(analytics.cost_today_usd) }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">7d</span>
+                <span class="stat-card-value">${{ "%.2f"|format(analytics.cost_7d_usd) }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="stats-group">
+        <div class="stats-group-label">Turns</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Total today</span>
+                <span class="stat-card-value">{{ analytics.turns_today|int }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Total 7d</span>
+                <span class="stat-card-value">{{ analytics.turns_7d|int }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Avg today</span>
+                <span class="stat-card-value">{{ "%.1f"|format(analytics.turns_avg_today) }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Avg 7d</span>
+                <span class="stat-card-value">{{ "%.1f"|format(analytics.turns_avg_7d) }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="stats-group">
+        <div class="stats-group-label">Memory</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Recalls today</span>
+                <span class="stat-card-value">{{ analytics.memory_recalls_today }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Recalls 7d</span>
+                <span class="stat-card-value">{{ analytics.memory_recalls_7d }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Extractions today</span>
+                <span class="stat-card-value">{{ analytics.memory_extractions_today }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Extractions 7d</span>
+                <span class="stat-card-value">{{ analytics.memory_extractions_7d }}</span>
+            </div>
+        </div>
     </div>
 </div>
 {% else %}
-<div class="analytics-trend">
-    <div class="trend-header">
-        <span class="trend-title">Analytics</span>
-    </div>
-    <p class="text-muted" style="padding: 0.5rem 0;">No analytics data yet. Metrics are collected automatically during system operation.</p>
-</div>
+<p class="text-muted" style="padding: 0.5rem 0;">No analytics data yet.</p>
 {% endif %}

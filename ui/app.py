@@ -121,7 +121,6 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         """Root route: single-page dashboard with all system state."""
-        from ui.data.analytics import get_analytics_summary
         from ui.data.machine import get_machine_name, get_machine_projects
         from ui.data.reflections import get_all_reflections
         from ui.data.sdlc import get_all_sessions
@@ -129,7 +128,6 @@ def create_app() -> FastAPI:
         sessions = get_all_sessions()
         reflections = get_all_reflections()
         machine_projects = get_machine_projects()
-        analytics = get_analytics_summary()
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -138,7 +136,6 @@ def create_app() -> FastAPI:
                 "reflections": reflections,
                 "machine_name": get_machine_name(),
                 "machine_projects": machine_projects,
-                "analytics": analytics,
             },
         )
 
@@ -344,6 +341,7 @@ def create_app() -> FastAPI:
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
             f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
             f'<span class="badge badge-ok">web</span>'
+            f'<button class="stats-toggle" onclick="toggleStats()">Stats</button>'
         )
 
     # Exception handler for Redis connection failures
