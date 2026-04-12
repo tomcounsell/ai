@@ -15,7 +15,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
+        <string>__PROJECT_DIR__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
         <key>HOME</key>
         <string>__HOME_DIR__</string>
     </dict>
