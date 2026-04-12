@@ -2913,9 +2913,21 @@ class ReflectionRunner:
         """Pipeline: Episode Cycle-Close → Pattern Crystallization.
 
         Runs the two episode learning steps in sequence.
-        A single checkpoint is written after both complete. Do NOT add
-        inner try/except here — let the outer runner catch failures.
+        Skips gracefully if the CyclicEpisode model is not yet installed
+        (models/cyclic_episode.py is part of an unmerged feature branch).
         """
+        try:
+            import models.cyclic_episode  # noqa: F401 — probe only
+        except ImportError:
+            logger.info(
+                "[behavioral_learning] models.cyclic_episode not available — "
+                "skipping episode cycle-close and pattern crystallization"
+            )
+            self.state.step_progress["behavioral_learning"] = {
+                "skipped": True,
+                "reason": "models.cyclic_episode not installed",
+            }
+            return
         await self.step_episode_cycle_close()
         await self.step_pattern_crystallization()
 
