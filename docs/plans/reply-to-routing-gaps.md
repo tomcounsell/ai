@@ -5,6 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-04-12
 tracking: https://github.com/tomcounsell/ai/issues/919
+plan: https://github.com/tomcounsell/ai/blob/main/docs/plans/reply-to-routing-gaps.md
 last_comment_id:
 ---
 
