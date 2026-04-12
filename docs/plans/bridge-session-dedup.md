@@ -1,5 +1,5 @@
 ---
-status: Critique
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -102,31 +102,39 @@ Message arrives → Session runs → Response delivered → `response_delivered_
    try:
        session.response_delivered_at = datetime.now(UTC)
        session.save()
-   except Exception:
-       pass  # Non-fatal — best-effort guard
+       logger.info(f"Stamped response_delivered_at for session {session.session_id}")
+   except Exception as e:
+       logger.warning(f"Failed to stamp response_delivered_at for {session.session_id}: {e}")
    ```
 
 3. **`agent/agent_session_queue.py`** — `_agent_session_health_check`:
    Before the `should_recover` block executes `transition_status(entry, "pending", ...)`, add:
    ```python
    if getattr(entry, "response_delivered_at", None) is not None:
-       finalize_session(
-           entry,
-           "completed",
-           reason="health check: response already delivered, completing instead of re-running",
-       )
-       recovered += 1
+       try:
+           logger.info(
+               "[session-health] Session %s already delivered response at %s, "
+               "finalizing instead of recovering",
+               entry.agent_session_id,
+               entry.response_delivered_at,
+           )
+           finalize_session(
+               entry,
+               "completed",
+               reason="health check: response already delivered, completing instead of re-running",
+           )
+           recovered += 1
+       except Exception as e:
+           logger.error(
+               "[session-health] Failed to finalize already-delivered session %s: %s",
+               entry.agent_session_id,
+               e,
+           )
        continue
    ```
+   Note: `finalize_session` is already idempotent (same-state guard in `transition_status`) and handles parent session finalization — verified in `models/session_lifecycle.py:217,273`.
 
-4. **`bridge/telegram_relay.py`** — `_record_sent_message`:
-   After `sessions[0].record_pm_message(msg_id)`, also stamp `response_delivered_at` if not already set:
-   ```python
-   if getattr(sessions[0], "response_delivered_at", None) is None:
-       sessions[0].response_delivered_at = datetime.now(UTC)
-       sessions[0].save()
-   ```
-   Note: `record_pm_message` already calls `save()`, so this requires a combined save or a second save. Prefer setting the field before the existing `save()` in `record_pm_message` (requires a small refactor of that method).
+4. **No relay changes** — `_record_sent_message` is called for EVERY relayed message (status updates, nudges, interim results), not just final delivery. Stamping `response_delivered_at` there would cause false-positive completion for mid-pipeline PM sessions. Rely only on the `send_to_chat action == "deliver"` path.
 
 ## Failure Path Test Strategy
 
@@ -200,7 +208,7 @@ No agent integration required — this is a worker/health-check internal change.
 
 - [ ] `response_delivered_at` field exists on `AgentSession` model
 - [ ] `send_to_chat`'s `deliver` action stamps `response_delivered_at` on the session
-- [ ] `_record_sent_message` in relay stamps `response_delivered_at` if not already set
+- [ ] Only `send_to_chat`'s `deliver` action stamps `response_delivered_at` (relay NOT modified)
 - [ ] `_agent_session_health_check` completes sessions with `response_delivered_at` set instead of recovering to pending
 - [ ] Unit tests cover both branches: session with and without `response_delivered_at`
 - [ ] Simulated recovery scenario: session delivered + crashed → health check marks completed (not re-queued)
@@ -232,9 +240,9 @@ No agent integration required — this is a worker/health-check internal change.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `response_delivered_at = DatetimeField(null=True)` to `models/agent_session.py` after `completed_at`
-- In `agent/agent_session_queue.py` `send_to_chat` inner function, after `action == "deliver"` sets `chat_state.completion_sent = True`, stamp `session.response_delivered_at = datetime.now(UTC)` and save (non-fatal try/except)
-- In `bridge/telegram_relay.py` `_record_sent_message`, after calling `record_pm_message`, also set `response_delivered_at` on the session if not already set
-- In `agent/agent_session_queue.py` `_agent_session_health_check`, add guard before `transition_status(entry, "pending", ...)`: if `response_delivered_at` is set, call `finalize_session(entry, "completed", ...)` and continue
+- In `agent/agent_session_queue.py` `send_to_chat` inner function, after `action == "deliver"` sets `chat_state.completion_sent = True`, stamp `session.response_delivered_at = datetime.now(UTC)` with `logger.info` on success and `logger.warning` on failure
+- In `agent/agent_session_queue.py` `_agent_session_health_check`, add guard before `transition_status(entry, "pending", ...)`: if `response_delivered_at` is set, call `finalize_session(entry, "completed", ...)` with `logger.info` and full try/except
+- DO NOT modify `bridge/telegram_relay.py` — relay stamps on every message, causing false positives
 - Write unit tests in `tests/unit/test_agent_session_queue.py`: `TestHealthCheckDeliveryGuard` with cases for (a) session with `response_delivered_at` → completed, (b) session without → recovered to pending
 
 ### 2. Validate implementation
@@ -272,6 +280,12 @@ No agent integration required — this is a worker/health-check internal change.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic/Operator/Adversary/User | Relay guard in `_record_sent_message` stamps on every message, not just final delivery — causes false-positive completion for mid-pipeline PM sessions | Removed relay guard entirely — only `send_to_chat action == "deliver"` stamps `response_delivered_at` | No changes to `bridge/telegram_relay.py` |
+| BLOCKER | Operator | `finalize_session` in health check may bypass parent PM session finalization | Verified: `models/session_lifecycle.py:334` — `finalize_session` already calls `_finalize_parent_sync`; idempotency confirmed at line 273 | No extra parent handling needed |
+| CONCERN | Skeptic | Health check delivery guard not wrapped in try/except | Addressed: health check guard wrapped with `try/except Exception as e: logger.error(...)` | |
+| CONCERN | Operator | No logging when delivery guard fires | Addressed: `logger.info` added in both `send_to_chat` stamp and health check guard | |
+| CONCERN | User | No end-to-end acceptance criterion for user-visible symptom | Addressed: Success Criteria item added for the simulated recovery scenario | |
+| NIT | Simplifier | validate-field task redundant | Kept for explicit reviewer gate — test pass is verified separately from build | |
 | BLOCKER | Skeptic, Operator, Adversary, User | Relay guard stamps `response_delivered_at` on every relayed message, not just final delivery — causes false-positive completion for mid-pipeline PM sessions | Remove `_record_sent_message` stamping entirely; rely only on `send_to_chat action=="deliver"` stamp | `_record_sent_message(session_id, msg_id)` has no action context. Only stamp in the `action == "deliver"` branch of `send_to_chat`, after `await send_cb(...)`. Do NOT modify `_record_sent_message`. |
 | BLOCKER | Operator | Health check calls `finalize_session(entry, "completed")` bypassing `_complete_agent_session` which handles parent PM session finalization | Verify `finalize_session` in `models/session_lifecycle.py` handles parent notification; if not, add or call shared helper | Check `models/session_lifecycle.py:finalize_session` — if it does not call parent completion logic, extract parent handling from `_complete_agent_session` into a shared function both paths call. |
 | CONCERN | Skeptic | Health check's `finalize_session` call for the delivery guard is not wrapped in try/except; failure would crash the health check loop | Wrap guard in try/except, log errors, continue | `try: finalize_session(entry, "completed", reason="health check: already delivered"); finalized += 1; continue; except Exception as e: logger.error(f"Health check: failed to finalize delivered session {entry.id}: {e}"); continue` |
