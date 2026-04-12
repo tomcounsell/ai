@@ -128,22 +128,22 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/consolidate-se
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `env_sync.py` replacement: verify the symlink-check function logs a warning and continues
+- [x] `env_sync.py` replacement: verify the symlink-check function logs a warning and continues
   if `~/Desktop/Valor/` does not exist (new machine pre-iCloud-sync scenario)
-- [ ] No other exception handlers in scope — this work touches shell scripts and docs, not
+- [x] No other exception handlers in scope — this work touches shell scripts and docs, not
   complex exception-handling code
 
 ### Empty/Invalid Input Handling
-- [ ] Symlink creation in `remote-update.sh`: guard against `VAULT_ENV` being empty before calling `ln`
-- [ ] `env_sync.py`: handle missing vault path gracefully (same as current missing-vault behavior)
+- [x] Symlink creation in `remote-update.sh`: guard against `VAULT_ENV` being empty before calling `ln`
+- [x] `env_sync.py`: handle missing vault path gracefully (same as current missing-vault behavior)
 
 ### Error State Rendering
-- [ ] The update script logs a clear warning if vault `.env` is not found (pre-iCloud-sync)
-- [ ] No user-visible UI output affected
+- [x] The update script logs a clear warning if vault `.env` is not found (pre-iCloud-sync)
+- [x] No user-visible UI output affected
 
 ## Test Impact
 
-- [ ] `tests/unit/test_update_env_sync.py` (if it exists) — UPDATE or DELETE: the copy logic being
+- [x] `tests/unit/test_update_env_sync.py` (if it exists) — UPDATE or DELETE: the copy logic being
   replaced by symlink-check logic will break any tests asserting keys were added/updated in project `.env`
 
 ```bash
@@ -206,26 +206,26 @@ No agent integration required — this is a configuration/infrastructure change.
 
 ## Documentation
 
-- [ ] Update `docs/features/config-architecture.md`: correct the Config Files table secrets row;
+- [x] Update `docs/features/config-architecture.md`: correct the Config Files table secrets row;
   add a `### Secrets` subsection explaining the symlink approach and iCloud sync rationale
-- [ ] Update `CLAUDE.md`: add `## Secrets` section with the canonical rule:
+- [x] Update `CLAUDE.md`: add `## Secrets` section with the canonical rule:
   "All secrets go in `~/Desktop/Valor/.env`. Never write secrets to `repo/.env`. The repo `.env`
   is a symlink — writing to it writes to the vault."
-- [ ] Update `.env.example` header comment: clarify it documents `~/Desktop/Valor/.env` contents,
+- [x] Update `.env.example` header comment: clarify it documents `~/Desktop/Valor/.env` contents,
   not a file to copy into the repo
-- [ ] No new feature doc needed — this is a clarification of existing config architecture
+- [x] No new feature doc needed — this is a clarification of existing config architecture
 
 ## Success Criteria
 
-- [ ] `ls -la ~/src/ai/.env` shows a symlink → `~/Desktop/Valor/.env`
-- [ ] `repo/.env` as a regular file no longer exists
-- [ ] `scripts/remote-update.sh` contains symlink creation/repair logic
-- [ ] `scripts/update/env_sync.py` verifies symlink, no longer copies keys
-- [ ] `docs/features/config-architecture.md` states `~/Desktop/Valor/.env` is the secrets file
-- [ ] `CLAUDE.md` contains searchable rule: "secrets go in `~/Desktop/Valor/.env`"
-- [ ] `.env.example` header references the vault path
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated
+- [x] `ls -la ~/src/ai/.env` shows a symlink → `~/Desktop/Valor/.env` (symlink created by update script on valor machine; code in PR)
+- [x] `repo/.env` as a regular file no longer exists (replaced by symlink on valor machine via /update)
+- [x] `scripts/remote-update.sh` contains symlink creation/repair logic
+- [x] `scripts/update/env_sync.py` verifies symlink, no longer copies keys
+- [x] `docs/features/config-architecture.md` states `~/Desktop/Valor/.env` is the secrets file
+- [x] `CLAUDE.md` contains searchable rule: "secrets go in `~/Desktop/Valor/.env`"
+- [x] `.env.example` header references the vault path
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated
 
 ## Team Orchestration
 
