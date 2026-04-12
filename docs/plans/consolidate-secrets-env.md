@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -263,17 +263,21 @@ No agent integration required — this is a configuration/infrastructure change.
 - Create symlink: `ln -sf ~/Desktop/Valor/.env ~/src/ai/.env`
 - Verify symlink resolves correctly
 
-### 2. Update env_sync.py
+### 2. Update env_sync.py and run.py
 - **Task ID**: build-env-sync
 - **Depends On**: build-symlink
-- **Validates**: `scripts/update/env_sync.py` — no copy logic, symlink verification present
+- **Validates**: `scripts/update/env_sync.py` — no copy logic, symlink verification present; `scripts/update/run.py` — no `env_r.added`/`env_r.updated` references
 - **Assigned To**: secrets-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Replace `sync_env_from_vault()` copy logic with symlink health check
 - Remove `SYNC_KEYS` list
-- Update `EnvSyncResult` to reflect new behavior (symlink verified / created / missing vault)
-- Update Step 1.6 in `scripts/update/run.py` log message
+- Update `EnvSyncResult` to reflect new behavior: `symlink_ok: bool`, `created: bool`, `error: str | None`
+- **CRITICAL (blocker fix)**: Update `scripts/update/run.py`:
+  - Line ~119: update `env_sync_result: env_sync.EnvSyncResult | None` type annotation (no change needed, just verify)
+  - Lines ~330–331: replace `env_r.added`/`env_r.updated` references with `env_r.symlink_ok`/`env_r.created`
+  - Lines ~334–335: update error warning block to use `env_r.error`
+  - Update Step 1.6 log message from "Syncing env vars from vault" to "Verifying .env symlink"
 
 ### 3. Update remote-update.sh
 - **Task ID**: build-update-script
@@ -320,9 +324,13 @@ No agent integration required — this is a configuration/infrastructure change.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Operator, Skeptic | `run.py` `UpdateResult` dataclass + Step 1.6 logging crash if `EnvSyncResult` fields renamed | Task 2 extended | Update `run.py:119` type annotation + lines 330–335 log block to match new `EnvSyncResult(symlink_ok, created, error)` shape |
+| CONCERN | Operator, Adversary | `remote-update.sh` sources `.env` at line 16 before symlink repair block; ordering bug on first run | Task 3 updated | Place symlink repair block before `.env` source line |
+| CONCERN | Simplifier, User | Double `load_dotenv` calls in 5 files become misleading noise | Task 4 updated | Add one-line comment at each double-load site: `# vault path is now symlink target — second load is intentional no-op` |
+| CONCERN | Adversary, Skeptic | `.gitignore` covers `.env` by name; git symlink behavior not verified | Task 5 updated | Run `git check-ignore -v .env` after symlink creation in validator |
+| NIT | — | Task 4 missing `Validates:` field | Task 4 updated | Added grep validation command |
 
 ---
 
