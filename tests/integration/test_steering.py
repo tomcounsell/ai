@@ -862,19 +862,19 @@ class TestResolveRootSessionId:
     async def test_reply_to_completed_session_reenqueues_with_context(self):
         """Reply to a completed session re-enqueues with context_summary prepended.
 
-        Tests that the bridge's completed-session branch (bridge/telegram_bridge.py)
-        queries for a completed session, prepends context_summary to the message,
-        and calls enqueue_agent_session with the augmented text and same session_id.
+        Tests the actual bridge helper _build_completed_resume_text which is called
+        by bridge/telegram_bridge.py's completed-session branch to augment the new
+        message with prior session context before re-enqueueing.
         """
+        from bridge.telegram_bridge import _build_completed_resume_text
         from models.agent_session import AgentSession
 
-        session_id = "test_completed_resume_ctx_v2"
         follow_up_text = "Can you also add logging?"
         context_summary = "Implemented feature X and wrote tests."
 
         # Create a completed session with context_summary
         session = AgentSession(
-            session_id=session_id,
+            session_id="test_completed_resume_helper_ctx",
             project_key="test",
             status="completed",
             message_text="original task",
@@ -883,62 +883,21 @@ class TestResolveRootSessionId:
         )
         session.save()
 
-        # Simulate the bridge's completed-session branch logic
-        # enqueue_agent_session is imported locally inside the handler, so patch at source
-        mock_enqueue = AsyncMock()
-        with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
-            # Replicate bridge/telegram_bridge.py completed-session branch logic
-            completed_sessions = AgentSession.query.filter(
-                session_id=session_id, status="completed"
-            )
-            assert len(completed_sessions) > 0, "completed session should be queryable"
+        # Call the actual bridge helper — not a re-implementation
+        result = _build_completed_resume_text(session, follow_up_text)
 
-            completed = completed_sessions[0]
-            summary = (
-                getattr(completed, "context_summary", None)
-                or "This continues a previously completed session."
-            )
-            augmented_text = f"[Prior session context: {summary}]\n\n{follow_up_text}"
-
-            await mock_enqueue(
-                project_key="test",
-                session_id=session_id,
-                working_dir="/tmp",
-                message_text=augmented_text,
-                sender_name="testuser",
-                chat_id=12345,
-                telegram_message_id=999,
-                chat_title="Test Chat",
-                priority="normal",
-                sender_id=111,
-                project_config=None,
-            )
-
-        # Assert enqueue_agent_session was called once
-        mock_enqueue.assert_called_once()
-        call_kwargs = mock_enqueue.call_args.kwargs
-
-        called_message_text = call_kwargs.get("message_text", "")
-        called_session_id = call_kwargs.get("session_id", "")
-
-        # Verify augmented text contains context summary
-        assert "[Prior session context:" in called_message_text, (
-            f"Expected '[Prior session context:' prefix, got: {called_message_text!r}"
+        # Verify augmented text contains the context summary preamble
+        assert "[Prior session context:" in result, (
+            f"Expected '[Prior session context:' prefix, got: {result!r}"
         )
-        assert context_summary in called_message_text, (
-            f"Expected context summary in message, got: {called_message_text!r}"
-        )
-        assert follow_up_text in called_message_text, (
-            f"Expected follow-up text in message, got: {called_message_text!r}"
-        )
-        # Verify thread continuity — same session_id passed to enqueue
-        assert called_session_id == session_id, (
-            f"Expected session_id={session_id!r}, got {called_session_id!r}"
-        )
+        assert context_summary in result, f"Expected context summary in result, got: {result!r}"
+        assert follow_up_text in result, f"Expected follow-up text in result, got: {result!r}"
+        # Canonical format check
+        assert result == f"[Prior session context: {context_summary}]\n\n{follow_up_text}"
 
         # --- Test fallback when context_summary is None ---
         session_no_summary = AgentSession(
-            session_id="test_completed_resume_no_ctx_v2",
+            session_id="test_completed_resume_helper_no_ctx",
             project_key="test",
             status="completed",
             message_text="done",
@@ -947,12 +906,10 @@ class TestResolveRootSessionId:
         )
         session_no_summary.save()
 
-        completed_no_ctx = AgentSession.query.filter(
-            session_id="test_completed_resume_no_ctx_v2", status="completed"
-        )
-        assert len(completed_no_ctx) > 0
-        fallback_summary = (
-            getattr(completed_no_ctx[0], "context_summary", None)
-            or "This continues a previously completed session."
-        )
-        assert fallback_summary == "This continues a previously completed session."
+        fallback_result = _build_completed_resume_text(session_no_summary, follow_up_text)
+
+        assert (
+            "[Prior session context: This continues a previously completed session.]"
+            in fallback_result
+        ), f"Expected fallback string, got: {fallback_result!r}"
+        assert follow_up_text in fallback_result
