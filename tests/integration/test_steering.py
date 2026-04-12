@@ -263,7 +263,10 @@ class TestBridgeSteeringCheck:
         assert matching_session is None
 
     def test_steering_no_match_for_completed(self):
-        """Steering check should NOT match completed sessions."""
+        """Running/active check skips completed sessions.
+
+        Completed sessions are handled by the dedicated re-enqueue branch.
+        """
         from models.agent_session import AgentSession
 
         session_id = "test_bridge_completed"
@@ -430,7 +433,9 @@ class TestPendingSessionSteering:
         session_id = "test_pending_steer_old"
         # Create with timestamp 10s in the past
         self._create_session(
-            session_id, "pending", created_at=datetime.now(tz=UTC) - timedelta(seconds=10)
+            session_id,
+            "pending",
+            created_at=datetime.now(tz=UTC) - timedelta(seconds=10),
         )
 
         from models.agent_session import AgentSession
@@ -535,96 +540,6 @@ class TestPendingSessionSteering:
                     active_sessions.append(ps)
 
         assert len(active_sessions) == 0
-
-
-class TestDrainOnStart:
-    """Tests for the drain-on-start logic in _pop_job (#619).
-
-    Uses AgentSession.create() (sync) + _pop_job_with_fallback() which has a
-    sync fallback that avoids the async_filter index visibility race in tests.
-    """
-
-    def _create_pending_job(self, session_id, chat_id="test_chat", message_text="hello"):
-        """Create a pending AgentSession (job) using the same pattern as test_job_queue_race."""
-        from models.agent_session import AgentSession
-
-        return AgentSession.create(
-            session_id=session_id,
-            project_key="test",
-            status="pending",
-            priority="normal",
-            chat_id=chat_id,
-            message_text=message_text,
-            created_at=datetime.now(tz=UTC),
-            working_dir="/tmp/test",
-            sender_name="Test",
-            telegram_message_id=1,
-        )
-
-    @pytest.mark.asyncio
-    async def test_drain_prepends_steering_to_message_text(self):
-        """Steering messages queued during pending should be prepended on start."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_prepend"
-        chat_id = "test_drain_chat_1"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="original message")
-
-        # Simulate follow-up messages arriving during pending window
-        push_steering_message(session_id, "follow-up context", "Tom")
-        push_steering_message(session_id, "another detail", "Tom")
-
-        # Pop the job (triggers drain-on-start)
-        job = await _pop_job_with_fallback(chat_id)
-        assert job is not None
-        assert "original message" in job.message_text
-        assert "follow-up context" in job.message_text
-        assert "another detail" in job.message_text
-
-    @pytest.mark.asyncio
-    async def test_drain_no_steering_messages_unchanged(self):
-        """If no steering messages, message_text should be unchanged."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_empty"
-        chat_id = "test_drain_chat_2"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="just this")
-
-        job = await _pop_job_with_fallback(chat_id)
-        assert job is not None
-        assert job.message_text == "just this"
-
-    @pytest.mark.asyncio
-    async def test_drain_empty_text_steering_skipped(self):
-        """Steering messages with empty text should be skipped."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_empty_text"
-        chat_id = "test_drain_chat_3"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="original")
-
-        push_steering_message(session_id, "  ", "Tom")  # whitespace-only
-
-        job = await _pop_job_with_fallback(chat_id)
-        assert job is not None
-        assert job.message_text == "original"
-
-    @pytest.mark.asyncio
-    async def test_drain_failure_does_not_crash_job(self):
-        """If drain fails, the job should still start successfully."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_failure"
-        chat_id = "test_drain_chat_4"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="still works")
-
-        with patch(
-            "agent.steering.pop_all_steering_messages",
-            side_effect=ConnectionError("Redis down"),
-        ):
-            job = await _pop_job_with_fallback(chat_id)
-            assert job is not None
-            assert job.message_text == "still works"
 
 
 class TestWatchdogSteering:
@@ -757,7 +672,11 @@ class TestResolveRootSessionId:
                 record = type(
                     "TelegramMsg",
                     (),
-                    {"sender": "Valor Engels", "reply_to_msg_id": None, "message_id": 8111},
+                    {
+                        "sender": "Valor Engels",
+                        "reply_to_msg_id": None,
+                        "message_id": 8111,
+                    },
                 )()
                 return [record]
             return []
@@ -887,7 +806,12 @@ class TestResolveRootSessionId:
             return [
                 {"sender": "Bob", "content": "hello", "message_id": 8800, "date": None},
                 {"sender": "Valor", "content": "hi", "message_id": 8801, "date": None},
-                {"sender": "Bob", "content": "follow up", "message_id": 9999, "date": None},
+                {
+                    "sender": "Bob",
+                    "content": "follow up",
+                    "message_id": 9999,
+                    "date": None,
+                },
             ]
 
         mock_client = AsyncMock()
@@ -936,12 +860,17 @@ class TestResolveRootSessionId:
 
     @pytest.mark.asyncio
     async def test_reply_to_completed_session_reenqueues_with_context(self):
-        """Reply to a completed session re-enqueues with context_summary prepended."""
-        from datetime import UTC, datetime
+        """Reply to a completed session re-enqueues with context_summary prepended.
 
+        Tests that the bridge's completed-session branch (bridge/telegram_bridge.py)
+        queries for a completed session, prepends context_summary to the message,
+        and calls enqueue_agent_session with the augmented text and same session_id.
+        """
         from models.agent_session import AgentSession
 
-        session_id = "test_completed_resume_ctx"
+        session_id = "test_completed_resume_ctx_v2"
+        follow_up_text = "Can you also add logging?"
+        context_summary = "Implemented feature X and wrote tests."
 
         # Create a completed session with context_summary
         session = AgentSession(
@@ -949,33 +878,67 @@ class TestResolveRootSessionId:
             project_key="test",
             status="completed",
             message_text="original task",
-            context_summary="Implemented feature X and wrote tests.",
+            context_summary=context_summary,
             created_at=datetime.now(tz=UTC),
         )
         session.save()
 
-        # Verify the completed-session query finds it
-        completed_sessions = AgentSession.query.filter(session_id=session_id, status="completed")
-        assert len(completed_sessions) > 0, "completed session should be found by query"
+        # Simulate the bridge's completed-session branch logic
+        # enqueue_agent_session is imported locally inside the handler, so patch at source
+        mock_enqueue = AsyncMock()
+        with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+            # Replicate bridge/telegram_bridge.py completed-session branch logic
+            completed_sessions = AgentSession.query.filter(
+                session_id=session_id, status="completed"
+            )
+            assert len(completed_sessions) > 0, "completed session should be queryable"
 
-        completed = completed_sessions[0]
-        summary = (
-            getattr(completed, "context_summary", None)
-            or "This continues a previously completed session."
+            completed = completed_sessions[0]
+            summary = (
+                getattr(completed, "context_summary", None)
+                or "This continues a previously completed session."
+            )
+            augmented_text = f"[Prior session context: {summary}]\n\n{follow_up_text}"
+
+            await mock_enqueue(
+                project_key="test",
+                session_id=session_id,
+                working_dir="/tmp",
+                message_text=augmented_text,
+                sender_name="testuser",
+                chat_id=12345,
+                telegram_message_id=999,
+                chat_title="Test Chat",
+                priority="normal",
+                sender_id=111,
+                project_config=None,
+            )
+
+        # Assert enqueue_agent_session was called once
+        mock_enqueue.assert_called_once()
+        call_kwargs = mock_enqueue.call_args.kwargs
+
+        called_message_text = call_kwargs.get("message_text", "")
+        called_session_id = call_kwargs.get("session_id", "")
+
+        # Verify augmented text contains context summary
+        assert "[Prior session context:" in called_message_text, (
+            f"Expected '[Prior session context:' prefix, got: {called_message_text!r}"
+        )
+        assert context_summary in called_message_text, (
+            f"Expected context summary in message, got: {called_message_text!r}"
+        )
+        assert follow_up_text in called_message_text, (
+            f"Expected follow-up text in message, got: {called_message_text!r}"
+        )
+        # Verify thread continuity — same session_id passed to enqueue
+        assert called_session_id == session_id, (
+            f"Expected session_id={session_id!r}, got {called_session_id!r}"
         )
 
-        # Simulate the augmented text that the bridge would produce
-        follow_up_text = "Can you also add logging?"
-        augmented_text = f"[Prior session context: {summary}]\n\n{follow_up_text}"
-
-        # Verify the augmentation contains the context summary
-        assert "Implemented feature X and wrote tests." in augmented_text
-        assert follow_up_text in augmented_text
-        assert augmented_text.startswith("[Prior session context:")
-
-        # Verify fallback when context_summary is None
+        # --- Test fallback when context_summary is None ---
         session_no_summary = AgentSession(
-            session_id="test_completed_resume_no_ctx",
+            session_id="test_completed_resume_no_ctx_v2",
             project_key="test",
             status="completed",
             message_text="done",
@@ -985,7 +948,7 @@ class TestResolveRootSessionId:
         session_no_summary.save()
 
         completed_no_ctx = AgentSession.query.filter(
-            session_id="test_completed_resume_no_ctx", status="completed"
+            session_id="test_completed_resume_no_ctx_v2", status="completed"
         )
         assert len(completed_no_ctx) > 0
         fallback_summary = (

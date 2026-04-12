@@ -79,6 +79,70 @@ The resolver never blocks message delivery:
 - API failure → `reply_to_msg_id` direct (old behavior, one extra AgentSession at worst)
 - Any exception → `reply_to_msg_id` direct (safe fallback logged at DEBUG level)
 
+## Deterministic Root Caching
+
+Prior to this fix, the three-step fallback chain had a race condition: if Valor's outbound
+`TelegramMessage` records weren't in Redis yet when a reply arrived, the cache walk and API
+walk could resolve *different* root messages for the same thread, producing non-deterministic
+`session_id` values and split sessions.
+
+### Redis Key Scheme
+
+Every successful root resolution (cache walk or API walk) now persists the result to a stable
+Redis key before returning:
+
+```
+session_root:{chat_id}:{start_msg_id}
+```
+
+- **TTL**: 7 days — reply chains don't change, so the key is safe to cache long-term
+- **Write semantics**: `SET NX EX 604800` — first writer wins; concurrent resolutions for the
+  same thread are de-duped at the Redis layer. This eliminates the race condition.
+- **Warm-path behavior**: `_get_cached_root` is checked as Step 0, before `_cache_walk_root`
+  and before the Telegram API. A warm key short-circuits all other resolution logic with a
+  single O(1) Redis GET — the warm path is *faster* than before.
+
+### Implementation
+
+Two helpers in `bridge/context.py`:
+
+```python
+async def _get_cached_root(chat_id: int, msg_id: int) -> int | None:
+    """Return the cached root message ID for this chain, or None on miss/error."""
+    ...
+
+async def _set_cached_root(chat_id: int, msg_id: int, root_id: int) -> None:
+    """Persist the resolved root. SET NX — first writer wins. Fails silently on error."""
+    ...
+```
+
+Both helpers fail silently — a Redis outage degrades to the original three-step fallback, never
+blocks message delivery.
+
+## Completed-Session Resume
+
+When a reply-to message resolves to a `completed` session, the steering check previously fell
+through and created a blank-slate re-enqueue with no prior context. The new behavior:
+
+1. The steering check at `bridge/telegram_bridge.py` inspects `completed` sessions after
+   the `running`/`active`/`pending` checks find nothing.
+2. If a completed session is found, its `context_summary` field is prepended to the new
+   message text:
+   ```
+   [Prior session context: {summary}]
+
+   {new message}
+   ```
+3. A fresh `AgentSession` is enqueued with the **same `session_id`** (preserving thread
+   continuity) and the augmented message as its task.
+4. A user-visible ack `"Resuming from prior session."` is sent as a reply so the user knows
+   the agent has their prior context.
+5. If `context_summary` is `None` (session completed without generating a summary), a generic
+   fallback string is used: `"This continues a previously completed session."`
+
+This eliminates the "context orphan" scenario where the agent starts from scratch on a task
+that was already partially completed.
+
 ## Race Conditions
 
 Two rapid replies both derive the same root session_id before either is processed. This is handled by `enqueue_agent_session()`'s same-session_id supersede logic (lines 318–336 of `telegram_bridge.py`). No shared mutable state in the chain walk.
