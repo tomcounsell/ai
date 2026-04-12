@@ -31,6 +31,12 @@ The session system has 8 mechanisms that can revive, recover, or re-enqueue sess
 | Terminal safety | **Safe by query scope** -- only queries `status="running"` and `status="pending"` |
 | Guard | Query filter (only non-terminal statuses) + `transition_status()` with default `reject_from_terminal=True` |
 
+#### Finalization gap on re-execution (issue #917)
+
+When the health check recovers a session (`running → pending → running`), the re-executed session may complete successfully but the inner `agent_session` lookup (which filters by `status="running"`) can return `None` — because the session's status was already changed by the recovery cycle. Prior to #917, this caused finalization to be silently skipped: the session stayed in `running` state permanently, and the health check would find it "stuck" again 10–15 minutes later, causing duplicate Telegram delivery.
+
+**Fix:** A fallback `else` branch after the `if agent_session:` finalization block in `_execute_agent_session()` calls `complete_transcript(session.session_id, status=final_status)` using the outer `session` parameter (always available). This is guarded by `if not chat_state.defer_reaction` to preserve the nudge path. `StatusConflictError` is caught at info level (CAS conflict = another process already finalized = success). Other exceptions are caught at warning level.
+
 ### 3. Hierarchy Health Check (`_agent_session_hierarchy_health_check`)
 
 | Property | Value |
@@ -164,6 +170,11 @@ Callers that previously did a bare `transition_status()` or `finalize_session()`
 - **Window**: `check_revival()` finds pending session that completes between query and user response
 - **Mitigation**: Revival only sends notification; actual respawn happens later via `queue_revival_agent_session()` -> `enqueue_agent_session()`, by which time the session is terminal and guards catch it
 
+### `agent_session` lookup returns None after health-check recovery (issue #917)
+
+- **Window**: Health check transitions session `running → pending`. Worker picks it up, transitions `pending → running`. Inside `_execute_agent_session()`, the inner `agent_session` lookup queries `AgentSession.query.filter(status="running")` — but by this point the status may have shifted again (e.g. another health check cycle or CAS mutation), returning `None`.
+- **Mitigation**: Fallback `else` branch calls `complete_transcript(session.session_id, status=final_status)` using the outer `session` parameter (always non-None). Guarded by `if not chat_state.defer_reaction` to preserve nudge path. `StatusConflictError` caught at info level (CAS conflict = success).
+
 ## Known Limitations
 
 - **Redis TTL expiry**: If terminal session records expire from Redis before a revival check, the terminal-sibling filter in `check_revival()` cannot detect them. Revival may proceed for sessions whose completion record has expired. This is acceptable: if the record is gone, there is no reliable way to detect prior completion.
@@ -196,6 +207,18 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 | `TestMarkSupersededTerminalGuard::test_completed_to_superseded_is_now_rejected` | _mark_superseded defense-in-depth | completed→superseded now rejected |
 | `TestMarkSupersededTerminalGuard::test_mark_superseded_kwarg_removed_from_source` | _mark_superseded defense-in-depth | Structural: override kwarg absent from source |
 
+Additional coverage in `tests/unit/test_health_check_recovery_finalization.py` (issue #917):
+
+| Test | What it proves |
+|------|---------------|
+| `test_completed_when_no_error` | agent_session=None + no error → complete_transcript("completed") |
+| `test_failed_when_error` | agent_session=None + error → complete_transcript("failed") |
+| `test_nudge_path_not_finalized` | agent_session=None + defer_reaction=True → complete_transcript NOT called |
+| `test_existing_path_when_agent_session_present` | agent_session non-None → existing path used (regression guard) |
+| `test_status_conflict_error_is_info_not_exception` | StatusConflictError caught at info level, not propagated |
+| `test_unexpected_exception_is_warning_not_propagated` | Unexpected exception caught at warning level, not propagated |
+| `test_fallback_finalization_present_in_agent_session_queue` | Structural: fallback code present in source |
+
 ## Related
 
 - [Session Lifecycle](session-lifecycle.md) -- State machine and lifecycle module
@@ -206,3 +229,4 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 - Issue #727 -- Startup recovery timing guard (race condition fix)
 - PR #703 -- Zombie loop fix (hierarchy health check vector)
 - PR #721 -- Lifecycle consolidation
+- Issue #917 -- Health-check recovery finalization gap (fallback else branch)
