@@ -28,9 +28,9 @@ cd ~/src/ai
 # 2. Install dependencies
 pip install -e .
 
-# 3. Configure environment
-cp .env.example .env
-# Edit .env with your credentials
+# 3. Configure environment (symlink to vault)
+ln -sf ~/Desktop/Valor/.env ~/src/ai/.env
+# All secrets live in ~/Desktop/Valor/.env (iCloud-synced vault)
 
 # 4. Start the bridge
 ./scripts/start_bridge.sh
@@ -53,11 +53,13 @@ This installs:
 
 ### 2. Configure Environment
 
-Copy the example and edit:
+The repo `.env` is a symlink to `~/Desktop/Valor/.env` — the iCloud-synced secrets vault. Create the symlink:
 
 ```bash
-cp .env.example .env
+ln -sf ~/Desktop/Valor/.env ~/src/ai/.env
 ```
+
+All secrets go in `~/Desktop/Valor/.env`. See `.env.example` for the full list of required variables.
 
 Required variables:
 

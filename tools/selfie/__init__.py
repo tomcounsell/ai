@@ -15,7 +15,7 @@ from openai import OpenAI
 from bridge.utc import utc_now
 
 load_dotenv()
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
 
 # Canonical appearance description derived from Valor's profile photo
 VALOR_APPEARANCE = (

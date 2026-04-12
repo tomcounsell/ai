@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-# Load shared API keys from parent env file
+# Load shared API keys from vault (repo .env is a symlink to vault)
 load_dotenv(Path.home() / "src" / ".env")
 load_dotenv()
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
 
 
 @pytest.fixture

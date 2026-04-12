@@ -50,9 +50,9 @@ A PM session steers the pipeline and delegates coding work to a Dev session. See
 # 1. Install dependencies
 pip install -e .
 
-# 2. Configure environment
-cp .env.example .env
-# Edit .env with your API keys and comms credentials
+# 2. Configure environment (symlink to vault)
+ln -sf ~/Desktop/Valor/.env ~/src/ai/.env
+# All secrets live in ~/Desktop/Valor/.env (iCloud-synced vault)
 
 # 3. Start the bridge and worker
 ./scripts/start_bridge.sh

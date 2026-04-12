@@ -52,16 +52,39 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 
 | File | Purpose | Source-Controlled |
 |------|---------|-------------------|
-| `.env` | Secrets and environment overrides | No (gitignored) |
-| `.env.example` | Template documenting all env vars | Yes |
-| `config/settings.py` | Pydantic Settings model (single source of truth) | Yes |
+| `.env` | Symlink → `~/Desktop/Valor/.env` (secrets) | No (gitignored) |
+| `~/Desktop/Valor/.env` | **Secrets source of truth** (iCloud-synced, machine-private) | No (external vault) |
+| `.env.example` | Documents the contents of `~/Desktop/Valor/.env` | Yes |
+| `config/settings.py` | Pydantic Settings model (single source of truth for config schema) | Yes |
 | `config/paths.py` | Path constants derived from `__file__` | Yes |
 | `~/Desktop/Valor/projects.json` | Per-project config (working dirs, GitHub orgs, Telegram groups) | No (external, iCloud-synced) |
 | `config/projects.example.json` | Template for projects.json | Yes |
 | `config/models.py` | Model name constants | Yes |
 | `config/personas/_base.md` | Shared persona base (identity, values, tools, philosophy) | Yes |
 | `config/personas/{persona}.md` | Per-persona overlays (developer, project-manager, teammate) | Yes |
-| `~/Desktop/Valor/` | Google OAuth tokens, DM whitelist, calendar config | No (machine-local) |
+| `~/Desktop/Valor/` | Google OAuth tokens, DM whitelist, calendar config, `.env` vault | No (machine-local) |
+
+### Secrets
+
+All secrets live in **`~/Desktop/Valor/.env`** — the iCloud-synced vault. The repository `.env` is a symlink to this file:
+
+```
+~/src/ai/.env → ~/Desktop/Valor/.env
+```
+
+**Why this design:**
+- `~/Desktop/Valor/` is iCloud-synced: secrets are available on every machine after sign-in, without any manual copy step
+- The symlink means all existing `load_dotenv` and pydantic-settings `env_file=".env"` calls work unchanged — they resolve through the symlink transparently
+- `.gitignore` covers `.env` by name, so the symlink entry is never committed regardless of what it points to
+
+**Adding a new secret:**
+1. Add the key/value to `~/Desktop/Valor/.env`
+2. Add a documented placeholder to `.env.example`
+3. Add the corresponding field to `config/settings.py`
+
+Never write secrets directly to `repo/.env`. Writing to the symlink writes to the vault, but adding secrets to `~/Desktop/Valor/.env` directly is the canonical workflow and avoids confusion.
+
+**On a fresh machine:** `scripts/remote-update.sh` and `scripts/update/env_sync.py` create the symlink automatically once iCloud has synced the vault file. Until then, a clear warning is logged.
 
 ### Credentials Location
 

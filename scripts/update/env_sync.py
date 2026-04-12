@@ -1,110 +1,66 @@
-"""Sync specific env vars from the Valor vault to the project .env.
+"""Verify that the project .env is a symlink pointing to the Valor vault.
 
-The vault at ~/Desktop/Valor/.env (iCloud-synced) is the source of truth
-for API keys shared across machines. This module copies specific keys
-into the project's .env if they are missing or outdated.
+The vault at ~/Desktop/Valor/.env (iCloud-synced) is the single source of truth
+for all secrets. The project .env must be a symlink to it — never a regular file.
+
+On a fresh machine or after accidental deletion, this module creates the symlink
+automatically so the update process is self-healing.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 
-# Keys to sync from vault to project .env.
-# Add new keys here as services are added.
-SYNC_KEYS: list[str] = [
-    "VOYAGE_API_KEY",
-]
-
 VAULT_ENV_PATH = Path.home() / "Desktop" / "Valor" / ".env"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class EnvSyncResult:
-    """Result of env sync operation."""
+    """Result of .env symlink verification."""
 
-    success: bool = True
-    added: list[str] = field(default_factory=list)
-    updated: list[str] = field(default_factory=list)
-    skipped: list[str] = field(default_factory=list)
+    symlink_ok: bool = False
+    created: bool = False
     error: str | None = None
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    """Parse a .env file into key-value pairs. Ignores comments and blank lines."""
-    result: dict[str, str] = {}
-    if not path.is_file():
-        return result
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        result[key.strip()] = value.strip()
-    return result
-
-
 def sync_env_from_vault(project_dir: Path) -> EnvSyncResult:
-    """Copy SYNC_KEYS from vault .env to project .env if missing or changed."""
+    """Verify project .env is a symlink to the vault. Create it if missing.
+
+    Returns EnvSyncResult with:
+      - symlink_ok=True  if the symlink exists and points to the vault
+      - created=True     if the symlink was just created (was missing)
+      - error            set if the vault is absent or symlink could not be created
+    """
     result = EnvSyncResult()
     project_env = project_dir / ".env"
 
-    if not VAULT_ENV_PATH.is_file():
-        result.error = f"Vault .env not found at {VAULT_ENV_PATH}"
+    if not VAULT_ENV_PATH.exists():
+        result.error = (
+            f"Vault .env not found at {VAULT_ENV_PATH} — "
+            "iCloud may not have synced yet. Secrets unavailable until sync completes."
+        )
+        logger.warning(result.error)
         return result
 
-    vault_vars = _parse_env_file(VAULT_ENV_PATH)
-    project_vars = _parse_env_file(project_env)
-
-    changes: list[str] = []
-    for key in SYNC_KEYS:
-        vault_value = vault_vars.get(key)
-        if vault_value is None:
-            result.skipped.append(key)
-            continue
-
-        project_value = project_vars.get(key)
-        if project_value == vault_value:
-            result.skipped.append(key)
-            continue
-
-        if project_value is None:
-            result.added.append(key)
-        else:
-            result.updated.append(key)
-
-        project_vars[key] = vault_value
-        changes.append(key)
-
-    if not changes:
+    # Already a correct symlink — nothing to do.
+    if project_env.is_symlink() and project_env.resolve() == VAULT_ENV_PATH.resolve():
+        result.symlink_ok = True
         return result
 
-    # Rewrite project .env preserving existing content, updating changed keys
+    # Regular file (old behaviour) or broken/wrong symlink — replace with symlink.
     try:
-        lines: list[str] = []
-        written_keys: set[str] = set()
-
-        if project_env.is_file():
-            for line in project_env.read_text().splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#") and "=" in stripped:
-                    key = stripped.partition("=")[0].strip()
-                    if key in changes:
-                        lines.append(f"{key}={project_vars[key]}")
-                        written_keys.add(key)
-                        continue
-                lines.append(line)
-
-        # Append any new keys not already in the file
-        for key in changes:
-            if key not in written_keys:
-                lines.append(f"{key}={project_vars[key]}")
-
-        project_env.write_text("\n".join(lines) + "\n")
-    except OSError as e:
-        result.success = False
-        result.error = str(e)
+        if project_env.exists() or project_env.is_symlink():
+            project_env.unlink()
+        project_env.symlink_to(VAULT_ENV_PATH)
+        result.symlink_ok = True
+        result.created = True
+        logger.info("Created .env symlink → %s", VAULT_ENV_PATH)
+    except OSError as exc:
+        result.error = str(exc)
+        logger.warning("Failed to create .env symlink: %s", exc)
 
     return result

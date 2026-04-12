@@ -11,6 +11,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOCK_DIR="$PROJECT_DIR/data/update.lock"
 
+# ── Ensure .env → ~/Desktop/Valor/.env symlink ──────────────────────
+# The vault file is the single source of truth for secrets. On a fresh machine
+# or after accidental deletion, create the symlink before sourcing .env so the
+# rest of this script always reads from the vault.
+VAULT_ENV="$HOME/Desktop/Valor/.env"
+REPO_ENV="$PROJECT_DIR/.env"
+if [ -n "$VAULT_ENV" ] && [ -f "$VAULT_ENV" ] && [ ! -L "$REPO_ENV" ]; then
+    echo "[update] Creating .env symlink → $VAULT_ENV"
+    [ -f "$REPO_ENV" ] && rm -f "$REPO_ENV"
+    ln -sf "$VAULT_ENV" "$REPO_ENV"
+elif [ ! -f "$VAULT_ENV" ] && [ ! -L "$REPO_ENV" ]; then
+    echo "[update] WARN: Vault .env not found at $VAULT_ENV — iCloud may not have synced yet"
+fi
+
 set -a
 # shellcheck disable=SC1091
 [ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
