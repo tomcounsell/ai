@@ -172,7 +172,7 @@ The `dashboard.json` endpoint includes an additive `analytics` key:
 }
 ```
 
-An HTMX partial (`ui/templates/_partials/analytics_trend.html`) renders a CSS-only sessions-per-day bar chart on the main dashboard page with 30-second polling refresh. When no data is available, it displays "No analytics data yet" gracefully.
+An HTMX partial (`ui/templates/_partials/analytics_stats.html`) renders compact stat cards grouped by category (Sessions, Cost, Turns, Memory) on the main dashboard. The panel is hidden by default behind a "Stats" pill button in the health bar; clicking it triggers HTMX to lazy-load the stats grid on first reveal. When no data is available, it displays "No analytics data yet" gracefully.
 
 ## Reflections Integration
 
@@ -203,7 +203,7 @@ No separate launchd job is needed -- the existing reflections schedule handles i
 | `analytics/rollup.py` | Daily aggregation and purge job |
 | `tools/analytics.py` | CLI entry point (`python -m tools.analytics`) |
 | `ui/data/analytics.py` | Dashboard data provider |
-| `ui/templates/_partials/analytics_trend.html` | HTMX sessions-per-day bar chart |
+| `ui/templates/_partials/analytics_stats.html` | HTMX stats grid partial (Sessions, Cost, Turns, Memory) |
 | `data/analytics.db` | SQLite database (auto-created, gitignored) |
 
 ## Related

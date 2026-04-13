@@ -1,0 +1,83 @@
+{# Analytics stats grid — compact stat cards grouped by category #}
+{% if analytics %}
+<div class="stats-grid">
+    <div class="stats-group">
+        <div class="stats-group-label">Sessions</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Started today</span>
+                <span class="stat-card-value">{{ analytics.sessions_started_today }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Started 7d</span>
+                <span class="stat-card-value">{{ analytics.sessions_started_7d }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Completed today</span>
+                <span class="stat-card-value">{{ analytics.sessions_completed_today }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Completed 7d</span>
+                <span class="stat-card-value">{{ analytics.sessions_completed_7d }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="stats-group">
+        <div class="stats-group-label">Cost</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Today</span>
+                <span class="stat-card-value">${{ "%.2f"|format(analytics.cost_today_usd) }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">7d</span>
+                <span class="stat-card-value">${{ "%.2f"|format(analytics.cost_7d_usd) }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="stats-group">
+        <div class="stats-group-label">Turns</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Total today</span>
+                <span class="stat-card-value">{{ analytics.turns_today|int }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Total 7d</span>
+                <span class="stat-card-value">{{ analytics.turns_7d|int }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Avg today</span>
+                <span class="stat-card-value">{{ "%.1f"|format(analytics.turns_avg_today) }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Avg 7d</span>
+                <span class="stat-card-value">{{ "%.1f"|format(analytics.turns_avg_7d) }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="stats-group">
+        <div class="stats-group-label">Memory</div>
+        <div class="stats-group-cards">
+            <div class="stat-card">
+                <span class="stat-card-label">Recalls today</span>
+                <span class="stat-card-value">{{ analytics.memory_recalls_today }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Recalls 7d</span>
+                <span class="stat-card-value">{{ analytics.memory_recalls_7d }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Extractions today</span>
+                <span class="stat-card-value">{{ analytics.memory_extractions_today }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-card-label">Extractions 7d</span>
+                <span class="stat-card-value">{{ analytics.memory_extractions_7d }}</span>
+            </div>
+        </div>
+    </div>
+</div>
+{% else %}
+<p class="text-muted" style="padding: 0.5rem 0;">No analytics data yet.</p>
+{% endif %}
