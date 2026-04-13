@@ -180,6 +180,21 @@ fi
 
 The SDK spawns Claude Code CLI subprocesses that inherit authentication from the running Claude Desktop app. No separate login command is needed.
 
+### Sentry CLI Authentication
+
+`sentry-cli` is installed automatically by `/update`. After installation, authenticate:
+
+```bash
+# Login to Sentry (generates auth token)
+sentry-cli login
+
+# Or set token directly in ~/Desktop/Valor/.env
+# SENTRY_PERSONAL_TOKEN=sntrys_...
+# The SDK automatically injects this as SENTRY_AUTH_TOKEN for PM sessions
+```
+
+The token is stored in `~/Desktop/Valor/.env` as `SENTRY_PERSONAL_TOKEN` and auto-injected into agent sessions by `sdk_client.py`.
+
 ## Step 6: Project Configuration (~/Desktop/Valor/projects.json)
 
 Project configuration lives in `~/Desktop/Valor/projects.json` (iCloud-synced, private). This directory is shared across machines via iCloud.

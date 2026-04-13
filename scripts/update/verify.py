@@ -178,6 +178,7 @@ def check_system_tools() -> list[ToolCheck]:
         ("claude", "--version"),
         ("gh", "--version"),
         ("git", "--version"),
+        ("sentry-cli", "--version"),
         ("uv", "--version"),
     ]
     results = [check_command(name, flag) for name, flag in tools]

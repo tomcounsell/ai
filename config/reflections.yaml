@@ -126,3 +126,18 @@ reflections:
       Format as a concise Telegram message (3-8 lines) and send to the 'Dev: Valor' chat.
       Subject line: Daily System Health Digest.
     enabled: true
+
+  - name: sentry-issue-triage
+    description: "Triage unresolved Sentry issues for all projects with SENTRY_DSN in their .env"
+    interval: 86400  # daily
+    priority: low
+    execution_type: agent
+    command: >
+      Triage unresolved Sentry issues across all local projects.
+      For each project returned by load_local_projects() that has SENTRY_DSN in its .env,
+      run: sentry issues list --status unresolved --json
+      Classify each issue using the A-E triage workflow from .claude/skills/sentry/SKILL.md.
+      For Class C or D issues, create a GitHub issue in that project's repo.
+      Send a summary to the 'Dev: Valor' Telegram chat.
+      Skip projects without SENTRY_DSN silently.
+    enabled: false

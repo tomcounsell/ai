@@ -351,6 +351,10 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
 
     project_root = Path(__file__).parent.parent
 
+    # Note: SENTRY_AUTH_TOKEN is injected by sdk_client.py at PM session launch
+    # time (line ~1031), so no env setup is needed here — _push_agent_session()
+    # only creates a Redis entry; the worker handles env injection later.
+
     # Resolve project key from the repo root
     try:
         from tools.valor_session import resolve_project_key
