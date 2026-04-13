@@ -290,6 +290,28 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     health_task.add_done_callback(_health_task_done)
 
+    # Start unified reflection scheduler (moved from bridge — processing belongs in worker)
+    reflection_task = None
+    try:
+        from agent.reflection_scheduler import ReflectionScheduler
+
+        _reflection_scheduler = ReflectionScheduler()
+        reflection_task = asyncio.create_task(
+            _reflection_scheduler.start(), name="reflection-scheduler"
+        )
+
+        def _reflection_task_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Reflection scheduler exited unexpectedly: %s", exc)
+
+        reflection_task.add_done_callback(_reflection_task_done)
+        logger.info("Reflection scheduler started")
+    except Exception as e:
+        logger.error(f"Failed to start reflection scheduler: {e}")
+
     # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
     notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
 
@@ -343,6 +365,14 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         await notify_task
     except asyncio.CancelledError:
         pass
+
+    # Cancel reflection scheduler
+    if reflection_task is not None:
+        reflection_task.cancel()
+        try:
+            await reflection_task
+        except asyncio.CancelledError:
+            pass
 
     logger.info("Worker shutdown complete")
 

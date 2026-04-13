@@ -28,7 +28,9 @@ from models.knowledge_document import KnowledgeDocument
 from models.link import Link
 from models.memory import Memory
 from models.reflection import Reflection
-from models.reflections import PRReviewAudit, ReflectionIgnore, ReflectionRun
+from models.pr_review_audit import PRReviewAudit
+from models.reflection_ignore import ReflectionIgnore
+from models.reflection_run import ReflectionRun
 from models.teammate_metrics import TeammateMetrics
 from models.telegram import TelegramMessage
 
