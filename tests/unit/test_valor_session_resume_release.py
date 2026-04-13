@@ -148,7 +148,9 @@ class TestCmdResumeHappyPath:
         # Steering message must be saved before transition_status is called
         session.save.assert_called()
         assert "Do the patch." in session.queued_steering_messages
-        mock_transition.assert_called_once_with(session, "pending", reason="valor-session resume")
+        mock_transition.assert_called_once_with(
+            session, "pending", reason="valor-session resume", reject_from_terminal=False
+        )
 
     def test_steering_message_saved_before_transition(self):
         """Steering save must precede transition_status call (no race window)."""
@@ -160,7 +162,7 @@ class TestCmdResumeHappyPath:
         def _record_save():
             call_order.append("save")
 
-        def _record_transition(s, status, reason=""):
+        def _record_transition(s, status, reason="", reject_from_terminal=True):
             call_order.append("transition")
 
         session.save.side_effect = _record_save
@@ -355,3 +357,67 @@ class TestModelNoneNotSetInOptions:
         assert agent.model == "claude-opus-4-5"
         # _create_options should include model in kwargs (covered by live integration,
         # but we verify the agent stores it correctly for dispatch).
+
+
+# ---------------------------------------------------------------------------
+# retain_for_resume: stage name case invariant
+# ---------------------------------------------------------------------------
+
+
+class TestRetainForResumeStageCase:
+    """Guard against case-mismatch bugs in the retain_for_resume harness guard.
+
+    pipeline_state.PipelineStateMachine.current_stage() returns uppercase stage
+    names from ALL_STAGES (e.g. "BUILD", "TEST"). The harness guard must compare
+    against the same uppercase literal.
+    """
+
+    def test_all_stages_are_uppercase(self):
+        """ALL_STAGES must consist entirely of uppercase strings."""
+        from agent.pipeline_state import ALL_STAGES
+
+        for stage in ALL_STAGES:
+            assert stage == stage.upper(), (
+                f"Stage {stage!r} is not uppercase — harness comparisons would break"
+            )
+
+    def test_build_stage_literal_is_uppercase(self):
+        """The BUILD literal used in the retain_for_resume guard must match ALL_STAGES."""
+        from agent.pipeline_state import ALL_STAGES
+
+        assert "BUILD" in ALL_STAGES, "BUILD must be present in ALL_STAGES"
+        # Confirm the lowercase variant is NOT in ALL_STAGES (the historical bug)
+        assert "build" not in ALL_STAGES, (
+            "lowercase 'build' must not be in ALL_STAGES — harness guard uses 'BUILD'"
+        )
+
+    def test_transition_status_resume_passes_reject_from_terminal_false(self):
+        """cmd_resume must pass reject_from_terminal=False to transition_status.
+
+        Without this flag, transitioning a completed session back to pending raises
+        ValueError because 'completed' is in TERMINAL_STATUSES.
+        """
+        session = _make_session("sess-terminal", status="completed")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+        mock_transition = MagicMock()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(transition_status=mock_transition),
+                },
+            ),
+        ):
+            result = cmd_resume(_resume_args(session_id="sess-terminal"))
+
+        assert result == 0
+        # Verify reject_from_terminal=False is explicitly passed
+        _, kwargs = mock_transition.call_args
+        assert kwargs.get("reject_from_terminal") is False, (
+            "transition_status must be called with reject_from_terminal=False "
+            "so completed→pending promotion is allowed"
+        )

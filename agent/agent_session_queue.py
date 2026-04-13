@@ -2844,7 +2844,7 @@ async def _handle_dev_session_completion(
         # reasoning context. The 30-day Meta.ttl acts as the backstop;
         # `valor-session release --pr <N>` clears it on merge.
         try:
-            if agent_session and current_stage == "build":
+            if agent_session and current_stage == "BUILD":
                 agent_session.retain_for_resume = True
                 agent_session.save()
                 logger.info(

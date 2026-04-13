@@ -277,7 +277,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
         # Transition to pending (atomic — fails if another process raced us).
         # Steering message is already persisted above, so no race window.
         try:
-            transition_status(session, "pending", reason="valor-session resume")
+            transition_status(
+                session, "pending", reason="valor-session resume", reject_from_terminal=False
+            )
         except Exception as e:
             print(
                 f"Error: Could not transition session {session_id} to pending: {e}",
