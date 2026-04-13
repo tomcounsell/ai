@@ -73,8 +73,8 @@ def make_telegram_event():
 
 @pytest.fixture
 def mock_agent_response():
-    """Patch get_agent_response_sdk to return a canned response."""
-    with patch("agent.sdk_client.get_agent_response_sdk") as mock_fn:
+    """Patch get_response_via_harness to return a canned response."""
+    with patch("agent.sdk_client.get_response_via_harness") as mock_fn:
         mock_fn.return_value = "I received your message and here is my response."
         yield mock_fn
 

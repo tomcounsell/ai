@@ -7,7 +7,7 @@
 The system separates Telegram I/O from session execution into two independent processes:
 
 - **Bridge** (`bridge/telegram_bridge.py`): Receives Telegram messages, routes them, enqueues `AgentSession` records to Redis. Delivers replies via registered output callbacks.
-- **Worker** (`python -m worker`): Polls Redis for pending sessions, executes them via the Claude Agent SDK, handles all session lifecycle functions.
+- **Worker** (`python -m worker`): Polls Redis for pending sessions, executes them via the CLI harness (`claude -p`), handles all session lifecycle functions.
 
 Communication between the two processes happens exclusively through Redis. The bridge never calls worker execution functions; the worker never touches Telegram.
 
@@ -100,28 +100,23 @@ The worker's startup sequence is deterministic:
 | 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records |
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Kill orphaned Claude SDK subprocesses (PPID=1) |
-| 4.5 | `verify_harness_health()` | If `DEV_SESSION_HARNESS` is non-`sdk`, verify CLI binary is available (see [Harness Abstraction](harness-abstraction.md)) |
+| 4.5 | `verify_harness_health()` | Verify CLI harness binary (`claude`) is available and healthy; fatal if missing (see [Harness Abstraction](harness-abstraction.md)) |
 | 5 | `_ensure_worker(worker_key)` for each pending session | Kick per-worker-key loops for queued sessions |
 | 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
 
 ### Execution Harness Routing
 
-At session execution time, the worker routes dev sessions to one of two execution backends based on the `DEV_SESSION_HARNESS` environment variable:
+All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was removed in issue #912.
 
 ```
 _execute_agent_session(session)
     |
     v
-session_type == "dev" AND DEV_SESSION_HARNESS != "sdk"?
-    |                           |
-   YES                         NO (default)
-    |                           |
-    v                           v
-get_response_via_harness()   get_agent_response_sdk()
-(claude -p subprocess)       (Claude Agent SDK)
-    |                           |
-    +---------------------------+
+build_harness_turn_input()  -- enriches message with context headers
+    |
+    v
+get_response_via_harness()  -- spawns claude -p subprocess
     |
     v
 _handle_dev_session_completion()  [dev sessions only]
@@ -131,7 +126,7 @@ _handle_dev_session_completion()  [dev sessions only]
     |-- steer_session(parent_pm_session)
 ```
 
-PM and teammate sessions always use the SDK path and skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for full details on streaming, batching, health checks, and configuration.
+PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for full details on streaming, batching, health checks, and configuration.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 

@@ -205,11 +205,11 @@ class TestWorkflowIdAbsent:
         sig = inspect.signature(enqueue_agent_session)
         assert "workflow_id" not in sig.parameters
 
-    def test_get_agent_response_sdk_no_workflow_id(self):
-        """get_agent_response_sdk must not accept workflow_id."""
-        from agent.sdk_client import get_agent_response_sdk
+    def test_build_harness_turn_input_no_workflow_id(self):
+        """build_harness_turn_input must not accept workflow_id."""
+        from agent.sdk_client import build_harness_turn_input
 
-        sig = inspect.signature(get_agent_response_sdk)
+        sig = inspect.signature(build_harness_turn_input)
         assert "workflow_id" not in sig.parameters
 
     def test_session_model_no_workflow_id_field(self):

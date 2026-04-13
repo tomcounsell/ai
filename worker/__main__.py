@@ -164,27 +164,28 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.error(f"Redis connection failed: {e}")
         sys.exit(1)
 
-    # Harness health check: if DEV_SESSION_HARNESS is set to a CLI harness,
-    # verify the binary is available and working at startup
-    _harness_mode = os.environ.get("DEV_SESSION_HARNESS", "sdk")
-    if _harness_mode != "sdk":
-        try:
-            from agent.sdk_client import verify_harness_health
+    # CLI harness health check: verify claude binary is available at startup.
+    # All session types execute via claude -p — a missing binary is fatal.
+    try:
+        from agent.sdk_client import verify_harness_health
 
-            _healthy = await verify_harness_health(_harness_mode)
-            if _healthy:
-                logger.info(f"CLI harness '{_harness_mode}' health check passed")
-            else:
-                logger.warning(
-                    f"CLI harness '{_harness_mode}' health check failed — "
-                    f"falling back to sdk for dev sessions"
-                )
-                os.environ["DEV_SESSION_HARNESS"] = "sdk"
-        except Exception as e:
-            logger.warning(
-                f"CLI harness health check error: {e} — falling back to sdk for dev sessions"
+        _healthy = await verify_harness_health("claude-cli")
+        if _healthy:
+            logger.info("CLI harness 'claude-cli' health check passed")
+        else:
+            logger.critical(
+                "CLI harness 'claude' not found or unhealthy — "
+                "install with: npm install -g @anthropic-ai/claude-code\n"
+                "Worker cannot start without the harness binary."
             )
-            os.environ["DEV_SESSION_HARNESS"] = "sdk"
+            sys.exit(1)
+    except Exception as e:
+        logger.critical(
+            f"CLI harness health check error: {e} — "
+            "install with: npm install -g @anthropic-ai/claude-code\n"
+            "Worker cannot start without the harness binary."
+        )
+        sys.exit(1)
 
     if dry_run:
         logger.info(

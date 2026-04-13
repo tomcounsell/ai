@@ -4,9 +4,9 @@
 
 The AgentSession model uses a **session_type discriminator** (`SessionType` enum from `config/enums.py`) to distinguish between three session roles:
 
-- **PM Session** (`session_type=SessionType.PM`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns Dev sessions. For multi-issue requests, a parent PM session can also spawn child PM sessions (see [PM Session Child Fan-out](pm-session-child-fanout.md)).
-- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational Agent SDK session with Teammate persona. Handles informational queries directly without spawning Dev sessions.
-- **Dev session** (`session_type=SessionType.DEV`): Full-permission Agent SDK session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
+- **PM Session** (`session_type=SessionType.PM`): Read-only CLI harness session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns Dev sessions. For multi-issue requests, a parent PM session can also spawn child PM sessions (see [PM Session Child Fan-out](pm-session-child-fanout.md)).
+- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational CLI harness session with Teammate persona. Handles informational queries directly without spawning Dev sessions.
+- **Dev session** (`session_type=SessionType.DEV`): Full-permission CLI harness session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
 
 Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
 
@@ -104,7 +104,7 @@ resolve_persona(project, chat_title, is_dm)
                     v
                 PM assesses current stage
                     |-- Creates Dev session via valor_session CLI
-                    |-- Worker executes Dev session (SDK or CLI harness)
+                    |-- Worker executes Dev session (CLI harness)
                     |-- Worker steers PM with completion status
                     |-- PM verifies and repeats until pipeline complete
                     |
@@ -200,7 +200,7 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 
 1. **PM assesses current stage** -- uses read-only Bash commands (gh, grep) to check what exists (issue, plan, PR, test status, review state)
 2. **PM creates one Dev session** -- calls `python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "..."` with the stage assignment (stage name, issue/PR URLs, current state, acceptance criteria)
-3. **Worker executes the Dev session** -- routes to SDK or CLI harness based on `DEV_SESSION_HARNESS`; runs the appropriate skill (/do-plan, /do-build, /do-test, etc.)
+3. **Worker executes the Dev session** -- routes to CLI harness (`claude -p`); runs the appropriate skill (/do-plan, /do-build, /do-test, etc.)
 4. **Worker steers PM with result** -- `_handle_dev_session_completion()` classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers the parent PM session
 5. **PM verifies the result** -- receives steering message with completion status and stage outcome
 6. **PM repeats** -- assesses the next stage, creates another Dev session, until the pipeline is complete or human input is needed
@@ -260,9 +260,8 @@ AgentSession created (session_type="dev", parent_agent_session_id=<pm_id>)
 Worker picks up Dev session from Redis queue
     |
     v
-_execute_agent_session() routes by DEV_SESSION_HARNESS
-    |-- sdk (default): get_agent_response_sdk()
-    |-- claude-cli: get_response_via_harness()  <- CLI subprocess
+_execute_agent_session() routes all session types to CLI harness
+    |-- get_response_via_harness()  <- claude -p subprocess
     |
     v
 Dev session executes assigned work
@@ -393,7 +392,7 @@ Telegram message
     -> enqueue_agent_session(project_config=project_dict)
     -> AgentSession.project_config stores the dict in Redis
     -> _execute_agent_session() reads session.project_config
-    -> get_agent_response_sdk() receives project dict with all fields
+    -> build_harness_turn_input() receives project dict with all fields
 ```
 
 **Cross-repo detection**: `sdk_client.py` uses `project_key != "valor"` to determine whether a session targets a cross-repo project, replacing the previous `project_working_dir != AI_REPO_ROOT` string comparisons.

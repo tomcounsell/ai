@@ -56,7 +56,7 @@ async def subagent_stop_hook(
 
     Logs the agent_type, agent_id, and outcome summary for all subagents.
     Dev session stage tracking is handled by the worker post-completion handler
-    (_handle_dev_session_completion) when DEV_SESSION_HARNESS=claude-cli.
+    (_handle_dev_session_completion) in the worker post-completion handler.
     """
     agent_type = input_data.get("agent_type", "unknown")
     agent_id = input_data.get("agent_id", "unknown")

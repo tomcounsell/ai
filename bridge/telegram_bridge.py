@@ -85,7 +85,7 @@ if _sentry_dsn:
 from telethon import TelegramClient, events  # noqa: E402
 from telethon.errors import FloodWaitError  # noqa: E402
 
-from agent import get_agent_response_sdk  # noqa: F401, E402
+from agent import build_harness_turn_input  # noqa: F401, E402
 from bridge.context import (  # noqa: E402
     build_activity_context,  # noqa: F401
     build_context_prefix,  # noqa: F401

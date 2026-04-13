@@ -2903,7 +2903,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
     3. Periodic calendar heartbeats during long-running work
     4. Set reaction based on result
     """
-    from agent import BackgroundTask, BossMessenger, get_agent_response_sdk
+    from agent import BackgroundTask, BossMessenger
 
     working_dir = Path(session.working_dir)
     allowed_root = Path.home() / "src"
@@ -3372,56 +3372,40 @@ async def _execute_agent_session(session: AgentSession) -> None:
         except Exception as _steer_err:
             logger.debug(f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}")
 
-    # Route dev sessions to CLI harness when DEV_SESSION_HARNESS is set
-    _harness_mode = os.environ.get("DEV_SESSION_HARNESS", "sdk")
-    _use_cli_harness = _session_type == "dev" and _harness_mode != "sdk"
+    # All session types route to CLI harness (claude -p)
+    from agent.sdk_client import build_harness_turn_input, get_response_via_harness
 
-    if _use_cli_harness:
-        from agent.sdk_client import get_response_via_harness
+    project_key = project_config.get("_key", "valor") if project_config else "valor"
+    _classification = getattr(agent_session, "classification_type", None) if agent_session else None
 
-        logger.info(
-            f"{log_prefix} Routing dev session to CLI harness (DEV_SESSION_HARNESS={_harness_mode})"
+    _harness_input = await build_harness_turn_input(
+        message=_turn_input,
+        session_id=session.session_id,
+        sender_name=session.sender_name,
+        chat_title=session.chat_title,
+        project=project_config,
+        task_list_id=task_list_id,
+        session_type=_session_type,
+        sender_id=session.sender_id,
+        classification=_classification,
+        is_cross_repo=(project_key != "valor"),
+    )
+
+    logger.info(f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness")
+
+    async def _harness_send_cb(text: str) -> None:
+        await send_cb(session.chat_id, text, session.telegram_message_id, agent_session)
+
+    async def do_work() -> str:
+        return await get_response_via_harness(
+            message=_harness_input,
+            send_cb=_harness_send_cb,
+            working_dir=str(working_dir),
+            env={
+                "AGENT_SESSION_ID": session.agent_session_id or "",
+                "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
+            },
         )
-        if _harness_mode != "claude-cli":
-            logger.warning(
-                f"{log_prefix} Non-claude harness '{_harness_mode}' selected — "
-                f"the streaming parser is claude-cli-specific (stream-json format); "
-                f"output may not be captured correctly"
-            )
-
-        # Build a simple send_cb that delivers directly to chat
-        # (bypasses nudge loop for dev sessions).
-        # Note: this closure captures `session` and `agent_session` from the
-        # enclosing scope — safe here because there is only one harness
-        # invocation per call to this function (no loop re-binding risk).
-        async def _harness_send_cb(text: str) -> None:
-            await send_cb(session.chat_id, text, session.telegram_message_id, agent_session)
-
-        async def do_work() -> str:
-            return await get_response_via_harness(
-                message=_turn_input,
-                send_cb=_harness_send_cb,
-                working_dir=str(working_dir),
-                env={
-                    "AGENT_SESSION_ID": session.agent_session_id or "",
-                    "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
-                },
-            )
-    else:
-
-        async def do_work() -> str:
-            return await get_agent_response_sdk(
-                _turn_input,
-                session.session_id,
-                session.sender_name,
-                session.chat_title,
-                project_config,
-                session.chat_id,
-                session.sender_id,
-                task_list_id,
-                cid,
-                session.agent_session_id,
-            )
 
     task = BackgroundTask(messenger=messenger)
     await task.run(do_work(), send_result=True)
@@ -3463,8 +3447,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
     finally:
         heartbeat.cancel()
 
-    # Post-completion SDLC handling for dev sessions run via CLI harness (Phase 3)
-    if _use_cli_harness and not task.error:
+    # Post-completion SDLC handling for dev sessions (Phase 3)
+    if _session_type == "dev" and not task.error:
         await _handle_dev_session_completion(
             session=session,
             agent_session=agent_session,

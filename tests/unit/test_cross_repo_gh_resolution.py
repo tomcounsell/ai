@@ -6,7 +6,7 @@ unreliable approach of relying on LLM markdown instructions.
 """
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -46,8 +46,8 @@ class TestValorAgentGhRepo:
         assert "GH_REPO" not in options.env
 
 
-class TestGetAgentResponseSdkGhRepo:
-    """Test that get_agent_response_sdk() passes gh_repo to ValorAgent for cross-repo SDLC."""
+class TestBuildHarnessTurnInputGhRepo:
+    """Test that build_harness_turn_input() injects GITHUB header for cross-repo SDLC."""
 
     POPOTO_PROJECT = {
         "name": "Popoto",
@@ -69,166 +69,137 @@ class TestGetAgentResponseSdkGhRepo:
         "working_directory": str(Path.home() / "src/nogithub"),
     }
 
-    @pytest.fixture
-    def mock_agent_class(self):
-        """Patch ValorAgent to capture constructor args."""
-        with patch("agent.sdk_client.ValorAgent") as mock_cls:
-            mock_instance = MagicMock()
-            mock_instance.query = AsyncMock(return_value="test response")
-            mock_cls.return_value = mock_instance
-            yield mock_cls
-
-    @pytest.fixture
-    def mock_dependencies(self):
-        """Patch all dependencies of get_agent_response_sdk.
-
-        Since classification is now read from the session (not re-classified),
-        we mock AgentSession.query.filter to return a session with the
-        desired classification_type.
-        """
-        # Create a mock session that returns "sdlc" classification
-        mock_session = MagicMock()
-        mock_session.classification_type = "sdlc"
-        mock_session.status = "running"
-        mock_session.created_at = 1000.0
-
-        patches = {
-            "classify": patch(
-                "models.agent_session.AgentSession.query",
-                **{"filter.return_value": [mock_session]},
-            ),
-            "context": patch(
-                "bridge.context.build_context_prefix",
-                return_value="CONTEXT",
-            ),
-            "pm_prompt": patch(
-                "agent.sdk_client.load_pm_system_prompt",
-                return_value=None,
-            ),
-        }
-        started = {k: p.start() for k, p in patches.items()}
-        # Store mock_session for tests that need to change classification
-        started["_mock_session"] = mock_session
-        yield started
-        for p in patches.values():
-            p.stop()
+    @pytest.fixture(autouse=True)
+    def mock_context(self):
+        """Patch build_context_prefix for all tests."""
+        with patch("bridge.context.build_context_prefix", return_value="CONTEXT"):
+            yield
 
     @pytest.mark.asyncio
-    async def test_cross_repo_sdlc_sets_gh_repo(self, mock_agent_class, mock_dependencies):
-        """When classification=sdlc and project is cross-repo, gh_repo should be set."""
-        from agent.sdk_client import get_agent_response_sdk
+    async def test_cross_repo_sdlc_sets_github_header(self):
+        """When classification=sdlc and project is cross-repo, GITHUB header should be set."""
+        from agent.sdk_client import build_harness_turn_input
 
-        await get_agent_response_sdk(
+        result = await build_harness_turn_input(
             message="SDLC issue 193",
             session_id="test-session-1",
             sender_name="Tom",
             chat_title="Dev: Popoto",
             project=self.POPOTO_PROJECT,
-            chat_id="123",
+            task_list_id=None,
+            session_type="dev",
+            sender_id=123,
+            classification="sdlc",
+            is_cross_repo=True,
         )
 
-        call_kwargs = mock_agent_class.call_args[1]
-        assert call_kwargs["gh_repo"] == "tomcounsell/popoto"
+        assert "GITHUB: tomcounsell/popoto" in result
 
     @pytest.mark.asyncio
-    async def test_ai_repo_sdlc_does_not_set_gh_repo(self, mock_agent_class, mock_dependencies):
-        """When project is the ai repo itself, gh_repo should NOT be set."""
-        from agent.sdk_client import get_agent_response_sdk
+    async def test_ai_repo_sdlc_does_not_set_github_header(self):
+        """When project is the ai repo itself (not cross-repo), no GITHUB header."""
+        from agent.sdk_client import build_harness_turn_input
 
-        await get_agent_response_sdk(
+        result = await build_harness_turn_input(
             message="SDLC issue 42",
             session_id="test-session-2",
             sender_name="Valor",
             chat_title="Dev: Valor",
             project=self.AI_PROJECT,
-            chat_id="456",
+            task_list_id=None,
+            session_type="dev",
+            sender_id=456,
+            classification="sdlc",
+            is_cross_repo=False,
         )
 
-        call_kwargs = mock_agent_class.call_args[1]
-        assert call_kwargs["gh_repo"] is None
+        assert "GITHUB:" not in result
 
     @pytest.mark.asyncio
-    async def test_non_sdlc_classification_does_not_set_gh_repo(
-        self, mock_agent_class, mock_dependencies
-    ):
-        """When classification is not sdlc (e.g., question), gh_repo should NOT be set."""
-        mock_dependencies["_mock_session"].classification_type = "question"
+    async def test_non_sdlc_classification_does_not_set_github_header(self):
+        """When classification is not sdlc, no GITHUB header."""
+        from agent.sdk_client import build_harness_turn_input
 
-        from agent.sdk_client import get_agent_response_sdk
-
-        await get_agent_response_sdk(
+        result = await build_harness_turn_input(
             message="What is popoto?",
             session_id="test-session-3",
             sender_name="Tom",
             chat_title="Dev: Popoto",
             project=self.POPOTO_PROJECT,
-            chat_id="123",
+            task_list_id=None,
+            session_type="dev",
+            sender_id=123,
+            classification="question",
+            is_cross_repo=True,
         )
 
-        call_kwargs = mock_agent_class.call_args[1]
-        assert call_kwargs["gh_repo"] is None
+        assert "GITHUB:" not in result
 
     @pytest.mark.asyncio
-    async def test_pm_mode_does_not_set_gh_repo(self, mock_agent_class, mock_dependencies):
-        """PM mode projects should never set gh_repo regardless of classification."""
+    async def test_pm_mode_does_not_set_github_header(self):
+        """PM mode projects should never set GITHUB header."""
         pm_project = {
             **self.POPOTO_PROJECT,
             "mode": "pm",
         }
 
-        from agent.sdk_client import get_agent_response_sdk
+        from agent.sdk_client import build_harness_turn_input
 
-        await get_agent_response_sdk(
+        result = await build_harness_turn_input(
             message="SDLC issue 193",
             session_id="test-session-4",
             sender_name="Tom",
             chat_title="Dev: Popoto",
             project=pm_project,
-            chat_id="123",
+            task_list_id=None,
+            session_type="dev",
+            sender_id=123,
+            classification="sdlc",
+            is_cross_repo=True,
         )
 
-        call_kwargs = mock_agent_class.call_args[1]
-        assert call_kwargs["gh_repo"] is None
+        assert "GITHUB:" not in result
 
     @pytest.mark.asyncio
-    async def test_project_without_github_config_does_not_crash(
-        self, mock_agent_class, mock_dependencies
-    ):
-        """Projects without a github config key should not crash and should not set gh_repo."""
-        from agent.sdk_client import get_agent_response_sdk
+    async def test_project_without_github_config_does_not_crash(self):
+        """Projects without a github config key should not crash."""
+        from agent.sdk_client import build_harness_turn_input
 
-        await get_agent_response_sdk(
+        result = await build_harness_turn_input(
             message="SDLC issue 1",
             session_id="test-session-5",
             sender_name="Tom",
             chat_title="Dev: NoGithub",
             project=self.NO_GITHUB_PROJECT,
-            chat_id="789",
+            task_list_id=None,
+            session_type="dev",
+            sender_id=789,
+            classification="sdlc",
+            is_cross_repo=True,
         )
 
-        call_kwargs = mock_agent_class.call_args[1]
-        assert call_kwargs["gh_repo"] is None
+        # No github config means no GITHUB header, but should not crash
+        assert "GITHUB:" not in result
 
     @pytest.mark.asyncio
-    async def test_enriched_message_still_contains_github_line(
-        self, mock_agent_class, mock_dependencies
-    ):
-        """The enriched message text should still contain the GITHUB: line as a safety net."""
-        from agent.sdk_client import get_agent_response_sdk
+    async def test_enriched_message_contains_github_line(self):
+        """The enriched message should contain the GITHUB: line for cross-repo SDLC."""
+        from agent.sdk_client import build_harness_turn_input
 
-        await get_agent_response_sdk(
+        result = await build_harness_turn_input(
             message="SDLC issue 193",
             session_id="test-session-6",
             sender_name="Tom",
             chat_title="Dev: Popoto",
             project=self.POPOTO_PROJECT,
-            chat_id="123",
+            task_list_id=None,
+            session_type="dev",
+            sender_id=123,
+            classification="sdlc",
+            is_cross_repo=True,
         )
 
-        # The first positional arg to agent.query() is the enriched message
-        query_call = mock_agent_class.return_value.query
-        enriched_msg = query_call.call_args[0][0]
-        assert "GITHUB: tomcounsell/popoto" in enriched_msg
+        assert "GITHUB: tomcounsell/popoto" in result
 
 
 class TestSessionProjectConfig:

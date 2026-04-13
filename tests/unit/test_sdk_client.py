@@ -122,18 +122,50 @@ class TestTelegramEnvInjection:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not _sdk_available(), reason="Claude Agent SDK binary not available")
-async def test_get_agent_response_sdk():
-    """Test the bridge-compatible function (requires API key and claude CLI)."""
-    from agent.sdk_client import get_agent_response_sdk
+async def test_build_harness_turn_input_basic():
+    """Test build_harness_turn_input produces correct context headers."""
+    from unittest.mock import patch
 
-    response = await get_agent_response_sdk(
-        message="What is the capital of France? Reply with just the city name.",
-        session_id="test_session_123",
-        sender_name="Test User",
-        chat_title="Test Chat",
-        project=None,
-        chat_id="12345",
-    )
-    assert response is not None
-    assert "Paris" in response
+    with patch("bridge.context.build_context_prefix", return_value="PROJECT: test"):
+        from agent.sdk_client import build_harness_turn_input
+
+        result = await build_harness_turn_input(
+            message="Hello world",
+            session_id="test-session-123",
+            sender_name="Test User",
+            chat_title="Test Chat",
+            project={"name": "Test", "_key": "test"},
+            task_list_id="task-list-1",
+            session_type="dev",
+            sender_id=12345,
+        )
+
+    assert "PROJECT: test" in result
+    assert "FROM: Test User" in result
+    assert "SESSION_ID: test-session-123" in result
+    assert "TASK_SCOPE: task-list-1" in result
+    assert "SCOPE:" in result
+    assert "MESSAGE: Hello world" in result
+
+
+@pytest.mark.asyncio
+async def test_build_harness_turn_input_none_sender():
+    """build_harness_turn_input with sender_name=None must not produce FROM: None."""
+    from unittest.mock import patch
+
+    with patch("bridge.context.build_context_prefix", return_value="CONTEXT"):
+        from agent.sdk_client import build_harness_turn_input
+
+        result = await build_harness_turn_input(
+            message="Hello",
+            session_id="test-session",
+            sender_name=None,
+            chat_title=None,
+            project=None,
+            task_list_id=None,
+            session_type="teammate",
+            sender_id=None,
+        )
+
+    assert "FROM: None" not in result
+    assert "FROM:" not in result

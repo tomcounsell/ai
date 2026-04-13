@@ -30,8 +30,8 @@ from .completion import (
 from .messenger import BackgroundTask, BossMessenger
 from .sdk_client import (
     ValorAgent,
+    build_harness_turn_input,
     get_active_client,
-    get_agent_response_sdk,
     get_all_active_sessions,
     get_response_via_harness,
     verify_harness_health,
@@ -46,7 +46,7 @@ from .steering import (
 
 __all__ = [
     "ValorAgent",
-    "get_agent_response_sdk",
+    "build_harness_turn_input",
     "get_active_client",
     "get_all_active_sessions",
     "get_response_via_harness",

@@ -11,7 +11,7 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -68,113 +68,96 @@ class TestLoadPmSystemPrompt:
 
 
 # ---------------------------------------------------------------------------
-# PM mode in get_agent_response_sdk() — classification bypass
+# PM mode in build_harness_turn_input() — context enrichment
 # ---------------------------------------------------------------------------
 
 
-class TestPmModeClassificationBypass:
-    """Tests verifying PM mode skips classify_work_request()."""
+class TestPmModeContextEnrichment:
+    """Tests verifying PM mode context enrichment via build_harness_turn_input()."""
 
     @pytest.mark.asyncio
-    async def test_pm_mode_skips_classification(self):
-        """PM mode project must NOT call classify_work_request()."""
+    async def test_pm_mode_produces_context_headers(self):
+        """PM mode project produces correct PROJECT context headers."""
         pm_project = {
             "name": "PM: Cuttlefish",
             "mode": "pm",
             "working_directory": "/tmp/test-vault/Cuttlefish",
+            "_key": "cuttlefish",
         }
 
-        with (
-            patch("agent.sdk_client.ValorAgent") as mock_agent_cls,
-            patch("bridge.routing.classify_work_request") as mock_classify,
-            patch("bridge.context.build_context_prefix", return_value=""),
-            patch("agent.sdk_client.load_pm_system_prompt", return_value="PM prompt"),
-        ):
-            mock_agent_instance = MagicMock()
-            mock_agent_instance.query = AsyncMock(return_value="response")
-            mock_agent_cls.return_value = mock_agent_instance
+        with patch("bridge.context.build_context_prefix", return_value="PROJECT: PM: Cuttlefish"):
+            from agent.sdk_client import build_harness_turn_input
 
-            from agent.sdk_client import get_agent_response_sdk
-
-            await get_agent_response_sdk(
+            result = await build_harness_turn_input(
                 message="What's the status of the project?",
                 session_id="test-session",
                 sender_name="Test",
                 chat_title="PM: Cuttlefish",
                 project=pm_project,
+                task_list_id=None,
+                session_type="pm",
+                sender_id=123,
             )
 
-            # classify_work_request should NOT have been called for PM mode
-            mock_classify.assert_not_called()
+        assert "PROJECT: PM: Cuttlefish" in result
+        assert "FROM: Test" in result
+        assert "SESSION_ID: test-session" in result
 
     @pytest.mark.asyncio
-    async def test_dev_mode_reads_classification_from_session(self):
-        """Dev mode project reads classification from AgentSession, not classify_work_request()."""
+    async def test_dev_mode_produces_context_headers(self):
+        """Dev mode project produces correct context headers."""
         dev_project = {
             "name": "Cuttlefish",
             "working_directory": "/tmp/test-vault/Cuttlefish",
+            "_key": "cuttlefish",
         }
 
-        with (
-            patch("agent.sdk_client.ValorAgent") as mock_agent_cls,
-            patch("bridge.context.build_context_prefix", return_value=""),
-        ):
-            mock_agent_instance = MagicMock()
-            mock_agent_instance.query = AsyncMock(return_value="response")
-            mock_agent_cls.return_value = mock_agent_instance
+        with patch("bridge.context.build_context_prefix", return_value="PROJECT: Cuttlefish"):
+            from agent.sdk_client import build_harness_turn_input
 
-            from agent.sdk_client import get_agent_response_sdk
-
-            # Dev mode should NOT raise and should fall back to "question" classification
-            # when no AgentSession exists for the session_id
-            result = await get_agent_response_sdk(
+            result = await build_harness_turn_input(
                 message="What's the status?",
-                session_id="test-session-nonexistent",
+                session_id="test-session",
                 sender_name="Test",
                 chat_title="Dev: Cuttlefish",
                 project=dev_project,
+                task_list_id=None,
+                session_type="dev",
+                sender_id=123,
             )
 
-            # Should get a response (classification defaults to "question")
-            assert result is not None
+        assert "PROJECT: Cuttlefish" in result
+        assert "SESSION_ID: test-session" in result
 
     @pytest.mark.asyncio
-    async def test_pm_mode_uses_pm_system_prompt(self):
-        """PM mode should use load_pm_system_prompt() for agent."""
+    async def test_pm_mode_no_github_header(self):
+        """PM mode projects should never get GITHUB header even if cross-repo."""
         pm_project = {
             "name": "PM: Cuttlefish",
             "mode": "pm",
             "working_directory": "/tmp/test-vault/Cuttlefish",
+            "_key": "cuttlefish",
+            "github": {"org": "tomcounsell", "repo": "cuttlefish"},
         }
 
-        with (
-            patch("agent.sdk_client.ValorAgent") as mock_agent_cls,
-            patch("bridge.context.build_context_prefix", return_value=""),
-            patch(
-                "agent.sdk_client.load_pm_system_prompt",
-                return_value="PM system prompt",
-            ) as mock_pm_prompt,
-        ):
-            mock_agent_instance = MagicMock()
-            mock_agent_instance.query = AsyncMock(return_value="response")
-            mock_agent_cls.return_value = mock_agent_instance
+        with patch("bridge.context.build_context_prefix", return_value="CONTEXT"):
+            from agent.sdk_client import build_harness_turn_input
 
-            from agent.sdk_client import get_agent_response_sdk
-
-            await get_agent_response_sdk(
-                message="Hello",
+            result = await build_harness_turn_input(
+                message="SDLC issue 193",
                 session_id="test-session",
                 sender_name="Test",
                 chat_title="PM: Cuttlefish",
                 project=pm_project,
+                task_list_id=None,
+                session_type="pm",
+                sender_id=123,
+                classification="sdlc",
+                is_cross_repo=True,
             )
 
-            # load_pm_system_prompt should have been called
-            mock_pm_prompt.assert_called_once()
-
-            # ValorAgent should have received the PM system prompt
-            call_kwargs = mock_agent_cls.call_args
-            assert call_kwargs.kwargs.get("system_prompt") == "PM system prompt"
+        # PM mode should NOT inject GITHUB header
+        assert "GITHUB:" not in result
 
 
 # ---------------------------------------------------------------------------

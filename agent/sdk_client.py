@@ -1683,6 +1683,81 @@ async def verify_harness_health(harness_name: str) -> bool:
         return False
 
 
+async def build_harness_turn_input(
+    message: str,
+    session_id: str,
+    sender_name: str | None,
+    chat_title: str | None,
+    project: dict | None,
+    task_list_id: str | None,
+    session_type: str | None,
+    sender_id: int | None,
+    classification: str | None = None,
+    is_cross_repo: bool = False,
+) -> str:
+    """Build context-enriched message for CLI harness execution.
+
+    Extracts the message enrichment logic that was previously inside
+    get_agent_response_sdk() into a standalone function. Produces a
+    context-prefixed message with PROJECT, FROM, SESSION_ID, TASK_SCOPE,
+    and SCOPE headers suitable for any session type.
+
+    Args:
+        message: Raw message text (already media-enriched by process_session).
+        session_id: Session ID for conversation continuity.
+        sender_name: Name of the sender (omitted from output if None).
+        chat_title: Chat title for logging context.
+        project: Project configuration dict from projects.json.
+        task_list_id: Optional task list ID for sub-agent scoping.
+        session_type: Session type (dev, pm, teammate).
+        sender_id: Telegram user ID for permission checking.
+        classification: Classification type from bridge (e.g., "sdlc", "question").
+        is_cross_repo: Whether this is a cross-repo project (project_key != "valor").
+
+    Returns:
+        Enriched message string with context headers prepended.
+    """
+    from bridge.context import build_context_prefix
+
+    enriched = build_context_prefix(project, session_type, sender_id)
+
+    if sender_name:
+        enriched += f"\n\nFROM: {sender_name}"
+        if chat_title:
+            enriched += f" in {chat_title}"
+    elif chat_title:
+        enriched += f"\n\nin {chat_title}"
+
+    if session_id:
+        enriched += f"\nSESSION_ID: {session_id}"
+    if task_list_id:
+        enriched += f"\nTASK_SCOPE: {task_list_id}"
+
+    enriched += (
+        "\nSCOPE: This session is scoped to the message below from this sender. "
+        "When reporting completion or summarizing work, only reference tasks and "
+        "work initiated in this specific session. Do not include work, PRs, or "
+        "requests from other sessions, other senders, or prior conversation threads."
+    )
+
+    # Cross-repo SDLC: inject target repo context
+    project_mode = project.get("mode", "dev") if project else "dev"
+    if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
+        project_name = project.get("name", "Unknown") if project else "Unknown"
+        project_working_dir = project.get("working_directory", "") if project else ""
+        github_config = project.get("github", {}) if project else {}
+        github_org = github_config.get("org", "")
+        github_repo = github_config.get("repo", "")
+        enriched += (
+            f"\nWORK REQUEST for project {project_name}.\nTARGET REPO: {project_working_dir}"
+        )
+        if github_org and github_repo:
+            enriched += f"\nGITHUB: {github_org}/{github_repo}"
+
+    enriched += f"\nMESSAGE: {message}"
+    return enriched
+
+
 async def get_agent_response_sdk(
     message: str,
     session_id: str,
@@ -1925,7 +2000,9 @@ async def get_agent_response_sdk(
                 )
                 if _intent_result.is_teammate:
                     _teammate_mode = True
-                    logger.info(f"[{request_id}] Routing to Teammate mode (direct response)")
+                    logger.info(
+                        f"[{request_id}] Haiku reclassified PM→teammate: session_id={session_id}"
+                    )
                 elif _intent_result.is_direct_action:
                     _collaboration_mode = True
                     logger.info(

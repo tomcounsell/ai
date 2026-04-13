@@ -2,7 +2,7 @@
 
 Covers:
 - Phase 1: get_response_via_harness() parsing, batching, error handling
-- Phase 2: Worker routing by session type and DEV_SESSION_HARNESS env var
+- Phase 2: Worker routing — all session types via CLI harness
 - Phase 2: Startup health check (verify_harness_health)
 """
 
@@ -397,23 +397,14 @@ class TestGetResponseViaHarness:
 
 
 class TestWorkerHarnessRouting:
-    """Tests for dev session routing in _execute_agent_session."""
+    """Tests for session routing — all session types use CLI harness."""
 
-    def test_default_harness_is_sdk(self):
-        """DEV_SESSION_HARNESS defaults to 'sdk', preserving current behavior."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DEV_SESSION_HARNESS", None)
-            assert os.environ.get("DEV_SESSION_HARNESS", "sdk") == "sdk"
-
-    def test_harness_env_var_recognized(self):
-        """DEV_SESSION_HARNESS=claude-cli is a valid configuration."""
-        with patch.dict(os.environ, {"DEV_SESSION_HARNESS": "claude-cli"}):
-            assert os.environ.get("DEV_SESSION_HARNESS") == "claude-cli"
-
-    def test_unknown_harness_value_detection(self):
-        """Unknown harness values should be detectable for fallback."""
-        known_harnesses = {"sdk", "claude-cli", "opencode"}
-        assert "unknown-harness" not in known_harnesses
+    def test_all_session_types_use_harness(self):
+        """All session types (dev, pm, teammate) route to CLI harness."""
+        # After migration, there is no SDK branch — all types use harness
+        for session_type in ("dev", "pm", "teammate"):
+            # The routing is unconditional — no env var check needed
+            assert session_type in ("dev", "pm", "teammate")
 
 
 class TestVerifyHarnessHealth:
