@@ -22,6 +22,16 @@ import sys
 import time
 from pathlib import Path
 
+# Load .env before any config imports — needed when launched via launchd
+# where bash source is blocked by iCloud macl restrictions on Desktop files.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).parent.parent / ".env")
+    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+except ImportError:
+    pass
+
 logger = logging.getLogger("worker")
 
 # Set to True when SIGTERM is received; causes main() to exit with code 1

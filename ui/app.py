@@ -358,9 +358,9 @@ def create_app() -> FastAPI:
         """HTMX partial: health indicator badges."""
         bridge = _get_bridge_health()
         if bridge["status"] in ("ok", "running"):
-            bridge_label = f"TG{_format_uptime(bridge['age_s'])}"
+            bridge_label = f"Telegram{_format_uptime(bridge['age_s'])}"
         else:
-            bridge_label = "TG"
+            bridge_label = "Telegram"
 
         worker = _get_worker_health()
         if worker["status"] in ("ok", "running"):
@@ -375,8 +375,7 @@ def create_app() -> FastAPI:
             email_label = "email"
 
         return HTMLResponse(
-            f'<button class="stats-toggle" onclick="toggleStats()">Stats</button>'
-            f'<span class="health-label">Bridge</span>'
+            f'<span class="health-label">Bridges</span>'
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
             f'<span class="badge badge-{email["status"]}">{email_label}</span>'
             f'<span class="health-label">Services</span>'

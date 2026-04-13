@@ -193,9 +193,11 @@ def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> 
     Returns:
         True if the reflection should be enqueued.
     """
-    if state.ran_at is None:
+    # Guard against Popoto returning the Field descriptor when value is None
+    ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
+    if ran_at is None:
         return True
-    return (state.ran_at + entry.interval) <= now
+    return (ran_at + entry.interval) <= now
 
 
 def is_reflection_running(state: Reflection) -> bool:

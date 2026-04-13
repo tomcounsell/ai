@@ -56,9 +56,13 @@ def get_all_reflections() -> list[dict]:
         interval = config.get("interval", 0)
 
         # Compute next_due from ran_at + interval (not stored as a field)
+        # Guard against Popoto returning the Field descriptor when value is None
+        ran_at = state.ran_at if state else None
+        if not isinstance(ran_at, (int, float)):
+            ran_at = None
         next_due = None
-        if state and state.ran_at and interval:
-            next_due = state.ran_at + interval
+        if ran_at and interval:
+            next_due = ran_at + interval
 
         due_in_seconds = (next_due - now) if next_due else None
         reflections.append(
@@ -69,7 +73,7 @@ def get_all_reflections() -> list[dict]:
                 "priority": config.get("priority", "normal"),
                 "enabled": config.get("enabled", True),
                 "execution_type": config.get("execution_type", "unknown"),
-                "last_run": state.ran_at if state else None,
+                "last_run": ran_at,
                 "next_due": next_due,
                 "due_in_seconds": due_in_seconds,
                 "overdue": due_in_seconds < 0 if due_in_seconds is not None else False,

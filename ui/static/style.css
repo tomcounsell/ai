@@ -775,6 +775,7 @@ a:hover {
     font-size: 0.75rem;
     color: var(--text-secondary, #888);
     margin-right: 2px;
+    margin-left: 8px;
 }
 
 /* Page title (no nav) */
