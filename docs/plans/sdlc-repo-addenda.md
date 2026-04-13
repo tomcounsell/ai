@@ -28,7 +28,7 @@ The global SDLC skills (`do-plan`, `do-build`, `do-test`, etc.) are intentionall
 - `~/.claude/skills/do-plan/SKILL.md` — exists, no addendum check present — confirmed
 - `scripts/update/run.py` — exists, modular structure, imports from `scripts/update/` — confirmed
 - `scripts/update/migrations.py` — exists, idempotent migration pattern with `data/migrations_completed.json` — confirmed
-- `scripts/reflections.py` — exists, daily maintenance script with 18 units — confirmed
+- `scripts/reflections.py` — exists, daily maintenance script with 17 units — confirmed
 - `.claude/hooks/validators/validate_documentation_section.py` — exists — confirmed
 
 **Cited sibling issues/PRs re-checked:**

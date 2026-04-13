@@ -110,9 +110,9 @@ When the watchdog detects that the bridge process is not running (via `pgrep`), 
 
 The daily maintenance pipeline runs from `scripts/reflections.py`. It is invoked manually or via launchd (not via the reflection scheduler -- the `daily-maintenance` registry entry was removed in PR #664). The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable -- a crash in one unit does not block the rest.
 
-The pipeline has 16 units: 13 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
+The pipeline has 17 units: 14 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
 
-### 16-Unit Pipeline
+### 17-Unit Pipeline
 
 **Independent units** (each checkpointed individually):
 
@@ -131,14 +131,15 @@ The pipeline has 16 units: 13 independent items and 3 merged pipelines. Complete
 | 11 | `principal_staleness` | Principal Context Staleness | Checks age of PRINCIPAL.md and flags if stale | AI repo only | Non-blocking |
 | 12 | `disk_space_check` | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
 | 13 | `pr_review_audit` | PR Review Audit | Scans merged PRs for unaddressed review findings from do-pr-review, files GitHub issues with severity labels | Per-project | Non-blocking, requires `gh` auth |
+| 14 | `analytics_rollup` | Analytics Daily Rollup | Aggregates daily metrics and purges stale analytics data | AI repo only | Non-blocking |
 
 **Merged pipelines** (sub-steps run internally, one checkpoint for the whole group):
 
 | # | Key | Name | Sub-steps | Description |
 |---|-----|------|-----------|-------------|
-| 14 | `session_intelligence` | Session Intelligence | session_analysis → llm_reflection → auto_fix_bugs | Analyzes sessions, reflects via Haiku, files high-confidence bug issues |
-| 15 | `behavioral_learning` | Behavioral Learning | episode_cycle_close → pattern_crystallization | Closes completed SDLC episodes and crystallizes recurring patterns |
-| 16 | `daily_report_and_notify` | Daily Report & Notify | produce_report → create_github_issue | Writes report, posts GitHub issues, sends Telegram summary (must be last) |
+| 15 | `session_intelligence` | Session Intelligence | session_analysis → llm_reflection → auto_fix_bugs | Analyzes sessions, reflects via Haiku, files high-confidence bug issues |
+| 16 | `behavioral_learning` | Behavioral Learning | episode_cycle_close → pattern_crystallization | Closes completed SDLC episodes and crystallizes recurring patterns |
+| 17 | `daily_report_and_notify` | Daily Report & Notify | produce_report → create_github_issue | Writes report, posts GitHub issues, sends Telegram summary (must be last) |
 
 **Removed:** `step_check_sentry` — was a permanent no-op (Sentry MCP never available in standalone mode). Deleted entirely.
 
@@ -472,7 +473,7 @@ After the daily maintenance pipeline completes, `main()` calls `agent.session_lo
 | `config/reflections.yaml` | Declarative registry of all reflections |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflections.py` | Core models: ReflectionRun (daily pipeline state), ReflectionIgnore (auto-fix suppression), PRReviewAudit (PR review dedup) |
-| `scripts/reflections.py` | Daily maintenance 16-unit runner |
+| `scripts/reflections.py` | Daily maintenance 17-unit runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
 | `scripts/install_reflections.sh` | launchd installation script (kept for manual invocation) |
 | `com.valor.reflections.plist` | launchd schedule definition (kept for manual invocation) |
