@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Approved
 type: enhancement
 appetite: Small
 owner: Valor
@@ -317,8 +317,15 @@ No agent integration required -- this is a persona document change. The PM sessi
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| Severity | Critic(s) | Finding | Addressed |
+|----------|-----------|---------|-----------|
+| CONCERN | Skeptic, Operator, Archaeologist | No compliance/observability mechanism — plan assumes LLMs follow templates but provides no self-check or detection | Add Pre-Dispatch Self-Check subsection to persona; add post-merge smoke test to Success Criteria |
+| CONCERN | Adversary | Calibration example omits `--model opus` from invocation block, defeating one of the six stated fixes | Expand calibration example invocation to show `--model opus` with comment |
+| CONCERN | Adversary, Archaeologist | Freeform fields allow semantic emptiness (PM writes "See issue" or "TBD") — structurally compliant but contextually hollow | Add inline ❌/✅ anti-patterns within each Required Field description |
+| CONCERN | Simplifier | Calibration example Key Files section lists `tools/valor_session.py` (out of scope per No-Gos) and `PR #909` (not a file) | Remove out-of-scope and non-file entries from example Key Files list |
+| CONCERN | Operator | Verification greps are not section-scoped — a match in calibration example or leftover fragment false-positives the check | Rewrite all verification commands with section-scoped sed/grep pattern |
+| NIT | Skeptic | Calibration example uses this plan's own issue — hypothetical ideal, not real trace | Mark as "(DRAFT - replace with first real post-merge briefing)" |
+| NIT | Simplifier | "What NOT to Include" section adds cognitive load — exclusions are implied by Required Fields | Consider removing or collapsing into a single sentence |
 
 ---
 
