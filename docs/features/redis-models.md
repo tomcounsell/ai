@@ -162,7 +162,7 @@ All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)`:
 | `completed_at` | DatetimeField(null=True) | Set on terminal status |
 | `scheduled_at` | DatetimeField(null=True) | Renamed from `scheduled_after` |
 
-Float timestamps are auto-converted to datetime via `__setattr__`. Note: Popoto `DatetimeField` returns naive datetimes from Redis (no timezone info). Code that compares with `time.time()` must assume UTC for naive datetimes.
+Timestamps are auto-converted to UTC-aware `datetime` via `AgentSession.__setattr__`: `int | float` values are treated as Unix timestamps; `str` values are parsed as ISO 8601 (falling back to `None` on failure); any other non-`datetime`, non-`None` type is reset to `None`. This guards against Popoto's `is_valid()` silently aborting `save()` when a field holds a corrupt value (see issue #929). Note: Popoto `DatetimeField` returns naive datetimes from Redis (no timezone info) for other models; `AgentSession` normalizes all datetime fields to UTC-aware on load.
 
 ### AgentSession Consolidated DictFields
 
