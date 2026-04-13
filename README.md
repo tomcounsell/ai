@@ -34,7 +34,7 @@ Valor ships real features through a structured pipeline — a directed cyclic gr
 - **Hard patches resume the builder.** When a Patch needs the original builder's accumulated context, PM resumes the Build session's Claude Code transcript instead of starting fresh — the dashed edge in the diagram.
 - **PM orchestrates, Dev executes.** A read-only PM session steers the pipeline stage-by-stage; each stage spawns a full-permission Dev session that runs one skill and reports back.
 
-The pipeline graph is defined in [`bridge/pipeline_graph.py`](bridge/pipeline_graph.py). See [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md) for the ground truth on stage definitions and [`docs/features/pipeline-graph.md`](docs/features/pipeline-graph.md) for the feature doc.
+The pipeline graph is defined in [`agent/pipeline_graph.py`](agent/pipeline_graph.py). See [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md) for the ground truth on stage definitions and [`docs/features/pipeline-graph.md`](docs/features/pipeline-graph.md) for the feature doc.
 
 ## Subsystems
 
