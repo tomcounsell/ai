@@ -246,3 +246,70 @@ class TestProcessInboundEmail:
             f"Expected session_id={original_session_id!r} from thread continuation, "
             f"got {called_session_id!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: health timestamp in _email_inbox_loop
+# ---------------------------------------------------------------------------
+
+
+class _BreakLoopError(Exception):
+    """Sentinel exception to break out of the infinite polling loop after one iteration."""
+
+
+class TestHealthTimestamp:
+    """_email_inbox_loop() writes email:last_poll_ts to Redis on each poll."""
+
+    @pytest.mark.asyncio
+    async def test_health_timestamp_written_after_poll(self):
+        """After one successful poll iteration, email:last_poll_ts is set in Redis."""
+        from bridge.email_bridge import REDIS_LAST_POLL_KEY, _email_inbox_loop
+
+        test_r = _test_redis()
+        # Ensure the key does not exist before the test
+        test_r.delete(REDIS_LAST_POLL_KEY)
+
+        imap_config = {
+            "host": "imap.example.com",
+            "port": 993,
+            "user": "test@example.com",
+            "password": "secret",
+            "ssl": True,
+        }
+
+        call_count = 0
+
+        async def _break_after_first(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                raise _BreakLoopError("break after first iteration")
+
+        try:
+            with patch(
+                "bridge.email_bridge._poll_imap",
+                new_callable=AsyncMock,
+                return_value=[],
+            ):
+                with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                    with patch(
+                        "bridge.email_bridge.asyncio.sleep",
+                        side_effect=_break_after_first,
+                    ):
+                        await _email_inbox_loop(imap_config, config={})
+        except _BreakLoopError:
+            pass
+
+        # Verify health timestamp was written
+        ts_value = test_r.get(REDIS_LAST_POLL_KEY)
+        assert ts_value is not None, (
+            f"Expected {REDIS_LAST_POLL_KEY} to be set in Redis after one poll"
+        )
+        # Verify it's a valid float timestamp
+        ts_float = float(ts_value)
+        assert ts_float > 0
+        assert ts_float <= time.time() + 1  # not in the future
+
+        # Cleanup
+        test_r.delete(REDIS_LAST_POLL_KEY)
+        test_r.close()

@@ -12,9 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bridge.email_bridge import (
+    IMAP_MAX_BATCH,
     EmailOutputHandler,
     _decode_header_value,
     _extract_address,
+    _poll_imap,
     parse_email_message,
 )
 
@@ -393,3 +395,109 @@ class TestEmailOutputHandlerSend:
         call_kwargs = mock_dl.call_args.kwargs
         assert call_kwargs["session_id"] == "test-session-dl"
         assert call_kwargs["recipient"] == "recipient@example.com"
+
+
+# ---------------------------------------------------------------------------
+# _poll_imap() batch cap
+# ---------------------------------------------------------------------------
+
+
+class TestPollImapBatchCap:
+    """_poll_imap() caps fetches to IMAP_MAX_BATCH per poll cycle."""
+
+    @pytest.mark.asyncio
+    async def test_batch_cap_limits_fetched_messages(self):
+        """When IMAP returns more than IMAP_MAX_BATCH unseen messages, only
+        IMAP_MAX_BATCH are fetched (store + fetch) and returned."""
+        total_unseen = IMAP_MAX_BATCH + 10
+        # Build fake message IDs as bytes (IMAP returns space-separated byte IDs)
+        fake_msg_ids = b" ".join(str(i).encode() for i in range(1, total_unseen + 1))
+
+        mock_conn = MagicMock()
+        mock_conn.login.return_value = ("OK", [])
+        mock_conn.select.return_value = ("OK", [])
+        mock_conn.search.return_value = ("OK", [fake_msg_ids])
+        mock_conn.store.return_value = ("OK", [])
+        # conn.fetch returns a tuple with raw bytes for each message
+        mock_conn.fetch.return_value = ("OK", [(b"1", b"raw email bytes")])
+
+        imap_config = {
+            "host": "imap.example.com",
+            "port": 993,
+            "user": "test@example.com",
+            "password": "secret",
+            "ssl": True,
+        }
+
+        with patch("bridge.email_bridge.imaplib.IMAP4_SSL", return_value=mock_conn):
+            # Patch asyncio.to_thread to call the sync function directly
+            with patch(
+                "bridge.email_bridge.asyncio.to_thread",
+                side_effect=lambda fn: fn(),
+            ):
+                result = await _poll_imap(imap_config)
+
+        assert mock_conn.store.call_count == IMAP_MAX_BATCH
+        assert mock_conn.fetch.call_count == IMAP_MAX_BATCH
+        assert len(result) == IMAP_MAX_BATCH
+
+    @pytest.mark.asyncio
+    async def test_batch_cap_exact_boundary(self):
+        """When IMAP returns exactly IMAP_MAX_BATCH messages, all are fetched
+        (no truncation)."""
+        fake_msg_ids = b" ".join(str(i).encode() for i in range(1, IMAP_MAX_BATCH + 1))
+
+        mock_conn = MagicMock()
+        mock_conn.login.return_value = ("OK", [])
+        mock_conn.select.return_value = ("OK", [])
+        mock_conn.search.return_value = ("OK", [fake_msg_ids])
+        mock_conn.store.return_value = ("OK", [])
+        mock_conn.fetch.return_value = ("OK", [(b"1", b"raw email bytes")])
+
+        imap_config = {
+            "host": "imap.example.com",
+            "port": 993,
+            "user": "test@example.com",
+            "password": "secret",
+            "ssl": True,
+        }
+
+        with patch("bridge.email_bridge.imaplib.IMAP4_SSL", return_value=mock_conn):
+            with patch(
+                "bridge.email_bridge.asyncio.to_thread",
+                side_effect=lambda fn: fn(),
+            ):
+                result = await _poll_imap(imap_config)
+
+        assert mock_conn.store.call_count == IMAP_MAX_BATCH
+        assert mock_conn.fetch.call_count == IMAP_MAX_BATCH
+        assert len(result) == IMAP_MAX_BATCH
+
+
+# ---------------------------------------------------------------------------
+# main() env loading
+# ---------------------------------------------------------------------------
+
+
+class TestMainEnvLoading:
+    """main() loads .env files via load_dotenv before starting the async loop."""
+
+    def test_main_calls_load_dotenv_with_correct_paths(self):
+        """main() calls load_dotenv twice: repo .env and vault .env."""
+        with patch("dotenv.load_dotenv") as mock_load:
+            with patch("bridge.email_bridge.asyncio.run"):
+                from bridge.email_bridge import main
+
+                main()
+
+        assert mock_load.call_count == 2
+
+        # First call: repo .env (relative to email_bridge.py's parent.parent)
+        first_path = mock_load.call_args_list[0][0][0]
+        assert str(first_path).endswith(".env")
+        assert "Desktop" not in str(first_path)
+
+        # Second call: vault .env
+        second_path = mock_load.call_args_list[1][0][0]
+        assert "Desktop" in str(second_path) and "Valor" in str(second_path)
+        assert str(second_path).endswith(".env")
