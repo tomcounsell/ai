@@ -759,8 +759,6 @@ def _infer_task_type_from_message(message: str, classification) -> str | None:
         return "sdlc-plan"
 
     # Classification-based inference
-    from config.enums import ClassificationType
-
     if classification == ClassificationType.BUG:
         return "bug-fix"
 
