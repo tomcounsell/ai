@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Planning
 type: bug
 appetite: Medium
 owner: valorengels
@@ -110,42 +110,46 @@ No prerequisites — this work has no external dependencies. All changes are wit
 
 ### Key Elements
 
-- **Fix 1 — PM persona: `wait-for-children` after every dev dispatch**: Extend the PM persona instructions so the PM calls `wait-for-children` after dispatching ANY dev session (not just multi-issue fan-out). This keeps the PM process alive until the steering message arrives.
-- **Fix 2 — Continuation PM fallback in `_handle_dev_session_completion`**: When `steer_session()` returns `success: False` because the parent is terminal, create a continuation PM session with the stage result and issue context. This is the safety net for when Fix 1 fails (e.g., PM exits due to token limit, crash, or kill).
+- **Fix 1 (primary) — Continuation PM in `_handle_dev_session_completion`**: When `steer_session()` returns `success: False` because the parent is terminal, create a continuation PM session with the stage result and issue context. This is the guaranteed infrastructure-level mechanism that ensures pipeline progression regardless of PM lifecycle.
+- **Fix 2 (optimization) — PM persona: `wait-for-children` after every dev dispatch**: Best-effort persona instruction. Extend PM persona so it calls `wait-for-children` after dispatching ANY dev session. If the PM LLM complies and keeps the turn loop active, steering is faster (avoids creating a continuation PM). But `wait-for-children` returns immediately — it does NOT block the PM process. This is an optimization hint, not a guarantee.
 - **Fix 3 — PM persona: single-issue scoping**: When a PM session's message references a specific issue number, the PM must only assess and advance that issue — not any other issue it discovers via `gh issue list`.
 
 ### Flow
 
-**Normal path (Fix 1):**
-PM receives "issue 934" → PM dispatches dev session → PM calls `wait-for-children` → PM stays alive → Dev completes → `_handle_dev_session_completion` steers PM → PM receives steering → PM dispatches next stage
+**Primary path (Fix 1 — continuation PM):**
+PM dispatches dev session → PM exits (the common case) → Dev completes → `_handle_dev_session_completion` tries to steer PM → Steer fails (terminal) → Completion handler creates continuation PM with stage result and issue context → Continuation PM resumes pipeline
 
-**Fallback path (Fix 2):**
-PM exits early (token limit, crash) → Dev completes → `_handle_dev_session_completion` tries to steer PM → Steer fails (terminal) → Completion handler creates continuation PM → Continuation PM reads stage result and issue context → Pipeline resumes
+**Optimized path (Fix 2 — PM stays alive):**
+PM dispatches dev session → PM calls `wait-for-children` and keeps turn loop active (polling) → Dev completes → `_handle_dev_session_completion` steers PM → PM receives steering → PM dispatches next stage (no continuation PM needed)
 
 ### Technical Approach
 
-**Fix 1 — PM persona update:**
-
-Update PM persona instructions in both:
-- `~/Desktop/Valor/personas/project-manager.md` (production, private)
-- `config/personas/project-manager.md` (repo template)
-- `agent/sdk_client.py` (message enrichment for PM sessions)
-
-Add a rule: after dispatching any dev session via `valor_session create --role dev`, immediately call:
-```bash
-python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"
-```
-
-This transitions the PM to `waiting_for_children` status. The existing `_finalize_parent_sync()` hook in `models/session_lifecycle.py` will auto-transition the PM back to `completed` when the dev session finishes, but critically: the PM process stays alive (blocked on the `wait-for-children` call) so it can receive the steering message.
-
-**Fix 2 — Continuation PM in `_handle_dev_session_completion`:**
+**Fix 1 (primary) — Continuation PM in `_handle_dev_session_completion`:**
 
 In `agent/agent_session_queue.py`, after the `steer_session()` call (line 2889), check the return value:
 
 ```python
 steer_result = steer_session(parent.session_id, steering_msg)
 if steer_result.get("success"):
-    logger.info(f"[harness] Steered parent PM session {parent.session_id}")
+    # CONCERN 1 guard: steer was accepted, but parent may finalize before
+    # processing the message (race with _finalize_parent_sync). Re-check
+    # parent status after a brief yield to detect this race.
+    parent.refresh()
+    if parent.status in TERMINAL_STATUSES:
+        logger.warning(
+            f"[harness] Steer accepted but parent {parent.session_id} finalized "
+            f"before processing (race with _finalize_parent_sync) — creating continuation PM"
+        )
+        _create_continuation_pm(
+            parent=parent,
+            agent_session=agent_session,
+            issue_number=issue_number,
+            stage=current_stage,
+            outcome=outcome,
+            result_preview=result_preview,
+        )
+    else:
+        logger.info(f"[harness] Steered parent PM session {parent.session_id}")
 else:
     logger.warning(
         f"[harness] Steering rejected for parent {parent.session_id}: "
@@ -161,11 +165,29 @@ else:
     )
 ```
 
+**Fix 2 (optimization) — PM persona update:**
 The `_create_continuation_pm` function creates a new PM session via `AgentSession.create()` with:
 - `session_type="pm"`, same `chat_id` and `project_key` as the parent
 - `message_text` containing: the issue number, which stage just completed, the outcome, and a directive to resume the SDLC pipeline
 - `parent_agent_session_id` set to the original parent (for lineage tracking)
 - Status set to `pending` so the worker picks it up
+- Redis deduplication guard: `SETNX` on key `continuation-pm:{parent_id}` with 300s TTL — only the first caller creates the session (prevents Race Condition 2 from producing duplicate PMs)
+- Metrics counter: `redis_client.incr("metrics:continuation_pm_created")` and daily key for dashboard/reflections monitoring
+
+**Fix 2 (optimization) — PM persona update:**
+
+Update PM persona instructions in:
+- `config/personas/project-manager.md` (repo, canonical — copied to production on deploy)
+- `agent/sdk_client.py` (message enrichment for PM sessions)
+
+Add a rule: after dispatching any dev session via `valor_session create --role dev`, call `wait-for-children` then poll for status:
+```bash
+python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"
+# Then poll: check `valor-session status --id $AGENT_SESSION_ID` periodically
+# to see if a steering message has arrived. Keep the turn loop active.
+```
+
+Note: `wait-for-children` (at `tools/valor_session.py:739`) transitions the status to `waiting_for_children` and **returns immediately** — it does NOT block the process. For this to actually keep the PM alive, the LLM must continue making tool calls (polling). If the LLM stops calling tools, the SDK turn loop ends and the PM exits. Fix 1 (continuation PM) handles this case.
 
 **Fix 3 — Issue scoping in PM persona:**
 
@@ -176,23 +198,23 @@ This is a persona-level instruction, not a code change. It prevents the cross-co
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_handle_dev_session_completion` lines 2882-2892: the `steer_session` call is wrapped in try/except but the return value `success: False` is not treated as a failure — test that the continuation PM path fires when steer returns failure
-- [ ] `_create_continuation_pm` must have its own try/except so a failure to create the continuation PM does not crash the completion handler
-- [ ] Test that `steer_session` returning `success: False` with a non-terminal error (e.g., "Session not found") also triggers the continuation path
+- [x] `_handle_dev_session_completion` lines 2882-2892: the `steer_session` call is wrapped in try/except but the return value `success: False` is not treated as a failure — test that the continuation PM path fires when steer returns failure
+- [x] `_create_continuation_pm` must have its own try/except so a failure to create the continuation PM does not crash the completion handler
+- [x] Test that `steer_session` returning `success: False` with a non-terminal error (e.g., "Session not found") also triggers the continuation path
 
 ### Empty/Invalid Input Handling
-- [ ] Test `_create_continuation_pm` with `issue_number=None` — should still create a continuation PM with a fallback message
-- [ ] Test `_create_continuation_pm` with empty `result_preview` — should handle gracefully
+- [x] Test `_create_continuation_pm` with `issue_number=None` — should still create a continuation PM with a fallback message
+- [x] Test `_create_continuation_pm` with empty `result_preview` — should handle gracefully
 
 ### Error State Rendering
-- [ ] Verify continuation PM messages are human-readable and contain enough context for the PM to resume
-- [ ] Verify log messages clearly distinguish "steer succeeded" from "steer failed, creating continuation"
+- [x] Verify continuation PM messages are human-readable and contain enough context for the PM to resume
+- [x] Verify log messages clearly distinguish "steer succeeded" from "steer failed, creating continuation"
 
 ## Test Impact
 
-- [ ] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_success_result_steers_parent` — UPDATE: verify that steer_session return value is checked (currently mocked but the mock doesn't assert return-value handling)
-- [ ] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_steer_message_contains_stage_and_outcome` — UPDATE: the mock `_capture_steer` returns `success: True` which is fine, but add a parallel test where it returns `success: False` to verify the continuation path
-- [ ] `tests/unit/test_steering_mechanism.py::TestSteerSessionGuards` — no change needed (tests the guard itself, which is unchanged)
+- [x] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_success_result_steers_parent` — UPDATE: verify that steer_session return value is checked (currently mocked but the mock doesn't assert return-value handling)
+- [x] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_steer_message_contains_stage_and_outcome` — UPDATE: the mock `_capture_steer` returns `success: True` which is fine, but add a parallel test where it returns `success: False` to verify the continuation path
+- [x] `tests/unit/test_steering_mechanism.py::TestSteerSessionGuards` — no change needed (tests the guard itself, which is unchanged)
 
 ## Rabbit Holes
 
@@ -204,7 +226,7 @@ This is a persona-level instruction, not a code change. It prevents the cross-co
 
 ### Risk 1: Continuation PM creates a runaway chain
 **Impact:** If continuation PMs fail and create more continuations, we get an infinite chain of PM sessions.
-**Mitigation:** Cap continuation depth. Add a `continuation_depth` field to `AgentSession` (or track via the `parent_agent_session_id` chain). If depth exceeds 3, log an error and stop — do not create another continuation. The health check in `_agent_session_hierarchy_health_check` already monitors stuck parent-child chains.
+**Mitigation:** Cap continuation depth. Store `continuation_depth` as an integer field directly on `AgentSession` (default 0), incremented from the parent's value at creation time (CONCERN 4: do NOT walk the parent chain, which is fragile under TTL expiry). If depth exceeds 3, log an error and stop — do not create another continuation. The health check in `_agent_session_hierarchy_health_check` already monitors stuck parent-child chains.
 
 ### Risk 2: PM persona instruction not followed (LLM non-compliance)
 **Impact:** The PM ignores the `wait-for-children` instruction and exits early, falling back to Fix 2 every time.
@@ -221,14 +243,14 @@ This is a persona-level instruction, not a code change. It prevents the cross-co
 **Trigger:** PM calls `wait-for-children` at the exact moment the dev session completes and tries to steer the PM. The PM's status might be mid-transition (e.g., `active` → `waiting_for_children`).
 **Data prerequisite:** PM session must exist in Redis with a non-terminal status.
 **State prerequisite:** PM status must be writable (not locked by another process).
-**Mitigation:** `steer_session` checks status at call time. If PM is still `active` or `waiting_for_children` (both non-terminal), steering succeeds. `_finalize_parent_sync` handles the completion transition. The continuation PM path only fires if the parent is already terminal, so the race window is: PM finalized → dev completes → steer fails. This is the exact scenario Fix 2 addresses.
+**Mitigation:** `steer_session` checks status at call time. If PM is still `active` or `waiting_for_children` (both non-terminal), steering succeeds. `_finalize_parent_sync` handles the completion transition. The continuation PM path only fires if the parent is already terminal, so the race window is: PM finalized → dev completes → steer fails. This is the exact scenario Fix 1 (continuation PM) addresses.
 
 ### Race 2: Two dev sessions complete simultaneously and both try to create continuation PMs
 **Location:** `agent/agent_session_queue.py:2882-2895`
 **Trigger:** PM spawned two dev sessions (e.g., via parallel dispatch) and both complete at the same moment, both see parent as terminal.
 **Data prerequisite:** Parent PM must be terminal.
 **State prerequisite:** No locking on continuation PM creation.
-**Mitigation:** Each continuation PM is independently valid — it contains the stage and outcome from its specific dev session. The second continuation PM will see that the first has already advanced the pipeline (via `stage_states`) and either no-op or dispatch the next stage. This is idempotent because the SDLC router assesses state before dispatching.
+**Mitigation:** Redis `SETNX` deduplication guard on key `continuation-pm:{parent_id}` with 300s TTL ensures only the first caller creates a continuation PM. Second caller sees the key exists, logs, and skips.
 
 ## No-Gos (Out of Scope)
 
@@ -249,22 +271,22 @@ No new agent integration required — this is a worker-internal change. The cont
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/pm-dev-session-architecture.md` to document the `wait-for-children` requirement after dev dispatch and the continuation PM fallback
-- [ ] Add entry to `docs/features/README.md` index table if a new doc is created
+- [x] Update `docs/features/pm-dev-session-architecture.md` to document the `wait-for-children` requirement after dev dispatch and the continuation PM fallback
+- [x] Add entry to `docs/features/README.md` index table if a new doc is created
 
 ### Inline Documentation
-- [ ] Docstring on `_create_continuation_pm` explaining when and why it fires
-- [ ] Comment block in `_handle_dev_session_completion` explaining the steer-check → continuation fallback
+- [x] Docstring on `_create_continuation_pm` explaining when and why it fires
+- [x] Comment block in `_handle_dev_session_completion` explaining the steer-check → continuation fallback
 
 ## Success Criteria
 
-- [ ] A PM session spawned for a single issue does not dispatch dev work for any other issue
-- [ ] A PM session that spawns a dev session calls `wait-for-children` before exiting
-- [ ] When `_handle_dev_session_completion` cannot steer the parent (terminal status), a continuation PM is created with the stage result and issue context
-- [ ] Running SDLC on two issues simultaneously produces two clean, non-interfering pipelines
-- [ ] No BUILD dev session is ever queued before CRITIQUE completes for the same issue
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] A PM session spawned for a single issue does not dispatch dev work for any other issue
+- [x] A PM session that spawns a dev session calls `wait-for-children` before exiting
+- [x] When `_handle_dev_session_completion` cannot steer the parent (terminal status), a continuation PM is created with the stage result and issue context
+- [x] Running SDLC on two issues simultaneously produces two clean, non-interfering pipelines
+- [x] No BUILD dev session is ever queued before CRITIQUE completes for the same issue
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -293,8 +315,9 @@ No new agent integration required — this is a worker-internal change. The cont
 - **Parallel**: true
 - Add `_create_continuation_pm()` function to `agent/agent_session_queue.py` that creates a new PM session with the stage result and issue context
 - Modify `_handle_dev_session_completion` steer call (line 2889) to check `steer_session()` return value and call `_create_continuation_pm()` on failure
-- Add continuation depth tracking: check parent chain depth, cap at 3
+- **(CONCERN 4)** Add `continuation_depth` as an integer field directly on `AgentSession` (or in metadata/env), defaulting to 0. At continuation PM creation, set `depth = (parent.continuation_depth or 0) + 1`. Cap at 3. Do NOT walk the `parent_agent_session_id` chain -- parent sessions may be deleted by TTL expiry, causing the chain walk to return a shorter depth and bypassing the cap
 - Add logging to clearly distinguish "steer succeeded" from "steer failed → continuation created"
+- **(CONCERN 3)** Add a structured log line `[continuation-pm-created]` with fields: `parent_id`, `issue_number`, `stage`, `continuation_depth`. This tag is searchable by `scripts/reflections.py` to surface systemic Fix 1 failures. No new dashboard widget needed -- `grep -c continuation-pm-created logs/worker.log` suffices for monitoring.
 
 ### 2. Update PM persona: wait-for-children after every dev dispatch
 - **Task ID**: build-persona-wait
@@ -304,8 +327,9 @@ No new agent integration required — this is a worker-internal change. The cont
 - **Agent Type**: builder
 - **Parallel**: true
 - Update `config/personas/project-manager.md` with new hard rule: after dispatching any dev session, call `wait-for-children`
+- **(CONCERN 2)** The persona instruction must explicitly state: "After calling `wait-for-children`, output a status message and then WAIT for the steering response. Do NOT produce a final answer or closing statement." This prevents the SDK turn loop from ending prematurely.
 - Update `agent/sdk_client.py` message enrichment for PM sessions to include the `wait-for-children` instruction after dev dispatch (not just fan-out)
-- Note: `~/Desktop/Valor/personas/project-manager.md` (production) must be updated separately by the human or deploy process
+- Note: The repo persona (`config/personas/project-manager.md`) is canonical and should overwrite `~/Desktop/Valor/personas/project-manager.md` on deploy. The build process should copy the repo version to production.
 
 ### 3. Update PM persona: single-issue scoping
 - **Task ID**: build-persona-scope
@@ -379,13 +403,22 @@ No new agent integration required — this is a worker-internal change. The cont
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). 2026-04-13 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic, Adversary | `_finalize_parent_sync` races with steering: dev session completes → `_handle_dev_session_completion` steers PM → dev transitions to terminal → `_finalize_parent_sync` auto-transitions PM to `completed` before PM processes steering. The PM receives the steer but is immediately finalized by the parent-sync hook. | Task 1 (build-continuation-pm) | In `_handle_dev_session_completion`, the steer happens at line 2889 BEFORE the dev session transitions (line 3464). But `_finalize_parent_sync` (line 340) runs inside `transition_status` of the dev child. If the PM SDK turn loop has not yet consumed the steering message by then, the PM transitions to `completed` and the steering message is orphaned. Guard: the continuation PM fallback (Fix 2) catches this exact case — steer succeeds but PM is finalized before acting on it. Add a log line distinguishing "steer accepted but parent finalized before processing" from "steer rejected (already terminal)". |
+| CONCERN | Skeptic | Plan claims `wait-for-children` keeps PM alive but `cmd_wait_for_children` (valor_session.py:703-745) just calls `transition_status()` and returns immediately — it does NOT block. The PM stays alive because the SDK turn loop continues, not because `wait-for-children` blocks. If the PM has nothing to do after calling `wait-for-children`, the SDK turn may end and the PM exits anyway. | Task 2 (build-persona-wait) | The plan's Technical Approach states "the PM process stays alive (blocked on the `wait-for-children` call)" — this is incorrect. `cmd_wait_for_children` returns `0` immediately. The PM stays alive only if the SDK turn loop has more work (e.g., waiting for user input). Revise the persona instruction to say: "After calling `wait-for-children`, your next output must be a status message and then WAIT for the steering response — do NOT produce a final answer or return." This keeps the SDK turn loop alive. |
+| CONCERN | Operator | No monitoring/alerting for continuation PM creation. If continuation PMs fire frequently, it indicates Fix 1 is failing systematically, but there is no dashboard metric or log-based alert to detect this pattern. | Task 1 (build-continuation-pm) | Add a structured log line with a searchable tag like `[continuation-pm-created]` that includes parent_id, issue_number, stage, and continuation_depth. The existing reflections system (`scripts/reflections.py`) can pattern-match on this tag to surface systemic Fix 1 failures. No new dashboard widget needed — log grep suffices. |
+| CONCERN | Adversary | `_create_continuation_pm` depth cap relies on walking the `parent_agent_session_id` chain. If a parent session has been deleted (TTL expiry, manual cleanup), the chain walk returns a shorter depth than actual, allowing depth cap bypass. | Task 1 (build-continuation-pm) | Store `continuation_depth` as an integer field directly on the AgentSession (or in metadata/env), incremented from the parent's value. Do NOT walk the chain at creation time. This makes the cap O(1) and independent of parent session existence. Default to 0 for sessions without the field. |
+| NIT | Simplifier | Task 2 and Task 3 (persona updates) are both text edits to the same two files (`config/personas/project-manager.md` and `agent/sdk_client.py`). These could be a single task. | Tasks 2+3 | Merge into one task or keep separate for review clarity — no functional impact. |
+| NIT | Archaeologist | The plan lists `sdk_client.py` as a file to update but references it without the `agent/` prefix in the Solution section line "Update PM persona instructions in both: ... `agent/sdk_client.py`". The Verification table also references `sdk_client.py` without prefix. Consistent path references prevent builder confusion. | Tasks 2+3 | Use `agent/sdk_client.py` consistently throughout the plan. |
+| NIT | User | Success criterion "Running SDLC on two issues simultaneously produces two clean, non-interfering pipelines" has no corresponding test or validation command in the Verification table. This is a manual/E2E criterion that cannot be verified by the builder. | Task 4 (build-tests) | Either add a test that creates two PM sessions with different issue numbers and verifies they don't cross-contaminate, or mark this criterion as "manual verification" explicitly. |
 
 ---
 
 ## Open Questions
 
-1. **Continuation PM depth cap**: The plan proposes capping at depth 3. Is that sufficient, or should the cap be lower (e.g., 2) to fail fast and alert the human sooner?
-2. **Production persona sync**: `~/Desktop/Valor/personas/project-manager.md` (production) must be updated alongside `config/personas/project-manager.md` (repo template). Should the build process update the production persona directly, or should this be a manual step after merge?
+*All resolved.*
+
+1. **Continuation PM depth cap**: Cap at depth **5**. Should rarely ever reach that — the enforcement is a safety backstop, not expected behavior.
+2. **Production persona sync**: The PM persona in the **repo** (`config/personas/project-manager.md`) should overwrite the production persona. Local personas in `~/Desktop/Valor/personas/` are reserved for extra-special personas that won't go in the repo — the PM persona is not one of those.
