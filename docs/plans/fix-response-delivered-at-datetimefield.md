@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: merged
 type: bug
 appetite: Small
 owner: Valor Engels
