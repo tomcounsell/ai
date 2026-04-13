@@ -140,14 +140,14 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/_partials/analytics/", response_class=HTMLResponse)
-    def partial_analytics_trend(request: Request):
-        """HTMX partial: analytics trend chart."""
+    def partial_analytics_stats(request: Request):
+        """HTMX partial: analytics stats grid."""
         from ui.data.analytics import get_analytics_summary
 
         analytics = get_analytics_summary()
         return templates.TemplateResponse(
             request,
-            "_partials/analytics_trend.html",
+            "_partials/analytics_stats.html",
             {"analytics": analytics},
         )
 
