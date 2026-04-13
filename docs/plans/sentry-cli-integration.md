@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Complete
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -146,15 +146,15 @@ Integration test: after build, trigger the sentry agent with `sentry issues list
 
 ## Documentation
 
-- [ ] Update `.claude/skills/setup/SKILL.md` to mention `sentry auth login` as a post-install step under the authentication section
-- [ ] No new feature doc needed — the sentry skill doc (`.claude/skills/sentry/SKILL.md`) is already on main and covers the triage workflow
+- [x] Update `.claude/skills/setup/SKILL.md` to mention `sentry auth login` as a post-install step under the authentication section
+- [x] No new feature doc needed — the sentry skill doc (`.claude/skills/sentry/SKILL.md`) is already on main and covers the triage workflow
 
 ## Test Impact
 
 No existing tests affected — this is a greenfield feature. The update module (`scripts/update/`) has no unit tests today. The reflection scheduler has integration tests but none cover agent-type reflections specifically.
 
-- [ ] Add `tests/unit/test_sentry_cli_update.py` — unit tests for `sentry_cli.install_or_update()` covering: already-installed (skipped), not-installed (mock curl succeeds), curl failure
-- [ ] Add assertion to `tests/unit/test_reflection_scheduler.py` (if it exists) that `_enqueue_agent_reflection()` injects `SENTRY_AUTH_TOKEN` when `SENTRY_PERSONAL_TOKEN` is set in `~/Desktop/Valor/.env`
+- [x] Add `tests/unit/test_sentry_cli_update.py` — unit tests for `sentry_cli.install_or_update()` covering: already-installed (skipped), not-installed (mock curl succeeds), curl failure
+- [x] Add assertion to `tests/unit/test_reflection_scheduler.py` (if it exists) that `_enqueue_agent_reflection()` injects `SENTRY_AUTH_TOKEN` when `SENTRY_PERSONAL_TOKEN` is set in `~/Desktop/Valor/.env`
 
 ## Failure Path Test Strategy
 
@@ -164,14 +164,14 @@ No existing tests affected — this is a greenfield feature. The update module (
 
 ## Success Criteria
 
-- [ ] `sentry-cli` installed by `/update` and appears in verify output (`sentry vX.Y.Z`)
-- [ ] `/update` exits cleanly on a machine where `sentry-cli` was not previously installed
-- [ ] `.claude/agents/sentry.md` has no `permissions:` block; contains CLI workflow section
-- [ ] `_enqueue_agent_reflection()` injects `SENTRY_AUTH_TOKEN` from `~/Desktop/Valor/.env`
-- [ ] `config/reflections.yaml` contains `sentry-issue-triage` entry with `enabled: false`
-- [ ] `.claude/skills/setup/SKILL.md` mentions `sentry auth login` as post-install step
-- [ ] Unit tests for `sentry_cli.py` pass
-- [ ] `python -m ruff check .` passes
+- [x] `sentry-cli` installed by `/update` and appears in verify output (`sentry vX.Y.Z`)
+- [x] `/update` exits cleanly on a machine where `sentry-cli` was not previously installed
+- [x] `.claude/agents/sentry.md` has no `permissions:` block; contains CLI workflow section
+- [x] `_enqueue_agent_reflection()` injects `SENTRY_AUTH_TOKEN` from `~/Desktop/Valor/.env`
+- [x] `config/reflections.yaml` contains `sentry-issue-triage` entry with `enabled: false`
+- [x] `.claude/skills/setup/SKILL.md` mentions `sentry auth login` as post-install step
+- [x] Unit tests for `sentry_cli.py` pass
+- [x] `python -m ruff check .` passes
 
 ## Team Orchestration
 
