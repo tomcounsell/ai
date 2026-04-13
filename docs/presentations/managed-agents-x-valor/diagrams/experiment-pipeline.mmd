@@ -1,0 +1,12 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart LR
+    A["Exp A\nMA Environment\n+ Chromium"] -->|"<30s\ncold start"| B["Exp B\nTool Cadence\nProfiling"]
+    B -->|"<5 calls\nper turn"| C["Exp C\nuser.message\nMid-Turn Test"]
+    C -->|"injection\nworks"| D["Exp D\nHosted Redis\nIntegration"]
+    D -->|"<50ms p95\nmemory query"| E["Exp E\nFull BUILD\nOffload"]
+
+    style A fill:#1a3a5c,stroke:#58a6ff,color:#fff
+    style B fill:#1a4a3c,stroke:#3fb950,color:#fff
+    style C fill:#4a3a1a,stroke:#d29922,color:#fff
+    style D fill:#3a1a4a,stroke:#a371f7,color:#fff
+    style E fill:#5c1a1a,stroke:#f85149,color:#fff

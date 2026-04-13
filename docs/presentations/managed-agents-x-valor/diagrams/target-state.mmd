@@ -1,0 +1,22 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart TB
+    TG["Telegram"] <--> VALOR
+
+    subgraph VALOR["Valor Layer"]
+        ORCH["Orchestration"]
+        SDLC["SDLC Router"]
+        ORCH --> SDLC
+    end
+
+    subgraph MA["Managed Agent Layer"]
+        BUILD["BUILD Session"]
+        TEST["TEST Session"]
+    end
+
+    SDLC --> BUILD
+    SDLC --> TEST
+    BUILD --> SDLC
+    TEST --> SDLC
+
+    MEM[("Memory<br/>(Redis)")] <--> VALOR
+    MEM <-.-> MA

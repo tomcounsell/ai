@@ -1,0 +1,11 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart LR
+    TG["Telegram"] --> BR["Bridge"]
+    BR --> WK["Worker"]
+    WK --> API["Claude API"]
+    API --> WK
+    WK --> BR
+    BR --> TG
+    MEM[("Memory<br/>(Redis)")] <--> WK
+    WK --> SDLC["SDLC Pipeline"]
+    SDLC --> WK

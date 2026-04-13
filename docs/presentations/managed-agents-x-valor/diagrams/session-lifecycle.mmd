@@ -1,0 +1,11 @@
+%%{init: {'theme': 'default'}}%%
+flowchart LR
+    PM["PM Session"] -->|"dispatch"| MA["MA Container"]
+    MA -->|"pre-fetch"| MEM[("Redis")]
+    MEM -->|"memories"| MA
+    MA -->|"branch + result"| PM
+    PM -->|"extract observations"| MEM
+
+    style PM fill:#d1fae5,stroke:#059669,color:#1a1a2e
+    style MA fill:#dbeafe,stroke:#2563eb,color:#1a1a2e
+    style MEM fill:#ede9fe,stroke:#7c3aed,color:#1a1a2e

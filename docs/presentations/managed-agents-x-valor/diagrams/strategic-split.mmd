@@ -1,0 +1,30 @@
+%%{init: {'theme': 'default'}}%%
+flowchart TB
+    subgraph VALOR["Valor Keeps"]
+        direction TB
+        V1["PM Orchestration"]
+        V2["Subconscious Memory"]
+        V3["Telegram + Email"]
+        V4["SDLC Router"]
+        V5["REVIEW Gate"]
+    end
+
+    subgraph OFFLOAD["Offload to MA"]
+        direction TB
+        M1["BUILD Execution"]
+        M2["TEST Execution"]
+    end
+
+    MEM[("Hosted Redis")] <--> VALOR
+    MEM <-.-> OFFLOAD
+
+    style VALOR fill:#d1fae5,stroke:#059669,color:#1a1a2e
+    style OFFLOAD fill:#dbeafe,stroke:#2563eb,color:#1a1a2e
+    style MEM fill:#ede9fe,stroke:#7c3aed,color:#1a1a2e
+    style V1 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style V2 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style V3 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style V4 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style V5 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style M1 fill:#ffffff,stroke:#2563eb,color:#1a1a2e
+    style M2 fill:#ffffff,stroke:#2563eb,color:#1a1a2e

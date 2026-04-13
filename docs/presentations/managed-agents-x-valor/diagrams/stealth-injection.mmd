@@ -1,0 +1,11 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart LR
+    AGENT["Claude Agent"] -->|"calls"| TOOL["git_commit\nrun_tests\nsubmit_work"]
+    TOOL -->|"intercept"| VALOR["Valor\nMiddleware"]
+    VALOR -->|"recall"| MEM[("Memory\n(Redis)")]
+    MEM -->|"memories"| VALOR
+    VALOR -->|"tool result +\n&lt;thought&gt; blocks"| AGENT
+
+    style TOOL fill:#5c4a1a,stroke:#f1c40f,color:#fff
+    style VALOR fill:#1a5c1a,stroke:#2ecc71,color:#fff
+    style MEM fill:#3a1a4a,stroke:#a371f7,color:#fff

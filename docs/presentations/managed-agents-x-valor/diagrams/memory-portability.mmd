@@ -1,0 +1,30 @@
+%%{init: {'theme': 'default'}}%%
+flowchart LR
+    subgraph LOCAL["Local Session"]
+        direction TB
+        L1["PostToolUse Hook"]
+        L2["Bloom Filter"]
+        L3["Thought Injection"]
+        L1 --> L2 --> L3
+    end
+
+    subgraph MA["Managed Agent"]
+        direction TB
+        M1["No Hooks"]
+        M2["No Mid-Gen Inject"]
+        M3["???"]
+        M1 --> M2 --> M3
+    end
+
+    MEM[("Shared Redis")] <--> LOCAL
+    MEM <-.-> MA
+
+    style LOCAL fill:#d1fae5,stroke:#059669,color:#1a1a2e
+    style MA fill:#fee2e2,stroke:#dc2626,color:#1a1a2e
+    style MEM fill:#ede9fe,stroke:#7c3aed,color:#1a1a2e
+    style L1 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style L2 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style L3 fill:#ffffff,stroke:#059669,color:#1a1a2e
+    style M1 fill:#ffffff,stroke:#dc2626,color:#1a1a2e
+    style M2 fill:#ffffff,stroke:#dc2626,color:#1a1a2e
+    style M3 fill:#ffffff,stroke:#dc2626,color:#1a1a2e

@@ -38,11 +38,26 @@ file <output.png>   # verify: should show "PNG image data"
 
 ## Workflow B: `.mmd` → PNG
 
-### Step 1: Read the Mermaid source
+### Step 1: Read and validate the Mermaid source
 
 ```bash
 cat <file.mmd>
 ```
+
+**Before proceeding, check for diagram topologies that produce bad renders:**
+
+| Pattern | Problem | Fix |
+|---------|---------|-----|
+| Cross-subgraph edges (nodes in subgraph A connect to nodes in subgraph B) | Spaghetti lines, overlapping edges | Flatten into a single graph, or use a simpler topology |
+| More than 7 nodes | Cluttered, unreadable at slide scale | Split into multiple diagrams or abstract into groups |
+| Bidirectional edges between 3+ nodes | Edge crossings multiply | Simplify to one-directional flow or use a table instead |
+| Subgraphs with connections to a shared "overlap" group | Venn-like layouts don't work in flowcharts | Replace with a side-by-side table or a simple list diagram |
+| `flowchart TB` with wide subgraphs | Horizontal overflow, cramped layout | Switch to `flowchart LR` or reduce subgraph width |
+
+**If any of these patterns are present, fix the `.mmd` source FIRST:**
+- Restructure the diagram to avoid the problematic topology
+- Consider whether a **table slide** would communicate the idea better than a diagram
+- For comparison/overlap diagrams: use two columns with shared items highlighted, not a flowchart
 
 ### Step 2: Open excalidraw.com
 
@@ -131,7 +146,21 @@ excalidraw-export /tmp/output.excalidraw -o <final-output.png> --scale 2
 file <final-output.png>
 ```
 
-### Step 8: Close the browser
+### Step 8: Validate the rendered output
+
+**Read the PNG and check for visual quality problems.** This is not optional — a PNG that exists but looks broken is worse than no PNG.
+
+Use the Read tool on the output PNG (Claude is multimodal and can evaluate images). Check for:
+
+- [ ] **Spaghetti lines**: edges crossing in a tangled mess → Go back to Step 1, restructure the `.mmd`
+- [ ] **Overlapping labels**: text on top of edges or other text → Simplify node labels or reduce connections
+- [ ] **Cramped layout**: nodes too close together, text truncated → Reduce node count or switch orientation (TB↔LR)
+- [ ] **Blank or nearly blank output**: rendering failed silently → Check the `.excalidraw` elements array
+- [ ] **Unreadable at slide scale**: diagram too detailed for a presentation slide → Split into multiple diagrams
+
+**If any check fails, do NOT proceed.** Fix the source `.mmd` and re-render. A bad diagram undermines the entire slide.
+
+### Step 9: Close the browser
 
 **Always close when done.** This is not optional — leaving the browser open wastes resources and leaves state behind for the next task.
 

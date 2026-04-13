@@ -80,11 +80,75 @@ Read `THEME_DETECTION.md` for the full detection process. Quick version:
 1. Search for CSS/design tokens in the repo:
    - `**/*.css`, `**/tailwind.config.*`, `**/theme.*`, `**/variables.*`, `**/tokens.*`
    - `**/styles/**`, `**/design-system/**`, `**/ui/**`
-2. Extract: background colors, text colors, accent colors, fonts, border radius, spacing
-3. If no design system found, use a clean dark theme as default
+2. Extract: accent colors, fonts, border radius, spacing
+3. If no design system found, use the clean light fallback theme
 4. Build the Marp `style:` block from extracted tokens
 
-### Step 5: Generate diagrams
+**IMPORTANT: All presentations use light backgrounds.** Even if the repo's design system is dark, adapt it to light mode. Keep the accent colors and fonts, invert backgrounds to white/light gray, use dark text. See the "Light Mode Mandate" section in `THEME_DETECTION.md` for the full dark→light token mapping.
+
+### Step 5: Collect brand logos
+
+When the presentation mentions companies, products, or branded technologies, pull in their logos for visual polish. Logos appear inline next to brand names or as small icons in tables/lists.
+
+**Source priority:**
+
+1. **Simple Icons (GitHub raw)** — 3000+ tech/business brands, monochrome SVGs, no auth
+   ```bash
+   # Download SVG (slug is lowercase brand name, no spaces)
+   curl -s "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/{slug}.svg" \
+     -o diagrams/logo-{slug}.svg
+   ```
+   Common slugs: `anthropic`, `stripe`, `github`, `slack`, `redis`, `python`, `docker`, `linear`, `sentry`, `notion`, `telegram`, `postgresql`
+
+   To find a slug, check: `https://raw.githubusercontent.com/simple-icons/simple-icons/develop/slugs.md`
+
+2. **Google Favicons** — universal fallback, any domain, PNG
+   ```bash
+   curl -sL "https://www.google.com/s2/favicons?domain={domain}&sz=128" \
+     -o diagrams/logo-{name}.png
+   ```
+
+**Colorizing SVGs for dark backgrounds:**
+
+Simple Icons SVGs have no fill color (default black — invisible on dark slides). Inject a fill:
+
+```bash
+# White (safe default for dark themes)
+sed -i '' 's/<path/<path fill="#e6edf3"/' diagrams/logo-{slug}.svg
+
+# Or use the brand's official color (Simple Icons provides these)
+sed -i '' 's/<path/<path fill="#FF6600"/' diagrams/logo-{slug}.svg
+```
+
+**Converting SVG to PNG (if needed for Marp compatibility):**
+
+```bash
+# macOS built-in, no dependencies, good quality at 512px
+qlmanage -t -s 512 -o diagrams/ diagrams/logo-{slug}.svg 2>/dev/null
+mv diagrams/logo-{slug}.svg.png diagrams/logo-{slug}.png
+```
+
+**Using logos in Marp slides:**
+
+```markdown
+<!-- Inline next to text (small, 24-32px) -->
+![w:28](diagrams/logo-anthropic.svg) Anthropic ships Managed Agents
+
+<!-- In a table cell -->
+| ![w:24](diagrams/logo-stripe.svg) Stripe | Payment processing |
+
+<!-- Larger, standalone -->
+![w:80](diagrams/logo-redis.svg)
+```
+
+**Rules:**
+- Only fetch logos for brands that are **central to the slide content**, not every passing mention
+- Keep logos small (24-32px inline, 64-80px standalone) — they accent, not dominate
+- SVGs render directly in Marp with `--allow-local-files` — prefer SVG over PNG for sharpness
+- If a brand isn't in Simple Icons, use Google Favicon as fallback
+- Don't spend time on logos if the presentation is internal/informal — this is for polished decks
+
+### Step 6: Generate diagrams
 
 For any architectural or flow concepts, create diagrams:
 
@@ -99,7 +163,7 @@ Diagram guidelines:
 - Label every arrow/connection
 - Use the repo's accent color for emphasis nodes
 
-### Step 6: Write the Marp markdown
+### Step 7: Write the Marp markdown
 
 Create the presentation file. Location priority:
 1. If user specifies a path, use that
@@ -139,7 +203,7 @@ content...
 - Bold key terms on first use
 - Use analogies liberally — connect technical concepts to everyday things
 
-### Step 7: Export
+### Step 8: Export
 
 Run Marp CLI to generate outputs:
 
@@ -154,7 +218,7 @@ npx --yes @marp-team/marp-cli "<source>.md" --html --allow-local-files -o "<sour
 npx --yes @marp-team/marp-cli "<source>.md" --pptx --allow-local-files -o "<source>.pptx"
 ```
 
-### Step 8: Verify
+### Step 9: Verify
 
 After export, confirm:
 - [ ] PDF generated without errors
@@ -170,4 +234,5 @@ Tell the user:
 3. How to edit (it's just markdown) and re-export
 
 ## Version history
+- v1.1.0 (2026-04-13): Added Step 5 (brand logo collection via Simple Icons + Google Favicons), renumbered subsequent steps
 - v1.0.0 (2026-04-10): Initial — research, structure, theme detection, Marp export

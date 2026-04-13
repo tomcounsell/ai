@@ -147,3 +147,16 @@ Use at least 2-3 of these across the deck:
 - **Left-to-right or top-to-bottom** — never mix flow directions
 - **Color sparingly** — accent color for the focus element only
 - **Include a legend** if using symbols, shapes, or colors for meaning
+
+### Diagrams That Should NOT Be Mermaid Flowcharts
+
+Some concepts look like they should be diagrams but produce spaghetti when rendered:
+
+| Concept | Bad approach | Good approach |
+|---------|-------------|---------------|
+| Feature comparison (A vs B) | Flowchart with cross-subgraph edges | Side-by-side table with shared items highlighted |
+| Venn overlap | Subgraphs with connections to a shared group | Table with columns: "Only A", "Both", "Only B" |
+| Many-to-many relationships | Flowchart with N edges crossing | Matrix/grid table |
+| Capability matrix | Flowchart nodes for each capability | Table with checkmarks |
+
+**Rule of thumb:** If the diagram has more edges than nodes, use a table instead. Edges crossing between subgraphs ALWAYS produce spaghetti in Mermaid→Excalidraw renders.

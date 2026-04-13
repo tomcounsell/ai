@@ -1,0 +1,18 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart LR
+    subgraph VALOR["Valor Only"]
+        V1["Orchestration"]
+        V2["Memory"]
+        V3["Delivery"]
+        V4["SDLC Pipeline"]
+    end
+
+    subgraph MA["MA Only"]
+        M1["Containers"]
+        M2["Scaling"]
+        M3["Zero Ops"]
+        M4["Crash Recovery"]
+    end
+
+    style VALOR fill:#1a3a1a,stroke:#2ecc71,color:#fff
+    style MA fill:#1a3a5c,stroke:#3498db,color:#fff

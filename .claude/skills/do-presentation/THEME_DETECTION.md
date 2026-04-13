@@ -68,20 +68,20 @@ Glob: **/.github/*.{yml,yaml}  # GitHub theme colors
 
 ### Fallback: Clean Default Theme
 
-If no design system is found, use this professional dark theme:
+If no design system is found, use this professional light theme:
 
 ```css
 section {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  background-color: #1a1a2e;
-  color: #eaeaea;
+  background-color: #ffffff;
+  color: #1a1a2e;
 }
-h1, h2, h3 { color: #64ffda; }
-strong { color: #82b1ff; }
+h1, h2, h3 { color: #1a56db; }
+strong { color: #1e40af; }
 code {
   font-family: "SF Mono", "Fira Code", monospace;
-  background: #16213e;
-  color: #f7768e;
+  background: #f3f4f6;
+  color: #b91c1c;
 }
 ```
 
@@ -237,18 +237,34 @@ section::after {
 }
 ```
 
-## Light Theme Adaptation
+## Light Mode Mandate
 
-If the repo uses a light theme:
-- Invert the background hierarchy (lightest → darkest for emphasis)
-- Use dark text on light background
-- Reduce border contrast
-- Use `section.lead` with a subtle gradient (light → slightly darker)
-- Ensure code blocks have enough contrast (light gray background, dark text)
+**All presentations MUST use light backgrounds** regardless of the repo's design system. Light slides are more readable on projectors, screens, and in print/PDF.
+
+When the repo's design system is dark-mode:
+- Extract the **accent colors** (headings, links, brand colors) and keep them
+- Extract the **font families** and keep them
+- **Invert** the background/text colors: white or near-white background, dark text
+- Use the repo's accent color for headings and emphasis — but verify it has enough contrast against white (WCAG AA: 4.5:1 ratio). Darken the accent if needed.
+- Code blocks: light gray background (`#f3f4f6` or similar), dark text
+- Table headers: light gray background, accent-colored text
+- Lead slides: subtle gradient from white to light gray, NOT dark gradients
+- Borders: light gray (`#e5e7eb`), not dark borders
+
+**Token mapping for dark→light adaptation:**
+
+| Dark theme token | Light theme equivalent |
+|---|---|
+| Dark background (`#0d1117`) | White (`#ffffff`) |
+| Secondary background (`#161b22`) | Light gray (`#f3f4f6`) |
+| Light text (`#e6edf3`) | Dark text (`#1f2937`) |
+| Muted text (`#8b949e`) | Medium gray (`#6b7280`) |
+| Border (`#30363d`) | Light border (`#e5e7eb`) |
+| Accent color | Keep as-is if contrast is sufficient; darken by 10-20% if too light against white |
 
 ## Multi-Theme Repos
 
 Some repos have both light and dark themes. Prefer:
-1. Dark theme (better for presentations/projection)
-2. Whichever theme the `ui/` or dashboard uses
-3. Whichever theme has more complete token definitions
+1. Light theme (mandatory for presentations)
+2. Whichever theme the `ui/` or dashboard uses (but adapt to light)
+3. Whichever theme has more complete token definitions (but adapt to light)

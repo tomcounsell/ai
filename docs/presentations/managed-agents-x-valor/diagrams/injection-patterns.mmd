@@ -1,0 +1,23 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart LR
+    MEM[("Memory")]
+
+    subgraph PRE["1. Pre-Session ✓"]
+        MEM1["Recall"] --> SP["System Prompt"]
+    end
+
+    subgraph MID["2. Mid-Session ?"]
+        MEM2["Recall"] --> ST["Slow Tool\nResult"]
+    end
+
+    subgraph POST["3. Post-Session ✓"]
+        TX["Transcript"] --> EX["Extract"] --> MEM3["Save"]
+    end
+
+    MEM --> MEM1
+    MEM --> MEM2
+    POST --> MEM
+
+    style PRE fill:#1a5c1a,stroke:#2ecc71
+    style MID fill:#5c4a1a,stroke:#f1c40f
+    style POST fill:#1a5c1a,stroke:#2ecc71

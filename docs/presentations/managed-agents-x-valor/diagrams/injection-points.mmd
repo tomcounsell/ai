@@ -1,0 +1,26 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart TB
+    AGENT["Claude Agent\n(running in MA)"]
+
+    subgraph A["1. Pre-Session"]
+        direction LR
+        R1["Memory Recall"] --> SYS["System Prompt\nInjection"]
+    end
+
+    subgraph B["2. Between Turns"]
+        direction LR
+        IDLE["Agent Idle\n(awaiting input)"] --> UM["user.message\nwith memories"]
+    end
+
+    subgraph C["3. Custom Tool Yield"]
+        direction LR
+        CALL["Agent calls\ncustom tool"] --> SLOW["Tool 'thinks'\n(fetches memories)"] --> RES["Returns memories\nin tool result"]
+    end
+
+    A --> AGENT
+    B --> AGENT
+    C --> AGENT
+
+    style A fill:#1a5c1a,stroke:#2ecc71,color:#fff
+    style B fill:#1a4a5c,stroke:#3498db,color:#fff
+    style C fill:#5c4a1a,stroke:#f1c40f,color:#fff

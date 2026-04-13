@@ -1,0 +1,16 @@
+%%{init: {'theme': 'dark'}}%%
+flowchart LR
+    ISS["Issue"] --> PLN["Plan"]
+    PLN --> BLD["Build"]
+    BLD --> TST["Test"]
+    TST --> REV["Review"]
+    REV --> DOC["Docs"]
+    DOC --> MRG["Merge"]
+
+    style BLD fill:#2c5f8a,stroke:#3498db,stroke-width:3px,color:#fff
+    style TST fill:#2c5f8a,stroke:#3498db,stroke-width:3px,color:#fff
+    style ISS fill:#333,stroke:#666,color:#ccc
+    style PLN fill:#333,stroke:#666,color:#ccc
+    style REV fill:#333,stroke:#666,color:#ccc
+    style DOC fill:#333,stroke:#666,color:#ccc
+    style MRG fill:#333,stroke:#666,color:#ccc
