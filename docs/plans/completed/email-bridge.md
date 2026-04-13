@@ -1,5 +1,5 @@
 ---
-status: In Review
+status: Merged
 type: feature
 appetite: Large
 owner: Valor
