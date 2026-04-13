@@ -25,7 +25,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Bridge/Worker Architecture](bridge-worker-architecture.md) | Bridge/worker process separation: bridge as pure I/O adapter, worker as sole session executor, Redis contract, operator CLI. Includes `worker_key` routing (project-keyed vs chat-keyed serialization), global `MAX_CONCURRENT_SESSIONS` semaphore, Redis pop lock (TOCTOU prevention), and CLI session UUID isolation. | Shipped |
 | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
-| [PM/Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
@@ -52,14 +51,14 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
 | [Google Workspace Auth](google-workspace-auth.md) | Error-resilient OAuth with verify_token(), --reauth/--check CLI flags, and actionable error messages | Shipped |
-| [Harness Abstraction](harness-abstraction.md) | CLI harness execution for dev sessions via `claude -p` with env-var routing (`DEV_SESSION_HARNESS`), stream-json parsing, and startup health checks (Phases 1-2 of #780) | Shipped |
 | [Happy Path Testing Pipeline](happy-path-testing-pipeline.md) | Three-stage pipeline (discover, generate, run) for deterministic browser regression tests without LLM tokens | Shipped |
+| [Harness Abstraction](harness-abstraction.md) | CLI harness execution for dev sessions via `claude -p` with env-var routing (`DEV_SESSION_HARNESS`), stream-json parsing, and startup health checks (Phases 1-2 of #780) | Shipped |
 | [Hooks Best Practices & Audit](hooks-best-practices.md) | `/audit-hooks` skill, codified hook safety patterns, and daily reflections integration | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
 | [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, companion memories for subconscious recall, and per-chunk embeddings for fine-grained semantic search over long documents | Shipped |
-| [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lifecycle CAS Authority](session-lifecycle.md#cas-conflict-detection) | Compare-and-set conflict detection in session lifecycle: `update_session()`, `get_authoritative_session()`, `StatusConflictError` prevent concurrent status mutation stomps | Shipped |
+| [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Local Doctor](local-doctor.md) | Unified health check CLI consolidating environment, service, auth, and resource checks into `python -m tools.doctor` | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
@@ -83,12 +82,13 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
 | [PM Telegram Tool](pm-telegram-tool.md) | PM session composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |
 | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
+| [PM/Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
 | [Popoto Index Hygiene](popoto-index-hygiene.md) | Automated cleanup of orphaned Popoto index entries, Meta.ttl on AgentSession, raw Redis migration to Popoto models, daily rebuild_indexes reflection | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |
-| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, agent-session-cleanup, branch cleanup, and 16-unit daily maintenance pipeline (including hooks audit and PR review audit) | Shipped |
+| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, agent-session-cleanup, branch cleanup, and 27-unit daily maintenance pipeline (including hooks audit and PR review audit). Scheduler runs in worker process, models split into individual files. | Shipped |
 | [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Resume Hydration Context](resume-hydration-context.md) | Injects recent branch commits into resumed PM sessions so the agent skips already-completed SDLC stages | Shipped |
@@ -137,8 +137,8 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Test Coverage Standards](test-coverage-standards.md) | Standards and tooling for preventing silent failure classes: exception swallowing, empty output loops, coupled tests, missing error rendering, silent builds | Shipped |
 | [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) | Branch-side retry for flaky tests, deterministic junitxml baseline parsing, and completeness validation for test classification | Shipped |
 | [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
-| [TRM Task Type Profile](trm-task-type-profile.md) | Grove-style Task-Relevant Maturity registry: per-task-type performance metrics drive PM delegation style (structured vs autonomous dev session handoff) | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
+| [TRM Task Type Profile](trm-task-type-profile.md) | Grove-style Task-Relevant Maturity registry: per-task-type performance metrics drive PM delegation style (structured vs autonomous dev session handoff) | Shipped |
 | [Unified Analytics](unified-analytics.md) | Dual-write metrics collection (SQLite + Redis) with instrumentation across all subsystems, historical query API, CLI export, dashboard trend view, and reflections rollup | Shipped |
 | [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC; CLI/log surfaces show explicit UTC labels, conversational surfaces convert to local time | Shipped |
 | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |

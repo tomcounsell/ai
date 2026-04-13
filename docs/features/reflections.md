@@ -420,15 +420,14 @@ Findings are added to `state.findings` with key `{slug}:pr_review_audit`. Step p
 
 ### Scheduling
 
-The reflection scheduler starts automatically as part of the bridge worker loop. No separate launchd plist is needed for scheduling -- the scheduler ticks every 60 seconds and checks which reflections are due.
+The reflection scheduler starts automatically as part of the standalone worker process (`python -m worker`). No separate launchd plist is needed for scheduling -- the scheduler ticks every 60 seconds and checks which reflections are due.
 
 | Component | Detail |
 |-----------|--------|
-| Scheduler | `agent/reflection_scheduler.py` (asyncio task in bridge) |
+| Scheduler | `agent/reflection_scheduler.py` (asyncio task in worker) |
 | Registry | `config/reflections.yaml` |
 | State | Redis via `models/reflection.py` |
 | Tick interval | 60 seconds |
-| Old plist | `com.valor.reflections.plist` (now managed by bridge scheduler) |
 
 ### Adding a New Reflection
 
@@ -454,7 +453,7 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `python scripts/reflections.py --dry-run` | Run without side effects |
 | `python scripts/reflections.py --ignore "pattern"` | Suppress auto-fix for pattern for 14 days |
 | `python scripts/reflections.py --ignore "pattern" --reason "why"` | Suppress with reason |
-| `tail -f logs/bridge.log` | Stream bridge logs (includes reflection scheduler output) |
+| `tail -f logs/worker.log` | Stream worker logs (includes reflection scheduler output) |
 | `python -c "from models.reflections import ReflectionIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
 
 ### Session Log Cleanup
