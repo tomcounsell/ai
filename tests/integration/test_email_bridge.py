@@ -253,7 +253,7 @@ class TestProcessInboundEmail:
 # ---------------------------------------------------------------------------
 
 
-class _BreakLoop(Exception):
+class _BreakLoopError(Exception):
     """Sentinel exception to break out of the infinite polling loop after one iteration."""
 
 
@@ -283,7 +283,7 @@ class TestHealthTimestamp:
             nonlocal call_count
             call_count += 1
             if call_count >= 1:
-                raise _BreakLoop("break after first iteration")
+                raise _BreakLoopError("break after first iteration")
 
         try:
             with patch(
@@ -297,7 +297,7 @@ class TestHealthTimestamp:
                         side_effect=_break_after_first,
                     ):
                         await _email_inbox_loop(imap_config, config={})
-        except _BreakLoop:
+        except _BreakLoopError:
             pass
 
         # Verify health timestamp was written

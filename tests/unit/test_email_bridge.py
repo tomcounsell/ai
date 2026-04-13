@@ -5,11 +5,9 @@ the standard library. SMTP is mocked via unittest.mock.patch to avoid network
 calls.
 """
 
-import asyncio
 import email.mime.multipart
 import email.mime.text
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -447,9 +445,7 @@ class TestPollImapBatchCap:
     async def test_batch_cap_exact_boundary(self):
         """When IMAP returns exactly IMAP_MAX_BATCH messages, all are fetched
         (no truncation)."""
-        fake_msg_ids = b" ".join(
-            str(i).encode() for i in range(1, IMAP_MAX_BATCH + 1)
-        )
+        fake_msg_ids = b" ".join(str(i).encode() for i in range(1, IMAP_MAX_BATCH + 1))
 
         mock_conn = MagicMock()
         mock_conn.login.return_value = ("OK", [])
