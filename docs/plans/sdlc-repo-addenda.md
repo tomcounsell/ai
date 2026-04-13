@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Critique
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -136,7 +136,9 @@ New tests to create:
 
 ## Race Conditions
 
-No race conditions identified — all operations are synchronous file creation in the update script, and the reflection agent runs on a fixed schedule with no concurrent writers.
+**Stub creation:** This repo runs on multiple machines (multi-instance deployment). Two machines running `/update` simultaneously would both attempt to write `docs/sdlc/` stubs. This is benign — stub content is deterministic (same template), so the last writer wins with identical content. The `if not path.exists():` guard reduces redundant writes but does not fully prevent them. No data loss or corruption risk.
+
+**Reflection agent:** Runs on a fixed 3-day schedule. If two instances fire simultaneously and both attempt to write the same addendum file, the last writer wins. Given the 3-day cadence and single-machine deployment of launchd services, this is not a practical concern.
 
 ## No-Gos (Out of Scope)
 
@@ -237,10 +239,10 @@ No `.mcp.json` changes needed.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `docs/sdlc/` directory
-- Create 8 stub files (do-plan.md, do-critique.md, do-build.md, do-test.md, do-patch.md, do-review.md, do-docs.md, do-merge.md) with comment headers
+- Create 8 stub files (do-plan.md, do-plan-critique.md, do-build.md, do-test.md, do-patch.md, do-pr-review.md, do-docs.md, do-merge.md) with comment headers
 - Hand-author initial content for `docs/sdlc/do-plan.md`: Popoto migration requirement, required plan sections (Documentation, Update System, Agent Integration, Test Impact), `docs/plans/` commit-on-main rule
 - Add `_migrate_create_sdlc_stubs()` to `scripts/update/migrations.py`
-- Register migration in `run_pending_migrations()`
+- Register migration in `MIGRATIONS` dict (required — `run_pending_migrations()` iterates `MIGRATIONS`)
 - Write `tests/unit/test_sdlc_stubs.py`
 
 ### 2. Add addendum check to SDLC skills
@@ -251,7 +253,8 @@ No `.mcp.json` changes needed.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add one instruction near the top of each SKILL.md: "Before starting, check if `docs/sdlc/do-X.md` exists in the current repo. If it does, read it and incorporate its guidance as repo-specific addenda to these instructions."
-- Files to modify: `~/.claude/skills/do-plan/SKILL.md`, `do-build/SKILL.md`, `do-test/SKILL.md`, `do-patch/SKILL.md`, `do-pr-review/SKILL.md`, `do-docs/SKILL.md`, `do-merge/SKILL.md`, `do-plan-critique/SKILL.md`
+- Global skills to modify (in `~/.claude/skills/`): `do-plan/SKILL.md`, `do-build/SKILL.md`, `do-test/SKILL.md`, `do-patch/SKILL.md`, `do-pr-review/SKILL.md`, `do-docs/SKILL.md`, `do-plan-critique/SKILL.md`
+- Repo-local command (different format, different path): `.claude/commands/do-merge.md` — prepend same addendum check note at top of this file (it is a markdown command file, not a SKILL.md; treat the same way — add a one-line instruction at the top)
 
 ### 3. Create SDLC reflection agent
 - **Task ID**: build-reflection-agent
