@@ -149,7 +149,12 @@ def check_python_alias() -> ToolCheck:
         try:
             result = run_cmd([python_path, "--version"], timeout=5)
             version = result.stdout.strip()
-            if "3.12" in version or "3.13" in version:
+            # Parse "Python X.Y.Z" and compare properly
+            import re as _re
+
+            m = _re.search(r"(\d+)\.(\d+)", version)
+            ok = m and (int(m.group(1)), int(m.group(2))) >= (3, 12)
+            if ok:
                 return ToolCheck(name="python", available=True, version=version)
             else:
                 return ToolCheck(
