@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Medium
 owner: Valor
@@ -7,6 +7,7 @@ created: 2026-04-13
 tracking: https://github.com/tomcounsell/ai/issues/926
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 ---
 
 # Reflections Quality Pass: Scheduler Placement, Model Split, Field Conventions
