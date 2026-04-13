@@ -246,6 +246,13 @@ class AgentSession(Model):
     # Meta.ttl below serves as absolute backstop if the release hook never fires.
     retain_for_resume = Field(default=False)
 
+    # === Continuation PM depth tracking ===
+    # Tracks how many continuation PMs have been chained from the original PM.
+    # Stored directly on the session (O(1)) rather than walking the parent chain
+    # (which is fragile under TTL expiry). Defaults to 0.
+    # _create_continuation_pm increments from parent's value; capped at 3.
+    continuation_depth = IntField(default=0)
+
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 
