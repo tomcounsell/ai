@@ -339,7 +339,7 @@ class TestReflectionModel:
 
         field_names = [f for f in dir(Reflection) if not f.startswith("_")]
         assert "name" in field_names
-        assert "last_run" in field_names
+        assert "ran_at" in field_names
         assert "run_count" in field_names
         assert "last_status" in field_names
         assert "last_error" in field_names

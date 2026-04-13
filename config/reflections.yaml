@@ -10,7 +10,7 @@
 #   priority:       Job queue priority: urgent | high | normal | low
 #   execution_type: "function" (direct Python callable) or "agent" (full Claude session)
 #   callable:       Python dotted path to the function (for execution_type: function)
-#   command:        Shell command to run (for execution_type: agent)
+#   command:        Natural-language prompt for PM session (for execution_type: agent)
 #   description:    Human-readable description
 #   enabled:        Whether this reflection is active (default: true)
 #

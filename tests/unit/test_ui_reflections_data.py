@@ -28,12 +28,6 @@ class TestReflectionsDataLayer:
             assert "last_status" in entry
             assert "run_count" in entry
 
-    def test_get_schedule_returns_sorted_list(self):
-        from ui.data.reflections import get_schedule
-
-        result = get_schedule()
-        assert isinstance(result, list)
-
     def test_get_run_history_empty(self):
         from ui.data.reflections import get_run_history
 
@@ -47,12 +41,6 @@ class TestReflectionsDataLayer:
 
         result = get_run_detail("nonexistent-reflection", 0)
         assert result is None
-
-    def test_get_log_content_not_found(self):
-        from ui.data.reflections import get_log_content
-
-        result = get_log_content("nonexistent-reflection", 0)
-        assert "not found" in result.lower() or "Run not found" in result
 
 
 class TestReflectionFormatters:

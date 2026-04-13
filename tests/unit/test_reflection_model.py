@@ -17,8 +17,7 @@ class TestReflectionMarkCompleted:
 
         return Reflection.create(
             name=name,
-            last_run=None,
-            next_due=None,
+            ran_at=None,
             run_count=0,
             last_status="pending",
             last_error=None,
