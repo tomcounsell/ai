@@ -407,7 +407,7 @@ class TestPopotoIndexCleanupReflection:
 
 
 class TestRedisDataQuality:
-    """Tests for step 14: Redis data quality checks."""
+    """Tests for redis_data_quality step."""
 
     @pytest.fixture(autouse=True)
     def _ensure_projects_config(self, tmp_path, monkeypatch):

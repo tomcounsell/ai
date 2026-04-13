@@ -121,7 +121,7 @@ result = rollup_daily()
 # {"aggregated_days": 5, "purged_rows": 142, "errors": []}
 ```
 
-Aggregates raw events into Redis daily summary keys and purges SQLite events older than 30 days. Runs automatically as reflections unit 15 (`analytics_rollup`).
+Aggregates raw events into Redis daily summary keys and purges SQLite events older than 30 days. Runs automatically as the `analytics_rollup` unit in the daily maintenance pipeline.
 
 ## CLI Usage
 
@@ -176,7 +176,7 @@ An HTMX partial (`ui/templates/_partials/analytics_stats.html`) renders compact 
 
 ## Reflections Integration
 
-The daily rollup runs as reflections step 15 (`analytics_rollup`) in `scripts/reflections.py`. It:
+The daily rollup runs as the `analytics_rollup` step in `scripts/reflections.py`. It:
 
 1. Reads raw events from SQLite within the retention window
 2. Aggregates totals and counts per day per metric into Redis daily keys

@@ -642,11 +642,11 @@ class TestCLIFlags:
         assert captured_runner["instance"].state.dry_run is True
 
 
-# --- Step 14 Branch and Plan Cleanup ---
+# --- Branch and Plan Cleanup ---
 
 
 class TestBranchPlanCleanup:
-    """Tests for step 14: branch and plan cleanup."""
+    """Tests for branch_plan_cleanup step."""
 
     @pytest.mark.asyncio
     async def test_deletes_merged_branches(self, tmp_path):
