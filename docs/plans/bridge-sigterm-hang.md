@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-13
 tracking: https://github.com/tomcounsell/ai/issues/937
 last_comment_id:
+revision_applied: true
 ---
 
 # Fix: Bridge process hangs after SIGTERM
@@ -15,7 +16,7 @@ last_comment_id:
 When the bridge receives SIGTERM, it enters `_graceful_shutdown()` but the process never exits. It hangs indefinitely because `asyncio.run()` waits for background tasks that have infinite `while True` loops and are never cancelled.
 
 **Current behavior:**
-SIGTERM → `_graceful_shutdown()` disconnects Telegram client → `main()` returns → `asyncio.run()` tries to clean up remaining tasks → five background tasks with `while True` loops block shutdown → process hangs for hours → launchd never restarts → dashboard shows `error`.
+SIGTERM → `_graceful_shutdown()` disconnects Telegram client → `main()` returns → `asyncio.run()` tries to clean up remaining tasks → six background tasks with `while True` loops block shutdown → process hangs for hours → launchd never restarts → dashboard shows `error`.
 
 **Desired outcome:**
 SIGTERM → `_graceful_shutdown()` cancels all background tasks → process exits within 10 seconds → launchd restarts bridge → dashboard returns to `ok`.
@@ -31,6 +32,7 @@ SIGTERM → `_graceful_shutdown()` cancels all background tasks → process exit
 - `bridge/telegram_bridge.py:1733` — `_shutdown_handler` signal handler — still holds (was line 1734 in issue, now 1733)
 - `bridge/telegram_bridge.py:1741` — `_graceful_shutdown` coroutine — still holds
 - `bridge/telegram_bridge.py:2020` — `asyncio.create_task(_run_catchup())` — still holds
+- `bridge/telegram_bridge.py:2029` — `asyncio.create_task(reconciler_loop(...))` — still holds
 - `bridge/telegram_bridge.py:2046` — `asyncio.create_task(watchdog_loop(...))` — still holds
 - `bridge/telegram_bridge.py:2084` — `asyncio.create_task(message_query_loop())` — still holds
 - `bridge/telegram_bridge.py:2091` — `asyncio.create_task(relay_loop(client))` — still holds
@@ -62,7 +64,7 @@ SIGTERM → `_graceful_shutdown()` cancels all background tasks → process exit
 2. **Signal handler** (`_shutdown_handler`, line 1733): Sets `SHUTTING_DOWN = True`, schedules `_graceful_shutdown(client)` on the event loop
 3. **`_graceful_shutdown`** (line 1741): Stops knowledge watcher, writes final `last_connected`, sleeps 2s, calls `await tg_client.disconnect()`
 4. **`run_until_disconnected`** (line 2135): Returns because client is disconnected, so `main()` returns
-5. **`asyncio.run()`** (line 2139): Attempts to cancel remaining tasks — but five `while True` loop tasks never check `SHUTTING_DOWN` and are never explicitly cancelled
+5. **`asyncio.run()`** (line 2139): Attempts to cancel remaining tasks — but six `while True` loop tasks never check `SHUTTING_DOWN` and are never explicitly cancelled
 6. **Hang**: `asyncio.run()` waits indefinitely (or up to implementation-specific timeout) for tasks that will never finish
 
 ## Appetite
@@ -96,7 +98,7 @@ No prerequisites — this work has no external dependencies.
 Follow the proven pattern from PR #742 (worker graceful shutdown):
 
 1. **Create a module-level list** `_background_tasks: list[asyncio.Task] = []` to track all background tasks created in `main()`
-2. **Append each `asyncio.create_task()` result** to `_background_tasks` (5 tasks: catchup, watchdog, message_query, relay, heartbeat)
+2. **Append each `asyncio.create_task()` result** to `_background_tasks` (6 tasks: catchup, reconciler, watchdog, message_query, relay, heartbeat)
 3. **In `_graceful_shutdown()`**, after the existing cleanup steps and before `tg_client.disconnect()`:
    - Cancel all tasks in `_background_tasks`
    - `await asyncio.gather(*_background_tasks, return_exceptions=True)`
@@ -124,7 +126,7 @@ No existing tests affected — the bridge shutdown path has no test coverage tod
 
 - **Adding `SHUTTING_DOWN` checks to every loop body**: Tempting but unnecessary. Explicit `task.cancel()` is cleaner and guaranteed to work. The worker PR #742 uses cancellation, not flag-checking. Don't mix approaches.
 - **Rewriting the signal handler to use `asyncio.Event`**: The worker uses this pattern, but the bridge's signal handler already works fine for scheduling the shutdown coroutine. Refactoring would increase scope for no benefit.
-- **Adding structured shutdown ordering for tasks**: Overkill. All five tasks are independent and can be cancelled simultaneously.
+- **Adding structured shutdown ordering for tasks**: Overkill. All six tasks are independent and can be cancelled simultaneously.
 
 ## Risks
 
@@ -196,7 +198,7 @@ No agent integration required — this is a bridge-internal change to the shutdo
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_background_tasks: list[asyncio.Task] = []` module-level list in `bridge/telegram_bridge.py`
-- Wrap each `asyncio.create_task()` call (lines 2020, 2046, 2084, 2091, 2132) to append the returned task to `_background_tasks`
+- Wrap each `asyncio.create_task()` call (lines 2020, 2029, 2046, 2084, 2091, 2132) to append the returned task to `_background_tasks`
 - In `_graceful_shutdown()`, before `tg_client.disconnect()`: cancel all tasks in `_background_tasks`, then `await asyncio.gather(*_background_tasks, return_exceptions=True)`
 - After `await client.run_until_disconnected()` returns (line 2135), add `sys.exit(1)` safety net for launchd ThrottleInterval
 - Add unit test `tests/unit/test_bridge_shutdown.py` that creates mock tasks, calls `_graceful_shutdown`, and asserts all tasks are cancelled
@@ -207,7 +209,7 @@ No agent integration required — this is a bridge-internal change to the shutdo
 - **Assigned To**: shutdown-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify `_background_tasks` list exists and all 5 `create_task` calls append to it
+- Verify `_background_tasks` list exists and all 6 `create_task` calls append to it
 - Verify `_graceful_shutdown` cancels all tasks before disconnecting
 - Verify `sys.exit(1)` safety net is present after `run_until_disconnected`
 - Run `pytest tests/unit/test_bridge_shutdown.py -v` and confirm pass
