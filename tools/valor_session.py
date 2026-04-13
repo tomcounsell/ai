@@ -371,6 +371,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "message": session.message_text
                 if full_message
                 else (session.message_text or "")[:100],
+                "message_preview": (session.message_text or "")[:100],  # backward-compat alias
                 "queued_steering_messages": session.queued_steering_messages or [],
                 "slug": getattr(session, "slug", None),
                 "branch_name": getattr(session, "branch_name", None),
@@ -483,10 +484,13 @@ def cmd_children(args: argparse.Namespace) -> int:
 
         # Scan all sessions for matching parent
         all_children: list[AgentSession] = []
-        for st in ("pending", "running", "active", "completed", "failed", "killed"):
+        from models.session_lifecycle import ALL_STATUSES
+
+        for st in ALL_STATUSES:
             try:
                 for s in AgentSession.query.filter(status=st):
                     pid = getattr(s, "parent_agent_session_id", None)
+                    # Dual-match: caller may pass either session_id or agent_session_id; check both
                     if pid and (pid == parent_agent_id or pid == parent_id):
                         all_children.append(s)
             except Exception:
@@ -551,8 +555,10 @@ def cmd_list(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
         else:
-            # Common statuses
-            for st in ("pending", "running", "active", "completed", "failed", "killed"):
+            # All known statuses — use ALL_STATUSES to avoid silently missing statuses
+            from models.session_lifecycle import ALL_STATUSES
+
+            for st in ALL_STATUSES:
                 try:
                     all_sessions.extend(list(AgentSession.query.filter(status=st)))
                 except Exception:

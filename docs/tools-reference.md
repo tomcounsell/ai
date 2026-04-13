@@ -194,6 +194,13 @@ python -m tools.valor_session list --role pm
 
 # Inspect a session
 python -m tools.valor_session status --id <SESSION_ID>
+python -m tools.valor_session status --id <SESSION_ID> --full-message  # print full prompt (no 100-char truncation)
+
+# Debug / raw field dump
+python -m tools.valor_session inspect --id <SESSION_ID>  # dump all raw Popoto fields
+
+# List child sessions spawned by a parent session
+python -m tools.valor_session children --id <SESSION_ID>
 
 # Inject a steering message into a running session
 python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"

@@ -1,5 +1,5 @@
 ---
-status: Critique
+status: Build
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -138,7 +138,7 @@ New tests to create:
 
 **Stub creation:** This repo runs on multiple machines (multi-instance deployment). Two machines running `/update` simultaneously would both attempt to write `docs/sdlc/` stubs. This is benign — stub content is deterministic (same template), so the last writer wins with identical content. The `if not path.exists():` guard reduces redundant writes but does not fully prevent them. No data loss or corruption risk.
 
-**Reflection agent:** Runs on a fixed 3-day schedule. If two instances fire simultaneously and both attempt to write the same addendum file, the last writer wins. Given the 3-day cadence and single-machine deployment of launchd services, this is not a practical concern.
+**Reflection agent:** Runs on a fixed 3-day schedule via `StartCalendarInterval` (Mon + Thu). On multi-machine deployments both plists can fire near-simultaneously. Guard condition at script startup: `gh pr list --state open --label sdlc-reflection` — if an open PR already exists, the script exits cleanly without writing. The opening machine's PR is self-enforcing; the second machine skips automatically. The `sdlc-reflection` label is applied when the PR is created.
 
 ## No-Gos (Out of Scope)
 
@@ -154,7 +154,7 @@ The update script (`scripts/update/run.py` → `migrations.py`) gains a new migr
 ```python
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing."""
-    stubs = ["do-plan", "do-critique", "do-build", "do-test",
+    stubs = ["do-plan", "do-plan-critique", "do-build", "do-test",
              "do-patch", "do-review", "do-docs", "do-merge"]
     sdlc_dir = project_dir / "docs" / "sdlc"
     sdlc_dir.mkdir(parents=True, exist_ok=True)
@@ -162,10 +162,15 @@ def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
         path = sdlc_dir / f"{name}.md"
         if not path.exists():
             path.write_text(STUB_TEMPLATE.format(name=name))
-    return None  # No error
+    # Verify all stubs were written — if any are missing, return error so
+    # run_pending_migrations() does NOT mark this migration complete and retries next run
+    missing = [n for n in stubs if not (sdlc_dir / f"{n}.md").exists()]
+    if missing:
+        return f"missing stubs: {', '.join(missing)}"
+    return None  # All present — mark complete
 ```
 
-This migration runs once per machine and is idempotent. Running `/update` on a machine that already has all 8 files is a no-op.
+This migration runs once per machine and is idempotent. Running `/update` on a machine that already has all 8 files is a no-op. If a write fails (permissions, disk full), the migration returns an error string so `run_pending_migrations()` does not mark it complete — it retries on the next run.
 
 ## Agent Integration
 
@@ -179,8 +184,9 @@ No `.mcp.json` changes needed.
 
 - [ ] Create `docs/features/sdlc-repo-addenda.md` describing the `docs/sdlc/` system and reflection agent
 - [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `CLAUDE.md` quick reference table to include `docs/sdlc/` as a resource
+- [ ] Update `CLAUDE.md` quick reference table to include `docs/sdlc/` as a resource and `tail -f logs/sdlc_reflection.log` as a log command
 - [ ] Add comment header to each `docs/sdlc/do-X.md` stub per spec
+- [ ] Document that adding a 9th SDLC stage requires a new named migration entry in `scripts/update/migrations.py`
 
 ## Success Criteria
 
@@ -264,7 +270,10 @@ No `.mcp.json` changes needed.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `scripts/sdlc_reflection.py`: fetches merged PRs since last run, extracts per-stage patterns, proposes targeted edits to `docs/sdlc/do-X.md` files, enforces 300-line cap
-- Create `com.valor.sdlc-reflection.plist` scheduled every 3 days (72-hour interval using `StartInterval`)
+- Guard against multi-machine PR collision: at startup, check `gh pr list --state open --label sdlc-reflection`; if a PR already exists, exit cleanly with "reflection PR already open, skipping"
+- Create `com.valor.sdlc-reflection.plist` scheduled every 3 days using `StartCalendarInterval` (Mon + Thu, matching `com.valor.reflections.plist` pattern — do NOT use `StartInterval`)
+  - Plist must write to **`logs/sdlc_reflection.log`** and **`logs/sdlc_reflection_error.log`** (dedicated files — do NOT share `logs/reflections.log`)
+  - Use `<key>StandardOutPath</key><string>__PROJECT_DIR__/logs/sdlc_reflection.log</string>` and matching ErrorPath
 - Create `scripts/install_sdlc_reflection.sh` matching pattern of `scripts/install_reflections.sh`
 - Store last-run timestamp in `data/sdlc_reflection_last_run.json`
 
@@ -313,13 +322,19 @@ No `.mcp.json` changes needed.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Adversary | Migration silently succeeds on partial stub write failure — `return None` regardless of whether writes succeeded; recorded as complete, never retries | Fixed in Update System section | Return `f"missing stubs: {', '.join(missing)}"` when any stub is absent after loop; `run_pending_migrations()` treats non-None as failure, skips recording, retries next run |
+| BLOCKER | Operator | Reflection agent log file collision — plan did not specify a log file; default would share `logs/reflections.log`, interleaving output | Fixed in Task 3 | Plist must write to `logs/sdlc_reflection.log` and `logs/sdlc_reflection_error.log`; keys `StandardOutPath` / `StandardErrorPath` added to plist spec |
+| CONCERN | Operator, Skeptic | Plist timing key inconsistency — Solution says `StartCalendarInterval`, Task 3 said `StartInterval` (uptime-relative, different semantics) | Fixed in Task 3 | Task 3 now specifies `StartCalendarInterval` (Mon + Thu) matching `com.valor.reflections.plist`; `StartInterval` reference removed |
+| CONCERN | Adversary | Multi-machine PR race — both machines can fire and open conflicting PRs on the same addendum files | Fixed in Race Conditions + Task 3 | Guard condition: check `gh pr list --state open --label sdlc-reflection`; if PR exists, exit cleanly; PR opened with `sdlc-reflection` label |
+| CONCERN | Skeptic | Future SDLC stage stubs not auto-created — migration recorded once; new stage added later requires a new migration entry | Documented | Documented explicitly: adding a 9th stage requires a new named migration entry in `MIGRATIONS` dict |
+| NIT | Simplifier | Team Orchestration over-specified — 5 named agents for straightforward sequential work | Noted | Retained for compatibility with `/do-build` format; builder may consolidate in practice |
+| NIT | Skeptic | `test_sdlc_addendum_graceful.py` tests an if-statement, not behavior | Noted | Replace with a test that verifies skill output changes when addendum is present vs absent |
 
 ---
 
 ## Open Questions
 
-1. Should the reflection agent auto-commit its edits directly to main, or open a PR for human review? Auto-commit is lower friction but bypasses review. PR is safer but adds overhead.
-2. For the skill addendum check in `do-plan-critique`, should it read `docs/sdlc/do-critique.md` or `docs/sdlc/do-plan-critique.md`? The global skill is named `do-plan-critique` but the issue sketch uses `do-critique.md`.
+1. ~~Should the reflection agent auto-commit its edits directly to main, or open a PR for human review?~~ **Resolved:** Reflection agent opens a PR and schedules a PM session to run the remaining SDLC stages (pr review, patch, docs, merge) in parallel.
+2. ~~Should `do-plan-critique` addendum read `docs/sdlc/do-critique.md` or `docs/sdlc/do-plan-critique.md`?~~ **Resolved:** Use `docs/sdlc/do-plan-critique.md` — match the global skill name.

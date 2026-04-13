@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-13
 tracking: https://github.com/tomcounsell/ai/issues/926
 last_comment_id:
+revision_applied: true
 ---
 
 # Reflections Quality Pass: Scheduler Placement, Model Split, Field Conventions
@@ -72,6 +73,8 @@ The reflections system has accumulated eight concrete correctness and hygiene is
 - **PR #511**: "Unified Web UI: Infrastructure, Reflections Dashboard" -- Created `ui/data/reflections.py` that reads the broken `next_due` field. The dashboard code was written assuming `next_due` would work.
 - **PR #664**: "Fix dashboard timestamps, surface session metadata" -- Fixed timestamp display in dashboard but did not address the `next_due` computation issue.
 
+- **Issue #748**: "Unify reflections: single model, split monolith into 24 declarative reflections" -- OPEN. The larger parent initiative this quality pass feeds into. This issue establishes a clean model foundation that makes #748 simpler.
+
 No prior attempts to fix these specific issues were found. These are known debt items surfaced by the integration audit.
 
 ## Data Flow
@@ -134,10 +137,10 @@ No prerequisites -- this work has no external dependencies. All changes are to e
 
 - **Model split strategy**: Create `models/reflection_run.py`, `models/reflection_ignore.py`, `models/pr_review_audit.py`. Keep `models/reflections.py` as a backward-compatible re-export shim (`from models.reflection_run import ReflectionRun` etc.) to avoid breaking all import sites simultaneously. Update `models/__init__.py` to import from new files. Gradually migrate direct importers to new paths.
 - **Scheduler move**: Remove the two lines at `bridge/telegram_bridge.py:2053-2055`. Add equivalent `ReflectionScheduler` initialization to `worker/__main__.py` startup, creating a background asyncio task.
-- **next_due removal**: Delete the `next_due` field from `Reflection` model. In `ui/data/reflections.py:get_all_reflections()`, compute `next_due = state.last_run + config["interval"]` when `state.last_run` is not None. The scheduler's `get_status()` method already computes this correctly (line 508) -- the dashboard just needs to match that pattern.
+- **next_due removal**: Delete the `next_due` field from `Reflection` model. In `ui/data/reflections.py:get_all_reflections()`, compute `next_due = state.ran_at + timedelta(seconds=config["interval"])` when `state.ran_at` is not None. This task depends on the timestamp rename (Task 5) since `ran_at` is `datetime`, requiring `timedelta` arithmetic. The scheduler's `get_status()` method already computes this correctly (line 508) -- the dashboard just needs to match that pattern.
 - **log_path cleanup**: Remove `log_path` from the `run_history` docstring in `Reflection`. Remove `get_log_content()` and the `log_path` branch in `get_run_detail()` from `ui/data/reflections.py`. Remove the `_read_log_file()` helper if no other callers exist.
 - **Timestamp migration**: Rename `last_run` -> `ran_at` (type datetime) in `Reflection`. Rename `started_at`, `created_at`, `expires_at`, `audited_at` in the split model files. Since these are Popoto Redis fields, existing float values in Redis will need coercion on read (Popoto handles this via field type).
-- **Output externalization**: Replace `findings`, `session_analysis`, `daily_report` DictField/ListField in `ReflectionRun` with a single `output_path` field. Write payload to `logs/reflections/{date}.json`. Update `scripts/reflections.py` write sites.
+- **Output externalization**: Replace `findings`, `session_analysis`, `daily_report` DictField/ListField in `ReflectionRun` with a single `output_path` field. Write payload to `logs/reflections/{date}.json`. Update the ~15 direct field assignment sites in `scripts/reflections.py` (e.g., `self.state.findings`, `self.state.session_analysis`, `self.state.daily_report` followed by `self.state.save()`) to write to filesystem instead. Note: `save_checkpoint()` is only called in tests, not in the production write path.
 - **Field rename**: Rename `ReflectionRun.reflections` to `session_observations`. Update all read/write sites in `scripts/reflections.py`.
 
 ## Failure Path Test Strategy
@@ -169,7 +172,7 @@ No prerequisites -- this work has no external dependencies. All changes are to e
 
 - **Full unification (#748)**: This is a quality pass, not the full model unification. Do not attempt to merge `Reflection` and `ReflectionRun` into a single model -- that is #748 scope.
 - **Stuck-detection threshold tuning**: The issue mentions this was dropped; do not add configurable thresholds.
-- **Redis data migration**: Do not write a migration script for existing Redis data. Popoto field type changes are handled on read. Old float timestamps will coerce to datetime on access. Old `reflections` field data will simply be inaccessible under the new `session_observations` name, but ReflectionRun records have a 30-day TTL so stale data expires naturally.
+- **Redis data migration**: Do not write a full migration script for existing Redis data. Popoto field type changes are handled on read. Old float timestamps will coerce to datetime on access. For the `reflections` -> `session_observations` rename, a one-time migration guard in the load path copies old field data to the new field name (see Task 7 critique fix). No standalone migration script needed.
 - **Dashboard UI redesign**: Only fix the data layer. Do not redesign the reflections dashboard template.
 
 ## Risks
@@ -235,6 +238,7 @@ No agent integration required -- this is an internal refactoring of models, sche
 - [ ] All existing reflection-related tests pass
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
+- [ ] Manual dashboard verification: start the UI with `python -m ui.app`, navigate to the reflections dashboard, confirm the next-due column shows non-null values for reflections that have run (**CRITIQUE FIX**: user-facing validation of the dashboard fix)
 
 ## Team Orchestration
 
@@ -293,15 +297,15 @@ No agent integration required -- this is an internal refactoring of models, sche
 
 ### 3. Remove next_due field, compute in dashboard
 - **Task ID**: build-next-due
-- **Depends On**: build-model-split
+- **Depends On**: build-model-split, build-timestamp-rename
 - **Validates**: `tests/unit/test_ui_reflections_data.py`, `tests/unit/test_reflection_model.py`
 - **Assigned To**: field-cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Remove `next_due = Field(type=float, null=True)` from `models/reflection.py`
 - Remove `next_due=None` from `get_or_create()` defaults
-- Update `ui/data/reflections.py:get_all_reflections()` to compute `next_due = state.last_run + config["interval"]` when `state.last_run is not None`
-- Remove the duplicate `get_schedule()` computation (it duplicates `get_all_reflections()` logic)
+- Update `ui/data/reflections.py:get_all_reflections()` to compute `next_due = state.ran_at + timedelta(seconds=config["interval"])` when `state.ran_at is not None` (**CRITIQUE FIX**: must use `timedelta` since `ran_at` is `datetime` after Task 5, not float addition)
+- Before removing `get_schedule()`, verify zero callers: run `grep -rn get_schedule ui/` to confirm no route handlers depend on it (**CRITIQUE FIX**: caller audit required before removal). If callers exist, replace the body with `return get_all_reflections()` rather than deleting
 - Update tests to reflect computed next_due
 
 ### 4. Remove log_path dead code
@@ -339,8 +343,7 @@ No agent integration required -- this is an internal refactoring of models, sche
 - **Agent Type**: builder
 - **Parallel**: false
 - Replace `findings`, `session_analysis`, `daily_report` fields in `ReflectionRun` with `output_path = Field(null=True)`
-- Update `scripts/reflections.py` to write payload to `logs/reflections/{date}.json` and store only the path
-- Update `save_checkpoint()` to handle the new field
+- Update `scripts/reflections.py` to write payload to `logs/reflections/{date}.json` and store only the path. **CRITIQUE FIX**: The real write path is NOT `save_checkpoint()` -- it is ~15 direct field assignment sites in `scripts/reflections.py` (e.g., `self.state.findings.setdefault(...)`, `self.state.session_analysis = ...`, `self.state.daily_report = ...`) followed by `self.state.save()`. All of these sites must be updated to write to the filesystem and store only `output_path`. `save_checkpoint()` is only called in `tests/integration/test_reflections_redis.py:88`.
 - Create `logs/reflections/` directory if missing on write
 
 ### 7. Rename ReflectionRun.reflections to session_observations
@@ -353,6 +356,7 @@ No agent integration required -- this is an internal refactoring of models, sche
 - Rename `reflections` field to `session_observations` in `ReflectionRun` model
 - Update all read/write sites in `scripts/reflections.py`
 - Update `save_checkpoint()` field list
+- **CRITIQUE FIX**: Add a one-time migration guard in `ReflectionRun.load_or_create()` (or equivalent load path): if the old `reflections` Redis hash key has data and `session_observations` is empty, copy the data over. This prevents in-progress runs that checkpointed before the rename from losing their data mid-run. Popoto stores each field under its own Redis hash key, so the old key persists even after the model field is renamed.
 
 ### 8. Validate all changes
 - **Task ID**: validate-all
