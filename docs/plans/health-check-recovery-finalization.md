@@ -2,7 +2,7 @@
 title: "Bug: health-check-recovered sessions not finalized — causes duplicate Telegram delivery"
 slug: health-check-recovery-finalization
 type: bug
-status: Critique Complete
+status: Complete
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/917
 last_comment_id: null
@@ -146,31 +146,31 @@ else:
 
 ## Step-by-Step Tasks
 
-- [ ] Read `_execute_agent_session()` from L3360–3390 in `agent/agent_session_queue.py` to confirm exact location of the `if agent_session:` finalization block
-- [ ] Add `else` branch after the `if agent_session:` block calling `complete_transcript(session.session_id, status=final_status)` guarded by `if not chat_state.defer_reaction` — this writes the SESSION_END transcript marker AND calls `finalize_session()` internally
-- [ ] Add `from models.session_lifecycle import StatusConflictError` import and catch `StatusConflictError` separately at `info` level (CAS conflict = success case, another process already finalized)
-- [ ] Catch remaining exceptions at `warning` level (preserves signal-to-noise ratio)
-- [ ] Add `logger.info` on successful fallback finalization (for observability)
-- [ ] Write `tests/unit/test_health_check_recovery_finalization.py`:
+- [x] Read `_execute_agent_session()` from L3360–3390 in `agent/agent_session_queue.py` to confirm exact location of the `if agent_session:` finalization block
+- [x] Add `else` branch after the `if agent_session:` block calling `complete_transcript(session.session_id, status=final_status)` guarded by `if not chat_state.defer_reaction` — this writes the SESSION_END transcript marker AND calls `finalize_session()` internally
+- [x] Add `from models.session_lifecycle import StatusConflictError` import and catch `StatusConflictError` separately at `info` level (CAS conflict = success case, another process already finalized)
+- [x] Catch remaining exceptions at `warning` level (preserves signal-to-noise ratio)
+- [x] Add `logger.info` on successful fallback finalization (for observability)
+- [x] Write `tests/unit/test_health_check_recovery_finalization.py`:
   - Test 1: `agent_session = None` + `task.error = None` + `defer_reaction = False` → `complete_transcript` called with `"completed"`
   - Test 2: `agent_session = None` + `task.error = "some error"` + `defer_reaction = False` → `complete_transcript` called with `"failed"`
   - Test 3: `agent_session = None` + `defer_reaction = True` → `complete_transcript` NOT called (nudge path preserved)
   - Test 4: `agent_session` is non-None → existing `complete_transcript` path used (regression guard)
   - Test 5: Fallback `complete_transcript` raises `StatusConflictError` → info logged, no exception propagated
   - Test 6: Fallback `complete_transcript` raises unexpected exception → warning logged, no exception propagated
-- [ ] Run `pytest tests/unit/test_health_check_recovery_finalization.py -v` — all pass
-- [ ] Run `pytest tests/unit/test_recovery_respawn_safety.py -v` — all pass (regression check for #898)
-- [ ] Run `python -m ruff check agent/agent_session_queue.py` — clean
-- [ ] Update `docs/features/session-recovery-mechanisms.md` to document the finalization gap and fallback fix
+- [x] Run `pytest tests/unit/test_health_check_recovery_finalization.py -v` — all pass
+- [x] Run `pytest tests/unit/test_recovery_respawn_safety.py -v` — all pass (regression check for #898)
+- [x] Run `python -m ruff check agent/agent_session_queue.py` — clean
+- [x] Update `docs/features/session-recovery-mechanisms.md` to document the finalization gap and fallback fix
 
 ## Success Criteria
 
-- [ ] A session recovered by the health check (`running → pending → running`) is marked `completed` in Redis after successful execution, even when the inner `agent_session` lookup returns `None`
-- [ ] No session remains in `running` state after `_execute_agent_session()` returns normally (non-exception path)
-- [ ] The nudge path is unaffected: sessions where `chat_state.defer_reaction = True` are not prematurely finalized
-- [ ] `finalized_by_execute` guard preserved — `#898` regression does not reappear
-- [ ] All new unit tests pass
-- [ ] `test_recovery_respawn_safety.py` continues to pass
+- [x] A session recovered by the health check (`running → pending → running`) is marked `completed` in Redis after successful execution, even when the inner `agent_session` lookup returns `None`
+- [x] No session remains in `running` state after `_execute_agent_session()` returns normally (non-exception path)
+- [x] The nudge path is unaffected: sessions where `chat_state.defer_reaction = True` are not prematurely finalized
+- [x] `finalized_by_execute` guard preserved — `#898` regression does not reappear
+- [x] All new unit tests pass
+- [x] `test_recovery_respawn_safety.py` continues to pass
 
 ## Prior Art
 
@@ -215,8 +215,8 @@ No agent integration changes required — this is internal session lifecycle log
 
 ## Documentation
 
-- [ ] Update `docs/features/session-recovery-mechanisms.md` — Section 2 "Health Check (`_agent_session_health_check`)" currently describes only the recovery trigger (running → pending). Add a subsection documenting the finalization gap: when `agent_session` inner lookup returns `None` on re-execution, finalization was silently skipped. Document the fallback path added by this fix: `finalize_session(session, final_status, reason="agent_session lookup miss — fallback finalization")` using the outer `session` param.
-- [ ] In the same doc, update the "Known Race Windows" section (or add an entry) describing the `agent_session = None` race window on health-check-recovered sessions and how the fallback finalization closes it.
+- [x] Update `docs/features/session-recovery-mechanisms.md` — Section 2 "Health Check (`_agent_session_health_check`)" currently describes only the recovery trigger (running → pending). Add a subsection documenting the finalization gap: when `agent_session` inner lookup returns `None` on re-execution, finalization was silently skipped. Document the fallback path added by this fix: `finalize_session(session, final_status, reason="agent_session lookup miss — fallback finalization")` using the outer `session` param.
+- [x] In the same doc, update the "Known Race Windows" section (or add an entry) describing the `agent_session = None` race window on health-check-recovered sessions and how the fallback finalization closes it.
 
 ## Open Questions
 
