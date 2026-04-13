@@ -80,6 +80,13 @@ tests/
 | integration | `test_unthreaded_routing.py` | 7 | Unthreaded message routing |
 | e2e | `test_message_pipeline.py` | 37 | Full routing → context → response flow |
 
+### `messaging` — Email bridge
+
+| Level | File | Tests | Description |
+|-------|------|------:|-------------|
+| unit | `test_email_bridge.py` | 31 | Parsing, SMTP output, batch cap, env loading |
+| integration | `test_email_bridge.py` | 5 | Inbound routing, thread continuation, health timestamp |
+
 ### `sdlc` — Pipeline stages and observer
 
 | Level | File | Tests | Description |
