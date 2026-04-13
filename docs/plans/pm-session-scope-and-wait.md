@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Medium
 owner: valorengels
 created: 2026-04-13
 tracking: https://github.com/tomcounsell/ai/issues/934
 last_comment_id:
+revision_applied: true
 ---
 
 # PM Session Scope + Wait: PM Exits Before Dev Session Completes

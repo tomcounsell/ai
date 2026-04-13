@@ -124,6 +124,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `session_id` -- Telegram-derived identifier
 - `session_type` (KeyField) -- "pm", "teammate", or "dev"
 - `status` (KeyField) -- pending/running/active/dormant/completed/failed
+- `continuation_depth` (IntField, default 0) -- tracks how many continuation PM sessions have been chained from the original. Capped at `_CONTINUATION_PM_MAX_DEPTH` (3) to prevent runaway chains.
 - `project_key`, `created_at`, `history`, etc.
 - `project_config` (DictField) -- full project dict from `projects.json`, populated at enqueue time. Carries all project properties (name, working_directory, github, mode, telegram, etc.) through the pipeline so downstream code never re-derives from a parallel registry. Empty/None for older sessions created before this field existed; the worker falls back to loading from `projects.json` at execution time.
 
@@ -326,7 +327,8 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 
 | Component | File | Role |
 |-----------|------|------|
-| `_handle_dev_session_completion()` | `agent/agent_session_queue.py` | Worker post-completion: classifies outcome, posts GitHub comment, steers parent PM |
+| `_handle_dev_session_completion()` | `agent/agent_session_queue.py` | Worker post-completion: classifies outcome, posts GitHub comment, steers parent PM; creates continuation PM on steer failure |
+| `_create_continuation_pm()` | `agent/agent_session_queue.py` | Creates a continuation PM session when the parent PM is terminal — includes SETNX dedup, depth cap, and structured logging |
 | `_extract_issue_number()` | `agent/agent_session_queue.py` | Resolves tracking issue from env vars or session message_text |
 | `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Starts pipeline stage on Skill tool calls (PM Skill path) |
 | `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path |
