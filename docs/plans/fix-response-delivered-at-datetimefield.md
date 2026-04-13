@@ -89,34 +89,43 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **Defensive coercion in `_normalize_kwargs`**: Extend the existing `response_delivered_at` coercion to handle string ISO timestamps (as stored by Popoto's `__datetime__` encoder when decoded improperly) and any non-`datetime` non-`None` value — reset to `None` if conversion fails
-- **Guard in `__init__`**: Ensure that after `super().__init__()` completes, `response_delivered_at` is always a `datetime` or `None` — never the field descriptor or an unconvertible type
-- **New unit tests**: Verify `append_event` succeeds when `response_delivered_at` is `None`, an integer timestamp, a `datetime`, and a bad value
+- **Extend `__setattr__` coercion**: `AgentSession.__setattr__` (line 305) already handles `int | float` → `datetime`; extend it to also convert `str` ISO timestamps and reset unknown types to `None` — this covers all assignment paths including Popoto's own init loops
+- **Extend `_normalize_kwargs` for defence-in-depth**: Add the same `str` and unknown-type handling to the existing coercion block at lines 453-458
+- **Add DEBUG log on coercion**: Log at `DEBUG` level when `__setattr__` normalizes a bad `response_delivered_at` value (observability)
+- **New unit tests**: Verify `append_event` succeeds when `response_delivered_at` is `None`, an integer timestamp, a `datetime`, a string ISO timestamp, and an unknown bad value
 
 ### Technical Approach
 
-**Primary fix — extend `_normalize_kwargs`** (`models/agent_session.py`):
+**Primary fix — extend `__setattr__`** (`models/agent_session.py`):
 
-The existing coercion block at lines 453-458 only handles `int | float`. Extend it to also handle:
-- `str` values: attempt `datetime.fromisoformat(value)` → fall through to `None` on failure
-- Any other non-`datetime` type: reset to `None` (field is `null=True`, so `None` is always valid)
+`AgentSession.__setattr__` (line 305) is the live guard for **all** attribute assignments, including those made by Popoto's own `__init__` kwargs-apply loop (`setattr(self, field_name, kwargs[field_name])`). The existing guard only converts `int | float` to `datetime`. Extend it to also handle:
+- `str` values in `_DATETIME_FIELDS`: attempt `datetime.fromisoformat(value)`, normalize to UTC-aware if naive, fall through to `None` on parse failure
+- Any other non-`datetime` type in `_DATETIME_FIELDS`: reset to `None` (field is `null=True`, so `None` is always valid)
+- Add `logger.debug(f"AgentSession: coerced {name}={value!r} → None (bad type {type(value).__name__})")` when resetting to `None`
 
-This ensures that whenever `AgentSession` is instantiated (from Redis load or direct construction), `response_delivered_at` is always a `datetime` or `None` before Popoto's `is_valid()` runs.
+This ensures that **any assignment path** — construction, Redis load, or direct set — always leaves `response_delivered_at` (and all other `_DATETIME_FIELDS`) as a `datetime` or `None`.
 
-**Secondary guard — post-init assertion in `__init__`** (`models/agent_session.py`):
+**Why `__setattr__` is the right fix location**: Popoto's `Model.__init__` always:
+1. Calls `setattr(self, field_name, default_value)` for all fields (defaults loop) — invokes `AgentSession.__setattr__`
+2. Calls `setattr(self, field_name, kwargs[field_name])` for provided kwargs (kwargs-apply loop) — also invokes `AgentSession.__setattr__`
 
-After `super().__init__(**kwargs)`, add a guard:
-```python
-# Ensure response_delivered_at is never a non-datetime non-None value
-# (guards against Popoto descriptor leak on old Redis records)
-val = object.__getattribute__(self, "response_delivered_at")
-if val is not None and not isinstance(val, datetime):
-    object.__setattr__(self, "response_delivered_at", None)
-```
+Since both loops go through `__setattr__`, fixing `__setattr__` covers all construction and load paths. `_normalize_kwargs` is called only during `AgentSession.__init__` and `AgentSession.create()` and does not cover post-construction assignments.
 
-This handles the descriptor-object edge case where Popoto's own `__init__` might leave the field in an unexpected state.
+**Secondary fix — extend `_normalize_kwargs`** (`models/agent_session.py`):
 
-**No Popoto upstream change required**: the fix lives entirely in `AgentSession`, using Python's `object.__getattribute__` / `object.__setattr__` to bypass Popoto's descriptor protocol when needed.
+Extend the `response_delivered_at` branch at lines 453-458 to also handle `str` ISO timestamps and unknown types (reset to `None`), for defence-in-depth at the construction callsite. Same logic as `__setattr__` extension.
+
+**`__init__` post-init guard — NOT NEEDED** (critique concern resolved):
+
+> **Critique concern:** The `__init__` post-init guard using `object.__getattribute__` may be solving a non-reachable code path.
+
+**Verified unreachable.** Code inspection of `popoto/models/base.py:Model.__init__` confirms: the defaults loop sets `None` via `setattr`, then the kwargs-apply loop re-sets the Redis-decoded value via `setattr` — both pass through `AgentSession.__setattr__`. Since `__setattr__` is the fix location, no non-datetime, non-None value can survive construction after the fix. The `object.__getattribute__` / `object.__setattr__` post-init guard described in the original plan sketch is **removed from scope** — it is unnecessary and would bypass Popoto's descriptor protocol for no benefit.
+
+**`__setattr__` scope clarification** (critique nit resolved):
+
+The fix extends the **existing** `AgentSession.__setattr__` override (line 305). No new `__setattr__` class is introduced — only the method body is extended to handle `str` and unknown types for all `_DATETIME_FIELDS`. No descriptor-protocol bypasses needed.
+
+**No Popoto upstream change required**: the fix lives entirely in `AgentSession.__setattr__` and `_normalize_kwargs`.
 
 ## Failure Path Test Strategy
 
@@ -125,9 +134,10 @@ This handles the descriptor-object edge case where Popoto's own `__init__` might
 
 ### Empty/Invalid Input Handling
 - [ ] `response_delivered_at=None` must not raise — already passes with current code
-- [ ] `response_delivered_at=<int>` (Unix timestamp) — handled by existing coercion; new test asserts no coercion error
-- [ ] `response_delivered_at=<DatetimeField descriptor>` — the descriptor-leak case; new test asserts reset to `None`
-- [ ] `response_delivered_at=<str ISO timestamp>` — new coercion path; new test asserts conversion to `datetime`
+- [ ] `response_delivered_at=<int>` (Unix timestamp) — handled by existing `__setattr__` coercion; new test asserts no coercion error
+- [ ] `response_delivered_at=<str "bad">` (invalid string) — new `__setattr__` path; new test asserts reset to `None`
+- [ ] `response_delivered_at=<str ISO timestamp>` (valid string) — new `__setattr__` path; new test asserts conversion to UTC-aware `datetime`
+- [ ] `response_delivered_at=<DatetimeField descriptor>` — covered by the "unknown type → None" branch in `__setattr__`; test asserts reset to `None`
 
 ### Error State Rendering
 - No user-visible output changes — this is a persistence fix
@@ -216,9 +226,10 @@ See plan template for full list.
 - **Assigned To**: coercion-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Extend `_normalize_kwargs` in `models/agent_session.py`: after the existing `int | float` branch for `response_delivered_at`, add handling for `str` (attempt `datetime.fromisoformat`, normalize to UTC, fall to `None` on failure) and any other non-`datetime` type (reset to `None`)
-- Add post-init guard in `AgentSession.__init__`: after `super().__init__(**kwargs)`, if `response_delivered_at` is not `None` and not a `datetime` instance, reset it to `None`
-- Add unit test `test_append_event_succeeds_with_bad_response_delivered_at` in `tests/unit/test_agent_session_queue.py` covering: `None`, int Unix timestamp, a `datetime`, and a non-datetime/non-None value (e.g., the string `"bad"`)
+- Extend `AgentSession.__setattr__` in `models/agent_session.py` (line 305): after the existing `int | float` branch for `_DATETIME_FIELDS`, add handling for `str` (attempt `datetime.fromisoformat`, normalize to UTC-aware if naive, fall to `None` on failure) and any other non-`datetime` type (reset to `None`); add `logger.debug(...)` when normalizing a bad value
+- Extend `_normalize_kwargs` in `models/agent_session.py` (lines 453-458): add the same `str` and unknown-type handling for `response_delivered_at` as defence-in-depth at the construction callsite
+- Do NOT add a post-init guard to `__init__` — verified unreachable; see Technical Approach for rationale
+- Add unit test `test_append_event_succeeds_with_bad_response_delivered_at` in `tests/unit/test_agent_session_queue.py` covering: `None`, int Unix timestamp, a `datetime`, a string ISO timestamp (valid), and a non-datetime/non-None value (e.g., the string `"bad"`)
 - Verify no regressions in `tests/unit/test_agent_session_queue.py` (health-check tests), `tests/integration/test_nudge_stomp_regression.py`, and `tests/integration/test_lifecycle_transition.py`
 
 ### 2. Validate fix
@@ -260,12 +271,16 @@ See plan template for full list.
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Coercion guard present | `grep -n "not isinstance.*datetime" models/agent_session.py` | output > 0 |
 | New test exists | `grep -n "test_append_event_succeeds_with_bad_response_delivered_at" tests/unit/test_agent_session_queue.py` | output > 0 |
+| No stale worker log | `grep "append_event save failed" logs/worker.log` | no matches after fix deployed |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Archaeologist | `__init__` post-init guard using `object.__getattribute__` may be solving an unreachable code path — Popoto `__init__` always sets defaults, so descriptor-leak cannot survive construction | Technical Approach: verified unreachable; guard removed from scope; `__setattr__` extension handles all paths | Verified by inspecting `popoto/models/base.py:Model.__init__` — defaults loop + kwargs-apply loop both go through `AgentSession.__setattr__` |
+| NIT | Operator | No DEBUG log when `_normalize_kwargs` coerces a bad value — makes silent normalization hard to observe | Technical Approach + Task 1: `logger.debug(...)` added to `__setattr__` coercion path | Log emitted when any `_DATETIME_FIELDS` value is reset to `None` due to bad type |
+| NIT | Operator | Worker log success criterion missing from Verification table | Verification table: added "No stale worker log" row | `grep "append_event save failed" logs/worker.log` should return no matches after deploy |
+| NIT | Simplifier | `__setattr__` override scope unclear — plan mentioned a new override class | Technical Approach: clarified the fix extends the **existing** `__setattr__` at line 305 | No new `__setattr__` class; only method body extended |
 
 ---
 
