@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-13
 tracking: https://github.com/tomcounsell/ai/issues/929
 last_comment_id:
+revision_applied: true
 ---
 
 # Fix: AgentSession.response_delivered_at DatetimeField coercion error stalls PM session pipeline
