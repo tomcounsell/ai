@@ -2048,8 +2048,6 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
 
-    # NOTE: ReflectionScheduler moved to worker/__main__.py (processing, not I/O)
-
     # Start knowledge document watcher (monitors ~/work-vault/ for file changes)
     try:
         from bridge.knowledge_watcher import KnowledgeWatcher
