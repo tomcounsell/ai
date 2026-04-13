@@ -39,6 +39,31 @@ Before dispatching DOCS:
 5. If the PR does not exist yet (BUILD not complete), the REVIEW gate does not apply — but BUILD
    must be dispatched before TEST.
 
+### Rule 3 — Single-Issue Scoping
+
+If this message references a specific issue number (e.g., "issue 934", "issue #934", "issues/934",
+or a GitHub issue URL), you MUST only assess and advance **that issue**. Do not query `gh issue list`
+for other issues. Do not dispatch stages for any issue other than the one specified.
+
+This prevents cross-contamination where a PM session for one issue accidentally dispatches work for
+a different issue it discovers via state assessment.
+
+### Rule 4 — Wait for Dev Session After Dispatch
+
+After dispatching **any** dev session via `python -m tools.valor_session create --role dev`, you MUST:
+
+1. Call `wait-for-children` to signal you are waiting:
+   ```bash
+   python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"
+   ```
+2. Output a brief status message (e.g., "Dispatched BUILD for issue #934. Waiting for completion.")
+3. **WAIT for the steering response.** Do NOT produce a final answer, closing statement, or summary.
+   The worker will steer you with the dev session's result when it completes.
+
+This applies to **every** dev session dispatch — not just multi-issue fan-out. The `wait-for-children`
+call transitions your status so the worker knows you are waiting. If you exit before the dev session
+completes, a continuation PM will be created as a fallback, but staying alive is the preferred path.
+
 ---
 
 ## SDLC Stage Sequence

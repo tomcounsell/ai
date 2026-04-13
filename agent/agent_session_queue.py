@@ -2784,6 +2784,135 @@ def _extract_issue_number(session: Any, agent_session: Any) -> int | None:
     return None
 
 
+# Maximum continuation PM depth — prevents runaway chains of continuation sessions.
+_CONTINUATION_PM_MAX_DEPTH = 3
+
+
+def _create_continuation_pm(
+    *,
+    parent: Any,
+    agent_session: Any,
+    issue_number: int | None,
+    stage: str | None,
+    outcome: str,
+    result_preview: str,
+) -> None:
+    """Create a continuation PM session when the parent PM is terminal.
+
+    Called by _handle_dev_session_completion when steer_session() fails because
+    the parent PM has already finalized. The continuation PM carries the stage
+    result and issue context so the pipeline can resume.
+
+    Uses Redis SETNX deduplication to prevent duplicate continuation PMs when
+    multiple dev sessions complete simultaneously for the same parent (Race
+    Condition 2 from the plan).
+
+    Stores continuation_depth directly on the AgentSession (O(1) — does NOT
+    walk the parent chain, which is fragile under TTL expiry).
+
+    Args:
+        parent: The terminal parent PM AgentSession.
+        agent_session: The completed dev AgentSession.
+        issue_number: The GitHub issue number (may be None).
+        stage: The SDLC stage that just completed (may be None).
+        outcome: "success" or "fail".
+        result_preview: First 500 chars of the dev session result.
+    """
+    try:
+        from models.agent_session import AgentSession as _AgentSession
+
+        # --- Depth cap (CONCERN 4) ---
+        parent_depth = 0
+        try:
+            parent_depth = int(getattr(parent, "continuation_depth", 0) or 0)
+        except (TypeError, ValueError):
+            parent_depth = 0
+
+        if parent_depth >= _CONTINUATION_PM_MAX_DEPTH:
+            logger.error(
+                f"[continuation-pm-blocked] Continuation depth {parent_depth} >= "
+                f"{_CONTINUATION_PM_MAX_DEPTH} for parent {getattr(parent, 'session_id', '?')}. "
+                f"Refusing to create another continuation PM."
+            )
+            return
+
+        # --- Redis SETNX deduplication (Race Condition 2) ---
+        parent_id = getattr(parent, "agent_session_id", None) or getattr(parent, "id", "unknown")
+        dedup_key = f"continuation-pm:{parent_id}"
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            acquired = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=300)
+            if not acquired:
+                logger.info(
+                    f"[harness] Continuation PM already created for parent {parent_id} "
+                    f"(dedup key exists), skipping."
+                )
+                return
+        except Exception as redis_err:
+            # If Redis dedup fails, proceed anyway — duplicate is better than none.
+            logger.warning(f"[harness] Continuation PM dedup check failed: {redis_err}")
+
+        # --- Build the continuation message ---
+        issue_ref = f"issue #{issue_number}" if issue_number else "unknown issue"
+        stage_ref = stage or "unknown"
+        message = (
+            f"CONTINUATION: The previous PM session for {issue_ref} has completed, "
+            f"but stage {stage_ref} just finished with outcome: {outcome}.\n\n"
+            f"Result preview:\n{result_preview}\n\n"
+            f"Resume the SDLC pipeline for {issue_ref}. Assess the current state "
+            f"and dispatch the next stage."
+        )
+        if issue_number:
+            message += f"\n\nTracking: https://github.com/tomcounsell/ai/issues/{issue_number}"
+
+        # --- Create the continuation PM session ---
+        new_depth = parent_depth + 1
+        continuation = _AgentSession.create(
+            session_type="pm",
+            project_key=getattr(parent, "project_key", "valor"),
+            status="pending",
+            chat_id=getattr(parent, "chat_id", None),
+            message_text=message,
+            parent_agent_session_id=parent_id,
+            continuation_depth=new_depth,
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        # Copy project_config from parent if available
+        try:
+            pc = getattr(parent, "project_config", None)
+            if pc:
+                continuation.project_config = pc
+                continuation.save()
+        except Exception:
+            pass
+
+        # --- Metrics ---
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            POPOTO_REDIS_DB.incr("metrics:continuation_pm_created")
+            daily_key = f"metrics:continuation_pm_created:{datetime.now(tz=UTC).date()}"
+            POPOTO_REDIS_DB.incr(daily_key)
+            POPOTO_REDIS_DB.expire(daily_key, 604800)  # 7 days
+        except Exception:
+            pass  # Metrics are best-effort
+
+        # --- Structured log (CONCERN 3) ---
+        logger.warning(
+            f"[continuation-pm-created] parent_id={parent_id} "
+            f"issue_number={issue_number} stage={stage_ref} "
+            f"continuation_depth={new_depth} "
+            f"new_session_id={getattr(continuation, 'session_id', '?')}"
+        )
+
+    except Exception as e:
+        logger.error(f"[harness] _create_continuation_pm failed: {e}", exc_info=True)
+
+
 async def _handle_dev_session_completion(
     session: Any,
     agent_session: Any,
@@ -2794,6 +2923,10 @@ async def _handle_dev_session_completion(
     Called after _get_response_via_harness() returns. Classifies the outcome,
     updates PipelineStateMachine, posts a stage comment to the tracking issue,
     and steers the parent PM session with the completion status.
+
+    If steering fails (parent already terminal), creates a continuation PM
+    session to carry the pipeline forward. This is the guaranteed fallback
+    that ensures pipeline progression regardless of PM lifecycle.
 
     All operations are wrapped in try/except -- failures never crash the worker.
 
@@ -2858,6 +2991,7 @@ async def _handle_dev_session_completion(
             outcome = "success" if result and len(result) > 10 else "fail"
 
         # Post stage comment to GitHub issue
+        issue_number = None
         try:
             issue_number = _extract_issue_number(session, agent_session)
             if issue_number and current_stage:
@@ -2879,17 +3013,72 @@ async def _handle_dev_session_completion(
         except Exception as comment_err:
             logger.warning(f"[harness] Stage comment posting failed (non-fatal): {comment_err}")
 
-        # Steer parent PM session with pipeline state update
+        # Steer parent PM session with pipeline state update.
+        # Check the return value — if steering fails (parent already terminal),
+        # create a continuation PM to carry the pipeline forward.
         try:
             result_preview = result[:500] if result else "(no result)"
             steering_msg = (
                 f"Dev session completed. Stage: {current_stage or 'unknown'}. "
                 f"Outcome: {outcome}. Result preview: {result_preview}"
             )
-            steer_session(parent.session_id, steering_msg)
-            logger.info(f"[harness] Steered parent PM session {parent.session_id}")
+            steer_result = steer_session(parent.session_id, steering_msg)
+            if steer_result.get("success"):
+                # CONCERN 1 guard: steer was accepted, but parent may finalize
+                # before processing the message (race with _finalize_parent_sync).
+                # Re-check parent status to detect this race.
+                try:
+                    refreshed_parent = ParentAgentSession.get_by_id(parent_id)
+                    refreshed_status = getattr(refreshed_parent, "status", None)
+                    if refreshed_parent and refreshed_status in _TERMINAL_STATUSES:
+                        logger.warning(
+                            f"[harness] Steer accepted but parent {parent.session_id} finalized "
+                            f"before processing (race with _finalize_parent_sync) — "
+                            f"creating continuation PM"
+                        )
+                        _create_continuation_pm(
+                            parent=refreshed_parent,
+                            agent_session=agent_session,
+                            issue_number=issue_number,
+                            stage=current_stage,
+                            outcome=outcome,
+                            result_preview=result_preview,
+                        )
+                    else:
+                        logger.info(f"[harness] Steered parent PM session {parent.session_id}")
+                except Exception:
+                    # If refresh fails, assume steer worked
+                    logger.info(f"[harness] Steered parent PM session {parent.session_id}")
+            else:
+                logger.warning(
+                    f"[harness] Steering rejected for parent {parent.session_id}: "
+                    f"{steer_result.get('error')} — creating continuation PM"
+                )
+                _create_continuation_pm(
+                    parent=parent,
+                    agent_session=agent_session,
+                    issue_number=issue_number,
+                    stage=current_stage,
+                    outcome=outcome,
+                    result_preview=result_preview,
+                )
         except Exception as steer_err:
-            logger.warning(f"[harness] PM session steering failed (non-fatal): {steer_err}")
+            logger.warning(
+                f"[harness] PM session steering failed (non-fatal): {steer_err} "
+                f"— creating continuation PM"
+            )
+            try:
+                result_preview = result[:500] if result else "(no result)"
+                _create_continuation_pm(
+                    parent=parent,
+                    agent_session=agent_session,
+                    issue_number=issue_number,
+                    stage=current_stage,
+                    outcome=outcome,
+                    result_preview=result_preview,
+                )
+            except Exception as cont_err:
+                logger.error(f"[harness] Continuation PM creation also failed: {cont_err}")
 
     except Exception as e:
         logger.warning(f"[harness] _handle_dev_session_completion failed (non-fatal): {e}")

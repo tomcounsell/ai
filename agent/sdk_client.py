@@ -2191,6 +2191,33 @@ async def get_agent_response_sdk(
                     "If you don't call this tool, your return text will be "
                     "automatically summarized and sent (fallback behavior)."
                 )
+    # --- Single-issue scoping (Fix 3) ---
+    # Prevent PM from cross-contaminating pipelines by dispatching work for
+    # issues other than the one it was assigned. Only relevant for PM sessions.
+    if _session_type == SessionType.PM and not _teammate_mode:
+        enriched_message += (
+            "\n\nSINGLE-ISSUE SCOPING: If the message references a specific issue number "
+            "(e.g., 'issue 934', '#934', 'issues/934'), you MUST only assess and advance "
+            "that issue. Do NOT query `gh issue list` for other issues. Do NOT dispatch "
+            "stages for any issue other than the one specified.\n"
+        )
+
+    # --- Wait-for-children after dev dispatch (Fix 2) ---
+    # Ensure PM stays alive while dev session runs, so steering messages
+    # are received directly rather than requiring a continuation PM.
+    if _session_type == SessionType.PM and not _teammate_mode:
+        enriched_message += (
+            "\nDEV SESSION WAIT RULE: After dispatching ANY dev session via "
+            "`python -m tools.valor_session create --role dev`, you MUST:\n"
+            "1. Call `python -m tools.valor_session wait-for-children "
+            '--session-id "$AGENT_SESSION_ID"`\n'
+            "2. Output a brief status message (e.g., 'Dispatched BUILD. Waiting.')\n"
+            "3. WAIT for the steering response — do NOT produce a final answer or "
+            "closing statement. The worker will steer you when the dev session completes.\n"
+            "This keeps your session alive so the dev session result is delivered "
+            "directly to you instead of requiring a continuation PM.\n"
+        )
+
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent

@@ -108,6 +108,8 @@ tests/
 | integration | `test_steering.py` | 32 | Steering queue push/pop/clear |
 | integration | `test_cross_repo_build.py` | 8 | Cross-repo build flow |
 | integration | `test_artifact_inference.py` | 15 | Artifact-based pipeline stage inference (real gh CLI + filesystem) |
+| unit | `test_continuation_pm.py` | 8 | Continuation PM creation, depth cap, dedup, steer failure fallback |
+| integration | `test_parent_child_round_trip.py` | 11 | Parent-child linkage, dev session completion steering, continuation PM round-trip |
 
 ### `sessions` — Session lifecycle and health
 

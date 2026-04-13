@@ -124,6 +124,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `session_id` -- Telegram-derived identifier
 - `session_type` (KeyField) -- "pm", "teammate", or "dev"
 - `status` (KeyField) -- pending/running/active/dormant/completed/failed
+- `continuation_depth` (IntField, default 0) -- tracks how many continuation PM sessions have been chained from the original. Capped at `_CONTINUATION_PM_MAX_DEPTH` (3) to prevent runaway chains.
 - `project_key`, `created_at`, `history`, etc.
 - `project_config` (DictField) -- full project dict from `projects.json`, populated at enqueue time. Carries all project properties (name, working_directory, github, mode, telegram, etc.) through the pipeline so downstream code never re-derives from a parallel registry. Empty/None for older sessions created before this field existed; the worker falls back to loading from `projects.json` at execution time.
 
@@ -212,6 +213,40 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 - **Recovery**: If a stage fails, the PM can re-dispatch or escalate without losing prior work
 - **Judgment**: The PM decides whether trivial/docs-only work warrants the full pipeline
 
+### PM Session Lifecycle: Wait and Continuation Fallback
+
+When a PM session dispatches a Dev session, the PM must stay alive to receive the Dev session's completion steering message. Two mechanisms ensure pipeline progression:
+
+**1. Wait-for-children (optimization path)**
+
+After dispatching any Dev session, the PM persona is instructed to:
+1. Call `python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"` to signal waiting status.
+2. Output a brief status message.
+3. Wait for the steering response without producing a final answer.
+
+This keeps the SDK turn loop alive so `_handle_dev_session_completion()` can steer the PM directly. Note: `wait-for-children` returns immediately (it transitions the session status but does not block). The PM stays alive only because the SDK turn loop has not ended.
+
+**2. Continuation PM (guaranteed fallback)**
+
+If the PM exits before the Dev session completes (the common case when the LLM ends its turn loop), `_handle_dev_session_completion()` detects this via the `steer_session()` return value:
+
+- **Steer succeeds + parent still active**: Direct delivery (optimal path).
+- **Steer succeeds + parent finalized** (race with `_finalize_parent_sync`): Creates a continuation PM.
+- **Steer fails** (parent already terminal): Creates a continuation PM.
+
+The continuation PM is a new `AgentSession(session_type="pm", status="pending")` containing:
+- The issue number, completed stage, outcome, and result preview.
+- `parent_agent_session_id` set to the original PM for lineage tracking.
+- `continuation_depth` incremented from the parent's value (capped at 3 to prevent runaway chains).
+
+**Deduplication**: Redis `SETNX` on key `continuation-pm:{parent_id}` (300s TTL) ensures only one continuation PM per parent, even when multiple Dev sessions complete simultaneously.
+
+**Monitoring**: The `[continuation-pm-created]` structured log tag is searchable by `scripts/reflections.py`. Daily metrics are tracked at `metrics:continuation_pm_created:{date}`.
+
+### Single-Issue Scoping
+
+PM sessions are scoped to a single issue when the incoming message references a specific issue number. The PM persona includes a hard rule (Rule 3) prohibiting `gh issue list` queries for other issues and dispatching stages for unrelated issues. This prevents cross-contamination between concurrent SDLC pipelines observed in production when one PM session assessed global state and dispatched BUILD for another PM's issue.
+
 ### Completion Warning
 
 The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the Dev session bypasses the pipeline. The warning is logged to stderr and is non-fatal.
@@ -291,7 +326,8 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 
 | Component | File | Role |
 |-----------|------|------|
-| `_handle_dev_session_completion()` | `agent/agent_session_queue.py` | Worker post-completion: classifies outcome, posts GitHub comment, steers parent PM |
+| `_handle_dev_session_completion()` | `agent/agent_session_queue.py` | Worker post-completion: classifies outcome, posts GitHub comment, steers parent PM; creates continuation PM on steer failure |
+| `_create_continuation_pm()` | `agent/agent_session_queue.py` | Creates a continuation PM session when the parent PM is terminal — includes SETNX dedup, depth cap, and structured logging |
 | `_extract_issue_number()` | `agent/agent_session_queue.py` | Resolves tracking issue from env vars or session message_text |
 | `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Starts pipeline stage on Skill tool calls (PM Skill path) |
 | `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path |
