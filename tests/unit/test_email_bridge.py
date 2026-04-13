@@ -358,7 +358,8 @@ class TestEmailOutputHandlerSend:
     @pytest.mark.asyncio
     async def test_send_no_smtp_config_raises_in_send_smtp(self):
         """_send_smtp raises RuntimeError when no SMTP config present."""
-        handler = EmailOutputHandler(smtp_config=None)
+        with patch("bridge.email_bridge._get_smtp_config", return_value=None):
+            handler = EmailOutputHandler(smtp_config=None)
         with pytest.raises(RuntimeError, match="SMTP not configured"):
             handler._send_smtp("recipient@example.com", MagicMock())
 
