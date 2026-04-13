@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-13
 tracking: https://github.com/tomcounsell/ai/issues/936
 last_comment_id:
+revision_applied: true
 ---
 
 # Email Bridge: Operational Test Coverage
@@ -174,6 +175,7 @@ No agent integration required — these are test files only. No MCP servers, bri
 - **Parallel**: true
 - Add `TestPollImapBatchCap` class to `tests/unit/test_email_bridge.py`
 - Mock `imaplib.IMAP4_SSL` to return `IMAP_MAX_BATCH + 10` message IDs from `conn.search()`
+- **Async handling (critique concern):** `_poll_imap()` is async and uses `asyncio.to_thread()` internally (line 514). Patch `asyncio.to_thread` with `side_effect=lambda fn: fn()` to call the inner sync function directly, avoiding the need for an event loop. This keeps the test synchronous.
 - Assert `conn.store()` called exactly `IMAP_MAX_BATCH` times
 - Assert `conn.fetch()` called exactly `IMAP_MAX_BATCH` times
 - Assert the returned list has exactly `IMAP_MAX_BATCH` items
@@ -187,7 +189,7 @@ No agent integration required — these are test files only. No MCP servers, bri
 - **Agent Type**: test-engineer
 - **Parallel**: true
 - Add `TestMainEnvLoading` class to `tests/unit/test_email_bridge.py`
-- Patch `bridge.email_bridge.load_dotenv` and `bridge.email_bridge.asyncio.run` to intercept calls
+- **Patch target (critique concern):** `load_dotenv` is imported locally inside `main()` at line 619 (`from dotenv import load_dotenv`), so no `load_dotenv` attribute exists on `bridge.email_bridge` at patch time. Patch `dotenv.load_dotenv` instead of `bridge.email_bridge.load_dotenv`. Also patch `bridge.email_bridge.asyncio.run` to intercept the async loop startup.
 - Call `main()` and assert `load_dotenv` was called twice (repo `.env` and vault `.env`)
 - Verify the paths passed to `load_dotenv` match the expected locations (repo root and `~/Desktop/Valor/.env`)
 
@@ -202,7 +204,8 @@ No agent integration required — these are test files only. No MCP servers, bri
 - Patch `_poll_imap` to return an empty list (simulating empty inbox)
 - Patch `asyncio.sleep` to raise a custom `_BreakLoop` exception after first call
 - Patch `_get_redis` to return the test Redis connection (db=1)
-- Call `_email_inbox_loop()` wrapped in a try/except for the break exception
+- **Function signature (critique nit):** `_email_inbox_loop(imap_config, config)` takes two arguments. Pass `config={}` as the second argument since `_poll_imap` is mocked to return `[]` and `_process_inbound_email` is never reached.
+- Call `_email_inbox_loop(imap_config, config={})` wrapped in a try/except for the break exception
 - Assert `email:last_poll_ts` key exists in test Redis and contains a valid timestamp
 - Clean up the Redis key after the test
 
