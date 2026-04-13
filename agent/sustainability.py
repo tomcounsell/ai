@@ -374,13 +374,11 @@ def recovery_drip() -> None:
 
 
 def sustainability_digest() -> None:
-    """Enqueue a Claude agent session to send a daily Telegram health summary.
+    """Send a daily health summary to Telegram.
 
-    The agent session is given a command prompt that includes required output fields:
-    - Circuit state per dependency
-    - Current throttle level
-    - Session count last 24 hours
-    - Active failure cluster count
+    Checks all health signals locally. If everything is nominal, sends a
+    one-line "all clear" directly via valor-telegram (no agent session needed).
+    Only spins up a full agent session when there are anomalies worth reporting.
 
     This reflection is registered with interval 86400s (daily).
     """
@@ -391,36 +389,122 @@ def sustainability_digest() -> None:
         project_key = _get_project_key()
         throttle_key = f"{project_key}:sustainability:throttle_level"
         pause_key = f"{project_key}:sustainability:queue_paused"
+        fingerprints_key = f"{project_key}:sustainability:seen_fingerprints"
 
-        # Gather state for the digest prompt
+        # Gather state
         throttle_level = (r.get(throttle_key) or b"none").decode()
         queue_paused = bool(r.exists(pause_key))
+        failure_cluster_count = r.scard(fingerprints_key) or 0
 
-        command = (
-            "You are generating the daily sustainability digest for the Valor AI system. "
-            "Collect and report the following required fields:\n"
-            "1. Circuit state per dependency (anthropic, telegram, redis)"
-            " — use get_health().summary()\n"
-            "2. Current throttle level — read from Redis key "
-            f"'{project_key}:sustainability:throttle_level' (current: {throttle_level})\n"
-            "3. Queue paused status — read from Redis key "
-            f"'{project_key}:sustainability:queue_paused'"
-            f" (currently: {'paused' if queue_paused else 'active'})\n"
-            "4. Session count in last 24 hours — query AgentSession records\n"
-            "5. Active failure cluster count — count entries in Redis set "
-            f"'{project_key}:sustainability:seen_fingerprints'\n\n"
-            "Format as a concise Telegram message (3-8 lines). "
-            "Send via valor-telegram to the 'Dev: Valor' chat. "
-            "Subject line: Daily System Health Digest."
+        # Check circuits
+        circuits_ok = True
+        try:
+            from bridge.health import get_health
+            from bridge.resilience import CircuitState
+
+            health = get_health()
+            for name in ("anthropic", "telegram", "redis"):
+                cb = health.get(name)
+                if cb is not None and cb.state != CircuitState.CLOSED:
+                    circuits_ok = False
+                    break
+        except Exception:
+            circuits_ok = False
+
+        # Count failed sessions in last 24h
+        failed_24h = 0
+        try:
+            all_sessions = list(AgentSession.query.filter(project_key=project_key))
+            cutoff = time.time() - 86400
+            for s in all_sessions:
+                if s.status not in ("failed", "abandoned"):
+                    continue
+                completed_at = getattr(s, "completed_at", None)
+                if completed_at is None:
+                    continue
+                ts = (
+                    completed_at
+                    if isinstance(completed_at, int | float)
+                    else getattr(completed_at, "timestamp", lambda: 0)()
+                )
+                if ts >= cutoff:
+                    failed_24h += 1
+        except Exception:
+            failed_24h = -1  # unknown — treat as anomaly
+
+        # Determine if everything is nominal
+        is_nominal = (
+            circuits_ok
+            and throttle_level == "none"
+            and not queue_paused
+            and failure_cluster_count == 0
+            and failed_24h == 0
         )
 
-        AgentSession.create_and_enqueue(
-            project_key=project_key,
-            message_text=command,
-            session_type="dev",
-            priority="low",
-            extra_context={"digest_type": "sustainability_digest"},
-        )
-        logger.info("[sustainability-digest] Enqueued daily digest session")
+        if is_nominal:
+            # Send a one-liner directly — no agent session needed
+            _send_telegram("🩺 Daily health check — all clear, no surprises.")
+            logger.info("[sustainability-digest] All nominal — sent one-liner")
+        else:
+            # Something noteworthy — spin up an agent to investigate and report
+            anomalies = []
+            if not circuits_ok:
+                anomalies.append("one or more circuits are not CLOSED")
+            if throttle_level != "none":
+                anomalies.append(f"throttle level is {throttle_level}")
+            if queue_paused:
+                anomalies.append("queue is paused")
+            if failure_cluster_count > 0:
+                anomalies.append(f"{failure_cluster_count} active failure cluster(s)")
+            if failed_24h > 0:
+                anomalies.append(f"{failed_24h} failed/abandoned session(s) in last 24h")
+            elif failed_24h < 0:
+                anomalies.append("could not count failed sessions")
+
+            command = (
+                "You are generating the daily sustainability digest for the Valor AI system. "
+                "There are anomalies that need reporting:\n"
+                + "\n".join(f"- {a}" for a in anomalies)
+                + "\n\n"
+                "Investigate each anomaly. Collect details:\n"
+                "1. Circuit state per dependency (anthropic, telegram, redis)\n"
+                "2. Current throttle level and queue paused status from Redis\n"
+                "3. Session counts and failure details from last 24 hours\n"
+                "4. Active failure cluster count\n\n"
+                "Format as a concise Telegram message highlighting what's wrong. "
+                "Send via valor-telegram to the 'Dev: Valor' chat. "
+                "Subject line: ⚠️ Daily Health Digest — anomalies detected."
+            )
+
+            AgentSession.create_and_enqueue(
+                project_key=project_key,
+                message_text=command,
+                session_type="dev",
+                priority="low",
+                extra_context={"digest_type": "sustainability_digest"},
+            )
+            logger.info(
+                "[sustainability-digest] Anomalies detected (%s) — enqueued agent session",
+                ", ".join(anomalies),
+            )
     except Exception:
         logger.exception("[sustainability-digest] Unhandled exception — skipping tick")
+
+
+def _send_telegram(message: str) -> None:
+    """Send a message to the 'Dev: Valor' chat via valor-telegram CLI."""
+    try:
+        result = subprocess.run(
+            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "[sustainability-digest] valor-telegram send failed (rc=%d): %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+    except Exception as e:
+        logger.error("[sustainability-digest] Failed to send Telegram message: %s", e)
