@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Medium
 owner: valorengels
@@ -198,23 +198,23 @@ This is a persona-level instruction, not a code change. It prevents the cross-co
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_handle_dev_session_completion` lines 2882-2892: the `steer_session` call is wrapped in try/except but the return value `success: False` is not treated as a failure — test that the continuation PM path fires when steer returns failure
-- [ ] `_create_continuation_pm` must have its own try/except so a failure to create the continuation PM does not crash the completion handler
-- [ ] Test that `steer_session` returning `success: False` with a non-terminal error (e.g., "Session not found") also triggers the continuation path
+- [x] `_handle_dev_session_completion` lines 2882-2892: the `steer_session` call is wrapped in try/except but the return value `success: False` is not treated as a failure — test that the continuation PM path fires when steer returns failure
+- [x] `_create_continuation_pm` must have its own try/except so a failure to create the continuation PM does not crash the completion handler
+- [x] Test that `steer_session` returning `success: False` with a non-terminal error (e.g., "Session not found") also triggers the continuation path
 
 ### Empty/Invalid Input Handling
-- [ ] Test `_create_continuation_pm` with `issue_number=None` — should still create a continuation PM with a fallback message
-- [ ] Test `_create_continuation_pm` with empty `result_preview` — should handle gracefully
+- [x] Test `_create_continuation_pm` with `issue_number=None` — should still create a continuation PM with a fallback message
+- [x] Test `_create_continuation_pm` with empty `result_preview` — should handle gracefully
 
 ### Error State Rendering
-- [ ] Verify continuation PM messages are human-readable and contain enough context for the PM to resume
-- [ ] Verify log messages clearly distinguish "steer succeeded" from "steer failed, creating continuation"
+- [x] Verify continuation PM messages are human-readable and contain enough context for the PM to resume
+- [x] Verify log messages clearly distinguish "steer succeeded" from "steer failed, creating continuation"
 
 ## Test Impact
 
-- [ ] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_success_result_steers_parent` — UPDATE: verify that steer_session return value is checked (currently mocked but the mock doesn't assert return-value handling)
-- [ ] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_steer_message_contains_stage_and_outcome` — UPDATE: the mock `_capture_steer` returns `success: True` which is fine, but add a parallel test where it returns `success: False` to verify the continuation path
-- [ ] `tests/unit/test_steering_mechanism.py::TestSteerSessionGuards` — no change needed (tests the guard itself, which is unchanged)
+- [x] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_success_result_steers_parent` — UPDATE: verify that steer_session return value is checked (currently mocked but the mock doesn't assert return-value handling)
+- [x] `tests/integration/test_parent_child_round_trip.py::TestHandleDevSessionCompletion::test_steer_message_contains_stage_and_outcome` — UPDATE: the mock `_capture_steer` returns `success: True` which is fine, but add a parallel test where it returns `success: False` to verify the continuation path
+- [x] `tests/unit/test_steering_mechanism.py::TestSteerSessionGuards` — no change needed (tests the guard itself, which is unchanged)
 
 ## Rabbit Holes
 
@@ -271,22 +271,22 @@ No new agent integration required — this is a worker-internal change. The cont
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/pm-dev-session-architecture.md` to document the `wait-for-children` requirement after dev dispatch and the continuation PM fallback
-- [ ] Add entry to `docs/features/README.md` index table if a new doc is created
+- [x] Update `docs/features/pm-dev-session-architecture.md` to document the `wait-for-children` requirement after dev dispatch and the continuation PM fallback
+- [x] Add entry to `docs/features/README.md` index table if a new doc is created
 
 ### Inline Documentation
-- [ ] Docstring on `_create_continuation_pm` explaining when and why it fires
-- [ ] Comment block in `_handle_dev_session_completion` explaining the steer-check → continuation fallback
+- [x] Docstring on `_create_continuation_pm` explaining when and why it fires
+- [x] Comment block in `_handle_dev_session_completion` explaining the steer-check → continuation fallback
 
 ## Success Criteria
 
-- [ ] A PM session spawned for a single issue does not dispatch dev work for any other issue
-- [ ] A PM session that spawns a dev session calls `wait-for-children` before exiting
-- [ ] When `_handle_dev_session_completion` cannot steer the parent (terminal status), a continuation PM is created with the stage result and issue context
-- [ ] Running SDLC on two issues simultaneously produces two clean, non-interfering pipelines
-- [ ] No BUILD dev session is ever queued before CRITIQUE completes for the same issue
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] A PM session spawned for a single issue does not dispatch dev work for any other issue
+- [x] A PM session that spawns a dev session calls `wait-for-children` before exiting
+- [x] When `_handle_dev_session_completion` cannot steer the parent (terminal status), a continuation PM is created with the stage result and issue context
+- [x] Running SDLC on two issues simultaneously produces two clean, non-interfering pipelines
+- [x] No BUILD dev session is ever queued before CRITIQUE completes for the same issue
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
