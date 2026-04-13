@@ -118,6 +118,45 @@ python -m tools.valor_session create \
   --message "Run BUILD stage for {slug}"
 ```
 
+## Dispatch Message Format
+
+The `--message` passed to each dev session is a briefing, not a specification. The stage skill already knows what to do — do not restate it.
+
+**Include only:**
+- The stage and skill name (so the dev session routes correctly)
+- The issue and/or PR URL (if not already in the worktree context)
+- Context the skill *cannot derive on its own*: a known constraint, a decision already made upstream, a specific artifact to target, or a reason the normal path doesn't apply
+
+**Never include:**
+- Acceptance criteria that restate the skill's own output format ("plan doc must exist at…", "all tests must pass")
+- Instructions the skill already contains ("run ruff", "open a PR", "commit on main")
+- A "current state" summary unless it contains a genuine gotcha — the skill will read artifacts itself
+
+**Examples:**
+
+Too much — the skill knows all of this:
+```
+Stage: PLAN
+Required skill: /do-plan
+Issue: https://github.com/.../issues/42
+Current state: No plan doc exists yet.
+Acceptance criteria: Plan doc exists at docs/plans/foo.md with all required sections. Committed on main.
+```
+
+Right — only what adds signal:
+```
+Stage: PLAN
+Issue: https://github.com/.../issues/42
+```
+
+Right — adding genuine upstream context:
+```
+Stage: BUILD
+Issue: https://github.com/.../issues/42
+Plan: docs/plans/foo.md
+Note: The critique flagged the Redis key scheme as a risk — the plan was revised to use hash fields instead of sorted sets. Build to the revised plan, not the original issue description.
+```
+
 ---
 
 ## Hard-PATCH Resume Decision Rules
