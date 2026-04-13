@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: shipped
 type: bug
 appetite: Small
 owner: Valor
@@ -109,14 +109,14 @@ This is the same approach that already works in `worker/__main__.py` lines 346-3
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The `_graceful_shutdown` function has a `try/except` around knowledge watcher stop — existing, no change needed
-- [ ] New cancellation code must use `return_exceptions=True` to avoid propagating `CancelledError`
+- [x] The `_graceful_shutdown` function has a `try/except` around knowledge watcher stop — existing, no change needed
+- [x] New cancellation code must use `return_exceptions=True` to avoid propagating `CancelledError`
 
 ### Empty/Invalid Input Handling
-- [ ] Handle case where `_background_tasks` is empty (bridge crashed before creating tasks) — `asyncio.gather()` with empty list is a no-op, safe by default
+- [x] Handle case where `_background_tasks` is empty (bridge crashed before creating tasks) — `asyncio.gather()` with empty list is a no-op, safe by default
 
 ### Error State Rendering
-- [ ] Not applicable — no user-visible output from shutdown path
+- [x] Not applicable — no user-visible output from shutdown path
 
 ## Test Impact
 
@@ -164,13 +164,13 @@ No agent integration required — this is a bridge-internal change to the shutdo
 
 ## Success Criteria
 
-- [ ] After SIGTERM, bridge process exits within 10 seconds
-- [ ] launchd restarts the bridge automatically (no manual intervention needed)
-- [ ] Dashboard Telegram badge returns to `ok`/`running` within ~60 seconds of SIGTERM
-- [ ] No background tasks keep running after shutdown begins
-- [ ] Unit test validates that `_graceful_shutdown` cancels all tracked tasks
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] After SIGTERM, bridge process exits within 10 seconds
+- [x] launchd restarts the bridge automatically (no manual intervention needed)
+- [x] Dashboard Telegram badge returns to `ok`/`running` within ~60 seconds of SIGTERM
+- [x] No background tasks keep running after shutdown begins
+- [x] Unit test validates that `_graceful_shutdown` cancels all tracked tasks
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
