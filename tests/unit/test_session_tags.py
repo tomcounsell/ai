@@ -367,3 +367,128 @@ class TestAutoTagGraceful:
         assert "long-session" in tags
         assert "pr-created" in tags
         assert "tested" in tags
+
+
+# ===================================================================
+# auto_tag_session — Rule 7: task_type derivation
+# ===================================================================
+
+
+class TestAutoTagTaskType:
+    """Tests for Rule 7: task_type field derivation from session metadata."""
+
+    def _reload_session(self, session_id: str):
+        """Re-read session from Redis to get persisted task_type."""
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        return sessions[0] if sessions else None
+
+    def test_task_type_sdlc_build_from_pr_created_tag(self, cleanup_transcript_dirs):
+        """SDLC branch + pr-created tag → task_type='sdlc-build'."""
+        _create_session(
+            session_id="tt-build-1",
+            branch_name="session/fix-bug",
+            slug="fix-bug",
+        )
+        session_dir = SESSION_LOGS_DIR / "tt-build-1"
+        _write_transcript(
+            "tt-build-1",
+            ["[2025-01-01] TOOL_CALL: Bash(gh pr create --title 'Fix')"],
+        )
+        cleanup_transcript_dirs.append(session_dir)
+
+        auto_tag_session("tt-build-1")
+        session = self._reload_session("tt-build-1")
+        assert session is not None
+        assert session.task_type == "sdlc-build"
+
+    def test_task_type_sdlc_test_from_tested_tag(self, cleanup_transcript_dirs):
+        """SDLC branch + tested tag (no pr-created) → task_type='sdlc-test'."""
+        _create_session(
+            session_id="tt-test-1",
+            branch_name="session/fix-bug",
+            slug="fix-bug",
+        )
+        session_dir = SESSION_LOGS_DIR / "tt-test-1"
+        _write_transcript(
+            "tt-test-1",
+            ["[2025-01-01] TOOL_CALL: Bash(pytest tests/ -v)"],
+        )
+        cleanup_transcript_dirs.append(session_dir)
+
+        auto_tag_session("tt-test-1")
+        session = self._reload_session("tt-test-1")
+        assert session is not None
+        assert session.task_type == "sdlc-test"
+
+    def test_task_type_sdlc_plan_from_sdlc_branch_with_slug(self):
+        """SDLC branch + slug, no pr-created/tested → task_type='sdlc-plan'."""
+        _create_session(
+            session_id="tt-plan-1",
+            branch_name="session/new-feature",
+            slug="new-feature",
+        )
+        auto_tag_session("tt-plan-1")
+        session = self._reload_session("tt-plan-1")
+        assert session is not None
+        assert session.task_type == "sdlc-plan"
+
+    def test_task_type_bug_fix_from_classification(self):
+        """classification_type='bug' → task_type='bug-fix'."""
+        _create_session(
+            session_id="tt-bug-1",
+            classification_type="bug",
+        )
+        auto_tag_session("tt-bug-1")
+        session = self._reload_session("tt-bug-1")
+        assert session is not None
+        assert session.task_type == "bug-fix"
+
+    def test_task_type_greenfield_feature_slug_no_sdlc_branch(self):
+        """Slug set + no SDLC branch → task_type='greenfield-feature'."""
+        _create_session(
+            session_id="tt-green-1",
+            slug="new-integration",
+            branch_name="main",
+        )
+        auto_tag_session("tt-green-1")
+        session = self._reload_session("tt-green-1")
+        assert session is not None
+        assert session.task_type == "greenfield-feature"
+
+    def test_task_type_none_when_no_signals(self):
+        """No classification signals → task_type remains None."""
+        _create_session(session_id="tt-none-1")
+        auto_tag_session("tt-none-1")
+        session = self._reload_session("tt-none-1")
+        assert session is not None
+        assert session.task_type is None
+
+    def test_task_type_idempotent_when_already_set(self):
+        """Rule 7 must not overwrite an existing task_type."""
+        session = _create_session(
+            session_id="tt-idem-1",
+            classification_type="bug",
+        )
+        # Manually set a task_type before calling auto_tag_session
+        session.task_type = "rework-triggered"
+        session.save()
+
+        auto_tag_session("tt-idem-1")
+        reloaded = self._reload_session("tt-idem-1")
+        assert reloaded is not None
+        # Should still be "rework-triggered", not overwritten to "bug-fix"
+        assert reloaded.task_type == "rework-triggered"
+
+    def test_task_type_rework_triggered_flag(self):
+        """rework_triggered='true' → task_type='rework-triggered' (highest priority)."""
+        session = _create_session(
+            session_id="tt-rework-1",
+            classification_type="bug",  # would normally map to "bug-fix"
+        )
+        session.rework_triggered = "true"
+        session.save()
+
+        auto_tag_session("tt-rework-1")
+        reloaded = self._reload_session("tt-rework-1")
+        assert reloaded is not None
+        assert reloaded.task_type == "rework-triggered"

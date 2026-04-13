@@ -59,6 +59,18 @@ STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
+# TRM task type vocabulary — used for TaskTypeProfile keying and delegation decisions.
+# Pattern-based derivation in tools/session_tags.py auto_tag_session() Rule 7.
+TASK_TYPE_VOCABULARY = {
+    "sdlc-build",
+    "sdlc-test",
+    "sdlc-patch",
+    "sdlc-plan",
+    "bug-fix",
+    "greenfield-feature",
+    "rework-triggered",
+}
+
 # Backward-compatible aliases (import from config.enums for new code)
 SESSION_TYPE_PM = SessionType.PM
 SESSION_TYPE_TEAMMATE = SessionType.TEAMMATE
@@ -164,6 +176,8 @@ class AgentSession(Model):
     log_path = Field(null=True)
     branch_name = Field(null=True)
     tags = ListField(null=True)
+    task_type = IndexedField(null=True)  # TRM task category (see TASK_TYPE_VOCABULARY)
+    rework_triggered = Field(null=True)  # "true"/"false" — session retried prior output
 
     # === Structured event log (replaces history, summary, result_text, stage_states) ===
     session_events = ListField(null=True)  # List of SessionEvent dicts

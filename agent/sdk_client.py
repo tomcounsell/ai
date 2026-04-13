@@ -729,6 +729,46 @@ def load_pm_system_prompt(working_directory: str) -> str:
     return persona_prompt
 
 
+def _infer_task_type_from_message(message: str, classification) -> str | None:
+    """Infer a TRM task_type from the incoming PM message using pattern matching.
+
+    Pattern-based only — no LLM calls. Checks for SDLC stage keywords, issue
+    URLs, and classification type. Returns the most specific match or None if
+    the task type cannot be determined.
+
+    Args:
+        message: The raw message text being handled by the PM session.
+        classification: ClassificationType value from bridge classification.
+
+    Returns:
+        A task_type string from TASK_TYPE_VOCABULARY, or None if indeterminate.
+    """
+    if not message:
+        return None
+
+    msg_lower = message.lower()
+
+    # Check for explicit SDLC stage keywords in the message
+    if "stage: build" in msg_lower or "do-build" in msg_lower:
+        return "sdlc-build"
+    if "stage: test" in msg_lower or "do-test" in msg_lower:
+        return "sdlc-test"
+    if "stage: patch" in msg_lower or "do-patch" in msg_lower:
+        return "sdlc-patch"
+    if "stage: plan" in msg_lower or "do-plan" in msg_lower or "make a plan" in msg_lower:
+        return "sdlc-plan"
+
+    # Classification-based inference
+    if classification == ClassificationType.BUG:
+        return "bug-fix"
+
+    # Issue URL present without explicit stage → likely SDLC orchestration start
+    if "github.com" in msg_lower and "/issues/" in msg_lower:
+        return "sdlc-plan"
+
+    return None
+
+
 def _is_code_file(file_path: str) -> bool:
     """Return True if the file path has a code extension (.py, .js, .ts).
 
@@ -1951,7 +1991,19 @@ async def get_agent_response_sdk(
                 "automatically summarized and sent (fallback behavior)."
             )
         else:
-            # PM dispatch: orchestrate SDLC work stage-by-stage
+            # PM dispatch: orchestrate SDLC work stage-by-stage.
+            # Consult TaskTypeProfile (TRM) to determine delegation style.
+            _pm_project_key = project.get("_key", "valor") if project else "unknown"
+            _trm_task_type = _infer_task_type_from_message(message, classification)
+            _delegation = "structured"  # safe default
+            try:
+                from models.task_type_profile import get_delegation_recommendation
+
+                _delegation = get_delegation_recommendation(_pm_project_key, _trm_task_type)
+            except Exception:
+                pass  # Always fall back to structured
+
+            # MULTI-ISSUE FAN-OUT applies to all delegation paths.
             enriched_message += (
                 "\n\nMULTI-ISSUE FAN-OUT: If the message contains more than one GitHub "
                 "issue number (e.g., 'Run SDLC on issues 777, 775, 776'), you MUST fan out. "
@@ -1967,59 +2019,88 @@ async def get_agent_response_sdk(
                 "Spawn child sessions sequentially (one create call at a time) then call "
                 "wait-for-children once. Send a Telegram update before pausing so Valor "
                 "knows fan-out happened.\n\n"
-                "You are the PM. Orchestrate SDLC work stage-by-stage:\n"
-                "1. **Assess the current stage** — use read-only Bash commands "
-                "(gh issue view, gh pr view, gh pr list, grep) to determine "
-                "where work stands. You can run Bash for reads freely.\n"
-                "1.5. **Gather prior stage context** — if a tracking issue exists, "
-                "fetch the last few comments with "
-                "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
-                "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
-                "of prior stage findings in the dev-session prompt so the next stage "
-                "has full context from previous stages.\n"
-                "2. **Spawn one dev-session for the next stage** — use Bash to create "
-                "a dev session via `python -m tools.valor_session create`:\n"
-                "   python -m tools.valor_session create \\\\\n"
-                "     --role dev \\\\\n"
-                '     --parent "$AGENT_SESSION_ID" \\\\\n'
-                '     --message "Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
-                "Issue: <URL>\\nPR: <URL if exists>\\n"
-                "Current state: <what's already done>\\n"
-                'Acceptance criteria: <what done looks like>"\n'
-                "   The --parent flag uses $AGENT_SESSION_ID (the AgentSession model ID "
-                "for this PM session). The worker steers you back when the dev session "
-                "finishes — wait for that steering message.\n"
-                "3. **Verify the result** — check that the stage completed successfully "
-                "before progressing to the next one.\n"
-                "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
-                "or you need human input.\n\n"
-                "For trivial or docs-only work, use your judgment on whether the full "
-                "pipeline is warranted.\n"
-                "Dev sessions are created via Bash — slash commands like /do-build "
-                "and /do-test are the dev-session's internal tools.\n\n"
-                "**Communicating with the stakeholder:**\n"
-                "You can send Telegram messages directly using:\n"
-                '  `python tools/send_telegram.py "Your message here"`\n'
-                "To attach a file (screenshot, document, image):\n"
-                '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
-                "Multiple files as an album (max 10):\n"
-                "  `python tools/send_telegram.py"
-                ' "Album caption" --file a.png --file b.png --file c.png`\n'
-                "File-only (no caption):\n"
-                "  `python tools/send_telegram.py --file /path/to/file.png`\n"
-                "Use --file to attach screenshots, images, or documents. "
-                "Repeat --file for albums. Telethon auto-detects the media type.\n"
-                "Use this tool for:\n"
-                "- Status updates and progress reports\n"
-                "- Questions that need human input\n"
-                "- Final delivery summaries\n"
-                "- Sharing screenshots or files\n"
-                "Write in business terms — never expose SDLC stage names, "
-                "pipeline internals, or implementation details. "
-                "Speak like a project manager updating a stakeholder.\n"
-                "If you don't call this tool, your return text will be "
-                "automatically summarized and sent (fallback behavior)."
             )
+
+            if _delegation == "autonomous":
+                # Autonomous handoff: proven task type — objective + constraints only.
+                # Skip step-by-step SDLC scaffolding; trust the dev session.
+                enriched_message += (
+                    "You are the PM. This task type is well-proven — delegate efficiently.\n"
+                    "Spawn a dev session with the objective and constraints. "
+                    "No step-by-step scaffolding needed.\n\n"
+                    "  python -m tools.valor_session create \\\\\n"
+                    "    --role dev \\\\\n"
+                    '    --parent "$AGENT_SESSION_ID" \\\\\n'
+                    '    --message "Objective: <what needs to be done>\\n'
+                    "Constraints: <key requirements or acceptance criteria>\\n"
+                    'Context: <any relevant state>"\n\n'
+                    "After spawning, wait for the steering message"
+                    " when the dev session finishes.\n\n"
+                    "**Communicating with the stakeholder:**\n"
+                    "You can send Telegram messages directly using:\n"
+                    '  `python tools/send_telegram.py "Your message here"`\n'
+                    "Write in business terms — never expose SDLC stage names, "
+                    "pipeline internals, or implementation details. "
+                    "Speak like a project manager updating a stakeholder.\n"
+                    "If you don't call this tool, your return text will be "
+                    "automatically summarized and sent (fallback behavior)."
+                )
+            else:
+                # Structured handoff: novel or error-prone task type — full SDLC guidance.
+                enriched_message += (
+                    "You are the PM. Orchestrate SDLC work stage-by-stage:\n"
+                    "1. **Assess the current stage** — use read-only Bash commands "
+                    "(gh issue view, gh pr view, gh pr list, grep) to determine "
+                    "where work stands. You can run Bash for reads freely.\n"
+                    "1.5. **Gather prior stage context** — if a tracking issue exists, "
+                    "fetch the last few comments with "
+                    "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
+                    "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
+                    "of prior stage findings in the dev-session prompt so the next stage "
+                    "has full context from previous stages.\n"
+                    "2. **Spawn one dev-session for the next stage** — use Bash to create "
+                    "a dev session via `python -m tools.valor_session create`:\n"
+                    "   python -m tools.valor_session create \\\\\n"
+                    "     --role dev \\\\\n"
+                    '     --parent "$AGENT_SESSION_ID" \\\\\n'
+                    '     --message "Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
+                    "Issue: <URL>\\nPR: <URL if exists>\\n"
+                    "Current state: <what's already done>\\n"
+                    'Acceptance criteria: <what done looks like>"\n'
+                    "   The --parent flag uses $AGENT_SESSION_ID (the AgentSession model ID "
+                    "for this PM session). The worker steers you back when the dev session "
+                    "finishes — wait for that steering message.\n"
+                    "3. **Verify the result** — check that the stage completed successfully "
+                    "before progressing to the next one.\n"
+                    "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
+                    "or you need human input.\n\n"
+                    "For trivial or docs-only work, use your judgment on whether the full "
+                    "pipeline is warranted.\n"
+                    "Dev sessions are created via Bash — slash commands like /do-build "
+                    "and /do-test are the dev-session's internal tools.\n\n"
+                    "**Communicating with the stakeholder:**\n"
+                    "You can send Telegram messages directly using:\n"
+                    '  `python tools/send_telegram.py "Your message here"`\n'
+                    "To attach a file (screenshot, document, image):\n"
+                    '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
+                    "Multiple files as an album (max 10):\n"
+                    "  `python tools/send_telegram.py"
+                    ' "Album caption" --file a.png --file b.png --file c.png`\n'
+                    "File-only (no caption):\n"
+                    "  `python tools/send_telegram.py --file /path/to/file.png`\n"
+                    "Use --file to attach screenshots, images, or documents. "
+                    "Repeat --file for albums. Telethon auto-detects the media type.\n"
+                    "Use this tool for:\n"
+                    "- Status updates and progress reports\n"
+                    "- Questions that need human input\n"
+                    "- Final delivery summaries\n"
+                    "- Sharing screenshots or files\n"
+                    "Write in business terms — never expose SDLC stage names, "
+                    "pipeline internals, or implementation details. "
+                    "Speak like a project manager updating a stakeholder.\n"
+                    "If you don't call this tool, your return text will be "
+                    "automatically summarized and sent (fallback behavior)."
+                )
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
@@ -2045,7 +2126,7 @@ async def get_agent_response_sdk(
 
     try:
         # Extract project_key from config for env var injection
-        _project_key = project.get("name", "valor").lower().replace(" ", "-") if project else None
+        _project_key = project.get("_key", "valor") if project else None
         # Extract message_id from the session context (passed through _execute_agent_session)
         _message_id = None  # message_id not available at this layer
 
