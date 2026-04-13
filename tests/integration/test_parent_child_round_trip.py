@@ -369,9 +369,7 @@ class TestPipelineStateMachineTransitions:
         # Verify continuation PM was created
         pm_children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=pm_session.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=pm_session.agent_session_id)
             if c.session_type == "pm"
         ]
         assert len(pm_children) >= 1

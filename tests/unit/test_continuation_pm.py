@@ -9,12 +9,11 @@ See docs/plans/pm-session-scope-and-wait.md for the design.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from models.agent_session import AgentSession
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -117,9 +116,7 @@ class TestCreateContinuationPM:
 
         pm_children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=terminal_pm.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=terminal_pm.agent_session_id)
             if c.session_type == "pm"
         ]
         assert len(pm_children) == 1
@@ -142,9 +139,7 @@ class TestCreateContinuationPM:
 
         pm_children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=terminal_pm.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=terminal_pm.agent_session_id)
             if c.session_type == "pm"
         ]
         assert len(pm_children) == 1
@@ -191,9 +186,7 @@ class TestContinuationDepthCap:
         # No continuation should be created
         children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=deep_parent.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=deep_parent.agent_session_id)
             if c.session_type == "pm"
         ]
         assert len(children) == 0
@@ -226,9 +219,7 @@ class TestContinuationDepthCap:
 
         children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=parent_at_1.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=parent_at_1.agent_session_id)
             if c.session_type == "pm"
         ]
         assert len(children) == 1
@@ -270,9 +261,7 @@ class TestHandleCompletionContinuationFallback:
         # A continuation PM should have been created
         pm_children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=terminal_pm.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=terminal_pm.agent_session_id)
             if c.session_type == "pm"
         ]
         assert len(pm_children) >= 1
@@ -327,9 +316,7 @@ class TestHandleCompletionContinuationFallback:
         # No continuation PM should exist
         pm_children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=active_pm.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=active_pm.agent_session_id)
             if c.session_type == "pm"
         ]
         assert len(pm_children) == 0
@@ -394,9 +381,7 @@ class TestContinuationDedup:
 
         pm_children = [
             c
-            for c in AgentSession.query.filter(
-                parent_agent_session_id=terminal_pm.agent_session_id
-            )
+            for c in AgentSession.query.filter(parent_agent_session_id=terminal_pm.agent_session_id)
             if c.session_type == "pm"
         ]
         # Only one continuation should exist despite two calls

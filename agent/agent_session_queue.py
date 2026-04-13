@@ -3029,7 +3029,8 @@ async def _handle_dev_session_completion(
                 # Re-check parent status to detect this race.
                 try:
                     refreshed_parent = ParentAgentSession.get_by_id(parent_id)
-                    if refreshed_parent and getattr(refreshed_parent, "status", None) in _TERMINAL_STATUSES:
+                    refreshed_status = getattr(refreshed_parent, "status", None)
+                    if refreshed_parent and refreshed_status in _TERMINAL_STATUSES:
                         logger.warning(
                             f"[harness] Steer accepted but parent {parent.session_id} finalized "
                             f"before processing (race with _finalize_parent_sync) — "
@@ -3077,9 +3078,7 @@ async def _handle_dev_session_completion(
                     result_preview=result_preview,
                 )
             except Exception as cont_err:
-                logger.error(
-                    f"[harness] Continuation PM creation also failed: {cont_err}"
-                )
+                logger.error(f"[harness] Continuation PM creation also failed: {cont_err}")
 
     except Exception as e:
         logger.warning(f"[harness] _handle_dev_session_completion failed (non-fatal): {e}")
