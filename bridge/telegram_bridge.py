@@ -2040,15 +2040,17 @@ async def main():
         )
         from bridge.reconciler import reconciler_loop
 
-        _background_tasks.append(asyncio.create_task(
-            reconciler_loop(
-                client=client,
-                monitored_groups=ALL_MONITORED_GROUPS,
-                should_respond_fn=should_respond_async,
-                enqueue_agent_session_fn=_reconciler_enqueue,
-                find_project_fn=find_project_for_chat,
+        _background_tasks.append(
+            asyncio.create_task(
+                reconciler_loop(
+                    client=client,
+                    monitored_groups=ALL_MONITORED_GROUPS,
+                    should_respond_fn=should_respond_async,
+                    enqueue_agent_session_fn=_reconciler_enqueue,
+                    find_project_fn=find_project_for_chat,
+                )
             )
-        ))
+        )
         logger.info("Message reconciler started")
     except Exception as e:
         logger.error(f"Failed to start message reconciler: {e}")
