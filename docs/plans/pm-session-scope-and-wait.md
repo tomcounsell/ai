@@ -110,37 +110,21 @@ No prerequisites — this work has no external dependencies. All changes are wit
 
 ### Key Elements
 
-- **Fix 1 — PM persona: `wait-for-children` after every dev dispatch**: Extend the PM persona instructions so the PM calls `wait-for-children` after dispatching ANY dev session (not just multi-issue fan-out). This keeps the PM process alive until the steering message arrives.
-- **Fix 2 — Continuation PM fallback in `_handle_dev_session_completion`**: When `steer_session()` returns `success: False` because the parent is terminal, create a continuation PM session with the stage result and issue context. This is the safety net for when Fix 1 fails (e.g., PM exits due to token limit, crash, or kill).
+- **Fix 1 (primary) — Continuation PM in `_handle_dev_session_completion`**: When `steer_session()` returns `success: False` because the parent is terminal, create a continuation PM session with the stage result and issue context. This is the guaranteed infrastructure-level mechanism that ensures pipeline progression regardless of PM lifecycle.
+- **Fix 2 (optimization) — PM persona: `wait-for-children` after every dev dispatch**: Best-effort persona instruction. Extend PM persona so it calls `wait-for-children` after dispatching ANY dev session. If the PM LLM complies and keeps the turn loop active, steering is faster (avoids creating a continuation PM). But `wait-for-children` returns immediately — it does NOT block the PM process. This is an optimization hint, not a guarantee.
 - **Fix 3 — PM persona: single-issue scoping**: When a PM session's message references a specific issue number, the PM must only assess and advance that issue — not any other issue it discovers via `gh issue list`.
 
 ### Flow
 
-**Normal path (Fix 1):**
-PM receives "issue 934" → PM dispatches dev session → PM calls `wait-for-children` → PM stays alive → Dev completes → `_handle_dev_session_completion` steers PM → PM receives steering → PM dispatches next stage
+**Primary path (Fix 1 — continuation PM):**
+PM dispatches dev session → PM exits (the common case) → Dev completes → `_handle_dev_session_completion` tries to steer PM → Steer fails (terminal) → Completion handler creates continuation PM with stage result and issue context → Continuation PM resumes pipeline
 
-**Fallback path (Fix 2):**
-PM exits early (token limit, crash) → Dev completes → `_handle_dev_session_completion` tries to steer PM → Steer fails (terminal) → Completion handler creates continuation PM → Continuation PM reads stage result and issue context → Pipeline resumes
+**Optimized path (Fix 2 — PM stays alive):**
+PM dispatches dev session → PM calls `wait-for-children` and keeps turn loop active (polling) → Dev completes → `_handle_dev_session_completion` steers PM → PM receives steering → PM dispatches next stage (no continuation PM needed)
 
 ### Technical Approach
 
-**Fix 1 — PM persona update:**
-
-Update PM persona instructions in both:
-- `~/Desktop/Valor/personas/project-manager.md` (production, private)
-- `config/personas/project-manager.md` (repo template)
-- `agent/sdk_client.py` (message enrichment for PM sessions)
-
-Add a rule: after dispatching any dev session via `valor_session create --role dev`, immediately call:
-```bash
-python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"
-```
-
-This transitions the PM to `waiting_for_children` status. The existing `_finalize_parent_sync()` hook in `models/session_lifecycle.py` will auto-transition the PM back to `completed` when the dev session finishes.
-
-> **CONCERN 2 (critique finding):** `cmd_wait_for_children` (valor_session.py:703-745) calls `transition_status()` and returns `0` immediately -- it does NOT block. The PM process stays alive only if the SDK turn loop has more work to do. If the PM produces a final answer after calling `wait-for-children`, the SDK turn ends and the PM exits anyway. Therefore, the persona instruction must say: "After calling `wait-for-children`, output a status message like 'Waiting for dev session to complete...' and then WAIT for the steering response. Do NOT produce a final answer, summary, or closing statement. Your next output must be in response to the steering message." This keeps the SDK turn loop alive by leaving it waiting for the next tool call or user input.
-
-**Fix 2 — Continuation PM in `_handle_dev_session_completion`:**
+**Fix 1 (primary) — Continuation PM in `_handle_dev_session_completion`:**
 
 In `agent/agent_session_queue.py`, after the `steer_session()` call (line 2889), check the return value:
 
@@ -181,11 +165,29 @@ else:
     )
 ```
 
+**Fix 2 (optimization) — PM persona update:**
 The `_create_continuation_pm` function creates a new PM session via `AgentSession.create()` with:
 - `session_type="pm"`, same `chat_id` and `project_key` as the parent
 - `message_text` containing: the issue number, which stage just completed, the outcome, and a directive to resume the SDLC pipeline
 - `parent_agent_session_id` set to the original parent (for lineage tracking)
 - Status set to `pending` so the worker picks it up
+- Redis deduplication guard: `SETNX` on key `continuation-pm:{parent_id}` with 300s TTL — only the first caller creates the session (prevents Race Condition 2 from producing duplicate PMs)
+- Metrics counter: `redis_client.incr("metrics:continuation_pm_created")` and daily key for dashboard/reflections monitoring
+
+**Fix 2 (optimization) — PM persona update:**
+
+Update PM persona instructions in:
+- `config/personas/project-manager.md` (repo, canonical — copied to production on deploy)
+- `agent/sdk_client.py` (message enrichment for PM sessions)
+
+Add a rule: after dispatching any dev session via `valor_session create --role dev`, call `wait-for-children` then poll for status:
+```bash
+python -m tools.valor_session wait-for-children --session-id "$AGENT_SESSION_ID"
+# Then poll: check `valor-session status --id $AGENT_SESSION_ID` periodically
+# to see if a steering message has arrived. Keep the turn loop active.
+```
+
+Note: `wait-for-children` (at `tools/valor_session.py:739`) transitions the status to `waiting_for_children` and **returns immediately** — it does NOT block the process. For this to actually keep the PM alive, the LLM must continue making tool calls (polling). If the LLM stops calling tools, the SDK turn loop ends and the PM exits. Fix 1 (continuation PM) handles this case.
 
 **Fix 3 — Issue scoping in PM persona:**
 
@@ -241,14 +243,14 @@ This is a persona-level instruction, not a code change. It prevents the cross-co
 **Trigger:** PM calls `wait-for-children` at the exact moment the dev session completes and tries to steer the PM. The PM's status might be mid-transition (e.g., `active` → `waiting_for_children`).
 **Data prerequisite:** PM session must exist in Redis with a non-terminal status.
 **State prerequisite:** PM status must be writable (not locked by another process).
-**Mitigation:** `steer_session` checks status at call time. If PM is still `active` or `waiting_for_children` (both non-terminal), steering succeeds. `_finalize_parent_sync` handles the completion transition. The continuation PM path only fires if the parent is already terminal, so the race window is: PM finalized → dev completes → steer fails. This is the exact scenario Fix 2 addresses.
+**Mitigation:** `steer_session` checks status at call time. If PM is still `active` or `waiting_for_children` (both non-terminal), steering succeeds. `_finalize_parent_sync` handles the completion transition. The continuation PM path only fires if the parent is already terminal, so the race window is: PM finalized → dev completes → steer fails. This is the exact scenario Fix 1 (continuation PM) addresses.
 
 ### Race 2: Two dev sessions complete simultaneously and both try to create continuation PMs
 **Location:** `agent/agent_session_queue.py:2882-2895`
 **Trigger:** PM spawned two dev sessions (e.g., via parallel dispatch) and both complete at the same moment, both see parent as terminal.
 **Data prerequisite:** Parent PM must be terminal.
 **State prerequisite:** No locking on continuation PM creation.
-**Mitigation:** Each continuation PM is independently valid — it contains the stage and outcome from its specific dev session. The second continuation PM will see that the first has already advanced the pipeline (via `stage_states`) and either no-op or dispatch the next stage. This is idempotent because the SDLC router assesses state before dispatching.
+**Mitigation:** Redis `SETNX` deduplication guard on key `continuation-pm:{parent_id}` with 300s TTL ensures only the first caller creates a continuation PM. Second caller sees the key exists, logs, and skips.
 
 ## No-Gos (Out of Scope)
 
@@ -327,7 +329,7 @@ No new agent integration required — this is a worker-internal change. The cont
 - Update `config/personas/project-manager.md` with new hard rule: after dispatching any dev session, call `wait-for-children`
 - **(CONCERN 2)** The persona instruction must explicitly state: "After calling `wait-for-children`, output a status message and then WAIT for the steering response. Do NOT produce a final answer or closing statement." This prevents the SDK turn loop from ending prematurely.
 - Update `agent/sdk_client.py` message enrichment for PM sessions to include the `wait-for-children` instruction after dev dispatch (not just fan-out)
-- Note: `~/Desktop/Valor/personas/project-manager.md` (production) must be updated separately by the human or deploy process
+- Note: The repo persona (`config/personas/project-manager.md`) is canonical and should overwrite `~/Desktop/Valor/personas/project-manager.md` on deploy. The build process should copy the repo version to production.
 
 ### 3. Update PM persona: single-issue scoping
 - **Task ID**: build-persona-scope
@@ -416,5 +418,7 @@ No new agent integration required — this is a worker-internal change. The cont
 
 ## Open Questions
 
-1. **Continuation PM depth cap**: The plan proposes capping at depth 3. Is that sufficient, or should the cap be lower (e.g., 2) to fail fast and alert the human sooner?
-2. **Production persona sync**: `~/Desktop/Valor/personas/project-manager.md` (production) must be updated alongside `config/personas/project-manager.md` (repo template). Should the build process update the production persona directly, or should this be a manual step after merge?
+*All resolved.*
+
+1. **Continuation PM depth cap**: Cap at depth **5**. Should rarely ever reach that — the enforcement is a safety backstop, not expected behavior.
+2. **Production persona sync**: The PM persona in the **repo** (`config/personas/project-manager.md`) should overwrite the production persona. Local personas in `~/Desktop/Valor/personas/` are reserved for extra-special personas that won't go in the repo — the PM persona is not one of those.
