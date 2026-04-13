@@ -1,5 +1,5 @@
 ---
-status: Building
+status: Shipped
 type: chore
 appetite: Medium
 owner: Valor Engels
