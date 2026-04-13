@@ -2151,8 +2151,6 @@ async def main():
     # Safety net: guarantee process termination after client disconnects.
     # Exit code 1 triggers launchd ThrottleInterval (10s default) to prevent
     # tight restart loops, matching the worker pattern from PR #789.
-    import sys
-
     sys.exit(1)
 
 
