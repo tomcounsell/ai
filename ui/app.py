@@ -214,6 +214,32 @@ def create_app() -> FastAPI:
             pass
         return {"status": "error", "age_s": None}
 
+    def _get_email_health() -> dict:
+        """Check email bridge health from Redis last_poll_ts."""
+        import time
+
+        try:
+            import os
+
+            import redis as redis_lib
+
+            r = redis_lib.Redis.from_url(
+                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            ts = r.get("email:last_poll_ts")
+            if ts:
+                age_s = round(time.time() - float(ts))
+                if age_s < 120:
+                    return {"status": "ok", "age_s": age_s}
+                elif age_s < 300:
+                    return {"status": "running", "age_s": age_s}
+                else:
+                    return {"status": "error", "age_s": age_s}
+        except Exception:
+            pass
+        return {"status": "error", "age_s": None}
+
     def _session_to_json(s) -> dict:
         """Serialize a PipelineProgress to JSON dict for the dashboard API."""
         result = {
@@ -269,6 +295,7 @@ def create_app() -> FastAPI:
 
         bridge = _get_bridge_health()
         worker = _get_worker_health()
+        email = _get_email_health()
         sessions = get_all_sessions()
         reflections = get_all_reflections()
         analytics = get_analytics_summary()
@@ -281,6 +308,8 @@ def create_app() -> FastAPI:
                     "bridge_last_seen_s": bridge["age_s"],
                     "worker": worker["status"],
                     "worker_last_seen_s": worker["age_s"],
+                    "email": email["status"],
+                    "email_last_seen_s": email["age_s"],
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,
@@ -299,6 +328,7 @@ def create_app() -> FastAPI:
 
         bridge = _get_bridge_health()
         worker = _get_worker_health()
+        email = _get_email_health()
         return JSONResponse(
             {
                 "webserver": "ok",
@@ -306,6 +336,8 @@ def create_app() -> FastAPI:
                 "bridge_last_seen_s": bridge["age_s"],
                 "worker": worker["status"],
                 "worker_last_seen_s": worker["age_s"],
+                "email": email["status"],
+                "email_last_seen_s": email["age_s"],
             }
         )
 
@@ -326,9 +358,9 @@ def create_app() -> FastAPI:
         """HTMX partial: health indicator badges."""
         bridge = _get_bridge_health()
         if bridge["status"] in ("ok", "running"):
-            bridge_label = f"bridge{_format_uptime(bridge['age_s'])}"
+            bridge_label = f"TG{_format_uptime(bridge['age_s'])}"
         else:
-            bridge_label = "bridge"
+            bridge_label = "TG"
 
         worker = _get_worker_health()
         if worker["status"] in ("ok", "running"):
@@ -336,12 +368,20 @@ def create_app() -> FastAPI:
         else:
             worker_label = "worker"
 
+        email = _get_email_health()
+        if email["status"] in ("ok", "running"):
+            email_label = f"email{_format_uptime(email['age_s'])}"
+        else:
+            email_label = "email"
+
         return HTMLResponse(
-            f'<span class="health-label">Services</span>'
+            f'<button class="stats-toggle" onclick="toggleStats()">Stats</button>'
+            f'<span class="health-label">Bridge</span>'
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
+            f'<span class="badge badge-{email["status"]}">{email_label}</span>'
+            f'<span class="health-label">Services</span>'
             f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
             f'<span class="badge badge-ok">web</span>'
-            f'<button class="stats-toggle" onclick="toggleStats()">Stats</button>'
         )
 
     # Exception handler for Redis connection failures

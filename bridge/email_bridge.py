@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 # Timeout between IMAP polls (seconds)
 IMAP_POLL_INTERVAL = int(os.environ.get("IMAP_POLL_INTERVAL", "30"))
 
+# Max messages to fetch per poll cycle (prevents hanging on inboxes with many unseen messages)
+IMAP_MAX_BATCH = int(os.environ.get("IMAP_MAX_BATCH", "20"))
+
 # Max retries for SMTP sends before dead-lettering
 SMTP_MAX_RETRIES = 3
 
@@ -487,6 +490,11 @@ async def _poll_imap(imap_config: dict) -> list[bytes]:
             if not msg_ids:
                 return []
 
+            # Cap per-poll batch to avoid hanging on inboxes with thousands of unseen messages.
+            # Take the most recent N (IMAP IDs are ascending, so slice from the end).
+            if len(msg_ids) > IMAP_MAX_BATCH:
+                msg_ids = msg_ids[-IMAP_MAX_BATCH:]
+
             messages = []
             for msg_id in msg_ids:
                 # Mark as SEEN before fetching to prevent re-processing on concurrent polls
@@ -606,6 +614,13 @@ async def run_email_bridge() -> None:
 def main() -> None:
     """Entry point for ``python -m bridge.email_bridge``."""
     import sys
+    from pathlib import Path
+
+    from dotenv import load_dotenv
+
+    # Mirror telegram_bridge.py env loading: repo .env first, vault .env second
+    load_dotenv(Path(__file__).parent.parent / ".env")
+    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
     logging.basicConfig(
         level=logging.INFO,
