@@ -758,8 +758,9 @@ def _infer_task_type_from_message(message: str, classification) -> str | None:
     if "stage: plan" in msg_lower or "do-plan" in msg_lower or "make a plan" in msg_lower:
         return "sdlc-plan"
 
-    # Classification-based inference
-    if classification == ClassificationType.BUG:
+    # Classification-based inference (BUG is not a ClassificationType member;
+    # bug detection happens via message content, not classification enum)
+    if isinstance(classification, str) and classification.lower() == "bug":
         return "bug-fix"
 
     # Issue URL present without explicit stage → likely SDLC orchestration start
