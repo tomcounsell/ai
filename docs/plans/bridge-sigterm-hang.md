@@ -246,9 +246,12 @@ No agent integration required — this is a bridge-internal change to the shutdo
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-13. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic, Operator | Plan lists 5 background tasks but source has 6 — `reconciler_loop` at line 2029 is missing | Task 1 | Add `reconciler_loop` (line 2029) to `_background_tasks` list. There are 6 `asyncio.create_task()` calls in `main()` startup: lines 2020, 2029, 2046, 2084, 2091, 2132. |
+| NIT | Simplifier | Plan says `sys.exit(1)` for launchd ThrottleInterval but issue sketch says `sys.exit(0)` — pick one and justify | Task 1 | Use `sys.exit(1)` per PR #789 pattern: exit code 1 triggers launchd ThrottleInterval (10s default), preventing tight restart loops. Exit code 0 would restart immediately. |
+| NIT | Archaeologist | Prior Art section references PR #742 pattern but the worker uses `asyncio.Event` + `shutdown_event.set()` while the plan uses direct `task.cancel()` — the plan correctly notes this divergence in Rabbit Holes but could be clearer that the bridge pattern is intentionally simpler | N/A | No action needed — the plan already addresses this in Rabbit Holes section. |
 
 ---
 
