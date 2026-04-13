@@ -6,9 +6,9 @@
     <string>__SERVICE_LABEL__</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-c</string>
-        <string>set -a; source __PROJECT_DIR__/.env; set +a; exec __PROJECT_DIR__/.venv/bin/python -m worker</string>
+        <string>__PROJECT_DIR__/.venv/bin/python</string>
+        <string>-m</string>
+        <string>worker</string>
     </array>
     <key>WorkingDirectory</key>
     <string>__PROJECT_DIR__</string>
