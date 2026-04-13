@@ -2116,13 +2116,14 @@ async def get_agent_response_sdk(
                 )
     # --- Single-issue scoping (Fix 3) ---
     # Prevent PM from cross-contaminating pipelines by dispatching work for
-    # issues other than the one it was assigned.
-    enriched_message += (
-        "\n\nSINGLE-ISSUE SCOPING: If the message references a specific issue number "
-        "(e.g., 'issue 934', '#934', 'issues/934'), you MUST only assess and advance "
-        "that issue. Do NOT query `gh issue list` for other issues. Do NOT dispatch "
-        "stages for any issue other than the one specified.\n"
-    )
+    # issues other than the one it was assigned. Only relevant for PM sessions.
+    if _session_type == SessionType.PM and not _teammate_mode:
+        enriched_message += (
+            "\n\nSINGLE-ISSUE SCOPING: If the message references a specific issue number "
+            "(e.g., 'issue 934', '#934', 'issues/934'), you MUST only assess and advance "
+            "that issue. Do NOT query `gh issue list` for other issues. Do NOT dispatch "
+            "stages for any issue other than the one specified.\n"
+        )
 
     # --- Wait-for-children after dev dispatch (Fix 2) ---
     # Ensure PM stays alive while dev session runs, so steering messages

@@ -2876,7 +2876,7 @@ def _create_continuation_pm(
             message_text=message,
             parent_agent_session_id=parent_id,
             continuation_depth=new_depth,
-            created_at=__import__("datetime").datetime.now(tz=__import__("datetime").UTC),
+            created_at=datetime.now(tz=UTC),
             turn_count=0,
             tool_call_count=0,
         )
@@ -2895,7 +2895,7 @@ def _create_continuation_pm(
             from popoto.redis_db import POPOTO_REDIS_DB
 
             POPOTO_REDIS_DB.incr("metrics:continuation_pm_created")
-            daily_key = f"metrics:continuation_pm_created:{__import__('datetime').date.today()}"
+            daily_key = f"metrics:continuation_pm_created:{datetime.now(tz=UTC).date()}"
             POPOTO_REDIS_DB.incr(daily_key)
             POPOTO_REDIS_DB.expire(daily_key, 604800)  # 7 days
         except Exception:
