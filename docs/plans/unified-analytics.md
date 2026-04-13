@@ -1,6 +1,6 @@
 ---
 slug: unified-analytics
-status: Building
+status: Merged
 type: feature
 appetite: Large
 tracking: https://github.com/tomcounsell/ai/issues/854
@@ -150,17 +150,17 @@ No prerequisites -- this work uses only stdlib SQLite and existing Redis. No new
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `analytics/collector.py::record_metric` -- primary try/except around SQLite write and Redis increment. Test that a SQLite connection failure does not propagate. Test that a Redis connection failure does not propagate. Both must log a warning.
-- [ ] `analytics/query.py` -- query functions must handle empty database and return sensible defaults (empty lists, zero counts) rather than raising.
+- [x] `analytics/collector.py::record_metric` -- primary try/except around SQLite write and Redis increment. Test that a SQLite connection failure does not propagate. Test that a Redis connection failure does not propagate. Both must log a warning.
+- [x] `analytics/query.py` -- query functions must handle empty database and return sensible defaults (empty lists, zero counts) rather than raising.
 
 ### Empty/Invalid Input Handling
-- [ ] `record_metric()` with empty name, None value, missing dimensions -- must not raise, must log and skip
-- [ ] Query functions with date ranges that have no data -- must return empty results, not errors
-- [ ] CLI export with no data in database -- must produce valid JSON with empty arrays
+- [x] `record_metric()` with empty name, None value, missing dimensions -- must not raise, must log and skip
+- [x] Query functions with date ranges that have no data -- must return empty results, not errors
+- [x] CLI export with no data in database -- must produce valid JSON with empty arrays
 
 ### Error State Rendering
-- [ ] Dashboard `analytics` section with no data -- must render "No data yet" rather than crashing
-- [ ] `dashboard.json` `analytics` key with empty database -- must return empty object, not error
+- [x] Dashboard `analytics` section with no data -- must render "No data yet" rather than crashing
+- [x] `dashboard.json` `analytics` key with empty database -- must return empty object, not error
 
 ## Test Impact
 
@@ -235,26 +235,26 @@ No agent integration required -- this is an infrastructure-internal change. The 
 
 ## Documentation
 
-- [ ] Create `docs/features/unified-analytics.md` describing the analytics system architecture, metric catalog, query API, and CLI usage
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/structured-logging-telemetry.md` to reference the new analytics system as the successor implementation
-- [ ] Add analytics CLI usage to `CLAUDE.md` Quick Commands table: `python -m tools.analytics export --days 30`
+- [x] Create `docs/features/unified-analytics.md` describing the analytics system architecture, metric catalog, query API, and CLI usage
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update `docs/features/structured-logging-telemetry.md` to reference the new analytics system as the successor implementation
+- [x] Add analytics CLI usage to `CLAUDE.md` Quick Commands table: `python -m tools.analytics export --days 30`
 
 ## Success Criteria
 
-- [ ] `analytics/collector.py` exists with `record_metric(name, value, dimensions)` API
-- [ ] Session metrics (count, duration, success/failure) are recorded for every agent session
-- [ ] Token cost per session is captured from `sdk_client.py` and persisted to `data/analytics.db`
-- [ ] SDLC stage transitions (start/complete per stage) are recorded
-- [ ] Memory system operations (recall attempts, hits, extractions) are recorded
-- [ ] Historical data is queryable via Python API (e.g., "sessions in the last 7 days")
-- [ ] The web dashboard at `localhost:8500` includes at least one historical trend view (sessions per day)
-- [ ] `python -m tools.analytics export --days 30` exports benchmark data as JSON
-- [ ] `dashboard.json` remains backward-compatible (new `analytics` key is additive only)
-- [ ] All metric recording is best-effort -- failures are caught and logged, never crash the caller
-- [ ] Existing tests continue to pass; new tests cover analytics collection and query paths
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `analytics/collector.py` exists with `record_metric(name, value, dimensions)` API
+- [x] Session metrics (count, duration, success/failure) are recorded for every agent session
+- [x] Token cost per session is captured from `sdk_client.py` and persisted to `data/analytics.db`
+- [x] SDLC stage transitions (start/complete per stage) are recorded
+- [x] Memory system operations (recall attempts, hits, extractions) are recorded
+- [x] Historical data is queryable via Python API (e.g., "sessions in the last 7 days")
+- [x] The web dashboard at `localhost:8500` includes at least one historical trend view (sessions per day)
+- [x] `python -m tools.analytics export --days 30` exports benchmark data as JSON
+- [x] `dashboard.json` remains backward-compatible (new `analytics` key is additive only)
+- [x] All metric recording is best-effort -- failures are caught and logged, never crash the caller
+- [x] Existing tests continue to pass; new tests cover analytics collection and query paths
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
