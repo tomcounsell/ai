@@ -154,7 +154,7 @@ The update script (`scripts/update/run.py` → `migrations.py`) gains a new migr
 ```python
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing."""
-    stubs = ["do-plan", "do-critique", "do-build", "do-test",
+    stubs = ["do-plan", "do-plan-critique", "do-build", "do-test",
              "do-patch", "do-review", "do-docs", "do-merge"]
     sdlc_dir = project_dir / "docs" / "sdlc"
     sdlc_dir.mkdir(parents=True, exist_ok=True)
@@ -321,5 +321,5 @@ No `.mcp.json` changes needed.
 
 ## Open Questions
 
-1. Should the reflection agent auto-commit its edits directly to main, or open a PR for human review? Auto-commit is lower friction but bypasses review. PR is safer but adds overhead.
-2. For the skill addendum check in `do-plan-critique`, should it read `docs/sdlc/do-critique.md` or `docs/sdlc/do-plan-critique.md`? The global skill is named `do-plan-critique` but the issue sketch uses `do-critique.md`.
+1. ~~Should the reflection agent auto-commit its edits directly to main, or open a PR for human review?~~ **Resolved:** Reflection agent opens a PR and schedules a PM session to run the remaining SDLC stages (pr review, patch, docs, merge) in parallel.
+2. ~~Should `do-plan-critique` addendum read `docs/sdlc/do-critique.md` or `docs/sdlc/do-plan-critique.md`?~~ **Resolved:** Use `docs/sdlc/do-plan-critique.md` — match the global skill name.
