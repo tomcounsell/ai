@@ -168,8 +168,11 @@ class TestHandleDevSessionCompletion:
         pm_sessions = list(AgentSession.query.filter(session_id=pm_session.session_id))
         updated_pm = pm_sessions[0]
 
+        def _steer_ok(session_id, message):
+            return {"success": True, "session_id": session_id, "error": None}
+
         with (
-            patch("agent.agent_session_queue.steer_session") as mock_steer,
+            patch("agent.agent_session_queue.steer_session", side_effect=_steer_ok) as mock_steer,
             patch("agent.agent_session_queue._extract_issue_number", return_value=None),
         ):
             await _handle_dev_session_completion(
@@ -317,6 +320,65 @@ class TestPipelineStateMachineTransitions:
         refreshed = list(AgentSession.query.filter(session_id=pm_session.session_id))[0]
         stage_states = json.loads(refreshed.stage_states) if refreshed.stage_states else {}
         assert stage_states.get("PLAN") in ("completed", "failed")
+
+    @pytest.mark.asyncio
+    async def test_steer_failure_creates_continuation_pm(
+        self, pm_session, dev_session, redis_test_db
+    ):
+        """When steer_session returns success=False, a continuation PM is created."""
+        from agent.agent_session_queue import _handle_dev_session_completion
+        from agent.pipeline_state import PipelineStateMachine
+        from models.session_lifecycle import finalize_session
+
+        # Advance pipeline to BUILD
+        sm = PipelineStateMachine(pm_session)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+        sm.complete_stage("PLAN")
+        sm.start_stage("CRITIQUE")
+        sm.complete_stage("CRITIQUE")
+        sm.start_stage("BUILD")
+
+        # Finalize parent PM to simulate it exiting early
+        pm_sessions = list(AgentSession.query.filter(session_id=pm_session.session_id))
+        updated_pm = pm_sessions[0]
+        finalize_session(updated_pm, "completed", "PM exited early")
+
+        # Reload after finalization
+        pm_sessions = list(AgentSession.query.filter(session_id=pm_session.session_id))
+        terminal_pm = pm_sessions[0]
+
+        with (
+            patch(
+                "agent.agent_session_queue.steer_session",
+                return_value={
+                    "success": False,
+                    "session_id": pm_session.session_id,
+                    "error": "Session is in terminal status 'completed' — steering rejected",
+                },
+            ),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=780),
+        ):
+            await _handle_dev_session_completion(
+                session=terminal_pm,
+                agent_session=dev_session,
+                result="BUILD complete. PR #42 created.",
+            )
+
+        # Verify continuation PM was created
+        pm_children = [
+            c
+            for c in AgentSession.query.filter(
+                parent_agent_session_id=pm_session.agent_session_id
+            )
+            if c.session_type == "pm"
+        ]
+        assert len(pm_children) >= 1
+        cont = pm_children[0]
+        assert cont.status == "pending"
+        assert "CONTINUATION" in cont.message_text
+        assert cont.continuation_depth == 1
 
     @pytest.mark.asyncio
     async def test_no_current_stage_skips_psm_update(self, pm_session, dev_session, redis_test_db):
