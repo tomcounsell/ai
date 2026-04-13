@@ -4,18 +4,18 @@ The reflections system is a unified framework for all recurring non-issue work. 
 
 ## Unified Reflection Scheduler
 
-All recurring tasks are declared in `config/reflections.yaml` and managed by a single scheduler that runs as an asyncio task inside the bridge worker loop.
+All recurring tasks are declared in `config/reflections.yaml` and managed by a single scheduler that runs as an asyncio task inside the standalone worker process (`python -m worker`).
 
 ### Architecture
 
 ```
-Bridge startup
+Worker startup (worker/__main__.py)
   -> ReflectionScheduler.start()
     -> Tick every 60 seconds
       -> For each reflection in registry:
-        -> Check if due (last_run + interval < now)
+        -> Check if due (ran_at + interval < now)
         -> Check skip-if-running guard
-        -> Execute: function (direct callable) or agent (subprocess)
+        -> Execute: function (direct callable) or agent (PM session)
         -> Update state in Redis (Reflection model)
 ```
 
@@ -39,7 +39,7 @@ reflections:
 | `priority` | string | `urgent`, `high`, `normal`, or `low` |
 | `execution_type` | string | `function` (direct callable) or `agent` (subprocess) |
 | `callable` | string | Dotted Python path (for function type) |
-| `command` | string | Shell command (for agent type) |
+| `command` | string | Natural-language prompt for PM session (for agent type) |
 | `enabled` | bool | Whether this reflection is active (default: true) |
 | `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
 
@@ -59,12 +59,14 @@ Each reflection gets a `Reflection` record in Redis tracking execution state:
 | Field | Type | Purpose |
 |-------|------|---------|
 | `name` | KeyField | Unique identifier matching registry |
-| `last_run` | Field(float) | Unix timestamp of last execution start |
-| `next_due` | Field(float) | Unix timestamp when next scheduled |
+| `ran_at` | Field(float) | Unix timestamp of last execution start |
 | `run_count` | IntField | Total number of executions |
 | `last_status` | Field | `pending`, `running`, `success`, `error`, `skipped` |
 | `last_error` | Field | Error message from last failure |
 | `last_duration` | Field(float) | Duration of last run in seconds |
+| `run_history` | ListField | Append-only list of run dicts (capped at 200) |
+
+Note: `next_due` is computed as `ran_at + interval` in the dashboard data layer, not stored as a field.
 
 ### Skip-if-Running Guard
 
@@ -146,7 +148,7 @@ The pipeline has 18 units: 15 independent items and 3 merged pipelines. Complete
 
 ## State & Persistence
 
-All reflections state lives in Redis via three Popoto models defined in `models/reflections.py`.
+All reflections state lives in Redis via three Popoto models, each in its own file: `models/reflection_run.py`, `models/reflection_ignore.py`, `models/pr_review_audit.py`. A backward-compatible shim at `models/reflections.py` re-exports all three.
 
 ### ReflectionRun
 
@@ -156,14 +158,14 @@ One record per calendar date. Acts as the primary state checkpoint for resumabil
 |-------|------|---------|
 | `date` | UniqueKeyField | YYYY-MM-DD, one run per day |
 | `completed_steps` | ListField | Units already finished, e.g. `["legacy_code_scan", "log_review"]` |
-| `daily_report` | ListField | Human-readable log lines per unit |
-| `findings` | DictField | `{category: [finding_strings]}` |
-| `session_analysis` | DictField | Output from session analysis sub-step |
-| `reflections` | ListField | LLM reflection outputs |
+| `output_path` | Field | Path to JSON file with large payloads (findings, session_analysis, daily_report) |
+| `session_observations` | ListField | LLM reflection outputs |
 | `auto_fix_attempts` | ListField | Auto-fix attempt records |
 | `step_progress` | DictField | Per-unit metrics, e.g. `{"legacy_code_scan": {"findings": 2}}` |
 | `started_at` | SortedField(float) | Unix timestamp, used for cleanup |
 | `dry_run` | Field(bool) | True if `--dry-run` mode |
+
+**Output externalization**: Large payloads (findings, session_analysis, daily_report) are written to `logs/reflections/{date}.json` on each save. Only `output_path` is stored in Redis, keeping the record size bounded.
 
 **Checkpoint cycle**: After each unit completes (or fails), the runner saves all state to Redis via `ReflectionRun.save_checkpoint()`. This deletes and recreates the record to handle Popoto's KeyField constraints.
 
@@ -473,7 +475,10 @@ After the daily maintenance pipeline completes, `main()` calls `agent.session_lo
 | `agent/reflection_scheduler.py` | Unified scheduler: registry loader, schedule evaluator, executor |
 | `config/reflections.yaml` | Declarative registry of all reflections |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
-| `models/reflections.py` | Core models: ReflectionRun (daily pipeline state), ReflectionIgnore (auto-fix suppression), PRReviewAudit (PR review dedup) |
+| `models/reflection_run.py` | ReflectionRun: daily pipeline state with resumability |
+| `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |
+| `models/pr_review_audit.py` | PRReviewAudit: PR review finding deduplication |
+| `models/reflections.py` | Backward-compatible re-export shim for the three split models |
 | `scripts/reflections.py` | Daily maintenance 17-unit runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
 | `scripts/install_reflections.sh` | launchd installation script (kept for manual invocation) |
