@@ -303,9 +303,37 @@ class AgentSession(Model):
         return super().save(*args, **kwargs)
 
     def __setattr__(self, name, value):
-        """Auto-convert float timestamps to datetime for DatetimeField fields."""
-        if name in self._DATETIME_FIELDS and isinstance(value, int | float):
-            value = datetime.fromtimestamp(value, tz=UTC)
+        """Auto-convert timestamps to datetime for DatetimeField fields.
+
+        Handles all assignment paths (construction, Redis load, direct set):
+        - int | float: Unix timestamp → UTC datetime
+        - str: ISO 8601 string → UTC-aware datetime (None on parse failure)
+        - other non-datetime, non-None types: reset to None (field is null=True)
+
+        This guards against Popoto's is_valid() coercion failure when a
+        DatetimeField holds a non-datetime value (e.g. a descriptor object
+        for sessions loaded from Redis before the field existed).
+        """
+        if name in self._DATETIME_FIELDS:
+            if isinstance(value, int | float):
+                value = datetime.fromtimestamp(value, tz=UTC)
+            elif isinstance(value, str):
+                try:
+                    dt = datetime.fromisoformat(value)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=UTC)
+                    value = dt
+                except (ValueError, TypeError):
+                    logger.debug(
+                        f"AgentSession: coerced {name}={value!r} → None (unparseable ISO string)"
+                    )
+                    value = None
+            elif value is not None and not isinstance(value, datetime):
+                logger.debug(
+                    f"AgentSession: coerced {name}={value!r} → None "
+                    f"(bad type {type(value).__name__})"
+                )
+                value = None
         super().__setattr__(name, value)
 
     @classmethod
@@ -315,6 +343,14 @@ class AgentSession(Model):
         This allows callers to pass old field names (message_text, sender_name,
         etc.) and have them automatically mapped into initial_telegram_message,
         extra_context, etc.
+
+        Also applies defensive coercion to ``response_delivered_at``. Beyond the
+        standard ``int | float → datetime`` conversion that all datetime fields
+        receive, this field gets extra handling for ``str`` (ISO 8601 → UTC
+        datetime) and any other non-datetime, non-None type (→ None). This guards
+        against Popoto's ``is_valid()`` silently aborting ``save()`` when a
+        session loaded from Redis holds a stale or corrupt value in this field
+        (issue #929).
         """
         # Extract fields that map to initial_telegram_message
         itm_fields = {}
@@ -450,12 +486,29 @@ class AgentSession(Model):
             kwargs["completed_at"] = datetime.fromtimestamp(kwargs["completed_at"], tz=UTC)
         if "updated_at" in kwargs and isinstance(kwargs["updated_at"], int | float):
             kwargs["updated_at"] = datetime.fromtimestamp(kwargs["updated_at"], tz=UTC)
-        if "response_delivered_at" in kwargs and isinstance(
-            kwargs["response_delivered_at"], int | float
-        ):
-            kwargs["response_delivered_at"] = datetime.fromtimestamp(
-                kwargs["response_delivered_at"], tz=UTC
-            )
+        if "response_delivered_at" in kwargs:
+            val = kwargs["response_delivered_at"]
+            if isinstance(val, int | float):
+                kwargs["response_delivered_at"] = datetime.fromtimestamp(val, tz=UTC)
+            elif isinstance(val, str):
+                # Defence-in-depth: __setattr__ handles this too, but normalise early
+                try:
+                    dt = datetime.fromisoformat(val)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=UTC)
+                    kwargs["response_delivered_at"] = dt
+                except (ValueError, TypeError):
+                    logger.debug(
+                        f"_normalize_kwargs: coerced response_delivered_at={val!r} → None "
+                        "(unparseable ISO string)"
+                    )
+                    kwargs["response_delivered_at"] = None
+            elif val is not None and not isinstance(val, datetime):
+                logger.debug(
+                    f"_normalize_kwargs: coerced response_delivered_at={val!r} → None "
+                    f"(bad type {type(val).__name__})"
+                )
+                kwargs["response_delivered_at"] = None
 
         return kwargs
 
