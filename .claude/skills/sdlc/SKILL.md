@@ -179,16 +179,18 @@ Cycles:     CRITIQUE(fail) -> PLAN -> CRITIQUE (max 2 cycles)
             REVIEW(fail|partial) -> PATCH -> TEST -> REVIEW
 ```
 
-| Stage | Skill | Notes |
-|-------|-------|-------|
-| ISSUE | /do-issue | Or already exists |
-| PLAN | /do-plan {slug} | |
-| CRITIQUE | /do-plan-critique | Validates plan before build |
-| BUILD | /do-build {plan or issue} | |
-| TEST | /do-test | |
-| PATCH | /do-patch | Routing-only; not a display stage |
-| REVIEW | /do-pr-review | |
-| DOCS | /do-docs | |
-| MERGE | — | Human decision (PM reports completion) |
+| Stage | Skill | Dev Model | Notes |
+|-------|-------|-----------|-------|
+| ISSUE | /do-issue | — | Or already exists |
+| PLAN | /do-plan {slug} | opus | Adversarial design |
+| CRITIQUE | /do-plan-critique | opus | Adversarial review |
+| BUILD | /do-build {plan or issue} | sonnet | Plan execution |
+| TEST | /do-test | sonnet | Deterministic runs |
+| PATCH | /do-patch | sonnet | Targeted fix (see resume rules in PM persona) |
+| REVIEW | /do-pr-review | opus | Code review judgment |
+| DOCS | /do-docs | sonnet | Structured writing |
+| MERGE | — | — | Human decision (PM reports completion) |
+
+The **Dev Model** column shows the model the PM should pass via `--model` when spawning a dev session for that stage (see Stage→Model Dispatch Table in PM persona).
 
 This list is for reference only. This skill does NOT advance through stages -- it picks the right one and returns.

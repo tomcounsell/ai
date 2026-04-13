@@ -233,8 +233,21 @@ class AgentSession(Model):
     # === Session hierarchy fields ===
     parent_agent_session_id = KeyField(null=True)
 
+    # === Per-session model selection ===
+    # Stores the Claude model name to use for this session (e.g. "sonnet", "opus").
+    # None means inherit from the environment/parent (backward-compatible default).
+    model = Field(null=True)
+
+    # === BUILD session retention for hard-PATCH resume ===
+    # When True, this session's completed record is exempt from scheduler cleanup
+    # so the PM can resume it via `valor-session resume --id <id>`.
+    # Set to True by the worker on BUILD session completion.
+    # Cleared by `valor-session release --pr <N>` after PR merge/close.
+    # Meta.ttl below serves as absolute backstop if the release hook never fires.
+    retain_for_resume = Field(default=False)
+
     class Meta:
-        ttl = 7776000  # 90 days — matches existing cleanup_expired(max_age_days=90) threshold
+        ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 
     # === Worker routing key ===
 

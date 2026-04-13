@@ -111,6 +111,39 @@ The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachi
 
 PM session orchestration uses the graph for pipeline progression. Individual `/do-*` skills report their results; the PM session determines what happens next.
 
+## Per-Stage Model Selection
+
+The PM session chooses which Claude model runs each stage at dispatch time, via the `model` parameter on `Agent(subagent_type="dev-session", ...)`. The Agent tool supports `sonnet`, `opus`, and `haiku` as per-call overrides; `agent_definitions.py` sets `model=None` on `dev-session` so inheritance is the fallback when PM omits the override.
+
+Stages fall into two tiers based on the cognitive load of the work:
+
+| Stage | Model | Rationale |
+|-------|-------|-----------|
+| ISSUE | sonnet | Template-driven issue drafting; isolated from downstream work |
+| PLAN | opus | Hardest reasoning in the pipeline; downstream stages depend on plan quality |
+| CRITIQUE | opus | Adversarial war-room critics; finding subtle flaws is where Opus earns its keep |
+| BUILD | sonnet | Translation of a detailed plan into code; PATCH is the escape hatch. Mid-build course correction comes from PM steering (see below), not a model swap |
+| TEST | sonnet | Tool-heavy verification. Independence from BUILD is the anti-cheat property; Opus is overkill |
+| PATCH (easy) | sonnet | Targeted fix against a written checklist of failures or review findings |
+| PATCH (hard) | sonnet, resumed from BUILD | PM resumes the original BUILD session's transcript to leverage accumulated context — see "Dev Session Resume" in [pm-dev-session-architecture.md](pm-dev-session-architecture.md) |
+| REVIEW | opus | Independent adversarial read of the diff; same justification as CRITIQUE |
+| DOCS | sonnet | Content transformation against code + plan; tool-heavy search and update |
+| MERGE | — | Human decision |
+
+### Rationale for the tier split
+
+The three Opus stages (PLAN, CRITIQUE, REVIEW) are the "hard thinking moments where quality of output gates everything downstream." Every other stage either executes a written plan or performs tool-driven verification, where Sonnet's capability ceiling is sufficient.
+
+As the Claude Code harness improves at BUILD execution and models get smarter, expect plans to become progressively more high-level, leaving more room for mid-build course correction via PM steering (PM is Opus by default). The model tier split assumes this trend and keeps BUILD on Sonnet even for non-trivial work.
+
+### Mid-build course correction (no model swap)
+
+When PM observes a running BUILD going off-plan, the correction path is **steering**, not a model change. PM writes an Opus-reasoned steering message and pushes it to the BUILD's Redis queue via `scripts/steer_child.py`. The BUILD session stays on Sonnet but executes Opus-authored instructions. This avoids the complexity of mid-transcript model swaps and keeps the builder's context intact.
+
+### Hard PATCH via resume
+
+For PATCH failures that need deep context, PM resumes the original BUILD session's Claude Code transcript rather than starting a fresh PATCH session. The builder already has every file, plan assumption, and implementation decision in its transcript — a resumed session reads that directly instead of re-deriving from the diff + plan artifacts. See "Dev Session Resume" in [pm-dev-session-architecture.md](pm-dev-session-architecture.md) for the mechanism.
+
 ## Files
 
 | File | Role |

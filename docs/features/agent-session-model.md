@@ -158,6 +158,34 @@ Only four fields change during continuation: `status` (reset to "pending"), `ini
 
 `status` is a Popoto `IndexedField`, so changing it only requires mutating the field and calling `.save()` — no delete-and-recreate needed.
 
+## Per-Session Model Selection
+
+`model` (`Field(null=True)`) stores the Claude model name to use for a dev session (e.g., `"sonnet"`, `"opus"`).
+`None` inherits the environment or CLI default (backward-compatible — all pre-existing sessions have `model=None`).
+
+**How it flows:**
+1. PM calls `python -m tools.valor_session create --role dev --model sonnet --message "..."`.
+2. `_push_agent_session(model="sonnet")` stores the value on the `AgentSession` record.
+3. `sdk_client.get_agent_response_sdk()` reads `session.model` and passes it to `ValorAgent(model=...)`.
+4. `ValorAgent._create_options()` includes `model="sonnet"` in `ClaudeAgentOptions` when set.
+
+See [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md) for the PM's per-stage model selection table.
+
+## BUILD Session Retention (`retain_for_resume`)
+
+`retain_for_resume` (`Field(default=False)`) marks a completed BUILD session as exempt from scheduler
+cleanup so the PM can resume it later via `python -m tools.valor_session resume`.
+
+**Lifecycle:**
+1. BUILD dev session completes → `_handle_dev_session_completion()` sets `retain_for_resume=True`.
+2. `tools/agent_session_scheduler.py cleanup` skips sessions where `retain_for_resume=True` and `status="completed"`.
+   A log message is emitted each time a session is skipped so operators can audit retention.
+3. PR merges/closes → PM calls `python -m tools.valor_session release --pr <N>` to clear the flag.
+4. `AgentSession.Meta.ttl = 2592000` (30 days) is the hard backstop — sessions expire even if the release hook never fires.
+
+**Default for pre-existing sessions:** `False` (backward-compatible — old BUILD sessions are not retained and will be
+cleaned up by the TTL when they next touch Redis).
+
 ## Backward Compatibility
 
 - `_normalize_kwargs()` maps deprecated field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`

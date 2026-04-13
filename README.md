@@ -24,13 +24,17 @@ See [`docs/features/bridge-worker-architecture.md`](docs/features/bridge-worker-
 
 ## The SDLC Pipeline
 
-Valor ships real features through a structured pipeline, each stage a skill the agent invokes:
+Valor ships real features through a structured pipeline — a directed cyclic graph with failure cycles, not a straight line. Each stage is a skill the agent invokes, and each stage runs on the model best suited to its cognitive load: **Opus** for hard reasoning (Plan, Critique, Review) and **Sonnet** for plan execution and tool-heavy work (Build, Test, Patch, Docs).
 
-```
-Plan → Critique → Build → Test → Patch → Review → Docs → Merge
-```
+<p align="center">
+  <img src="docs/assets/sdlc-pipeline.png" alt="Valor SDLC pipeline: Issue → Plan → Critique → Build → Test → Review → Docs → Merge with failure cycles and a hard-patch resume-builder edge" width="820">
+</p>
 
-A PM session steers the pipeline and delegates coding work to a Dev session. See [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md) for the ground truth on stage definitions.
+- **Cycles are first-class.** Critique loops back to Plan when concerns surface. Test→Patch→Test iterates until the fix holds. Review→Patch→Test→Review repeats until findings clear.
+- **Hard patches resume the builder.** When a Patch needs the original builder's accumulated context, PM resumes the Build session's Claude Code transcript instead of starting fresh — the dashed edge in the diagram.
+- **PM orchestrates, Dev executes.** A read-only PM session steers the pipeline stage-by-stage; each stage spawns a full-permission Dev session that runs one skill and reports back.
+
+The pipeline graph is defined in [`agent/pipeline_graph.py`](agent/pipeline_graph.py). See [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md) for the ground truth on stage definitions and [`docs/features/pipeline-graph.md`](docs/features/pipeline-graph.md) for the feature doc.
 
 ## Subsystems
 
