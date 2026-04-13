@@ -697,18 +697,43 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if (project_dir / "com.valor.worker.plist").exists():
             if service.install_worker(project_dir):
                 log("Worker service installed", v)
-                # Verify worker starts
+                # Verify worker starts and writes heartbeat.
+                # Worker writes last_worker_connected on startup (before health loop),
+                # so a fresh file confirms it's actually running and healthy.
                 import time as _time
 
-                for _ in range(5):
+                heartbeat_file = project_dir / "data" / "last_worker_connected"
+                install_ts = _time.time()
+                worker_healthy = False
+                for _ in range(15):  # 30s window
                     _time.sleep(2)
-                    if service.is_worker_running():
-                        worker_pid = service.get_worker_pid()
-                        log(f"Worker running (PID: {worker_pid})", v)
-                        break
-                else:
-                    log("WARN: Worker not running after install", v, always=True)
-                    result.warnings.append("Worker not running after install")
+                    if not service.is_worker_running():
+                        continue
+                    worker_pid = service.get_worker_pid()
+                    # Check heartbeat was written after we started installing
+                    try:
+                        if heartbeat_file.exists() and heartbeat_file.stat().st_mtime > install_ts:
+                            log(f"Worker running (PID: {worker_pid})", v)
+                            worker_healthy = True
+                            break
+                    except OSError:
+                        pass
+                if not worker_healthy:
+                    # Process present but heartbeat not yet written — warn but not an error
+                    worker_pid = service.get_worker_pid()
+                    if worker_pid:
+                        log(
+                            f"Worker running (PID: {worker_pid}) — heartbeat pending",
+                            v,
+                            always=True,
+                        )
+                        result.warnings.append(
+                            "Worker started but heartbeat pending — "
+                            "dashboard may show stale status briefly"
+                        )
+                    else:
+                        log("WARN: Worker not running after install", v, always=True)
+                        result.warnings.append("Worker not running after install")
             else:
                 result.warnings.append("Worker plist install failed")
 

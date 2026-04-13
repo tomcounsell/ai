@@ -22,15 +22,19 @@ import sys
 import time
 from pathlib import Path
 
-# Load .env before any config imports — needed when launched via launchd
-# where bash source is blocked by iCloud macl restrictions on Desktop files.
-try:
-    from dotenv import load_dotenv
+# Load .env for direct invocations (python -m worker from terminal).
+# When running via launchd, env vars are injected into the plist by
+# install_worker.sh — VALOR_LAUNCHD=1 is set to signal this. We skip
+# dotenv entirely in that case: macOS TCC blocks open() on iCloud-synced
+# ~/Desktop/Valor/.env (which .env symlinks to), causing the process to
+# hang indefinitely.
+if not os.environ.get("VALOR_LAUNCHD"):
+    try:
+        from dotenv import load_dotenv
 
-    load_dotenv(Path(__file__).parent.parent / ".env")
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
-except ImportError:
-    pass
+        load_dotenv(Path(__file__).parent.parent / ".env")
+    except ImportError:
+        pass
 
 logger = logging.getLogger("worker")
 
@@ -147,6 +151,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
         _session_notify_listener,
+        _write_worker_heartbeat,
         cleanup_corrupted_agent_sessions,
         register_callbacks,
         request_shutdown,
@@ -176,26 +181,44 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     # CLI harness health check: verify claude binary is available at startup.
     # All session types execute via claude -p — a missing binary is fatal.
-    try:
-        from agent.sdk_client import verify_harness_health
+    # Binary existence is the hard gate; the subprocess smoke test is advisory
+    # because launchd can hang on asyncio.create_subprocess_exec for node binaries
+    # (macOS TCC / TTY restrictions). A 30s timeout prevents an infinite hang.
+    import shutil as _shutil
 
-        _healthy = await verify_harness_health("claude-cli")
-        if _healthy:
-            logger.info("CLI harness 'claude-cli' health check passed")
-        else:
-            logger.critical(
-                "CLI harness 'claude' not found or unhealthy — "
-                "install with: npm install -g @anthropic-ai/claude-code\n"
-                "Worker cannot start without the harness binary."
-            )
-            sys.exit(1)
-    except Exception as e:
+    if not _shutil.which("claude"):
         logger.critical(
-            f"CLI harness health check error: {e} — "
+            "CLI harness 'claude' not found on PATH — "
             "install with: npm install -g @anthropic-ai/claude-code\n"
             "Worker cannot start without the harness binary."
         )
         sys.exit(1)
+
+    logger.info("CLI harness 'claude' found on PATH")
+
+    # Under launchd (VALOR_LAUNCHD=1), skip the subprocess smoke test entirely.
+    # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions
+    # before yielding to the event loop, so asyncio.wait_for cannot apply the timeout.
+    # Binary existence (shutil.which) is the only reliable check in this environment.
+    if os.environ.get("VALOR_LAUNCHD"):
+        logger.info("CLI harness smoke test skipped (VALOR_LAUNCHD — TCC restriction)")
+    else:
+        try:
+            from agent.sdk_client import verify_harness_health
+
+            _healthy = await asyncio.wait_for(verify_harness_health("claude-cli"), timeout=30.0)
+            if _healthy:
+                logger.info("CLI harness 'claude-cli' health check passed")
+            else:
+                logger.warning(
+                    "CLI harness subprocess test failed — binary found, continuing anyway"
+                )
+        except TimeoutError:
+            logger.warning(
+                "CLI harness subprocess test timed out (30s) — binary found, skipping smoke test"
+            )
+        except Exception as e:
+            logger.warning(f"CLI harness subprocess test error: {e} — binary found, continuing")
 
     if dry_run:
         logger.info(
@@ -277,6 +300,10 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         f"{len(pending_sessions)} pending session(s), "
         f"{len(started_workers)} worker loop(s)"
     )
+
+    # Write heartbeat immediately so dashboard shows green without waiting
+    # for the first 5-minute health loop tick.
+    _write_worker_heartbeat()
 
     # Start health monitor as background task
     health_task = asyncio.create_task(_agent_session_health_loop(), name="session-health-monitor")

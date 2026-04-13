@@ -18,6 +18,8 @@
         <string>__HOME_DIR__/.local/bin:__PROJECT_DIR__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
         <key>HOME</key>
         <string>__HOME_DIR__</string>
+        <key>VALOR_LAUNCHD</key>
+        <string>1</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

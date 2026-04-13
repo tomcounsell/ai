@@ -47,8 +47,8 @@ def _resolve_config_path() -> Path:
 
     Resolution order:
     1. PROJECTS_CONFIG_PATH env var (explicit override)
-    2. ~/Desktop/Valor/projects.json (iCloud-synced default)
-    3. config/projects.json (legacy in-repo fallback)
+    2. ~/Desktop/Valor/projects.json (iCloud-synced default) — skipped under launchd
+    3. config/projects.json (local copy, updated by install_worker.sh)
     """
     import os
 
@@ -56,11 +56,16 @@ def _resolve_config_path() -> Path:
     if env_path:
         return Path(env_path).expanduser()
 
-    desktop_path = Path.home() / "Desktop" / "Valor" / "projects.json"
-    if desktop_path.exists():
-        return desktop_path
+    # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced
+    # Desktop path entirely. macOS TCC blocks open() and even stat() on
+    # ~/Desktop files from launchd agents, causing indefinite hangs.
+    # install_worker.sh copies projects.json → config/projects.json at install time.
+    if not os.environ.get("VALOR_LAUNCHD"):
+        desktop_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+        if desktop_path.exists():
+            return desktop_path
 
-    # Legacy fallback: in-repo config
+    # Local copy (updated by install_worker.sh) or legacy in-repo fallback
     return Path(__file__).parent.parent / "config" / "projects.json"
 
 

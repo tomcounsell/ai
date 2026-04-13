@@ -200,7 +200,11 @@ class Settings(BaseSettings):
     """Main application settings with environment variable support."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Skip reading .env when VALOR_LAUNCHD=1: all vars are already injected
+        # into the launchd plist by install_worker.sh. The .env symlinks to
+        # ~/Desktop/Valor/.env (iCloud), and pydantic-settings' open() on that
+        # file blocks indefinitely under macOS TCC in the launchd environment.
+        env_file=None if __import__("os").environ.get("VALOR_LAUNCHD") else ".env",
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         case_sensitive=False,
