@@ -405,6 +405,6 @@ Telegram message
 ## Migration
 
 - Older AgentSession records in Redis with `session_type="chat"` need migration via `scripts/migrate_session_type_chat_to_pm.py`
-- Float timestamps are auto-converted to datetime via `__setattr__`; run `scripts/migrate_datetime_fields.py` for existing data
+- Timestamps (int, float, or ISO string) are auto-converted to UTC-aware datetime via `__setattr__`; invalid types are reset to `None`; run `scripts/migrate_datetime_fields.py` for existing data
 - `_normalize_kwargs()` maps old field names to consolidated equivalents
 - Workers auto-adapt: jobs with chat_id use per-chat routing; older jobs fall back to project_key
