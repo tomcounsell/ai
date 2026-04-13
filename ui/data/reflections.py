@@ -38,7 +38,8 @@ def get_all_reflections() -> list[dict]:
     """Get all registered reflections with their current state from Redis.
 
     Merges registry config (description, interval, etc.) with live Redis
-    state (last_run, status, run_count, etc.).
+    state (ran_at, status, run_count, etc.). Computes next_due from
+    ran_at + config interval (not stored as a field).
 
     Returns:
         List of dicts with merged config + state for each reflection.
@@ -52,17 +53,23 @@ def get_all_reflections() -> list[dict]:
     reflections = []
     for name, config in registry.items():
         state = states.get(name)
-        next_due = state.next_due if state else None
+        interval = config.get("interval", 0)
+
+        # Compute next_due from ran_at + interval (not stored as a field)
+        next_due = None
+        if state and state.ran_at and interval:
+            next_due = state.ran_at + interval
+
         due_in_seconds = (next_due - now) if next_due else None
         reflections.append(
             {
                 "name": name,
                 "description": config.get("description", ""),
-                "interval": config.get("interval", 0),
+                "interval": interval,
                 "priority": config.get("priority", "normal"),
                 "enabled": config.get("enabled", True),
                 "execution_type": config.get("execution_type", "unknown"),
-                "last_run": state.last_run if state else None,
+                "last_run": state.ran_at if state else None,
                 "next_due": next_due,
                 "due_in_seconds": due_in_seconds,
                 "overdue": due_in_seconds < 0 if due_in_seconds is not None else False,
@@ -77,32 +84,6 @@ def get_all_reflections() -> list[dict]:
         )
 
     # Sort: entries with next_due first (soonest first), then entries without
-    with_due = [r for r in reflections if r["next_due"] is not None]
-    without_due = [r for r in reflections if r["next_due"] is None]
-    with_due.sort(key=lambda r: r["next_due"])
-
-    return with_due + without_due
-
-
-def get_schedule() -> list[dict]:
-    """Get reflections ordered by next-due timestamp.
-
-    Returns:
-        List of dicts sorted by next_due (soonest first). Entries
-        with no next_due are placed at the end.
-    """
-    reflections = get_all_reflections()
-    now = time.time()
-
-    for r in reflections:
-        if r["next_due"]:
-            r["due_in_seconds"] = r["next_due"] - now
-            r["overdue"] = r["due_in_seconds"] < 0
-        else:
-            r["due_in_seconds"] = None
-            r["overdue"] = False
-
-    # Sort: entries with next_due first (by time), then entries without
     with_due = [r for r in reflections if r["next_due"] is not None]
     without_due = [r for r in reflections if r["next_due"] is None]
     with_due.sort(key=lambda r: r["next_due"])
@@ -177,50 +158,4 @@ def get_run_detail(name: str, run_index: int) -> dict | None:
     run["index"] = run_index
     run["name"] = name
 
-    # Try to read log content if log_path is set
-    log_path = run.get("log_path")
-    if log_path:
-        run["log_content"] = _read_log_file(log_path)
-    else:
-        run["log_content"] = None
-
     return run
-
-
-def get_log_content(name: str, run_index: int) -> str:
-    """Get log file content for a specific run.
-
-    Args:
-        name: Reflection name
-        run_index: Zero-based index into run_history
-
-    Returns:
-        Log file content string, or an error/not-found message.
-    """
-    run = get_run_detail(name, run_index)
-    if not run:
-        return "Run not found."
-
-    if run.get("log_content"):
-        return run["log_content"]
-
-    log_path = run.get("log_path")
-    if not log_path:
-        return "No log file associated with this run."
-
-    return _read_log_file(log_path)
-
-
-def _read_log_file(path: str) -> str:
-    """Safely read a log file, returning an error message if unavailable."""
-    try:
-        p = Path(path)
-        if not p.exists():
-            return f"Log file not found: {path}"
-        content = p.read_text(errors="replace")
-        # Cap at 100KB to avoid huge responses
-        if len(content) > 100_000:
-            content = content[:100_000] + "\n\n... (truncated at 100KB)"
-        return content
-    except Exception as e:
-        return f"Error reading log file: {e}"

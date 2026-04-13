@@ -247,7 +247,7 @@ class TestScheduleEvaluation:
             callable="f",
         )
         state = MagicMock()
-        state.last_run = None
+        state.ran_at = None
         assert is_reflection_due(entry, state, time.time()) is True
 
     def test_recently_run_not_due(self):
@@ -261,7 +261,7 @@ class TestScheduleEvaluation:
             callable="f",
         )
         state = MagicMock()
-        state.last_run = time.time() - 100  # Ran 100s ago, interval is 300s
+        state.ran_at = time.time() - 100  # Ran 100s ago, interval is 300s
         assert is_reflection_due(entry, state, time.time()) is False
 
     def test_past_interval_is_due(self):
@@ -275,7 +275,7 @@ class TestScheduleEvaluation:
             callable="f",
         )
         state = MagicMock()
-        state.last_run = time.time() - 400  # Ran 400s ago, interval is 300s
+        state.ran_at = time.time() - 400  # Ran 400s ago, interval is 300s
         assert is_reflection_due(entry, state, time.time()) is True
 
     def test_exactly_at_interval_is_due(self):
@@ -290,7 +290,7 @@ class TestScheduleEvaluation:
             callable="f",
         )
         state = MagicMock()
-        state.last_run = now - 300
+        state.ran_at = now - 300
         assert is_reflection_due(entry, state, now) is True
 
 
@@ -339,7 +339,7 @@ class TestReflectionModel:
 
         field_names = [f for f in dir(Reflection) if not f.startswith("_")]
         assert "name" in field_names
-        assert "last_run" in field_names
+        assert "ran_at" in field_names
         assert "run_count" in field_names
         assert "last_status" in field_names
         assert "last_error" in field_names
@@ -385,7 +385,7 @@ class TestReflectionScheduler:
         # Mock the Reflection.get_or_create to avoid Redis dependency
         with patch("agent.reflection_scheduler.Reflection") as mock_reflection:
             mock_state = MagicMock()
-            mock_state.last_run = time.time() - 100
+            mock_state.ran_at = time.time() - 100
             mock_state.last_status = "success"
             mock_state.last_error = None
             mock_state.last_duration = 1.5
@@ -404,7 +404,7 @@ class TestReflectionScheduler:
 
         with patch("agent.reflection_scheduler.Reflection") as mock_reflection:
             mock_state = MagicMock()
-            mock_state.last_run = time.time()  # Just ran
+            mock_state.ran_at = time.time()  # Just ran
             mock_state.last_status = "success"
             mock_reflection.get_or_create.return_value = mock_state
 
@@ -419,7 +419,7 @@ class TestReflectionScheduler:
 
         with patch("agent.reflection_scheduler.Reflection") as mock_reflection:
             mock_state = MagicMock()
-            mock_state.last_run = time.time() - 10  # Recently started
+            mock_state.ran_at = time.time() - 10  # Recently started
             mock_state.last_status = "running"
             mock_reflection.get_or_create.return_value = mock_state
 
@@ -438,7 +438,7 @@ class TestReflectionScheduler:
 
         with patch("agent.reflection_scheduler.Reflection") as mock_reflection:
             mock_state = MagicMock()
-            mock_state.last_run = time.time() - 10
+            mock_state.ran_at = time.time() - 10
             mock_state.last_status = "running"
             mock_reflection.get_or_create.return_value = mock_state
 

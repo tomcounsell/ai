@@ -703,9 +703,14 @@ class ReflectionRunner:
         If completed_steps contains integers (legacy format from before string keys),
         treat the run as stale and reset to an empty list. This safely re-runs any
         steps that already ran on that day — all steps are idempotent.
+
+        Large payloads (findings, session_analysis, daily_report) are loaded from
+        the output file referenced by output_path if it exists.
         """
+        import json
+
         today = utc_now().strftime("%Y-%m-%d")
-        from models.reflections import ReflectionRun
+        from models.reflection_run import ReflectionRun
 
         run = ReflectionRun.load_or_create(today)
         raw_completed = run.completed_steps or []
@@ -714,13 +719,31 @@ class ReflectionRunner:
             logger.info("Legacy integer completed_steps detected — resetting to empty list")
             raw_completed = []
 
+        # Load large payloads from output file if available
+        findings = {}
+        session_analysis = {}
+        daily_report = []
+        session_observations = run.session_observations or []
+
+        if run.output_path:
+            try:
+                output_data = json.loads(Path(run.output_path).read_text())
+                findings = output_data.get("findings", {})
+                session_analysis = output_data.get("session_analysis", {})
+                daily_report = output_data.get("daily_report", [])
+                # Also load session_observations from file if present
+                if "session_observations" in output_data:
+                    session_observations = output_data["session_observations"]
+            except Exception as e:
+                logger.warning(f"Failed to load output file {run.output_path}: {e}")
+
         state = ReflectionsState(
             completed_steps=raw_completed,
-            daily_report=run.daily_report or [],
+            daily_report=daily_report,
             date=run.date or today,
-            findings=run.findings or {},
-            session_analysis=run.session_analysis or {},
-            reflections=run.reflections or [],
+            findings=findings,
+            session_analysis=session_analysis,
+            session_observations=session_observations,
             auto_fix_attempts=run.auto_fix_attempts or [],
             step_progress=run.step_progress or {},
         )
@@ -1140,9 +1163,9 @@ class ReflectionRunner:
             report_lines.append("")
 
         # Add reflections if available
-        if self.state.reflections:
+        if self.state.session_observations:
             report_lines.append("## LLM Reflections")
-            for r in self.state.reflections:
+            for r in self.state.session_observations:
                 report_lines.append(f"- **{r.get('category', 'unknown')}**: {r.get('summary', '')}")
                 report_lines.append(f"  - Pattern: {r.get('pattern', '')}")
                 report_lines.append(f"  - Prevention: {r.get('prevention', '')}")
@@ -1212,7 +1235,7 @@ class ReflectionRunner:
     async def step_llm_reflection(self) -> None:
         """Step 7: Run LLM reflection on session analysis."""
         reflections = run_llm_reflection(self.state.session_analysis)
-        self.state.reflections = reflections
+        self.state.session_observations = reflections
 
         if reflections:
             self.state.add_finding(
@@ -1245,7 +1268,7 @@ class ReflectionRunner:
         prune_ignore_log()
         ignore_entries = load_ignore_log()
 
-        reflections = self.state.reflections
+        reflections = self.state.session_observations
         candidates = [r for r in reflections if is_high_confidence(r)]
 
         logger.info(
@@ -2936,7 +2959,12 @@ from dataclasses import dataclass, field  # noqa: E402
 
 @dataclass
 class ReflectionsState:
-    """Persisted state for resumability via Redis ReflectionRun model."""
+    """Persisted state for resumability via Redis ReflectionRun model.
+
+    Large payloads (findings, session_analysis, daily_report) are written
+    to logs/reflections/{date}.json on each save. Only the output_path is
+    stored in Redis to keep record size bounded.
+    """
 
     step_started_at: str | None = None
     step_progress: dict[str, Any] = field(default_factory=dict)
@@ -2945,15 +2973,34 @@ class ReflectionsState:
     date: str = field(default_factory=lambda: utc_now().strftime("%Y-%m-%d"))
     findings: dict[str, list[str]] = field(default_factory=dict)
     session_analysis: dict[str, Any] = field(default_factory=dict)
-    reflections: list[dict[str, str]] = field(default_factory=list)
+    session_observations: list[dict[str, str]] = field(default_factory=list)
     auto_fix_attempts: list[dict] = field(default_factory=list)
     dry_run: bool = False
 
+    def _write_output_file(self) -> str:
+        """Write large payloads to logs/reflections/{date}.json, return path."""
+        import json
+
+        output_dir = Path(__file__).parent.parent / "logs" / "reflections"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{self.date}.json"
+        payload = {
+            "findings": self.findings,
+            "session_analysis": self.session_analysis,
+            "daily_report": self.daily_report,
+            "session_observations": self.session_observations,
+        }
+        output_path.write_text(json.dumps(payload, indent=2, default=str))
+        return str(output_path)
+
     def save(self) -> None:
-        """Save state to Redis ReflectionRun model."""
+        """Save state to Redis ReflectionRun model.
+
+        Writes large payloads to filesystem and stores only the path in Redis.
+        """
         import time as _time
 
-        from models.reflections import ReflectionRun
+        from models.reflection_run import ReflectionRun
 
         existing = ReflectionRun.query.filter(date=self.date)
         started_at = _time.time()
@@ -2961,13 +3008,13 @@ class ReflectionsState:
             started_at = existing[0].started_at or started_at
             existing[0].delete()
 
+        output_path = self._write_output_file()
+
         ReflectionRun.create(
             date=self.date,
             completed_steps=self.completed_steps,
-            daily_report=self.daily_report,
-            findings=self.findings,
-            session_analysis=self.session_analysis,
-            reflections=self.reflections,
+            output_path=output_path,
+            session_observations=self.session_observations,
             auto_fix_attempts=self.auto_fix_attempts,
             step_progress=self.step_progress,
             started_at=started_at,

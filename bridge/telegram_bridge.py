@@ -2048,16 +2048,6 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
 
-    # Start unified reflection scheduler (subsumes all recurring reflection tasks)
-    try:
-        from agent.reflection_scheduler import ReflectionScheduler
-
-        _reflection_scheduler = ReflectionScheduler()
-        asyncio.create_task(_reflection_scheduler.start())
-        logger.info("Reflection scheduler started")
-    except Exception as e:
-        logger.error(f"Failed to start reflection scheduler: {e}")
-
     # Start knowledge document watcher (monitors ~/work-vault/ for file changes)
     try:
         from bridge.knowledge_watcher import KnowledgeWatcher

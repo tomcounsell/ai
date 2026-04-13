@@ -1,7 +1,7 @@
 """Reflection model - Redis-backed state for the unified reflection scheduler.
 
-Tracks per-reflection execution state: when it last ran, when it's next due,
-run count, and last status/error. Used by agent/reflection_scheduler.py to
+Tracks per-reflection execution state: when it last ran, run count, and last
+status/error. Used by agent/reflection_scheduler.py to
 decide which reflections are due and to record outcomes.
 
 See docs/features/reflections.md for full documentation.
@@ -28,20 +28,18 @@ class Reflection(Model):
 
     Fields:
         name: Unique identifier matching the registry entry
-        last_run: Unix timestamp of last successful execution start
-        next_due: Unix timestamp when the reflection should next run
+        ran_at: Unix timestamp of last successful execution start
         run_count: Total number of times this reflection has executed
         last_status: Result of last run: 'success', 'error', 'skipped', or 'running'
         last_error: Error message from last failed run (None if last run succeeded)
         last_duration: Duration of last run in seconds
         run_history: Append-only list of recent run dicts (capped at 200).
-            Each dict: {timestamp, status, duration, error, log_path}
+            Each dict: {timestamp, status, duration, error}
     """
 
     reflection_id = AutoKeyField()
     name = KeyField()
-    last_run = Field(type=float, null=True)
-    next_due = Field(type=float, null=True)
+    ran_at = Field(type=float, null=True)
     run_count = IntField(default=0)
     last_status = Field(default="pending")  # pending | running | success | error | skipped
     last_error = Field(null=True)
@@ -69,8 +67,7 @@ class Reflection(Model):
             return existing[0]
         return cls.create(
             name=name,
-            last_run=None,
-            next_due=None,
+            ran_at=None,
             run_count=0,
             last_status="pending",
             last_error=None,
@@ -81,7 +78,7 @@ class Reflection(Model):
     def mark_started(self) -> None:
         """Mark this reflection as currently running."""
         self.last_status = "running"
-        self.last_run = time.time()
+        self.ran_at = time.time()
         self._normalize_run_history()
         self.save()
 
@@ -141,7 +138,7 @@ class Reflection(Model):
         all_records = cls.query.all()
         deleted = 0
         for record in all_records:
-            if record.last_run and record.last_run < cutoff:
+            if record.ran_at and record.ran_at < cutoff:
                 record.delete()
                 deleted += 1
         return deleted

@@ -36,7 +36,7 @@ The reflections dashboard at `/reflections/` provides visibility into all regist
 ## Data Sources
 
 - **Registry**: `config/reflections.yaml` - names, descriptions, intervals, execution types
-- **State**: `Reflection` Popoto model in Redis - last_run, next_due, status, run_count, error
+- **State**: `Reflection` Popoto model in Redis - ran_at, status, run_count, error (next_due is computed from ran_at + interval, not stored)
 - **History**: `Reflection.run_history` ListField - capped at 200 entries per reflection
 - **Ignores**: `ReflectionIgnore` Popoto model in Redis - active patterns with TTL
 
