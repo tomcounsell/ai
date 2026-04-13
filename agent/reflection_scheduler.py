@@ -351,6 +351,15 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
 
     project_root = Path(__file__).parent.parent
 
+    # Inject SENTRY_AUTH_TOKEN from ~/Desktop/Valor/.env so sentry-cli works
+    # in agent reflections (mirrors sdk_client.py token injection for PM sessions).
+    sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
+    if sentry_env.exists():
+        for line in sentry_env.read_text().splitlines():
+            if line.startswith("SENTRY_PERSONAL_TOKEN="):
+                os.environ["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
+                break
+
     # Resolve project key from the repo root
     try:
         from tools.valor_session import resolve_project_key

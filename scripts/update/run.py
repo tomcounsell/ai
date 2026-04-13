@@ -32,6 +32,7 @@ from scripts.update import (  # noqa: E402
     npm_tools,
     officecli,
     rodney,
+    sentry_cli,
     service,
     verify,
 )
@@ -122,6 +123,7 @@ class UpdateResult:
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
+    sentry_cli_result: sentry_cli.InstallResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -515,6 +517,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 log(f"  WARN: {npm_r.name}: {npm_r.error}", v)
                 result.warnings.append(f"npm:{npm_r.name}: {npm_r.error}")
+
+    # Step 3.10: sentry-cli install/update
+    log("Checking sentry-cli...", v)
+    result.sentry_cli_result = sentry_cli.install_or_update()
+    sr = result.sentry_cli_result
+    if sr.success:
+        if sr.action == "skipped":
+            log(f"sentry-cli {sr.version} (up to date)", v)
+        else:
+            log(f"sentry-cli {sr.action}: {sr.version}", v, always=True)
+    else:
+        log(f"WARN: sentry-cli {sr.action}: {sr.error}", v)
+        result.warnings.append(f"sentry-cli: {sr.error}")
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:

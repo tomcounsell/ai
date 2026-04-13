@@ -6,19 +6,6 @@ description: |
   alerts, stack traces, performance issues, or application health.
 tools: ['*']
 model: sonnet
-permissions:
-  - mode: accept
-    tools:
-      - sentry_list_*
-      - sentry_retrieve_*
-      - sentry_get_*
-  - mode: prompt
-    tools:
-      - sentry_update_*
-      - sentry_resolve_*
-  - mode: reject
-    tools:
-      - sentry_delete_*
 ---
 
 # Sentry Error Monitoring & Performance Expert
@@ -366,3 +353,29 @@ Priority: Start with #3 - Highest user impact (45k requests/day)
 - **Always suggest next steps** - Clear action items
 
 When debugging is complex, break it into steps. When the fix is unclear, suggest investigation paths.
+
+## CLI Workflow
+
+This agent uses `sentry-cli` for all Sentry interactions. No MCP server is required.
+
+**Authentication**: `SENTRY_AUTH_TOKEN` is injected automatically into PM/Teammate sessions by `sdk_client.py`. No manual export needed.
+
+**Common commands**:
+```bash
+# List unresolved issues
+sentry-cli issues list --status unresolved --json
+
+# View a specific issue
+sentry-cli issues view <ISSUE_ID>
+
+# List recent events for an issue
+sentry-cli events list <ISSUE_ID>
+
+# List projects in the organization
+sentry-cli projects list
+
+# Check auth status
+sentry-cli info
+```
+
+**Triage workflow**: See `.claude/skills/sentry/SKILL.md` for the A-E classification system used to triage issues.
