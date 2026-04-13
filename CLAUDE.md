@@ -363,6 +363,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 - **Session lock cleanup**: Kills stale processes holding session-related files on startup
 - **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s
 - **Crash tracker**: Logs start/crash events to Redis via `monitoring/crash_tracker.py` with git commit correlation
+- **Graceful shutdown**: On SIGTERM, all background tasks are cancelled before disconnect; `sys.exit(1)` safety net guarantees process termination within seconds
 - **5-level escalation**: restart → kill stale → clear locks → revert commit → alert human
 
 **Check watchdog**: `python monitoring/bridge_watchdog.py --check-only`

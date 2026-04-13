@@ -279,6 +279,31 @@ python scripts/telegram_login.py  # re-authenticate
 ./scripts/valor-service.sh restart  # restart bridge
 ```
 
+### 15. Graceful Shutdown Task Cancellation (`bridge/telegram_bridge.py`)
+
+**Problem**: When the bridge receives SIGTERM, `_graceful_shutdown()` disconnects the Telegram client and `main()` returns. However, `asyncio.run()` then tries to clean up remaining tasks — six background tasks with infinite `while True` loops that are never cancelled. The process hangs indefinitely, preventing launchd from restarting the bridge.
+
+**Solution**: All background tasks created in `main()` are tracked in a module-level `_background_tasks` list. During `_graceful_shutdown()`, all tracked tasks are explicitly cancelled and awaited before disconnecting the Telegram client. A `sys.exit(1)` safety net after `run_until_disconnected()` guarantees process termination.
+
+This follows the proven cancellation pattern from the worker graceful shutdown (PR #742) and the exit-code-1 pattern for launchd ThrottleInterval (PR #789).
+
+**Tracked tasks** (6 total):
+- `_run_catchup()` — startup message catchup scan
+- `reconciler_loop()` — periodic message gap detection
+- `watchdog_loop()` — session health monitoring
+- `message_query_loop()` — message query request polling
+- `relay_loop()` — PM message relay (outbox queue processing)
+- `heartbeat_loop()` — periodic liveness signal for external watchdog
+
+**Shutdown sequence**:
+1. Signal handler sets `SHUTTING_DOWN = True`, schedules `_graceful_shutdown()`
+2. `_graceful_shutdown()` stops knowledge watcher, writes final `last_connected`
+3. Cancels all tracked background tasks via `task.cancel()`
+4. `await asyncio.gather(*_background_tasks, return_exceptions=True)` — swallows `CancelledError`
+5. Disconnects Telegram client
+6. `main()` returns, `sys.exit(1)` terminates process
+7. launchd restarts bridge after ThrottleInterval
+
 ## Recovery Lock
 
 During recovery, `data/recovery-in-progress` is created to prevent:

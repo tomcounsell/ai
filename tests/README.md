@@ -68,6 +68,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_bridge_logic.py` | 40 | Group-to-project mapping, routing |
+| unit | `test_bridge_shutdown.py` | 5 | Graceful shutdown task cancellation |
 | unit | `test_valor_telegram.py` | 17 | Telegram command handling |
 | unit | `test_media_handling.py` | 17 | Media attachment handling |
 | unit | `test_transcript_liveness.py` | 12 | Transcript state management |

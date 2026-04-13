@@ -158,6 +158,11 @@ _recent_session_by_chat: dict[str, tuple[str, float]] = {}
 # Shutdown flag - set by signal handlers to stop accepting new messages
 SHUTTING_DOWN = False
 
+# Background tasks tracked for explicit cancellation during shutdown.
+# Populated in main(), cancelled in _graceful_shutdown().
+# Pattern established by worker graceful shutdown (PR #742).
+_background_tasks: list = []
+
 # Project directory (for running scripts, checking flags, etc.)
 _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 
@@ -1760,8 +1765,17 @@ async def main():
         if _bridge_was_connected:
             _write_last_connected()
 
-        logger.info("Waiting 2s for in-flight tasks to finish...")
-        await asyncio.sleep(2)
+        # Cancel all tracked background tasks (catchup, reconciler, watchdog,
+        # message_query, relay, heartbeat). This follows the proven pattern from
+        # the worker graceful shutdown (PR #742). Without explicit cancellation,
+        # asyncio.run() hangs waiting for these infinite while-True loops.
+        if _background_tasks:
+            logger.info(f"Cancelling {len(_background_tasks)} background task(s)...")
+            for task in _background_tasks:
+                task.cancel()
+            await asyncio.gather(*_background_tasks, return_exceptions=True)
+            logger.info("All background tasks cancelled")
+
         logger.info("Disconnecting Telegram client...")
         await tg_client.disconnect()
 
@@ -2017,7 +2031,7 @@ async def main():
         except Exception as e:
             logger.error(f"Catchup scan failed: {e}", exc_info=True)
 
-    asyncio.create_task(_run_catchup())
+    _background_tasks.append(asyncio.create_task(_run_catchup()))
 
     # Start message reconciler (detects live-session gaps)
     try:
@@ -2026,13 +2040,15 @@ async def main():
         )
         from bridge.reconciler import reconciler_loop
 
-        asyncio.create_task(
-            reconciler_loop(
-                client=client,
-                monitored_groups=ALL_MONITORED_GROUPS,
-                should_respond_fn=should_respond_async,
-                enqueue_agent_session_fn=_reconciler_enqueue,
-                find_project_fn=find_project_for_chat,
+        _background_tasks.append(
+            asyncio.create_task(
+                reconciler_loop(
+                    client=client,
+                    monitored_groups=ALL_MONITORED_GROUPS,
+                    should_respond_fn=should_respond_async,
+                    enqueue_agent_session_fn=_reconciler_enqueue,
+                    find_project_fn=find_project_for_chat,
+                )
             )
         )
         logger.info("Message reconciler started")
@@ -2043,7 +2059,7 @@ async def main():
     try:
         from monitoring.session_watchdog import watchdog_loop
 
-        asyncio.create_task(watchdog_loop(telegram_client=client))
+        _background_tasks.append(asyncio.create_task(watchdog_loop(telegram_client=client)))
         logger.info("Session watchdog started")
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
@@ -2081,14 +2097,14 @@ async def main():
                 logger.error(f"Message query check failed: {e}", exc_info=True)
             await asyncio.sleep(1)
 
-    asyncio.create_task(message_query_loop())
+    _background_tasks.append(asyncio.create_task(message_query_loop()))
     logger.info("Message query polling started")
 
     # Start PM message relay (processes outbox queue from tools/send_telegram.py)
     try:
         from bridge.telegram_relay import relay_loop
 
-        asyncio.create_task(relay_loop(client))
+        _background_tasks.append(asyncio.create_task(relay_loop(client)))
         logger.info("PM Telegram relay started")
     except Exception as e:
         logger.error(f"Failed to start PM Telegram relay: {e}")
@@ -2129,10 +2145,15 @@ async def main():
             if uptime_min > 0 and uptime_min % 2 == 0:
                 logger.info(f"[heartbeat] Bridge alive (uptime={uptime_min}m)")
 
-    asyncio.create_task(heartbeat_loop())
+    _background_tasks.append(asyncio.create_task(heartbeat_loop()))
 
     # Keep running
     await client.run_until_disconnected()
+
+    # Safety net: guarantee process termination after client disconnects.
+    # Exit code 1 triggers launchd ThrottleInterval (10s default) to prevent
+    # tight restart loops, matching the worker pattern from PR #789.
+    sys.exit(1)
 
 
 if __name__ == "__main__":
