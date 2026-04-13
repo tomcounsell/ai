@@ -483,7 +483,9 @@ def cmd_children(args: argparse.Namespace) -> int:
 
         # Scan all sessions for matching parent
         all_children: list[AgentSession] = []
-        for st in ("pending", "running", "active", "completed", "failed", "killed"):
+        from models.session_lifecycle import ALL_STATUSES
+
+        for st in ALL_STATUSES:
             try:
                 for s in AgentSession.query.filter(status=st):
                     pid = getattr(s, "parent_agent_session_id", None)
@@ -551,8 +553,10 @@ def cmd_list(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
         else:
-            # Common statuses
-            for st in ("pending", "running", "active", "completed", "failed", "killed"):
+            # All known statuses — use ALL_STATUSES to avoid silently missing statuses
+            from models.session_lifecycle import ALL_STATUSES
+
+            for st in ALL_STATUSES:
                 try:
                     all_sessions.extend(list(AgentSession.query.filter(status=st)))
                 except Exception:
