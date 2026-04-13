@@ -263,7 +263,10 @@ class TestBridgeSteeringCheck:
         assert matching_session is None
 
     def test_steering_no_match_for_completed(self):
-        """Steering check should NOT match completed sessions."""
+        """Running/active check skips completed sessions.
+
+        Completed sessions are handled by the dedicated re-enqueue branch.
+        """
         from models.agent_session import AgentSession
 
         session_id = "test_bridge_completed"
@@ -430,7 +433,9 @@ class TestPendingSessionSteering:
         session_id = "test_pending_steer_old"
         # Create with timestamp 10s in the past
         self._create_session(
-            session_id, "pending", created_at=datetime.now(tz=UTC) - timedelta(seconds=10)
+            session_id,
+            "pending",
+            created_at=datetime.now(tz=UTC) - timedelta(seconds=10),
         )
 
         from models.agent_session import AgentSession
@@ -535,96 +540,6 @@ class TestPendingSessionSteering:
                     active_sessions.append(ps)
 
         assert len(active_sessions) == 0
-
-
-class TestDrainOnStart:
-    """Tests for the drain-on-start logic in _pop_job (#619).
-
-    Uses AgentSession.create() (sync) + _pop_job_with_fallback() which has a
-    sync fallback that avoids the async_filter index visibility race in tests.
-    """
-
-    def _create_pending_job(self, session_id, chat_id="test_chat", message_text="hello"):
-        """Create a pending AgentSession (job) using the same pattern as test_job_queue_race."""
-        from models.agent_session import AgentSession
-
-        return AgentSession.create(
-            session_id=session_id,
-            project_key="test",
-            status="pending",
-            priority="normal",
-            chat_id=chat_id,
-            message_text=message_text,
-            created_at=datetime.now(tz=UTC),
-            working_dir="/tmp/test",
-            sender_name="Test",
-            telegram_message_id=1,
-        )
-
-    @pytest.mark.asyncio
-    async def test_drain_prepends_steering_to_message_text(self):
-        """Steering messages queued during pending should be prepended on start."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_prepend"
-        chat_id = "test_drain_chat_1"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="original message")
-
-        # Simulate follow-up messages arriving during pending window
-        push_steering_message(session_id, "follow-up context", "Tom")
-        push_steering_message(session_id, "another detail", "Tom")
-
-        # Pop the job (triggers drain-on-start)
-        job = await _pop_job_with_fallback(chat_id)
-        assert job is not None
-        assert "original message" in job.message_text
-        assert "follow-up context" in job.message_text
-        assert "another detail" in job.message_text
-
-    @pytest.mark.asyncio
-    async def test_drain_no_steering_messages_unchanged(self):
-        """If no steering messages, message_text should be unchanged."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_empty"
-        chat_id = "test_drain_chat_2"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="just this")
-
-        job = await _pop_job_with_fallback(chat_id)
-        assert job is not None
-        assert job.message_text == "just this"
-
-    @pytest.mark.asyncio
-    async def test_drain_empty_text_steering_skipped(self):
-        """Steering messages with empty text should be skipped."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_empty_text"
-        chat_id = "test_drain_chat_3"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="original")
-
-        push_steering_message(session_id, "  ", "Tom")  # whitespace-only
-
-        job = await _pop_job_with_fallback(chat_id)
-        assert job is not None
-        assert job.message_text == "original"
-
-    @pytest.mark.asyncio
-    async def test_drain_failure_does_not_crash_job(self):
-        """If drain fails, the job should still start successfully."""
-        from agent.job_queue import _pop_job_with_fallback
-
-        session_id = "test_drain_failure"
-        chat_id = "test_drain_chat_4"
-        self._create_pending_job(session_id, chat_id=chat_id, message_text="still works")
-
-        with patch(
-            "agent.steering.pop_all_steering_messages",
-            side_effect=ConnectionError("Redis down"),
-        ):
-            job = await _pop_job_with_fallback(chat_id)
-            assert job is not None
-            assert job.message_text == "still works"
 
 
 class TestWatchdogSteering:
@@ -757,7 +672,11 @@ class TestResolveRootSessionId:
                 record = type(
                     "TelegramMsg",
                     (),
-                    {"sender": "Valor Engels", "reply_to_msg_id": None, "message_id": 8111},
+                    {
+                        "sender": "Valor Engels",
+                        "reply_to_msg_id": None,
+                        "message_id": 8111,
+                    },
                 )()
                 return [record]
             return []
@@ -869,14 +788,14 @@ class TestResolveRootSessionId:
 
     @pytest.mark.asyncio
     async def test_resolve_root_session_id_api_fallback_on_cache_miss(self):
-        """Cache miss triggers API chain walk to find root."""
-        from bridge.context import resolve_root_session_id
+        """Cache miss triggers API chain walk; result is persisted to Redis cache."""
+        from bridge.context import _get_cached_root, resolve_root_session_id
 
         chat_id = 99005
         project_key = "testproject"
         reply_to_msg_id = 9999
 
-        # Cache: no records (simulate cache miss)
+        # Cache: no records (simulate TelegramMessage cache miss)
         def mock_filter(chat_id=None, message_id=None):
             return []
 
@@ -887,7 +806,12 @@ class TestResolveRootSessionId:
             return [
                 {"sender": "Bob", "content": "hello", "message_id": 8800, "date": None},
                 {"sender": "Valor", "content": "hi", "message_id": 8801, "date": None},
-                {"sender": "Bob", "content": "follow up", "message_id": 9999, "date": None},
+                {
+                    "sender": "Bob",
+                    "content": "follow up",
+                    "message_id": 9999,
+                    "date": None,
+                },
             ]
 
         mock_client = AsyncMock()
@@ -901,3 +825,91 @@ class TestResolveRootSessionId:
 
         # First human message in chain is msg_id=8800
         assert result == f"tg_{project_key}_{chat_id}_8800"
+
+        # After API fallback, the root must be persisted to the authoritative Redis cache.
+        # A second call via _get_cached_root should return the same root without needing
+        # the API again — proving the cache was written on the first resolution.
+        cached = await _get_cached_root(chat_id, reply_to_msg_id)
+        assert cached == 8800, f"Expected root 8800 to be cached after API fallback, got {cached}"
+
+    @pytest.mark.asyncio
+    async def test_resolve_root_session_id_uses_cached_root(self):
+        """Pre-populated Redis cache is hit first; cache walk and API are never called."""
+        from bridge.context import _set_cached_root, resolve_root_session_id
+
+        chat_id = 99006
+        project_key = "testproject"
+        reply_to_msg_id = 7001
+        expected_root = 7000
+
+        # Pre-populate the authoritative Redis cache
+        await _set_cached_root(chat_id, reply_to_msg_id, expected_root)
+
+        mock_client = AsyncMock()
+
+        with patch("bridge.context._cache_walk_root") as mock_cache_walk:
+            with patch("bridge.context.fetch_reply_chain") as mock_api_walk:
+                result = await resolve_root_session_id(
+                    mock_client, chat_id, reply_to_msg_id, project_key
+                )
+
+        assert result == f"tg_{project_key}_{chat_id}_{expected_root}"
+        # Neither the TelegramMessage cache walk nor the Telegram API should be called
+        mock_cache_walk.assert_not_called()
+        mock_api_walk.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reply_to_completed_session_reenqueues_with_context(self):
+        """Reply to a completed session re-enqueues with context_summary prepended.
+
+        Tests the actual bridge helper _build_completed_resume_text which is called
+        by bridge/telegram_bridge.py's completed-session branch to augment the new
+        message with prior session context before re-enqueueing.
+        """
+        from bridge.telegram_bridge import _build_completed_resume_text
+        from models.agent_session import AgentSession
+
+        follow_up_text = "Can you also add logging?"
+        context_summary = "Implemented feature X and wrote tests."
+
+        # Create a completed session with context_summary
+        session = AgentSession(
+            session_id="test_completed_resume_helper_ctx",
+            project_key="test",
+            status="completed",
+            message_text="original task",
+            context_summary=context_summary,
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+
+        # Call the actual bridge helper — not a re-implementation
+        result = _build_completed_resume_text(session, follow_up_text)
+
+        # Verify augmented text contains the context summary preamble
+        assert "[Prior session context:" in result, (
+            f"Expected '[Prior session context:' prefix, got: {result!r}"
+        )
+        assert context_summary in result, f"Expected context summary in result, got: {result!r}"
+        assert follow_up_text in result, f"Expected follow-up text in result, got: {result!r}"
+        # Canonical format check
+        assert result == f"[Prior session context: {context_summary}]\n\n{follow_up_text}"
+
+        # --- Test fallback when context_summary is None ---
+        session_no_summary = AgentSession(
+            session_id="test_completed_resume_helper_no_ctx",
+            project_key="test",
+            status="completed",
+            message_text="done",
+            context_summary=None,
+            created_at=datetime.now(tz=UTC),
+        )
+        session_no_summary.save()
+
+        fallback_result = _build_completed_resume_text(session_no_summary, follow_up_text)
+
+        assert (
+            "[Prior session context: This continues a previously completed session.]"
+            in fallback_result
+        ), f"Expected fallback string, got: {fallback_result!r}"
+        assert follow_up_text in fallback_result

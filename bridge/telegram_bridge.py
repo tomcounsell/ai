@@ -191,7 +191,10 @@ def _read_flood_backoff() -> float | None:
         # Ignore stale files (>24h old based on file mtime)
         file_age = now - _FLOOD_BACKOFF_FILE.stat().st_mtime
         if file_age > _FLOOD_BACKOFF_MAX_AGE_SECONDS:
-            logger.info("[flood-backoff] Ignoring stale backoff file (%.1fh old)", file_age / 3600)
+            logger.info(
+                "[flood-backoff] Ignoring stale backoff file (%.1fh old)",
+                file_age / 3600,
+            )
             _FLOOD_BACKOFF_FILE.unlink(missing_ok=True)
             return None
         # Ignore already-expired entries
@@ -608,6 +611,26 @@ from bridge.update import (  # noqa: E402
 )
 
 
+def _build_completed_resume_text(completed_session, follow_up_text: str) -> str:
+    """Build the augmented message text for re-enqueueing a completed session.
+
+    Prepends the completed session's context_summary (or a generic fallback) to
+    the new message text so the resumed agent knows what was done previously.
+
+    Args:
+        completed_session: An AgentSession record with status="completed".
+        follow_up_text: The new message text to append after the context preamble.
+
+    Returns:
+        Augmented message string: "[Prior session context: <summary>]\n\n<follow_up>"
+    """
+    summary = (
+        getattr(completed_session, "context_summary", None)
+        or "This continues a previously completed session."
+    )
+    return f"[Prior session context: {summary}]\n\n{follow_up_text}"
+
+
 async def check_message_query_request(client: TelegramClient) -> None:
     """Check for and process message query requests via file-based IPC.
 
@@ -952,7 +975,10 @@ async def main():
                             "active",
                         ):
                             # Active session: queue steering message, ack, return
-                            from agent.steering import ABORT_KEYWORDS, push_steering_message
+                            from agent.steering import (
+                                ABORT_KEYWORDS,
+                                push_steering_message,
+                            )
 
                             is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
                             push_steering_message(
@@ -1231,6 +1257,88 @@ async def main():
                         logger.info(
                             f"[{project_name}] Steered reply-to into "
                             f"pending session {session_id} (age={age:.1f}s)"
+                        )
+                        return
+
+                    # Check for completed session — re-enqueue with prior context.
+                    # Guard: re-check for live sessions first (handles concurrent message
+                    # delivery races and repeated replies to already-resumed sessions).
+                    completed_sessions = AgentSession.query.filter(
+                        session_id=session_id, status="completed"
+                    )
+                    if completed_sessions:
+                        # Belt-and-suspenders: a concurrent reply may have already
+                        # created a pending/running record between the checks above.
+                        live_guard = None
+                        for _guard_status in ("pending", "running", "active"):
+                            _live = AgentSession.query.filter(
+                                session_id=session_id, status=_guard_status
+                            )
+                            if _live:
+                                live_guard = _live[0]
+                                break
+                        if live_guard:
+                            # A live session now exists — steer into it instead.
+                            from agent.steering import ABORT_KEYWORDS
+
+                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                            push_steering_message(
+                                session_id, clean_text, sender_name, is_abort=is_abort
+                            )
+                            ack_text = (
+                                "Stopping current task." if is_abort else "Adding to current task"
+                            )
+                            from bridge.markdown import send_markdown
+
+                            await send_markdown(
+                                client, event.chat_id, ack_text, reply_to=message.id
+                            )
+                            return
+
+                        # Use the most-recent completed record for the best context_summary.
+                        def _completed_created_at(s):
+                            ts = getattr(s, "created_at", None)
+                            if ts is None:
+                                return 0
+                            if hasattr(ts, "timestamp"):
+                                return ts.timestamp()
+                            return float(ts)
+
+                        completed = max(completed_sessions, key=_completed_created_at)
+                        augmented_text = _build_completed_resume_text(completed, clean_text)
+                        # Compute working_dir inline (not yet defined at this point in the handler)
+                        _completed_working_dir = ""
+                        if project:
+                            _completed_working_dir = project.get(
+                                "working_directory",
+                                DEFAULTS.get("working_directory", ""),
+                            )
+                        if not _completed_working_dir:
+                            _completed_working_dir = str(Path(__file__).parent.parent)
+                        await enqueue_agent_session(
+                            project_key=project_key,
+                            session_id=session_id,
+                            working_dir=_completed_working_dir,
+                            message_text=augmented_text,
+                            sender_name=sender_name,
+                            chat_id=telegram_chat_id,
+                            telegram_message_id=message.id,
+                            chat_title=chat_title,
+                            priority="normal",
+                            sender_id=sender_id,
+                            project_config=project,
+                        )
+                        from bridge.markdown import send_markdown
+
+                        await send_markdown(
+                            client,
+                            event.chat_id,
+                            "Resuming from prior session.",
+                            reply_to=message.id,
+                        )
+                        logger.info(
+                            f"[{project_name}] Resumed completed session "
+                            f"{session_id} with prior context"
                         )
                         return
             except (ConnectionError, OSError) as e:
@@ -1877,7 +1985,9 @@ async def main():
         try:
             from datetime import UTC
 
-            from agent.agent_session_queue import enqueue_agent_session as _enqueue_agent_session
+            from agent.agent_session_queue import (
+                enqueue_agent_session as _enqueue_agent_session,
+            )
             from bridge.catchup import scan_for_missed_messages
 
             # Use the last_connected value captured BEFORE we wrote the new
@@ -1911,7 +2021,9 @@ async def main():
 
     # Start message reconciler (detects live-session gaps)
     try:
-        from agent.agent_session_queue import enqueue_agent_session as _reconciler_enqueue
+        from agent.agent_session_queue import (
+            enqueue_agent_session as _reconciler_enqueue,
+        )
         from bridge.reconciler import reconciler_loop
 
         asyncio.create_task(

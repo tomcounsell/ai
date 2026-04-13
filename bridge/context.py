@@ -403,6 +403,51 @@ def format_reply_chain(chain: list[dict]) -> str:
     return "\n".join(lines)
 
 
+async def _get_cached_root(chat_id: int, msg_id: int) -> int | None:
+    """Read the authoritative root message ID from Redis for a given message.
+
+    Key schema: session_root:{chat_id}:{msg_id}
+
+    Returns:
+        The cached root message ID as an int, or None on cache miss or error.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        _r = POPOTO_REDIS_DB
+
+        key = f"session_root:{chat_id}:{msg_id}"
+        value = _r.get(key)
+        if value is not None:
+            return int(value)
+        return None
+    except Exception as exc:
+        logger.debug(f"[session-root] _get_cached_root({chat_id}, {msg_id}) error: {exc}")
+        return None
+
+
+async def _set_cached_root(chat_id: int, msg_id: int, root_id: int) -> None:
+    """Persist the authoritative root message ID to Redis for a given message.
+
+    Uses SET NX EX 604800 (7-day TTL, first writer wins) so concurrent
+    callers cannot overwrite each other's resolved root.
+
+    Fails silently on any Redis error.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        _r = POPOTO_REDIS_DB
+
+        key = f"session_root:{chat_id}:{msg_id}"
+        # NX = only set if key does not already exist; EX = TTL in seconds (7 days)
+        _r.set(key, str(root_id), nx=True, ex=604800)
+    except Exception as exc:
+        logger.debug(
+            f"[session-root] _set_cached_root({chat_id}, {msg_id}, {root_id}) error: {exc}"
+        )
+
+
 async def resolve_root_session_id(
     client: TelegramClient,
     chat_id: int,
@@ -417,12 +462,17 @@ async def resolve_root_session_id(
     — map to the same canonical session_id as the original human message.
 
     Resolution strategy (in order of preference):
+    0. Authoritative Redis cache: check session_root:{chat_id}:{msg_id} first.
+       Returns immediately if found — deterministic, concurrent-safe.
     1. Cache-first walk: query TelegramMessage.query.filter(chat_id, message_id)
        to traverse the chain without Telegram API calls.
     2. API fallback: if any cache lookup misses, call fetch_reply_chain() to
        walk the chain via the Telegram API.
     3. Final fallback: on any exception, return a session_id derived directly
        from reply_to_msg_id (preserves previous behavior).
+
+    After any successful resolution (steps 0–2), the result is persisted to
+    the authoritative Redis cache so future lookups are deterministic.
 
     Args:
         client: Telegram client (used for API fallback).
@@ -436,6 +486,16 @@ async def resolve_root_session_id(
     fallback = f"tg_{project_key}_{chat_id}_{reply_to_msg_id}"
 
     try:
+        # ── Step 0: Authoritative Redis cache (deterministic, concurrent-safe) ─
+        cached_root = await _get_cached_root(chat_id, reply_to_msg_id)
+        if cached_root is not None:
+            session_id = f"tg_{project_key}_{chat_id}_{cached_root}"
+            logger.debug(
+                f"[session-root] authoritative cache hit for msg_id={reply_to_msg_id} → "
+                f"{cached_root} (session={session_id})"
+            )
+            return session_id
+
         # ── Step 1: Cache-first walk via TelegramMessage ──────────────────────
         root_msg_id = await _cache_walk_root(chat_id, reply_to_msg_id)
         if root_msg_id is not None:
@@ -444,6 +504,7 @@ async def resolve_root_session_id(
                 f"[session-root] cache walk resolved {reply_to_msg_id} → "
                 f"{root_msg_id} (session={session_id})"
             )
+            await _set_cached_root(chat_id, reply_to_msg_id, root_msg_id)
             return session_id
 
         # ── Step 2: API fallback via fetch_reply_chain ────────────────────────
@@ -461,6 +522,7 @@ async def resolve_root_session_id(
                     f"[session-root] API chain walk resolved {reply_to_msg_id} → "
                     f"{root_msg_id} (session={session_id})"
                 )
+                await _set_cached_root(chat_id, reply_to_msg_id, root_msg_id)
                 return session_id
 
         # Chain is empty or all Valor messages — use fallback
