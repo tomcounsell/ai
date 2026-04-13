@@ -320,3 +320,6 @@ Source modules with no test coverage. Priority targets for new tests.
 | High | `agent/completion.py` | 316 | Auto-continue |
 | High | `tools/job_scheduler.py` | 705 | Async work execution |
 | Medium | Hook validators (29 files) | ~1,500 | Config enforcement |
+
+**Partially covered** (operational layer added in #936):
+- `bridge/email_bridge.py` — parsing, SMTP output, routing, and thread continuation have full coverage. Operational layer (`main()`, `_poll_imap()` batch cap, `_email_inbox_loop()` health timestamp) now covered via unit and integration tests.

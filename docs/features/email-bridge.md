@@ -75,6 +75,7 @@ IMAP_HOST=imap.gmail.com
 IMAP_PORT=993
 IMAP_USER=valor@yuda.me
 IMAP_PASSWORD=<gmail-app-password>
+IMAP_MAX_BATCH=20        # max unseen messages fetched per poll cycle (default: 20)
 
 # SMTP (outbound)
 SMTP_HOST=smtp.gmail.com
@@ -144,6 +145,8 @@ Or via the service script:
 **`telegram_message_id=0` sentinel.** The session queue requires a message ID for deduplication. Email sessions use `0` as a sentinel value since they have no Telegram message ID. This avoids a nullable field or a parallel code path in the queue.
 
 **Transport stored in `extra_context`.** `extra_context["transport"] = "email"` is the discriminator the worker uses to select `EmailOutputHandler` over `TelegramRelayOutputHandler`. The same mechanism supports future transports (e.g. Slack) without changes to the core queue.
+
+**Per-poll batch cap (`IMAP_MAX_BATCH`).** Each poll cycle fetches at most `IMAP_MAX_BATCH` unseen messages (default 20, configurable via env var). On inboxes with thousands of unread messages, this prevents the poller from hanging indefinitely on a single cycle. The most recent messages are fetched first.
 
 **30-second poll interval.** A balance between responsiveness and IMAP connection overhead. Gmail supports IMAP IDLE for push delivery, but polling is simpler and sufficient for the current load.
 
