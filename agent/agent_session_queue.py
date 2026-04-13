@@ -3426,6 +3426,39 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"session {session.session_id} (operation: finalize status to "
                 f"{'completed' if not task.error else 'failed'}): {e}"
             )
+    else:
+        # agent_session lookup returned None (race on status="running" filter,
+        # e.g. after health-check recovery). Finalize using outer `session`
+        # param directly to prevent session from staying in `running` state
+        # permanently. Uses complete_transcript() (not finalize_session()
+        # directly) to ensure the SESSION_END transcript marker is written —
+        # complete_transcript queries by session_id alone (no status filter),
+        # so it works here. See issue #917.
+        if not chat_state.defer_reaction:
+            try:
+                from bridge.session_transcript import complete_transcript
+                from models.session_lifecycle import StatusConflictError
+
+                final_status = "completed" if not task.error else "failed"
+                complete_transcript(session.session_id, status=final_status)
+                logger.info(
+                    "Fallback finalization: session %s → %s (agent_session was None)",
+                    session.agent_session_id,
+                    final_status,
+                )
+            except StatusConflictError:
+                # CAS conflict = another process already finalized. This is success.
+                logger.info(
+                    "Fallback finalization skipped: session %s already transitioned "
+                    "(CAS conflict — expected)",
+                    session.agent_session_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Fallback finalization failed for session %s: %s",
+                    session.agent_session_id,
+                    e,
+                )
 
     # Save session snapshot for error cases
     if task.error:
