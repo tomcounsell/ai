@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -159,8 +159,8 @@ No agent integration required — this is a bridge-internal change to the shutdo
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-self-healing.md` — add a subsection on graceful shutdown task cancellation
-- [ ] Add inline code comments in `_graceful_shutdown()` explaining the cancellation pattern and its origin (PR #742)
+- [x] Update `docs/features/bridge-self-healing.md` — add a subsection on graceful shutdown task cancellation
+- [x] Add inline code comments in `_graceful_shutdown()` explaining the cancellation pattern and its origin (PR #742)
 
 ## Success Criteria
 
