@@ -77,11 +77,51 @@ def _migrate_agent_session_keyfield_rename(project_dir: Path) -> str | None:
         return str(e)
 
 
+_SDLC_STUB_TEMPLATE = """\
+# {name} addendum — this repo only
+<!-- Do not duplicate content from the global skill.
+     Only include what is unique to this repo. Max 300 lines. -->
+"""
+
+_SDLC_STUBS = [
+    "do-plan",
+    "do-plan-critique",
+    "do-build",
+    "do-test",
+    "do-patch",
+    "do-pr-review",
+    "do-docs",
+    "do-merge",
+]
+
+
+def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
+    """Create docs/sdlc/ stub files if missing.
+
+    Idempotent — only creates files that do not yet exist.
+    Returns None on success, error string on failure.
+    """
+    try:
+        sdlc_dir = project_dir / "docs" / "sdlc"
+        sdlc_dir.mkdir(parents=True, exist_ok=True)
+        for name in _SDLC_STUBS:
+            path = sdlc_dir / f"{name}.md"
+            if not path.exists():
+                path.write_text(_SDLC_STUB_TEMPLATE.format(name=name))
+        return None
+    except Exception as e:
+        return str(e)
+
+
 # Migration name -> (function, description)
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
         "Rename AgentSession job_id/parent_job_id KeyFields in Redis",
+    ),
+    "create_sdlc_stubs": (
+        _migrate_create_sdlc_stubs,
+        "Create docs/sdlc/ per-stage addendum stub files",
     ),
 }
 
