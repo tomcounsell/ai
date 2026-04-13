@@ -394,7 +394,7 @@ class TestAutoFixStep:
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        runner.state.reflections = [
+        runner.state.session_observations = [
             {
                 "category": "code_bug",
                 "summary": "A bug",
@@ -416,7 +416,7 @@ class TestAutoFixStep:
 
         runner = ReflectionRunner()
         runner.state.dry_run = True
-        runner.state.reflections = [
+        runner.state.session_observations = [
             {
                 "category": "code_bug",
                 "summary": "Null pointer in loop",
@@ -449,7 +449,7 @@ class TestAutoFixStep:
 
         runner = ReflectionRunner()
         runner.state.dry_run = False
-        runner.state.reflections = [
+        runner.state.session_observations = [
             {
                 "category": "code_bug",
                 "summary": "Known ignored bug",
@@ -483,7 +483,7 @@ class TestAutoFixStep:
 
         runner = ReflectionRunner()
         runner.state.dry_run = True
-        runner.state.reflections = [
+        runner.state.session_observations = [
             {
                 "category": "misunderstanding",  # not code_bug
                 "summary": "User misunderstood",
@@ -536,7 +536,7 @@ class TestAutoFixStep:
 
         runner = ReflectionRunner()
         runner.state.dry_run = False
-        runner.state.reflections = [
+        runner.state.session_observations = [
             {
                 "category": "code_bug",
                 "summary": "Already tracked",
