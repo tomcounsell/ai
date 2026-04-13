@@ -241,9 +241,12 @@ No agent integration required — these are test files only. No MCP servers, bri
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-13. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Task 2 says patch `bridge.email_bridge.load_dotenv` but `load_dotenv` is imported locally inside `main()` (line 619), so that patch target won't exist at module level | Task 2 revision | Patch `dotenv.load_dotenv` instead of `bridge.email_bridge.load_dotenv`. The local import `from dotenv import load_dotenv` binds to the dotenv module, so `patch('dotenv.load_dotenv')` is the correct target. |
+| CONCERN | Skeptic | Task 1 batch cap test must handle `_poll_imap` being async (`asyncio.to_thread` wrapper at line 514). Plan doesn't specify whether tests are async or how to handle the threading layer | Task 1 revision | Either mark the test `@pytest.mark.asyncio` and `await _poll_imap(mock_config)`, or patch `asyncio.to_thread` to call the function synchronously via `side_effect=lambda fn: fn()`. The latter avoids needing an event loop for a unit test. |
+| NIT | Simplifier | Task 3 doesn't mention the `config` parameter of `_email_inbox_loop(imap_config, config)` — builder must supply a valid second argument | | Pass `config={}` since `_poll_imap` is mocked to return `[]` and `_process_inbound_email` is never reached |
 
 ---
 
