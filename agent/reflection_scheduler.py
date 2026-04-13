@@ -193,9 +193,9 @@ def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> 
     Returns:
         True if the reflection should be enqueued.
     """
-    if state.last_run is None:
+    if state.ran_at is None:
         return True
-    return (state.last_run + entry.interval) <= now
+    return (state.ran_at + entry.interval) <= now
 
 
 def is_reflection_running(state: Reflection) -> bool:
@@ -417,12 +417,12 @@ class ReflectionScheduler:
                 # Skip if already running
                 if is_reflection_running(state):
                     # Check for stuck reflections (running > 2x interval)
-                    if state.last_run and (now - state.last_run) > (entry.interval * 2):
+                    if state.ran_at and (now - state.ran_at) > (entry.interval * 2):
                         logger.warning(
                             "[reflection] %s appears stuck (running for %.0fs, interval=%ds). "
                             "Resetting status.",
                             entry.name,
-                            now - state.last_run,
+                            now - state.ran_at,
                             entry.interval,
                         )
                         state.last_status = "error"
@@ -504,8 +504,8 @@ class ReflectionScheduler:
             try:
                 state = Reflection.get_or_create(entry.name)
                 time_until_due = None
-                if state.last_run:
-                    next_due = state.last_run + entry.interval
+                if state.ran_at:
+                    next_due = state.ran_at + entry.interval
                     time_until_due = max(0, next_due - now)
 
                 statuses.append(
@@ -515,7 +515,7 @@ class ReflectionScheduler:
                         "interval": entry.interval,
                         "priority": entry.priority,
                         "execution_type": entry.execution_type,
-                        "last_run": state.last_run,
+                        "last_run": state.ran_at,
                         "last_status": state.last_status,
                         "last_error": state.last_error,
                         "last_duration": state.last_duration,
