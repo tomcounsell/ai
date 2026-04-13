@@ -11,6 +11,9 @@ Usage:
     valor-session release --pr 900
     valor-session steer --id abc123 --message "Stop after critique stage"
     valor-session status --id abc123
+    valor-session status --id abc123 --full-message
+    valor-session inspect --id abc123
+    valor-session children --id abc123
     valor-session list
     valor-session list --status running
     valor-session list --role pm
@@ -352,6 +355,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 1
 
         session = sessions[0]
+        full_message = getattr(args, "full_message", False)
 
         if args.json:
             data = {
@@ -364,12 +368,15 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "created_at": str(session.created_at) if session.created_at else None,
                 "started_at": str(session.started_at) if session.started_at else None,
                 "updated_at": str(session.updated_at) if session.updated_at else None,
-                "message_preview": (session.message_text or "")[:100],
+                "message": session.message_text
+                if full_message
+                else (session.message_text or "")[:100],
                 "queued_steering_messages": session.queued_steering_messages or [],
                 "slug": getattr(session, "slug", None),
                 "branch_name": getattr(session, "branch_name", None),
                 "issue_url": getattr(session, "issue_url", None),
                 "pr_url": getattr(session, "pr_url", None),
+                "parent_agent_session_id": getattr(session, "parent_agent_session_id", None),
             }
             print(json.dumps(data, indent=2, default=str))
             return 0
@@ -383,7 +390,14 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  Created:       {_format_ts(session.created_at)}")
         print(f"  Started:       {_format_ts(session.started_at)}")
         print(f"  Updated:       {_format_ts(session.updated_at)}")
-        print(f"  Message:       {(session.message_text or '')[:80]}")
+        parent = getattr(session, "parent_agent_session_id", None)
+        if parent:
+            print(f"  Parent:        {parent}")
+
+        if full_message:
+            print(f"  Message:\n{session.message_text or ''}")
+        else:
+            print(f"  Message:       {(session.message_text or '')[:80]}")
 
         steering = session.queued_steering_messages
         if steering:
@@ -402,6 +416,113 @@ def cmd_status(args: argparse.Namespace) -> int:
         pr = getattr(session, "pr_url", None)
         if pr:
             print(f"  PR:            {pr}")
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Dump all raw fields of a session for debugging."""
+    _load_env()
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=args.id))
+        if not sessions:
+            print(f"Session not found: {args.id}", file=sys.stderr)
+            return 1
+
+        session = sessions[0]
+
+        # Gather all accessible fields
+        data: dict = {}
+        for field_name in dir(session):
+            if field_name.startswith("_"):
+                continue
+            try:
+                val = getattr(session, field_name)
+                if callable(val):
+                    continue
+                data[field_name] = val
+            except Exception:
+                pass
+
+        if args.json:
+            print(json.dumps(data, indent=2, default=str))
+        else:
+            for k, v in sorted(data.items()):
+                v_str = str(v) if not isinstance(v, str) else v
+                if len(v_str) > 200:
+                    v_str = v_str[:200] + "…"
+                print(f"  {k:<35} {v_str}")
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_children(args: argparse.Namespace) -> int:
+    """List child sessions spawned by a parent session."""
+    _load_env()
+    try:
+        from models.agent_session import AgentSession
+
+        # Resolve the parent's agent_session_id from its session_id
+        parent_id = args.id
+        parent_sessions = list(AgentSession.query.filter(session_id=parent_id))
+        if parent_sessions:
+            parent_agent_id = parent_sessions[0].agent_session_id
+        else:
+            # Maybe they passed the agent_session_id directly
+            parent_agent_id = parent_id
+
+        # Scan all sessions for matching parent
+        all_children: list[AgentSession] = []
+        for st in ("pending", "running", "active", "completed", "failed", "killed"):
+            try:
+                for s in AgentSession.query.filter(status=st):
+                    pid = getattr(s, "parent_agent_session_id", None)
+                    if pid and (pid == parent_agent_id or pid == parent_id):
+                        all_children.append(s)
+            except Exception:
+                pass
+
+        all_children.sort(key=lambda s: s.created_at or 0)
+
+        if args.json:
+            data = [
+                {
+                    "session_id": s.session_id,
+                    "agent_session_id": s.agent_session_id,
+                    "status": s.status,
+                    "session_type": getattr(s, "session_type", None),
+                    "role": getattr(s, "role", None),
+                    "created_at": str(s.created_at) if s.created_at else None,
+                    "message_preview": (s.message_text or "")[:120],
+                }
+                for s in all_children
+            ]
+            print(json.dumps(data, indent=2, default=str))
+            return 0
+
+        if not all_children:
+            print(f"No child sessions found for: {parent_id}")
+            return 0
+
+        print(f"Children of {parent_id} ({len(all_children)}):")
+        print()
+        for s in all_children:
+            sid = s.session_id or "—"
+            status = s.status or "—"
+            stype = getattr(s, "session_type", None) or getattr(s, "role", None) or "—"
+            created = _format_ts(s.created_at)
+            msg = (s.message_text or "")[:60]
+            print(f"  {sid:<38} {status:<12} {stype:<8} {created:<22} {msg}")
 
         return 0
 
@@ -785,6 +906,12 @@ def main() -> int:
     # status subcommand
     status_parser = subparsers.add_parser("status", help="Show session status")
     status_parser.add_argument("--id", required=True, help="Session ID")
+    status_parser.add_argument(
+        "--full-message",
+        dest="full_message",
+        action="store_true",
+        help="Print full initial message without truncation",
+    )
     status_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     # list subcommand
@@ -793,6 +920,20 @@ def main() -> int:
     list_parser.add_argument("--role", help="Filter by role/session_type")
     list_parser.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # inspect subcommand
+    inspect_parser = subparsers.add_parser(
+        "inspect", help="Dump all raw fields of a session (for debugging)"
+    )
+    inspect_parser.add_argument("--id", required=True, help="Session ID")
+    inspect_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # children subcommand
+    children_parser = subparsers.add_parser(
+        "children", help="List child sessions spawned by a parent session"
+    )
+    children_parser.add_argument("--id", required=True, help="Parent session ID")
+    children_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     # kill subcommand
     kill_parser = subparsers.add_parser("kill", help="Kill a session")
@@ -839,6 +980,8 @@ def main() -> int:
         "kill": cmd_kill,
         "wait-for-children": cmd_wait_for_children,
         "release": cmd_release,
+        "inspect": cmd_inspect,
+        "children": cmd_children,
     }
 
     return dispatch[args.command](args)
