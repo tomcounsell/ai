@@ -145,6 +145,9 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.agent_session_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
 | `python -m tools.valor_session list` | List all sessions |
 | `python -m tools.valor_session status --id <ID>` | Show session status and pending steering messages |
+| `python -m tools.valor_session status --full-message --id <ID>` | Show full initial prompt (no 100-char truncation) |
+| `python -m tools.valor_session inspect --id <ID>` | Dump all raw Popoto fields for a session (debugging) |
+| `python -m tools.valor_session children --id <ID>` | List all child sessions spawned by a parent session |
 | `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
 | `python -m tools.valor_session kill --id <ID>` | Kill a session |
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
