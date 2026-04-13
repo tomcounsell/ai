@@ -37,7 +37,7 @@ reflections:
 | `name` | string | Unique identifier (used as Redis key) |
 | `interval` | int | Seconds between runs |
 | `priority` | string | `urgent`, `high`, `normal`, or `low` |
-| `execution_type` | string | `function` (direct callable) or `agent` (subprocess) |
+| `execution_type` | string | `function` (direct callable) or `agent` (PM session) |
 | `callable` | string | Dotted Python path (for function type) |
 | `command` | string | Natural-language prompt for PM session (for agent type) |
 | `enabled` | bool | Whether this reflection is active (default: true) |

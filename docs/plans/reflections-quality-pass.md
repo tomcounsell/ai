@@ -226,8 +226,8 @@ No agent integration required -- this is an internal refactoring of models, sche
 - [ ] `Reflection.next_due` field removed; dashboard computes next_due from `ran_at + config.interval`
 - [ ] Dashboard "next due" column displays correct values for reflections that have run
 - [ ] `log_path` removed from docstring and UI code paths (`get_log_content`, `get_run_detail` log_path branch, `_read_log_file`)
-- [ ] `Reflection.last_run` renamed to `ran_at` with type `datetime`
-- [ ] `ReflectionRun`, `ReflectionIgnore`, `PRReviewAudit` timestamp fields use `datetime` type
+- [ ] `Reflection.last_run` renamed to `ran_at` (kept as `float` epoch — Popoto coercion to `datetime` deferred per Risk 2 assessment)
+- [ ] `ReflectionRun`, `ReflectionIgnore`, `PRReviewAudit` timestamp fields kept as `float` epoch (datetime conversion deferred)
 - [ ] `ReflectionRun` large-payload fields replaced with `output_path`; output written to `logs/reflections/{date}.json`
 - [ ] `ReflectionRun.reflections` renamed to `session_observations`
 - [ ] `config/reflections.yaml` header comment updated

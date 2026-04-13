@@ -1,7 +1,7 @@
 """Reflection model - Redis-backed state for the unified reflection scheduler.
 
-Tracks per-reflection execution state: when it last ran, when it's next due,
-run count, and last status/error. Used by agent/reflection_scheduler.py to
+Tracks per-reflection execution state: when it last ran, run count, and last
+status/error. Used by agent/reflection_scheduler.py to
 decide which reflections are due and to record outcomes.
 
 See docs/features/reflections.md for full documentation.
