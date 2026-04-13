@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 CONFIG = {}
 DEFAULTS = {}
 GROUP_TO_PROJECT = {}
+EMAIL_TO_PROJECT: dict[str, dict] = {}
 ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
 RESPOND_TO_DMS = True
@@ -151,6 +152,42 @@ def build_group_to_project_map(config: dict) -> dict:
     return group_map
 
 
+def build_email_to_project_map(config: dict) -> dict:
+    """Build a mapping from email addresses (lowercase) to project configs.
+
+    Reads the 'email.contacts' section from each project in projects.json.
+    Keys are exact-match email addresses (lowercased). Values are the project
+    config dict (same as GROUP_TO_PROJECT values).
+
+    Returns:
+        dict mapping lowercase email address -> project config dict
+    """
+    email_map: dict[str, dict] = {}
+    projects = config.get("projects", {})
+
+    for project_key in ACTIVE_PROJECTS:
+        if project_key not in projects:
+            continue
+
+        project = projects[project_key]
+        project["_key"] = project_key  # Ensure key is set (mirrors group map behavior)
+
+        email_config = project.get("email", {})
+        contacts = email_config.get("contacts", {})
+
+        for email_addr, contact_info in contacts.items():
+            email_lower = email_addr.lower()
+            if email_lower in email_map:
+                logger.warning(f"Email '{email_addr}' is mapped to multiple projects, using first")
+                continue
+            email_map[email_lower] = project
+            logger.info(
+                f"Mapping email '{email_addr}' -> project '{project.get('name', project_key)}'"
+            )
+
+    return email_map
+
+
 # =============================================================================
 # Project and Chat Mapping
 # =============================================================================
@@ -167,6 +204,24 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
             return project
 
     return None
+
+
+def find_project_for_email(sender_email: str | None) -> dict | None:
+    """Find which project an email sender belongs to.
+
+    Exact-match lookup on the sender's email address in EMAIL_TO_PROJECT.
+    The map is built from projects.json 'email.contacts' sections.
+
+    Args:
+        sender_email: The sender's email address (case-insensitive).
+
+    Returns:
+        Project config dict with '_key' set, or None if no match.
+    """
+    if not sender_email:
+        return None
+
+    return EMAIL_TO_PROJECT.get(sender_email.lower())
 
 
 def is_team_chat(chat_title: str | None) -> bool:

@@ -150,6 +150,9 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     logger.info(f"Global session semaphore initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
 
     handler = TelegramRelayOutputHandler(file_handler=FileOutputHandler())
+    from bridge.email_bridge import EmailOutputHandler as _EmailOutputHandler
+
+    email_handler = _EmailOutputHandler()
 
     # Verify Redis is reachable by attempting to list sessions
     try:
@@ -194,6 +197,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     for project_key in projects:
         register_callbacks(project_key, handler=handler)
         logger.info(f"[{project_key}] Registered TelegramRelayOutputHandler")
+
+    # Register EmailOutputHandler for projects with email contacts config
+    for project_key, project_cfg in projects.items():
+        email_contacts = project_cfg.get("email", {}).get("contacts", {})
+        if email_contacts:
+            register_callbacks(project_key, transport="email", handler=email_handler)
+            logger.info(f"[{project_key}] Registered EmailOutputHandler (transport=email)")
 
     # Step 1: Rebuild indexes for ALL Popoto models (SCAN-based, production-safe)
     # Cleans up stale/orphaned index entries across all models, not just AgentSession
