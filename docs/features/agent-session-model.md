@@ -24,7 +24,26 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
 
 **Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `parent_session_id` and `parent_chat_session_id` (deprecated `@property` aliases delegating to `parent_agent_session_id`), `role` (DataField — "pm", "dev", or null), `slug`
 
-All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float timestamps are auto-converted via `__setattr__`.
+All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float/int timestamps are auto-converted via `__setattr__`.
+
+### Defensive coercion for `response_delivered_at`
+
+`response_delivered_at` receives additional defensive coercion beyond the standard `int | float → datetime` conversion. This guards against Popoto's `is_valid()` coercion failure when sessions loaded from Redis (created before PR #923) have the field absent or holding a non-datetime value (e.g. the field descriptor object).
+
+Coercion is applied in two places for defence-in-depth:
+
+| Location | Coverage |
+|---|---|
+| `AgentSession.__setattr__` | All assignment paths: construction, Redis load, direct `session.field = value` |
+| `AgentSession._normalize_kwargs` | Construction callsite: `AgentSession(...)`, `AgentSession.create(...)` |
+
+Normalization rules for `response_delivered_at`:
+- `int | float` → `datetime.fromtimestamp(value, tz=UTC)`
+- `str` (valid ISO 8601) → `datetime.fromisoformat(value)`, normalized to UTC if naive
+- `str` (unparseable) → `None` (logged at DEBUG level)
+- any other non-`datetime`, non-`None` type → `None` (logged at DEBUG level)
+
+**Why this matters:** Without coercion, a `DatetimeField` holding a non-datetime value causes `is_valid()` to return `False`, silently aborting `save()`. This causes `append_event("lifecycle", ...)` to drop the PM session status transition, leaving the session stuck at `status=running` in Redis and stalling the SDLC pipeline permanently (issue #929).
 
 ## SessionEvent (Structured Event Log)
 
