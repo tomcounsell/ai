@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: In Review
 type: feature
 appetite: Large
 owner: Valor
@@ -123,26 +123,26 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/email-bridge.m
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] IMAP connection failures (network, auth) — must log warning and retry after backoff, not crash the poll loop
-- [ ] SMTP send failures — must log error, retry once, then route to dead letter queue (mirror `bridge/telegram_relay.py` pattern)
-- [ ] Malformed emails (no sender, no body, encoding errors) — must skip with warning log, not crash
-- [ ] Unknown sender (no project match) — must log and discard, not enqueue a session with no project
+- [x] IMAP connection failures (network, auth) — must log warning and retry after backoff, not crash the poll loop
+- [x] SMTP send failures — must log error, retry once, then route to dead letter queue (mirror `bridge/telegram_relay.py` pattern)
+- [x] Malformed emails (no sender, no body, encoding errors) — must skip with warning log, not crash
+- [x] Unknown sender (no project match) — must log and discard, not enqueue a session with no project
 
 ### Empty/Invalid Input Handling
-- [ ] Empty email body — skip, do not enqueue session
-- [ ] Email with only attachments (no text body) — log warning, skip (attachment handling is out of scope)
-- [ ] Whitespace-only email body — skip
-- [ ] `find_project_for_email()` with None/empty string — return None
+- [x] Empty email body — skip, do not enqueue session
+- [x] Email with only attachments (no text body) — log warning, skip (attachment handling is out of scope)
+- [x] Whitespace-only email body — skip
+- [x] `find_project_for_email()` with None/empty string — return None
 
 ### Error State Rendering
-- [ ] SMTP connection failure during reply — error logged, message persisted in dead letter queue for retry
-- [ ] Email output handler `react()` is a no-op (email has no reactions) — verify it does not raise
+- [x] SMTP connection failure during reply — error logged, message persisted in dead letter queue for retry
+- [x] Email output handler `react()` is a no-op (email has no reactions) — verify it does not raise
 
 ## Test Impact
 
 No existing tests affected — this is a greenfield feature with no prior test coverage. The email bridge is a new module (`bridge/email_bridge.py`) and the only existing code modified is `register_callbacks()` in `agent/agent_session_queue.py`, which gains backward-compatible transport keying. Existing tests for `register_callbacks()` will continue to work because the default transport fallback preserves current behavior.
 
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add test cases for transport-keyed callback registration (existing tests should still pass unchanged due to backward compat)
+- [x] `tests/unit/test_agent_session_queue.py` — UPDATE: add test cases for transport-keyed callback registration (existing tests should still pass unchanged due to backward compat)
 
 ## Rabbit Holes
 
@@ -215,29 +215,29 @@ The bridge itself (`bridge/email_bridge.py`) is a new standalone module that imp
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/email-bridge.md` describing the email bridge architecture, config, and operation
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/deployment.md` with email bridge setup instructions
+- [x] Create `docs/features/email-bridge.md` describing the email bridge architecture, config, and operation
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update `docs/deployment.md` with email bridge setup instructions
 
 ### Inline Documentation
-- [ ] Docstrings on all public functions in `bridge/email_bridge.py`
-- [ ] Docstrings on `find_project_for_email()` in `bridge/routing.py`
-- [ ] Update `register_callbacks()` docstring for transport parameter
+- [x] Docstrings on all public functions in `bridge/email_bridge.py`
+- [x] Docstrings on `find_project_for_email()` in `bridge/routing.py`
+- [x] Update `register_callbacks()` docstring for transport parameter
 
 ## Success Criteria
 
-- [ ] `bridge/email_bridge.py` receives inbound email via IMAP and calls `enqueue_agent_session()`
-- [ ] `EmailOutputHandler` sends session output via SMTP, replying to the originating thread
-- [ ] Email sender → project resolution works via `projects.json` contact config
-- [ ] `AgentSession` carries `transport` in `extra_context`; worker resolves the correct outbox per session
-- [ ] `register_callbacks()` supports transport-keyed registration without breaking existing Telegram callers
-- [ ] Telegram bridge behavior is unchanged — no regressions
-- [ ] `session_id` for email sessions uses `email_` prefix
-- [ ] Unit tests: email → project resolution, `EmailOutputHandler.send()` shapes correct SMTP message, transport-keyed callback dispatch
-- [ ] Integration test: end-to-end inbound email → session enqueued → output delivered via SMTP
-- [ ] Email thread continuation: inbound reply with `In-Reply-To` header resumes the correct session via Redis reverse mapping
-- [ ] Dead letter queue: failed SMTP sends persist to Redis and can be replayed
-- [ ] Health monitoring: `email:last_poll_ts` updated on each IMAP poll, stale detection works
+- [x] `bridge/email_bridge.py` receives inbound email via IMAP and calls `enqueue_agent_session()`
+- [x] `EmailOutputHandler` sends session output via SMTP, replying to the originating thread
+- [x] Email sender → project resolution works via `projects.json` contact config
+- [x] `AgentSession` carries `transport` in `extra_context`; worker resolves the correct outbox per session
+- [x] `register_callbacks()` supports transport-keyed registration without breaking existing Telegram callers
+- [x] Telegram bridge behavior is unchanged — no regressions
+- [x] `session_id` for email sessions uses `email_` prefix
+- [x] Unit tests: email → project resolution, `EmailOutputHandler.send()` shapes correct SMTP message, transport-keyed callback dispatch
+- [x] Integration test: end-to-end inbound email → session enqueued → output delivered via SMTP
+- [x] Email thread continuation: inbound reply with `In-Reply-To` header resumes the correct session via Redis reverse mapping
+- [x] Dead letter queue: failed SMTP sends persist to Redis and can be replayed
+- [x] Health monitoring: `email:last_poll_ts` updated on each IMAP poll, stale detection works
 
 ## Team Orchestration
 
