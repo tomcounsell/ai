@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Merged
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -164,24 +164,24 @@ _delegation = get_delegation_recommendation(project_key, _task_type)
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `update_task_type_profile()` in `finalize_session()` is wrapped in `try/except Exception` — test that a deliberate exception in the profile update does not prevent the session from reaching terminal status
-- [ ] `get_delegation_recommendation()` must never raise — test with missing profile (returns `"structured"` as safe default)
-- [ ] Popoto save failure in `update_task_type_profile()` — log debug, do not re-raise
+- [x] `update_task_type_profile()` in `finalize_session()` is wrapped in `try/except Exception` — test that a deliberate exception in the profile update does not prevent the session from reaching terminal status
+- [x] `get_delegation_recommendation()` must never raise — test with missing profile (returns `"structured"` as safe default)
+- [x] Popoto save failure in `update_task_type_profile()` — log debug, do not re-raise
 
 ### Empty/Invalid Input Handling
-- [ ] `update_task_type_profile(session_id)` with session where `task_type` is None → no-op, no profile created for `None` type
-- [ ] `get_delegation_recommendation(project_key=None, task_type=None)` → returns `"structured"` (safe default)
-- [ ] `_infer_task_type_from_message("")` → returns None without error
+- [x] `update_task_type_profile(session_id)` with session where `task_type` is None → no-op, no profile created for `None` type
+- [x] `get_delegation_recommendation(project_key=None, task_type=None)` → returns `"structured"` (safe default)
+- [x] `_infer_task_type_from_message("")` → returns None without error
 
 ### Error State Rendering
-- [ ] If profile lookup fails in PM dispatch, SDLC handoff falls back to `"structured"` (current behavior preserved) — no user-visible error
+- [x] If profile lookup fails in PM dispatch, SDLC handoff falls back to `"structured"` (current behavior preserved) — no user-visible error
 
 ## Test Impact
 
-- [ ] `tests/unit/test_session_tags.py` — UPDATE: add test cases for Rule 7 (task_type derivation) and verify idempotency
-- [ ] `tests/unit/test_session_lifecycle.py` — UPDATE: verify `update_task_type_profile` is called after `auto_tag_session` in finalize path; verify skip when `skip_auto_tag=True`
-- [ ] `tests/integration/test_session_finalize.py` (create if absent) — CREATE: end-to-end: complete a dev session, verify `TaskTypeProfile` is updated with correct metrics
-- [ ] `tests/unit/test_agent_session.py` — UPDATE: verify `task_type` IndexedField is indexable and queryable
+- [x] `tests/unit/test_session_tags.py` — UPDATE: add test cases for Rule 7 (task_type derivation) and verify idempotency
+- [x] `tests/unit/test_session_lifecycle.py` — UPDATE: verify `update_task_type_profile` is called after `auto_tag_session` in finalize path; verify skip when `skip_auto_tag=True`
+- [x] `tests/integration/test_session_finalize.py` (create if absent) — CREATE: end-to-end: complete a dev session, verify `TaskTypeProfile` is updated with correct metrics
+- [x] `tests/unit/test_agent_session.py` — UPDATE: verify `task_type` IndexedField is indexable and queryable (covered by integration tests)
 
 ## Rabbit Holes
 
@@ -233,22 +233,22 @@ No agent integration required — `TaskTypeProfile` is consulted within the PM s
 
 ## Documentation
 
-- [ ] Create `docs/features/trm-task-type-profile.md` describing the TRM registry, `TaskTypeProfile` model fields, `task_type` vocabulary, and how `delegation_recommendation` is derived
-- [ ] Add entry to `docs/features/README.md` index table
+- [x] Create `docs/features/trm-task-type-profile.md` describing the TRM registry, `TaskTypeProfile` model fields, `task_type` vocabulary, and how `delegation_recommendation` is derived
+- [x] Add entry to `docs/features/README.md` index table
 
 ## Success Criteria
 
-- [ ] `AgentSession` has `task_type = IndexedField(null=True)` and `rework_triggered = Field(null=True)`
-- [ ] `auto_tag_session()` derives and sets `task_type` at completion using the defined vocabulary
-- [ ] `TaskTypeProfile` Popoto model exists with `avg_turns`, `rework_rate`, `failure_stage_distribution`, `delegation_recommendation`, `session_count`, `last_updated` fields
-- [ ] `TaskTypeProfile` is updated post-session via `finalize_session()` hook (after `auto_tag_session`), wrapped in try/except
-- [ ] `delegation_recommendation` logic is tested: `structured` when `rework_rate > 0.3` or `session_count < 5`, `autonomous` otherwise
-- [ ] PM spawn logic consults `TaskTypeProfile.delegation_recommendation` before building dev session prompt
-- [ ] Unit tests for profile update logic and recommendation derivation
-- [ ] Integration test: complete a session, verify `TaskTypeProfile` is updated
-- [ ] A profile update failure never prevents session finalization (failure injection test)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `AgentSession` has `task_type = IndexedField(null=True)` and `rework_triggered = Field(null=True)`
+- [x] `auto_tag_session()` derives and sets `task_type` at completion using the defined vocabulary
+- [x] `TaskTypeProfile` Popoto model exists with `avg_turns`, `rework_rate`, `failure_stage_distribution`, `delegation_recommendation`, `session_count`, `last_updated` fields
+- [x] `TaskTypeProfile` is updated post-session via `finalize_session()` hook (after `auto_tag_session`), wrapped in try/except
+- [x] `delegation_recommendation` logic is tested: `structured` when `rework_rate > 0.3` or `session_count < 5`, `autonomous` otherwise
+- [x] PM spawn logic consults `TaskTypeProfile.delegation_recommendation` before building dev session prompt
+- [x] Unit tests for profile update logic and recommendation derivation
+- [x] Integration test: complete a session, verify `TaskTypeProfile` is updated
+- [x] A profile update failure never prevents session finalization (failure injection test)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
