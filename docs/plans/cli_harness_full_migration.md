@@ -429,7 +429,13 @@ No MCP or bridge changes required. This is an internal routing change in `agent_
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| BLOCKER | Skeptic, Simplifier | Test names in Test Impact do not match actual codebase | Fix test names before build | Run `pytest --collect-only -q` on the 2 test files and correct all 3 mismatched names |
+| BLOCKER | Skeptic, Archaeologist, Adversary, Operator, Simplifier | `build_harness_turn_input()` lacks `classification` param — cross-repo SDLC GITHUB header is lost | Add `classification` param OR document harness self-detection | Add `classification: str \| None = None` and `is_cross_repo: bool = False` to signature; caller resolves from `session.classification_type` |
+| BLOCKER | Adversary | `sender_name=None` produces "FROM: None" header — guard not specified | Specify guard in Step 1 | Use `if sender_name: enriched_message += f"\n\nFROM: {sender_name}"` |
+| BLOCKER | Operator, Skeptic | Worker health check non-fatal with no fallback — silent degradation when `claude` binary missing | Make health check fatal OR add graceful degradation flag | In `worker/__main__.py:184–187`: either `sys.exit(1)` or set `_harness_unavailable = True` flag checked in `process_session()` |
+| BLOCKER | User, Archaeologist | Haiku reclassification removal not validated — "no known production edge cases" asserted without evidence | Audit production logs or add temporary log line | Deploy `logger.info("Haiku reclassified PM→teammate")` for 14 days; confirm zero occurrences before removing |
+| CONCERN | Skeptic, Adversary, Simplifier | Steering messages bypass `build_harness_turn_input()` — PM/teammate sessions steered without context headers | Document or fix steering path | Check `output_router.py`; if messages are plain text, apply `build_harness_turn_input()` to steering msgs too, or verify SESSION_ID/PROJECT are in env vars |
+| CONCERN | User | Success criteria are all technical — no user-facing routing validation | Add user-facing success criterion | Add: "new test confirms PM/teammate sessions never trigger dev SDLC post-processing and receive correct context headers regardless of message content" |
 
 ---
 
