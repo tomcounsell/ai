@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: shipped
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -135,18 +135,18 @@ No agent integration required — these are test files only. No MCP servers, bri
 
 ## Documentation
 
-- [ ] Add email bridge operational tests to the `tests/README.md` Test Index under a new `email` subsection or extend the `messaging` section
-- [ ] Update the Known Blind Spots section in `tests/README.md` to reflect that `bridge/email_bridge.py` operational layer is now covered
+- [x] Add email bridge operational tests to the `tests/README.md` Test Index under a new `email` subsection or extend the `messaging` section
+- [x] Update the Known Blind Spots section in `tests/README.md` to reflect that `bridge/email_bridge.py` operational layer is now covered
 
 ## Success Criteria
 
-- [ ] `_poll_imap()` batch cap test: mock IMAP with `IMAP_MAX_BATCH + 10` unseen messages, assert exactly `IMAP_MAX_BATCH` fetches occur
-- [ ] Health timestamp test: run one poll iteration, assert `email:last_poll_ts` exists in Redis test db
-- [ ] Env loading test: validate `main()` calls `load_dotenv()` with correct file paths
-- [ ] All new tests pass: `pytest tests/unit/test_email_bridge.py tests/integration/test_email_bridge.py -v`
-- [ ] `tests/README.md` documents email bridge coverage
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `_poll_imap()` batch cap test: mock IMAP with `IMAP_MAX_BATCH + 10` unseen messages, assert exactly `IMAP_MAX_BATCH` fetches occur
+- [x] Health timestamp test: run one poll iteration, assert `email:last_poll_ts` exists in Redis test db
+- [x] Env loading test: validate `main()` calls `load_dotenv()` with correct file paths
+- [x] All new tests pass: `pytest tests/unit/test_email_bridge.py tests/integration/test_email_bridge.py -v`
+- [x] `tests/README.md` documents email bridge coverage
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
