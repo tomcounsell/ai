@@ -60,6 +60,33 @@ def _fetch_github_title(url: str) -> str | None:
     return None
 
 
+_SYSTEM_PROMPT_PREFIXES = ("PROJECT:", "[Prior session context")
+_INTERNAL_SENDERS = {"valor-session (pm)", "valor-session (dev)", "None", ""}
+
+
+def _extract_from_system_prompt(message_text: str) -> str | None:
+    """Extract a human-readable label from a session system-prompt message_text.
+
+    Tries MESSAGE: content first, then FROM: if it looks human-authored,
+    then falls back to None so the caller can use a type/project label.
+    """
+    # Try MESSAGE: marker — the actual user task text
+    msg_match = re.search(r"^MESSAGE:\s*(.+)$", message_text, re.MULTILINE)
+    if msg_match:
+        msg = msg_match.group(1).strip()
+        if msg and msg != "None":
+            return msg[:80] + ("..." if len(msg) > 80 else "")
+
+    # Try FROM: — e.g. "Tom in PM: Valor", skip internal sender names
+    from_match = re.search(r"^FROM:\s*(.+)$", message_text, re.MULTILINE)
+    if from_match:
+        sender = from_match.group(1).strip()
+        if sender and sender not in _INTERNAL_SENDERS:
+            return sender
+
+    return None
+
+
 # Match GitHub issue/PR URLs anywhere in a string.
 # Intentionally permissive on owner/repo to tolerate org-scoped and nested paths.
 _GITHUB_ISSUE_URL_RE = re.compile(r"https://github\.com/[^\s/]+/[^\s/]+/issues/\d+")
@@ -243,7 +270,7 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: slug > issue/PR title > context_summary > truncated message."""
+        """Human-friendly name: slug > issue/PR title > context_summary > message > type•project."""
         if self.slug:
             return self.slug
         for url in (self.issue_url, self.pr_url):
@@ -254,6 +281,13 @@ class PipelineProgress(BaseModel):
         if self.context_summary:
             return self.context_summary
         if self.message_text:
+            if any(self.message_text.startswith(p) for p in _SYSTEM_PROMPT_PREFIXES):
+                extracted = _extract_from_system_prompt(self.message_text)
+                if extracted:
+                    return extracted
+                # Nothing useful in the prompt — show type • project
+                parts = [p for p in (self.session_type, self.project_key) if p]
+                return " • ".join(parts) if parts else self.agent_session_id or "unknown"
             text = self.message_text[:60]
             if len(self.message_text) > 60:
                 text += "..."
