@@ -20,6 +20,7 @@ CONFIG = {}
 DEFAULTS = {}
 GROUP_TO_PROJECT = {}
 EMAIL_TO_PROJECT: dict[str, dict] = {}
+EMAIL_DOMAIN_TO_PROJECT: dict[str, dict] = {}  # domain -> project config
 ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
 RESPOND_TO_DMS = True
@@ -157,17 +158,19 @@ def build_group_to_project_map(config: dict) -> dict:
     return group_map
 
 
-def build_email_to_project_map(config: dict) -> dict:
-    """Build a mapping from email addresses (lowercase) to project configs.
+def build_email_to_project_map(config: dict) -> tuple[dict, dict]:
+    """Build mappings from email addresses and domains to project configs.
 
-    Reads the 'email.contacts' section from each project in projects.json.
-    Keys are exact-match email addresses (lowercased). Values are the project
-    config dict (same as GROUP_TO_PROJECT values).
+    Reads the 'email.contacts' and 'email.domains' sections from each project
+    in projects.json.
 
     Returns:
-        dict mapping lowercase email address -> project config dict
+        Tuple of (address_map, domain_map) where:
+        - address_map: lowercase email address -> project config dict (exact match)
+        - domain_map: lowercase domain -> project config dict (wildcard match)
     """
     email_map: dict[str, dict] = {}
+    domain_map: dict[str, dict] = {}
     projects = config.get("projects", {})
 
     for project_key in ACTIVE_PROJECTS:
@@ -178,8 +181,9 @@ def build_email_to_project_map(config: dict) -> dict:
         project["_key"] = project_key  # Ensure key is set (mirrors group map behavior)
 
         email_config = project.get("email", {})
-        contacts = email_config.get("contacts", {})
 
+        # Exact-match contacts
+        contacts = email_config.get("contacts", {})
         for email_addr, contact_info in contacts.items():
             email_lower = email_addr.lower()
             if email_lower in email_map:
@@ -190,7 +194,19 @@ def build_email_to_project_map(config: dict) -> dict:
                 f"Mapping email '{email_addr}' -> project '{project.get('name', project_key)}'"
             )
 
-    return email_map
+        # Domain wildcard (e.g. "psyoptimal.com" matches *@psyoptimal.com)
+        domains = email_config.get("domains", [])
+        for domain in domains:
+            domain_lower = domain.lower().lstrip("@")
+            if domain_lower in domain_map:
+                logger.warning(f"Domain '{domain}' is mapped to multiple projects, using first")
+                continue
+            domain_map[domain_lower] = project
+            logger.info(
+                f"Mapping domain '@{domain_lower}' -> project '{project.get('name', project_key)}'"
+            )
+
+    return email_map, domain_map
 
 
 # =============================================================================
@@ -214,8 +230,8 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
 def find_project_for_email(sender_email: str | None) -> dict | None:
     """Find which project an email sender belongs to.
 
-    Exact-match lookup on the sender's email address in EMAIL_TO_PROJECT.
-    The map is built from projects.json 'email.contacts' sections.
+    Checks exact-match first (email.contacts), then domain wildcard (email.domains).
+    The maps are built from projects.json 'email.contacts' and 'email.domains' sections.
 
     Args:
         sender_email: The sender's email address (case-insensitive).
@@ -226,7 +242,19 @@ def find_project_for_email(sender_email: str | None) -> dict | None:
     if not sender_email:
         return None
 
-    return EMAIL_TO_PROJECT.get(sender_email.lower())
+    email_lower = sender_email.lower()
+
+    # Exact match first
+    if email_lower in EMAIL_TO_PROJECT:
+        return EMAIL_TO_PROJECT[email_lower]
+
+    # Domain wildcard: someone@psyoptimal.com -> psyoptimal.com
+    if "@" in email_lower:
+        domain = email_lower.split("@", 1)[1]
+        if domain in EMAIL_DOMAIN_TO_PROJECT:
+            return EMAIL_DOMAIN_TO_PROJECT[domain]
+
+    return None
 
 
 def is_team_chat(chat_title: str | None) -> bool:

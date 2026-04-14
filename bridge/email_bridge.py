@@ -384,6 +384,7 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
     """
     from agent.agent_session_queue import enqueue_agent_session
     from bridge.routing import ACTIVE_PROJECTS, find_project_for_email
+    from config.enums import SessionType
 
     from_addr = parsed["from_addr"]
     body = parsed["body"]
@@ -401,6 +402,10 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
     if project_key not in ACTIVE_PROJECTS:
         logger.info(f"[email] Project '{project_key}' not in ACTIVE_PROJECTS, discarding")
         return
+
+    # Derive session type from email.persona (default: teammate for human-facing email)
+    email_persona = project.get("email", {}).get("persona", "teammate")
+    session_type = SessionType.TEAMMATE if email_persona == "teammate" else SessionType.PM
 
     working_dir = project.get("working_directory") or config.get("defaults", {}).get(
         "working_directory", "~/src"
@@ -448,6 +453,7 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
             telegram_message_id=0,  # sentinel for email sessions
             chat_title=subject or f"Email from {from_addr}",
             project_config=project,
+            session_type=session_type,
             extra_context_overrides={
                 "transport": "email",
                 "email_message_id": message_id,
@@ -597,15 +603,18 @@ async def run_email_bridge() -> None:
     # Load projects config and build email contact map
     config = load_config()
 
-    # Initialize EMAIL_TO_PROJECT global (mirrors how telegram_bridge initializes GROUP_TO_PROJECT)
+    # Initialize EMAIL_TO_PROJECT / EMAIL_DOMAIN_TO_PROJECT globals
     import bridge.routing as _routing_module
 
-    _routing_module.EMAIL_TO_PROJECT.update(build_email_to_project_map(config))
+    addr_map, domain_map = build_email_to_project_map(config)
+    _routing_module.EMAIL_TO_PROJECT.update(addr_map)
+    _routing_module.EMAIL_DOMAIN_TO_PROJECT.update(domain_map)
 
     logger.info(
         f"[email] Email bridge starting. "
         f"IMAP host={imap_config['host']}, poll interval={IMAP_POLL_INTERVAL}s, "
-        f"contacts={len(_routing_module.EMAIL_TO_PROJECT)}"
+        f"contacts={len(_routing_module.EMAIL_TO_PROJECT)}, "
+        f"domains={len(_routing_module.EMAIL_DOMAIN_TO_PROJECT)}"
     )
 
     await _email_inbox_loop(imap_config, config)
