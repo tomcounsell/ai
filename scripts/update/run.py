@@ -769,12 +769,6 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             result.warnings.append("Update cron not installed")
 
-        # Install/reload reflections scheduler
-        if service.install_reflections(project_dir):
-            log("Reflections scheduler installed", v)
-        elif (project_dir / "com.valor.reflections.plist").exists():
-            result.warnings.append("Reflections plist install failed")
-
         # Install/reload standalone worker service
         if (project_dir / "com.valor.worker.plist").exists():
             if service.install_worker(project_dir):

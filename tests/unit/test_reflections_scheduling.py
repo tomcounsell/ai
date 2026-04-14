@@ -71,20 +71,16 @@ class TestInstallMechanism:
                     f"launchctl call should not swallow errors with || true: {line}"
                 )
 
-    def test_service_install_reflections_uses_bootstrap(self):
-        """service.py install_reflections() must use bootstrap/bootout."""
+    def test_service_install_reflections_deleted(self):
+        """service.py install_reflections() must be absent — reflections run
+        inside the worker process now; there is no launchd plist for them."""
         service_path = PROJECT_ROOT / "scripts" / "update" / "service.py"
         content = service_path.read_text()
-        # Extract the install_reflections function body
-        func_start = content.index("def install_reflections(")
-        # Find the next def or end of file
-        next_def = content.find("\ndef ", func_start + 1)
-        func_body = content[func_start:next_def] if next_def != -1 else content[func_start:]
-
-        assert "bootout" in func_body, "install_reflections must use bootout"
-        assert "bootstrap" in func_body, "install_reflections must use bootstrap"
-        assert '"unload"' not in func_body, "install_reflections must not use unload"
-        assert '"load"' not in func_body, "install_reflections must not use load"
+        assert "def install_reflections(" not in content, (
+            "install_reflections() was deleted in the monolith removal — "
+            "reflections are now scheduled by agent/reflection_scheduler.py "
+            "as a subprocess managed by the worker, not a launchd service"
+        )
 
     def test_service_install_caffeinate_uses_bootstrap(self):
         """service.py install_caffeinate() must use bootstrap, not load."""
