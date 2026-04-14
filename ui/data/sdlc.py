@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 
 from pydantic import BaseModel
@@ -23,6 +24,41 @@ logger = logging.getLogger(__name__)
 
 # Configurable retention for inactive sessions (default 48h)
 DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))
+
+# Cache GitHub issue/PR titles to avoid repeated subprocess calls
+_github_title_cache: dict[str, str] = {}
+
+
+def _fetch_github_title(url: str) -> str | None:
+    """Return the title of a GitHub issue or PR URL, using a process-level cache."""
+    if url in _github_title_cache:
+        return _github_title_cache[url]
+    try:
+        if "/issues/" in url:
+            result = subprocess.run(
+                ["gh", "issue", "view", url, "--json", "title", "--jq", ".title"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        elif "/pull/" in url:
+            result = subprocess.run(
+                ["gh", "pr", "view", url, "--json", "title", "--jq", ".title"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        else:
+            return None
+        if result.returncode == 0:
+            title = result.stdout.strip()
+            if title:
+                _github_title_cache[url] = title
+                return title
+    except Exception:
+        pass
+    return None
+
 
 # Match GitHub issue/PR URLs anywhere in a string.
 # Intentionally permissive on owner/repo to tolerate org-scoped and nested paths.
@@ -207,9 +243,14 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: slug, then context_summary, then truncated message."""
+        """Human-friendly name: slug > issue/PR title > context_summary > truncated message."""
         if self.slug:
             return self.slug
+        for url in (self.issue_url, self.pr_url):
+            if url:
+                title = _fetch_github_title(url)
+                if title:
+                    return title
         if self.context_summary:
             return self.context_summary
         if self.message_text:
