@@ -87,10 +87,15 @@ from telethon.errors import FloodWaitError  # noqa: E402
 
 from agent import build_harness_turn_input  # noqa: F401, E402
 from bridge.context import (  # noqa: E402
+    REPLY_THREAD_CONTEXT_HEADER,  # noqa: F401
     build_activity_context,  # noqa: F401
     build_context_prefix,  # noqa: F401
     build_conversation_history,  # noqa: F401
+    fetch_reply_chain,
+    format_reply_chain,
     is_status_question,  # noqa: F401
+    matched_context_patterns,
+    references_prior_context,
     resolve_root_session_id,
 )
 from bridge.media import (  # noqa: E402
@@ -616,24 +621,49 @@ from bridge.update import (  # noqa: E402
 )
 
 
-def _build_completed_resume_text(completed_session, follow_up_text: str) -> str:
+def _build_completed_resume_text(
+    completed_session,
+    follow_up_text: str,
+    reply_chain_context: str | None = None,
+) -> str:
     """Build the augmented message text for re-enqueueing a completed session.
 
-    Prepends the completed session's context_summary (or a generic fallback) to
-    the new message text so the resumed agent knows what was done previously.
+    Layered preamble -- both layers appear when present, in a fixed order so
+    the agent always sees them in the same shape:
+
+        1. ``[Prior session context: <summary>]`` -- always present; falls back
+           to a generic sentinel when the completed session has no
+           ``context_summary`` recorded.
+        2. ``REPLY THREAD CONTEXT (oldest to newest): ...`` -- inserted when
+           the caller passes ``reply_chain_context``. Pre-formatted by
+           ``bridge.context.format_reply_chain``. Absent when the caller
+           couldn't fetch the chain (e.g. live Telegram error).
+        3. The original ``follow_up_text`` verbatim.
+
+    Passing an empty string or ``None`` for ``reply_chain_context`` is a no-op
+    -- the output is identical to calling without the argument. This preserves
+    the canonical single-newline layout the existing
+    `test_reply_to_completed_session_reenqueues_with_context` test asserts.
 
     Args:
         completed_session: An AgentSession record with status="completed".
-        follow_up_text: The new message text to append after the context preamble.
+        follow_up_text: The new message text to append after the context
+            preamble.
+        reply_chain_context: Optional pre-formatted reply-thread block from
+            `format_reply_chain`. Must already include the canonical
+            ``REPLY THREAD CONTEXT`` header.
 
     Returns:
-        Augmented message string: "[Prior session context: <summary>]\n\n<follow_up>"
+        Augmented message string.
     """
     summary = (
         getattr(completed_session, "context_summary", None)
         or "This continues a previously completed session."
     )
-    return f"[Prior session context: {summary}]\n\n{follow_up_text}"
+    summary_block = f"[Prior session context: {summary}]"
+    if reply_chain_context:
+        return f"{summary_block}\n\n{reply_chain_context}\n\n{follow_up_text}"
+    return f"{summary_block}\n\n{follow_up_text}"
 
 
 async def check_message_query_request(client: TelegramClient) -> None:
@@ -1300,6 +1330,25 @@ async def main():
                             )
                             return
 
+                        # Early short-circuit: if this exact (chat_id, msg_id) was
+                        # already processed, bail out BEFORE fetching the reply
+                        # chain. Saves a Telegram API call for duplicates and
+                        # tightens the window for Race 2 (concurrent rapid-fire
+                        # replies resolving to the same completed session).
+                        # Plan IN-4.
+                        from bridge.dedup import (
+                            is_duplicate_message,
+                            record_message_processed,
+                        )
+
+                        if await is_duplicate_message(event.chat_id, message.id):
+                            logger.debug(
+                                f"[{project_name}] Resume-completed branch: "
+                                f"message {message.id} already processed, "
+                                f"skipping re-enqueue"
+                            )
+                            return
+
                         # Use the most-recent completed record for the best context_summary.
                         def _completed_created_at(s):
                             ts = getattr(s, "created_at", None)
@@ -1310,7 +1359,46 @@ async def main():
                             return float(ts)
 
                         completed = max(completed_sessions, key=_completed_created_at)
-                        augmented_text = _build_completed_resume_text(completed, clean_text)
+
+                        # Hydrate reply-thread context synchronously with a
+                        # short timeout. A failure or timeout is a WARNING --
+                        # we fall back to the summary-only preamble and still
+                        # enqueue the session. Plan Change A, IN-6 (sync path
+                        # because augmented_text is built at enqueue time).
+                        reply_chain_context: str | None = None
+                        if message.reply_to_msg_id:
+                            try:
+                                chain = await asyncio.wait_for(
+                                    fetch_reply_chain(
+                                        client,
+                                        event.chat_id,
+                                        message.reply_to_msg_id,
+                                    ),
+                                    timeout=3.0,
+                                )
+                                if chain:
+                                    reply_chain_context = format_reply_chain(chain)
+                            except TimeoutError:
+                                logger.warning(
+                                    "RESUME_REPLY_CHAIN_FAIL timeout "
+                                    f"session_id={session_id} "
+                                    f"chat_id={event.chat_id} "
+                                    f"reply_to_msg_id={message.reply_to_msg_id}"
+                                )
+                            except Exception as rc_exc:
+                                logger.warning(
+                                    "RESUME_REPLY_CHAIN_FAIL exception "
+                                    f"session_id={session_id} "
+                                    f"chat_id={event.chat_id} "
+                                    f"reply_to_msg_id={message.reply_to_msg_id} "
+                                    f"error={rc_exc!r}"
+                                )
+
+                        augmented_text = _build_completed_resume_text(
+                            completed,
+                            clean_text,
+                            reply_chain_context=reply_chain_context,
+                        )
                         # Compute working_dir inline (not yet defined at this point in the handler)
                         _completed_working_dir = ""
                         if project:
@@ -1320,6 +1408,11 @@ async def main():
                             )
                         if not _completed_working_dir:
                             _completed_working_dir = str(Path(__file__).parent.parent)
+                        # Plan Change A: pass telegram_message_key so the
+                        # worker's deferred enrichment can hydrate media,
+                        # YouTube, and link summaries. The reply-chain step is
+                        # idempotent against the header this handler already
+                        # prepended (see agent_session_queue enrichment).
                         await enqueue_agent_session(
                             project_key=project_key,
                             session_id=session_id,
@@ -1331,13 +1424,14 @@ async def main():
                             chat_title=chat_title,
                             priority="normal",
                             sender_id=sender_id,
+                            telegram_message_key=stored_msg_id,
                             project_config=project,
                         )
                         logger.info(
                             f"[{project_name}] Resumed completed session "
-                            f"{session_id} with prior context"
+                            f"{session_id} with prior context "
+                            f"(reply_chain={'yes' if reply_chain_context else 'no'})"
                         )
-                        from bridge.dedup import record_message_processed
 
                         await record_message_processed(event.chat_id, message.id)
                         return
@@ -1696,13 +1790,58 @@ async def main():
         if not (is_reply_to_valor and message.reply_to_msg_id):
             _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
 
+        # === IMPLICIT-CONTEXT DIRECTIVE (Plan Change C) ===
+        # Messages that reference prior state without a Telegram reply-to
+        # ("did we get that fixed?", "the bug is still broken") get a
+        # lightweight tool-order directive so the agent reaches for
+        # valor-telegram / memory_search before asking the user for
+        # clarification. The heuristic is narrow and the directive is
+        # advisory (not a forced call), so false positives cost at most one
+        # agent turn.
+        #
+        # Honors env kill-switch REPLY_CONTEXT_DIRECTIVE_DISABLED (truthy = off)
+        # so Change C can be disabled in-place without a code deploy (IN-5).
+        enqueued_message_text = clean_text
+        _directive_disabled = os.getenv("REPLY_CONTEXT_DIRECTIVE_DISABLED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if (
+            not _directive_disabled
+            and not message.reply_to_msg_id
+            and references_prior_context(clean_text)
+        ):
+            matched_patterns = matched_context_patterns(clean_text)
+            context_directive = (
+                "[CONTEXT DIRECTIVE] This message references context not in "
+                "the current turn. If the auto-recalled memory below does not "
+                "cover it, fetch additional context in this order: "
+                "(1) `valor-telegram read --chat \"<chat>\" --limit 20` for "
+                "recent chat history, (2) `memory_search` for prior decisions, "
+                "(3) project knowledge base, (4) `gh issue list` / `gh pr list` "
+                "if an issue or PR is implied. Skip this directive entirely if "
+                "the prior context is obvious from the auto-recalled memory."
+            )
+            enqueued_message_text = f"{context_directive}\n\n{clean_text}"
+            logger.info(
+                "implicit_context_directive_injected",
+                extra={
+                    "session_id": session_id,
+                    "chat_id": telegram_chat_id,
+                    "matched_patterns": matched_patterns,
+                    "text_preview": clean_text[:80],
+                },
+            )
+
         # Enqueue: session_type drives PM vs Dev session creation.
         # Pass full project config so the session carries it through the pipeline.
         depth = await enqueue_agent_session(
             project_key=project_key,
             session_id=session_id,
             working_dir=working_dir_str,
-            message_text=clean_text,
+            message_text=enqueued_message_text,
             sender_name=sender_name,
             chat_id=telegram_chat_id,
             telegram_message_id=message.id,

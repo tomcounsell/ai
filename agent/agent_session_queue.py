@@ -3543,6 +3543,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
         except Exception as e:
             logger.debug(f"[{session.project_key}] TelegramMessage lookup failed: {e}")
 
+    # Idempotency guard (Plan IN-1 / Race 1): if the handler already prepended
+    # a REPLY THREAD CONTEXT block (e.g. resume-completed branch pre-hydrates
+    # synchronously), skip the deferred reply-chain fetch so the agent does
+    # not see two headers. Substring check against the canonical constant
+    # imported from bridge.context.
+    from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+
+    if enrich_reply_to_msg_id and REPLY_THREAD_CONTEXT_HEADER in (session.message_text or ""):
+        logger.debug(
+            f"[{session.project_key}] Reply chain already hydrated by handler; "
+            f"skipping deferred fetch (session={session.session_id})"
+        )
+        enrich_reply_to_msg_id = None
+
     if enrich_has_media or enrich_youtube_urls or enrich_non_youtube_urls or enrich_reply_to_msg_id:
         try:
             from bridge.enrichment import enrich_message, get_telegram_client
