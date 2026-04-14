@@ -124,11 +124,7 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |
 | `curl -s localhost:8500/dashboard.json` | Check the dashboard — full system state as JSON (sessions, health, reflections, machine) |
-| `python scripts/reflections.py` | Run reflections maintenance manually |
-| `python scripts/reflections.py --dry-run` | Test reflections without side effects |
-| `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
-| `./scripts/install_reflections.sh` | Install reflections launchd schedule |
-| `tail -f logs/reflections.log` | Stream reflections logs |
+| `tail -f logs/worker.log` | Stream worker logs (includes reflection scheduler) |
 | `python scripts/sdlc_reflection.py` | Run SDLC reflection manually |
 | `python scripts/sdlc_reflection.py --dry-run` | Preview SDLC reflection without writing |
 | `python scripts/sdlc_reflection.py --days 14` | Run with larger lookback window |
@@ -477,7 +473,7 @@ Use these labels consistently when creating or editing issues:
 | Label | When to use |
 |-------|-------------|
 | `bug` | Something is broken or not working as expected |
-| `reflections` | Related to the reflections maintenance system (`scripts/reflections.py`) |
+| `reflections` | Related to the reflections maintenance system (`reflections/` package, `agent/reflection_scheduler.py`) |
 | `memory` | Related to the subconscious memory system (memory search, bloom filter, recall/extract) |
 | `skills` | Related to skills (`/do-*` commands), tools (MCP/Python), or the SDLC pipeline |
 | `dashboard` | Related to the web UI dashboard (`ui/`) |
