@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/748
 last_comment_id: ""
+revision_applied: true
 ---
 
 # Reflections Monolith Deletion
@@ -59,7 +60,7 @@ divergent state models, and a maintenance surface nobody can reason about holist
 
 **Active plans in `docs/plans/` overlapping this area:**
 - `docs/plans/reflections-quality-pass.md` — marked status `In Progress` or `Complete` (PR #933 merged). Does not conflict.
-- `docs/plans/memory-consolidation-reflection.md` — tracked #795, now closed. No conflict.
+- Memory consolidation work (#795, PR #959) — now closed and merged. No conflict.
 
 **Notes:** `memory-dedup` is already wired; the plan's Phase B scope is now 3 reflections, not 4. `docs_auditor.py` uses `ReflectionRun` as a singleton metadata store for `last_audit_date` — this must be migrated to a different storage key before `ReflectionRun` can be deleted.
 
@@ -133,7 +134,7 @@ Worker startup
 
 **Phase A — Extract monolith units**
 
-Create `reflections/` package with one module per thematic group:
+Create `reflections/` package with one module per thematic group. **All new YAML entries added in Phase A must have `enabled: false`** — they will be enabled in Phase C after the monolith is deleted. This eliminates the transition-window race where both the YAML scheduler and the launchd monolith could execute the same logical unit concurrently and write to the same Redis state.
 
 | Module | Functions | Maps to monolith steps |
 |--------|-----------|------------------------|
@@ -191,7 +192,7 @@ Shared helpers currently on `ReflectionRunner` that multiple units need (e.g., `
 - [ ] `tests/unit/test_reflections_preflight.py` — DELETE: patches `scripts.reflections.ReflectionRunner._load_state` and `scripts.reflections.load_local_projects`. Both are gone after monolith deletion. No replacement needed — preflight logic moves inside each callable.
 - [ ] `tests/unit/test_reflections_multi_repo.py` — UPDATE: patches `scripts.reflections.load_local_projects` → update import to `reflections.utils.load_local_projects`.
 - [ ] `tests/unit/test_reflections_scheduling.py` — likely unaffected (tests the YAML scheduler, not the monolith). Verify imports.
-- [ ] `tests/unit/test_reflections_report.py` — UPDATE or DELETE: if it tests `scripts.reflections` report generation, migrate to `reflections/daily_report.py`.
+- [ ] `tests/unit/test_reflections_report.py` — VERIFY: test imports from `scripts.reflections_report` (a separate standalone module, not the monolith `scripts.reflections`). No changes expected — `scripts/reflections_report.py` is not deleted by this plan. Confirm imports still resolve after monolith deletion. (Implementation note: line 8 imports `from scripts.reflections_report import create_reflections_issue, ...` — this module is independent and survives intact.)
 - [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: add tests for vault fallback path in `load_registry()`.
 - [ ] Add `tests/unit/test_reflections_package.py` — new: smoke tests for each callable in the `reflections/` package (import, call with mocked Redis, assert dict return).
 
@@ -200,7 +201,7 @@ Shared helpers currently on `ReflectionRunner` that multiple units need (e.g., `
 - **`depends_on` in YAML**: Do not add a `depends_on` field to the YAML schema to express pipeline ordering. Keep each pipeline (`session_intelligence`, `behavioral_learning`, `daily_report`) as a single callable that internally sequences its sub-steps. Introducing DAG scheduling is a separate effort.
 - **Migrating `ReflectionRun` data**: Do not write a data migration script for existing `ReflectionRun` records. They are day-keyed (date strings). After 30 days they expire via TTL (the monolith calls `cleanup_expired(max_age_days=30)`). Just let them die.
 - **Per-unit rate limiting**: Do not add per-unit Redis rate-limiting logic in Phase A. The YAML scheduler's `interval` field already prevents over-triggering.
-- **`daily-report-and-notify` ordering guarantee**: The "must run after all other daily reflections" constraint from the issue cannot be mechanically enforced by the current scheduler (no DAG). Accept this limitation. The `daily-report-and-notify` callable simply aggregates whatever findings exist in Redis at run time — it does not need other units to have finished first. The Telegram notification at the end of that unit is the best-effort daily summary.
+- **`daily-report-and-notify` ordering guarantee**: The "must run after all other daily reflections" constraint from the issue (#748 acceptance criterion) cannot be mechanically enforced by the current scheduler (no DAG). Accept this limitation. The `daily-report-and-notify` callable simply aggregates whatever findings exist in Redis at run time — it does not need other units to have finished first. The Telegram notification at the end of that unit is the best-effort daily summary. **A follow-up GitHub issue must be created after this plan ships** to track DAG scheduling support so the unfulfilled AC is not silently dropped.
 - **`behavioral_learning` / `models.cyclic_episode`**: The step currently guards against `ImportError` on `models.cyclic_episode`. Keep this guard in the extracted callable. Do not implement `CyclicEpisode` as part of this plan.
 
 ## Risks
@@ -211,7 +212,7 @@ Shared helpers currently on `ReflectionRunner` that multiple units need (e.g., `
 
 ### Risk 2: `docs_auditor.py` loses its `last_audit_date` state
 **Impact:** `DocAuditor` re-audits all docs on every run instead of skipping recently audited ones.
-**Mitigation:** Before deleting `ReflectionRun`, migrate `_load_state` / `_record_audit_date` to a plain Redis key (`docs_auditor:last_audit_date`) via `redis.Redis().set()` / `.get()`. Write a targeted test to confirm state persists across calls.
+**Mitigation:** Before deleting `ReflectionRun`, migrate `_load_state` / `_record_audit_date` to a plain Redis key (`docs_auditor:last_audit_date`) using the project's standard Redis connection (`redis.Redis.from_url(settings.REDIS_URL)` from `config/settings.py`). The key is global (not per-project) — `docs_auditor.py` audits a single codebase and `ReflectionRun` was never project-scoped for this usage. Write a targeted test to confirm state persists across calls.
 
 ### Risk 3: Config relocation breaks fresh-clone setup
 **Impact:** A fresh machine without `~/Desktop/Valor/reflections.yaml` fails to start the scheduler.
@@ -219,7 +220,7 @@ Shared helpers currently on `ReflectionRunner` that multiple units need (e.g., `
 
 ### Risk 4: Launchd plist still installed on live machines
 **Impact:** After repo deletion of the plist, existing machines still have `com.valor.reflections` running and triggering the now-deleted script → launchd errors.
-**Mitigation:** The `/update` skill must include an `unload_reflections_launchd()` step that runs `launchctl unload` on the old plist path before deleting it. Add this to `scripts/update/` and call it from `remote-update.sh`.
+**Mitigation:** The `/update` skill must include an `unload_reflections_launchd()` step that sources `.env` to read `SERVICE_LABEL_PREFIX`, derives the label dynamically (`${SERVICE_LABEL_PREFIX:-com.valor}.reflections`), and unloads `~/Library/LaunchAgents/${LABEL}.plist` before deleting it. A hardcoded path will silently miss machines with a non-default prefix. Add this to `scripts/update/` and call it from `remote-update.sh`.
 
 ### Risk 5: `memory-decay-prune` deletes important memories
 **Impact:** Memories with low importance but meaningful content are permanently deleted.
@@ -230,7 +231,7 @@ Shared helpers currently on `ReflectionRunner` that multiple units need (e.g., `
 ### Race 1: YAML scheduler fires a unit while the monolith is mid-run
 **Location:** `agent/reflection_scheduler.py` + `com.valor.reflections` launchd
 **Trigger:** During the transition period (Phase A complete, Phase C not yet started), both paths may run `popoto-index-cleanup` or `analytics-rollup` concurrently.
-**Mitigation:** The YAML scheduler's `is_reflection_running()` guard prevents concurrent runs of the same reflection name. For the transition window, use distinct names: monolith step keys use `_` (e.g., `analytics_rollup`); YAML entries use `-` (e.g., `analytics-rollup`). No collision.
+**Mitigation:** All new YAML entries added in Phase A **must use `enabled: false`** until the monolith is deleted in Phase C. This prevents any concurrent execution — the YAML scheduler won't execute disabled entries regardless of name differences. Enable entries in Phase C only after the monolith is confirmed deleted. The naming distinction (monolith uses `_`, YAML uses `-`) provides an additional guard but is not sufficient on its own because the distinct names bypass `is_reflection_running()` — meaning both could execute concurrently if both are enabled.
 
 ### Race 2: Config symlink creation and scheduler startup race
 **Location:** `agent/reflection_scheduler.py:REGISTRY_PATH` vs `scripts/update/env_sync.py`
@@ -252,7 +253,7 @@ The `/update` skill and `scripts/remote-update.sh` need two additions:
 
 1. **`sync_reflections_yaml()`** in `scripts/update/env_sync.py`: follows the same pattern as `sync_projects_json()` — checks for `~/Desktop/Valor/reflections.yaml`, creates `config/reflections.yaml` symlink if vault file exists, skips gracefully if not (in-repo fallback takes over).
 
-2. **`unload_reflections_launchd()`** in `scripts/update/` or inline in `remote-update.sh`: runs `launchctl unload ~/Library/LaunchAgents/com.valor.reflections.plist 2>/dev/null` and removes the file if it exists. This is idempotent (safe to run on machines that never installed the launchd service).
+2. **`unload_reflections_launchd()`** in `scripts/update/` or inline in `remote-update.sh`: must read `SERVICE_LABEL_PREFIX` from `.env` using the same pattern as `scripts/install_reflections.sh` lines 14-17 (`set -a; source "$PROJECT_DIR/.env"; set +a`), then derive the label dynamically: `LABEL="${SERVICE_LABEL_PREFIX:-com.valor}.reflections"` and unload `~/Library/LaunchAgents/${LABEL}.plist 2>/dev/null`, removing the file if it exists. Using a hardcoded `com.valor.reflections` path will silently fail on machines where `SERVICE_LABEL_PREFIX` was customized. This is idempotent (safe to run on machines that never installed the launchd service).
 
 Both additions are called from `remote-update.sh` in the config sync phase.
 
@@ -342,7 +343,7 @@ Tier 1 — builder, validator, documentarian.
 - Create `reflections/__init__.py`.
 - Create `reflections/utils.py` with `load_local_projects`, `has_existing_github_work`, `is_ignored`, `run_llm_reflection` extracted from monolith helpers.
 - Create `reflections/maintenance.py` with `run_legacy_code_scan`, `run_redis_ttl_cleanup`, `run_redis_data_quality`, `run_branch_plan_cleanup`, `run_disk_space_check`, `run_analytics_rollup`.
-- Add YAML entries for all 6 units with intervals from the plan's solution table.
+- Add YAML entries for all 6 units with intervals from the plan's solution table. **Set `enabled: false` on all new entries** — they will be enabled in Phase C after monolith deletion.
 - Add smoke tests.
 
 ### 2. Extract auditing units
@@ -353,7 +354,7 @@ Tier 1 — builder, validator, documentarian.
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `reflections/auditing.py` with `run_log_review`, `run_documentation_audit`, `run_skills_audit`, `run_hooks_audit`, `run_feature_docs_audit`, `run_pr_review_audit`.
-- Add YAML entries for all 6 units.
+- Add YAML entries for all 6 units. **Set `enabled: false` on all new entries.**
 - Add smoke tests.
 
 ### 3. Extract task management units
@@ -364,7 +365,7 @@ Tier 1 — builder, validator, documentarian.
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `reflections/task_management.py` with `run_task_management`, `run_principal_staleness`.
-- Add YAML entries.
+- Add YAML entries. **Set `enabled: false` on all new entries.**
 - Add smoke tests.
 
 ### 4. Extract pipeline units
@@ -377,7 +378,7 @@ Tier 1 — builder, validator, documentarian.
 - Create `reflections/session_intelligence.py` with `run()` calling `step_session_analysis`, `step_llm_reflection`, `step_auto_fix_bugs` logic (inlined from monolith, using `reflections/utils.py` helpers).
 - Create `reflections/behavioral_learning.py` with `run()` and `ImportError` guard for `models.cyclic_episode`.
 - Create `reflections/daily_report.py` with `run()`.
-- Add YAML entries for all 3 pipelines.
+- Add YAML entries for all 3 pipelines. **Set `enabled: false` on all new entries.**
 - Add smoke tests (with appropriate mocking for Anthropic API calls in session_intelligence).
 
 ### 5. Implement memory-management reflections
@@ -408,12 +409,13 @@ Tier 1 — builder, validator, documentarian.
 - **Assigned To**: deletion-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Migrate `scripts/docs_auditor.py` `_load_state` / `_record_audit_date` to plain Redis key `docs_auditor:last_audit_date`.
+- Migrate `scripts/docs_auditor.py` `_load_state` / `_record_audit_date` to plain Redis key `docs_auditor:last_audit_date` using `redis.Redis.from_url(settings.REDIS_URL)` from `config/settings.py`. Key is global (not per-project).
 - Delete `scripts/reflections.py`, `scripts/install_reflections.sh`, `com.valor.reflections.plist`.
 - Delete `models/reflection_run.py`. Update `models/reflections.py` shim and `models/__init__.py`.
+- **Enable all previously-disabled YAML entries** (set `enabled: true` for all entries added in Phase A tasks 1-4). The monolith is now gone — the race condition no longer exists.
 - Update `agent/reflection_scheduler.py` `load_registry()` to: check `os.environ.get("REFLECTIONS_YAML")` → `~/Desktop/Valor/reflections.yaml` → `config/reflections.yaml`.
 - Add `sync_reflections_yaml()` to `scripts/update/env_sync.py`.
-- Add `unload_reflections_launchd()` call to `scripts/remote-update.sh`.
+- Add `unload_reflections_launchd()` call to `scripts/remote-update.sh` (must source `.env` to read `SERVICE_LABEL_PREFIX`, derive label dynamically as `${SERVICE_LABEL_PREFIX:-com.valor}.reflections`).
 - Copy `config/reflections.yaml` to `~/Desktop/Valor/reflections.yaml`, then replace `config/reflections.yaml` with a symlink.
 
 ### 8. Validate deletion
@@ -466,9 +468,14 @@ Tier 1 — builder, validator, documentarian.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | `test_reflections_report.py` disposition is wrong — imports from `scripts.reflections_report` (standalone module, not monolith) | Test Impact entry updated to VERIFY | `scripts/reflections_report.py` is not deleted; no migration needed |
+| CONCERN | Operator | `unload_reflections_launchd()` must read `SERVICE_LABEL_PREFIX` from `.env` dynamically | Risk 4 and Update System updated | Pattern from `install_reflections.sh` lines 14-17: `LABEL="${SERVICE_LABEL_PREFIX:-com.valor}.reflections"` |
+| CONCERN | Adversary | `docs_auditor.py` Redis migration leaves connection approach unspecified | Risk 2 and Task 7 updated | Use `redis.Redis.from_url(settings.REDIS_URL)`; key is global (not per-project) |
+| CONCERN | Adversary, Operator | Transition window race: distinct names bypass `is_reflection_running()` guard | Phase A, Race 1, Tasks 1-4, Task 7 updated | New YAML entries use `enabled: false` in Phase A; enabled in Phase C after monolith deleted |
+| NIT | Skeptic | Reference to non-existent `docs/plans/memory-consolidation-reflection.md` | Freshness Check section corrected | Referenced as closed issue/PR instead |
+| NIT | Operator | Unfulfilled AC (daily-report ordering) not tracked after plan ships | Rabbit Holes note updated | Follow-up GitHub issue to be created after ship |
 
 ---
 
