@@ -125,7 +125,7 @@ Jobs support parent-child decomposition via the `parent_agent_session_id` field 
 | `parent_agent_session_id` | `KeyField(null=True)` | Links child to parent session. Indexed for efficient queries. |
 | `stable_agent_session_id` | `KeyField(null=True)` | UUID set once at creation, never changes on delete-and-recreate. Used as dependency reference key. |
 | ~~`depends_on`~~ | ~~`ListField(null=True)`~~ | Removed. Dependency tracking was removed from the model. |
-| `commit_sha` | `Field(null=True)` | HEAD commit SHA for checkpoint/restore across session pause/resume. |
+| `commit_sha` | `@property` | HEAD commit SHA for checkpoint/restore. Derived from the latest `checkpoint` event in `session_events` — not a stored Popoto field. |
 
 ### Status Values
 

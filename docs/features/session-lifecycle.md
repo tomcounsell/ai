@@ -179,7 +179,7 @@ Any `AgentSession` method that saves companion fields (non-status fields) **must
 | `retain_for_resume` save | `["retain_for_resume", "updated_at"]` | `agent/agent_session_queue.py` |
 | Session metadata save | `["updated_at", "branch_name", "task_list_id"]` | `agent/agent_session_queue.py` |
 | `response_delivered_at` save | `["response_delivered_at", "updated_at"]` | `agent/agent_session_queue.py` |
-| Branch/commit checkpoint | `["branch_name", "commit_sha", "updated_at"]` | `agent/agent_session_queue.py` |
+| Branch/commit checkpoint | `["branch_name", "session_events", "updated_at"]` | `agent/agent_session_queue.py` |
 | Resume hydration | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
 | Priority reorder | `["priority", "updated_at"]` | `agent/agent_session_queue.py` |
 | Continuation project_config | `["project_config", "updated_at"]` | `agent/agent_session_queue.py` |
