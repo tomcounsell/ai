@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -146,3 +148,48 @@ class TestGracefulDegradation:
 
         for stub in EXPECTED_STUBS:
             assert (sdlc_dir / stub).exists(), f"Missing in real repo: {stub}"
+
+
+class TestCheckExistingReflectionPr:
+    """Tests for _check_existing_reflection_pr duplicate-PR guard."""
+
+    def test_returns_true_when_existing_pr_found(self) -> None:
+        """Returns True when gh finds an open reflection PR."""
+        from scripts.sdlc_reflection import _check_existing_reflection_pr
+
+        mock_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                [{"number": 100, "title": "docs(sdlc): reflection update (2026-04-10)"}]
+            ),
+            stderr="",
+        )
+        with patch("scripts.sdlc_reflection.subprocess.run", return_value=mock_result):
+            assert _check_existing_reflection_pr() is True
+
+    def test_returns_false_when_no_existing_pr(self) -> None:
+        """Returns False when gh finds no open reflection PRs."""
+        from scripts.sdlc_reflection import _check_existing_reflection_pr
+
+        mock_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps([]),
+            stderr="",
+        )
+        with patch("scripts.sdlc_reflection.subprocess.run", return_value=mock_result):
+            assert _check_existing_reflection_pr() is False
+
+    def test_returns_false_on_gh_failure(self) -> None:
+        """Returns False (safe default) when gh command fails."""
+        from scripts.sdlc_reflection import _check_existing_reflection_pr
+
+        mock_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="gh: not logged in",
+        )
+        with patch("scripts.sdlc_reflection.subprocess.run", return_value=mock_result):
+            assert _check_existing_reflection_pr() is False

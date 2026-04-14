@@ -110,6 +110,7 @@ def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
                 path.write_text(_SDLC_STUB_TEMPLATE.format(name=name))
         return None
     except Exception as e:
+        print(f"[migration] create_sdlc_stubs failed: {e}")
         return str(e)
 
 

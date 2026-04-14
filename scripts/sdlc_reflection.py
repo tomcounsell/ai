@@ -217,9 +217,48 @@ def propose_edits(
     return modified
 
 
+def _check_existing_reflection_pr() -> bool:
+    """Check if an open reflection PR already exists (title-prefix search).
+
+    Returns True if a matching open PR is found, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--search",
+                "docs(sdlc): reflection update",
+                "--json",
+                "number,title",
+                "--limit",
+                "5",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_DIR,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            log(f"gh pr list (duplicate check) failed: {result.stderr[:300]}")
+            return False
+        prs = json.loads(result.stdout)
+        return len(prs) > 0
+    except Exception as e:
+        log(f"_check_existing_reflection_pr error: {e}")
+        return False
+
+
 def open_pr_with_changes(modified_stages: list[str]) -> bool:
     """Commit changes to a branch and open a PR for human review."""
     if not modified_stages:
+        return False
+
+    if _check_existing_reflection_pr():
+        log("Reflection PR already exists; skipping PR creation")
         return False
 
     branch = f"session/sdlc-reflection-{datetime.now(UTC).strftime('%Y%m%d')}"
