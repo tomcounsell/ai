@@ -1,5 +1,5 @@
 ---
-status: Build
+status: Approved
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -182,24 +182,24 @@ No `.mcp.json` changes needed.
 
 ## Documentation
 
-- [ ] Create `docs/features/sdlc-repo-addenda.md` describing the `docs/sdlc/` system and reflection agent
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `CLAUDE.md` quick reference table to include `docs/sdlc/` as a resource and `tail -f logs/sdlc_reflection.log` as a log command
-- [ ] Add comment header to each `docs/sdlc/do-X.md` stub per spec
-- [ ] Document that adding a 9th SDLC stage requires a new named migration entry in `scripts/update/migrations.py`
+- [x] Create `docs/features/sdlc-repo-addenda.md` describing the `docs/sdlc/` system and reflection agent
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update `CLAUDE.md` quick reference table to include `docs/sdlc/` as a resource and `tail -f logs/sdlc_reflection.log` as a log command
+- [x] Add comment header to each `docs/sdlc/do-X.md` stub per spec
+- [x] Document that adding a 9th SDLC stage requires a new named migration entry in `scripts/update/migrations.py`
 
 ## Success Criteria
 
-- [ ] `docs/sdlc/` exists with 8 stub files after running `/update` on a clean machine
-- [ ] Running `/update` on a machine with all 8 files is a no-op (idempotent)
-- [ ] `/do-plan` reads `docs/sdlc/do-plan.md` when present and incorporates its content
-- [ ] Same addendum check exists in do-build, do-test, do-patch, do-pr-review, do-docs, do-merge
-- [ ] Reflection agent cron entry runs every 3 days
-- [ ] Each stub file has a comment header: "Do not duplicate content from the global skill"
-- [ ] No addendum file exceeds 300 lines (enforced by reflection agent prompt)
-- [ ] `docs/sdlc/do-plan.md` ships with hand-authored content (Popoto migration note, required plan sections)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `docs/sdlc/` exists with 8 stub files after running `/update` on a clean machine
+- [x] Running `/update` on a machine with all 8 files is a no-op (idempotent)
+- [x] `/do-plan` reads `docs/sdlc/do-plan.md` when present and incorporates its content
+- [x] Same addendum check exists in do-build, do-test, do-patch, do-pr-review, do-docs, do-merge
+- [x] Reflection agent cron entry runs every 3 days
+- [x] Each stub file has a comment header: "Do not duplicate content from the global skill"
+- [x] No addendum file exceeds 300 lines (enforced by reflection agent prompt)
+- [x] `docs/sdlc/do-plan.md` ships with hand-authored content (Popoto migration note, required plan sections)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
