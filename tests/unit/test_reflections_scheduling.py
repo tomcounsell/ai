@@ -1,111 +1,17 @@
-"""Tests for reflections scheduling infrastructure (plist and install script)."""
+"""Tests for reflections scheduling infrastructure in remote-update.sh.
+
+Note: com.valor.reflections.plist and scripts/install_reflections.sh were deleted
+as part of the monolith removal (Phase C). Tests for those files are removed here.
+The reflections scheduler now runs via agent/reflection_scheduler.py as a subprocess
+managed by the standalone worker, with no launchd plist of its own.
+"""
 
 from __future__ import annotations
 
-import plistlib
 import subprocess
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-
-
-class TestReflectionsPlist:
-    """Tests for the launchd plist configuration."""
-
-    def test_plist_is_valid_xml(self):
-        plist_path = PROJECT_ROOT / "com.valor.reflections.plist"
-        assert plist_path.exists(), "Plist file must exist in project root"
-        with open(plist_path, "rb") as f:
-            data = plistlib.load(f)
-        assert isinstance(data, dict)
-
-    def test_plist_label(self):
-        """Source-of-truth template uses the __SERVICE_LABEL__ placeholder
-        which install scripts substitute with ${SERVICE_LABEL_PREFIX}.reflections."""
-        with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:
-            data = plistlib.load(f)
-        assert data["Label"] == "__SERVICE_LABEL__"
-
-    def test_plist_label_renders_with_custom_prefix(self, tmp_path):
-        """Verify install script renders the placeholder for a custom prefix."""
-        import os
-
-        env = os.environ.copy()
-        env["SERVICE_LABEL_PREFIX"] = "com.example"
-        env["HOME"] = str(tmp_path)
-        # Create LaunchAgents dir to avoid actual installation failure surfacing
-        (tmp_path / "Library" / "LaunchAgents").mkdir(parents=True)
-        # Render the plist directly using the same sed pattern the install script uses
-        src = (PROJECT_ROOT / "com.valor.reflections.plist").read_text()
-        rendered = (
-            src.replace("__PROJECT_DIR__", str(PROJECT_ROOT))
-            .replace("__HOME_DIR__", str(tmp_path))
-            .replace("__SERVICE_LABEL__", "com.example.reflections")
-        )
-        rendered_path = tmp_path / "rendered.plist"
-        rendered_path.write_text(rendered)
-        with open(rendered_path, "rb") as f:
-            data = plistlib.load(f)
-        assert data["Label"] == "com.example.reflections"
-
-    def test_plist_schedule_6am(self):
-        with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:
-            data = plistlib.load(f)
-        schedule = data["StartCalendarInterval"]
-        assert schedule["Hour"] == 6
-        assert schedule["Minute"] == 0
-
-    def test_plist_points_to_reflections_script(self):
-        with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:
-            data = plistlib.load(f)
-        args = data["ProgramArguments"]
-        # Uses bash -c to source .env before running python
-        assert args[0] == "/bin/bash"
-        assert "reflections.py" in args[-1]
-        assert ".env" in args[-1]
-
-    def test_plist_log_paths(self):
-        with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:
-            data = plistlib.load(f)
-        assert "reflections.log" in data["StandardOutPath"]
-        assert "reflections_error.log" in data["StandardErrorPath"]
-
-    def test_plist_has_environment_variables(self):
-        with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:
-            data = plistlib.load(f)
-        env = data["EnvironmentVariables"]
-        assert "PATH" in env
-        assert "HOME" in env
-
-    def test_plist_has_working_directory(self):
-        with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:
-            data = plistlib.load(f)
-        assert "WorkingDirectory" in data
-
-
-class TestInstallScript:
-    """Tests for the install script."""
-
-    def test_install_script_exists_and_executable(self):
-        script = PROJECT_ROOT / "scripts" / "install_reflections.sh"
-        assert script.exists()
-        assert script.stat().st_mode & 0o111, "Script must be executable"
-
-    def test_install_script_syntax_valid(self):
-        script = PROJECT_ROOT / "scripts" / "install_reflections.sh"
-        result = subprocess.run(
-            ["bash", "-n", str(script)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"Syntax error: {result.stderr}"
-
-    def test_install_script_references_plist(self):
-        script = PROJECT_ROOT / "scripts" / "install_reflections.sh"
-        content = script.read_text()
-        assert "com.valor.reflections" in content
-        assert "launchctl bootstrap" in content
-        assert "launchctl bootout" in content
 
 
 class TestRemoteUpdateScript:
@@ -130,20 +36,6 @@ class TestRemoteUpdateScript:
 class TestInstallMechanism:
     """Tests that all launchctl calls use the modern bootstrap/bootout API."""
 
-    def test_install_script_uses_bootstrap(self):
-        """install_reflections.sh must use launchctl bootstrap, not load."""
-        script = PROJECT_ROOT / "scripts" / "install_reflections.sh"
-        content = script.read_text()
-        assert "launchctl bootstrap" in content, "Must use launchctl bootstrap"
-        assert "launchctl load" not in content, "Must not use deprecated launchctl load"
-
-    def test_install_script_uses_bootout(self):
-        """install_reflections.sh must use launchctl bootout, not unload."""
-        script = PROJECT_ROOT / "scripts" / "install_reflections.sh"
-        content = script.read_text()
-        assert "launchctl bootout" in content, "Must use launchctl bootout"
-        assert "launchctl unload" not in content, "Must not use deprecated launchctl unload"
-
     def test_remote_update_uses_bootstrap(self):
         """remote-update.sh must use launchctl bootstrap, not load."""
         script = PROJECT_ROOT / "scripts" / "remote-update.sh"
@@ -159,14 +51,21 @@ class TestInstallMechanism:
         assert "launchctl unload" not in content, "Must not use deprecated launchctl unload"
 
     def test_remote_update_no_silent_failures(self):
-        """remote-update.sh must not use || true on launchctl calls."""
+        """remote-update.sh must not use || true on launchctl calls, except
+        for intentional migration guards (daydream and reflections legacy unload)."""
         script = PROJECT_ROOT / "scripts" / "remote-update.sh"
         content = script.read_text()
         # Find all launchctl bootstrap/bootout lines and ensure none have || true
         for line in content.splitlines():
             if "launchctl bootstrap" in line or "launchctl bootout" in line:
-                # The old daydream bootout is allowed to have || true (migration guard)
+                # Migration guards: these services may not exist on all machines
+                # during the transition period, so || true is intentional.
                 if "com.valor.daydream" in line:
+                    continue
+                if "REFLECTIONS_LABEL" in line or "com.valor.reflections" in line:
+                    # NOTE: reflections legacy-unload bootout uses || true as a
+                    # migration guard — the old service may not be loaded on all
+                    # machines. This is intentional, not a silent failure swallower.
                     continue
                 assert "|| true" not in line, (
                     f"launchctl call should not swallow errors with || true: {line}"
