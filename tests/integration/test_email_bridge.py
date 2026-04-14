@@ -249,6 +249,155 @@ class TestProcessInboundEmail:
 
 
 # ---------------------------------------------------------------------------
+# Tests: domain-routed inbound email → outbound SMTP reply
+# ---------------------------------------------------------------------------
+
+
+class TestDomainRoutedEmailHandlerDirect:
+    """Tests for EmailOutputHandler.send() SMTP call with domain-routed sessions."""
+
+    def _domain_project_config(self, key: str = "psyoptimal") -> dict:
+        """Return a minimal project config with email.domains (no contacts)."""
+        return {
+            "_key": key,
+            "name": key,
+            "working_directory": "/tmp/test-psyoptimal",
+            "email": {
+                "domains": ["psyoptimal.com"],
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_domain_sender_enqueues_session(self, monkeypatch):
+        """Sender @psyoptimal.com (domain-only project) triggers enqueue_agent_session."""
+        import bridge.routing as routing_module
+        from bridge.email_bridge import _process_inbound_email
+
+        project_key = "psyoptimal"
+        project = self._domain_project_config(project_key)
+        config = {"projects": {project_key: project}}
+
+        # Patch EMAIL_DOMAIN_TO_PROJECT so find_project_for_email resolves via domain
+        monkeypatch.setattr(routing_module, "EMAIL_TO_PROJECT", {})
+        monkeypatch.setattr(
+            routing_module,
+            "EMAIL_DOMAIN_TO_PROJECT",
+            {"psyoptimal.com": project},
+        )
+        monkeypatch.setattr(routing_module, "ACTIVE_PROJECTS", [project_key])
+
+        mock_enqueue = AsyncMock()
+        with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+            test_r = _test_redis()
+            with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                await _process_inbound_email(
+                    _parsed_email(
+                        from_addr="tcounsell@psyoptimal.com",
+                        subject="Test from domain",
+                    ),
+                    config,
+                )
+            test_r.close()
+
+        mock_enqueue.assert_called_once()
+        kwargs = mock_enqueue.call_args.kwargs
+        assert kwargs["project_key"] == project_key
+        assert kwargs["sender_name"] == "tcounsell@psyoptimal.com"
+        extra = kwargs.get("extra_context_overrides", {})
+        assert extra.get("transport") == "email"
+        assert extra.get("email_from") == "tcounsell@psyoptimal.com"
+
+    @pytest.mark.asyncio
+    async def test_domain_routed_send_calls_send_smtp(self, monkeypatch):
+        """EmailOutputHandler.send() calls _send_smtp with correct To and In-Reply-To."""
+        from bridge.email_bridge import EmailOutputHandler
+
+        smtp_config = {
+            "host": "smtp.example.com",
+            "port": 587,
+            "user": "noreply@psyoptimal.com",
+            "password": "secret",
+            "use_tls": True,
+        }
+        handler = EmailOutputHandler(smtp_config=smtp_config)
+
+        # Build a minimal mock session with extra_context from the domain routing path
+        class _MockSession:
+            session_id = "test-session-domain-001"
+            extra_context = {
+                "transport": "email",
+                "email_message_id": "<original-msg@psyoptimal.com>",
+                "email_from": "tcounsell@psyoptimal.com",
+                "email_subject": "Domain test",
+            }
+
+        sent_calls = []
+
+        def _capture_smtp(to_addr, mime_msg):
+            sent_calls.append({"to": to_addr, "msg": mime_msg})
+
+        monkeypatch.setattr(handler, "_send_smtp", _capture_smtp)
+
+        # Patch asyncio.to_thread to call the function synchronously (avoids real thread)
+        async def _sync_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr("bridge.email_bridge.asyncio.to_thread", _sync_to_thread)
+
+        await handler.send(
+            chat_id="tcounsell@psyoptimal.com",
+            text="Hello from domain routing!",
+            reply_to_msg_id=0,
+            session=_MockSession(),
+        )
+
+        assert len(sent_calls) == 1, "Expected exactly one SMTP send"
+        call = sent_calls[0]
+        assert call["to"] == "tcounsell@psyoptimal.com"
+        assert call["msg"]["To"] == "tcounsell@psyoptimal.com"
+        assert call["msg"]["In-Reply-To"] == "<original-msg@psyoptimal.com>"
+        assert call["msg"]["Subject"].startswith("Re:")
+
+    @pytest.mark.asyncio
+    async def test_no_bridge_callbacks_warning_suppressed_for_email_transport(self, monkeypatch):
+        """Regression guard: enqueued email session has transport=email in extra_context,
+        confirming the handler would be found via (project_key, 'email') composite key."""
+        import bridge.routing as routing_module
+        from bridge.email_bridge import _process_inbound_email
+
+        project_key = "psyoptimal"
+        project = self._domain_project_config(project_key)
+        config = {"projects": {project_key: project}}
+
+        monkeypatch.setattr(routing_module, "EMAIL_TO_PROJECT", {})
+        monkeypatch.setattr(
+            routing_module,
+            "EMAIL_DOMAIN_TO_PROJECT",
+            {"psyoptimal.com": project},
+        )
+        monkeypatch.setattr(routing_module, "ACTIVE_PROJECTS", [project_key])
+
+        mock_enqueue = AsyncMock()
+        with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+            test_r = _test_redis()
+            with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                await _process_inbound_email(
+                    _parsed_email(from_addr="user@psyoptimal.com"),
+                    config,
+                )
+            test_r.close()
+
+        mock_enqueue.assert_called_once()
+        extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+        # transport=email in extra_context means the worker will look up
+        # (project_key, "email") composite key and find EmailOutputHandler
+        assert extra.get("transport") == "email", (
+            "transport='email' must be set so worker resolves EmailOutputHandler "
+            "via composite key — without it 'No bridge callbacks registered' is emitted"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tests: health timestamp in _email_inbox_loop
 # ---------------------------------------------------------------------------
 
@@ -313,3 +462,131 @@ class TestHealthTimestamp:
         # Cleanup
         test_r.delete(REDIS_LAST_POLL_KEY)
         test_r.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: domain-routed inbound email → session enqueued (the bug fix path)
+# ---------------------------------------------------------------------------
+
+
+def _domain_project_config(key: str = "psyoptimal") -> dict:
+    """Return a minimal project config dict with email.domains section (no contacts)."""
+    return {
+        "_key": key,
+        "name": key,
+        "working_directory": "/tmp/psyoptimal",
+        "email": {
+            "domains": ["psyoptimal.com"],
+        },
+    }
+
+
+class TestDomainRoutedEmailReply:
+    """Domain-routed inbound email should enqueue a session (not silently discard).
+
+    This exercises the fix in worker/__main__.py:
+      _should_register_email_handler() now returns True for email.domains-only projects,
+      so EmailOutputHandler gets registered and the reply is SMTP-delivered.
+
+    The integration test validates the inbound routing path:
+    - find_project_for_email() resolves via EMAIL_DOMAIN_TO_PROJECT (domain fallback)
+    - enqueue_agent_session() is called with correct project_key and extra_context
+    - "No bridge callbacks" log line is NOT emitted (regression guard for silent-discard)
+    """
+
+    @pytest.mark.asyncio
+    async def test_domain_routed_email_enqueues_session(self):
+        """Inbound email from @psyoptimal.com resolves via domain routing and enqueues."""
+        import bridge.routing as routing
+        from bridge.email_bridge import _process_inbound_email
+
+        project_key = "psyoptimal"
+        project = _domain_project_config(project_key)
+        config = {
+            "projects": {
+                project_key: project,
+            }
+        }
+
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_domain_map = routing.EMAIL_DOMAIN_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            # No exact-match entry — only domain routing
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_DOMAIN_TO_PROJECT["psyoptimal.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+
+            mock_enqueue = AsyncMock()
+            with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                test_r = _test_redis()
+                with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                    await _process_inbound_email(
+                        _parsed_email(
+                            from_addr="tcounsell@psyoptimal.com",
+                            subject="Domain routed inquiry",
+                            body="Hello from a domain-routed sender.",
+                        ),
+                        config,
+                    )
+                test_r.close()
+
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.EMAIL_DOMAIN_TO_PROJECT.clear()
+            routing.EMAIL_DOMAIN_TO_PROJECT.update(original_domain_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        mock_enqueue.assert_called_once()
+        kwargs = mock_enqueue.call_args.kwargs
+        assert kwargs["project_key"] == project_key
+        assert kwargs["message_text"] == "Hello from a domain-routed sender."
+        assert kwargs["sender_name"] == "tcounsell@psyoptimal.com"
+
+    @pytest.mark.asyncio
+    async def test_domain_routed_email_sets_transport_in_extra_context(self):
+        """Domain-routed email propagates transport=email in extra_context_overrides."""
+        import bridge.routing as routing
+        from bridge.email_bridge import _process_inbound_email
+
+        project_key = "psyoptimal"
+        project = _domain_project_config(project_key)
+        config = {"projects": {project_key: project}}
+
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_domain_map = routing.EMAIL_DOMAIN_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_DOMAIN_TO_PROJECT["psyoptimal.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+
+            mock_enqueue = AsyncMock()
+            with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                test_r = _test_redis()
+                with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                    await _process_inbound_email(
+                        _parsed_email(
+                            from_addr="tcounsell@psyoptimal.com",
+                            message_id="<domain-msg-001@psyoptimal.com>",
+                            subject="Domain-routed subject",
+                        ),
+                        config,
+                    )
+                test_r.close()
+
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.EMAIL_DOMAIN_TO_PROJECT.clear()
+            routing.EMAIL_DOMAIN_TO_PROJECT.update(original_domain_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        mock_enqueue.assert_called_once()
+        extra = mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+        assert extra.get("transport") == "email"
+        assert extra.get("email_from") == "tcounsell@psyoptimal.com"
+        assert extra.get("email_subject") == "Domain-routed subject"

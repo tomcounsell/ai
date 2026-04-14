@@ -94,6 +94,23 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _should_register_email_handler(project_cfg: dict) -> bool:
+    """Return True if the project has any email routing configured.
+
+    Registers EmailOutputHandler when either email.contacts OR email.domains
+    is non-empty, matching the inbound routing logic in bridge.routing which
+    builds both an address map and a domain map.
+
+    Args:
+        project_cfg: Project configuration dict from projects.json.
+
+    Returns:
+        True if the project should have an EmailOutputHandler registered.
+    """
+    email_cfg = project_cfg.get("email", {}) or {}
+    return bool(email_cfg.get("contacts") or email_cfg.get("domains"))
+
+
 def _load_projects(project_filter: str | None = None) -> dict:
     """Load project configurations from projects.json.
 
@@ -232,10 +249,9 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         register_callbacks(project_key, handler=handler)
         logger.info(f"[{project_key}] Registered TelegramRelayOutputHandler")
 
-    # Register EmailOutputHandler for projects with email contacts config
+    # Register EmailOutputHandler for projects with any email routing config
     for project_key, project_cfg in projects.items():
-        email_contacts = project_cfg.get("email", {}).get("contacts", {})
-        if email_contacts:
+        if _should_register_email_handler(project_cfg):
             register_callbacks(project_key, transport="email", handler=email_handler)
             logger.info(f"[{project_key}] Registered EmailOutputHandler (transport=email)")
 

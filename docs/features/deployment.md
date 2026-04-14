@@ -161,9 +161,9 @@ Both Bridge and Worker must run on bridge machines. The bridge is I/O only and d
 
 ### Email Bridge
 
-The email bridge runs as an optional service on bridge machines. It polls IMAP every 30 seconds and routes inbound emails to agent sessions via sender-based project matching.
+The email bridge runs as an optional service on bridge machines. It polls IMAP every 30 seconds and routes inbound emails to agent sessions via contact-based or domain-based project matching.
 
-**Prerequisites:** Add `email.contacts` to `projects.json` and set IMAP/SMTP credentials in `.env`:
+**Prerequisites:** Add `email.contacts` and/or `email.domains` to `projects.json` and set IMAP/SMTP credentials in `.env`:
 
 ```bash
 IMAP_HOST=imap.gmail.com
