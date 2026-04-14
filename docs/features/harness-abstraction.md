@@ -42,9 +42,10 @@ Final result string returned
 
 `get_response_via_harness()` in `agent/sdk_client.py` spawns `claude -p --output-format stream-json` as an async subprocess and parses stdout line-by-line:
 
-- **`content_block_delta` events**: Text chunks are accumulated internally in a full-text buffer
+- **`content_block_start` events**: Resets the internal text buffer — only the current block is retained, never a concatenation across blocks or turns
+- **`content_block_delta` events**: Text chunks accumulate into the current block buffer
 - **`result` event**: Contains the final response text and a `session_id` for potential future resume support
-- **Fallback**: If no `result` event fires (e.g. subprocess crash), the accumulated text is returned and a `WARNING` is logged
+- **Interruption (no `result` event)**: If the subprocess is killed before emitting `result` (e.g. crash or SIGTERM), the function returns `""` and logs at `ERROR` level. `BackgroundTask` skips the send on empty string — nothing reaches Telegram
 - **Error handling**: Malformed JSON lines are skipped; non-zero exit codes are logged with stderr
 
 The function returns the final result text only — it has no streaming callback parameter.
