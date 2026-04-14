@@ -907,3 +907,102 @@ class TestHealthCheckNoProgressRecovery:
         mock_transition.assert_called_once()
         assert mock_transition.call_args[0][1] == "pending"
         mock_finalize.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: register_callbacks() and _resolve_callbacks() transport-keyed behavior
+# ---------------------------------------------------------------------------
+
+
+class TestCallbackResolutionTransportKeyed:
+    """register_callbacks() and _resolve_callbacks() support (project_key, transport) keys."""
+
+    @pytest.fixture(autouse=True)
+    def isolate_callback_dicts(self, monkeypatch):
+        """Reset the module-level callback dicts before each test to avoid cross-test bleed."""
+        import agent.agent_session_queue as q
+
+        monkeypatch.setattr(q, "_send_callbacks", {})
+        monkeypatch.setattr(q, "_reaction_callbacks", {})
+
+    def test_register_and_resolve_with_transport(self):
+        """register_callbacks with transport='email' resolves via composite key."""
+        from agent.agent_session_queue import _resolve_callbacks, register_callbacks
+
+        class _MockHandler:
+            async def send(self, *args, **kwargs):
+                pass
+
+            async def react(self, *args, **kwargs):
+                pass
+
+        h = _MockHandler()
+        register_callbacks("proj", transport="email", handler=h)
+
+        send_cb, react_cb = _resolve_callbacks("proj", "email")
+        # Bound method identity: compare the underlying object and function
+        assert send_cb is not None
+        assert send_cb.__self__ is h
+        assert send_cb.__func__ is _MockHandler.send
+        assert react_cb is not None
+        assert react_cb.__self__ is h
+        assert react_cb.__func__ is _MockHandler.react
+
+    def test_no_registration_returns_none_none(self):
+        """No registration → _resolve_callbacks returns (None, None)."""
+        from agent.agent_session_queue import _resolve_callbacks
+
+        send_cb, react_cb = _resolve_callbacks("unknown_proj", "email")
+        assert send_cb is None
+        assert react_cb is None
+
+    def test_transport_agnostic_fallback(self):
+        """Transport-agnostic registration still resolves when transport lookup misses."""
+        from agent.agent_session_queue import _resolve_callbacks, register_callbacks
+
+        class _MockHandler:
+            async def send(self, *args, **kwargs):
+                pass
+
+            async def react(self, *args, **kwargs):
+                pass
+
+        h = _MockHandler()
+        # Register without transport (plain key)
+        register_callbacks("proj", handler=h)
+
+        # Resolve with a transport — should fall back to plain key
+        send_cb, react_cb = _resolve_callbacks("proj", "email")
+        assert send_cb is not None
+        assert send_cb.__self__ is h
+        assert react_cb is not None
+        assert react_cb.__self__ is h
+
+    def test_composite_key_wins_over_plain_key(self):
+        """Composite (project, transport) key wins over plain project_key fallback."""
+        from agent.agent_session_queue import _resolve_callbacks, register_callbacks
+
+        class _GenericHandler:
+            async def send(self, *args, **kwargs):
+                pass
+
+            async def react(self, *args, **kwargs):
+                pass
+
+        class _EmailHandler:
+            async def send(self, *args, **kwargs):
+                pass
+
+            async def react(self, *args, **kwargs):
+                pass
+
+        generic = _GenericHandler()
+        email_h = _EmailHandler()
+
+        register_callbacks("proj", handler=generic)
+        register_callbacks("proj", transport="email", handler=email_h)
+
+        send_cb, react_cb = _resolve_callbacks("proj", "email")
+        # Should resolve to email_h, not generic
+        assert send_cb.__self__ is email_h
+        assert react_cb.__self__ is email_h

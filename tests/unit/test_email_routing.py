@@ -112,10 +112,10 @@ class TestBuildEmailToProjectMap:
                 },
             },
         )
-        result = build_email_to_project_map(config)
-        assert "alice@example.com" in result
-        assert "bob@example.com" in result
-        assert result["alice@example.com"]["name"] == "ACME Corp"
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert "alice@example.com" in addr_map
+        assert "bob@example.com" in addr_map
+        assert addr_map["alice@example.com"]["name"] == "ACME Corp"
 
     def test_addresses_lowercased_in_map(self):
         """Map keys are always lowercase regardless of config casing."""
@@ -130,9 +130,9 @@ class TestBuildEmailToProjectMap:
                 },
             },
         )
-        result = build_email_to_project_map(config)
-        assert "alice@example.com" in result
-        assert "Alice@EXAMPLE.COM" not in result
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert "alice@example.com" in addr_map
+        assert "Alice@EXAMPLE.COM" not in addr_map
 
     def test_inactive_projects_excluded(self, monkeypatch):
         """Projects not in ACTIVE_PROJECTS are skipped."""
@@ -149,9 +149,9 @@ class TestBuildEmailToProjectMap:
                 "email": {"contacts": {"charlie@example.com": {}}},
             },
         )
-        result = build_email_to_project_map(config)
-        assert "alice@example.com" in result
-        assert "charlie@example.com" not in result
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert "alice@example.com" in addr_map
+        assert "charlie@example.com" not in addr_map
 
     def test_project_key_set_on_result_project(self):
         """build_email_to_project_map() sets '_key' on each project dict."""
@@ -162,8 +162,8 @@ class TestBuildEmailToProjectMap:
                 "email": {"contacts": {"alice@example.com": {}}},
             },
         )
-        result = build_email_to_project_map(config)
-        assert result["alice@example.com"]["_key"] == "acme"
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert addr_map["alice@example.com"]["_key"] == "acme"
 
     def test_project_with_no_email_config_produces_no_entries(self):
         """Project without email.contacts produces no map entries."""
@@ -174,8 +174,9 @@ class TestBuildEmailToProjectMap:
                 # No 'email' key
             },
         )
-        result = build_email_to_project_map(config)
-        assert len(result) == 0
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert len(addr_map) == 0
+        assert len(domain_map) == 0
 
     def test_project_with_empty_contacts_produces_no_entries(self):
         """Project with contacts={} produces no map entries."""
@@ -186,8 +187,9 @@ class TestBuildEmailToProjectMap:
                 "email": {"contacts": {}},
             },
         )
-        result = build_email_to_project_map(config)
-        assert len(result) == 0
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert len(addr_map) == 0
+        assert len(domain_map) == 0
 
     def test_duplicate_email_address_warns_and_uses_first(self, caplog):
         """Duplicate address across two active projects: first wins, warning logged."""
@@ -204,10 +206,10 @@ class TestBuildEmailToProjectMap:
             },
         )
         with caplog.at_level(logging.WARNING, logger="bridge.routing"):
-            result = build_email_to_project_map(config)
+            addr_map, domain_map = build_email_to_project_map(config)
 
         # First project wins
-        assert result["shared@example.com"]["name"] in ("ACME Corp", "Beta Project")
+        assert addr_map["shared@example.com"]["name"] in ("ACME Corp", "Beta Project")
         # A warning must have been emitted
         assert any("multiple projects" in msg.lower() for msg in caplog.messages)
 
@@ -225,12 +227,126 @@ class TestBuildEmailToProjectMap:
                 "email": {"contacts": {"charlie@example.com": {}}},
             },
         )
-        result = build_email_to_project_map(config)
-        assert len(result) == 2
-        assert result["alice@example.com"]["_key"] == "acme"
-        assert result["charlie@example.com"]["_key"] == "beta"
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert len(addr_map) == 2
+        assert addr_map["alice@example.com"]["_key"] == "acme"
+        assert addr_map["charlie@example.com"]["_key"] == "beta"
 
     def test_returns_empty_dict_for_empty_config(self):
-        """Empty config produces empty map without errors."""
-        result = build_email_to_project_map({"projects": {}, "defaults": {}})
-        assert result == {}
+        """Empty config produces empty maps without errors."""
+        addr_map, domain_map = build_email_to_project_map({"projects": {}, "defaults": {}})
+        assert addr_map == {} and domain_map == {}
+
+    # -----------------------------------------------------------------
+    # New domain-map tests
+    # -----------------------------------------------------------------
+
+    def test_domain_map_populated_for_domain_only_project(self, monkeypatch):
+        """Domain-only project populates domain_map, not addr_map."""
+        monkeypatch.setattr(routing_module, "ACTIVE_PROJECTS", ["acme"])
+        config = _make_config(
+            {
+                "_key": "acme",
+                "name": "ACME Corp",
+                "email": {"domains": ["psyoptimal.com"]},
+            },
+        )
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert addr_map == {}
+        assert "psyoptimal.com" in domain_map
+        assert domain_map["psyoptimal.com"]["_key"] == "acme"
+
+    def test_domain_map_key_has_at_sign_stripped(self, monkeypatch):
+        """Domain with leading '@' is stored without it."""
+        monkeypatch.setattr(routing_module, "ACTIVE_PROJECTS", ["acme"])
+        config = _make_config(
+            {
+                "_key": "acme",
+                "name": "ACME Corp",
+                "email": {"domains": ["@psyoptimal.com"]},
+            },
+        )
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert "psyoptimal.com" in domain_map
+        assert "@psyoptimal.com" not in domain_map
+
+    def test_both_contacts_and_domains_populate_both_maps(self):
+        """Project with both contacts and domains populates both maps."""
+        config = _make_config(
+            {
+                "_key": "acme",
+                "name": "ACME Corp",
+                "email": {
+                    "contacts": {"alice@example.com": {}},
+                    "domains": ["example.com"],
+                },
+            },
+        )
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert "alice@example.com" in addr_map
+        assert "example.com" in domain_map
+
+    def test_empty_domains_list_produces_no_domain_entries(self):
+        """Project with domains=[] produces no domain_map entries."""
+        config = _make_config(
+            {
+                "_key": "acme",
+                "name": "ACME Corp",
+                "email": {"contacts": {}, "domains": []},
+            },
+        )
+        addr_map, domain_map = build_email_to_project_map(config)
+        assert addr_map == {}
+        assert domain_map == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests for find_project_for_email() domain fallback
+# ---------------------------------------------------------------------------
+
+
+class TestFindProjectForEmailDomainFallback:
+    """find_project_for_email() falls back to EMAIL_DOMAIN_TO_PROJECT for @domain matches."""
+
+    @pytest.fixture(autouse=True)
+    def seed_domain_map(self, monkeypatch):
+        """Clear exact-match map; seed domain map with psyoptimal.com."""
+        self.domain_project = {
+            "_key": "psyoptimal",
+            "name": "PsyOptimal",
+        }
+        monkeypatch.setattr(routing_module, "EMAIL_TO_PROJECT", {})
+        monkeypatch.setattr(
+            routing_module,
+            "EMAIL_DOMAIN_TO_PROJECT",
+            {"psyoptimal.com": self.domain_project},
+        )
+
+    def test_domain_sender_resolves_to_project(self):
+        """Sender from @psyoptimal.com resolves via domain fallback."""
+        result = find_project_for_email("tcounsell@psyoptimal.com")
+        assert result is not None
+        assert result["_key"] == "psyoptimal"
+
+    def test_domain_lookup_case_insensitive(self):
+        """Domain lookup is case-insensitive."""
+        result = find_project_for_email("USER@PSYOPTIMAL.COM")
+        assert result is not None
+        assert result["_key"] == "psyoptimal"
+
+    def test_exact_match_wins_over_domain(self, monkeypatch):
+        """Exact address match takes priority over domain fallback."""
+        exact_project = {"_key": "exact", "name": "Exact Match"}
+        monkeypatch.setattr(
+            routing_module,
+            "EMAIL_TO_PROJECT",
+            {"alice@psyoptimal.com": exact_project},
+        )
+        result = find_project_for_email("alice@psyoptimal.com")
+        assert result is not None
+        assert result["_key"] == "exact"
+
+    def test_unknown_domain_returns_none(self):
+        """Sender from unknown domain returns None."""
+        result = find_project_for_email("user@unknown.com")
+        assert result is None
