@@ -1,0 +1,17 @@
+%%{init: {'theme': 'default'}}%%
+flowchart LR
+    subgraph MA["Claude Managed Agents"]
+        style MA fill:#e8f0fe,stroke:#1a56db,color:#1a1a2e
+        A1["Orchestrator<br/>(Valor)"] -->|"REST API"| A2["Session"]
+        A2 --> A3["Container"]
+        A3 --> A4["bash / files<br/>code execution"]
+        A2 -->|"SSE stream"| A1
+    end
+
+    subgraph PC["Perplexity Computer"]
+        style PC fill:#fef3c7,stroke:#d97706,color:#1a1a2e
+        B1["User"] -->|"Web UI"| B2["Task"]
+        B2 --> B3["VM + Browser"]
+        B3 --> B4["Visual interaction<br/>clicks / types"]
+        B2 -->|"Results in UI"| B1
+    end

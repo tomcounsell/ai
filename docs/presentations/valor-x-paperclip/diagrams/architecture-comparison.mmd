@@ -1,0 +1,58 @@
+%%{init: {'theme': 'default'}}%%
+graph TB
+    subgraph Valor["Valor AI System"]
+        style Valor fill:#dbeafe,stroke:#1a56db,color:#1a1a2e
+        TG["Telegram / Email"]
+        style TG fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        BR["Bridge<br/>(I/O only)"]
+        style BR fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        RD["Redis<br/>(Sessions, Memory, Outbox)"]
+        style RD fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        WK["Worker<br/>(Session Executor)"]
+        style WK fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        CL["Claude CLI Harness<br/>(claude -p)"]
+        style CL fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        PM["PM Session<br/>(Orchestrate)"]
+        style PM fill:#ffffff,stroke:#1e40af,color:#1a1a2e
+        DV["Dev Session<br/>(Execute)"]
+        style DV fill:#ffffff,stroke:#1e40af,color:#1a1a2e
+        MEM["Subconscious Memory<br/>(BM25 + RRF)"]
+        style MEM fill:#ffffff,stroke:#1e40af,color:#1a1a2e
+
+        TG --> BR --> RD --> WK --> CL
+        CL --> PM
+        PM -->|"valor-session create"| DV
+        CL --> DV
+        MEM -.->|"thought injection"| CL
+        DV -.->|"extraction"| MEM
+    end
+
+    subgraph Paperclip["Paperclip Control Plane"]
+        style Paperclip fill:#d1fae5,stroke:#059669,color:#1a1a2e
+        UI["React Dashboard"]
+        style UI fill:#ffffff,stroke:#059669,color:#1a1a2e
+        API["Node.js API Server"]
+        style API fill:#ffffff,stroke:#059669,color:#1a1a2e
+        PG["PostgreSQL<br/>(Companies, Tasks, Audit)"]
+        style PG fill:#ffffff,stroke:#059669,color:#1a1a2e
+        HB["Heartbeat Scheduler"]
+        style HB fill:#ffffff,stroke:#059669,color:#1a1a2e
+        ORG["Org Chart<br/>(Roles, Hierarchy)"]
+        style ORG fill:#ffffff,stroke:#047857,color:#1a1a2e
+        BUD["Budget Engine<br/>(Per-Agent Limits)"]
+        style BUD fill:#ffffff,stroke:#047857,color:#1a1a2e
+        AD1["Adapter: Claude"]
+        style AD1 fill:#ffffff,stroke:#047857,color:#1a1a2e
+        AD2["Adapter: OpenClaw"]
+        style AD2 fill:#ffffff,stroke:#047857,color:#1a1a2e
+        AD3["Adapter: HTTP/Bash"]
+        style AD3 fill:#ffffff,stroke:#047857,color:#1a1a2e
+
+        UI --> API --> PG
+        API --> HB
+        HB --> AD1
+        HB --> AD2
+        HB --> AD3
+        ORG --> API
+        BUD --> API
+    end

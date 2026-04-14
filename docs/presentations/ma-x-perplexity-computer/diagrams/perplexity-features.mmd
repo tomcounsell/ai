@@ -1,0 +1,31 @@
+%%{init: {'theme': 'default'}}%%
+flowchart TB
+    INPUT["Task Input: Web UI / Mobile / Slack / Chrome"]
+
+    INPUT --> DECOMP["Task Decomposition"]
+    DECOMP --> CLAUDE["Claude Opus<br/>Reasoning"]
+    DECOMP --> GPT["GPT-5.2<br/>Long context"]
+    DECOMP --> GEMINI["Gemini<br/>Research"]
+    DECOMP --> GROK["Grok<br/>Lightweight"]
+
+    CLAUDE --> EXEC["Cloud VM + Virtual Browser"]
+    GPT --> EXEC
+    GEMINI --> EXEC
+    GROK --> EXEC
+
+    EXEC --> BROWSER["Visual Browser<br/>See + Click + Type"]
+    EXEC --> SANDBOX["Code Sandbox<br/>Py / JS / SQL"]
+    EXEC --> INT["400+ Integrations<br/>Slack, Google, SaaS"]
+    EXEC --> KG["Knowledge Graph<br/>Cross-session memory"]
+
+    style INPUT fill:#fce7f3,stroke:#db2777,color:#1a1a2e
+    style DECOMP fill:#fef3c7,stroke:#d97706,color:#1a1a2e
+    style EXEC fill:#ffedd5,stroke:#ea580c,color:#1a1a2e
+    style CLAUDE fill:#fff,stroke:#d97706,color:#1a1a2e
+    style GPT fill:#fff,stroke:#d97706,color:#1a1a2e
+    style GEMINI fill:#fff,stroke:#d97706,color:#1a1a2e
+    style GROK fill:#fff,stroke:#d97706,color:#1a1a2e
+    style BROWSER fill:#fff,stroke:#ea580c,color:#1a1a2e
+    style SANDBOX fill:#fff,stroke:#ea580c,color:#1a1a2e
+    style INT fill:#fff,stroke:#ea580c,color:#1a1a2e
+    style KG fill:#e0e7ff,stroke:#4f46e5,color:#1a1a2e

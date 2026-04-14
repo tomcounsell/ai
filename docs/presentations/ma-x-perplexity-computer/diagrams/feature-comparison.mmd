@@ -1,0 +1,49 @@
+%%{init: {'theme': 'default'}}%%
+flowchart LR
+    subgraph MA["Managed Agents"]
+        direction TB
+        MA_API["API-First<br/>REST + SSE"]
+        MA_CODE["Code Execution<br/>Any language, full bash"]
+        MA_TOOLS["Custom Tools<br/>+ MCP Servers"]
+        MA_VAULT["Vault Secrets<br/>Env var injection"]
+        MA_STEER["Mid-Run Steering<br/>Programmatic control"]
+        MA_PRICE["Transparent Pricing<br/>Per-ms + per-token"]
+    end
+
+    subgraph SHARED["Both Have"]
+        direction TB
+        S_WEB["Web Search"]
+        S_FILES["File Operations"]
+        S_SANDBOX["Sandboxed Execution"]
+        S_MCP["MCP Support"]
+    end
+
+    subgraph PC["Perplexity Computer"]
+        direction TB
+        PC_BROWSER["Visual Browser<br/>See rendered pages"]
+        PC_MODELS["19+ Models<br/>Auto-routed per task"]
+        PC_INT["400+ Integrations<br/>Pre-built connectors"]
+        PC_MEMORY["Knowledge Graph<br/>Production memory"]
+        PC_SCHEDULE["Scheduled Jobs<br/>Proactive monitoring"]
+        PC_UX["Consumer UX<br/>Web, mobile, Slack"]
+    end
+
+    style MA fill:#dbeafe,stroke:#2563eb,color:#1a1a2e
+    style SHARED fill:#f3f4f6,stroke:#9ca3af,color:#1a1a2e
+    style PC fill:#fef3c7,stroke:#d97706,color:#1a1a2e
+    style MA_API fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style MA_CODE fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style MA_TOOLS fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style MA_VAULT fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style MA_STEER fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style MA_PRICE fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style S_WEB fill:#fff,stroke:#9ca3af,color:#1a1a2e
+    style S_FILES fill:#fff,stroke:#9ca3af,color:#1a1a2e
+    style S_SANDBOX fill:#fff,stroke:#9ca3af,color:#1a1a2e
+    style S_MCP fill:#fff,stroke:#9ca3af,color:#1a1a2e
+    style PC_BROWSER fill:#fff,stroke:#d97706,color:#1a1a2e
+    style PC_MODELS fill:#fff,stroke:#d97706,color:#1a1a2e
+    style PC_INT fill:#fff,stroke:#d97706,color:#1a1a2e
+    style PC_MEMORY fill:#fff,stroke:#d97706,color:#1a1a2e
+    style PC_SCHEDULE fill:#fff,stroke:#d97706,color:#1a1a2e
+    style PC_UX fill:#fff,stroke:#d97706,color:#1a1a2e

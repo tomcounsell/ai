@@ -1,0 +1,53 @@
+%%{init: {'theme': 'default'}}%%
+graph LR
+    subgraph VALOR["Valor SDLC Pipeline"]
+        style VALOR fill:#dbeafe,stroke:#1a56db,color:#1a1a2e
+        PLAN["Plan"]
+        style PLAN fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        CRIT["Critique"]
+        style CRIT fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        BUILD["Build"]
+        style BUILD fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        TEST["Test"]
+        style TEST fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        PATCH["Patch"]
+        style PATCH fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        REVIEW["Review"]
+        style REVIEW fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        DOCS["Docs"]
+        style DOCS fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        MERGE["Merge"]
+        style MERGE fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+
+        PLAN --> CRIT --> BUILD --> TEST
+        TEST -->|"fail"| PATCH --> TEST
+        TEST -->|"pass"| REVIEW
+        REVIEW -->|"blockers"| PATCH
+        REVIEW -->|"clean"| DOCS --> MERGE
+    end
+
+    subgraph PAPER["Paperclip Task Model"]
+        style PAPER fill:#d1fae5,stroke:#059669,color:#1a1a2e
+        GOAL["Company Goal"]
+        style GOAL fill:#ffffff,stroke:#059669,color:#1a1a2e
+        PROJ["Project"]
+        style PROJ fill:#ffffff,stroke:#059669,color:#1a1a2e
+        TASK["Task"]
+        style TASK fill:#ffffff,stroke:#059669,color:#1a1a2e
+        SUB["Subtask"]
+        style SUB fill:#ffffff,stroke:#059669,color:#1a1a2e
+        DONE["Complete"]
+        style DONE fill:#ffffff,stroke:#059669,color:#1a1a2e
+
+        GOAL --> PROJ --> TASK --> SUB --> DONE
+    end
+
+    subgraph GAP["Gap Analysis"]
+        style GAP fill:#fee2e2,stroke:#dc2626,color:#1a1a2e
+        G1["No stage gates<br/>in Paperclip"]
+        style G1 fill:#ffffff,stroke:#dc2626,color:#1a1a2e
+        G2["No loop-back<br/>on failure"]
+        style G2 fill:#ffffff,stroke:#dc2626,color:#1a1a2e
+        G3["No quality<br/>enforcement"]
+        style G3 fill:#ffffff,stroke:#dc2626,color:#1a1a2e
+    end

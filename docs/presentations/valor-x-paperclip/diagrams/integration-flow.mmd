@@ -1,0 +1,52 @@
+%%{init: {'theme': 'default'}}%%
+graph TB
+    subgraph PC["Paperclip Control Plane"]
+        style PC fill:#d1fae5,stroke:#059669,color:#1a1a2e
+        BOARD["Board Operator<br/>(Human)"]
+        style BOARD fill:#ffffff,stroke:#059669,color:#1a1a2e
+        GOALS["Company Goals"]
+        style GOALS fill:#ffffff,stroke:#059669,color:#1a1a2e
+        BUDGET["Budget Engine"]
+        style BUDGET fill:#ffffff,stroke:#059669,color:#1a1a2e
+        TASKS["Task Queue"]
+        style TASKS fill:#ffffff,stroke:#059669,color:#1a1a2e
+        AUDIT["Audit Log"]
+        style AUDIT fill:#ffffff,stroke:#059669,color:#1a1a2e
+
+        BOARD --> GOALS --> TASKS
+        BUDGET --> TASKS
+        TASKS --> AUDIT
+    end
+
+    subgraph ADAPT["Custom Adapter"]
+        style ADAPT fill:#ede9fe,stroke:#7c3aed,color:#1a1a2e
+        HB["Heartbeat<br/>Receiver"]
+        style HB fill:#ffffff,stroke:#7c3aed,color:#1a1a2e
+        TR["Task Translator<br/>(Paperclip Task<br/>to GitHub Issue)"]
+        style TR fill:#ffffff,stroke:#7c3aed,color:#1a1a2e
+        CR["Cost Reporter<br/>(Token Usage<br/>to Budget API)"]
+        style CR fill:#ffffff,stroke:#7c3aed,color:#1a1a2e
+
+        HB --> TR
+        TR --> CR
+    end
+
+    subgraph VALOR["Valor Instance"]
+        style VALOR fill:#dbeafe,stroke:#1a56db,color:#1a1a2e
+        GH["GitHub Issue"]
+        style GH fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        SDLC["SDLC Pipeline<br/>(Plan > Build > Test > Ship)"]
+        style SDLC fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        PR["Pull Request"]
+        style PR fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        MEM["Memory System"]
+        style MEM fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+
+        GH --> SDLC --> PR
+        SDLC <-.-> MEM
+    end
+
+    TASKS -->|"heartbeat"| HB
+    TR -->|"create issue"| GH
+    PR -->|"completion"| CR
+    CR -->|"report cost"| BUDGET

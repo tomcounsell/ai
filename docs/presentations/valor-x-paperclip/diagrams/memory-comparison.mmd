@@ -1,0 +1,52 @@
+%%{init: {'theme': 'default'}}%%
+graph TB
+    subgraph VMEM["Valor Memory System"]
+        style VMEM fill:#dbeafe,stroke:#1a56db,color:#1a1a2e
+
+        HM["Human Message<br/>(importance 6.0)"]
+        style HM fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        BLOOM["Bloom Filter<br/>(O(1) check)"]
+        style BLOOM fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        BM25["BM25 + RRF<br/>Fusion Retrieval"]
+        style BM25 fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        CAT["Category-Weighted<br/>Re-ranking"]
+        style CAT fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        THOUGHT["Stealth Injection<br/>(thought blocks)"]
+        style THOUGHT fill:#ffffff,stroke:#1e40af,color:#1a1a2e
+        EXTRACT["Post-Session<br/>Extraction (Haiku)"]
+        style EXTRACT fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        OUTCOME["Outcome Detection<br/>(acted/dismissed)"]
+        style OUTCOME fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        DECAY["Importance Decay<br/>(dismissal tracking)"]
+        style DECAY fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        KNOW["Knowledge Docs<br/>(per-chunk embeddings)"]
+        style KNOW fill:#ffffff,stroke:#1a56db,color:#1a1a2e
+        REDIS["Redis<br/>(Memory Model)"]
+        style REDIS fill:#ffffff,stroke:#1e40af,color:#1a1a2e
+
+        HM --> REDIS
+        REDIS --> BLOOM --> BM25 --> CAT --> THOUGHT
+        EXTRACT --> REDIS
+        OUTCOME --> DECAY --> REDIS
+        KNOW --> REDIS
+    end
+
+    subgraph PMEM["Paperclip State Management"]
+        style PMEM fill:#d1fae5,stroke:#059669,color:#1a1a2e
+
+        TSTATE["Task State<br/>(PostgreSQL)"]
+        style TSTATE fill:#ffffff,stroke:#059669,color:#1a1a2e
+        ALOG["Audit Log<br/>(append-only)"]
+        style ALOG fill:#ffffff,stroke:#059669,color:#1a1a2e
+        CTXP["Context Packet<br/>(per heartbeat)"]
+        style CTXP fill:#ffffff,stroke:#059669,color:#1a1a2e
+        NONE["No Memory<br/>Retrieval"]
+        style NONE fill:#ffffff,stroke:#dc2626,color:#1a1a2e
+        NONE2["No Learning<br/>Across Tasks"]
+        style NONE2 fill:#ffffff,stroke:#dc2626,color:#1a1a2e
+
+        TSTATE --> CTXP
+        ALOG --> CTXP
+        NONE -.-> CTXP
+        NONE2 -.-> CTXP
+    end

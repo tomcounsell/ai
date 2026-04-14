@@ -1,0 +1,37 @@
+%%{init: {'theme': 'default'}}%%
+flowchart TB
+    API["REST API + SSE Streaming"]
+    API --> CREATE["Create Session"]
+    API --> SEND["Send Events"]
+    API --> STREAM["Stream Responses"]
+    API --> STEER["Steer Mid-Run"]
+
+    CREATE --> ENV["Persistent Linux Container"]
+    SEND --> ENV
+    STREAM --> ENV
+    STEER --> ENV
+
+    ENV --> BASH["bash<br/>Full shell"]
+    ENV --> FILES["read / write / edit<br/>glob / grep"]
+    ENV --> CODE["Any language<br/>Any framework"]
+    ENV --> WEB["web_fetch<br/>web_search"]
+    ENV --> CUSTOM["Custom Tools<br/>+ MCP Servers"]
+
+    BASH --> SEC["Vault Secrets + Network Config + Container Isolation"]
+    FILES --> SEC
+    CODE --> SEC
+    WEB --> SEC
+    CUSTOM --> SEC
+
+    style API fill:#dbeafe,stroke:#2563eb,color:#1a1a2e
+    style ENV fill:#fef3c7,stroke:#d97706,color:#1a1a2e
+    style SEC fill:#ede9fe,stroke:#7c3aed,color:#1a1a2e
+    style CREATE fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style SEND fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style STREAM fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style STEER fill:#fff,stroke:#2563eb,color:#1a1a2e
+    style BASH fill:#fff,stroke:#d97706,color:#1a1a2e
+    style FILES fill:#fff,stroke:#d97706,color:#1a1a2e
+    style CODE fill:#fff,stroke:#d97706,color:#1a1a2e
+    style WEB fill:#fff,stroke:#d97706,color:#1a1a2e
+    style CUSTOM fill:#fff,stroke:#d97706,color:#1a1a2e
