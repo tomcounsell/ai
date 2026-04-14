@@ -360,6 +360,30 @@ def finalize_session(
     session.completed_at = time.time()
     session.save()
 
+    # 5.1. Defensive srem: remove session from ALL non-target status index sets.
+    # This cleans up orphan index entries left by stale-object full saves that
+    # clobbered the status before this finalize ran. See #950 for root cause analysis.
+    # NOTE: Two Popoto coupling points that must be re-verified on Popoto upgrade:
+    #   1. _saved_field_values["status"] backfill above (finalize_session/transition_status)
+    #   2. Defensive srem index key construction below (get_special_use_field_db_key + DB_key)
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+        from popoto.models.db_key import DB_key
+
+        member_key = session.db_key.redis_key
+        status_field = session._meta.fields["status"]
+        field_cls = type(status_field)
+        for other_status in ALL_STATUSES:
+            if other_status == status:
+                continue
+            idx_key = DB_key(
+                field_cls.get_special_use_field_db_key(session, "status"),
+                other_status,
+            )
+            POPOTO_REDIS_DB.srem(idx_key.redis_key, member_key)
+    except Exception as e:
+        logger.debug(f"[lifecycle] Defensive srem failed (non-fatal): {e}")
+
     # 5.5. Update TaskTypeProfile (after auto_tag sets task_type AND after status is saved)
     # Runs only for completed sessions — profile is now authoritative after the Redis save above.
     if not skip_auto_tag and status == "completed":

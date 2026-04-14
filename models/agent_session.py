@@ -1335,7 +1335,7 @@ class AgentSession(Model):
             )
             setattr(self, field_name, url)
             try:
-                self.save()
+                self.save(update_fields=[field_name, "updated_at"])
             except Exception as e:
                 logger.warning(
                     f"set_link save failed for session {self.session_id} "
@@ -1438,7 +1438,7 @@ class AgentSession(Model):
             current = current[-STEERING_QUEUE_MAX:]
         self.queued_steering_messages = current
         try:
-            self.save()
+            self.save(update_fields=["queued_steering_messages", "updated_at"])
         except Exception as e:
             logger.warning(f"Failed to save steering message for session {self.session_id}: {e}")
 
@@ -1450,7 +1450,7 @@ class AgentSession(Model):
         messages = list(current)
         self.queued_steering_messages = []
         try:
-            self.save()
+            self.save(update_fields=["queued_steering_messages", "updated_at"])
         except Exception as e:
             logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
         return messages
