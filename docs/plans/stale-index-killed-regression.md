@@ -237,9 +237,9 @@ Convert ALL `session.save()` and `agent_session.save()` calls in `agent_session_
 
 ## Test Impact
 
-- [ ] `tests/integration/test_nudge_stomp_regression.py::TestLayer2PartialSavePreservesFields` — UPDATE: extend to verify `set_link()` partial save also preserves status
-- [ ] `tests/unit/test_agent_session_index_corruption.py` — UPDATE: add test cases for the `killed` transition path (currently only tests `completed` path indirectly)
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: add assertion that defensive srem fires during finalize_session
+- [x] `tests/integration/test_nudge_stomp_regression.py::TestLayer2PartialSavePreservesFields` — UPDATE: extend to verify `set_link()` partial save also preserves status
+- [x] `tests/unit/test_agent_session_index_corruption.py` — UPDATE: add test cases for the `killed` transition path (currently only tests `completed` path indirectly)
+- [x] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: add assertion that defensive srem fires during finalize_session
 
 ## Rabbit Holes
 
@@ -284,24 +284,24 @@ No agent integration required — this is a session-lifecycle-internal change. N
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/session-lifecycle.md` with the rule: "companion-field saves on AgentSession must use `save(update_fields=[...])` to avoid clobbering status"
-- [ ] Add "Known follow-up" note to `docs/plans/nudge-stomp-append-event-bypass.md` pointing to this issue
+- [x] Update `docs/features/session-lifecycle.md` with the rule: "companion-field saves on AgentSession must use `save(update_fields=[...])` to avoid clobbering status"
+- [x] Add "Known follow-up" note to `docs/plans/nudge-stomp-append-event-bypass.md` pointing to this issue
 
 ### Inline Documentation
-- [ ] Add docstring warnings on `set_link`, `push_steering_message`, `pop_steering_messages` noting the partial-save requirement
+- [x] Add docstring warnings on `set_link`, `push_steering_message`, `pop_steering_messages` noting the partial-save requirement
 
 ## Success Criteria
 
-- [ ] `set_link()`, `push_steering_message()`, `pop_steering_messages()` use partial saves
-- [ ] All identified full-save sites in `agent_session_queue.py` that operate on stale session references are converted to partial saves
-- [ ] Defensive srem in `finalize_session` removes hash key from all non-target status index sets
-- [ ] New regression test: create a pending session, simulate a stale-object full save with wrong status, then kill — assert no orphan in pending index
-- [ ] Parametrized test across all five terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`) asserting zero orphan index entries post-transition
-- [ ] Existing tests in `test_nudge_stomp_regression.py` continue to pass
-- [ ] `"Stale index entry"` warning count on a 24-hour `bridge.log` drops to zero post-deploy
-- [ ] Reflections regression check at `scripts/reflections.py:964` remains installed and untouched
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `set_link()`, `push_steering_message()`, `pop_steering_messages()` use partial saves
+- [x] All identified full-save sites in `agent_session_queue.py` that operate on stale session references are converted to partial saves
+- [x] Defensive srem in `finalize_session` removes hash key from all non-target status index sets
+- [x] New regression test: create a pending session, simulate a stale-object full save with wrong status, then kill — assert no orphan in pending index
+- [x] Parametrized test across all five terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`) asserting zero orphan index entries post-transition
+- [x] Existing tests in `test_nudge_stomp_regression.py` continue to pass
+- [x] `"Stale index entry"` warning count on a 24-hour `bridge.log` drops to zero post-deploy
+- [x] Reflections regression check at `scripts/reflections.py:964` remains installed and untouched
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
