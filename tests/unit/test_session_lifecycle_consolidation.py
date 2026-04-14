@@ -103,6 +103,24 @@ class TestFinalizeSessionLifecycleLog:
         mock_session.save.assert_called_once()
 
 
+class TestFinalizeSessionDefensiveSrem:
+    """finalize_session() includes defensive srem for orphan index cleanup (#950)."""
+
+    def test_defensive_srem_called_after_save(self, mock_session):
+        """After save(), defensive srem removes session from non-target index sets."""
+        with (
+            patch("agent.agent_session_queue.checkpoint_branch_state"),
+            patch("models.session_lifecycle.POPOTO_REDIS_DB", create=True) as mock_redis,
+            patch("models.session_lifecycle.DB_key", create=True),
+        ):
+            finalize_session(mock_session, "killed", "test kill")
+
+        # srem must be called (once per non-target status)
+        assert mock_redis.srem.call_count == len(ALL_STATUSES) - 1, (
+            f"Expected {len(ALL_STATUSES) - 1} srem calls, got {mock_redis.srem.call_count}"
+        )
+
+
 class TestFinalizeSessionIdempotency:
     """finalize_session() is idempotent for already-terminal sessions."""
 
