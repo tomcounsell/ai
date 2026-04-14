@@ -20,9 +20,9 @@ This path fires automatically for all sessions initiated through the Telegram br
 Each SDLC skill writes explicit in_progress/completed markers using `tools/sdlc_stage_marker.py`:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage DOCS --status in_progress 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage DOCS --status in_progress --issue-number {issue_number} 2>/dev/null || true
 # ... skill work ...
-python -m tools.sdlc_stage_marker --stage DOCS --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage DOCS --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 Skills with markers:
@@ -32,13 +32,14 @@ Skills with markers:
 - `do-pr-review` → REVIEW stage
 - `do-docs` → DOCS stage
 
-The tool resolves the PM session from `VALOR_SESSION_ID` or `AGENT_SESSION_ID` environment variables. It fails silently (exit 0, empty JSON `{}`) if no session is found — skill execution is never interrupted by marker failures.
+The tool resolves the PM session in priority order: `--session-id` argument, `VALOR_SESSION_ID` env var, `AGENT_SESSION_ID` env var, then `--issue-number` argument (which finds the PM session tracking that issue via `find_session_by_issue()`). For local Claude Code sessions, `--issue-number` is the primary resolution path since env vars don't persist across bash blocks. It fails silently (exit 0, empty JSON `{}`) if no session is found — skill execution is never interrupted by marker failures.
 
 ## `tools/sdlc_stage_marker.py` CLI
 
 ```bash
 python -m tools.sdlc_stage_marker --stage <STAGE> --status <in_progress|completed>
 python -m tools.sdlc_stage_marker --stage REVIEW --status completed --session-id <ID>
+python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number 941
 ```
 
 Exit code is always 0. Returns `{}` on error, `{"stage": "DOCS", "status": "completed"}` on success.
@@ -62,9 +63,19 @@ The merge gate (`/do-merge`) reads stored state only via `get_display_progress()
 
 The gate is a reminder, not a hard blocker. The agent can choose to proceed, but only after explicit on-record acknowledgment.
 
+## Local Session Creation
+
+For local Claude Code sessions, the SDLC router ensures a trackable session exists before dispatching sub-skills via `tools/sdlc_session_ensure.py`. This creates an `AgentSession` keyed by `sdlc-local-{issue_number}` so that downstream markers have a session to write to. The operation is idempotent — running it multiple times for the same issue reuses the same session.
+
+```bash
+python -m tools.sdlc_session_ensure --issue-number 941 --issue-url "https://github.com/owner/repo/issues/941"
+```
+
+See `docs/features/sdlc-pipeline-state.md` for the full local session tracking design.
+
 ## SDLC Router Fallback
 
-When `stage_states` is unavailable (local Claude Code, no PM session), the SDLC router uses conversation dispatch history to determine what has already been dispatched in the current session. It does not infer from artifacts. If nothing has been dispatched, it starts from the beginning of the pipeline.
+When `stage_states` is unavailable (local Claude Code with no session created yet), the SDLC router uses conversation dispatch history to determine what has already been dispatched in the current session. It does not infer from artifacts. If nothing has been dispatched, it starts from the beginning of the pipeline.
 
 ## Why Artifact Inference Was Removed
 

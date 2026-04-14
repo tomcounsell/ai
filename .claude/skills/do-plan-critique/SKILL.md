@@ -12,14 +12,14 @@ context: fork
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage CRITIQUE --status in_progress 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage CRITIQUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
 After posting the verdict (Step 5), write the completion marker if READY TO BUILD, leave in_progress otherwise:
 
 ```bash
 # On READY TO BUILD verdict:
-python -m tools.sdlc_stage_marker --stage CRITIQUE --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage CRITIQUE --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 

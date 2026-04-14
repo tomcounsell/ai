@@ -98,6 +98,10 @@ tests/
 | unit | `test_pipeline_graph.py` | 29 | Pipeline graph visualization |
 | unit | `test_observer_early_return.py` | 18 | Early return optimization |
 | unit | `test_pipeline_state.py` | 15 | Pipeline state transitions |
+| unit | `test_sdlc_stage_marker.py` | 12 | Stage marker writes via CLI (session resolution, issue-number fallback) |
+| unit | `test_sdlc_stage_query.py` | 17 | Stage query CLI (session-id and issue-number resolution) |
+| unit | `test_sdlc_session_ensure.py` | 8 | Local session creation/reuse for SDLC pipeline state |
+| unit | `test_sdlc_utils.py` | 6 | Shared `find_session_by_issue()` helper |
 | unit | `test_observer_message_for_user.py` | 11 | Observer user messaging |
 | unit | `test_sdlc_env_vars.py` | 10 | SDLC environment variable injection |
 | unit | `test_stop_reason_observer.py` | 7 | Stop reason classification |

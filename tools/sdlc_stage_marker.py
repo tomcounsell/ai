@@ -11,11 +11,15 @@ Usage:
     python -m tools.sdlc_stage_marker --stage DOCS --status in_progress
     python -m tools.sdlc_stage_marker --stage DOCS --status completed
     python -m tools.sdlc_stage_marker --stage REVIEW --status in_progress --session-id <ID>
+    python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number 941
     python -m tools.sdlc_stage_marker --help
 
 Environment variables (checked in order if --session-id not provided):
     VALOR_SESSION_ID   — bridge-injected PM session ID
     AGENT_SESSION_ID   — alternative session ID env var
+
+When no session ID is available (local Claude Code sessions), use --issue-number
+to resolve the session by GitHub issue number.
 
 Exit codes:
     0 — always (errors print {} and exit 0, never crash the calling skill)
@@ -44,13 +48,14 @@ _VALID_STAGES = frozenset(
 _VALID_STATUSES = frozenset(["in_progress", "completed"])
 
 
-def _find_session(session_id: str | None):
-    """Find a PM AgentSession by explicit ID or env vars.
+def _find_session(session_id: str | None, issue_number: int | None = None):
+    """Find a PM AgentSession by explicit ID, env vars, or issue number.
 
     Resolution order:
     1. --session-id argument (if provided)
     2. VALOR_SESSION_ID env var
     3. AGENT_SESSION_ID env var
+    4. --issue-number argument (primary path for local Claude Code sessions)
 
     Returns the session object or None.
     """
@@ -58,7 +63,17 @@ def _find_session(session_id: str | None):
         session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
     )
     if not resolved_id:
-        logger.debug("sdlc_stage_marker: no session ID available (no arg, no env vars)")
+        # No session ID from args or env — try issue number as fallback
+        if issue_number is not None:
+            try:
+                from tools._sdlc_utils import find_session_by_issue
+
+                session = find_session_by_issue(issue_number)
+                if session:
+                    return session
+            except Exception as e:
+                logger.debug(f"sdlc_stage_marker: issue-number lookup failed: {e}")
+        logger.debug("sdlc_stage_marker: no session ID available (no arg, no env vars, no issue)")
         return None
 
     try:
@@ -78,13 +93,16 @@ def _find_session(session_id: str | None):
         return None
 
 
-def write_marker(stage: str, status: str, session_id: str | None = None) -> dict:
+def write_marker(
+    stage: str, status: str, session_id: str | None = None, issue_number: int | None = None
+) -> dict:
     """Write a stage marker to the PipelineStateMachine.
 
     Args:
         stage: Pipeline stage name (e.g., "DOCS", "REVIEW").
         status: "in_progress" or "completed".
         session_id: Optional explicit session ID (falls back to env vars).
+        issue_number: Optional issue number for local session resolution.
 
     Returns:
         Dict with stage/status on success, empty dict on any failure.
@@ -97,7 +115,7 @@ def write_marker(stage: str, status: str, session_id: str | None = None) -> dict
         logger.debug(f"sdlc_stage_marker: invalid status {status!r}")
         return {}
 
-    session = _find_session(session_id)
+    session = _find_session(session_id, issue_number=issue_number)
     if not session:
         return {}
 
@@ -155,6 +173,12 @@ def main() -> None:
         help="PM session ID (falls back to VALOR_SESSION_ID / AGENT_SESSION_ID env vars)",
     )
     parser.add_argument(
+        "--issue-number",
+        type=int,
+        default=None,
+        help="GitHub issue number (for local sessions without VALOR_SESSION_ID)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging",
@@ -169,6 +193,7 @@ def main() -> None:
         stage=args.stage.upper(),
         status=args.status,
         session_id=args.session_id,
+        issue_number=args.issue_number,
     )
     print(json.dumps(result))
 

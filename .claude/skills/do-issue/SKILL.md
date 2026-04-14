@@ -12,13 +12,13 @@ argument-hint: "<title or description>"
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage ISSUE --status in_progress 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage ISSUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
 After the issue is created (Step 7), write the completion marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage ISSUE --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage ISSUE --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 

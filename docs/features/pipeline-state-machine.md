@@ -136,15 +136,19 @@ The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as t
 The router invokes `tools/sdlc_stage_query.py` via bash to read stored stage state:
 
 ```bash
-STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
+# Bridge sessions (env var available):
+python -m tools.sdlc_stage_query
+
+# Local Claude Code sessions (pass issue number explicitly):
+python -m tools.sdlc_stage_query --issue-number 941
 ```
 
-The CLI tool loads the PM session from Redis, reads `stage_states`, and returns a JSON dict mapping stage names to statuses.
+The CLI tool resolves the PM session from `--session-id`, `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, or `--issue-number` (in that priority order), reads `stage_states`, and returns a JSON dict mapping stage names to statuses.
 
 ### Routing Logic
 
 - **stage_states available**: Used as the primary signal. A stage is considered complete only if it shows `"completed"` in stage_states.
-- **stage_states unavailable** (empty JSON `{}`): Falls back to conversation dispatch history to determine what has already run. Artifact inference is not used. This happens for local Claude Code invocations without a PM session.
+- **stage_states unavailable** (empty JSON `{}`): Falls back to conversation dispatch history to determine what has already run. Artifact inference is not used. This previously happened for all local Claude Code invocations; with `--issue-number` support and `sdlc_session_ensure`, local sessions now have trackable state in Redis.
 
 ### Merge Gate
 
@@ -176,10 +180,12 @@ When stage_states is unavailable (cold start), the merge gate emits an explicit 
 | File | Purpose |
 |------|---------|
 | `agent/pipeline_state.py` | PipelineStateMachine class — stored-state-only stage tracking (canonical; `bridge/pipeline_state.py` is a shim) |
-| `tools/sdlc_stage_marker.py` | CLI tool for skills to write in_progress/completed markers |
+| `tools/sdlc_stage_marker.py` | CLI tool for skills to write in_progress/completed markers (supports `--issue-number` for local sessions) |
 | `agent/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) (canonical; `bridge/pipeline_graph.py` is a shim) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
-| `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router) |
+| `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router, supports `--issue-number`) |
+| `tools/sdlc_session_ensure.py` | CLI tool to create/find local SDLC sessions keyed by issue number |
+| `tools/_sdlc_utils.py` | Shared `find_session_by_issue()` helper (deduplicated from sdlc_stage_query) |
 | `.claude/skills/sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 2.0) |
 | `agent/agent_session_queue.py` | `_handle_dev_session_completion()` — `complete_stage()`/`fail_stage()` wiring for dev-session path |
 | `agent/hooks/pre_tool_use.py` | `start_stage()` wiring — Skill path via `_handle_skill_tool_start()` + `_SKILL_TO_STAGE` |

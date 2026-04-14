@@ -50,22 +50,13 @@ def _find_session_by_id(session_id: str):
 def _find_session_by_issue(issue_number: int):
     """Find a PM session tracking the given issue number.
 
-    Scans recent PM sessions for an issue_url containing the issue number.
+    Delegates to the shared implementation in tools._sdlc_utils.
     Returns the session object or None.
     """
     try:
-        from models.agent_session import AgentSession
+        from tools._sdlc_utils import find_session_by_issue
 
-        # NOTE: Linear scan of PM sessions — acceptable for current scale (typically
-        # <100 PM sessions). If PM session count grows significantly, consider adding
-        # an indexed lookup by issue_url or caching issue->session mappings.
-        pm_sessions = list(AgentSession.query.filter(session_type="pm"))
-        target_suffix = f"/issues/{issue_number}"
-        for s in pm_sessions:
-            issue_url = getattr(s, "issue_url", None) or ""
-            if issue_url.endswith(target_suffix):
-                return s
-        return None
+        return find_session_by_issue(issue_number)
     except Exception as e:
         logger.debug(f"_find_session_by_issue failed: {e}")
         return None
