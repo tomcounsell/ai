@@ -411,6 +411,38 @@ The fix threads `cwd` from `hook_input["cwd"]` through all four functions. `DEFA
 
 See [Claude Code Memory — Project Key Resolution](claude-code-memory.md#project-key-resolution) for the cwd threading table and one-time migration instructions.
 
+## Health Checks
+
+The `status` subcommand provides a focused, fast health snapshot of the memory system without the overhead of `python -m tools.doctor`.
+
+```bash
+python -m tools.memory_search status           # Human-readable summary (<1s)
+python -m tools.memory_search status --json    # Machine-readable JSON
+python -m tools.memory_search status --deep    # Adds orphan index count + per-category confidence
+python -m tools.memory_search status --project dm  # Scope to a specific project key
+```
+
+**JSON output shape:**
+```json
+{
+  "healthy": true,
+  "redis": {"ok": true},
+  "project_key": "default",
+  "total": 80,
+  "by_category": {"correction": 5, "pattern": 12, "other": 63},
+  "superseded": 3,
+  "avg_confidence": 0.5,
+  "last_write": "2026-04-15T02:37:04",
+  "embedding_field": "not_configured"
+}
+```
+
+`--deep` adds `orphan_index_count` (via `_count_orphans()` from `scripts/popoto_index_cleanup.py`) and `by_category_confidence` (per-category average confidence).
+
+**Exit codes:** 0 = healthy, 1 = Redis unreachable. The `tools.doctor` integration is a future step (tracked by issue #964).
+
+**Note:** `last_write` reflects the most recent relevance-score update, not creation time. Decay or boost operations on old records can make them appear recent.
+
 ## Error Handling
 
 All memory operations are wrapped in try/except with logging. The memory system is designed to fail silently:
@@ -447,3 +479,4 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)
 - Project key isolation: [#811](https://github.com/tomcounsell/ai/issues/811) (PR [#820](https://github.com/tomcounsell/ai/pull/820)) -- DEFAULT_PROJECT_KEY changed from "dm" to "default", cwd threading, migration script
 - Memory consolidation: [#795](https://github.com/tomcounsell/ai/issues/795) -- `memory-dedup` reflection, `superseded_by` fields, recall filter, semantic dedup via Haiku
+- Memory status CLI: [#964](https://github.com/tomcounsell/ai/issues/964) -- `python -m tools.memory_search status` health subcommand
