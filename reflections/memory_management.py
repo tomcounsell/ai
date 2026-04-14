@@ -47,9 +47,7 @@ async def run_memory_decay_prune() -> dict:
     """
     import os
 
-    apply_mode = os.environ.get("MEMORY_DECAY_PRUNE_APPLY", "false").lower() in (
-        "true", "1", "yes"
-    )
+    apply_mode = os.environ.get("MEMORY_DECAY_PRUNE_APPLY", "false").lower() in ("true", "1", "yes")
     dry_run = not apply_mode
 
     findings: list[str] = []
@@ -87,7 +85,9 @@ async def run_memory_decay_prune() -> dict:
             created_at = getattr(memory, "created_at", None)
             if created_at is None:
                 continue
-            created_ts = created_at.timestamp() if hasattr(created_at, "timestamp") else float(created_at)
+            created_ts = (
+                created_at.timestamp() if hasattr(created_at, "timestamp") else float(created_at)
+            )
             if created_ts > cutoff:
                 # Less than 30 days old — exempt
                 continue
@@ -115,9 +115,7 @@ async def run_memory_decay_prune() -> dict:
                     memory.delete()
                     deleted_count += 1
                 except Exception as e:
-                    logger.warning(
-                        f"Memory decay prune: delete failed for {memory.memory_id}: {e}"
-                    )
+                    logger.warning(f"Memory decay prune: delete failed for {memory.memory_id}: {e}")
 
             findings.append(
                 f"Deleted {deleted_count} of {candidate_count} candidate memories "
@@ -130,8 +128,7 @@ async def run_memory_decay_prune() -> dict:
 
     mode_str = "DRY RUN" if dry_run else "APPLIED"
     summary = (
-        f"Memory decay prune [{mode_str}]: {candidate_count} candidates, "
-        f"{deleted_count} deleted"
+        f"Memory decay prune [{mode_str}]: {candidate_count} candidates, {deleted_count} deleted"
     )
     logger.info(summary)
     return {"status": "ok", "findings": findings, "summary": summary}

@@ -98,9 +98,7 @@ def load_ignore_entries() -> list[dict]:
         return [
             {
                 "pattern": entry.pattern,
-                "ignored_until": (
-                    str(entry.expires_at) if entry.expires_at else ""
-                ),
+                "ignored_until": (str(entry.expires_at) if entry.expires_at else ""),
                 "reason": entry.reason or "",
             }
             for entry in active

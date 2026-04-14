@@ -87,9 +87,7 @@ def _parse_review_findings(body: str) -> list[dict[str, str]]:
     return findings
 
 
-def _check_finding_addressed(
-    pr_commits: list[dict], review_timestamp: str, file_path: str
-) -> bool:
+def _check_finding_addressed(pr_commits: list[dict], review_timestamp: str, file_path: str) -> bool:
     """Check if a finding was addressed by a commit after the review."""
     if not file_path or not pr_commits:
         return False
@@ -207,8 +205,7 @@ async def run_log_review() -> dict:
                 size_mb = log_file.stat().st_size / (1024 * 1024)
                 if size_mb > 10:
                     findings.append(
-                        f"[{slug}] Log file {log_file.name} is {size_mb:.1f}MB - "
-                        "consider rotation"
+                        f"[{slug}] Log file {log_file.name} is {size_mb:.1f}MB - consider rotation"
                     )
 
                 errors = extract_structured_errors(log_file)
@@ -218,9 +215,7 @@ async def run_log_review() -> dict:
                     )
                     for error in errors[-5:]:
                         msg = error["message"][:200]
-                        findings.append(
-                            f"  [{error['level']}] {error['timestamp']}: {msg}"
-                        )
+                        findings.append(f"  [{error['level']}] {error['timestamp']}: {msg}")
 
                 with open(log_file) as f:
                     lines = f.readlines()[-1000:]
@@ -380,21 +375,17 @@ async def run_hooks_audit() -> dict:
                         has_or_true = "|| true" in cmd
 
                         if event_type in ("Stop", "SubagentStop") and not has_or_true:
-                            findings.append(
-                                f"FAIL: {event_type} hook missing || true: {cmd[:60]}"
-                            )
+                            findings.append(f"FAIL: {event_type} hook missing || true: {cmd[:60]}")
                             settings_issues += 1
 
                         for part in cmd.replace("|| true", "").split():
                             if part.endswith(".py") or part.endswith(".sh"):
-                                script_path = part.replace(
-                                    '"$CLAUDE_PROJECT_DIR"/', ""
-                                ).replace("$CLAUDE_PROJECT_DIR/", "")
+                                script_path = part.replace('"$CLAUDE_PROJECT_DIR"/', "").replace(
+                                    "$CLAUDE_PROJECT_DIR/", ""
+                                )
                                 full_path = PROJECT_ROOT / script_path
                                 if not full_path.exists():
-                                    findings.append(
-                                        f"WARN: Hook script not found: {script_path}"
-                                    )
+                                    findings.append(f"WARN: Hook script not found: {script_path}")
                                     settings_issues += 1
                                 break
         except (json.JSONDecodeError, OSError) as e:
@@ -457,9 +448,7 @@ async def run_feature_docs_audit() -> dict:
                 if not migration_context:
                     doc_findings.append(f"stale term '{old_term}' (now '{new_term}')")
 
-        content_lines = [
-            ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")
-        ]
+        content_lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
         if len(content_lines) < 5:
             stats["stubs"] += 1
             doc_findings.append("stub doc (<5 content lines)")
@@ -555,12 +544,19 @@ async def run_pr_review_audit() -> dict:
         try:
             pr_result = subprocess.run(
                 [
-                    "gh", "pr", "list",
-                    "--repo", repo,
-                    "--state", "merged",
-                    "--limit", "20",
-                    "--search", f"merged:>={search_date}",
-                    "--json", "number,title,url,mergedAt",
+                    "gh",
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "merged",
+                    "--limit",
+                    "20",
+                    "--search",
+                    f"merged:>={search_date}",
+                    "--json",
+                    "number,title,url,mergedAt",
                 ],
                 capture_output=True,
                 text=True,
@@ -583,39 +579,52 @@ async def run_pr_review_audit() -> dict:
                 try:
                     comments_result = subprocess.run(
                         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/comments", "--paginate"],
-                        capture_output=True, text=True, timeout=30, cwd=project_wd,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        cwd=project_wd,
                     )
                     reviews_result = subprocess.run(
                         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/reviews", "--paginate"],
-                        capture_output=True, text=True, timeout=30, cwd=project_wd,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        cwd=project_wd,
                     )
 
                     all_comments: list[dict] = []
                     if comments_result.returncode == 0 and comments_result.stdout.strip():
                         for comment in json.loads(comments_result.stdout):
-                            all_comments.append({
-                                "id": comment.get("id", 0),
-                                "body": comment.get("body", ""),
-                                "created_at": comment.get("created_at", ""),
-                                "html_url": comment.get("html_url", ""),
-                            })
+                            all_comments.append(
+                                {
+                                    "id": comment.get("id", 0),
+                                    "body": comment.get("body", ""),
+                                    "created_at": comment.get("created_at", ""),
+                                    "html_url": comment.get("html_url", ""),
+                                }
+                            )
                     if reviews_result.returncode == 0 and reviews_result.stdout.strip():
                         for review in json.loads(reviews_result.stdout):
                             body = review.get("body", "")
                             if body and body.strip():
-                                all_comments.append({
-                                    "id": review.get("id", 0),
-                                    "body": body,
-                                    "created_at": review.get("submitted_at", ""),
-                                    "html_url": review.get("html_url", ""),
-                                })
+                                all_comments.append(
+                                    {
+                                        "id": review.get("id", 0),
+                                        "body": body,
+                                        "created_at": review.get("submitted_at", ""),
+                                        "html_url": review.get("html_url", ""),
+                                    }
+                                )
 
                     if not all_comments:
                         continue
 
                     commits_result = subprocess.run(
                         ["gh", "api", f"repos/{repo}/pulls/{pr_number}/commits", "--paginate"],
-                        capture_output=True, text=True, timeout=30, cwd=project_wd,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        cwd=project_wd,
                     )
                     pr_commits: list[dict] = []
                     if commits_result.returncode == 0 and commits_result.stdout.strip():
@@ -658,18 +667,31 @@ async def run_pr_review_audit() -> dict:
                         else:
                             # Actual filing (dry_run=False not enabled by default)
                             labels = ["pr-review-audit"] + sorted(
-                                {SEVERITY_LABELS.get(f["severity"], "tech-debt")
-                                 for f in unaddressed_for_pr}
+                                {
+                                    SEVERITY_LABELS.get(f["severity"], "tech-debt")
+                                    for f in unaddressed_for_pr
+                                }
                             )
                             issue_body = _format_audit_issue_body(
                                 pr_number, pr_title, pr_url, unaddressed_for_pr
                             )
                             issue_result = subprocess.run(
-                                ["gh", "issue", "create", "--repo", repo,
-                                 "--title", f"PR #{pr_number}: unaddressed review findings",
-                                 "--body", issue_body]
+                                [
+                                    "gh",
+                                    "issue",
+                                    "create",
+                                    "--repo",
+                                    repo,
+                                    "--title",
+                                    f"PR #{pr_number}: unaddressed review findings",
+                                    "--body",
+                                    issue_body,
+                                ]
                                 + [arg for label in labels for arg in ("--label", label)],
-                                capture_output=True, text=True, timeout=30, cwd=project_wd,
+                                capture_output=True,
+                                text=True,
+                                timeout=30,
+                                cwd=project_wd,
                             )
                             if issue_result.returncode == 0:
                                 issue_url = issue_result.stdout.strip()

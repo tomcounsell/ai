@@ -20,7 +20,6 @@ import logging
 import time as _time
 from collections import Counter, defaultdict
 from datetime import datetime
-from pathlib import Path
 
 logger = logging.getLogger("reflections.behavioral_learning")
 
@@ -58,6 +57,7 @@ async def run() -> dict:
 
     try:
         from models.cyclic_episode import CyclicEpisode
+
         from models.agent_session import AgentSession
 
         try:
@@ -145,9 +145,7 @@ async def run() -> dict:
                     stage_durations={},
                     deviation_count=0,
                     resolution_type=(
-                        "clean_merge"
-                        if not session.has_failed_stage()
-                        else "patch_required"
+                        "clean_merge" if not session.has_failed_stage() else "patch_required"
                     ),
                     intent_satisfied=session.status == "completed",
                     review_round_count=0,
@@ -166,9 +164,7 @@ async def run() -> dict:
             findings.append(
                 f"Created {episodes_created} behavioral episodes from completed SDLC sessions"
             )
-        logger.info(
-            f"Episode cycle-close: created={episodes_created}, skipped={sessions_skipped}"
-        )
+        logger.info(f"Episode cycle-close: created={episodes_created}, skipped={sessions_skipped}")
 
         # Sub-step 2: Pattern crystallization
         crystallization_threshold = 3

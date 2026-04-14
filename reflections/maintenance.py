@@ -24,7 +24,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from reflections.utils import PROJECT_ROOT, extract_structured_errors, load_local_projects
+from reflections.utils import PROJECT_ROOT, load_local_projects
 
 logger = logging.getLogger("reflections.maintenance")
 
@@ -156,9 +156,7 @@ async def run_redis_data_quality() -> dict:
 
         # 2. Dead channels
         all_chats = Chat.query.all()
-        dead_chats = [
-            chat for chat in all_chats if chat.updated_at and chat.updated_at < month_ago
-        ]
+        dead_chats = [chat for chat in all_chats if chat.updated_at and chat.updated_at < month_ago]
         if dead_chats:
             findings.append(f"{len(dead_chats)} chat(s) with no activity in 30+ days")
             for chat in dead_chats[:5]:
@@ -177,8 +175,10 @@ async def run_redis_data_quality() -> dict:
             s
             for s in all_sessions
             if (
-                lambda sa: sa is not None
-                and (sa.timestamp() if isinstance(sa, datetime) else float(sa)) > recent_cutoff
+                lambda sa: (
+                    sa is not None
+                    and (sa.timestamp() if isinstance(sa, datetime) else float(sa)) > recent_cutoff
+                )
             )(s.started_at)
         ]
 
@@ -325,7 +325,12 @@ async def run_branch_plan_cleanup() -> dict:
             return issue_num, "unknown"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "gh", "issue", "view", str(issue_num), "--json", "state",
+                "gh",
+                "issue",
+                "view",
+                str(issue_num),
+                "--json",
+                "state",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=project_wd,

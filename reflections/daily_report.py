@@ -16,11 +16,8 @@ Returns:
 
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
 from datetime import datetime
-from pathlib import Path
 
 from reflections.utils import PROJECT_ROOT, load_local_projects
 
@@ -55,14 +52,10 @@ def _collect_reflection_findings() -> dict[str, list[str]]:
             status = reflection.last_status or "unknown"
 
             if reflection.last_error:
-                findings.setdefault(f"{name}", []).append(
-                    f"ERROR: {reflection.last_error[:200]}"
-                )
+                findings.setdefault(f"{name}", []).append(f"ERROR: {reflection.last_error[:200]}")
             elif status == "ok":
                 duration = reflection.last_duration or 0
-                findings.setdefault(name, []).append(
-                    f"Completed in {duration:.1f}s"
-                )
+                findings.setdefault(name, []).append(f"Completed in {duration:.1f}s")
 
     except Exception as e:
         logger.warning(f"Could not collect reflection findings: {e}")
@@ -107,9 +100,7 @@ async def run() -> dict:
 
         principal = load_principal_context(condensed=True)
         if principal:
-            report_lines.extend(
-                ["## Principal Priorities", "", principal, ""]
-            )
+            report_lines.extend(["## Principal Priorities", "", principal, ""])
     except Exception as e:
         logger.debug(f"Could not load principal context: {e}")
 
@@ -121,9 +112,7 @@ async def run() -> dict:
                 report_lines.append(f"- {item}")
             report_lines.append("")
 
-    report_lines.extend(
-        ["---", f"*Generated at {utc_now().isoformat()}*"]
-    )
+    report_lines.extend(["---", f"*Generated at {utc_now().isoformat()}*"])
 
     report_content = "\n".join(report_lines)
     REFLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -146,16 +135,12 @@ async def run() -> dict:
             if not project.get("github"):
                 continue
 
-            project_findings = {
-                k: v for k, v in reflection_findings.items() if v
-            }
+            project_findings = {k: v for k, v in reflection_findings.items() if v}
             if not project_findings:
                 continue
 
             project_wd = project["working_directory"]
-            issue_result = create_reflections_issue(
-                project_findings, today, cwd=project_wd
-            )
+            issue_result = create_reflections_issue(project_findings, today, cwd=project_wd)
 
             issue_url = ""
             if isinstance(issue_result, str) and issue_result:

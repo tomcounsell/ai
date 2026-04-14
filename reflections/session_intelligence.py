@@ -13,16 +13,13 @@ Returns:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
 from reflections.utils import (
-    PROJECT_ROOT,
     CORRECTION_PATTERNS,
     THRASH_RATIO_THRESHOLD,
     has_existing_github_work,
@@ -104,9 +101,7 @@ def _analyze_sessions_from_redis(target_date: str) -> dict:
             if session.status == "failed":
                 summary_text = (session.summary or "")[:200]
                 if not summary_text.strip():
-                    logger.warning(
-                        "Skipping failed session %s with empty summary", session_id
-                    )
+                    logger.warning("Skipping failed session %s with empty summary", session_id)
                     continue
                 result["error_patterns"].append(
                     {
@@ -166,8 +161,7 @@ async def run() -> dict:
         )
     if analysis["thrash_sessions"]:
         findings.append(
-            f"Detected {len(analysis['thrash_sessions'])} thrashing sessions "
-            "(high failure ratio)"
+            f"Detected {len(analysis['thrash_sessions'])} thrashing sessions (high failure ratio)"
         )
     error_patterns = analysis.get("error_patterns", [])
     if error_patterns:
@@ -238,10 +232,15 @@ async def run() -> dict:
             try:
                 result = subprocess.run(
                     [
-                        "gh", "issue", "create",
-                        "--title", issue_title,
-                        "--body", issue_body,
-                        "--label", "bug",
+                        "gh",
+                        "issue",
+                        "create",
+                        "--title",
+                        issue_title,
+                        "--body",
+                        issue_body,
+                        "--label",
+                        "bug",
                     ],
                     capture_output=True,
                     text=True,
