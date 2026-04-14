@@ -408,7 +408,7 @@ def checkpoint_branch_state(session: AgentSession) -> None:
             commit_sha = commit.stdout.strip()
             session.branch_name = branch_name
             session.commit_sha = commit_sha
-            session.save()
+            session.save(update_fields=["branch_name", "commit_sha", "updated_at"])
             logger.info(
                 f"[checkpoint] Saved branch={branch_name} commit={commit_sha[:8]} "
                 f"for session {session.session_id}"
@@ -604,7 +604,7 @@ async def _maybe_inject_resume_hydration(chosen, worker_key: str) -> None:
 
         original = chosen.message_text or ""
         chosen.message_text = f"{hydration_block}\n\n{original}" if original else hydration_block
-        await chosen.async_save()
+        await chosen.async_save(update_fields=["message_text", "updated_at"])
         logger.info(
             f"[worker:{worker_key}] Injected resume hydration into session {chosen.id} "
             f"({len(resume_files)} prior resume files found)"
@@ -789,7 +789,7 @@ async def _pop_agent_session(
                 prepend = "\n\n".join(extra_texts)
                 original = chosen.message_text or ""
                 chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
-                await chosen.async_save()
+                await chosen.async_save(update_fields=["message_text", "updated_at"])
                 logger.info(
                     f"[worker:{worker_key}] Drained {len(extra_texts)} steering message(s) "
                     f"into session {chosen.id} message_text"
@@ -920,7 +920,7 @@ async def _pop_agent_session_with_fallback(
                     prepend = "\n\n".join(extra_texts)
                     original = chosen.message_text or ""
                     chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
-                    await chosen.async_save()
+                    await chosen.async_save(update_fields=["message_text", "updated_at"])
                     logger.info(
                         f"[worker:{worker_key}] Sync fallback: drained {len(extra_texts)} "
                         f"steering message(s) into session {chosen.id} message_text"
@@ -987,7 +987,7 @@ def reorder_agent_session(agent_session_id: str, new_priority: str) -> bool:
         return False
 
     session.priority = new_priority
-    session.save()
+    session.save(update_fields=["priority", "updated_at"])
     logger.info(f"[pm-controls] Reordered session {agent_session_id} (priority={new_priority})")
     return True
 
@@ -2947,7 +2947,7 @@ def _create_continuation_pm(
             pc = getattr(parent, "project_config", None)
             if pc:
                 continuation.project_config = pc
-                continuation.save()
+                continuation.save(update_fields=["project_config", "updated_at"])
         except Exception:
             pass
 
@@ -3040,7 +3040,7 @@ async def _handle_dev_session_completion(
         try:
             if agent_session and current_stage == "BUILD":
                 agent_session.retain_for_resume = True
-                agent_session.save()
+                agent_session.save(update_fields=["retain_for_resume", "updated_at"])
                 logger.info(
                     f"[harness] Set retain_for_resume=True on dev session "
                     f"{getattr(agent_session, 'session_id', '?')} (stage={current_stage})"
@@ -3288,7 +3288,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             agent_session.branch_name = branch_name
             # Persist task_list_id so hooks can resolve this session
             agent_session.task_list_id = task_list_id
-            agent_session.save()
+            agent_session.save(update_fields=["updated_at", "branch_name", "task_list_id"])
             agent_session.append_history("user", (session.message_text or "")[:200])
     except Exception as e:
         logger.debug(f"AgentSession update failed (non-fatal): {e}")
@@ -3497,7 +3497,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             try:
                 if agent_session is not None:
                     agent_session.response_delivered_at = datetime.now(UTC)
-                    agent_session.save()
+                    agent_session.save(update_fields=["response_delivered_at", "updated_at"])
                     logger.info(f"Stamped response_delivered_at for session {session.session_id}")
             except Exception as e:
                 logger.warning(
@@ -3696,10 +3696,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     _calendar_heartbeat(session.project_key, project=session.project_key)
                 )
                 # Write updated_at heartbeat so stale cleanup doesn't kill this session
+                # Use partial save to avoid clobbering status on stale references (#950)
                 if agent_session:
                     try:
                         agent_session.updated_at = datetime.now(tz=UTC)
-                        agent_session.save()
+                        agent_session.save(update_fields=["updated_at"])
                     except Exception as hb_err:
                         logger.warning(
                             "[%s] updated_at heartbeat save failed: %s",

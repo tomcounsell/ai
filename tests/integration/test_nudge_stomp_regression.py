@@ -222,3 +222,286 @@ class TestLayer2PartialSavePreservesFields:
         )
         assert "session_events" in call_kwargs["update_fields"]
         assert "updated_at" in call_kwargs["update_fields"]
+
+
+@pytest.mark.integration
+class TestSetLinkPartialSavePreservesStatus:
+    """set_link() partial save must not clobber authoritative status (#950).
+
+    Validates the Layer 1 fix: set_link() uses save(update_fields=[field_name, "updated_at"])
+    instead of a full save, preventing stale worker references from clobbering status.
+    """
+
+    def test_set_link_preserves_killed_status(self, redis_test_db):
+        """set_link on a stale object must not clobber status=killed back to running.
+
+        Scenario:
+        1. Create session with status=running.
+        2. Obtain a stale reference (the worker's local copy).
+        3. Kill the session via finalize_session (authoritative).
+        4. Call stale_ref.set_link("issue", url) — triggers partial save.
+        5. Fresh query: status must remain 'killed', issue_url must be set.
+        """
+        session_id = "set-link-partial-save-001"
+        project_key = "test"
+
+        original = AgentSession.create(
+            session_id=session_id,
+            project_key=project_key,
+            status="running",
+            created_at=datetime.now(tz=UTC),
+        )
+
+        # Stale reference
+        stale_ref = AgentSession.query.get(id=original.id)
+        assert stale_ref is not None
+
+        # Kill via authoritative path
+        finalize_session(original, "killed", reason="test kill")
+        after_kill = AgentSession.query.get(id=original.id)
+        assert after_kill.status == "killed"
+
+        # Stale reference calls set_link (status is still "running" in memory)
+        stale_ref.set_link("issue", "https://github.com/test/issues/999")
+
+        # Fresh query — status must remain killed
+        final = AgentSession.query.get(id=original.id)
+        assert final is not None
+        assert final.status == "killed", (
+            f"set_link partial save must not clobber status, got '{final.status}'"
+        )
+        assert final.issue_url == "https://github.com/test/issues/999", (
+            "set_link must still persist the URL"
+        )
+
+
+@pytest.mark.integration
+class TestStaleIndexKilledRegression:
+    """Regression tests for #950: stale index entry survives pending-to-killed transitions.
+
+    Root cause: A full save() on a stale session object clobbers the on-disk status
+    to an intermediate value. When a kill subsequently fires, its srem targets the
+    clobbered value instead of the original pending index entry, leaving an orphan.
+
+    The fix converts all non-lifecycle saves to partial saves (update_fields=[...])
+    and adds a defensive srem in finalize_session that removes from ALL non-target
+    status index sets.
+    """
+
+    def _get_index_members(self, status: str) -> set[str]:
+        """Return member keys in the AgentSession status index set for a given status.
+
+        Note: A probe session is created per call to derive the Popoto index key via
+        the same internal path as production code. This is intentionally not cached
+        across calls — each test may run in an isolated Redis DB with fresh state.
+        """
+        from popoto.models.db_key import DB_key
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        # Build the index key the same way Popoto does
+        sample = AgentSession.create(
+            session_id="idx-probe-tmp",
+            project_key="test",
+            status="pending",
+            created_at=datetime.now(tz=UTC),
+        )
+        status_field = sample._meta.fields["status"]
+        field_cls = type(status_field)
+        idx_key = DB_key(
+            field_cls.get_special_use_field_db_key(sample, "status"),
+            status,
+        )
+        # Clean up probe
+        sample.delete()
+        return {
+            m.decode() if isinstance(m, bytes) else m
+            for m in POPOTO_REDIS_DB.smembers(idx_key.redis_key)
+        }
+
+    def test_stale_full_save_does_not_create_orphan_with_partial_saves(self, redis_test_db):
+        """Partial saves prevent stale objects from clobbering status into the wrong index.
+
+        Scenario (alternative sequence from #950 plan):
+        1. Session created as pending.
+        2. Worker pops -> transitions to running.
+        3. Nudge -> transitions back to pending (fresh read).
+        4. Worker's stale reference (status=running) calls set_link (partial save).
+        5. Kill fires on the pending session.
+        6. Assert: no orphan in pending index.
+        """
+        session_id = "stale-index-killed-regression-001"
+        project_key = "test"
+
+        # Step 1: Create pending session
+        session = AgentSession.create(
+            session_id=session_id,
+            project_key=project_key,
+            status="pending",
+            created_at=datetime.now(tz=UTC),
+        )
+
+        # Step 2: Worker pops -> running
+        worker_ref = AgentSession.query.get(id=session.id)
+        transition_status(worker_ref, "running", reason="worker pop")
+
+        # Step 3: Nudge -> back to pending (fresh read)
+        nudge_ref = AgentSession.query.get(id=session.id)
+        assert nudge_ref.status == "running"
+        transition_status(nudge_ref, "pending", reason="nudge re-enqueue")
+
+        # Verify on-disk is pending
+        check = AgentSession.query.get(id=session.id)
+        assert check.status == "pending"
+
+        # Step 4: Worker's stale reference (status=running in memory) does a partial save
+        # With the fix, set_link uses update_fields so it doesn't clobber status
+        worker_ref.set_link("issue", "https://github.com/test/issues/950")
+
+        # Verify status is still pending (partial save didn't clobber)
+        after_link = AgentSession.query.get(id=session.id)
+        assert after_link.status == "pending", (
+            f"Partial save must not clobber status, got '{after_link.status}'"
+        )
+
+        # Step 5: Kill fires
+        kill_ref = AgentSession.query.get(id=session.id)
+        assert kill_ref.status == "pending"
+        finalize_session(
+            kill_ref,
+            "killed",
+            reason="valor-session kill --all",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
+
+        # Step 6: Assert no orphan in pending index
+        final = AgentSession.query.get(id=session.id)
+        assert final.status == "killed"
+
+        pending_members = self._get_index_members("pending")
+        member_key = session.db_key.redis_key
+        assert member_key not in pending_members, (
+            f"Session {session_id} must not remain in the pending index after being killed. "
+            f"Orphan found: {member_key}"
+        )
+
+        # Also verify it IS in the killed index
+        killed_members = self._get_index_members("killed")
+        assert member_key in killed_members, f"Session {session_id} must be in the killed index"
+
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [
+            "completed",
+            "failed",
+            "killed",
+            "abandoned",
+            "cancelled",
+        ],
+    )
+    def test_no_orphan_after_terminal_transition(self, redis_test_db, terminal_status):
+        """No orphan index entries remain after any terminal transition.
+
+        Parametrized across all five terminal statuses. Creates a session,
+        transitions it through running, then finalizes to the terminal status.
+        Asserts zero orphan entries in any non-target index set.
+        """
+        session_id = f"terminal-orphan-test-{terminal_status}-001"
+        project_key = "test"
+
+        session = AgentSession.create(
+            session_id=session_id,
+            project_key=project_key,
+            status="pending",
+            created_at=datetime.now(tz=UTC),
+        )
+
+        # Transition to running first
+        transition_status(session, "running", reason="worker pop")
+
+        # Finalize to terminal status
+        finalize_session(
+            session,
+            terminal_status,
+            reason=f"test {terminal_status}",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
+
+        # Verify on-disk
+        final = AgentSession.query.get(id=session.id)
+        assert final.status == terminal_status
+
+        # Check ALL index sets — session must only appear in the target
+        member_key = session.db_key.redis_key
+        from models.session_lifecycle import ALL_STATUSES
+
+        for check_status in ALL_STATUSES:
+            members = self._get_index_members(check_status)
+            if check_status == terminal_status:
+                assert member_key in members, f"Session must be in the {terminal_status} index"
+            else:
+                assert member_key not in members, (
+                    f"Orphan: session in {check_status} index after "
+                    f"terminal transition to {terminal_status}"
+                )
+
+    def test_defensive_srem_cleans_pre_existing_orphan(self, redis_test_db):
+        """Defensive srem in finalize_session cleans up a pre-existing orphan.
+
+        Scenario: Manually inject an orphan entry into the pending index for a
+        session that's currently running, then finalize to killed. The defensive
+        srem must remove the orphan from the pending index.
+        """
+        from popoto.models.db_key import DB_key
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        session_id = "defensive-srem-test-001"
+        project_key = "test"
+
+        session = AgentSession.create(
+            session_id=session_id,
+            project_key=project_key,
+            status="running",
+            created_at=datetime.now(tz=UTC),
+        )
+
+        # Manually inject an orphan into the pending index
+        # (simulates the corruption that would have occurred pre-fix)
+        status_field = session._meta.fields["status"]
+        field_cls = type(status_field)
+        pending_idx_key = DB_key(
+            field_cls.get_special_use_field_db_key(session, "status"),
+            "pending",
+        )
+        member_key = session.db_key.redis_key
+        POPOTO_REDIS_DB.sadd(pending_idx_key.redis_key, member_key)
+
+        # Verify the orphan exists
+        assert POPOTO_REDIS_DB.sismember(pending_idx_key.redis_key, member_key)
+
+        # Finalize to killed — defensive srem should clean the orphan
+        finalize_session(
+            session,
+            "killed",
+            reason="test kill",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
+
+        # The orphan must be gone
+        assert not POPOTO_REDIS_DB.sismember(pending_idx_key.redis_key, member_key), (
+            "Defensive srem must remove orphan from pending index during finalize"
+        )
+
+        # And the session should be in killed index
+        killed_idx_key = DB_key(
+            field_cls.get_special_use_field_db_key(session, "status"),
+            "killed",
+        )
+        assert POPOTO_REDIS_DB.sismember(killed_idx_key.redis_key, member_key), (
+            "Session must be in killed index after finalize"
+        )

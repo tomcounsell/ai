@@ -366,7 +366,7 @@ def _update_agent_session(hook_input: dict) -> None:
 
         agent_session.updated_at = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
-        agent_session.save()
+        agent_session.save(update_fields=["updated_at", "tool_call_count"])
 
         # Capture GitHub links from gh Bash invocations.
         if hook_input.get("tool_name") == "Bash":

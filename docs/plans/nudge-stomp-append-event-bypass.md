@@ -526,3 +526,7 @@ Using Tier 1 only: `builder`, `test-engineer`, `validator`, `documentarian`. No 
 |----------|--------|---------|--------------|---------------------|
 
 ---
+
+## Known Follow-up
+
+- **#950 (Stale Index Regression)**: PR #905 fixed the `completed`-stomp path but left other full-save sites open. Issue #950 found that `set_link()`, `push_steering_message()`, `pop_steering_messages()`, and the heartbeat loop in `agent_session_queue.py` all did full saves that could clobber status on stale worker references. Fixed by converting all companion-field saves to partial saves and adding a defensive `srem` in `finalize_session`. See `docs/plans/stale-index-killed-regression.md`.

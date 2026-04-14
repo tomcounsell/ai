@@ -1318,7 +1318,11 @@ class AgentSession(Model):
         self.append_event(role, text)
 
     def set_link(self, kind: str, url: str) -> None:
-        """Set a tracked link on this session."""
+        """Set a tracked link on this session.
+
+        Uses partial save (update_fields) to avoid clobbering status on stale
+        worker references. See #950 for the root cause analysis.
+        """
         field_map = {
             "issue": "issue_url",
             "plan": "plan_url",
@@ -1335,7 +1339,7 @@ class AgentSession(Model):
             )
             setattr(self, field_name, url)
             try:
-                self.save()
+                self.save(update_fields=[field_name, "updated_at"])
             except Exception as e:
                 logger.warning(
                     f"set_link save failed for session {self.session_id} "
@@ -1424,7 +1428,11 @@ class AgentSession(Model):
     # === Queued steering message helpers ===
 
     def push_steering_message(self, text: str) -> None:
-        """Buffer a human reply for the PM session."""
+        """Buffer a human reply for the PM session.
+
+        Uses partial save (update_fields) to avoid clobbering status on stale
+        worker references. See #950.
+        """
         current = self.queued_steering_messages
         if not isinstance(current, list):
             current = []
@@ -1438,19 +1446,23 @@ class AgentSession(Model):
             current = current[-STEERING_QUEUE_MAX:]
         self.queued_steering_messages = current
         try:
-            self.save()
+            self.save(update_fields=["queued_steering_messages", "updated_at"])
         except Exception as e:
             logger.warning(f"Failed to save steering message for session {self.session_id}: {e}")
 
     def pop_steering_messages(self) -> list[str]:
-        """Pop all buffered steering messages, clearing the queue."""
+        """Pop all buffered steering messages, clearing the queue.
+
+        Uses partial save (update_fields) to avoid clobbering status on stale
+        worker references. See #950.
+        """
         current = self.queued_steering_messages
         if not isinstance(current, list) or not current:
             return []
         messages = list(current)
         self.queued_steering_messages = []
         try:
-            self.save()
+            self.save(update_fields=["queued_steering_messages", "updated_at"])
         except Exception as e:
             logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
         return messages
