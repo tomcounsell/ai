@@ -2,6 +2,22 @@
 
 PM session (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports text messages, single file attachments, and multi-file albums (up to 10 files grouped as a Telegram album).
 
+## When to Use the Tool
+
+The PM uses `send_telegram.py` **only** for:
+
+1. **Questions requiring human input** — a decision the stakeholder must make before work can continue
+2. **Final delivery summary** — when the full task is complete
+3. **Sharing files as deliverables** — screenshots, documents, or images produced by the work
+
+The tool must **not** be used for:
+
+- Step-by-step progress narration ("I'm working on X", "Now running Y")
+- Intermediate status updates during pipeline execution
+- Commentary on internal SDLC stages or implementation details
+
+The PM works silently through the pipeline and communicates only at decision points or on completion. Narrating every action floods the chat and violates the "work silently" principle.
+
 ## Architecture
 
 ### Problem

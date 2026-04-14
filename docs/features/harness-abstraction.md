@@ -52,11 +52,17 @@ Batched text delivery via send_cb
 `get_response_via_harness()` in `agent/sdk_client.py` spawns `claude -p --output-format stream-json` as an async subprocess and parses stdout line-by-line:
 
 - **`content_block_delta` events**: Text chunks are accumulated in a buffer
-- **Flush triggers**: Buffer is flushed to `send_cb` when it reaches 2000 characters or 3 seconds have elapsed since the last flush
+- **Flush triggers**: Buffer is flushed internally when it reaches 2000 characters or 3 seconds have elapsed since the last flush
 - **`result` event**: Contains the final response text and a `session_id` for potential future resume support
 - **Error handling**: Malformed JSON lines are skipped; non-zero exit codes are logged with stderr
 
 The function returns the final result text (from the `result` event if present, otherwise accumulated text).
+
+### Streaming Chunk Suppression
+
+`_harness_send_cb` in `agent/agent_session_queue.py` is a **no-op for all session types**. Streaming text chunks from the CLI harness subprocess are not forwarded to Telegram mid-session. Forwarding them bypasses the nudge loop and causes mid-sentence message fragments to appear in Telegram as discrete messages.
+
+The final result is delivered by `BackgroundTask` through the nudge loop, which ensures complete, coherent messages reach the user. This applies equally to PM, Teammate, and Dev sessions — no session type receives real-time streaming output in Telegram.
 
 ### Startup Health Check
 

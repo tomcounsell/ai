@@ -209,9 +209,22 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 ### Why Stage-by-Stage
 
 - **Accountability**: Each stage result is verified before progressing
-- **Visibility**: The PM can report intermediate progress to stakeholders
+- **Visibility**: The PM surfaces questions and the final delivery summary to the stakeholder, not intermediate step-by-step narration
 - **Recovery**: If a stage fails, the PM can re-dispatch or escalate without losing prior work
 - **Judgment**: The PM decides whether trivial/docs-only work warrants the full pipeline
+
+### Spawn vs. Resume
+
+When directing a Dev session, the PM chooses between spawning a fresh session or resuming a recently completed one:
+
+| Situation | Action |
+|-----------|--------|
+| Dev session recently completed, same issue, context still warm (branch checked out, transcript loaded) | Resume: `python -m tools.valor_session resume --id <id> --message "..."` |
+| New issue, different codebase area | Spawn fresh: `python -m tools.valor_session create --role dev ...` |
+| Prior session's context would be stale or misleading | Spawn fresh |
+| Parallel work needed on separate issues | Spawn fresh for each |
+
+Resuming avoids the cold-start cost of re-loading codebase context and keeps the in-progress branch checked out. Spawning fresh is safer when context from the prior session could lead the agent astray.
 
 ### PM Session Lifecycle: Wait and Continuation Fallback
 
