@@ -1,5 +1,6 @@
 ---
-status: Needs Revision
+status: Ready
+revision_applied: true
 type: feature
 appetite: Medium
 owner: valorengels
@@ -79,17 +80,17 @@ This plan sequences the work so parallel tasks ship incrementally, with reflecti
 
 ## Data Flow
 
-1. **Trigger**: Nightly, the reflection scheduler calls `scripts.memory_consolidation.run_consolidation()`
-2. **Load**: Query all active Memory records for the project (filter: `superseded_by` is null, `relevance` score > decay floor)
+1. **Trigger**: Nightly, the reflection scheduler calls `scripts.memory_consolidation.run_consolidation()` with **zero arguments** (scheduler convention). `project_key` defaults to `None`; the callable resolves it via `os.environ.get("PROJECT_KEY", "valor")`. For multi-project environments, consolidation runs once per scheduled invocation for the configured project. If multi-project iteration is needed in the future, `load_local_projects()` can be used to enumerate projects — this is documented in the Rabbit Holes section.
+2. **Load**: Query all active Memory records for the resolved project_key (filter: `superseded_by == ""`, i.e. not already archived)
 3. **Group**: Partition records by `metadata.category` (correction, decision, pattern, surprise) and `metadata.tags` overlap. Groups exceeding 50 records are split into sub-batches of 50.
 4. **LLM pass (Haiku)**: For each group, send structured prompt (see Solution section) with serialized memory content. Haiku returns a JSON consolidation plan.
 5. **Parse and validate**: Parse JSON response; validate each action (merge/flag_contradiction). Reject malformed output — log and skip.
 6. **Dry-run gate**: If dry-run mode (default for first 14 days), log proposed actions to `logs/reflections.log` — no writes to Redis.
 7. **Apply gate**: If `--apply` flag is set AND dry-run period has elapsed AND run count ≤ 10 merges/run:
-   - Write merged record as NEW Memory via `Memory.safe_save()`
-   - Set `superseded_by=<new_id>` on all originals via `m.superseded_by = new_id; m.save()`
+   - Write merged record as NEW Memory via `Memory.safe_save()` (uses `agent_id="consolidation"`, `project_key=<resolved_project_key>`, `source="system"`)
+   - For each original: `m.superseded_by = new_id; m.superseded_by_rationale = rationale; result = m.save()` — **guard the return value**: `if result is False: logger.warning("WriteFilter blocked superseded_by write for %s", m.memory_id)`
    - Log each action to `logs/reflections.log`
-8. **Contradiction path**: Flag-only. Write a Telegram notification via `valor-telegram send` with the contradiction summary. No auto-resolve.
+8. **Contradiction path**: Flag-only. Attempt Telegram notification via `valor-telegram send` with the contradiction summary; if the subprocess raises `CalledProcessError` (bridge down), catch and write to `logs/memory-contradictions.log` instead. No auto-resolve.
 9. **Return**: Summary dict `{proposed_merges, applied_merges, flagged_contradictions, skipped_exempt}` for scheduler run history.
 
 ## Architectural Impact
@@ -125,7 +126,7 @@ This plan sequences the work so parallel tasks ship incrementally, with reflecti
 
 - **`superseded_by` field**: Additive StringField on Memory model. Empty string = active. Non-empty = archived; value is the `memory_id` of the merged replacement.
 - **Recall filter**: `retrieve_memories()` skips records where `superseded_by != ""`. One-line guard. Archived memories remain in Redis for audit.
-- **Consolidation callable**: `scripts/memory_consolidation.py::run_consolidation()`. Groups memories, calls Haiku, applies or dry-runs the plan.
+- **Consolidation callable**: `scripts/memory_consolidation.py::run_consolidation()`. Signature: `run_consolidation(project_key=None, dry_run=True, max_merges=10)` — `project_key` defaults to `None` with env-var fallback (`os.environ.get("PROJECT_KEY", "valor")`) so the scheduler can call it with zero arguments. Groups memories, calls Haiku, applies or dry-runs the plan.
 - **Haiku prompt**: Structured JSON output (see below). Processes one group (≤50 records) per call.
 - **Safety rails**: Importance ≥7.0 exempt from merging. Max 10 merges per run. Contradictions flag-only. Dry-run default for 14 days.
 - **Canary set**: 10 hand-curated memories that must never merge (tested automatically).
@@ -218,7 +219,7 @@ The canary set is a hardcoded list of 10 memory content strings in `tests/unit/t
 9. "Telegram output routing uses the nudge loop — bridge has no SDLC awareness"
 10. "SupersededBy records must be excluded from recall but retained in Redis for audit"
 
-The canary test creates Memory records for each pair of adjacent canary items and asserts that `run_consolidation(dry_run=True)` proposes zero merges across any canary pair.
+The canary test creates Memory records for **all 10 canary items together in a single batch** and asserts that `run_consolidation(dry_run=True)` proposes `proposed_merges == 0` across the entire set. Testing only adjacent pairs misses non-adjacent merges (e.g., items 1 and 5 being incorrectly merged); the full-batch assertion covers all pairings.
 
 ### Rollout Sequence
 
@@ -250,6 +251,7 @@ Phase 3 (apply mode):
 ### Exception Handling Coverage
 - [ ] `run_consolidation()` wraps the Haiku API call in try/except; on failure logs WARNING and returns early with `{applied_merges: 0, error: str(e)}`
 - [ ] `Memory.safe_save()` already wraps all Redis writes — consolidation creates merged records through this path, inheriting its error handling
+- [ ] `m.save()` return value is checked when writing `superseded_by`: `if result is False: logger.warning(...)` — test that WriteFilter returning False logs a WARNING and does not raise (B2)
 - [ ] JSON parse failure from Haiku: log WARNING with raw response snippet, skip the group, continue with remaining groups
 - [ ] Each `except Exception` path must have a corresponding test asserting `logs/reflections.log` gets a WARNING entry
 
@@ -262,12 +264,13 @@ Phase 3 (apply mode):
 ### Error State Rendering
 - [ ] Dry-run log entries are human-readable: `[DRY-RUN] Would merge {ids}: {rationale}`
 - [ ] Contradiction flags produce a Telegram message via `valor-telegram send`; test that the send call is invoked with correct content
+- [ ] When `valor-telegram send` raises `CalledProcessError` (bridge down), contradiction is written to `logs/memory-contradictions.log` as fallback; test both paths (C3)
 
 ## Test Impact
 
 - [ ] `tests/unit/test_memory_model.py` — UPDATE: add assertions that `superseded_by` field defaults to `""` and accepts a memory_id string
 - [ ] `tests/unit/test_memory_retrieval.py` — UPDATE: add test that `retrieve_memories()` excludes records where `superseded_by != ""`
-- [ ] `tests/unit/test_memory_consolidation.py` — CREATE (new file): canary set test, idempotency test, superseded-recall test, exemption test (importance ≥7.0 never merged), rate-limit test (max 10 merges enforced)
+- [ ] `tests/unit/test_memory_consolidation.py` — CREATE (new file): canary set test (all-10-item batch), idempotency test, superseded-recall test, exemption test (importance ≥7.0 never merged), rate-limit test (max 10 merges enforced), WriteFilter guard test (save() returning False logs warning, no exception)
 
 No other existing memory tests are affected — consolidation is additive and the recall filter is the only behavioral change to existing code paths.
 
@@ -279,6 +282,8 @@ No other existing memory tests are affected — consolidation is additive and th
 - **Migrating existing records**: Don't backfill `superseded_by` on existing records or run a bulk migration. The field defaults to `""` which is correct for all existing records.
 - **Changing the bloom filter**: Superseded records remaining in the bloom causes harmless false positives (the retrieval step filters them). Don't modify the bloom filter logic — it's a complex data structure and the benefit is negligible.
 - **Cross-project consolidation**: Memory records are partitioned by `project_key`. Consolidation runs per-project. Don't merge memories across projects.
+- **Multi-project iteration via `load_local_projects()`**: If the system grows to many projects, iterating `load_local_projects()` inside `run_consolidation()` would let one scheduled invocation cover all projects. That's future scope — the current implementation resolves a single `project_key` per run. Add this only when actually needed.
+- **Telegram fallback escalation**: The bridge-down fallback writes contradictions to `logs/memory-contradictions.log`. A future enhancement could poll that file and re-send when the bridge recovers. Not in scope here.
 
 ## Risks
 
@@ -288,7 +293,7 @@ No other existing memory tests are affected — consolidation is additive and th
 
 ### Risk 2: Reflection scheduler changes break the `memory-dedup` callable contract
 **Impact:** A future refactor to `agent/reflection_scheduler.py` changes how callables are invoked, breaking the reflection
-**Mitigation:** The callable signature `run_consolidation(project_key, dry_run=True, max_merges=10)` follows the existing pattern established by other function-type reflections in `config/reflections.yaml`. Any scheduler refactor must maintain backward compatibility with existing callables. Additionally, the callable can always be run manually: `python -m scripts.memory_consolidation --dry-run`.
+**Mitigation:** The callable signature `run_consolidation(project_key=None, dry_run=True, max_merges=10)` uses all-keyword-argument defaults so the scheduler's zero-argument `func()` call succeeds. Any scheduler refactor must maintain backward compatibility with existing callables. Additionally, the callable can always be run manually: `python scripts/memory_consolidation.py --dry-run`.
 
 ### Risk 3: Superseded records accumulate in Redis without pruning
 **Impact:** Redis memory grows; superseded records are invisible to recall but still occupy space
@@ -355,7 +360,7 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 - [ ] `Memory` model has `superseded_by = StringField(default="")` and `superseded_by_rationale = StringField(default="")` fields
 - [ ] `agent/memory_retrieval.py` `retrieve_memories()` filters out records where `superseded_by != ""`
-- [ ] `scripts/memory_consolidation.py` callable exists with Haiku prompt, dry-run mode, apply mode, max-10-merges rate cap, importance ≥7.0 exemption, and contradiction flagging
+- [ ] `scripts/memory_consolidation.py` callable exists with signature `run_consolidation(project_key=None, dry_run=True, max_merges=10)`, Haiku prompt, dry-run mode, apply mode, max-10-merges rate cap, importance ≥7.0 exemption, WriteFilter save() guard, contradiction flagging with Telegram + log fallback
 - [ ] `memory-dedup` reflection registered in `config/reflections.yaml` with `interval: 86400`, `priority: normal`, `execution_type: function`, `enabled: true`
 - [ ] `tests/unit/test_memory_consolidation.py` has canary set test, idempotency test, superseded-recall test, exemption test, and rate-limit test
 - [ ] Dry-run mode is the default; apply is gated behind a config flag or `--apply` argument
@@ -436,13 +441,15 @@ No agent integration required beyond the existing memory recall pipeline — thi
 - **Assigned To**: consolidation-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `scripts/memory_consolidation.py` with `run_consolidation(project_key, dry_run=True, max_merges=10)` entry point
+- Create `scripts/memory_consolidation.py` with `run_consolidation(project_key=None, dry_run=True, max_merges=10)` entry point — `project_key=None` default so scheduler can call with zero args; resolve via `if project_key is None: project_key = os.environ.get("PROJECT_KEY", "valor")`
 - Implement grouping by `metadata.category` and `metadata.tags`, batching at 50 records
 - Implement Haiku API call with the prompt specified in the Solution section
 - Implement JSON response validation (reject malformed, reject merges with importance ≥7.0 IDs)
 - Implement dry-run path: log to `logs/reflections.log`, no Redis writes
-- Implement apply path: `Memory.safe_save()` for merged record, `m.superseded_by = new_id; m.superseded_by_rationale = rationale; m.save()` for originals
-- Implement contradiction flagging: `valor-telegram send` with contradiction summary
+- Implement apply path:
+  - `Memory.safe_save(agent_id="consolidation", project_key=project_key, source="system", ...)` for merged record
+  - For each original: `m.superseded_by = new_id; m.superseded_by_rationale = rationale; result = m.save()` — guard: `if result is False: logger.warning("WriteFilter blocked superseded_by write for %s", m.memory_id)`
+- Implement contradiction flagging: `valor-telegram send` with contradiction summary; on `CalledProcessError` (bridge down), write to `logs/memory-contradictions.log` as fallback
 - Return summary dict `{proposed_merges, applied_merges, flagged_contradictions, skipped_exempt}`
 
 ### 4. Write consolidation tests
@@ -453,11 +460,12 @@ No agent integration required beyond the existing memory recall pipeline — thi
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Create `tests/unit/test_memory_consolidation.py`
-- Canary set test: create Memory records for each of the 10 canary pairs; assert `run_consolidation(dry_run=True)` proposes zero merges across any canary pair
+- Canary set test: create Memory records for **all 10 canary items in a single batch**; assert `run_consolidation(dry_run=True)` returns `proposed_merges == 0` (covers all pairings, not just adjacent)
 - Idempotency test: run consolidation twice in sequence; assert second run proposes no additional merges
 - Superseded-recall test: create two duplicate memories, run with `--apply`; assert originals excluded from `retrieve_memories()` and merged record included
 - Exemption test: create two near-duplicate memories with importance=8.0; assert neither is proposed for merge
 - Rate-limit test: inject 15 merge proposals via mock; assert only 10 applied
+- WriteFilter guard test: mock `m.save()` to return `False`; assert `logger.warning` is called with the `memory_id` and no exception is raised (B2)
 
 ### 5. Register reflection
 - **Task ID**: build-reflection-registration
@@ -514,23 +522,29 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 ## Critique Results
 
-**Verdict: NEEDS REVISION** — 2 blockers, 4 concerns, 2 nits. Critique run: 2026-04-14.
+**Verdict: NEEDS REVISION** — 2 blockers, 4 concerns, 2 nits. Critique run: 2026-04-14. **Revision applied: 2026-04-14** — all blockers and concerns embedded as Implementation Notes below.
 
 ### Blockers (must resolve before build)
 
 **B1: Callable signature incompatible with scheduler** — `run_consolidation(project_key, dry_run=True, max_merges=10)` will raise `TypeError` at runtime because `execute_function_reflection()` calls `func()` with zero arguments (confirmed in `agent/reflection_scheduler.py`). Fix: make `project_key` optional (`project_key=None`) with env-var fallback: `if project_key is None: project_key = os.environ.get("PROJECT_KEY", "valor")`.
+> **Implementation Note (applied):** Signature changed to `run_consolidation(project_key=None, dry_run=True, max_merges=10)` in Task 3, Solution/Key Elements, and Data Flow step 1. Env-var fallback documented throughout.
 
 **B2: WriteFilter silently drops superseded_by writes** — `m.superseded_by = new_id; m.save()` does not check the return value. `WriteFilterMixin` runs on every `save()`; if it returns `False`, the record is never marked superseded with no error raised. Fix: `if m.save() is False: logger.warning(...)` and add a test for this failure path.
+> **Implementation Note (applied):** Apply path in Task 3 and Data Flow step 7 now reads: `result = m.save(); if result is False: logger.warning(...)`. WriteFilter guard test added to Task 4 and Test Impact section.
 
 ### Concerns (embed Implementation Notes before build)
 
 **C1: Canary set tests only adjacent pairs** — Task 4 specifies adjacent pairs only (9 pairs); non-adjacent merges (e.g., items 1+5) go untested. Fix: create all 10 canary records in one batch, assert `proposed_merges == 0`.
+> **Implementation Note (applied):** Task 4 canary test updated to create all 10 records in a single batch and assert `proposed_merges == 0`. Canary Set definition section updated to clarify the full-batch assertion.
 
 **C2: project_key resolution undocumented for multi-project envs** — Data Flow step 2 does not specify whether consolidation runs once per project or for a single configured project. Fix: document resolution strategy; consider iterating `load_local_projects()`.
+> **Implementation Note (applied):** Data Flow step 1 now documents `project_key=None` resolution via env-var, single-project-per-run behavior, and notes that `load_local_projects()` iteration is a future Rabbit Hole.
 
 **C3: Contradiction notification has no fallback if bridge is down** — `valor-telegram send` subprocess has no fallback on `CalledProcessError`. Fix: catch subprocess failure and write to `logs/memory-contradictions.log`.
+> **Implementation Note (applied):** Task 3, Data Flow step 8, and Failure Path Test Strategy updated to include `except CalledProcessError` fallback writing to `logs/memory-contradictions.log`. Test for both paths added to Task 4.
 
 **C4: Merged record KeyFields not specified** — `Memory.safe_save()` requires `agent_id` and `project_key` (both KeyFields). Plan doesn't specify what values to use for the merged record. Fix: document `agent_id="consolidation"`, `project_key=<originals>`, `source="system"` in Task 3.
+> **Implementation Note (applied):** Task 3 apply path now specifies `agent_id="consolidation"`, `project_key=project_key` (resolved project), `source="system"` for the merged record. Data Flow step 7 updated accordingly.
 
 ---
 
