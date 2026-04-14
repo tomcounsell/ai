@@ -1636,12 +1636,13 @@ async def get_response_via_harness(
 
     if result_text is not None:
         return result_text
-    # No result event — process was interrupted before completing
+    # No result event — process was interrupted before completing; return empty
+    # string so BackgroundTask skips the send (falsy check at messenger.py:151)
     logger.error(
         "Harness exited without a result event (interrupted mid-run, %d chars discarded)",
         len(full_text),
     )
-    return "Error: session was interrupted before completing."
+    return ""
 
 
 async def verify_harness_health(harness_name: str) -> bool:
