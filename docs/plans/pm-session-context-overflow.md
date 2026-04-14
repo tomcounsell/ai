@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/958
 last_comment_id: null
+revision_applied: true
 ---
 
 # PM Session Context Overflow — Harness Input Budget Cap
@@ -57,7 +58,7 @@ No prior attempt addressed the harness input size limit directly.
 3. **Worker runs `_get_response_via_harness()`** → calls `build_harness_turn_input()` which prepends project context, reply-thread context (from bridge), and scope headers
 4. **`get_response_via_harness()`** → assembles `cmd = harness_cmd + [message]` and launches `claude -p --output-format stream-json ... [full_message]`
 5. **`claude` binary receives full message as positional arg** → binary internally chunks the message for its context window; if total input exceeds its chunk limit, raises "Separator is not found, and chunk exceed the limit"
-6. **`BackgroundTask._run_work()`** catches the exception at `await coro` (line 148) → logs error → sends raw error string to Telegram
+6. **`BackgroundTask._run_work()`** catches the exception at `await coro` (line 148) → if separator error: logs WARNING and sends user-friendly "Context too long" message; otherwise: logs ERROR and sends raw error (existing behavior)
 
 **The unbounded growth compounds across turns:**
 - Turn 1: context prefix (~500 chars) + steering message (~100 chars) ≈ 600 chars
@@ -92,7 +93,7 @@ No prerequisites — this work has no external dependencies.
 - **Context budget constant**: `HARNESS_MAX_INPUT_CHARS = 100_000` — a conservative cap well below the observed failure threshold (empirically the error occurs around 200KB+; 100K gives headroom while preserving full context for all normal sessions)
 - **`_apply_context_budget(message: str, max_chars: int) -> str`**: trim function that preserves everything after the last `\n\nMESSAGE:` header (the actual steering message, which must never be truncated) and trims from the oldest context (the top of the string) to meet the budget
 - **Apply at harness call site**: call `_apply_context_budget()` inside `get_response_via_harness()` before `cmd = harness_cmd + [message]`
-- **Separator error catch**: catch the specific error strings in `BackgroundTask._run_work()` and retry with a hard-truncated input as a last-resort fallback; log a WARNING with input length so the trim threshold can be tuned
+- **Separator error catch**: catch the specific error strings in `BackgroundTask._run_work()` and send a user-friendly "Context too long — please resend your request." message instead of the raw error string; log a WARNING with input length so the trim threshold can be tuned
 
 ### Flow
 
@@ -150,24 +151,33 @@ if len(message) < original_len:
 
 **Change 3: Catch separator errors in `BackgroundTask._run_work()` as last-resort fallback**
 
-In `agent/messenger.py` `_run_work()`, distinguish the separator error from other errors:
+In `agent/messenger.py` `_run_work()`, distinguish the separator error from other errors. When the budget cap fails (e.g., steering message alone exceeds the limit), send a user-friendly message instead of exposing the raw error string to Telegram:
 
 ```python
+_SEPARATOR_ERRORS = (
+    "Separator is not found, and chunk exceed the limit",
+    "Separator is found, but chunk is longer than limit",
+)
+
 except Exception as e:
     err_str = str(e)
-    _SEPARATOR_ERRORS = (
-        "Separator is not found, and chunk exceed the limit",
-        "Separator is found, but chunk is longer than limit",
-    )
     if any(sig in err_str for sig in _SEPARATOR_ERRORS):
         logger.warning(
             f"[{self.messenger.session_id}] Harness context overflow ({len(err_str)} chars): {err_str[:120]}"
         )
-        # This path should be rare post-budget-cap — log for tuning
-    # ... existing error handling unchanged
+        await self.messenger.send(
+            "Context too long — please resend your request.",
+            message_type="error",
+        )
+    else:
+        # existing error handling unchanged
+        await self.messenger.send(
+            f"I encountered an error: {str(e)[:200]}",
+            message_type="error",
+        )
 ```
 
-Note: the coro has already completed when the error is raised — there is no retry mechanism here. The budget cap in Change 2 is the primary prevention. Change 3 is diagnostic instrumentation to detect threshold violations.
+Note: the coro has already completed when the error is raised — there is no retry mechanism here. The budget cap in Change 2 is the primary prevention. Change 3 is a fallback that replaces the raw error string with a user-friendly message when the rare budget-cap bypass occurs.
 
 ## Failure Path Test Strategy
 
@@ -181,12 +191,13 @@ Note: the coro has already completed when the error is raised — there is no re
 - [ ] `_apply_context_budget(message)` where steering message alone exceeds budget → passes through unchanged (cannot safely trim)
 
 ### Error State Rendering
-- [ ] Separator error in `_run_work()` must NOT surface raw error string to Telegram; budget cap prevents this, but the catch in Change 3 adds a log-only path
+- [ ] Separator error in `_run_work()` must NOT surface raw error string to Telegram; budget cap is the primary prevention; when it fails, Change 3 sends "Context too long — please resend your request." (not the raw separator text)
+- [ ] Non-separator errors continue to surface the existing `f"I encountered an error: {str(e)[:200]}"` message unchanged
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdk_client.py` — UPDATE: add tests for `_apply_context_budget()` function (budget logic, MESSAGE: boundary preservation, no-op when under limit, trim marker injection)
-- [ ] `tests/unit/test_cross_repo_gh_resolution.py` — UPDATE: verify `build_harness_turn_input()` output still passes through `_apply_context_budget()` unchanged for normal-sized inputs (regression guard)
+- [ ] `tests/unit/test_sdk_client.py` — UPDATE: add tests for `_apply_context_budget()` function (budget logic, MESSAGE: boundary preservation, no-op when under limit, trim marker injection); also add a dedicated integration test for the `get_response_via_harness()` → `_apply_context_budget()` call path (verifies budget is applied inside the harness call, not just the helper in isolation)
+- [ ] `tests/unit/test_cross_repo_gh_resolution.py` — UPDATE: this test verifies `build_harness_turn_input()` cross-repo header injection only — it does NOT exercise the `_apply_context_budget()` call inside `get_response_via_harness()`; keep as a regression guard for normal-sized inputs not being affected by the budget cap
 - [ ] No existing tests assert on message length passed to the harness subprocess — no deletions needed
 
 ## Rabbit Holes
@@ -238,6 +249,7 @@ No agent integration required — the budget cap is applied transparently inside
 - [ ] `HARNESS_MAX_INPUT_CHARS = 100_000` is a module-level constant, adjustable without code change
 - [ ] Unit tests: budget logic, no-op path, MESSAGE: boundary preservation, edge cases (empty, no marker)
 - [ ] Both separator error variants ("Separator is not found" and "Separator is found, but chunk is longer") are logged as WARNING with input length when they do occur
+- [ ] When the separator error fires (budget cap bypass), Telegram receives "Context too long — please resend your request." — not the raw separator error string
 - [ ] Tests pass (`pytest tests/unit/test_sdk_client.py -q`)
 - [ ] `python -m ruff check agent/ && python -m ruff format --check agent/` exits 0
 
@@ -266,15 +278,18 @@ See template for full list.
 ### 1. Implement context budget cap
 - **Task ID**: build-budget-cap
 - **Depends On**: none
-- **Validates**: tests/unit/test_sdk_client.py (add), tests/unit/test_cross_repo_gh_resolution.py (regression)
+- **Validates**: tests/unit/test_sdk_client.py (add), tests/unit/test_cross_repo_gh_resolution.py (regression guard)
 - **Assigned To**: harness-budget-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `HARNESS_MAX_INPUT_CHARS = 100_000` constant to `agent/sdk_client.py` (module level, near `_HARNESS_FLUSH_INTERVAL`)
 - Implement `_apply_context_budget(message: str, max_chars: int = HARNESS_MAX_INPUT_CHARS) -> str` in `agent/sdk_client.py` — trim from oldest context, preserve MESSAGE: boundary
 - In `get_response_via_harness()`, call `_apply_context_budget(message)` before `cmd = harness_cmd + [message]`; log INFO when trim occurs (original vs trimmed length)
-- In `BackgroundTask._run_work()` (`agent/messenger.py`), add a named check for separator error strings and log WARNING with input-length context (diagnostic only — no retry)
-- Add unit tests to `tests/unit/test_sdk_client.py`: no-op when under budget, trim removes oldest prefix, `MESSAGE:` boundary preserved, trim marker injected, empty input passthrough, steering-only exceeds budget passthrough
+- In `BackgroundTask._run_work()` (`agent/messenger.py`), add a two-branch separator error handler: if separator error (check for both "Separator is not found" and "Separator is found, but chunk is longer" variants), log WARNING and `await self.messenger.send("Context too long — please resend your request.", message_type="error")`; otherwise use existing error send path
+- Add unit tests to `tests/unit/test_sdk_client.py`:
+  - `_apply_context_budget()`: no-op when under budget, trim removes oldest prefix, `MESSAGE:` boundary preserved, trim marker injected, empty input passthrough, steering-only exceeds budget passthrough
+  - Integration test for `get_response_via_harness()` → `_apply_context_budget()` call path: verify that budget is applied inside the harness call for an oversized input (normal-sized inputs pass through unchanged)
+- `tests/unit/test_cross_repo_gh_resolution.py`: verify `build_harness_turn_input()` cross-repo header injection still works for normal-sized inputs (regression guard — this test covers header injection only, not the budget cap)
 - Verify `pytest tests/unit/test_sdk_client.py tests/unit/test_cross_repo_gh_resolution.py -q` exits 0
 - Run `python -m ruff check agent/ && python -m ruff format --check agent/`
 
@@ -286,11 +301,12 @@ See template for full list.
 - **Parallel**: false
 - Confirm `_apply_context_budget()` exists in `agent/sdk_client.py` and is called in `get_response_via_harness()`
 - Confirm `HARNESS_MAX_INPUT_CHARS` is a module-level constant
-- Confirm separator-error WARNING is added to `agent/messenger.py`
+- Confirm separator-error handler in `agent/messenger.py` sends "Context too long — please resend your request." (not the raw error string) and logs WARNING
+- Confirm non-separator errors still use the existing `f"I encountered an error: {str(e)[:200]}"` path
 - Run `pytest tests/unit/test_sdk_client.py -q` — must pass
 - Run `pytest tests/unit/test_cross_repo_gh_resolution.py -q` — must pass (regression guard)
 - Run `python -m ruff check agent/` — must exit 0
-- Update `docs/features/bridge-worker-architecture.md` — add one paragraph about the harness context budget
+- Update `docs/features/bridge-worker-architecture.md` — in the harness call chain section, add a note that `_apply_context_budget()` is called inside `get_response_via_harness()` with `HARNESS_MAX_INPUT_CHARS = 100_000` before subprocess launch
 
 ## Verification
 
@@ -307,7 +323,9 @@ See template for full list.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| — | — | Not yet critiqued | — | — |
+| CONCERN | Operator, User | C1: Separator error still surfaces raw string to Telegram when budget cap fails — Change 3 only changed log level but did not suppress the raw error send | Change 3 revised in Technical Approach | Two-branch handler: separator → send "Context too long — please resend your request."; other → existing send. Confirmed in Task 1 and validate-budget-cap checklist. |
+| CONCERN | Operator, Archaeologist | C2: `docs/features/bridge-worker-architecture.md` not updated with budget cap note | validate-budget-cap task updated | Task 2 now explicitly requires adding a note about `_apply_context_budget()` and `HARNESS_MAX_INPUT_CHARS` at the harness call chain diagram. |
+| NIT | — | N1: `test_cross_repo_gh_resolution.py` scope claim vs reality — task described it as an integration guard for `_apply_context_budget()`, but the test only covers `build_harness_turn_input()` header injection | Test Impact and Task 1 clarified | Cross-repo test retained as regression guard for header injection only; dedicated `get_response_via_harness()` → `_apply_context_budget()` integration test added to `test_sdk_client.py`. |
 
 ---
 
