@@ -1617,7 +1617,10 @@ async def get_response_via_harness(
 
         if event_type == "stream_event":
             event = data.get("event", {})
-            if (
+            if event.get("type") == "content_block_start":
+                # Reset on each new block so full_text holds only the last block
+                full_text = ""
+            elif (
                 event.get("type") == "content_block_delta"
                 and event.get("delta", {}).get("type") == "text_delta"
             ):
@@ -1631,16 +1634,14 @@ async def get_response_via_harness(
         stderr_text = stderr_data.decode("utf-8", errors="replace") if stderr_data else ""
         logger.warning(f"Harness exited with code {proc.returncode}: {stderr_text[:500]}")
 
-    # Prefer result event text, fall back to accumulated text
-    if result_text is None:
-        logger.warning(
-            "Harness exited without a result event — falling back to accumulated text (%d chars)",
-            len(full_text),
-        )
-    final = result_text if result_text is not None else full_text
-    if not final:
-        return "Error: harness produced no output."
-    return final
+    if result_text is not None:
+        return result_text
+    # No result event — process was interrupted before completing
+    logger.error(
+        "Harness exited without a result event (interrupted mid-run, %d chars discarded)",
+        len(full_text),
+    )
+    return "Error: session was interrupted before completing."
 
 
 async def verify_harness_health(harness_name: str) -> bool:
