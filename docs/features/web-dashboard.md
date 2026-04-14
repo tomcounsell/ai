@@ -134,7 +134,7 @@ The central data model for dashboard display, containing:
 - Timestamps: `created_at`, `started_at`, `completed_at`, `updated_at`
 - SDLC state: `stages` (list of `StageState`), `current_stage`, `events`
 - Links: `issue_url`, `plan_url`, `pr_url`
-- Computed properties: `duration`, `is_active`, `is_complete`, `display_name` (prefers `slug` over `context_summary`)
+- Computed properties: `duration`, `is_active`, `is_complete`, `display_name` (fallback chain: `slug` > issue/PR title via GitHub API > `context_summary` > `MESSAGE:`/`FROM:` extracted from system prompt preamble > `type • project`)
 
 ### `StageState`
 

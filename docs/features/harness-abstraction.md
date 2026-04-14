@@ -4,41 +4,32 @@
 
 ## Overview
 
-Dev role sessions can now execute via a CLI harness (`claude -p --output-format stream-json`) instead of the Claude Agent SDK. The harness is selected by a single environment variable (`DEV_SESSION_HARNESS`), making the execution backend swappable without changing any PM, bridge, or session model code.
+All session types (PM, Teammate, Dev) now execute via the CLI harness (`claude -p --output-format stream-json`). The original `DEV_SESSION_HARNESS` environment variable is preserved for legacy reference, but all session types are unconditionally routed to `get_response_via_harness()` — the SDK path (`get_agent_response_sdk()`) is no longer used.
 
-PM and teammate sessions remain on the SDK path. Only dev sessions are routed through the harness abstraction.
-
-**Phase 6 (end-to-end validation)** remains pending — production validation with `DEV_SESSION_HARNESS=claude-cli` running a full SDLC pipeline.
+**Phase 6 (end-to-end validation)** is complete — all session types run through the CLI harness in production.
 
 ## How It Works
 
 ### Harness Selection
 
-The worker reads `DEV_SESSION_HARNESS` at session execution time:
+All session types are unconditionally routed to `get_response_via_harness()` in `agent/agent_session_queue.py`. The `DEV_SESSION_HARNESS` environment variable is preserved but no longer gates routing for PM or Teammate sessions — they always run via the CLI harness.
 
-| Value | Behavior |
-|-------|----------|
-| `sdk` (default) | Dev sessions use `get_agent_response_sdk()` -- current behavior, zero change |
-| `claude-cli` | Dev sessions use `get_response_via_harness()` -- CLI subprocess |
-| Any other value | Treated as a harness name; must have an entry in `_HARNESS_COMMANDS` |
-
-PM and teammate sessions always use the SDK regardless of this setting.
+| Session Type | Execution Path |
+|-------------|---------------|
+| PM | `get_response_via_harness()` — CLI harness, always |
+| Teammate | `get_response_via_harness()` — CLI harness, always |
+| Dev | `get_response_via_harness()` — CLI harness, always |
 
 ### Routing Path
 
 ```
-Worker receives pending AgentSession
+Worker receives pending AgentSession (any session_type)
     |
     v
-session_type == "dev" AND DEV_SESSION_HARNESS != "sdk"?
-    |                           |
-   YES                         NO
-    |                           |
-    v                           v
-get_response_via_harness()   get_agent_response_sdk()
-    |                           |
-    v                           v
-claude -p subprocess         Claude Agent SDK
+get_response_via_harness()   [all types: PM, Teammate, Dev]
+    |
+    v
+claude -p subprocess
     |
     v
 stream-json stdout parsing
@@ -74,10 +65,11 @@ When `DEV_SESSION_HARNESS` is set to a non-`sdk` value, the worker runs `verify_
 4. Logs a warning if `apiKeySource` indicates API key billing (the point of the CLI harness is to use subscription billing)
 5. On failure: logs a warning but does not block startup -- sessions fall back to SDK
 
-### Security
+### Security and Session Context
 
 - `ANTHROPIC_API_KEY` is explicitly stripped from the subprocess environment to prevent the CLI from using API billing when a subscription is available
-- Extra env vars (`AGENT_SESSION_ID`, `CLAUDE_CODE_TASK_LIST_ID`) are passed through for session isolation
+- `AGENT_SESSION_ID` and `CLAUDE_CODE_TASK_LIST_ID` are passed to all session types for session isolation
+- `VALOR_PARENT_SESSION_ID` is additionally injected for PM and Teammate sessions, enabling child subprocesses (spawned via `valor_session create --parent` or the Agent tool) to link their `AgentSession` records back to the parent session in `user_prompt_submit.py`. Dev sessions do not receive this env var — they are leaf nodes in the hierarchy.
 
 ## Harness Command Registry
 

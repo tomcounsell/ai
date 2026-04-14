@@ -68,8 +68,11 @@ The gate is a reminder, not a hard blocker. The agent can choose to proceed, but
 For local Claude Code sessions, the SDLC router ensures a trackable session exists before dispatching sub-skills via `tools/sdlc_session_ensure.py`. This creates an `AgentSession` keyed by `sdlc-local-{issue_number}` so that downstream markers have a session to write to. The operation is idempotent — running it multiple times for the same issue reuses the same session.
 
 ```bash
-python -m tools.sdlc_session_ensure --issue-number 941 --issue-url "https://github.com/owner/repo/issues/941"
+SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
+python -m tools.sdlc_session_ensure --issue-number 941 --issue-url "https://github.com/$SDLC_REPO/issues/941"
 ```
+
+The `SDLC_REPO` value is shell-derived to avoid hardcoding the repo owner/name. `tools/sdlc_session_ensure.py` also resolves `project_key` dynamically via `resolve_project_key(cwd)` — it no longer hardcodes `project_key='ai'`.
 
 See `docs/features/sdlc-pipeline-state.md` for the full local session tracking design.
 
