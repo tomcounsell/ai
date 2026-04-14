@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/948
 last_comment_id:
+revision_applied: true
 ---
 
 # Centralize Dedup Recording in Bridge Dispatch
@@ -351,8 +352,7 @@ No agent integration required. This is a bridge-internal change. `dispatch_teleg
 - **Parallel**: false
 - Run `pytest tests/ -x -q` — all pass.
 - Run `python -m ruff check .` and `python -m ruff format --check .` — clean.
-- Run the new contract test directly: `pytest tests/unit/test_bridge_dispatch_contract.py -v` — passes.
-- Temporarily inject a bare `await enqueue_agent_session(...)` into `handler()` to confirm the contract test fails, then revert.
+- Run the new contract test directly: `pytest tests/unit/test_bridge_dispatch_contract.py -v` — passes, including `test_contract_detects_violation_in_synthetic_source` (C5 — no manual inject/revert dance).
 - Verify Mermaid diagrams render in both docs files (visual check on GitHub preview or with a local Mermaid renderer).
 - Walk through the 2026-04-14 11:54 incident against the new code path and document the reasoning in the PR description.
 - Confirm the "benign race" paragraph is gone from `docs/features/message-reconciler.md`.
@@ -372,7 +372,37 @@ No agent integration required. This is a bridge-internal change. `dispatch_teleg
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns)
+**Findings:** 0 blockers, 5 concerns, 3 nits
+**Revision pass:** applied — Implementation Notes embedded below.
+
+### Concerns (with Implementation Notes)
+
+**C1 — AST contract check must be scope-aware.**
+*Concern:* A naïve `ast.walk(handler)` will descend into nested helper functions defined inside `handler()`, treating their calls as handler calls. It will also miss calls made via attribute access on imported aliases.
+*Implementation Note:* In `tests/unit/test_bridge_dispatch_contract.py`, use a scope-aware walker that enters the `handler` `AsyncFunctionDef` body but does NOT descend into inner `FunctionDef`/`AsyncFunctionDef`/`Lambda` nodes. Concrete shape: write a small `_iter_direct_calls(node)` generator that yields `Call` nodes only while the current node's enclosing function is `handler` itself. Cover both `Name` (`enqueue_agent_session(...)`) and `Attribute` (`dedup.record_message_processed(...)`) forms.
+
+**C2 — Top-level AST lookup must pin to `handler` deterministically.**
+*Concern:* `next(n for n in ast.walk(tree) if ... n.name=='handler')` matches the first function named `handler` anywhere in the tree, which risks matching a nested helper or a future same-name function.
+*Implementation Note:* Resolve `handler` by walking only the top-level module body (`tree.body`) and selecting the `AsyncFunctionDef` whose name is `handler` AND whose decorator list contains a `client.on(...)` call (Telethon event registration). If not found, fail the test with a clear error so a rename is caught loudly, not silently skipped. The Verification shell command in the plan should use the same deterministic lookup (walk `tree.body`, match decorator).
+
+**C3 — `record_telegram_message_handled` shim: keep it, but justify via observability.**
+*Concern:* A thin wrapper that only calls `record_message_processed` adds a second name for the same operation and duplicates the contract surface. Drop it and call `record_message_processed` directly, OR keep it and earn its weight by adding observability.
+*Implementation Note:* Keep the shim and earn its weight. Inside `record_telegram_message_handled`, emit a single `logger.debug("telegram message handled without enqueue: chat=%s msg=%s", chat_id, message_id)` before delegating to `record_message_processed`. This gives the "steered/finalized without enqueue" branches a grep-able signature distinct from the enqueue path, which is exactly the semantic the shim exists to express. No new log levels, no new metrics.
+
+**C4 — `record_message_processed` swallows exceptions; dedup failures are invisible.**
+*Concern:* `bridge/dedup.py::record_message_processed` has `except Exception: logger.debug(...)`. A Redis outage silently disables dedup, and the reconciler will re-dispatch every message for the duration of the outage. Debug-level logging guarantees no one will notice.
+*Implementation Note:* Raise the log level in `bridge/dedup.py::record_message_processed` from `logger.debug(...)` to `logger.warning(...)` and include the exception in the message (`logger.warning("dedup record failed for chat=%s msg=%s: %s", chat_id, message_id, exc)`). Do NOT re-raise — the caller's semantics (never break on dedup failure) are correct. Add a unit test in `tests/unit/test_dedup.py::test_record_logs_warning_on_redis_failure` asserting the warning is emitted when the underlying save raises.
+
+**C5 — Replace the manual "inject a bare call, confirm, revert" step with a synthetic-source smoke test.**
+*Concern:* Task 4 currently asks the validator to manually inject a bare `await enqueue_agent_session(...)` into `handler()` to confirm the contract test fails, then revert. This is fragile: a revert failure leaves the repo dirty; a skipped verification defeats the contract.
+*Implementation Note:* In `tests/unit/test_bridge_dispatch_contract.py`, add a test case `test_contract_detects_violation_in_synthetic_source` that constructs an in-memory string containing a minimal module with an async function named `handler` decorated with `@client.on()`, containing a bare `await enqueue_agent_session(...)` call. Run the same AST walker against this synthetic source and assert the walker reports the violation. This provides the same guarantee without touching the real source tree. Remove the manual "inject and revert" step from Task 4's validator checklist; update the Success Criteria accordingly.
+
+### Nits (acknowledged, non-blocking)
+
+- N1: Consider renaming `dispatch_telegram_session` → `dispatch_telegram_message` for symmetry with `record_telegram_message_handled`. Deferred — not worth churn if current name ships first.
+- N2: Verification table's shell one-liner is brittle (single-line AST via `python -c`); the unit test supersedes it, but keep the shell check as a smoke signal.
+- N3: `Step by Step Tasks` header numbering skips from 4 → no 5; cosmetic.
 
 ---
 
