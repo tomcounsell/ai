@@ -72,9 +72,11 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         if issue_url:
             kwargs["issue_url"] = issue_url
 
+        from tools.valor_session import resolve_project_key
+
         session = AgentSession.create_local(
             session_id=local_session_id,
-            project_key="ai",
+            project_key=resolve_project_key(os.getcwd()),
             working_dir=os.getcwd(),
             session_type="pm",
             **kwargs,

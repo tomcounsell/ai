@@ -43,7 +43,8 @@ If NO issue or PR number was provided (just a feature description), invoke `/do-
 After resolving the issue number, ensure a local SDLC session exists in Redis so that stage markers can track progress. This is a no-op for bridge-initiated sessions (which already have `VALOR_SESSION_ID`), but critical for local Claude Code sessions.
 
 ```bash
-python -m tools.sdlc_session_ensure --issue-number {issue_number} --issue-url "https://github.com/{repo}/issues/{issue_number}" 2>/dev/null || true
+SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
+python -m tools.sdlc_session_ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
 ```
 
 This is idempotent -- running it multiple times for the same issue reuses the same session. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
