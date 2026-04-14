@@ -95,6 +95,41 @@ def issue_exists_for_date(date: str, cwd: str | None = None) -> bool:
         return False
 
 
+def ensure_reflections_label(cwd: str | None = None) -> bool:
+    """Ensure the 'reflections' label exists in the target repo.
+
+    Reflections runs across multiple project repos (see ~/Desktop/Valor/projects.json).
+    The label only exists where someone created it, so issue creation fails with
+    "could not add label: 'reflections' not found" in fresh repos. Creating the
+    label with --force is idempotent: no-op if it exists, creates it if not.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "label",
+                "create",
+                "reflections",
+                "--color",
+                "6f42c1",
+                "--description",
+                "Related to the reflections maintenance system",
+                "--force",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            logger.warning(f"Could not ensure reflections label: {result.stderr.strip()}")
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Error ensuring reflections label: {e}")
+        return False
+
+
 def create_reflections_issue(
     findings: dict[str, list[str]], date: str, cwd: str | None = None
 ) -> str | bool:
@@ -130,6 +165,9 @@ def create_reflections_issue(
     if issue_exists_for_date(date, cwd=cwd):
         logger.info(f"Reflections issue already exists for {date}, skipping")
         return False
+
+    # Ensure the label exists in this repo before attempting to attach it.
+    ensure_reflections_label(cwd=cwd)
 
     # Format and create
     title = f"Reflections Report - {date}"

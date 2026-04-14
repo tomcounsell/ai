@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from scripts.reflections_report import (
     create_reflections_issue,
+    ensure_reflections_label,
     format_report_body,
     issue_exists_for_date,
     reset_dedup_guard,
@@ -111,11 +112,11 @@ class TestCreateReflectionsIssue:
         result = create_reflections_issue(findings, "2026-02-17")
         # Returns the issue URL string on success
         assert result == "https://github.com/org/repo/issues/42"
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args[0][0]
-        assert "gh" in call_args
-        assert "issue" in call_args
-        assert "create" in call_args
+        # Two subprocess calls: ensure_reflections_label, then gh issue create
+        assert mock_run.call_count == 2
+        label_args, issue_args = mock_run.call_args_list[0][0][0], mock_run.call_args_list[1][0][0]
+        assert label_args[:3] == ["gh", "label", "create"]
+        assert issue_args[:3] == ["gh", "issue", "create"]
 
     @patch("scripts.reflections_report.issue_exists_for_date", return_value=True)
     def test_skips_when_issue_exists(self, mock_exists):
@@ -153,6 +154,28 @@ class TestCreateReflectionsIssue:
         mock_exists.assert_called_once_with("2026-02-17", cwd="/tmp/proj")
 
 
+class TestEnsureReflectionsLabel:
+    """Tests for ensure_reflections_label — the multi-repo label auto-create."""
+
+    @patch("scripts.reflections_report.subprocess.run")
+    def test_creates_label_with_force_flag(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        assert ensure_reflections_label(cwd="/tmp/proj") is True
+        args = mock_run.call_args[0][0]
+        assert args[:4] == ["gh", "label", "create", "reflections"]
+        assert "--force" in args
+        assert mock_run.call_args[1]["cwd"] == "/tmp/proj"
+
+    @patch("scripts.reflections_report.subprocess.run")
+    def test_returns_false_on_gh_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="permission denied")
+        assert ensure_reflections_label() is False
+
+    @patch("scripts.reflections_report.subprocess.run", side_effect=OSError("gh missing"))
+    def test_returns_false_when_gh_unavailable(self, mock_run):
+        assert ensure_reflections_label() is False
+
+
 class TestDedupGuard:
     """Tests for in-memory dedup guard preventing race condition duplicates."""
 
@@ -177,8 +200,9 @@ class TestDedupGuard:
         result2 = create_reflections_issue(findings, "2026-02-17", cwd="/tmp/proj")
         assert result2 is False
 
-        # subprocess.run (for gh issue create) should only be called once
-        assert mock_run.call_count == 1
+        # subprocess.run is called twice on the first attempt (ensure label + create issue);
+        # the second call is short-circuited by the dedup guard before any subprocess.
+        assert mock_run.call_count == 2
 
     @patch("scripts.reflections_report.subprocess.run")
     @patch("scripts.reflections_report.issue_exists_for_date", return_value=False)
@@ -194,7 +218,8 @@ class TestDedupGuard:
 
         assert isinstance(result1, str)
         assert isinstance(result2, str)
-        assert mock_run.call_count == 2
+        # Each create call makes two subprocess calls (ensure label + create issue).
+        assert mock_run.call_count == 4
 
     def test_reset_clears_guard(self):
         """reset_dedup_guard clears all tracked entries."""
