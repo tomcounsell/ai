@@ -153,31 +153,31 @@ Same flow as Change A for the reply thread. Additionally: when the prior session
 
 ### Exception Handling Coverage
 
-- [ ] Reply-chain fetch in the handler must be wrapped in try/except and log a WARNING on failure (not silent). On failure, fall back to the existing `_build_completed_resume_text` behavior (summary-only). Test: simulate a `fetch_reply_chain` raising `ConnectionError`; assert logger.warning was called and the session still enqueues with the summary-only preamble.
-- [ ] Implicit-context detection must not crash on empty/None text. Test: `references_prior_context("")` returns `False`, `references_prior_context(None)` returns `False` (or raises TypeError and is guarded by caller — pick one and test it).
-- [ ] Existing `except Exception: pass` at `agent_session_queue.py:3483` remains but must be accompanied by a debug log confirming the fallback fired. Already present — verify unchanged.
+- [x] Reply-chain fetch in the handler must be wrapped in try/except and log a WARNING on failure (not silent). On failure, fall back to the existing `_build_completed_resume_text` behavior (summary-only). Test: simulate a `fetch_reply_chain` raising `ConnectionError`; assert logger.warning was called and the session still enqueues with the summary-only preamble.
+- [x] Implicit-context detection must not crash on empty/None text. Test: `references_prior_context("")` returns `False`, `references_prior_context(None)` returns `False` (or raises TypeError and is guarded by caller — pick one and test it).
+- [x] Existing `except Exception: pass` at `agent_session_queue.py:3483` remains but must be accompanied by a debug log confirming the fallback fired. Already present — verify unchanged.
 
 ### Empty/Invalid Input Handling
 
-- [ ] `fetch_reply_chain` returns an empty list when the replied-to message was deleted. Test: mock client.get_messages to return None; assert chain is empty and `format_reply_chain([])` returns "" so the augmented text is unchanged.
-- [ ] Agent receives empty string from `format_reply_chain([])` — must not cause a double-blank-line or malformed preamble. Test: assert `_build_completed_resume_text(session, "hi", reply_chain_context="")` produces the same output as `_build_completed_resume_text(session, "hi")`.
-- [ ] `references_prior_context` must return False for whitespace-only input.
+- [x] `fetch_reply_chain` returns an empty list when the replied-to message was deleted. Test: mock client.get_messages to return None; assert chain is empty and `format_reply_chain([])` returns "" so the augmented text is unchanged.
+- [x] Agent receives empty string from `format_reply_chain([])` — must not cause a double-blank-line or malformed preamble. Test: assert `_build_completed_resume_text(session, "hi", reply_chain_context="")` produces the same output as `_build_completed_resume_text(session, "hi")`.
+- [x] `references_prior_context` must return False for whitespace-only input.
 
 ### Error State Rendering
 
-- [ ] If reply-chain fetch fails, the user still gets an agent response (just without the extra context). No user-visible error should be rendered. Integration test: force `fetch_reply_chain` to raise; assert session completes normally.
-- [ ] `logger.warning` message must include `session_id`, `chat_id`, and the exception message so it is greppable in `logs/bridge.log`.
+- [x] If reply-chain fetch fails, the user still gets an agent response (just without the extra context). No user-visible error should be rendered. Integration test: force `fetch_reply_chain` to raise; assert session completes normally.
+- [x] `logger.warning` message must include `session_id`, `chat_id`, and the exception message so it is greppable in `logs/bridge.log`.
 
 ## Test Impact
 
-- [ ] `tests/integration/test_steering.py::test_reply_to_completed_session_reenqueues_with_context` — UPDATE: assert the augmented text now also contains a `REPLY THREAD CONTEXT` block, not just `context_summary`.
-- [ ] `tests/integration/test_steering.py::test_reply_to_completed_session_fallback_without_summary` — UPDATE: same assertion for the fallback path (no summary but reply chain should still appear).
-- [ ] `tests/integration/test_steering.py` — ADD: new test `test_resume_completed_carries_reply_chain` that wires `fetch_reply_chain` through the handler and asserts the chain appears in the enqueued session's `message_text`.
-- [ ] `tests/integration/test_steering.py` — ADD: new test `test_implicit_context_directive_injected` asserting `references_prior_context("did we get this fixed?")` triggers the directive injection.
-- [ ] `tests/integration/test_steering.py` — ADD: new test `test_reply_chain_fetch_failure_falls_back` asserting a `fetch_reply_chain` exception does not block session enqueue.
-- [ ] `tests/integration/test_catchup_revival.py` — VERIFY (no changes expected): existing tests must still pass; the resume-completed branch is touched but only additively.
-- [ ] `tests/unit/` — ADD: unit tests for `references_prior_context` covering the keyword list (positive and negative cases).
-- [ ] `tests/unit/test_delivery_execution.py` — VERIFY: pattern-match tests for enrichment path must still pass; `telegram_message_key` is still passed on the normal path.
+- [x] `tests/integration/test_steering.py::test_reply_to_completed_session_reenqueues_with_context` — UPDATE: assert the augmented text now also contains a `REPLY THREAD CONTEXT` block, not just `context_summary`.
+- [x] `tests/integration/test_steering.py::test_reply_to_completed_session_fallback_without_summary` — UPDATE: same assertion for the fallback path (no summary but reply chain should still appear).
+- [x] `tests/integration/test_steering.py` — ADD: new test `test_resume_completed_carries_reply_chain` that wires `fetch_reply_chain` through the handler and asserts the chain appears in the enqueued session's `message_text`.
+- [x] `tests/integration/test_steering.py` — ADD: new test `test_implicit_context_directive_injected` asserting `references_prior_context("did we get this fixed?")` triggers the directive injection.
+- [x] `tests/integration/test_steering.py` — ADD: new test `test_reply_chain_fetch_failure_falls_back` asserting a `fetch_reply_chain` exception does not block session enqueue.
+- [x] `tests/integration/test_catchup_revival.py` — VERIFY (no changes expected): existing tests must still pass; the resume-completed branch is touched but only additively.
+- [x] `tests/unit/` — ADD: unit tests for `references_prior_context` covering the keyword list (positive and negative cases).
+- [x] `tests/unit/test_delivery_execution.py` — VERIFY: pattern-match tests for enrichment path must still pass; `telegram_message_key` is still passed on the normal path.
 
 ## Rabbit Holes
 
@@ -263,16 +263,16 @@ One integration test verifies end-to-end: simulate a Telegram message matching t
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-management.md` — the existing "Resume Completed Session" section must describe the new reply-chain hydration and the implicit-context directive.
-- [ ] Update `docs/features/bridge-module-architecture.md` if its handler flow diagrams show the resume-completed branch (verify during docs pass; update if so).
-- [ ] Create `docs/features/reply-thread-context-hydration.md` describing the three changes (A/B/C), the hydration rules, and the precedence between pre-hydration and deferred enrichment.
-- [ ] Add an entry to `docs/features/README.md` index table.
+- [x] Update `docs/features/session-management.md` — the existing "Resume Completed Session" section must describe the new reply-chain hydration and the implicit-context directive.
+- [x] Update `docs/features/bridge-module-architecture.md` if its handler flow diagrams show the resume-completed branch (verify during docs pass; update if so).
+- [x] Create `docs/features/reply-thread-context-hydration.md` describing the three changes (A/B/C), the hydration rules, and the precedence between pre-hydration and deferred enrichment.
+- [x] Add an entry to `docs/features/README.md` index table.
 
 ### Inline Documentation
 
-- [ ] Update `_build_completed_resume_text` docstring to describe the new `reply_chain_context` parameter and the layered preamble format.
-- [ ] Add a module-level docstring to `bridge/context.py`'s `references_prior_context` helper with examples of matching and non-matching text.
-- [ ] Update `build_conversation_history` docstring at `bridge/context.py:237-246` — remove the "NOT called by default" language now that the implicit-context directive exists.
+- [x] Update `_build_completed_resume_text` docstring to describe the new `reply_chain_context` parameter and the layered preamble format.
+- [x] Add a module-level docstring to `bridge/context.py`'s `references_prior_context` helper with examples of matching and non-matching text.
+- [x] Update `build_conversation_history` docstring at `bridge/context.py:237-246` — remove the "NOT called by default" language now that the implicit-context directive exists.
 
 ### External Documentation Site
 
@@ -280,16 +280,16 @@ This repo does not publish external docs; skip.
 
 ## Success Criteria
 
-- [ ] A Telegram message with `reply_to_msg_id` set produces an agent prompt containing `REPLY THREAD CONTEXT` **in both the new-session branch and the resume-completed branch** (verified by integration test).
-- [ ] The resume-completed branch includes both `context_summary` (when present) AND reply-chain context (when present).
-- [ ] Messages matching `references_prior_context` and lacking `reply_to_msg_id` get a system-prompt directive instructing the agent to use `valor-telegram` first.
-- [ ] Replaying the 2026-04-14 11:54 incident through the new code path surfaces either the prior session's transcript or the chat thread context to the agent.
-- [ ] No double-hydration: the agent never sees two `REPLY THREAD CONTEXT` blocks.
-- [ ] No regressions: `tests/integration/test_steering.py` and `tests/integration/test_catchup_revival.py` pass.
-- [ ] New unit tests for `references_prior_context` pass.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
-- [ ] Ruff clean (`python -m ruff check bridge/ agent/`).
+- [x] A Telegram message with `reply_to_msg_id` set produces an agent prompt containing `REPLY THREAD CONTEXT` **in both the new-session branch and the resume-completed branch** (verified by integration test).
+- [x] The resume-completed branch includes both `context_summary` (when present) AND reply-chain context (when present).
+- [x] Messages matching `references_prior_context` and lacking `reply_to_msg_id` get a system-prompt directive instructing the agent to use `valor-telegram` first.
+- [x] Replaying the 2026-04-14 11:54 incident through the new code path surfaces either the prior session's transcript or the chat thread context to the agent.
+- [x] No double-hydration: the agent never sees two `REPLY THREAD CONTEXT` blocks.
+- [x] No regressions: `tests/integration/test_steering.py` and `tests/integration/test_catchup_revival.py` pass.
+- [x] New unit tests for `references_prior_context` pass.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
+- [x] Ruff clean (`python -m ruff check bridge/ agent/`).
 
 ## Team Orchestration
 
