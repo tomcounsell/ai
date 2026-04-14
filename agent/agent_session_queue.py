@@ -1558,6 +1558,12 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                     )
                     _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
+                    # Wake up an already-running idle worker — _ensure_worker returns
+                    # early if the worker exists, so the event is never set and the
+                    # recovered pending session would stall until a new notify arrives.
+                    event = _active_events.get(worker_key)
+                    if event is not None:
+                        event.set()
                 recovered += 1
         except Exception:
             logger.exception(
