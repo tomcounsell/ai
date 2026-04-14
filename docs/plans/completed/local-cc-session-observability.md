@@ -1,5 +1,5 @@
 ---
-status: Building
+status: merged
 type: feature
 appetite: Medium
 owner: Valor

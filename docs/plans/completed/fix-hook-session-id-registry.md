@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: merged
 type: bug
 appetite: Small
 owner: Valor
