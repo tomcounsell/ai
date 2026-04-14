@@ -260,8 +260,10 @@ Below is a fully rendered PLAN-stage briefing showing expected verbosity and fie
     no constraints, --model flag omitted, and brittle venv resolution.
 
     ## Key Files / Entry Points
-    - config/personas/project-manager.md — PRIMARY file to change (contains dispatch template)
-    - docs/plans/ — output directory for the plan doc
+    - config/personas/project-manager.md — PRIMARY file to change (contains dispatch template, lines ~120-250)
+    - tools/valor_session.py — the `create` subcommand the template invokes (for --model flag reference)
+    - .claude/skills/sdlc/SKILL.md — Stage→Model Dispatch Table ground truth referenced by the template
+    - docs/plans/ — output directory for the plan doc this stage produces
 
     ## Prior Stage Findings
     None — this is the first stage.
