@@ -1333,18 +1333,13 @@ async def main():
                             sender_id=sender_id,
                             project_config=project,
                         )
-                        from bridge.markdown import send_markdown
-
-                        await send_markdown(
-                            client,
-                            event.chat_id,
-                            "Resuming from prior session.",
-                            reply_to=message.id,
-                        )
                         logger.info(
                             f"[{project_name}] Resumed completed session "
                             f"{session_id} with prior context"
                         )
+                        from bridge.dedup import record_message_processed
+
+                        await record_message_processed(event.chat_id, message.id)
                         return
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback

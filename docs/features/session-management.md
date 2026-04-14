@@ -135,8 +135,9 @@ through and created a blank-slate re-enqueue with no prior context. The new beha
    ```
 3. A fresh `AgentSession` is enqueued with the **same `session_id`** (preserving thread
    continuity) and the augmented message as its task.
-4. A user-visible ack `"Resuming from prior session."` is sent as a reply so the user knows
-   the agent has their prior context.
+4. No ack is sent. The PM behaves like a human PM resuming a conversation with their CEO:
+   they don't announce "picking up where we left off" — they just respond to the substance
+   of the new message. The resumed session's actual reply is the only user-visible signal.
 5. If `context_summary` is `None` (session completed without generating a summary), a generic
    fallback string is used: `"This continues a previously completed session."`
 
