@@ -1,14 +1,49 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: valorengels
 created: 2026-04-07
 tracking: https://github.com/tomcounsell/ai/issues/795
-last_comment_id:
+last_comment_id: IC_kwDOEYGa0878K8bp
 ---
 
 # Memory Consolidation Reflection: LLM-Based Semantic Dedup
+
+## Recon Summary
+
+**Confirmed:** 4 items — ready to include as specified
+
+- **Memory model is greenfield for `superseded_by`**: `models/memory.py` has no `superseded_by` field; adding `StringField(default="")` is purely additive. Memory model uses Popoto `StringField`, `FloatField`, `DictField`, `BM25Field`, `DecayingSortedField`, `ConfidenceField`, `ExistenceFilter` — all compatible with a new `StringField`.
+- **Recall pipeline has no superseded filter**: `agent/memory_retrieval.py` `retrieve_memories()` hydrates Memory instances from BM25+RRF fusion with no superseded-by guard. The one-line filter `[r for r in records if not r.superseded_by]` is the correct insertion point (after hydration loop at line 231–239).
+- **Reflection framework is live**: `config/reflections.yaml` exists and is actively used by `agent/reflection_scheduler.py`. PR #933 (reflections quality pass) landed, confirming #748's framework is operational. A new `memory-dedup` entry can be added now without waiting.
+- **No prior consolidation implementation**: `scripts/memory_consolidation.py` does not exist. `tools/memory_search.py` handles search/save/inspect but not consolidation. This is greenfield.
+
+**Revised:** 2 items — scope adjusted based on issue comments and freshness check
+
+- **Merge rationale field**: Issue commenter (m13v) correctly noted that storing only `superseded_by` (the ID) makes audit trails opaque months later. Revised: store `superseded_by_rationale = StringField(default="")` alongside `superseded_by` — populated from the Haiku response's `rationale` field. This is additive and costs nothing extra.
+- **Cross-category dedup**: Commenter suggested lightweight embeddings to catch cross-category duplicates (e.g., a "test strategy" memory and a "CI config" memory both saying "use real DBs"). Revised decision: **do not add embeddings** — this contradicts the architecture's intentional choice of BM25+bigram over vectors. The Haiku prompt already operates on content text across all groups in a batch; cross-category duplicates that share near-identical wording will surface. The risk of missed cross-category duplicates is documented in Rabbit Holes.
+
+**Pre-requisites:** 0 items — no blockers
+
+- #748 (reflections unification) has effectively landed via PR #933. `config/reflections.yaml` and `agent/reflection_scheduler.py` are in place.
+
+**Dropped:** 0 items — all original scope retained
+
+## Freshness Check
+
+**Disposition: Minor drift**
+
+Verified 2026-04-14 against git HEAD (9be2a5ce).
+
+- **`models/memory.py`**: No changes since plan was created (2026-04-07). `Memory` class fields confirmed: no `superseded_by` field exists. Plan's field addition is still correct.
+- **`agent/memory_retrieval.py`**: No changes since plan creation. `retrieve_memories()` hydration loop at lines 231–239 is the correct insertion point for the superseded filter. Unchanged.
+- **`config/reflections.yaml`**: Changed (PR #933 refactor). The file now uses the full `reflections:` YAML structure with `execution_type`, `callable`, `command`, `enabled` fields. The plan's proposed `memory-dedup` YAML entry matches this schema exactly. No structural changes needed to the plan.
+- **`agent/reflection_scheduler.py`**: Updated in PR #933. Scheduler reads `config/reflections.yaml` directly. Compatible with the `memory-dedup` entry as specified.
+- **Issue #748** (hard dependency): OPEN, but functionally superseded by PR #933 which landed the unified reflection framework. The registration step can proceed without waiting for #748 to formally close.
+- **No other referenced files changed** since plan creation.
+
+Line number drift: none — all referenced functions are at the same locations.
 
 ## Problem
 
@@ -20,7 +55,7 @@ Concrete symptoms that will accumulate: "don't mock the DB" / "use real integrat
 
 ## Prior Art
 
-- **Issue #748** — Reflections unification (OPEN). Defines the `memory-dedup` / `memory-decay-prune` / `memory-quality-audit` / `knowledge-reindex` reflection slots. This plan is the detailed design for `memory-dedup` specifically. **Hard dependency: #748 must land before this reflection can be registered in the unified YAML scheduler.**
+- **Issue #748** — Reflections unification (OPEN, functionally landed via PR #933). Defines the `memory-dedup` / `memory-decay-prune` / `memory-quality-audit` / `knowledge-reindex` reflection slots. This plan is the detailed design for `memory-dedup` specifically. The unified YAML scheduler is now live — registration can proceed.
 - **Issue #620** — Claude Code feature integration roadmap. Lists "cron memory consolidation" as a Phase 1 item with brief spec. This plan fleshes out that item.
 - **Issue #613** (closed) — Memory trigger training. Covers outcome tracking and routine compression; adjacent but distinct.
 - **Issue #323** (closed) — MuninnDB cognitive memory layer. Foundational design of the Memory model.
@@ -28,22 +63,19 @@ Concrete symptoms that will accumulate: "don't mock the DB" / "use real integrat
 
 ## Dependency Sequencing
 
-**#748 is a hard dependency.** That issue delivers:
-1. The unified `Reflection` model and YAML scheduler replacing the monolith
-2. The `~/Desktop/Valor/reflections.yaml` deployment-specific config path
-3. The declarative reflection registration pattern this plan depends on
+**#748's framework is now operational** (PR #933 landed the unified reflection scheduler). All work can proceed in parallel — there are no external blockers.
 
-**What can be done in parallel before #748 lands:**
-- Add the `superseded_by` field to the `Memory` model (additive, no behavioral change)
+**Parallel tasks (no ordering dependency between them):**
+- Add the `superseded_by` and `superseded_by_rationale` fields to the `Memory` model (additive, no behavioral change)
 - Add the recall-filter change in `agent/memory_retrieval.py` (one-line guard, safe to ship independently)
 - Write `tests/unit/test_memory_consolidation.py` with canary set, idempotency, and superseded-recall tests
 - Write the consolidation callable (`scripts/memory_consolidation.py`) in isolation
 
-**What must wait for #748:**
-- Registering the reflection in `config/reflections.yaml` / `~/Desktop/Valor/reflections.yaml`
-- Wiring the callable into the unified scheduler
+**Final integration step (after above):**
+- Register `memory-dedup` in `config/reflections.yaml` / `~/Desktop/Valor/reflections.yaml`
+- Wire the callable into the unified scheduler
 
-This plan sequences the work so that parallel tasks ship incrementally, and the reflection registration is the final integration step after #748 merges.
+This plan sequences the work so parallel tasks ship incrementally, with reflection registration as the final step.
 
 ## Data Flow
 
@@ -62,7 +94,7 @@ This plan sequences the work so that parallel tasks ship incrementally, and the 
 
 ## Architectural Impact
 
-- **New field on Memory model**: `superseded_by = StringField(default="")` — additive, no migration needed for old records (empty string = not superseded).
+- **New fields on Memory model**: `superseded_by = StringField(default="")` and `superseded_by_rationale = StringField(default="")` — both additive, no migration needed for old records (empty strings = not superseded).
 - **Recall filter change**: `agent/memory_retrieval.py` `retrieve_memories()` adds a one-line filter: skip records where `m.superseded_by != ""`. Load-bearing but isolated.
 - **New script**: `scripts/memory_consolidation.py` — standalone callable, no bridge imports.
 - **New reflection entry**: `config/reflections.yaml` gets a `memory-dedup` entry. Deployment copy at `~/Desktop/Valor/reflections.yaml` added via update script.
@@ -85,7 +117,7 @@ This plan sequences the work so that parallel tasks ship incrementally, and the 
 |-------------|---------------|---------|
 | Redis running | `redis-cli ping` | Memory model storage |
 | Anthropic API key | `python -c "from dotenv import dotenv_values; assert dotenv_values('/Users/valorengels/src/ai/.env').get('ANTHROPIC_API_KEY')"` | Haiku LLM calls |
-| #748 merged (for registration step only) | `gh issue view 748 --json state -q .state` → `CLOSED` | Unified scheduler |
+| Reflection framework live | `ls config/reflections.yaml` | Unified scheduler (confirmed via PR #933) |
 
 ## Solution
 
@@ -144,7 +176,7 @@ Do not include any memory with importance >= 7.0 in any action.
 - Reject malformed JSON entirely (log and skip the group)
 - Cap applied merges at `MAX_MERGES_PER_RUN = 10` across the entire run
 
-### `superseded_by` Field Schema
+### `superseded_by` and `superseded_by_rationale` Field Schema
 
 ```python
 # In models/memory.py, added to the Memory class:
@@ -152,9 +184,16 @@ superseded_by = StringField(default="")
 # Empty string = active record
 # Non-empty = memory_id of the merged replacement record
 # Populated only by the consolidation reflection; never set by ingestion paths
+
+superseded_by_rationale = StringField(default="")
+# Empty string = not superseded
+# Non-empty = one-sentence rationale from Haiku explaining why the merge was proposed
+# Preserves audit trail for human review months after the merge occurred
 ```
 
 **Why StringField not Optional[str]**: Popoto's `StringField(default="")` handles None/empty consistently in Redis serialization. The empty string serves as the null sentinel. Querying active records: filter where `superseded_by == ""`.
+
+**Why store rationale**: Storing only the `superseded_by` ID makes audit trails opaque. Reviewers need to know WHY two memories were merged (not just that they were) to trust the system's decisions. The rationale is a single sentence from the Haiku response — it costs nothing extra and makes the difference between a trustworthy audit trail and a black box.
 
 **Recall filter change** in `agent/memory_retrieval.py`:
 ```python
@@ -184,15 +223,15 @@ The canary test creates Memory records for each pair of adjacent canary items an
 ### Rollout Sequence
 
 ```
-Phase 0 (parallel, pre-#748):
-  1. Add superseded_by field to Memory model
+Phase 0 (parallel — no ordering dependency):
+  1. Add superseded_by and superseded_by_rationale fields to Memory model
   2. Add recall filter to agent/memory_retrieval.py
   3. Write scripts/memory_consolidation.py (callable)
   4. Write tests/unit/test_memory_consolidation.py (canary + idempotency + superseded-recall)
   5. Capture baseline metrics (memory count, duplication depth for known corrections)
 
-Phase 1 (after #748 merges):
-  6. Register memory-dedup in config/reflections.yaml (dry_run=true, interval=86400, priority=normal)
+Phase 1 (after Phase 0 complete — reflection framework already live):
+  6. Register memory-dedup in config/reflections.yaml (interval=86400, priority=normal)
   7. Deploy: update script propagates new reflections.yaml to ~/Desktop/Valor/reflections.yaml
 
 Phase 2 (14-day dry-run period):
@@ -247,9 +286,9 @@ No other existing memory tests are affected — consolidation is additive and th
 **Impact:** Distinct corrections collapsed into a generic platitude — precision loss, hard to detect until human notices degraded recall
 **Mitigation:** Canary set test (automated), 14-day dry-run with daily human review of proposed merges, 95% agreement threshold before enabling apply, max 10 merges/run rate cap
 
-### Risk 2: #748 slips, blocking reflection registration
-**Impact:** Phase 0 work (field, filter, tests) ships but reflection never activates
-**Mitigation:** Phase 0 is independently useful (superseded_by field + recall filter are correct regardless). The consolidation callable can be run manually via `python -m scripts.memory_consolidation --dry-run` while waiting for #748.
+### Risk 2: Reflection scheduler changes break the `memory-dedup` callable contract
+**Impact:** A future refactor to `agent/reflection_scheduler.py` changes how callables are invoked, breaking the reflection
+**Mitigation:** The callable signature `run_consolidation(project_key, dry_run=True, max_merges=10)` follows the existing pattern established by other function-type reflections in `config/reflections.yaml`. Any scheduler refactor must maintain backward compatibility with existing callables. Additionally, the callable can always be run manually: `python -m scripts.memory_consolidation --dry-run`.
 
 ### Risk 3: Superseded records accumulate in Redis without pruning
 **Impact:** Redis memory grows; superseded records are invisible to recall but still occupy space
@@ -305,7 +344,7 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 ## Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md`: add a **Memory Consolidation** section describing the `memory-dedup` reflection, `superseded_by` field, recall filter, and rollout phases
+- [ ] Update `docs/features/subconscious-memory.md`: add a **Memory Consolidation** section describing the `memory-dedup` reflection, `superseded_by` and `superseded_by_rationale` fields, recall filter, and rollout phases
 - [ ] Update `docs/features/subconscious-memory.md` Key Files table: add `scripts/memory_consolidation.py`
 - [ ] Update `docs/features/subconscious-memory.md` Reversibility section: note that superseded records can be re-activated by clearing `superseded_by`
 - [ ] Add entry to `docs/features/README.md` index table if a standalone consolidation doc is warranted (likely not — the subconscious-memory.md update is sufficient)
@@ -314,10 +353,10 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 ## Success Criteria
 
-- [ ] `Memory` model has `superseded_by = StringField(default="")` field
+- [ ] `Memory` model has `superseded_by = StringField(default="")` and `superseded_by_rationale = StringField(default="")` fields
 - [ ] `agent/memory_retrieval.py` `retrieve_memories()` filters out records where `superseded_by != ""`
 - [ ] `scripts/memory_consolidation.py` callable exists with Haiku prompt, dry-run mode, apply mode, max-10-merges rate cap, importance ≥7.0 exemption, and contradiction flagging
-- [ ] `memory-dedup` reflection registered in `config/reflections.yaml` with `interval: 86400`, `priority: normal`, `execution_type: function`, `enabled: true` (after #748 lands)
+- [ ] `memory-dedup` reflection registered in `config/reflections.yaml` with `interval: 86400`, `priority: normal`, `execution_type: function`, `enabled: true`
 - [ ] `tests/unit/test_memory_consolidation.py` has canary set test, idempotency test, superseded-recall test, exemption test, and rate-limit test
 - [ ] Dry-run mode is the default; apply is gated behind a config flag or `--apply` argument
 - [ ] Contradictions produce a Telegram notification, never auto-resolve
@@ -350,7 +389,7 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 - **Builder (reflection-registration)**
   - Name: reflection-builder
-  - Role: Register `memory-dedup` in `config/reflections.yaml` (depends on #748)
+  - Role: Register `memory-dedup` in `config/reflections.yaml` (framework is live via PR #933)
   - Agent Type: builder
   - Resume: true
 
@@ -376,8 +415,9 @@ No agent integration required beyond the existing memory recall pipeline — thi
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `superseded_by = StringField(default="")` to `models/memory.py` Memory class
-- Add docstring comment: "Empty string = active. Non-empty = memory_id of merged replacement."
-- Update `tests/unit/test_memory_model.py`: assert field defaults to `""`, accepts a string ID
+- Add `superseded_by_rationale = StringField(default="")` to `models/memory.py` Memory class
+- Add docstring comment for each: "Empty string = active. Non-empty = memory_id/rationale of merged replacement."
+- Update `tests/unit/test_memory_model.py`: assert both fields default to `""`, accept string values
 
 ### 2. Add recall filter for superseded records
 - **Task ID**: build-recall-filter
@@ -401,7 +441,7 @@ No agent integration required beyond the existing memory recall pipeline — thi
 - Implement Haiku API call with the prompt specified in the Solution section
 - Implement JSON response validation (reject malformed, reject merges with importance ≥7.0 IDs)
 - Implement dry-run path: log to `logs/reflections.log`, no Redis writes
-- Implement apply path: `Memory.safe_save()` for merged record, `m.superseded_by = new_id; m.save()` for originals
+- Implement apply path: `Memory.safe_save()` for merged record, `m.superseded_by = new_id; m.superseded_by_rationale = rationale; m.save()` for originals
 - Implement contradiction flagging: `valor-telegram send` with contradiction summary
 - Return summary dict `{proposed_merges, applied_merges, flagged_contradictions, skipped_exempt}`
 
@@ -419,9 +459,9 @@ No agent integration required beyond the existing memory recall pipeline — thi
 - Exemption test: create two near-duplicate memories with importance=8.0; assert neither is proposed for merge
 - Rate-limit test: inject 15 merge proposals via mock; assert only 10 applied
 
-### 5. Register reflection (post-#748 gate)
+### 5. Register reflection
 - **Task ID**: build-reflection-registration
-- **Depends On**: build-consolidation, build-tests (requires #748 to be merged)
+- **Depends On**: build-consolidation, build-tests
 - **Validates**: `config/reflections.yaml` has `memory-dedup` entry
 - **Assigned To**: reflection-builder
 - **Agent Type**: builder
@@ -480,6 +520,5 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 ## Open Questions
 
-1. **#748 timeline**: Is there a target date for #748 to merge? This determines whether Phase 0 work ships as a standalone PR or waits. If #748 is 2+ weeks away, shipping Phase 0 independently (field + filter + tests + callable) is the right call.
-2. **Dry-run period length**: The issue spec says 14 days. Is this fixed, or can it be shortened to 7 days if 95% agreement is achieved earlier in the review of `logs/reflections.log`?
-3. **Contradiction notification channel**: The plan sends contradiction flags via `valor-telegram send` to the "Dev: Valor" chat. Confirm this is the right channel vs. a dedicated memory-health chat.
+1. **Dry-run period length**: The issue spec says 14 days. Is this fixed, or can it be shortened to 7 days if 95% agreement is achieved earlier in the review of `logs/reflections.log`?
+2. **Contradiction notification channel**: The plan sends contradiction flags via `valor-telegram send` to the "Dev: Valor" chat. Confirm this is the right channel vs. a dedicated memory-health chat.
