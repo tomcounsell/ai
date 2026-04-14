@@ -408,7 +408,7 @@ def checkpoint_branch_state(session: AgentSession) -> None:
             commit_sha = commit.stdout.strip()
             session.branch_name = branch_name
             session.commit_sha = commit_sha
-            session.save()
+            session.save(update_fields=["branch_name", "commit_sha", "updated_at"])
             logger.info(
                 f"[checkpoint] Saved branch={branch_name} commit={commit_sha[:8]} "
                 f"for session {session.session_id}"
@@ -604,7 +604,7 @@ async def _maybe_inject_resume_hydration(chosen, worker_key: str) -> None:
 
         original = chosen.message_text or ""
         chosen.message_text = f"{hydration_block}\n\n{original}" if original else hydration_block
-        await chosen.async_save()
+        await chosen.async_save(update_fields=["message_text", "updated_at"])
         logger.info(
             f"[worker:{worker_key}] Injected resume hydration into session {chosen.id} "
             f"({len(resume_files)} prior resume files found)"
@@ -987,7 +987,7 @@ def reorder_agent_session(agent_session_id: str, new_priority: str) -> bool:
         return False
 
     session.priority = new_priority
-    session.save()
+    session.save(update_fields=["priority", "updated_at"])
     logger.info(f"[pm-controls] Reordered session {agent_session_id} (priority={new_priority})")
     return True
 
@@ -2947,7 +2947,7 @@ def _create_continuation_pm(
             pc = getattr(parent, "project_config", None)
             if pc:
                 continuation.project_config = pc
-                continuation.save()
+                continuation.save(update_fields=["project_config", "updated_at"])
         except Exception:
             pass
 

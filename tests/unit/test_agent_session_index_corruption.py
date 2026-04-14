@@ -10,7 +10,9 @@ _saved_field_values["status"] in both transition_status() and finalize_session()
 before calling session.save().
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers

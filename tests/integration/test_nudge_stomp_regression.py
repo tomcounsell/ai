@@ -222,3 +222,54 @@ class TestLayer2PartialSavePreservesFields:
         )
         assert "session_events" in call_kwargs["update_fields"]
         assert "updated_at" in call_kwargs["update_fields"]
+
+
+@pytest.mark.integration
+class TestSetLinkPartialSavePreservesStatus:
+    """set_link() partial save must not clobber authoritative status (#950).
+
+    Validates the Layer 1 fix: set_link() uses save(update_fields=[field_name, "updated_at"])
+    instead of a full save, preventing stale worker references from clobbering status.
+    """
+
+    def test_set_link_preserves_killed_status(self, redis_test_db):
+        """set_link on a stale object must not clobber status=killed back to running.
+
+        Scenario:
+        1. Create session with status=running.
+        2. Obtain a stale reference (the worker's local copy).
+        3. Kill the session via finalize_session (authoritative).
+        4. Call stale_ref.set_link("issue", url) — triggers partial save.
+        5. Fresh query: status must remain 'killed', issue_url must be set.
+        """
+        session_id = "set-link-partial-save-001"
+        project_key = "test"
+
+        original = AgentSession.create(
+            session_id=session_id,
+            project_key=project_key,
+            status="running",
+            created_at=datetime.now(tz=UTC),
+        )
+
+        # Stale reference
+        stale_ref = AgentSession.query.get(id=original.id)
+        assert stale_ref is not None
+
+        # Kill via authoritative path
+        finalize_session(original, "killed", reason="test kill")
+        after_kill = AgentSession.query.get(id=original.id)
+        assert after_kill.status == "killed"
+
+        # Stale reference calls set_link (status is still "running" in memory)
+        stale_ref.set_link("issue", "https://github.com/test/issues/999")
+
+        # Fresh query — status must remain killed
+        final = AgentSession.query.get(id=original.id)
+        assert final is not None
+        assert final.status == "killed", (
+            f"set_link partial save must not clobber status, got '{final.status}'"
+        )
+        assert final.issue_url == "https://github.com/test/issues/999", (
+            "set_link must still persist the URL"
+        )
