@@ -274,6 +274,66 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
     return killed_count, skipped_live
 
 
+def _cleanup_duplicate_sessions(project_dir: Path) -> int:
+    """Kill pending sessions that re-process messages already handled by a completed session.
+
+    A session is a re-run if another session with the same (chat_id, telegram_message_id)
+    has already reached a terminal state (completed, killed, abandoned, failed).
+    Pending duplicates are killed before the worker picks them up.
+
+    Returns the number of sessions killed.
+    """
+    from collections import defaultdict
+
+    from models.agent_session import AgentSession
+    from models.session_lifecycle import finalize_session
+
+    # Collect pending sessions that have a telegram_message_id
+    pending = list(AgentSession.query.filter(status="pending"))
+    pending_by_key: dict[tuple[str, int], list] = defaultdict(list)
+    for s in pending:
+        msg_id = s.telegram_message_id
+        chat_id = getattr(s, "chat_id", None)
+        if msg_id and chat_id:
+            pending_by_key[(str(chat_id), int(msg_id))].append(s)
+
+    if not pending_by_key:
+        return 0
+
+    # Find terminal sessions that cover the same keys
+    terminal_keys: set[tuple[str, int]] = set()
+    for status in ("completed", "killed", "abandoned", "failed"):
+        for s in AgentSession.query.filter(status=status):
+            msg_id = s.telegram_message_id
+            chat_id = getattr(s, "chat_id", None)
+            if msg_id and chat_id:
+                terminal_keys.add((str(chat_id), int(msg_id)))
+
+    killed = 0
+    for key, sessions in pending_by_key.items():
+        if key not in terminal_keys:
+            continue
+        for s in sessions:
+            try:
+                finalize_session(
+                    s,
+                    "killed",
+                    reason="re-run of already-handled message",
+                    skip_checkpoint=True,
+                )
+                killed += 1
+            except Exception as exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "[update] Failed to kill duplicate session %s: %s",
+                    getattr(s, "agent_session_id", "?"),
+                    exc,
+                )
+
+    return killed
+
+
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     """Run update with given configuration."""
     result = UpdateResult()
@@ -345,6 +405,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if env_r.error:
         log(f"WARN: Env symlink: {env_r.error}", v)
         result.warnings.append(f"Env symlink: {env_r.error}")
+
+    # Step 1.65: Verify config/projects.json symlink (worker fails to start without it)
+    log("Verifying config/projects.json symlink...", v)
+    projects_r = env_sync.sync_projects_json(project_dir)
+    if projects_r.created:
+        log("config/projects.json symlink created → ~/Desktop/Valor/projects.json", v, always=True)
+    elif projects_r.symlink_ok:
+        log("config/projects.json symlink OK", v)
+    if projects_r.error:
+        log(f"WARN: projects.json symlink: {projects_r.error}", v, always=True)
+        result.warnings.append(f"projects.json symlink: {projects_r.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)
@@ -785,6 +856,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Skipped {skipped_live} live session(s) (recent heartbeat)", v)
     except Exception as e:
         log(f"WARN: Session cleanup failed: {e}", v)
+
+    try:
+        dupe_killed = _cleanup_duplicate_sessions(project_dir)
+        if dupe_killed > 0:
+            log(
+                f"Killed {dupe_killed} duplicate session(s) (already-handled messages)",
+                v,
+                always=True,
+            )  # noqa: E501
+    except Exception as e:
+        log(f"WARN: Duplicate session cleanup failed: {e}", v)
 
     # Step 5.6: Repair Popoto field-index corruption.
     #
