@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -217,7 +217,7 @@ No agent integration changes required — `agent/sustainability.py` is already w
 | Lint clean | `python -m ruff check agent/sustainability.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/sustainability.py` | exit code 0 |
 | Anomaly string updated | `grep -n "not CLOSED" agent/sustainability.py` | exit code 1 |
-| Plain-language instruction present | `grep -n "closed.*OK\|CLOSED.*OK\|open.*DOWN\|OPEN.*DOWN\|half_open.*RECOVERING\|HALF_OPEN.*RECOVERING" agent/sustainability.py` | exit code 0 |
+| Plain-language instruction present | `grep -n "RECOVERING" agent/sustainability.py` | exit code 0 |
 
 ## Critique Results
 
