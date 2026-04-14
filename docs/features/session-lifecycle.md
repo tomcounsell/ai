@@ -164,6 +164,32 @@ finally:
 
 **Crash path**: `_execute_agent_session` raises. `finalized_by_execute=False`. The finally block runs as designed: `log_lifecycle_transition`, snapshot, nudge guard, `_complete_agent_session`. Since the SDK aborted before `end_turn`, `_enqueue_nudge` could not have fired, so the outer session's stale state is still the only authoritative state.
 
+### Layer 1b: Partial Saves on Companion-Field Methods (#950)
+
+Any `AgentSession` method that saves companion fields (non-status fields) **must** use `save(update_fields=[...])` to avoid clobbering `status` on stale worker references. The following methods were converted from full saves to partial saves:
+
+| Method | Fields Written | File |
+|--------|---------------|------|
+| `set_link()` | `[field_name, "updated_at"]` | `models/agent_session.py` |
+| `push_steering_message()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
+| `pop_steering_messages()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
+| Heartbeat in `_heartbeat_loop` | `["updated_at"]` | `agent/agent_session_queue.py` |
+| Steering drain (async) | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
+| Steering drain (sync fallback) | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
+| `retain_for_resume` save | `["retain_for_resume", "updated_at"]` | `agent/agent_session_queue.py` |
+| Session metadata save | `["updated_at", "branch_name", "task_list_id"]` | `agent/agent_session_queue.py` |
+| `response_delivered_at` save | `["response_delivered_at", "updated_at"]` | `agent/agent_session_queue.py` |
+| Branch/commit checkpoint | `["branch_name", "commit_sha", "updated_at"]` | `agent/agent_session_queue.py` |
+| Resume hydration | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
+| Priority reorder | `["priority", "updated_at"]` | `agent/agent_session_queue.py` |
+| Continuation project_config | `["project_config", "updated_at"]` | `agent/agent_session_queue.py` |
+
+**Rule**: When adding a new save site on `AgentSession` that modifies non-lifecycle fields, always use `save(update_fields=[...])` listing only the fields you modified plus `"updated_at"`. Never use a bare `save()` on a session object that might be stale.
+
+### Layer 1c: Defensive `srem` in `finalize_session` (#950)
+
+After `session.save()`, `finalize_session()` performs a defensive `srem` that removes the session's hash key from ALL status index sets except the target terminal status. This catches orphan index entries that were created by prior stale-object saves clobbering the status to an intermediate value. The defensive `srem` is wrapped in try/except and is non-fatal.
+
 ### Layer 2: Partial Save in `_append_event_dict`
 
 Even when `finalized_by_execute` gates off the finally block, `log_lifecycle_transition` (called from other paths) triggers `append_event → _append_event_dict`. Without protection, this would do a full `self.save()` on the stale object, clobbering `status`, `auto_continue_count`, and `message_text`.
