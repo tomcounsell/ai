@@ -3583,13 +3583,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
     logger.info(f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness")
 
     async def _harness_send_cb(text: str) -> None:
-        # Only forward real-time streaming chunks for Teammate sessions.
-        # PM and Dev sessions: the CLI harness streams process narration that
-        # should stay internal — BackgroundTask delivers the final result instead.
-        # Forwarding these chunks bypasses the nudge loop and sends mid-sentence
-        # fragments directly to Telegram.
-        if _is_teammate:
-            await send_cb(session.chat_id, text, session.telegram_message_id, agent_session)
+        # Streaming chunks from the CLI harness are suppressed for all session types.
+        # Forwarding them bypasses the nudge loop and sends mid-sentence fragments
+        # directly to Telegram. BackgroundTask delivers the final result instead.
+        pass
 
     async def do_work() -> str:
         return await get_response_via_harness(
