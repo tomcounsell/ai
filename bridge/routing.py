@@ -481,6 +481,119 @@ async def classify_needs_response_async(text: str) -> bool:
     return await loop.run_in_executor(None, classify_needs_response, text)
 
 
+# Regex for standalone "?" — excludes query-string params like ?q=1 or &page=2
+_STANDALONE_QUESTION_RE = re.compile(r"(?<![=&])\?")
+
+
+async def classify_conversation_terminus(
+    text: str,
+    thread_messages: list[str],  # recent turns, oldest first
+    sender_is_bot: bool = False,
+) -> str:
+    """Classify whether a reply-to-Valor message is a conversation terminus.
+
+    Returns one of:
+    - "RESPOND" — message warrants a reply (default/conservative)
+    - "REACT"   — thread is winding down; set an acknowledgment emoji (human-only)
+    - "SILENT"  — bot loop or acknowledgment; do nothing
+
+    Fast-path order (critical — checked before LLM):
+    1. sender_is_bot + no question → SILENT  (primary loop-break signal)
+    2. acknowledgment token or very short (≤1 word) → SILENT
+    3. standalone "?" in text (not URL query param) → RESPOND
+
+    LLM (Ollama-first, Haiku fallback) handles everything else.
+    REACT is collapsed to SILENT when sender_is_bot=True.
+    Conservative default: any classifier error → RESPOND.
+    """
+    # Guard: empty/None text — treat as continuation
+    if not text or not text.strip():
+        return "RESPOND"
+
+    text_stripped = text.strip()
+    text_lower = text_stripped.lower()
+
+    # Fast-path 1: bot sender with no question → SILENT (strongest signal for loop break)
+    if sender_is_bot and not _STANDALONE_QUESTION_RE.search(text_stripped):
+        return "SILENT"
+
+    # Fast-path 2: acknowledgment token (fires AFTER sender check, never before)
+    token_normalized = text_lower.rstrip("!.,").strip()
+    word_count = len(text_stripped.split())
+    if token_normalized in _ACKNOWLEDGMENT_TOKENS or word_count <= 1:
+        return "SILENT"
+
+    # Fast-path 3: standalone "?" → RESPOND (excludes URL query params)
+    if _STANDALONE_QUESTION_RE.search(text_stripped):
+        return "RESPOND"
+
+    # LLM classification: Ollama-first, Haiku fallback
+    thread_context = "\n".join(thread_messages[-2:]) if thread_messages else ""
+    prompt = f"""Classify this reply in a conversation thread. The reply was sent to Valor (an AI agent).
+
+Reply text: {text_stripped[:300]}
+
+Recent thread context (may be empty):
+{thread_context[:400] if thread_context else "(none)"}
+
+Sender is a bot: {sender_is_bot}
+
+Instructions:
+- If the message contains a question or requests action → reply RESPOND
+- If the message is a natural conversation closer (completion language, agreement, acknowledgment without question) → reply REACT
+- If the message adds nothing new or is redundant with prior context → reply REACT
+- If the sender is a bot and the message is declarative (no question) → reply SILENT
+- Default to RESPOND when uncertain
+
+Reply with ONLY one word: RESPOND, REACT, or SILENT."""
+
+    result = None
+
+    # Try Ollama first
+    try:
+        import ollama
+
+        response = ollama.chat(
+            model=OLLAMA_LOCAL_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0},
+        )
+        raw = response["message"]["content"].strip().upper()
+        if raw in ("RESPOND", "REACT", "SILENT"):
+            result = raw
+    except Exception as e:
+        logger.debug(f"Ollama terminus classification failed: {e}")
+
+    # Haiku fallback if Ollama failed or returned garbage
+    if result is None:
+        try:
+            import anthropic
+
+            api_key = get_anthropic_api_key()
+            if api_key:
+                client = anthropic.Anthropic(api_key=api_key)
+                resp = client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = resp.content[0].text.strip().upper()
+                if raw in ("RESPOND", "REACT", "SILENT"):
+                    result = raw
+        except Exception as e:
+            logger.debug(f"Haiku terminus classification failed: {e}")
+
+    # Conservative default on any failure
+    if result is None:
+        result = "RESPOND"
+
+    # Collapse REACT → SILENT for bot senders (no emoji spam in bot loops)
+    if sender_is_bot and result == "REACT":
+        result = "SILENT"
+
+    return result
+
+
 # =============================================================================
 # Work Request Classification (SDLC Routing)
 # =============================================================================
@@ -866,8 +979,24 @@ async def should_respond_async(
         try:
             replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
             if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
-                logger.debug("Reply to Valor detected - continuing session")
-                return True, True
+                sender_is_bot = getattr(sender, "bot", False)
+                terminus = await classify_conversation_terminus(
+                    text=text,
+                    thread_messages=[replied_msg.message or ""] if replied_msg else [],
+                    sender_is_bot=sender_is_bot,
+                )
+                if terminus == "RESPOND":
+                    logger.info("Reply to Valor detected - continuing session")
+                    return True, True
+                if terminus == "REACT" and not sender_is_bot:
+                    try:
+                        from bridge.response import set_reaction  # deferred to avoid circular import
+
+                        await set_reaction(client, event.chat_id, message.id, "👍")
+                    except Exception as react_err:
+                        logger.debug(f"set_reaction failed (non-fatal): {react_err}")
+                logger.info(f"Reply to Valor: terminus={terminus}, not responding")
+                return False, True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
 
