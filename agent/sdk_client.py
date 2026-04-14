@@ -1480,9 +1480,6 @@ def _resolve_persona(
 
 # === CLI Harness Streaming ===
 
-_HARNESS_FLUSH_INTERVAL = 3.0  # seconds between flushes
-_HARNESS_FLUSH_CHAR_THRESHOLD = 2000  # chars before forced flush
-
 # Maximum input chars for CLI harness arguments. Conservative cap below the
 # claude binary's internal chunk limit (~200KB+). Prevents "Separator is not
 # found, and chunk exceed the limit" crashes on long PM session resumes.
@@ -1545,20 +1542,19 @@ _HARNESS_COMMANDS: dict[str, list[str]] = {
 
 async def get_response_via_harness(
     message: str,
-    send_cb,
     working_dir: str,
     harness_cmd: list[str] | None = None,
     env: dict[str, str] | None = None,
 ) -> str:
-    """Run a CLI harness (e.g. claude -p) and stream text to send_cb.
+    """Run a CLI harness (e.g. claude -p) and return the final result text.
 
-    Parses stdout as stream-json line-by-line. Extracts text from
-    content_block_delta events and flushes to send_cb based on time/size
-    thresholds. Returns the final result text.
+    Parses stdout as stream-json line-by-line. Extracts the final result from
+    the ``result`` event, or falls back to accumulated ``content_block_delta``
+    text if no result event fires. No streaming callback is used — intermediate
+    chunks are accumulated internally and never delivered mid-session.
 
     Args:
         message: The prompt to send to the CLI.
-        send_cb: Async callback to deliver text chunks.
         working_dir: Working directory for the subprocess.
         harness_cmd: Override CLI command (default: claude -p stream-json).
         env: Extra environment variables for the subprocess.
@@ -1595,9 +1591,7 @@ async def get_response_via_harness(
         logger.error(f"Harness binary not found: {e}")
         return f"Error: CLI harness not found — {e}"
 
-    buffer = ""
     full_text = ""
-    last_flush = time.monotonic()
     result_text = None
     session_id_from_harness = None
 
@@ -1629,21 +1623,7 @@ async def get_response_via_harness(
             ):
                 chunk = event["delta"].get("text", "")
                 if chunk:
-                    buffer += chunk
                     full_text += chunk
-
-                    now = time.monotonic()
-                    if (
-                        len(buffer) >= _HARNESS_FLUSH_CHAR_THRESHOLD
-                        or (now - last_flush) >= _HARNESS_FLUSH_INTERVAL
-                    ):
-                        await send_cb(buffer)
-                        buffer = ""
-                        last_flush = now
-
-    # Final flush of remaining buffer
-    if buffer:
-        await send_cb(buffer)
 
     # Wait for process to finish and capture stderr
     _, stderr_data = await proc.communicate()
@@ -1652,6 +1632,11 @@ async def get_response_via_harness(
         logger.warning(f"Harness exited with code {proc.returncode}: {stderr_text[:500]}")
 
     # Prefer result event text, fall back to accumulated text
+    if result_text is None:
+        logger.warning(
+            "Harness exited without a result event — falling back to accumulated text (%d chars)",
+            len(full_text),
+        )
     final = result_text if result_text is not None else full_text
     if not final:
         return "Error: harness produced no output."

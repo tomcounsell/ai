@@ -4,6 +4,13 @@ Covers:
 - Phase 1: get_response_via_harness() parsing, batching, error handling
 - Phase 2: Worker routing — all session types via CLI harness
 - Phase 2: Startup health check (verify_harness_health)
+
+NOTE: These tests verify ``get_response_via_harness()`` in isolation — they confirm
+that the function correctly parses harness NDJSON, accumulates text, and returns the
+result string. In production, no streaming callback is passed to this function; the
+no-op suppression contract (streaming chunks are never forwarded to any output
+transport mid-session) is validated in
+``tests/integration/test_harness_no_op_contract.py``.
 """
 
 import json
@@ -48,8 +55,6 @@ class TestGetResponseViaHarness:
         ]
         stdout_data = "\n".join(lines) + "\n"
 
-        send_cb = AsyncMock()
-
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
             mock_proc.stdout = _async_lines(stdout_data)
@@ -60,13 +65,10 @@ class TestGetResponseViaHarness:
 
             result = await get_response_via_harness(
                 message="test prompt",
-                send_cb=send_cb,
                 working_dir="/tmp/test",
             )
 
         assert result == "Hello world"
-        # send_cb should have been called at least once (final flush)
-        assert send_cb.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_skips_tool_use_events(self):
@@ -108,8 +110,6 @@ class TestGetResponseViaHarness:
         ]
         stdout_data = "\n".join(lines) + "\n"
 
-        send_cb = AsyncMock()
-
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
             mock_proc.stdout = _async_lines(stdout_data)
@@ -117,16 +117,9 @@ class TestGetResponseViaHarness:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            result = await get_response_via_harness(
-                message="test", send_cb=send_cb, working_dir="/tmp"
-            )
+            result = await get_response_via_harness(message="test", working_dir="/tmp")
 
         assert result == "Only text"
-        # The tool events should not have produced any text output
-        for call in send_cb.call_args_list:
-            text = call.args[0] if call.args else call.kwargs.get("text", "")
-            assert "input_json" not in text
-            assert "tool_use" not in text
 
     @pytest.mark.asyncio
     async def test_handles_malformed_json_lines(self):
@@ -149,8 +142,6 @@ class TestGetResponseViaHarness:
         ]
         stdout_data = "\n".join(lines) + "\n"
 
-        send_cb = AsyncMock()
-
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
             mock_proc.stdout = _async_lines(stdout_data)
@@ -158,22 +149,17 @@ class TestGetResponseViaHarness:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            result = await get_response_via_harness(
-                message="test", send_cb=send_cb, working_dir="/tmp"
-            )
+            result = await get_response_via_harness(message="test", working_dir="/tmp")
 
         assert result == "good text"
 
     @pytest.mark.asyncio
-    async def test_char_threshold_batching(self):
-        """Text is flushed when buffer exceeds char threshold."""
-        from agent.sdk_client import (
-            _HARNESS_FLUSH_CHAR_THRESHOLD,
-            get_response_via_harness,
-        )
+    async def test_text_accumulated_across_chunks(self):
+        """Text chunks are accumulated correctly even without flushing."""
+        from agent.sdk_client import get_response_via_harness
 
-        # Generate enough text to trigger the char threshold
-        big_text = "x" * (_HARNESS_FLUSH_CHAR_THRESHOLD + 100)
+        # Generate a large chunk to confirm accumulation still works
+        big_text = "x" * 3000
         lines = [
             json.dumps(
                 {
@@ -197,8 +183,6 @@ class TestGetResponseViaHarness:
         ]
         stdout_data = "\n".join(lines) + "\n"
 
-        send_cb = AsyncMock()
-
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
             mock_proc.stdout = _async_lines(stdout_data)
@@ -206,10 +190,9 @@ class TestGetResponseViaHarness:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            await get_response_via_harness(message="test", send_cb=send_cb, working_dir="/tmp")
+            result = await get_response_via_harness(message="test", working_dir="/tmp")
 
-        # Should have been called at least twice: once for the big chunk, once for final flush
-        assert send_cb.call_count >= 2
+        assert result == big_text + " more"
 
     @pytest.mark.asyncio
     async def test_binary_not_found(self):
@@ -219,7 +202,6 @@ class TestGetResponseViaHarness:
         with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("not found")):
             result = await get_response_via_harness(
                 message="test",
-                send_cb=AsyncMock(),
                 working_dir="/tmp",
                 harness_cmd=["nonexistent-binary", "-p"],
             )
@@ -244,8 +226,6 @@ class TestGetResponseViaHarness:
         ]
         stdout_data = "\n".join(lines) + "\n"
 
-        send_cb = AsyncMock()
-
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
             mock_proc.stdout = _async_lines(stdout_data)
@@ -253,9 +233,7 @@ class TestGetResponseViaHarness:
             mock_proc.returncode = 1
             mock_exec.return_value = mock_proc
 
-            result = await get_response_via_harness(
-                message="test", send_cb=send_cb, working_dir="/tmp"
-            )
+            result = await get_response_via_harness(message="test", working_dir="/tmp")
 
         # Should return accumulated text even on error
         assert "partial output" in result
@@ -279,8 +257,6 @@ class TestGetResponseViaHarness:
         ]
         stdout_data = "\n".join(lines) + "\n"
 
-        send_cb = AsyncMock()
-
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
             mock_proc.stdout = _async_lines(stdout_data)
@@ -288,9 +264,7 @@ class TestGetResponseViaHarness:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            result = await get_response_via_harness(
-                message="test", send_cb=send_cb, working_dir="/tmp"
-            )
+            result = await get_response_via_harness(message="test", working_dir="/tmp")
 
         assert result == "some output"
 
@@ -299,8 +273,6 @@ class TestGetResponseViaHarness:
         """Returns fallback message when no output is produced."""
         from agent.sdk_client import get_response_via_harness
 
-        send_cb = AsyncMock()
-
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = AsyncMock()
             mock_proc.stdout = _async_lines("")
@@ -308,9 +280,7 @@ class TestGetResponseViaHarness:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            result = await get_response_via_harness(
-                message="test", send_cb=send_cb, working_dir="/tmp"
-            )
+            result = await get_response_via_harness(message="test", working_dir="/tmp")
 
         assert "no output" in result.lower()
 
@@ -330,7 +300,6 @@ class TestGetResponseViaHarness:
 
             await get_response_via_harness(
                 message="test",
-                send_cb=AsyncMock(),
                 working_dir="/tmp",
                 harness_cmd=custom_cmd,
             )
@@ -356,7 +325,6 @@ class TestGetResponseViaHarness:
 
             await get_response_via_harness(
                 message="test",
-                send_cb=AsyncMock(),
                 working_dir="/tmp",
                 env=custom_env,
             )
@@ -385,7 +353,6 @@ class TestGetResponseViaHarness:
 
                 await get_response_via_harness(
                     message="test",
-                    send_cb=AsyncMock(),
                     working_dir="/tmp",
                 )
 

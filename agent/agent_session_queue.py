@@ -3689,11 +3689,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
     logger.info(f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness")
 
-    async def _harness_send_cb(text: str) -> None:
-        # Streaming chunks from the CLI harness are suppressed for all session types.
-        # Forwarding them bypasses the nudge loop and sends mid-sentence fragments
-        # directly to Telegram. BackgroundTask delivers the final result instead.
-        pass
+    # Streaming chunks from the CLI harness are suppressed for all session types
+    # (Telegram and email). Forwarding them bypasses the nudge loop and sends
+    # mid-sentence fragments directly. BackgroundTask delivers the final result instead.
 
     # PM and Teammate sessions set VALOR_PARENT_SESSION_ID so child subprocesses
     # (spawned via valor_session create --parent or via Agent tool) can link their
@@ -3708,7 +3706,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
     async def do_work() -> str:
         return await get_response_via_harness(
             message=_harness_input,
-            send_cb=_harness_send_cb,
             working_dir=str(working_dir),
             env=_harness_env,
         )
