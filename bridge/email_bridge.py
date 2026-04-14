@@ -603,8 +603,14 @@ async def run_email_bridge() -> None:
     # Load projects config and build email contact map
     config = load_config()
 
-    # Initialize EMAIL_TO_PROJECT / EMAIL_DOMAIN_TO_PROJECT globals
+    # Populate ACTIVE_PROJECTS (email bridge runs standalone, not via telegram_bridge)
     import bridge.routing as _routing_module
+
+    if not _routing_module.ACTIVE_PROJECTS:
+        from bridge.telegram_bridge import _get_active_projects
+
+        _routing_module.ACTIVE_PROJECTS = _get_active_projects()
+        logger.info(f"[email] Active projects: {_routing_module.ACTIVE_PROJECTS}")
 
     addr_map, domain_map = build_email_to_project_map(config)
     _routing_module.EMAIL_TO_PROJECT.update(addr_map)
