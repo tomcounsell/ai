@@ -367,8 +367,8 @@ def finalize_session(
     #   1. _saved_field_values["status"] backfill above (finalize_session/transition_status)
     #   2. Defensive srem index key construction below (get_special_use_field_db_key + DB_key)
     try:
-        from popoto.redis_db import POPOTO_REDIS_DB
         from popoto.models.db_key import DB_key
+        from popoto.redis_db import POPOTO_REDIS_DB
 
         member_key = session.db_key.redis_key
         status_field = session._meta.fields["status"]

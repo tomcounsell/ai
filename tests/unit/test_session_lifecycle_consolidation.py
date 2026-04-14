@@ -774,6 +774,4 @@ class TestDefensiveSremInFinalizeSession:
                     skip_parent=True,
                 )
 
-            assert session.status == terminal, (
-                f"Expected status {terminal}, got {session.status}"
-            )
+            assert session.status == terminal, f"Expected status {terminal}, got {session.status}"

@@ -79,7 +79,7 @@ def main():
                         # If transition was idempotent (already running), field
                         # changes above were not saved. Ensure they persist.
                         if agent_session.status == "running":
-                            agent_session.save()
+                            agent_session.save(update_fields=["updated_at", "completed_at"])
                 except Exception:
                     pass  # Non-fatal
             else:

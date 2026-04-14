@@ -10,7 +10,7 @@ _saved_field_values["status"] in both transition_status() and finalize_session()
 before calling session.save().
 """
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -320,9 +320,7 @@ class TestStaleSaveThenKillOrphanPrevention:
 
         session.save.assert_called_once()
         call_kwargs = session.save.call_args.kwargs
-        assert "update_fields" in call_kwargs, (
-            "set_link must use partial save (update_fields)"
-        )
+        assert "update_fields" in call_kwargs, "set_link must use partial save (update_fields)"
         assert "issue_url" in call_kwargs["update_fields"]
         assert "updated_at" in call_kwargs["update_fields"]
         # status must NOT be in update_fields
@@ -331,7 +329,7 @@ class TestStaleSaveThenKillOrphanPrevention:
         )
 
     def test_partial_save_on_push_steering_does_not_write_status(self):
-        """push_steering_message partial save must only write queued_steering_messages + updated_at."""
+        """push_steering_message partial save: only queued_steering_messages + updated_at."""
         from models.agent_session import AgentSession
 
         session = MagicMock(spec=AgentSession)
@@ -348,7 +346,7 @@ class TestStaleSaveThenKillOrphanPrevention:
         assert "status" not in call_kwargs["update_fields"]
 
     def test_partial_save_on_pop_steering_does_not_write_status(self):
-        """pop_steering_messages partial save must only write queued_steering_messages + updated_at."""
+        """pop_steering_messages partial save: only queued_steering_messages + updated_at."""
         from models.agent_session import AgentSession
 
         session = MagicMock(spec=AgentSession)

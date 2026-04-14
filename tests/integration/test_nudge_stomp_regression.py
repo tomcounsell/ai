@@ -289,7 +289,12 @@ class TestStaleIndexKilledRegression:
     """
 
     def _get_index_members(self, status: str) -> set[str]:
-        """Return member keys in the AgentSession status index set for a given status."""
+        """Return member keys in the AgentSession status index set for a given status.
+
+        Note: A probe session is created per call to derive the Popoto index key via
+        the same internal path as production code. This is intentionally not cached
+        across calls — each test may run in an isolated Redis DB with fresh state.
+        """
         from popoto.models.db_key import DB_key
         from popoto.redis_db import POPOTO_REDIS_DB
 
@@ -308,7 +313,10 @@ class TestStaleIndexKilledRegression:
         )
         # Clean up probe
         sample.delete()
-        return {m.decode() if isinstance(m, bytes) else m for m in POPOTO_REDIS_DB.smembers(idx_key.redis_key)}
+        return {
+            m.decode() if isinstance(m, bytes) else m
+            for m in POPOTO_REDIS_DB.smembers(idx_key.redis_key)
+        }
 
     def test_stale_full_save_does_not_create_orphan_with_partial_saves(self, redis_test_db):
         """Partial saves prevent stale objects from clobbering status into the wrong index.
@@ -358,8 +366,14 @@ class TestStaleIndexKilledRegression:
         # Step 5: Kill fires
         kill_ref = AgentSession.query.get(id=session.id)
         assert kill_ref.status == "pending"
-        finalize_session(kill_ref, "killed", reason="valor-session kill --all",
-                        skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)
+        finalize_session(
+            kill_ref,
+            "killed",
+            reason="valor-session kill --all",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
 
         # Step 6: Assert no orphan in pending index
         final = AgentSession.query.get(id=session.id)
@@ -374,13 +388,18 @@ class TestStaleIndexKilledRegression:
 
         # Also verify it IS in the killed index
         killed_members = self._get_index_members("killed")
-        assert member_key in killed_members, (
-            f"Session {session_id} must be in the killed index"
-        )
+        assert member_key in killed_members, f"Session {session_id} must be in the killed index"
 
-    @pytest.mark.parametrize("terminal_status", [
-        "completed", "failed", "killed", "abandoned", "cancelled",
-    ])
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [
+            "completed",
+            "failed",
+            "killed",
+            "abandoned",
+            "cancelled",
+        ],
+    )
     def test_no_orphan_after_terminal_transition(self, redis_test_db, terminal_status):
         """No orphan index entries remain after any terminal transition.
 
@@ -402,8 +421,14 @@ class TestStaleIndexKilledRegression:
         transition_status(session, "running", reason="worker pop")
 
         # Finalize to terminal status
-        finalize_session(session, terminal_status, reason=f"test {terminal_status}",
-                        skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)
+        finalize_session(
+            session,
+            terminal_status,
+            reason=f"test {terminal_status}",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
 
         # Verify on-disk
         final = AgentSession.query.get(id=session.id)
@@ -416,9 +441,7 @@ class TestStaleIndexKilledRegression:
         for check_status in ALL_STATUSES:
             members = self._get_index_members(check_status)
             if check_status == terminal_status:
-                assert member_key in members, (
-                    f"Session must be in the {terminal_status} index"
-                )
+                assert member_key in members, f"Session must be in the {terminal_status} index"
             else:
                 assert member_key not in members, (
                     f"Orphan: session in {check_status} index after "
@@ -460,8 +483,14 @@ class TestStaleIndexKilledRegression:
         assert POPOTO_REDIS_DB.sismember(pending_idx_key.redis_key, member_key)
 
         # Finalize to killed — defensive srem should clean the orphan
-        finalize_session(session, "killed", reason="test kill",
-                        skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)
+        finalize_session(
+            session,
+            "killed",
+            reason="test kill",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+            skip_parent=True,
+        )
 
         # The orphan must be gone
         assert not POPOTO_REDIS_DB.sismember(pending_idx_key.redis_key, member_key), (
