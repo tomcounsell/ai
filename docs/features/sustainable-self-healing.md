@@ -49,6 +49,8 @@ Scans failed/abandoned sessions from the last 4 hours. Groups them by error fing
 
 Enqueues a dev-role AgentSession that generates and sends a daily Telegram health summary to the `Dev: Valor` chat. The digest includes circuit state, throttle level, session counts, and active failure cluster count.
 
+Circuit states are translated to plain-language labels in the agent session prompt — the LLM is instructed to report `OK` (closed), `DOWN` (open), and `RECOVERING` (half-open) rather than the raw internal enum values. This covers both the lowercase `.value` strings (`closed`, `open`, `half_open`) and the uppercase enum names (`CLOSED`, `OPEN`, `HALF_OPEN`).
+
 - **Interval:** 86400s (daily)
 
 ## Redis Key Schema
@@ -138,3 +140,4 @@ Unit tests in `tests/unit/test_sustainability.py`:
 - `_pop_agent_session`: queue_paused set → returns None
 - `recovery_drip`: transitions session, clears flag when empty, no-op when flag absent
 - `failure_loop_detector`: 3+ same-fingerprint failures → issue filed; already seen → no duplicate; < 3 → no issue
+- `sustainability_digest`: anomaly string uses plain language (no raw enum names); agent prompt maps all six circuit state forms to `OK`/`DOWN`/`RECOVERING`
