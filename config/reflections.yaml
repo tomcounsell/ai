@@ -127,6 +127,19 @@ reflections:
       Subject line: Daily System Health Digest.
     enabled: true
 
+  # === Memory Consolidation (issue #795) ===
+  # LLM-based semantic dedup: merges near-duplicate memories, flags contradictions.
+  # Default: dry_run=True — runs in observe-only mode for 14 days, logging proposed
+  # merges to logs/reflections.log. Enable apply mode by passing apply=True after
+  # reviewing dry-run logs and achieving >= 95% human agreement on proposed merges.
+  - name: memory-dedup
+    description: "LLM-based semantic consolidation: merge near-duplicate memories, flag contradictions"
+    interval: 86400  # daily
+    priority: normal
+    execution_type: function
+    callable: "scripts.memory_consolidation.run_consolidation"
+    enabled: true
+
   - name: sentry-issue-triage
     description: "Triage unresolved Sentry issues for all projects with SENTRY_DSN in their .env"
     interval: 86400  # daily
