@@ -163,7 +163,7 @@ class TestFindSessionByIssue:
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
 
-        with patch("models.agent_session.AgentSession", mock_as):
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = _find_session_by_issue(704)
 
         assert result == mock_session
@@ -177,7 +177,7 @@ class TestFindSessionByIssue:
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
 
-        with patch("models.agent_session.AgentSession", mock_as):
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = _find_session_by_issue(704)
 
         assert result is None
@@ -188,7 +188,7 @@ class TestFindSessionByIssue:
         mock_as = MagicMock()
         mock_as.query.filter.side_effect = ConnectionError("Redis down")
 
-        with patch("models.agent_session.AgentSession", mock_as):
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
             result = _find_session_by_issue(704)
 
         assert result is None

@@ -38,6 +38,16 @@ gh pr view {number} --json number,title,state,headRefName,reviewDecision,statusC
 
 If NO issue or PR number was provided (just a feature description), invoke `/do-issue` to create a quality issue. Do not proceed without an issue number.
 
+## Step 1.5: Ensure Local Session Exists
+
+After resolving the issue number, ensure a local SDLC session exists in Redis so that stage markers can track progress. This is a no-op for bridge-initiated sessions (which already have `VALOR_SESSION_ID`), but critical for local Claude Code sessions.
+
+```bash
+python -m tools.sdlc_session_ensure --issue-number {issue_number} --issue-url "https://github.com/{repo}/issues/{issue_number}" 2>/dev/null || true
+```
+
+This is idempotent -- running it multiple times for the same issue reuses the same session. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
+
 ## Step 2: Assess Current State
 
 Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local operations (defaults to `.` for same-repo work). Run ALL of these checks — do not skip any.
@@ -46,10 +56,10 @@ Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local oper
 
 Query the PM session's `stage_states` for authoritative stage completion data. This is the **exclusive signal** for routing decisions. Stage completion is determined ONLY by stored state — never by artifact inference.
 
-Run the stage query tool directly and read its output from the tool result -- no shell substitution, no pipes, no environment-variable capture. The tool resolves the active session from `VALOR_SESSION_ID` or `AGENT_SESSION_ID` internally, so the skill does not need to branch on shell variables.
+Run the stage query tool directly and read its output from the tool result -- no shell substitution, no pipes, no environment-variable capture. The tool resolves the active session from `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, or `--issue-number` internally.
 
 ```bash
-python -m tools.sdlc_stage_query
+python -m tools.sdlc_stage_query --issue-number {issue_number}
 ```
 
 Interpret the JSON output from the tool result:

@@ -11,13 +11,13 @@ allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage PLAN --status in_progress 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage PLAN --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
 After the plan document is committed and pushed (end of Step 5), write the completion marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage PLAN --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 

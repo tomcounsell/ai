@@ -12,13 +12,13 @@ After a code change lands, find every document that references the changed area 
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage DOCS --status in_progress 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage DOCS --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
 After all documentation updates are complete and committed (Step 4), write the completion marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage DOCS --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage DOCS --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 ## Goal Alignment

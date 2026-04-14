@@ -55,13 +55,13 @@ Each sub-skill has a single responsibility and receives pre-resolved context.
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage REVIEW --status in_progress 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage REVIEW --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
 After posting the review (Step 6), on approval (no blockers):
 
 ```bash
-python -m tools.sdlc_stage_marker --stage REVIEW --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 Note: If blockers found, leave as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes.
