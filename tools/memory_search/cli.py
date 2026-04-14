@@ -259,7 +259,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     by_category = result.get("by_category", {})
 
     print(f"Memory System Status — project '{project}'")
-    print(f"  Redis:           ok")
+    print("  Redis:           ok")
     print(f"  Total records:   {total}")
     print(f"  Superseded:      {superseded}")
     print(f"  Avg confidence:  {avg_conf:.4f}")

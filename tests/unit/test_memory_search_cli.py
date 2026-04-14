@@ -220,7 +220,7 @@ class TestCmdStatus:
 
         with (
             patch("tools.memory_search.cli.status", return_value=redis_down_result),
-            patch("sys.stderr", new_callable=StringIO) as mock_err,
+            patch("sys.stderr", new_callable=StringIO),
         ):
             code = cmd_status(self._make_args())
 
