@@ -175,10 +175,10 @@ The touched block already has a surrounding `try/except` at `agent/agent_session
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_queue.py::TestHealthCheckDeliveryGuard` — UPDATE: add a new test class `TestHealthCheckNoProgressRecovery` alongside it with the 7 cases listed in Task 1 (including the AD2 regression `test_recovered_dev_session_popped_by_shared_pm_worker` and the AD1 race-acceptance `test_progress_written_between_check_and_transition_is_lost_but_session_retries`). The existing delivery-guard tests should remain green (they use sessions with `worker_alive=False`; the new branch only fires when `worker_alive=True`).
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — VERIFY: this file covers `running → abandoned/completed` transitions. Confirm the existing tests still pass after the fix; no changes needed unless a test happens to exercise a session with `worker_alive=True`, past the guard, and no progress — in which case the outcome changes (which is the intent).
-- [ ] `tests/integration/test_agent_session_health_monitor.py` — VERIFY: integration test; confirm the assertions still hold and add one new assertion that a `turn_count=0`/empty-`log_path` running session with a live project-keyed worker is recovered after the guard window.
-- [ ] `tests/unit/test_recovery_respawn_safety.py`, `tests/unit/test_stall_detection.py`, `tests/integration/test_agent_session_queue_race.py` — VERIFY: these also exercise the health-check code path. Run them after the fix and confirm no regressions.
+- [x] `tests/unit/test_agent_session_queue.py::TestHealthCheckDeliveryGuard` — UPDATE: add a new test class `TestHealthCheckNoProgressRecovery` alongside it with the 7 cases listed in Task 1 (including the AD2 regression `test_recovered_dev_session_popped_by_shared_pm_worker` and the AD1 race-acceptance `test_progress_written_between_check_and_transition_is_lost_but_session_retries`). The existing delivery-guard tests should remain green (they use sessions with `worker_alive=False`; the new branch only fires when `worker_alive=True`).
+- [x] `tests/unit/test_health_check_recovery_finalization.py` — VERIFY: this file covers `running → abandoned/completed` transitions. Confirm the existing tests still pass after the fix; no changes needed unless a test happens to exercise a session with `worker_alive=True`, past the guard, and no progress — in which case the outcome changes (which is the intent).
+- [x] `tests/integration/test_agent_session_health_monitor.py` — VERIFY: integration test; confirm the assertions still hold and add one new assertion that a `turn_count=0`/empty-`log_path` running session with a live project-keyed worker is recovered after the guard window.
+- [x] `tests/unit/test_recovery_respawn_safety.py`, `tests/unit/test_stall_detection.py`, `tests/integration/test_agent_session_queue_race.py` — VERIFY: these also exercise the health-check code path. Run them after the fix and confirm no regressions.
 
 No tests are deleted. No existing assertions are inverted. The fix is additive in its recovery surface — it widens the set of sessions recovered by adding a new qualifying condition, without changing outcomes for any session that was already being handled.
 
@@ -234,12 +234,12 @@ No agent integration required. This is a worker-internal change. The health chec
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-self-healing.md` (or the closest doc on the health-check system) with one paragraph describing the no-progress recovery path. If no existing doc describes `_agent_session_health_check` in detail, add a short section to `docs/features/bridge-worker-architecture.md` under the worker's responsibilities.
-- [ ] Grep `docs/` for references to `AGENT_SESSION_HEALTH_MIN_RUNNING` and `_agent_session_health_check` and update any that describe the recovery decision tree.
+- [x] Update `docs/features/bridge-self-healing.md` (or the closest doc on the health-check system) with one paragraph describing the no-progress recovery path. If no existing doc describes `_agent_session_health_check` in detail, add a short section to `docs/features/bridge-worker-architecture.md` under the worker's responsibilities.
+- [x] Grep `docs/` for references to `AGENT_SESSION_HEALTH_MIN_RUNNING` and `_agent_session_health_check` and update any that describe the recovery decision tree.
 
 ### Inline Documentation
-- [ ] Update the docstring of `_agent_session_health_check` at `agent/agent_session_queue.py:1353-1381` to list the new no-progress branch as item 2 (renumber existing items).
-- [ ] Add a one-line comment above the new branch explaining the rationale: "Project-keyed dev sessions share worker_key with PM; without a progress signal, worker_alive alone doesn't prove the dev session is being handled."
+- [x] Update the docstring of `_agent_session_health_check` at `agent/agent_session_queue.py:1353-1381` to list the new no-progress branch as item 2 (renumber existing items).
+- [x] Add a one-line comment above the new branch explaining the rationale: "Project-keyed dev sessions share worker_key with PM; without a progress signal, worker_alive alone doesn't prove the dev session is being handled."
 
 ### External Documentation Site
 
@@ -247,17 +247,17 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 ## Success Criteria
 
-- [ ] **User-framed outcome:** Time-to-recovery for a stuck slugless Dev session drops from ~45 min to ≤5 min when a PM co-runs on the same project key. Verified by reproducing the 2026-04-14 scenario (two local `"test"` dev sessions stuck with `turn_count=0`/empty `log_path` while a `"valor"` PM is active) in a test fixture or staging run.
-- [ ] A slugless dev session stuck in `running` with `turn_count=0`, empty `log_path`, and empty `claude_session_uuid` is recovered (→ `abandoned` for local sessions, → `pending` for project-keyed sessions) within one health-check cycle after the startup guard expires, even when a PM session is actively running under the same `worker_key`.
-- [ ] A legitimately active dev session (ANY of `turn_count > 0`, non-empty `log_path`, or non-empty `claude_session_uuid`) is NOT incorrectly recovered while its worker is alive.
-- [ ] New unit test: mock `_active_workers` with a live project-keyed task, create a session with all three progress fields empty, advance time past the guard, assert the health check recovers it via the expected path (local → abandoned, project-keyed → pending).
-- [ ] New unit test: parametrized over the progress-field truth table, assert non-recovery whenever ANY of `turn_count`, `log_path`, or `claude_session_uuid` is set.
-- [ ] New unit test `test_recovered_dev_session_popped_by_shared_pm_worker`: asserts `_pop_agent_session(worker_key, is_project_keyed=True)` returns the recovered Dev session even when a PM owns the worker task (AD2 regression lock-in).
-- [ ] New unit test `test_progress_written_between_check_and_transition_is_lost_but_session_retries`: asserts the AD1 race behavior — a session that writes progress AFTER `entry` is loaded but BEFORE `transition_status` runs is re-queued (documented acceptable false-positive).
-- [ ] All existing tests in `tests/unit/test_agent_session_queue.py`, `tests/unit/test_health_check_recovery_finalization.py`, `tests/unit/test_recovery_respawn_safety.py`, `tests/unit/test_stall_detection.py`, `tests/integration/test_agent_session_health_monitor.py`, and `tests/integration/test_agent_session_queue_race.py` still pass.
-- [ ] No regression to the 45-minute timeout path — sessions with progress still hit that fallback when their worker appears alive for longer than the timeout.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] **User-framed outcome:** Time-to-recovery for a stuck slugless Dev session drops from ~45 min to ≤5 min when a PM co-runs on the same project key. Verified by reproducing the 2026-04-14 scenario (two local `"test"` dev sessions stuck with `turn_count=0`/empty `log_path` while a `"valor"` PM is active) in a test fixture or staging run.
+- [x] A slugless dev session stuck in `running` with `turn_count=0`, empty `log_path`, and empty `claude_session_uuid` is recovered (→ `abandoned` for local sessions, → `pending` for project-keyed sessions) within one health-check cycle after the startup guard expires, even when a PM session is actively running under the same `worker_key`.
+- [x] A legitimately active dev session (ANY of `turn_count > 0`, non-empty `log_path`, or non-empty `claude_session_uuid`) is NOT incorrectly recovered while its worker is alive.
+- [x] New unit test: mock `_active_workers` with a live project-keyed task, create a session with all three progress fields empty, advance time past the guard, assert the health check recovers it via the expected path (local → abandoned, project-keyed → pending).
+- [x] New unit test: parametrized over the progress-field truth table, assert non-recovery whenever ANY of `turn_count`, `log_path`, or `claude_session_uuid` is set.
+- [x] New unit test `test_recovered_dev_session_popped_by_shared_pm_worker`: asserts `_pop_agent_session(worker_key, is_project_keyed=True)` returns the recovered Dev session even when a PM owns the worker task (AD2 regression lock-in).
+- [x] New unit test `test_progress_written_between_check_and_transition_is_lost_but_session_retries`: asserts the AD1 race behavior — a session that writes progress AFTER `entry` is loaded but BEFORE `transition_status` runs is re-queued (documented acceptable false-positive).
+- [x] All existing tests in `tests/unit/test_agent_session_queue.py`, `tests/unit/test_health_check_recovery_finalization.py`, `tests/unit/test_recovery_respawn_safety.py`, `tests/unit/test_stall_detection.py`, `tests/integration/test_agent_session_health_monitor.py`, and `tests/integration/test_agent_session_queue_race.py` still pass.
+- [x] No regression to the 45-minute timeout path — sessions with progress still hit that fallback when their worker appears alive for longer than the timeout.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
