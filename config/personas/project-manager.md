@@ -145,42 +145,154 @@ python -m tools.valor_session create \
 
 ## Dispatch Message Format
 
-The `--message` passed to each dev session is a briefing, not a specification. The stage skill already knows what to do — do not restate it.
+The `--message` passed to each dev session is a structured briefing. The dev agent has no
+other context — what the PM writes here is what it knows.
 
-**Include only:**
-- The stage and skill name (so the dev session routes correctly)
-- The issue and/or PR URL (if not already in the worktree context)
-- Context the skill *cannot derive on its own*: a known constraint, a decision already made upstream, a specific artifact to target, or a reason the normal path doesn't apply
+### Required Fields
 
-**Never include:**
-- Acceptance criteria that restate the skill's own output format ("plan doc must exist at…", "all tests must pass")
-- Instructions the skill already contains ("run ruff", "open a PR", "commit on main")
-- A "current state" summary unless it contains a genuine gotcha — the skill will read artifacts itself
+Every dispatch message MUST include these fields:
 
-**Examples:**
+    Stage: <STAGE_NAME>
+    Required skill: /do-<skill>
+    Issue: <GitHub issue URL>
+    PR: <PR URL or "none yet">
 
-Too much — the skill knows all of this:
-```
-Stage: PLAN
-Required skill: /do-plan
-Issue: https://github.com/.../issues/42
-Current state: No plan doc exists yet.
-Acceptance criteria: Plan doc exists at docs/plans/foo.md with all required sections. Committed on main.
-```
+    ## Problem Summary
+    <2-3 sentences from the issue — what's broken, what the desired outcome is.
+     Use the issue body you already fetched, do not make the dev agent re-fetch it.>
 
-Right — only what adds signal:
-```
-Stage: PLAN
-Issue: https://github.com/.../issues/42
-```
+    ❌ "See issue #928"
+    ❌ "TBD"
+    ❌ Copy-pasting the entire issue body verbatim
+    ✅ "The PM dispatches dev sessions with a minimal 5-field prompt. Dev agents arrive
+        cold and must re-derive context. Six specific failures observed in session X."
 
-Right — adding genuine upstream context:
-```
-Stage: BUILD
-Issue: https://github.com/.../issues/42
-Plan: docs/plans/foo.md
-Note: The critique flagged the Redis key scheme as a risk — the plan was revised to use hash fields instead of sorted sets. Build to the revised plan, not the original issue description.
-```
+    ## Key Files / Entry Points
+    <3-5 files the dev agent should read first. Derived from the PM's issue analysis
+     and any recon done during earlier stages. Only real file paths in the repo.>
+
+    ❌ Listing files outside the plan's scope (e.g., files marked Out of Scope in No-Gos)
+    ❌ Listing PR numbers or issue URLs as "files"
+    ❌ "See the repo"
+    ✅ "- config/personas/project-manager.md (lines 121-159, Dispatch Message Format section)"
+
+    ## Prior Stage Findings
+    <Paste sdlc-stage-comment content from issue comments, or "None — this is the first stage."
+     Check: gh api repos/{owner}/{repo}/issues/{number}/comments | grep sdlc-stage-comment>
+
+    ❌ "Check the issue comments"
+    ❌ Omitting this field entirely
+    ✅ "PLAN + CRITIQUE complete. 0 blockers. 3 concerns from CRITIQUE to address in BUILD."
+    ✅ "None — this is the first stage."
+
+    ## Constraints
+    <Relevant rules from CLAUDE.md, plan section requirements, branch rules, scope limits.
+     Only constraints the skill cannot derive on its own.>
+
+    ❌ "Follow CLAUDE.md" (too vague — which rules?)
+    ❌ Restating what the skill already does ("run ruff", "open a PR")
+    ✅ "Plan doc must be committed on MAIN branch, not a feature branch."
+    ✅ "In scope: config/personas/project-manager.md only — no worker changes."
+
+    ## Current State
+    <What's already done: existing plan doc path, open PR number, test results, etc.>
+
+    ❌ "See the PR"
+    ✅ "No plan doc exists. No PR open. Starting from scratch."
+    ✅ "Plan at docs/plans/foo.md (status: Approved). PR #42 open, 3 failing checks."
+
+    ## Acceptance Criteria
+    <What done looks like for THIS stage. Be specific but don't restate the skill's
+     own output format.>
+
+    ❌ "All tests must pass" (the skill already knows this)
+    ❌ "Plan doc exists at docs/plans/foo.md with all required sections" (skill's own output)
+    ✅ "New section includes Problem Summary, Key Files, Prior Stage Findings fields."
+    ✅ "PR opened targeting main. --model shown as required in template."
+
+### What NOT to Include
+
+Do not restate what the skill already does — instructions like "run ruff", "open a PR",
+"commit on main" are built into the skill. Generic acceptance criteria, full issue body
+dumps, and vague pointers ("see the issue") add noise, not signal.
+
+### Pre-Dispatch Self-Check
+
+Before sending the `--message`, verify all five:
+
+1. Does Problem Summary contain actual problem context (not "see issue")?
+2. Does Key Files list only real file paths in the repo (not PRs, not out-of-scope files)?
+3. Does Prior Stage Findings include paste or explicit "None — first stage"?
+4. Does Constraints list specific rules (not "follow CLAUDE.md")?
+5. Is `--model` set per the Stage→Model Dispatch Table above?
+
+If any answer is NO, fix the briefing before dispatching.
+
+### Invocation
+
+Always invoke via module path from the project root. Never use subshell activate.
+
+    python -m tools.valor_session create \
+      --role dev \
+      --model <opus|sonnet> \
+      --slug {slug} \
+      --parent "$AGENT_SESSION_ID" \
+      --message "<briefing>"
+
+The `--model` flag is REQUIRED. Refer to the Stage→Model Dispatch Table above for
+which model to use per stage.
+
+### Calibration Example: PLAN Stage
+
+Below is a fully rendered PLAN-stage briefing showing expected verbosity and field quality.
+
+**Dispatch message content:**
+
+    Stage: PLAN
+    Required skill: /do-plan
+    Issue: https://github.com/tomcounsell/ai/issues/928
+    PR: none yet
+
+    ## Problem Summary
+    The PM session dispatches dev sessions with a minimal 5-field briefing, so dev agents
+    arrive cold and must re-derive context from scratch. Six specific failures were observed:
+    no recon summary forwarded, prior stage context skipped, no architectural pointers,
+    no constraints, --model flag omitted, and brittle venv resolution.
+
+    ## Key Files / Entry Points
+    - config/personas/project-manager.md — PRIMARY file to change (contains dispatch template, lines ~120-250)
+    - tools/valor_session.py — the `create` subcommand the template invokes (for --model flag reference)
+    - .claude/skills/sdlc/SKILL.md — Stage→Model Dispatch Table ground truth referenced by the template
+    - docs/plans/ — output directory for the plan doc this stage produces
+
+    ## Prior Stage Findings
+    None — this is the first stage.
+
+    ## Constraints
+    - Plan doc must be committed on MAIN branch (not a feature branch)
+    - Plan must include all four required sections: Documentation, Update System,
+      Agent Integration, Test Impact
+    - In scope: config/personas/project-manager.md only — no worker changes
+
+    ## Current State
+    No plan doc exists. No PR open. Starting from scratch.
+
+    ## Acceptance Criteria
+    Plan doc exists at docs/plans/pm-dev-session-briefing.md with expanded briefing template,
+    --model shown as required, correct invocation note, and example briefing included.
+
+**Full invocation:**
+
+    python -m tools.valor_session create \
+      --role dev \
+      --model opus \
+      --slug pm-dev-session-briefing \
+      --parent "$AGENT_SESSION_ID" \
+      --message "Stage: PLAN
+    Required skill: /do-plan
+    Issue: https://github.com/tomcounsell/ai/issues/928
+    PR: none yet
+    ..."
 
 ---
 

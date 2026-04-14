@@ -200,7 +200,7 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 ### Flow
 
 1. **PM assesses current stage** -- uses read-only Bash commands (gh, grep) to check what exists (issue, plan, PR, test status, review state)
-2. **PM creates one Dev session** -- calls `python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "..."` with the stage assignment (stage name, issue/PR URLs, current state, acceptance criteria)
+2. **PM creates one Dev session** -- calls `python -m tools.valor_session create --role dev --model <opus|sonnet> --parent "$AGENT_SESSION_ID" --message "..."` with a structured briefing. See the "Dispatch Message Format" section in `config/personas/project-manager.md` for the six required fields (Problem Summary, Key Files, Prior Stage Findings, Constraints, Current State, Acceptance Criteria) and per-stage model selection.
 3. **Worker executes the Dev session** -- routes to CLI harness (`claude -p`); runs the appropriate skill (/do-plan, /do-build, /do-test, etc.)
 4. **Worker steers PM with result** -- `_handle_dev_session_completion()` classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers the parent PM session
 5. **PM verifies the result** -- receives steering message with completion status and stage outcome
@@ -291,7 +291,7 @@ The parent-child session lifecycle is driven by the worker's post-completion han
 The PM session creates Dev sessions by calling:
 
 ```bash
-python -m tools.valor_session create --role dev --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."
+python -m tools.valor_session create --role dev --model <opus|sonnet> --parent "$AGENT_SESSION_ID" --message "Stage: BUILD\n..."
 ```
 
 This enqueues a new `AgentSession` record with `session_type="dev"` and `parent_agent_session_id` set to the PM's `agent_session_id`. The worker then picks up and executes the session.
