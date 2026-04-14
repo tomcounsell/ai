@@ -20,7 +20,7 @@ import json
 import sys
 from datetime import UTC
 
-from tools.memory_search import forget, inspect, outcome_stats, save, search
+from tools.memory_search import forget, inspect, outcome_stats, save, search, status
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -230,6 +230,58 @@ def cmd_forget(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show memory system health status."""
+    result = status(
+        project_key=args.project,
+        deep=getattr(args, "deep", False),
+    )
+
+    # Redis-down: always exit 1 with human-readable error on stderr
+    if not result.get("healthy", True) and "error" in result:
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    # Human-readable output
+    project = result.get("project_key", "")
+    total = result.get("total", 0)
+    superseded = result.get("superseded", 0)
+    avg_conf = result.get("avg_confidence", 0.0)
+    last_write = result.get("last_write") or "unknown"
+    embedding = result.get("embedding_field", "unknown")
+    by_category = result.get("by_category", {})
+
+    print(f"Memory System Status — project '{project}'")
+    print(f"  Redis:           ok")
+    print(f"  Total records:   {total}")
+    print(f"  Superseded:      {superseded}")
+    print(f"  Avg confidence:  {avg_conf:.4f}")
+    print(f"  Last write:      {last_write}")
+    print(f"  Embedding field: {embedding}")
+
+    if by_category:
+        print("  By category:")
+        for cat, count in sorted(by_category.items()):
+            print(f"    {cat}: {count}")
+
+    if "orphan_index_count" in result:
+        print(f"  Orphan index keys: {result['orphan_index_count']}")
+
+    if "by_category_confidence" in result:
+        print("  Per-category confidence:")
+        for cat, info in sorted(result["by_category_confidence"].items()):
+            print(f"    {cat}: avg={info['avg_confidence']:.4f} (n={info['count']})")
+
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -303,6 +355,16 @@ def main() -> int:
     )
     forget_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # status command
+    status_parser = subparsers.add_parser("status", help="Check memory system health")
+    status_parser.add_argument("--project", "-p", help="Project key (default: from env)")
+    status_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    status_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run slow checks: orphan index count and per-category confidence",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -315,6 +377,7 @@ def main() -> int:
         "inspect": cmd_inspect,
         "stats": cmd_stats,
         "forget": cmd_forget,
+        "status": cmd_status,
     }
 
     handler = handlers.get(args.command)
