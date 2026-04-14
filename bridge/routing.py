@@ -531,23 +531,24 @@ async def classify_conversation_terminus(
 
     # LLM classification: Ollama-first, Haiku fallback
     thread_context = "\n".join(thread_messages[-2:]) if thread_messages else ""
-    prompt = f"""Classify this reply in a conversation thread. The reply was sent to Valor (an AI agent).
-
-Reply text: {text_stripped[:300]}
-
-Recent thread context (may be empty):
-{thread_context[:400] if thread_context else "(none)"}
-
-Sender is a bot: {sender_is_bot}
-
-Instructions:
-- If the message contains a question or requests action → reply RESPOND
-- If the message is a natural conversation closer (completion language, agreement, acknowledgment without question) → reply REACT
-- If the message adds nothing new or is redundant with prior context → reply REACT
-- If the sender is a bot and the message is declarative (no question) → reply SILENT
-- Default to RESPOND when uncertain
-
-Reply with ONLY one word: RESPOND, REACT, or SILENT."""
+    prompt = (
+        "Classify this reply in a conversation thread. "
+        "The reply was sent to Valor (an AI agent).\n\n"
+        f"Reply text: {text_stripped[:300]}\n\n"
+        "Recent thread context (may be empty):\n"
+        f"{thread_context[:400] if thread_context else '(none)'}\n\n"
+        f"Sender is a bot: {sender_is_bot}\n\n"
+        "Instructions:\n"
+        "- If the message contains a question or requests action → reply RESPOND\n"
+        "- If the message is a natural conversation closer (completion language,\n"
+        "  agreement, acknowledgment without question) → reply REACT\n"
+        "- If the message adds nothing new or is redundant with prior context"
+        " → reply REACT\n"
+        "- If the sender is a bot and the message is declarative (no question)"
+        " → reply SILENT\n"
+        "- Default to RESPOND when uncertain\n\n"
+        "Reply with ONLY one word: RESPOND, REACT, or SILENT."
+    )
 
     result = None
 
@@ -981,7 +982,11 @@ async def should_respond_async(
         try:
             replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
             if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
-                sender_is_bot = getattr(sender, "bot", False)
+                try:
+                    _sender_obj = await event.get_sender()
+                    sender_is_bot = getattr(_sender_obj, "bot", False)
+                except Exception:
+                    sender_is_bot = False
                 terminus = await classify_conversation_terminus(
                     text=text,
                     thread_messages=[replied_msg.message or ""] if replied_msg else [],
@@ -992,7 +997,9 @@ async def should_respond_async(
                     return True, True
                 if terminus == "REACT" and not sender_is_bot:
                     try:
-                        from bridge.response import set_reaction  # deferred to avoid circular import
+                        from bridge.response import (
+                            set_reaction,  # deferred to avoid circular import
+                        )
 
                         await set_reaction(client, event.chat_id, message.id, "👍")
                     except Exception as react_err:
