@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 revision_applied: true
 type: feature
 appetite: Medium
@@ -249,28 +249,28 @@ Phase 3 (apply mode):
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `run_consolidation()` wraps the Haiku API call in try/except; on failure logs WARNING and returns early with `{applied_merges: 0, error: str(e)}`
-- [ ] `Memory.safe_save()` already wraps all Redis writes — consolidation creates merged records through this path, inheriting its error handling
-- [ ] `m.save()` return value is checked when writing `superseded_by`: `if result is False: logger.warning(...)` — test that WriteFilter returning False logs a WARNING and does not raise (B2)
-- [ ] JSON parse failure from Haiku: log WARNING with raw response snippet, skip the group, continue with remaining groups
-- [ ] Each `except Exception` path must have a corresponding test asserting `logs/reflections.log` gets a WARNING entry
+- [x] `run_consolidation()` wraps the Haiku API call in try/except; on failure logs WARNING and returns early with `{applied_merges: 0, error: str(e)}`
+- [x] `Memory.safe_save()` already wraps all Redis writes — consolidation creates merged records through this path, inheriting its error handling
+- [x] `m.save()` return value is checked when writing `superseded_by`: `if result is False: logger.warning(...)` — test that WriteFilter returning False logs a WARNING and does not raise (B2)
+- [x] JSON parse failure from Haiku: log WARNING with raw response snippet, skip the group, continue with remaining groups
+- [x] Each `except Exception` path must have a corresponding test asserting `logs/reflections.log` gets a WARNING entry
 
 ### Empty/Invalid Input Handling
-- [ ] Empty memory group (0 records): return `{"actions": []}` immediately, no Haiku call
-- [ ] Single-record group (1 record): return `{"actions": []}` immediately (can't merge with itself)
-- [ ] Haiku returns empty string or whitespace: treated as JSON parse failure (log and skip)
-- [ ] Memory record with `importance=None`: treat as 0.0, apply exemption threshold check conservatively (exempt if None)
+- [x] Empty memory group (0 records): return `{"actions": []}` immediately, no Haiku call
+- [x] Single-record group (1 record): return `{"actions": []}` immediately (can't merge with itself)
+- [x] Haiku returns empty string or whitespace: treated as JSON parse failure (log and skip)
+- [x] Memory record with `importance=None`: treat as 0.0, apply exemption threshold check conservatively (exempt if None)
 
 ### Error State Rendering
-- [ ] Dry-run log entries are human-readable: `[DRY-RUN] Would merge {ids}: {rationale}`
-- [ ] Contradiction flags produce a Telegram message via `valor-telegram send`; test that the send call is invoked with correct content
-- [ ] When `valor-telegram send` raises `CalledProcessError` (bridge down), contradiction is written to `logs/memory-contradictions.log` as fallback; test both paths (C3)
+- [x] Dry-run log entries are human-readable: `[DRY-RUN] Would merge {ids}: {rationale}`
+- [x] Contradiction flags produce a Telegram message via `valor-telegram send`; test that the send call is invoked with correct content
+- [x] When `valor-telegram send` raises `CalledProcessError` (bridge down), contradiction is written to `logs/memory-contradictions.log` as fallback; test both paths (C3)
 
 ## Test Impact
 
-- [ ] `tests/unit/test_memory_model.py` — UPDATE: add assertions that `superseded_by` field defaults to `""` and accepts a memory_id string
-- [ ] `tests/unit/test_memory_retrieval.py` — UPDATE: add test that `retrieve_memories()` excludes records where `superseded_by != ""`
-- [ ] `tests/unit/test_memory_consolidation.py` — CREATE (new file): canary set test (all-10-item batch), idempotency test, superseded-recall test, exemption test (importance ≥7.0 never merged), rate-limit test (max 10 merges enforced), WriteFilter guard test (save() returning False logs warning, no exception)
+- [x] `tests/unit/test_memory_model.py` — UPDATE: add assertions that `superseded_by` field defaults to `""` and accepts a memory_id string
+- [x] `tests/unit/test_memory_retrieval.py` — UPDATE: add test that `retrieve_memories()` excludes records where `superseded_by != ""`
+- [x] `tests/unit/test_memory_consolidation.py` — CREATE (new file): canary set test (all-10-item batch), idempotency test, superseded-recall test, exemption test (importance ≥7.0 never merged), rate-limit test (max 10 merges enforced), WriteFilter guard test (save() returning False logs warning, no exception)
 
 No other existing memory tests are affected — consolidation is additive and the recall filter is the only behavioral change to existing code paths.
 
@@ -349,26 +349,26 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 ## Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md`: add a **Memory Consolidation** section describing the `memory-dedup` reflection, `superseded_by` and `superseded_by_rationale` fields, recall filter, and rollout phases
-- [ ] Update `docs/features/subconscious-memory.md` Key Files table: add `scripts/memory_consolidation.py`
-- [ ] Update `docs/features/subconscious-memory.md` Reversibility section: note that superseded records can be re-activated by clearing `superseded_by`
-- [ ] Add entry to `docs/features/README.md` index table if a standalone consolidation doc is warranted (likely not — the subconscious-memory.md update is sufficient)
-- [ ] Add inline docstring to `scripts/memory_consolidation.py` covering algorithm, safety rails, and dry-run/apply modes
-- [ ] Update `config/reflections.yaml` inline comment to document the `memory-dedup` entry's purpose and the dry-run period requirement
+- [x] Update `docs/features/subconscious-memory.md`: add a **Memory Consolidation** section describing the `memory-dedup` reflection, `superseded_by` and `superseded_by_rationale` fields, recall filter, and rollout phases
+- [x] Update `docs/features/subconscious-memory.md` Key Files table: add `scripts/memory_consolidation.py`
+- [x] Update `docs/features/subconscious-memory.md` Reversibility section: note that superseded records can be re-activated by clearing `superseded_by`
+- [x] Add entry to `docs/features/README.md` index table if a standalone consolidation doc is warranted (likely not — the subconscious-memory.md update is sufficient)
+- [x] Add inline docstring to `scripts/memory_consolidation.py` covering algorithm, safety rails, and dry-run/apply modes
+- [x] Update `config/reflections.yaml` inline comment to document the `memory-dedup` entry's purpose and the dry-run period requirement
 
 ## Success Criteria
 
-- [ ] `Memory` model has `superseded_by = StringField(default="")` and `superseded_by_rationale = StringField(default="")` fields
-- [ ] `agent/memory_retrieval.py` `retrieve_memories()` filters out records where `superseded_by != ""`
-- [ ] `scripts/memory_consolidation.py` callable exists with signature `run_consolidation(project_key=None, dry_run=True, max_merges=10)`, Haiku prompt, dry-run mode, apply mode, max-10-merges rate cap, importance ≥7.0 exemption, WriteFilter save() guard, contradiction flagging with Telegram + log fallback
-- [ ] `memory-dedup` reflection registered in `config/reflections.yaml` with `interval: 86400`, `priority: normal`, `execution_type: function`, `enabled: true`
-- [ ] `tests/unit/test_memory_consolidation.py` has canary set test, idempotency test, superseded-recall test, exemption test, and rate-limit test
-- [ ] Dry-run mode is the default; apply is gated behind a config flag or `--apply` argument
-- [ ] Contradictions produce a Telegram notification, never auto-resolve
-- [ ] Baseline metrics captured before first apply run
-- [ ] 14-day dry-run period planned with human review checkpoint documented in `logs/reflections.log`
-- [ ] All tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `Memory` model has `superseded_by = StringField(default="")` and `superseded_by_rationale = StringField(default="")` fields
+- [x] `agent/memory_retrieval.py` `retrieve_memories()` filters out records where `superseded_by != ""`
+- [x] `scripts/memory_consolidation.py` callable exists with signature `run_consolidation(project_key=None, dry_run=True, max_merges=10)`, Haiku prompt, dry-run mode, apply mode, max-10-merges rate cap, importance ≥7.0 exemption, WriteFilter save() guard, contradiction flagging with Telegram + log fallback
+- [x] `memory-dedup` reflection registered in `config/reflections.yaml` with `interval: 86400`, `priority: normal`, `execution_type: function`, `enabled: true`
+- [x] `tests/unit/test_memory_consolidation.py` has canary set test, idempotency test, superseded-recall test, exemption test, and rate-limit test
+- [x] Dry-run mode is the default; apply is gated behind a config flag or `--apply` argument
+- [x] Contradictions produce a Telegram notification, never auto-resolve
+- [x] Baseline metrics captured before first apply run
+- [x] 14-day dry-run period planned with human review checkpoint documented in `logs/reflections.log`
+- [x] All tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
