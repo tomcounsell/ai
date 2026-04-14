@@ -101,7 +101,7 @@ Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
 
 3. **Definitions section** — If the issue uses 2+ domain-specific terms, add a Definitions table. Each term gets a one-line definition and a link to where the reader can learn more.
 
-4. **Solution sketch** — Brief description of the approach. Not a full plan (that's `/do-plan`'s job), but enough that the planner knows the direction.
+4. **Solution sketch** — Brief description of the approach. Not a full plan (that's `/do-plan`'s job), but enough that the planner knows the direction. **For architectural or structural problems where the root cause is still uncertain, write open questions here instead of approaches — do-plan will not challenge a concrete sketch, it will execute it.**
 
 5. **Downstream context** — Explicitly state what happens next: "This issue will be consumed by `/do-plan` to produce a plan document at `docs/plans/{slug}.md`."
 
