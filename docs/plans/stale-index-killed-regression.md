@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -237,9 +237,9 @@ Convert ALL `session.save()` and `agent_session.save()` calls in `agent_session_
 
 ## Test Impact
 
-- [ ] `tests/integration/test_nudge_stomp_regression.py::TestLayer2PartialSavePreservesFields` — UPDATE: extend to verify `set_link()` partial save also preserves status
-- [ ] `tests/unit/test_agent_session_index_corruption.py` — UPDATE: add test cases for the `killed` transition path (currently only tests `completed` path indirectly)
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: add assertion that defensive srem fires during finalize_session
+- [x] `tests/integration/test_nudge_stomp_regression.py::TestLayer2PartialSavePreservesFields` — UPDATE: extend to verify `set_link()` partial save also preserves status
+- [x] `tests/unit/test_agent_session_index_corruption.py` — UPDATE: add test cases for the `killed` transition path (currently only tests `completed` path indirectly)
+- [x] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: add assertion that defensive srem fires during finalize_session
 
 ## Rabbit Holes
 
@@ -284,24 +284,24 @@ No agent integration required — this is a session-lifecycle-internal change. N
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/session-lifecycle.md` with the rule: "companion-field saves on AgentSession must use `save(update_fields=[...])` to avoid clobbering status"
-- [ ] Add "Known follow-up" note to `docs/plans/nudge-stomp-append-event-bypass.md` pointing to this issue
+- [x] Update `docs/features/session-lifecycle.md` with the rule: "companion-field saves on AgentSession must use `save(update_fields=[...])` to avoid clobbering status"
+- [x] Add "Known follow-up" note to `docs/plans/nudge-stomp-append-event-bypass.md` pointing to this issue
 
 ### Inline Documentation
-- [ ] Add docstring warnings on `set_link`, `push_steering_message`, `pop_steering_messages` noting the partial-save requirement
+- [x] Add docstring warnings on `set_link`, `push_steering_message`, `pop_steering_messages` noting the partial-save requirement
 
 ## Success Criteria
 
-- [ ] `set_link()`, `push_steering_message()`, `pop_steering_messages()` use partial saves
-- [ ] All identified full-save sites in `agent_session_queue.py` that operate on stale session references are converted to partial saves
-- [ ] Defensive srem in `finalize_session` removes hash key from all non-target status index sets
-- [ ] New regression test: create a pending session, simulate a stale-object full save with wrong status, then kill — assert no orphan in pending index
-- [ ] Parametrized test across all five terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`) asserting zero orphan index entries post-transition
-- [ ] Existing tests in `test_nudge_stomp_regression.py` continue to pass
-- [ ] `"Stale index entry"` warning count on a 24-hour `bridge.log` drops to zero post-deploy
-- [ ] Reflections regression check at `scripts/reflections.py:964` remains installed and untouched
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `set_link()`, `push_steering_message()`, `pop_steering_messages()` use partial saves
+- [x] All identified full-save sites in `agent_session_queue.py` that operate on stale session references are converted to partial saves
+- [x] Defensive srem in `finalize_session` removes hash key from all non-target status index sets
+- [x] New regression test: create a pending session, simulate a stale-object full save with wrong status, then kill — assert no orphan in pending index
+- [x] Parametrized test across all five terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`) asserting zero orphan index entries post-transition
+- [x] Existing tests in `test_nudge_stomp_regression.py` continue to pass
+- [x] `"Stale index entry"` warning count on a 24-hour `bridge.log` drops to zero post-deploy
+- [x] Reflections regression check at `scripts/reflections.py:964` remains installed and untouched
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -406,15 +406,14 @@ No agent integration required — this is a session-lifecycle-internal change. N
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room) on 2026-04-14. Re-run with full source verification. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-14. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Adversary, Skeptic | Layer 3 sites (3291, 3500, 3702) are TOCTOU-vulnerable fresh loads not stale references — plan mislabels mechanism, affecting test design | Revision: clarify Data Flow + Task 3 test scenarios | Fix (partial saves) is correct regardless. But Task 3 tests must simulate concurrent kill between fresh load and save (TOCTOU), not just stale-object saves. At line 3291 `agent_session` is freshly loaded at 3279 via `filter(status="running")`; a concurrent kill between 3279 and 3291 clobbers status. Same for 3500, 3702. |
-| CONCERN | Operator, Skeptic | Lines 792/923 use `async_save()` not `save()` — plan omits async variant | Task 1: add explicit async_save note | `await chosen.async_save(update_fields=["message_text", "updated_at"])` at both lines. Confirmed: Popoto `async_save()` passes `update_fields` through to `save()`. |
-| CONCERN | Archaeologist, Operator | Defensive srem (Layer 2) imports 3 Popoto internals (DB_key, POPOTO_REDIS_DB, get_special_use_field_db_key) — adds coupling points beyond existing `_saved_field_values` | Task 2: add Popoto coupling comment | Hand-rolled srem is acceptable (try/excepted, non-fatal). Test must assert srem fires via `sismember` check on non-target index sets. Add inline comment listing all 3 Popoto coupling points for upgrade verification. |
-| CONCERN | Skeptic, Simplifier | `retain_for_resume` save at line 3043 not explicitly listed in Task 1 bullets — left to "audit" discovery | Task 1: add explicit bullet | `agent_session.save(update_fields=["retain_for_resume", "updated_at"])` at line 3043. This `agent_session` is loaded early in `_execute_agent_session` and may be killed externally before line 3043 fires post-harness. |
-| NIT | Operator | Verification command for reflections check (`git diff main | grep -c "Stale index entry"`) may false-positive on context lines | — | Use line-specific check: `git show HEAD:scripts/reflections.py \| sed -n '964p' \| grep -q "Stale index entry"` |
-| NIT | Simplifier | Risk 1 says include `updated_at` in all `update_fields` lists but Popoto `auto_now` fields may already auto-refresh on partial save | Task 1 | Not harmful to include explicitly. Check if `updated_at` uses `auto_now=True`; if so, the Risk 1 mitigation rationale is weaker than stated but the fix is still correct. |
+| CONCERN | Skeptic, Operator | Layer 3 audit lists 6 full-save sites in agent_session_queue.py but plan says "audit" without committing to convert all; lines 792/923 use `async_save()` not `save()` — plan should explicitly confirm `async_save` supports `update_fields` | Task 1 (build-partial-saves) | `async_save()` at `popoto/models/base.py:2290` accepts `update_fields` identically to `save()`. Plan should commit to converting lines 792, 923, 3043, 3291, 3500, 3702 to partial saves — not just "audit". Builder must convert `await chosen.async_save()` to `await chosen.async_save(update_fields=["message_text", "updated_at"])` at lines 792 and 923. |
+| CONCERN | Adversary | Defensive srem (Layer 2) constructs index keys using `DB_key(status_field.get_special_use_field_db_key(...), other_status)` and `session.db_key.redis_key` as the member — plan should verify these match the actual Popoto index key format to avoid silent no-ops | Task 2 (build-defensive-srem) | Verified: `indexed_field_mixin.py:134` uses `model_instance.db_key.redis_key` as member_key and `DB_key(cls.get_special_use_field_db_key(model_instance, field_name), field_value)` as the set key. The plan's pseudocode at Layer 2 uses `session._meta.fields["status"]` which is the field class, not the field name string — call must be `type(status_field).get_special_use_field_db_key(session, "status")` since it's a classmethod on the field class. |
+| CONCERN | Operator | Heartbeat save at line 3702 fires every ~60s for every running session; converting to partial save with `update_fields=["updated_at"]` is correct but plan doesn't mention this is the highest-frequency stale-save vector — it should be the first conversion, not an "audit" item | Task 1 (build-partial-saves) | Line 3702 runs inside `_heartbeat_loop` which ticks every 60 seconds. On a stale worker reference (status diverged), each tick writes stale status to Redis. This is the primary re-pollution vector that causes rebuild_indexes to fail to stick. Builder should prioritize this conversion. |
+| NIT | Simplifier | Risk 1 mitigation says "Include `updated_at` in all partial-save `update_fields` lists" — but Popoto's `save()` has `skip_auto_now` defaulting to False, which already updates `auto_now` fields. Including `updated_at` explicitly may double-write. | Task 1 | Check if AgentSession.updated_at uses `auto_now=True`. If so, partial saves already refresh it when it's in `update_fields`. Not harmful to include explicitly, but the Risk 1 mitigation rationale is weaker than stated. |
+| NIT | Archaeologist | Plan references `indexed_field_mixin.py:139` guard and `indexed_field_mixin.py:174` sadd — these are Popoto internals that could change on upgrade. Plan already notes this coupling at line 355-356 but the defensive srem (Layer 2) adds a second coupling point. Consider a comment in the defensive srem code noting both coupling sites. | Task 2 | Add inline comment listing both Popoto coupling points: (1) `_saved_field_values` backfill in finalize_session/transition_status, (2) defensive srem index key construction. Both must be re-verified on Popoto upgrade. |
 
 ---
 
