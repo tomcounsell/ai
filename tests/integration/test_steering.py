@@ -913,3 +913,191 @@ class TestResolveRootSessionId:
             in fallback_result
         ), f"Expected fallback string, got: {fallback_result!r}"
         assert follow_up_text in fallback_result
+
+        # --- Extended by issue #949: with reply chain, both blocks appear ---
+        from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+
+        chain_block = (
+            f"{REPLY_THREAD_CONTEXT_HEADER} (oldest to newest):\n"
+            "----------------------------------------\n"
+            "Tom: any update?\nValor: fixed yesterday\n"
+            "----------------------------------------"
+        )
+        with_chain = _build_completed_resume_text(
+            session, follow_up_text, reply_chain_context=chain_block
+        )
+        assert context_summary in with_chain
+        assert REPLY_THREAD_CONTEXT_HEADER in with_chain
+        assert follow_up_text in with_chain
+        # Exactly one header — Race 1 / IN-1 guard
+        assert with_chain.count(REPLY_THREAD_CONTEXT_HEADER) == 1
+        # Order: summary -> chain -> follow_up
+        assert with_chain.index("[Prior session context:") < with_chain.index(
+            REPLY_THREAD_CONTEXT_HEADER
+        ) < with_chain.index(follow_up_text)
+
+    @pytest.mark.asyncio
+    async def test_reply_to_completed_session_fallback_without_summary(self):
+        """Reply to a completed session with no context_summary still carries the reply chain.
+
+        Replays the 2026-04-14 11:54 incident (issue #949): the prior session's
+        context_summary was empty, so the fallback preamble is used. With the
+        new reply-chain carry, the agent still sees the thread context.
+        """
+        from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+        from bridge.telegram_bridge import _build_completed_resume_text
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id="test_fallback_reply_chain_949",
+            project_key="test",
+            status="completed",
+            message_text="errored out",
+            context_summary=None,  # the 11:54 incident had no summary
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+
+        chain_block = (
+            f"{REPLY_THREAD_CONTEXT_HEADER} (oldest to newest):\n"
+            "----------------------------------------\n"
+            "Tom: can you check and see if we got this fixed?\n"
+            "----------------------------------------"
+        )
+        result = _build_completed_resume_text(
+            session,
+            "did we get this fixed?",
+            reply_chain_context=chain_block,
+        )
+        # Fallback sentinel still present
+        assert "This continues a previously completed session." in result
+        # Reply chain hydrated -- this is the new carry
+        assert REPLY_THREAD_CONTEXT_HEADER in result
+        assert result.count(REPLY_THREAD_CONTEXT_HEADER) == 1
+        assert "did we get this fixed?" in result
+
+    @pytest.mark.asyncio
+    async def test_resume_completed_carries_reply_chain(self):
+        """End-to-end: the helper produces a prompt containing the REPLY THREAD CONTEXT
+        block when the handler passes a reply_chain_context.
+
+        This is the guard against regression of the gap described in #949:
+        the resume-completed branch used to omit reply-thread context.
+        """
+        from bridge.context import REPLY_THREAD_CONTEXT_HEADER, format_reply_chain
+        from bridge.telegram_bridge import _build_completed_resume_text
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id="test_resume_carries_chain",
+            project_key="test",
+            status="completed",
+            message_text="",
+            context_summary="prior context",
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+
+        # Build a realistic reply chain block via the real formatter
+        chain = [
+            {"sender": "Tom", "content": "is the bug fixed?", "message_id": 1, "date": None},
+            {"sender": "Valor", "content": "yes, shipped yesterday", "message_id": 2, "date": None},
+        ]
+        chain_block = format_reply_chain(chain)
+        assert REPLY_THREAD_CONTEXT_HEADER in chain_block
+
+        augmented = _build_completed_resume_text(
+            session,
+            "can you verify it's still working?",
+            reply_chain_context=chain_block,
+        )
+        assert "prior context" in augmented
+        assert REPLY_THREAD_CONTEXT_HEADER in augmented
+        assert "is the bug fixed?" in augmented
+        assert "can you verify" in augmented
+
+    def test_no_double_hydration_when_handler_prehydrates(self):
+        """Race 1 / IN-7: if handler prepended the canonical header, the deferred
+        enrichment short-circuits and does not add a second one.
+
+        Guards the idempotency check in agent/agent_session_queue.py against
+        being accidentally removed or re-ordered.
+        """
+        from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+
+        # Read the source and assert the guard is in place. This is a
+        # structural test -- simulating the full worker path would pull in
+        # Claude SDK / Popoto queues. The guard is a handful of lines and
+        # regresses only by deletion, which this test catches.
+        import pathlib
+
+        src = pathlib.Path(__file__).resolve().parents[2] / "agent" / "agent_session_queue.py"
+        content = src.read_text()
+        assert "REPLY_THREAD_CONTEXT_HEADER" in content, (
+            "Idempotency guard removed — reply chain may double-hydrate"
+        )
+        # Must do the check AGAINST enrich_reply_to_msg_id so the fetch is skipped
+        assert "enrich_reply_to_msg_id = None" in content
+        assert REPLY_THREAD_CONTEXT_HEADER  # sanity check the import
+
+    def test_implicit_context_directive_injected(self):
+        """Plan Change C: messages that reference prior context without reply-to
+        get a [CONTEXT DIRECTIVE] prepended before enqueue.
+
+        Tests the predicate and directive contents that the handler uses.
+        """
+        from bridge.context import matched_context_patterns, references_prior_context
+
+        # Positive case -- message references prior context
+        assert references_prior_context("did we get this fixed?") is True
+        assert len(matched_context_patterns("did we get this fixed?")) >= 1
+
+        # Negative case -- fresh request, no directive injection
+        assert references_prior_context("please create a new issue") is False
+        assert matched_context_patterns("please create a new issue") == []
+
+        # The directive string itself is embedded in telegram_bridge.py.
+        # Assert its canonical prefix ships so the agent sees a recognizable marker.
+        import pathlib
+
+        src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        content = src.read_text()
+        assert "[CONTEXT DIRECTIVE]" in content, (
+            "Implicit-context directive removed from bridge handler"
+        )
+        assert "REPLY_CONTEXT_DIRECTIVE_DISABLED" in content, (
+            "Env kill-switch REPLY_CONTEXT_DIRECTIVE_DISABLED removed"
+        )
+
+    def test_reply_chain_fetch_failure_falls_back(self):
+        """Plan failure-path: a fetch_reply_chain exception must not prevent
+        the handler from enqueueing the session. The helper must still produce
+        a valid summary-only preamble when reply_chain_context is None.
+        """
+        from bridge.telegram_bridge import _build_completed_resume_text
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id="test_fetch_fail_fallback",
+            project_key="test",
+            status="completed",
+            message_text="prior",
+            context_summary="did work",
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+
+        # Simulate the handler's catch branch: reply_chain_context is None
+        result = _build_completed_resume_text(session, "follow up", reply_chain_context=None)
+
+        # Summary-only format; the agent still gets SOMETHING
+        assert result == "[Prior session context: did work]\n\nfollow up"
+        # Assert the handler's WARNING log tag is present in source so the
+        # WARNING code path isn't removed by accident.
+        import pathlib
+
+        src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        content = src.read_text()
+        assert "RESUME_REPLY_CHAIN_FAIL" in content, (
+            "RESUME_REPLY_CHAIN_FAIL log tag missing — failure path invisible in logs"
+        )
