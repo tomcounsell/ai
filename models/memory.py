@@ -86,6 +86,14 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     )  # SOURCE_HUMAN, SOURCE_AGENT, SOURCE_SYSTEM, SOURCE_KNOWLEDGE
     reference = StringField(default="")  # Generic JSON pointer (e.g. tool call, URL, entity)
     metadata = DictField(default=dict)
+    superseded_by = StringField(default="")
+    # Empty string = active record.
+    # Non-empty = memory_id of the merged replacement record.
+    # Populated only by the consolidation reflection; never set by ingestion paths.
+    superseded_by_rationale = StringField(default="")
+    # Empty string = not superseded.
+    # Non-empty = one-sentence rationale from Haiku explaining why the merge was proposed.
+    # Preserves audit trail for human review months after the merge occurred.
 
     relevance = DecayingSortedField(
         base_score_field="importance",

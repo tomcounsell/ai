@@ -149,3 +149,54 @@ class TestMemoryModel:
         from models import Memory
 
         assert Memory is not None
+
+    def test_superseded_by_field_defaults_to_empty_string(self):
+        """superseded_by defaults to '' (active record sentinel)."""
+        from models.memory import Memory
+
+        m = Memory(
+            agent_id="test-agent",
+            project_key="test-project",
+            content="Test memory for superseded_by default",
+            importance=2.0,
+        )
+        assert m.superseded_by == ""
+
+    def test_superseded_by_rationale_field_defaults_to_empty_string(self):
+        """superseded_by_rationale defaults to '' (not superseded sentinel)."""
+        from models.memory import Memory
+
+        m = Memory(
+            agent_id="test-agent",
+            project_key="test-project",
+            content="Test memory for superseded_by_rationale default",
+            importance=2.0,
+        )
+        assert m.superseded_by_rationale == ""
+
+    def test_superseded_by_accepts_memory_id_string(self):
+        """superseded_by accepts a non-empty memory_id string."""
+        from models.memory import Memory
+
+        m = Memory(
+            agent_id="test-agent",
+            project_key="test-project",
+            content="Test memory to be superseded",
+            importance=2.0,
+        )
+        m.superseded_by = "some-other-memory-id-12345"
+        assert m.superseded_by == "some-other-memory-id-12345"
+
+    def test_superseded_by_rationale_accepts_rationale_string(self):
+        """superseded_by_rationale accepts a one-sentence rationale string."""
+        from models.memory import Memory
+
+        m = Memory(
+            agent_id="test-agent",
+            project_key="test-project",
+            content="Test memory with rationale",
+            importance=2.0,
+        )
+        rationale = "These two memories express the same instruction with negligible semantic difference."
+        m.superseded_by_rationale = rationale
+        assert m.superseded_by_rationale == rationale
