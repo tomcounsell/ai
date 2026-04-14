@@ -524,3 +524,76 @@ class TestRetrieveMemories:
         hydrated_keys = [call.args[0] for call in mock_memory_cls.query.get.call_args_list]
         assert len(hydrated_keys) == 1
         assert "projA" in hydrated_keys[0]
+
+
+class TestSupersededFilter:
+    """Test that superseded records are excluded from retrieve_memories() results."""
+
+    def test_superseded_records_excluded_from_recall(self):
+        """Records with non-empty superseded_by must not appear in results."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_retrieval import retrieve_memories
+
+        active_record = MagicMock()
+        active_record.memory_id = "active-id"
+        active_record.superseded_by = ""  # active
+
+        superseded_record = MagicMock()
+        superseded_record.memory_id = "superseded-id"
+        superseded_record.superseded_by = "active-id"  # archived
+
+        fused_results = [
+            ("Memory:agent:proj:active-id", 0.8),
+            ("Memory:agent:proj:superseded-id", 0.7),
+        ]
+
+        def mock_get(key):
+            if "active-id" in key:
+                return active_record
+            if "superseded-id" in key:
+                return superseded_record
+            return None
+
+        with (
+            patch("agent.memory_retrieval.get_bm25_ranked", return_value=fused_results),
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.rrf_fuse", return_value=fused_results),
+            patch("agent.memory_retrieval._filter_by_project", return_value=fused_results),
+            patch("models.memory.Memory.query") as mock_query,
+        ):
+            mock_query.get.side_effect = mock_get
+            result = retrieve_memories("test query", "proj", limit=10)
+
+        # Only the active record should be returned
+        result_ids = [r.memory_id for r in result]
+        assert "active-id" in result_ids
+        assert "superseded-id" not in result_ids
+
+    def test_none_superseded_by_treated_as_active(self):
+        """Records with superseded_by=None are treated as active (falsy check)."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_retrieval import retrieve_memories
+
+        none_superseded_record = MagicMock()
+        none_superseded_record.memory_id = "none-superseded-id"
+        none_superseded_record.superseded_by = None  # should be treated as active
+
+        fused_results = [("Memory:agent:proj:none-superseded-id", 0.9)]
+
+        with (
+            patch("agent.memory_retrieval.get_bm25_ranked", return_value=fused_results),
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.rrf_fuse", return_value=fused_results),
+            patch("agent.memory_retrieval._filter_by_project", return_value=fused_results),
+            patch("models.memory.Memory.query") as mock_query,
+        ):
+            mock_query.get.return_value = none_superseded_record
+            result = retrieve_memories("test query", "proj", limit=10)
+
+        # None superseded_by is falsy -> treated as active, should be included
+        result_ids = [r.memory_id for r in result]
+        assert "none-superseded-id" in result_ids
