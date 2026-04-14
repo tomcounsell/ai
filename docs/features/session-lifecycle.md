@@ -183,6 +183,8 @@ Any `AgentSession` method that saves companion fields (non-status fields) **must
 | Resume hydration | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
 | Priority reorder | `["priority", "updated_at"]` | `agent/agent_session_queue.py` |
 | Continuation project_config | `["project_config", "updated_at"]` | `agent/agent_session_queue.py` |
+| Tool call tracking | `["updated_at", "tool_call_count"]` | `.claude/hooks/post_tool_use.py` |
+| Idempotent reactivation | `["updated_at", "completed_at"]` | `.claude/hooks/user_prompt_submit.py` |
 
 **Rule**: When adding a new save site on `AgentSession` that modifies non-lifecycle fields, always use `save(update_fields=[...])` listing only the fields you modified plus `"updated_at"`. Never use a bare `save()` on a session object that might be stale.
 

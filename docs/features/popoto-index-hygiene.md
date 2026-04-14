@@ -68,6 +68,14 @@ Each model is processed independently -- one model failure does not abort the sw
 | `scripts/reflections.py` | `ReflectionRunner.step_popoto_index_cleanup` standalone safety net |
 | `config/reflections.yaml` | Reflection registry entry for `ReflectionScheduler` |
 
+## Inline Orphan Prevention (Defensive srem)
+
+`rebuild_indexes()` is a batch repair run — it catches orphans after the fact. A complementary inline mechanism in `finalize_session()` prevents a specific class of orphans at creation time:
+
+When stale-object full saves clobber a session's status in Redis (e.g., a session appearing in the `pending` index after being killed), the `finalize_session()` call that ends the session performs a **defensive `srem`** across ALL non-target status index sets immediately after the terminal save. This removes any stale entries left by prior writes.
+
+The defensive `srem` is non-fatal (wrapped in try/except) and depends on three Popoto internals that must be re-verified on Popoto upgrade: `DB_key`, `POPOTO_REDIS_DB.srem()`, and `get_special_use_field_db_key`. See `models/session_lifecycle.py` (`finalize_session`) for implementation detail. The broader fix (preventing stale-object saves in the first place) is documented in [Session Lifecycle](session-lifecycle.md#layer-1b-partial-saves-on-companion-field-methods-950).
+
 ## Verification
 
 After the cleanup reflection runs, `grep -rn "import redis" agent/` should return zero hits, and bridge logs should show no `"one or more redis keys points to missing objects"` warnings.
