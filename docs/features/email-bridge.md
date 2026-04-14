@@ -44,11 +44,25 @@ Each outbound SMTP send records the sent `Message-ID` in Redis so future replies
 
 `AgentSession` callbacks are keyed by `(project_key, transport)`. The worker resolves the correct `OutputHandler` by looking up `(project_key, "email")` instead of the Telegram default. This keeps email and Telegram sessions fully isolated with no cross-contamination of delivery channels.
 
+### Worker Registration
+
+At startup, `worker/__main__.py` registers `EmailOutputHandler` for each project that has **any** email routing configured — either `email.contacts` or `email.domains` (or both). The gate condition is:
+
+```python
+def _should_register_email_handler(project_cfg: dict) -> bool:
+    email_cfg = project_cfg.get("email", {}) or {}
+    return bool(email_cfg.get("contacts") or email_cfg.get("domains"))
+```
+
+This matches the inbound routing logic in `bridge/routing.py`, which builds both a contact address map (`EMAIL_TO_PROJECT`) and a domain map (`EMAIL_DOMAIN_TO_PROJECT`). A project must have `EmailOutputHandler` registered for either routing strategy to produce outbound SMTP replies — without it, the worker falls back to `FileOutputHandler` and silently discards the reply to a log file.
+
 ## Configuration
 
 ### projects.json
 
-Add an `email.contacts` block to any project entry:
+Two routing strategies are supported: contact-based (exact-match) and domain-based (wildcard). A project can use either or both.
+
+**Contact-based routing** — only senders explicitly listed in `email.contacts` are routed:
 
 ```json
 {
@@ -65,7 +79,40 @@ Add an `email.contacts` block to any project entry:
 }
 ```
 
-Only senders listed in `contacts` are routed to sessions. Unrecognized senders are ignored.
+**Domain-based routing** — all senders from a domain are routed to the project:
+
+```json
+{
+  "projects": {
+    "psyoptimal": {
+      "email": {
+        "domains": ["psyoptimal.com"]
+      }
+    }
+  }
+}
+```
+
+Any sender `@psyoptimal.com` is matched to the `psyoptimal` project, regardless of the specific address.
+
+**Combined** — a project can have both; exact-match (`contacts`) takes priority over domain fallback:
+
+```json
+{
+  "projects": {
+    "my-project": {
+      "email": {
+        "contacts": {
+          "alice@example.com": {"name": "Alice", "persona": "teammate"}
+        },
+        "domains": ["example.com"]
+      }
+    }
+  }
+}
+```
+
+Unrecognized senders (no contact match and no domain match) are ignored.
 
 ### Environment Variables
 
@@ -140,7 +187,7 @@ Or via the service script:
 
 **stdlib only.** `imaplib`, `smtplib`, and `email` from the Python standard library — no third-party dependencies. This keeps the email bridge installable anywhere Python runs.
 
-**Single inbox, sender-based routing.** All projects share one inbox (`valor@yuda.me`). The sender address determines which project the message is routed to. This avoids per-project mailboxes while keeping routing deterministic.
+**Single inbox, sender-based routing.** All projects share one inbox (`valor@yuda.me`). The sender address determines which project the message is routed to — either by exact contact match or by domain wildcard. This avoids per-project mailboxes while keeping routing deterministic.
 
 **`telegram_message_id=0` sentinel.** The session queue requires a message ID for deduplication. Email sessions use `0` as a sentinel value since they have no Telegram message ID. This avoids a nullable field or a parallel code path in the queue.
 
