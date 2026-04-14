@@ -70,27 +70,43 @@ fi
 # Output goes directly to Telegram - keep it clean for PM-style summary
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron
 
-# ── Reload reflections plist if present ──────────────────────────────
-REFLECTIONS_PLIST="$PROJECT_DIR/com.valor.reflections.plist"
+# ── Unload legacy reflections launchd service (issue #748) ───────────
+# The com.valor.reflections launchd service has been deleted (scripts/reflections.py
+# monolith removed). Unload and remove the plist if still installed on this machine.
+# Must source .env to read SERVICE_LABEL_PREFIX (not hardcoded to avoid prefix mismatch).
 REFLECTIONS_LABEL="${SERVICE_LABEL_PREFIX}.reflections"
 REFLECTIONS_DST="$HOME/Library/LaunchAgents/${REFLECTIONS_LABEL}.plist"
+if [ -f "$REFLECTIONS_DST" ]; then
+    if launchctl list | grep -q "$REFLECTIONS_LABEL"; then
+        launchctl bootout "gui/$(id -u)/$REFLECTIONS_LABEL" 2>/dev/null || true
+    fi
+    rm -f "$REFLECTIONS_DST"
+    echo "Removed legacy reflections launchd service: $REFLECTIONS_LABEL"
+fi
+
+# ── Sync config/reflections.yaml symlink ─────────────────────────────
+# Vault file at ~/Desktop/Valor/reflections.yaml takes precedence over in-repo.
+# Idempotent: skips gracefully if vault file doesn't exist (fresh machine).
+"$PYTHON" -c "
+from scripts.update.env_sync import sync_reflections_yaml
+from pathlib import Path
+result = sync_reflections_yaml(Path('$PROJECT_DIR'))
+if result.skipped:
+    print('reflections.yaml: vault not found, using in-repo fallback')
+elif result.created:
+    print('reflections.yaml: symlink created → ~/Desktop/Valor/reflections.yaml')
+elif result.symlink_ok:
+    print('reflections.yaml: symlink OK')
+elif result.error:
+    print(f'reflections.yaml: WARNING - {result.error}')
+" 2>/dev/null || true
+
 # Hard-pin legacy daydream cleanup to com.valor — that label only ever
 # existed under the original prefix.
 OLD_DAYDREAM_DST="$HOME/Library/LaunchAgents/com.valor.daydream.plist"
 if launchctl list | grep -q "com.valor.daydream"; then
     launchctl bootout "gui/$(id -u)/com.valor.daydream" 2>/dev/null || true
     rm -f "$OLD_DAYDREAM_DST"
-fi
-if [ -f "$REFLECTIONS_PLIST" ]; then
-    if launchctl list | grep -q "$REFLECTIONS_LABEL"; then
-        if ! launchctl bootout "gui/$(id -u)/$REFLECTIONS_LABEL"; then
-            echo "ERROR: Failed to bootout $REFLECTIONS_LABEL"
-        fi
-    fi
-    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$REFLECTIONS_LABEL|g" "$REFLECTIONS_PLIST" > "$REFLECTIONS_DST"
-    if ! launchctl bootstrap "gui/$(id -u)" "$REFLECTIONS_DST"; then
-        echo "ERROR: Failed to bootstrap $REFLECTIONS_LABEL"
-    fi
 fi
 
 # ── Reload worker plist if present ───────────────────────────────────

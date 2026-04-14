@@ -113,3 +113,64 @@ def sync_projects_json(project_dir: Path) -> ProjectsSyncResult:
         logger.warning("Failed to create config/projects.json symlink: %s", exc)
 
     return result
+
+
+VAULT_REFLECTIONS_PATH = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
+
+
+@dataclass
+class ReflectionsSyncResult:
+    """Result of config/reflections.yaml symlink verification."""
+
+    symlink_ok: bool = False
+    created: bool = False
+    skipped: bool = False
+    error: str | None = None
+
+
+def sync_reflections_yaml(project_dir: Path) -> ReflectionsSyncResult:
+    """Verify config/reflections.yaml is a symlink to the vault. Create it if missing.
+
+    If the vault file doesn't exist, the in-repo fallback is left intact and
+    the result is marked skipped (not an error). This allows fresh machines
+    that haven't synced the vault to continue using the in-repo config.
+
+    Returns ReflectionsSyncResult with:
+      - symlink_ok=True  if the symlink exists and points to the vault
+      - created=True     if the symlink was just created (was missing)
+      - skipped=True     if vault file doesn't exist (in-repo fallback active)
+      - error            set if symlink could not be created
+    """
+    result = ReflectionsSyncResult()
+    config_reflections = project_dir / "config" / "reflections.yaml"
+
+    if not VAULT_REFLECTIONS_PATH.exists():
+        # Vault file not present — use in-repo fallback. Not an error.
+        result.skipped = True
+        logger.info(
+            "Vault reflections.yaml not found at %s — using in-repo fallback",
+            VAULT_REFLECTIONS_PATH,
+        )
+        return result
+
+    # Already a correct symlink — nothing to do.
+    if (
+        config_reflections.is_symlink()
+        and config_reflections.resolve() == VAULT_REFLECTIONS_PATH.resolve()
+    ):
+        result.symlink_ok = True
+        return result
+
+    # Replace with symlink
+    try:
+        if config_reflections.exists() or config_reflections.is_symlink():
+            config_reflections.unlink()
+        config_reflections.symlink_to(VAULT_REFLECTIONS_PATH)
+        result.symlink_ok = True
+        result.created = True
+        logger.info("Created config/reflections.yaml symlink → %s", VAULT_REFLECTIONS_PATH)
+    except OSError as exc:
+        result.error = str(exc)
+        logger.warning("Failed to create config/reflections.yaml symlink: %s", exc)
+
+    return result

@@ -1,16 +1,15 @@
-"""Backward-compatible re-export shim for split reflection models.
+"""Backward-compatible re-export shim for reflection models.
 
-Models have been moved to individual files:
-- ReflectionRun -> models/reflection_run.py
+Models are in individual files:
 - ReflectionIgnore -> models/reflection_ignore.py
 - PRReviewAudit -> models/pr_review_audit.py
 
-This file re-exports all three so existing `from models.reflections import X`
-imports continue to work without modification.
+ReflectionRun has been removed (issue #748). The docs_auditor.py
+singleton pattern was migrated to a plain Redis key ('docs_auditor:last_audit_date').
+All other ReflectionRun usage was in the deleted scripts/reflections.py monolith.
 """
 
 from models.pr_review_audit import PRReviewAudit
 from models.reflection_ignore import ReflectionIgnore
-from models.reflection_run import ReflectionRun
 
-__all__ = ["ReflectionRun", "ReflectionIgnore", "PRReviewAudit"]
+__all__ = ["ReflectionIgnore", "PRReviewAudit"]

@@ -137,54 +137,6 @@ def restart_service(project_dir: Path) -> bool:
         return False
 
 
-def install_reflections(project_dir: Path) -> bool:
-    """Install/reload reflections plist. Returns True if successful."""
-    plist_src = project_dir / "com.valor.reflections.plist"
-    label = f"{SERVICE_PREFIX}.reflections"
-    plist_dst = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
-    # Legacy daydream label hard-pinned to com.valor — that name only ever
-    # existed under the original prefix.
-    old_label = "com.valor.daydream"
-    old_plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.daydream.plist"
-
-    if not plist_src.exists():
-        return False
-
-    try:
-        uid = os.getuid()
-        result = run_cmd(["launchctl", "list"])
-
-        # Unload old daydream service if present (migration)
-        if old_label in result.stdout:
-            run_cmd(["launchctl", "bootout", f"gui/{uid}/{old_label}"])
-            old_plist_dst.unlink(missing_ok=True)
-
-        # Unload current if loaded
-        if label in result.stdout:
-            run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
-
-        # Render template (substituting __SERVICE_LABEL__ etc.) and bootstrap
-        plist_dst.parent.mkdir(parents=True, exist_ok=True)
-        rendered = plist_src.read_text()
-        rendered = rendered.replace("__PROJECT_DIR__", str(project_dir))
-        rendered = rendered.replace("__HOME_DIR__", str(Path.home()))
-        rendered = rendered.replace("__SERVICE_LABEL__", label)
-        plist_dst.write_text(rendered)
-        run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
-        return True
-    except Exception:
-        return False
-
-
-def is_reflections_installed() -> bool:
-    """Check if reflections scheduler is installed."""
-    try:
-        result = run_cmd(["launchctl", "list"])
-        return f"{SERVICE_PREFIX}.reflections" in result.stdout
-    except Exception:
-        return False
-
-
 def get_worker_pid() -> int | None:
     """Get PID of running worker process."""
     try:

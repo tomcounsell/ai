@@ -272,7 +272,6 @@ class TestProjectKeyPresence:
             ("models.chat", "Chat"),
             ("models.dead_letter", "DeadLetter"),
             ("models.link", "Link"),
-            ("models.reflections", "ReflectionRun"),
         ],
     )
     def test_project_key_field_registered(self, model_path, model_name):
@@ -293,7 +292,6 @@ class TestProjectKeyPresence:
             ("models.bridge_event", "BridgeEvent"),
             ("models.dead_letter", "DeadLetter"),
             ("models.link", "Link"),
-            ("models.reflections", "ReflectionRun"),
         ],
     )
     def test_project_key_is_key_field(self, model_path, model_name):
