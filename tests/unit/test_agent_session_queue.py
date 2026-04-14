@@ -849,7 +849,9 @@ class TestHealthCheckNoProgressRecovery:
 
             result = await _pop_agent_session("valor", is_project_keyed=True)
 
-        assert result is not None, "PM-associated project-keyed worker must pop the recovered dev session"
+        assert result is not None, (
+            "PM-associated project-keyed worker must pop the recovered dev session"
+        )
         assert result.agent_session_id == "ad2-regression-1"
         assert result.session_type == "dev"
 
