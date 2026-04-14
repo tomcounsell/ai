@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: valorengels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/911
 last_comment_id:
+revision_applied: true
 ---
 
 # Agent Reply Loop: Conversation Terminus Detection (RESPOND / REACT / SILENT)
@@ -55,7 +56,7 @@ No prior issues or PRs attempted to fix the reply-loop / terminus detection prob
 1. **Entry point**: Telegram message arrives — another agent's reply to a Valor message
 2. **`handler()` in `telegram_bridge.py`**: Extracts `sender`, `text`, `chat_title`, `is_dm`; calls `should_respond_async(...)`
 3. **`should_respond_async()` in `bridge/routing.py`**: Checks `message.reply_to_msg_id`; fetches replied message; if `replied_msg.out` → currently returns `(True, True)` unconditionally
-4. **NEW — `classify_conversation_terminus()`**: Called at the reply-to-Valor decision point with `text`, `thread_messages`, `sender_is_bot`. Returns `"RESPOND"`, `"REACT"`, or `"SILENT"`.
+4. **NEW — `classify_conversation_terminus()`**: Called at the reply-to-Valor decision point with `text`, `thread_messages`, `sender_is_bot` (no `chat_title` — unused). Returns `"RESPOND"`, `"REACT"`, or `"SILENT"`.
 5. **Dispatch**:
    - `RESPOND` → `return True, True` (existing behavior preserved)
    - `REACT` → caller sets emoji reaction via `set_reaction`; `return False, True`
@@ -80,13 +81,13 @@ No prerequisites — no new deps, no config changes required. Ollama and Haiku f
 
 ### Key Elements
 
-- **`classify_conversation_terminus()`**: New async function in `bridge/routing.py`. Takes `text`, `thread_messages` (recent turns), `sender_is_bot`, optional `chat_title`. Returns `"RESPOND"`, `"REACT"`, or `"SILENT"`.
+- **`classify_conversation_terminus()`**: New async function in `bridge/routing.py`. Takes `text`, `thread_messages` (recent turns), `sender_is_bot`. Returns `"RESPOND"`, `"REACT"`, or `"SILENT"`.
 - **Wire-up in `should_respond_async()`**: At the reply-to-Valor detection point (lines 865–870), call `classify_conversation_terminus` before returning `(True, True)`. If terminus detected, return `(False, True)` optionally with a reaction.
-- **Reaction dispatch**: When terminus is `REACT`, `should_respond_async` returns `(False, True)` and the bridge handler calls `set_reaction` (imported from `bridge/response.py`) with a contextual emoji.
+- **Reaction dispatch**: When terminus is `REACT`, `should_respond_async` calls `set_reaction` via a **deferred local import** inside `should_respond_async` (not a top-level import) to avoid a circular dependency with `bridge/response.py`, which already defers `from bridge.routing import DEFAULT_MENTIONS` at its line 331.
 
 ### Flow
 
-Incoming reply to Valor → `should_respond_async` detects reply-to-Valor → calls `classify_conversation_terminus` → `RESPOND`: continue as now / `REACT`: set emoji + return silent / `SILENT`: return silent + preserve `is_reply_to_valor` flag
+Incoming reply to Valor → `should_respond_async` detects reply-to-Valor → calls `classify_conversation_terminus` → `RESPOND`: continue as now / `REACT` (human sender only): set emoji + return silent / `SILENT`: return silent + preserve `is_reply_to_valor` flag. Bot senders always collapse to SILENT when terminus is non-RESPOND.
 
 ### Technical Approach
 
@@ -97,43 +98,53 @@ async def classify_conversation_terminus(
     text: str,
     thread_messages: list[str],  # recent turns, oldest first
     sender_is_bot: bool = False,
-    chat_title: str | None = None,
 ) -> str:  # "RESPOND" | "REACT" | "SILENT"
 ```
 
+The `chat_title` parameter is removed — it was unused and added no signal to terminus detection.
+
 **Signifier priority (for LLM prompt context):**
 
-1. Sender is a bot + no question present → SILENT (strongest signal)
-2. Thread depth ≥ 3 with no human message + no question → REACT
-3. Short/acknowledgment message (≤ 10 words or in `_ACKNOWLEDGMENT_TOKENS`) → SILENT
+Fast-paths (checked after `sender_is_bot` guard, in this order):
+1. Sender is a bot + text contains no question → SILENT (strongest signal; checked first because bot sources are the primary loop scenario)
+2. Short/acknowledgment message (≤ 10 words or text in `_ACKNOWLEDGMENT_TOKENS`) — applied **only after** `sender_is_bot` is checked, to avoid silencing human short acknowledgments before knowing the sender → SILENT
+3. Text contains a standalone `?` (not preceded by `=` or `&`, i.e., not a URL query parameter) → RESPOND (fast exit for questions before LLM call)
+
+LLM-evaluated (when no fast-path fires):
 4. Completion language without follow-up ("that makes sense", "agreed", "fair enough") → REACT
 5. Semantic redundancy (restates content already in last 2 turns) → REACT
 
+**Ordering rationale:** Critiques found that the original draft fired `_ACKNOWLEDGMENT_TOKENS` *before* `sender_is_bot` check, which could silence human "yes/no" replies. The revised order: check sender first, then acknowledgment tokens. The `?` fast-path is narrowed to avoid false-negatives on URL-containing messages (e.g., `https://example.com?q=1` would not trigger RESPOND).
+
+**Collapse REACT → SILENT for bot senders:** The REACT path was originally added to set an acknowledgment emoji when a human-initiated thread winds down naturally. For bot senders, REACT adds emoji spam with minimal value since the bot loop is the primary concern and the bot won't see the reaction. **Revised behavior:** When `sender_is_bot=True` and terminus is non-RESPOND, always return `SILENT`. REACT is reserved for human-sender threads only. This eliminates the import complexity concern — `set_reaction` is called only when `sender_is_bot=False` and terminus is `REACT`.
+
 **LLM approach:** Ollama-first, Haiku fallback — matching the existing `classify_needs_response` pattern. The signifiers above become heuristic context injected into the prompt. Conservative fallback: if both fail, return `"RESPOND"` to avoid false silences on genuine questions.
 
-**Thread context retrieval:** Rather than adding a Telegram API call per message, use messages already available in the event context. The bridge handler has access to `message.reply_to_msg_id`; `client.get_messages()` is already called at the reply-to-Valor check. Fetch up to 3 recent thread messages in the same `get_messages` call (or pass the already-fetched replied message as the one-message thread). This limits API overhead to what is already being done.
+**Thread context retrieval:** Use the already-fetched `replied_msg` as one-message thread context. No additional API calls. This is intentional (per No-Gos).
 
 **Wire-up point (replacing current lines 865–870):**
 
 ```python
 if replied_msg and replied_msg.out:
+    sender_is_bot = getattr(sender, "bot", False)
     terminus = await classify_conversation_terminus(
         text=text,
         thread_messages=[replied_msg.message or ""] if replied_msg else [],
-        sender_is_bot=getattr(sender, "bot", False),
-        chat_title=chat_title,
+        sender_is_bot=sender_is_bot,
     )
     if terminus == "RESPOND":
-        logger.debug("Reply to Valor detected - continuing session")
+        logger.info("Reply to Valor detected - continuing session")
         return True, True
-    # REACT or SILENT: preserve is_reply_to_valor flag but don't respond
-    logger.debug(f"Reply to Valor: terminus={terminus}, not responding")
-    return False, True, terminus  # extend tuple only if caller needs reaction hint
+    if terminus == "REACT" and not sender_is_bot:
+        from bridge.response import set_reaction  # deferred to avoid circular import
+        await set_reaction(client, event.chat_id, message.id, "👍")
+    logger.info(f"Reply to Valor: terminus={terminus}, not responding")
+    return False, True
 ```
 
-Note: The `(False, True, terminus)` 3-tuple would require updating the call site in `telegram_bridge.py`. Alternative: return `(False, True)` and handle reaction entirely within `should_respond_async` by accepting `client`, `event` params, or by returning a reaction hint via a sentinel. Simplest approach: handle reaction internally in `should_respond_async` (pass `client` and `event.message.id` so it can call `set_reaction` directly when terminus is `REACT`) — avoids changing the function signature for callers.
+**Return signature unchanged:** `should_respond_async` still returns `(bool, bool)`. All terminus logic is self-contained — no caller changes needed. The deferred `from bridge.response import set_reaction` inside `should_respond_async` avoids the circular import: `bridge/response.py` already defers `from bridge.routing import DEFAULT_MENTIONS` at its line 331, so making routing's import of response also deferred keeps both directions lazy and cycle-free.
 
-**Simplest safe approach**: keep `should_respond_async` returning `(bool, bool)` — no signature change. When terminus is REACT, call `set_reaction(client, event.chat_id, message.id, "👍")` from within `should_respond_async` before returning `(False, True)`. This isolates all terminus logic inside the routing layer with zero impact on callers.
+**Log level:** Terminus decisions log at `INFO` (not `DEBUG`) so they are visible in production log tails without enabling debug verbosity.
 
 ## Failure Path Test Strategy
 
@@ -162,9 +173,12 @@ New tests to add (in `tests/unit/test_routing.py`):
 
 - `test_classify_terminus_bot_no_question_returns_silent` — bot sender + declarative message → SILENT
 - `test_classify_terminus_human_question_returns_respond` — human sender + "?" → RESPOND
-- `test_classify_terminus_acknowledgment_token_returns_silent` — "got it" → SILENT
+- `test_classify_terminus_url_with_query_param_not_respond` — `"https://example.com?q=1"` with no standalone `?` — bot sender → SILENT (not RESPOND; `?` inside URL query string must not trigger fast-path)
+- `test_classify_terminus_acknowledgment_token_returns_silent` — "got it" from human → SILENT
+- `test_classify_terminus_acknowledgment_fires_after_bot_check` — "yes" from bot → SILENT (same result, but sender_is_bot fast-path fires first)
 - `test_classify_terminus_ollama_failure_defaults_to_respond` — mock Ollama failure → RESPOND
 - `test_classify_terminus_empty_text_returns_respond` — empty text → RESPOND
+- `test_classify_terminus_bot_react_collapses_to_silent` — when LLM returns REACT but sender_is_bot=True → SILENT
 
 ## Rabbit Holes
 
@@ -179,9 +193,9 @@ New tests to add (in `tests/unit/test_routing.py`):
 **Impact:** Valor stays silent when another agent asks a real question via reply chain.
 **Mitigation:** Conservative fallback (`"RESPOND"` on classifier error or uncertainty). Prompt includes explicit "if message contains a question, return RESPOND" instruction. `sender_is_bot=True` only applies stricter rules, not absolute silence.
 
-### Risk 2: Reaction call from within routing layer
-**Impact:** `should_respond_async` in `bridge/routing.py` calling `set_reaction` (from `bridge/response.py`) introduces a circular or layered import.
-**Mitigation:** Verify import order at build time. `bridge/response.py` does not import from `bridge/routing.py`, so the dependency is one-directional and safe.
+### Risk 2: Circular import between routing and response modules
+**Impact:** `bridge/response.py` already defers `from bridge.routing import DEFAULT_MENTIONS` at line 331. Adding a top-level `from bridge.response import set_reaction` in `routing.py` would create a circular import at module load time.
+**Mitigation:** Use a deferred local import inside `should_respond_async` — `from bridge.response import set_reaction` is placed inline, only executed when terminus is REACT and sender is human. Both directions stay lazy; Python's import machinery handles this safely. This is the same pattern `bridge/response.py` already uses for `bridge.routing`.
 
 ## Race Conditions
 
@@ -209,13 +223,17 @@ No agent integration required — this is a bridge-internal routing decision. Th
 
 ## Success Criteria
 
-- [ ] `classify_conversation_terminus` function exists in `bridge/routing.py`
+- [ ] `classify_conversation_terminus(text, thread_messages, sender_is_bot) -> str` exists in `bridge/routing.py` — no `chat_title` parameter
 - [ ] Reply-to-Valor path in `should_respond_async` calls `classify_conversation_terminus` before deciding to respond
-- [ ] When `sender_is_bot=True` AND message has no question AND thread depth ≥ 1, default is SILENT or REACT (not RESPOND)
-- [ ] When terminus is REACT, a reaction emoji is set via `set_reaction` from `bridge/response.py`
+- [ ] When `sender_is_bot=True` AND message has no question, result is SILENT (not RESPOND, not REACT)
+- [ ] `_ACKNOWLEDGMENT_TOKENS` fast-path fires AFTER `sender_is_bot` check — never before
+- [ ] Standalone `?` in text triggers RESPOND fast-path; `?` inside URL query strings (preceded by `=` or `&`) does NOT
+- [ ] When terminus is REACT and sender is human (not bot), a reaction emoji is set via `set_reaction` using a deferred local import (not top-level)
+- [ ] No top-level `from bridge.response import` in `bridge/routing.py` — circular import prevented
+- [ ] Terminus decisions log at INFO level (not DEBUG)
 - [ ] Existing behavior for human reply chains is NOT degraded (genuine questions still get responses)
 - [ ] `classify_conversation_terminus` returns `"RESPOND"` on any classifier failure (conservative)
-- [ ] Unit tests pass: bot-sender + no-question → SILENT; human-sender + question → RESPOND; acknowledgment token → SILENT; classifier failure → RESPOND; empty text → RESPOND
+- [ ] Unit tests pass: bot-sender + no-question → SILENT; human-sender + question → RESPOND; acknowledgment token → SILENT; URL with query param → not RESPOND for bot sender; classifier failure → RESPOND; empty text → RESPOND; bot REACT collapses to SILENT
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -261,10 +279,11 @@ No agent integration required — this is a bridge-internal routing decision. Th
 - **Assigned To**: routing-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `classify_conversation_terminus(text, thread_messages, sender_is_bot, chat_title) -> str` to `bridge/routing.py` using Ollama-first, Haiku fallback pattern matching `classify_needs_response`
-- Fast-path: return `"SILENT"` if `text` matches `_ACKNOWLEDGMENT_TOKENS` or is empty; return `"RESPOND"` if `"?"` in text
+- Add `classify_conversation_terminus(text, thread_messages, sender_is_bot) -> str` to `bridge/routing.py` using Ollama-first, Haiku fallback pattern matching `classify_needs_response`. No `chat_title` parameter — unused.
+- Fast-path order (critical — see critique findings): (a) if `sender_is_bot` and no question → `"SILENT"`; (b) if `text.strip().lower() in _ACKNOWLEDGMENT_TOKENS` or len ≤ 1 word → `"SILENT"` (acknowledgment check runs AFTER sender check, never before); (c) if standalone `?` in text (regex: `(?<![=&])\?` to exclude URL query strings) → `"RESPOND"`
 - LLM prompt: inject signifiers (sender_is_bot, thread depth, question detection) as context; return `RESPOND`, `REACT`, or `SILENT`; fallback to `"RESPOND"` on any exception
-- Wire into `should_respond_async` at lines 865–870: call `classify_conversation_terminus` after confirming `replied_msg.out`; if result is not `"RESPOND"`, call `set_reaction` (imported from `bridge/response.py`) when `REACT`, then `return False, True`
+- REACT collapse: when `sender_is_bot=True`, map any `REACT` result to `SILENT` — no emoji spam for bot loops
+- Wire into `should_respond_async` at lines 865–870: call `classify_conversation_terminus` after confirming `replied_msg.out`; use deferred `from bridge.response import set_reaction` inside `should_respond_async` (NOT a top-level import) to avoid circular import with `bridge/response.py` which already defers `from bridge.routing import DEFAULT_MENTIONS` at line 331; log at `INFO` not `DEBUG`
 - Keep `should_respond_async` return signature as `(bool, bool)` — no caller changes needed
 
 ### 2. Write unit tests
@@ -286,7 +305,10 @@ No agent integration required — this is a bridge-internal routing decision. Th
 - Run `pytest tests/unit/test_routing.py -v` — all tests must pass
 - Run `python -m ruff check bridge/routing.py` and `python -m ruff format --check bridge/routing.py`
 - Confirm `should_respond_async` return signature unchanged (still `tuple[bool, bool]`)
-- Confirm `_ACKNOWLEDGMENT_TOKENS` fast-path is exercised in `classify_conversation_terminus`
+- Confirm `_ACKNOWLEDGMENT_TOKENS` fast-path fires AFTER `sender_is_bot` check (not before)
+- Confirm no top-level `from bridge.response import` in `routing.py` — deferred import only
+- Confirm terminus decisions log at `INFO` not `DEBUG`
+- Confirm `classify_conversation_terminus` signature has NO `chat_title` parameter
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -318,12 +340,21 @@ No agent integration required — this is a bridge-internal routing decision. Th
 | Terminus function exists | `grep -n "classify_conversation_terminus" bridge/routing.py` | output > 0 |
 | Wire-up in should_respond_async | `grep -A5 "replied_msg.out" bridge/routing.py \| grep "terminus"` | output > 0 |
 | Signature unchanged | `grep "async def should_respond_async" bridge/routing.py` | output contains "tuple\[bool, bool\]" |
+| No top-level circular import | `grep "^from bridge.response" bridge/routing.py` | no output |
+| chat_title param absent | `grep "chat_title" bridge/routing.py` | no output in terminus function |
+| INFO log level | `grep "logger.info.*terminus" bridge/routing.py` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist | `bridge/response.py:331` defers `from bridge.routing import DEFAULT_MENTIONS`; adding top-level `from bridge.response import set_reaction` in `routing.py` creates a circular import | Resolved | Use deferred local import inside `should_respond_async` — same pattern response.py already uses. No top-level import of response in routing. |
+| CONCERN | Skeptic | `_ACKNOWLEDGMENT_TOKENS` fast-path fired before `sender_is_bot` check, potentially silencing human "yes/no" replies | Resolved | Fast-path order revised: (1) sender_is_bot check, (2) acknowledgment tokens, (3) standalone `?` fast-path. |
+| CONCERN | Adversary | `"?" in text` fast-path false-negatives on URL query strings (e.g., `?q=1`) | Resolved | Narrowed to regex `(?<![=&])\?` — standalone `?` only, not query-param `?` |
+| CONCERN | Operator | Signifier 2 (thread depth ≥ 3) is unreachable — plan limits to 1-message context | Resolved | Signifier 2 removed from signifier list. Thread depth not evaluated with single-message context. |
+| CONCERN | Simplifier | REACT path adds import complexity for marginal value when sender is a bot | Resolved | REACT is now human-only. When `sender_is_bot=True`, any REACT result collapses to SILENT. Import only runs for human-sender REACT cases. |
+| NIT | Operator | Log level DEBUG for terminus decisions makes them invisible in production | Resolved | Changed to INFO in wire-up pseudocode and Step 3 validation checklist. |
+| NIT | Simplifier | `chat_title` parameter in `classify_conversation_terminus` was unused | Resolved | Parameter removed from function signature throughout plan. |
 
 ---
 
