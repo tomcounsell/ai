@@ -6,7 +6,7 @@ Analyzes all .md files in docs/ (excluding docs/plans/) against the actual
 codebase. Uses the Anthropic API (Haiku for initial analysis, Sonnet for
 uncertain cases) to produce KEEP / UPDATE / DELETE verdicts, then applies them.
 
-Integrated into reflections.py as a weekly maintenance step.
+Also callable via `reflections.auditing.run_documentation_audit` as a scheduled reflection.
 
 Usage:
     python scripts/docs_auditor.py [--dry-run]
