@@ -12,8 +12,6 @@ import asyncio
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 def run_async(coro):
     """Run a coroutine synchronously."""
@@ -53,8 +51,10 @@ class TestMemoryDecayPrune:
         mock_memory.created_at = MagicMock()
         mock_memory.created_at.timestamp.return_value = old_time
 
-        with patch("models.memory.Memory") as mock_model, \
-             patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "false"}):
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "false"}),
+        ):
             mock_model.query.all.return_value = [mock_memory]
             result = run_async(run_memory_decay_prune())
 
@@ -76,8 +76,10 @@ class TestMemoryDecayPrune:
         mock_memory.created_at = MagicMock()
         mock_memory.created_at.timestamp.return_value = old_time
 
-        with patch("models.memory.Memory") as mock_model, \
-             patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}):
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}),
+        ):
             mock_model.query.all.return_value = [mock_memory]
             result = run_async(run_memory_decay_prune())
 
@@ -87,7 +89,7 @@ class TestMemoryDecayPrune:
 
     def test_cap_at_50_deletions(self):
         """Caps at MAX_PRUNE_PER_RUN (50) deletions even if more candidates exist."""
-        from reflections.memory_management import run_memory_decay_prune, MAX_PRUNE_PER_RUN
+        from reflections.memory_management import MAX_PRUNE_PER_RUN, run_memory_decay_prune
 
         old_time = time.time() - (40 * 86400)
 
@@ -103,8 +105,10 @@ class TestMemoryDecayPrune:
 
         candidates = [make_candidate(i) for i in range(MAX_PRUNE_PER_RUN + 20)]
 
-        with patch("models.memory.Memory") as mock_model, \
-             patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}):
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}),
+        ):
             mock_model.query.all.return_value = candidates
             result = run_async(run_memory_decay_prune())
 
@@ -136,8 +140,10 @@ class TestMemoryDecayPrune:
         important_memory.created_at = MagicMock()
         important_memory.created_at.timestamp.return_value = old_time
 
-        with patch("models.memory.Memory") as mock_model, \
-             patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}):
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}),
+        ):
             mock_model.query.all.return_value = [important_memory]
             result = run_async(run_memory_decay_prune())
 
@@ -157,8 +163,10 @@ class TestMemoryDecayPrune:
         accessed_memory.created_at = MagicMock()
         accessed_memory.created_at.timestamp.return_value = old_time
 
-        with patch("models.memory.Memory") as mock_model, \
-             patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}):
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}),
+        ):
             mock_model.query.all.return_value = [accessed_memory]
             result = run_async(run_memory_decay_prune())
 
@@ -186,8 +194,10 @@ class TestMemoryDecayPrune:
         c1 = make_candidate(1, fail=True)
         c2 = make_candidate(2)
 
-        with patch("models.memory.Memory") as mock_model, \
-             patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}):
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch.dict("os.environ", {"MEMORY_DECAY_PRUNE_APPLY": "true"}),
+        ):
             mock_model.query.all.return_value = [c1, c2]
             result = run_async(run_memory_decay_prune())
 
@@ -330,8 +340,11 @@ class TestKnowledgeReindex:
         vault_path.mkdir(parents=True)
 
         import sys
-        with patch("pathlib.Path.home", return_value=tmp_path), \
-             patch.dict(sys.modules, {"tools.knowledge.indexer": None}):
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch.dict(sys.modules, {"tools.knowledge.indexer": None}),
+        ):
             result = run_async(run_knowledge_reindex())
 
         assert_valid_result(result)
@@ -348,8 +361,11 @@ class TestKnowledgeReindex:
         mock_indexer.reindex_vault.return_value = {"indexed": 10, "skipped": 5, "errors": []}
 
         import sys
-        with patch("pathlib.Path.home", return_value=tmp_path), \
-             patch.dict(sys.modules, {"tools.knowledge.indexer": mock_indexer}):
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch.dict(sys.modules, {"tools.knowledge.indexer": mock_indexer}),
+        ):
             result = run_async(run_knowledge_reindex())
 
         assert_valid_result(result)

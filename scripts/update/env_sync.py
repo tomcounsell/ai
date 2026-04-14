@@ -161,16 +161,6 @@ def sync_reflections_yaml(project_dir: Path) -> ReflectionsSyncResult:
         result.symlink_ok = True
         return result
 
-    # Copy in-repo YAML to vault if vault is being created fresh
-    if not VAULT_REFLECTIONS_PATH.exists():
-        try:
-            import shutil
-
-            shutil.copy2(str(config_reflections), str(VAULT_REFLECTIONS_PATH))
-            logger.info("Copied config/reflections.yaml to vault: %s", VAULT_REFLECTIONS_PATH)
-        except OSError as exc:
-            logger.warning("Failed to copy reflections.yaml to vault: %s", exc)
-
     # Replace with symlink
     try:
         if config_reflections.exists() or config_reflections.is_symlink():
