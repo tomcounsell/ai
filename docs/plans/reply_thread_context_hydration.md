@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/949
 last_comment_id:
+revision_applied: true
 ---
 
 # Reply-Thread Context Hydration
@@ -416,7 +417,116 @@ This repo does not publish external docs; skip.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+### Verdict: READY TO BUILD (with concerns)
+
+The plan passed critique with 0 blockers and multiple concerns. The Implementation Notes below translate each concern into concrete direction the builder must apply.
+
+## Implementation Notes (from critique — MUST apply during build)
+
+These notes are authoritative. The builder MUST follow them; deviation requires explicit rationale in the PR description.
+
+### IN-1: Idempotency uses canonical header constant + explicit parameter (replaces string-magic)
+
+- In `agent/agent_session_queue.py` (enrichment module, around line 3513-3565 depending on current main — re-verify at build time), introduce a module-level constant `REPLY_THREAD_CONTEXT_HEADER = "REPLY THREAD CONTEXT"`.
+- Also export it from `bridge/context.py` (single source of truth — import it in the queue module).
+- `enrich_message` MUST check `if REPLY_THREAD_CONTEXT_HEADER in message_text: return` BEFORE fetching the chain. Exact substring match, not regex. This replaces the "string check" hand-wave from Risk 1.
+- Additionally, add an explicit `reply_chain_hydrated: bool = False` parameter to the enqueue path (or set a flag on the `AgentSession` record) so we are NOT relying on substring match alone. The belt-and-suspenders: flag is primary, header check is defensive.
+- **Rationale:** Critique flagged the substring-only approach as fragile. A canonical constant plus explicit flag is both reviewable and resilient.
+
+### IN-2: Drop Change B transcript injection for this PR
+
+- Remove transcript-injection work (`logs/sessions/{session_id}/*_turn_*.json` glob) from the build scope. The actual log layout uses `transcript.jsonl` and the glob pattern proposed in the plan is wrong.
+- Change B in this PR is **reply-chain + context_summary** only (still a richer-than-current carry). Transcript injection is deferred to a follow-up issue.
+- Update `Step by Step Tasks` task 1 to drop the transcript bullet. Keep `context_summary` + reply-chain hydration only.
+- **Rationale:** Critique flagged wrong glob pattern and layering-boundary concerns. Defer rather than ship half-correct.
+
+### IN-3: Lock down `references_prior_context` heuristic list
+
+- Initial patterns (narrow, high-precision):
+  - Deictic + status: `r"\b(the|that)\s+(bug|issue|ticket|PR|pull request)\b"`, `r"\bstill\s+(broken|failing|crashing)\b"`, `r"\bwe\s+(fixed|shipped|merged|resolved)\b"`, `r"\blast\s+time\b"`, `r"\bas\s+I\s+(mentioned|said)\b"`, `r"\bdid\s+we\s+"`, `r"\bwhat\s+about\s+(that|the)\b"`.
+  - Combined with existing `STATUS_QUESTION_PATTERNS`.
+- Composition rule: match if ANY pattern hits (OR). Keep max ~10 patterns; resist expansion without empirical false-negative data from logs.
+- Input contract: `references_prior_context(text: str) -> bool`.
+  - `None` input: return `False` (explicit guard at the top of the function).
+  - Empty string / whitespace-only: return `False`.
+  - Non-string: return `False` (do not raise).
+- Covered by explicit unit tests in `tests/unit/test_context_helpers.py`.
+
+### IN-4: Early `is_message_processed` short-circuit
+
+- In the bridge handler, move the `is_message_processed(chat_id, msg_id)` check to run **before** `fetch_reply_chain` on the resume-completed branch.
+- Rationale: reply-chain fetch is an API call. Running it for a duplicate message wastes calls and widens Race 2's window.
+- Verify during build that no dedup guarantees are violated (prior dedup happens at line 1340-1342; earlier short-circuit is purely additive tightening).
+
+### IN-5: Env-var kill-switch + structured audit log for implicit-context directive
+
+- Honor `REPLY_CONTEXT_DIRECTIVE_DISABLED` env var. When truthy, skip directive injection entirely (regardless of heuristic match). This gives us a 1-line rollback.
+- When the directive IS injected, emit a structured log entry:
+  ```python
+  logger.info(
+      "implicit_context_directive_injected",
+      extra={
+          "session_id": session_id,
+          "chat_id": chat_id,
+          "matched_patterns": matched_patterns_list,
+          "text_preview": clean_text[:80],
+      },
+  )
+  ```
+- Use the structured `extra=` form so log-analysis tooling can aggregate false-positive rates.
+
+### IN-6: Prefer deferred enrichment with explicit `reply_to_msg_id` parameter
+
+- Instead of calling `fetch_reply_chain` synchronously from the handler hot path, the preferred pattern is:
+  1. Handler extracts `message.reply_to_msg_id` from the live Telegram event.
+  2. Handler passes it as an explicit `reply_to_msg_id: int | None` parameter to `enqueue_agent_session` (new param).
+  3. Worker's enrichment sees the explicit param (bypassing the `TelegramMessage` cache lookup) and runs `fetch_reply_chain` asynchronously before the agent turn starts.
+- This keeps the handler fast (no blocking API call) and still delivers the context to the agent BEFORE its first turn.
+- **Exception:** the resume-completed branch currently builds `augmented_text` synchronously at enqueue time. If that augmentation MUST include the chain text inline (rather than deferring), wrap the fetch in `asyncio.wait_for(..., timeout=3.0)` and fall back to summary-only on timeout. Log with tag `RESUME_REPLY_CHAIN_FAIL` on failure/timeout.
+- **Rationale:** Critique flagged the handler-side synchronous fetch as a latency risk. Deferred-with-explicit-param is both faster and cleaner. Sync-with-timeout is the fallback if deferred doesn't fit the resume path.
+
+### IN-7: No-double-hydration regression test is required
+
+- Add `tests/integration/test_steering.py::test_no_double_hydration_when_handler_prehydrates` as a first-class test (not optional).
+- The test MUST: simulate handler pre-hydrating `message_text` with the canonical header, then run the worker enrichment path, then assert `message_text.count(REPLY_THREAD_CONTEXT_HEADER) == 1`.
+- This is the regression guard for Risk 1 / Race 1.
+
+### IN-8: Correct file:line citations (rolling)
+
+- At build time, re-confirm exact line numbers for:
+  - Resume-completed branch: was cited as `bridge/telegram_bridge.py:1303-1340`, verify current range.
+  - `enrich_message` reply-chain call site: cite as `agent/agent_session_queue.py:3513-3565` (critique's corrected range) — re-verify against current main before build.
+  - `bridge/enrichment.py:156-179` — if reply-chain wiring lives here in current code, use this range (critique noted it here, issue body cited the queue module — both possible depending on refactors).
+- Any drift from these ranges in current main must be captured in a one-line note at the top of the build session's commit message.
+
+### IN-9: Test name corrections
+
+- `test_reply_to_completed_session_fallback_without_summary` does not exist as a standalone test in current main. Remove that UPDATE bullet from Test Impact and replace with an ADD bullet for the same name (create the test, don't update a non-existent one).
+- Re-verify all cited test names with `grep -rn '<test_name>' tests/` before writing the task list for the test engineer.
+
+### IN-10: Directive ordering vs subconscious memory auto-recall
+
+- The subconscious memory system (see `docs/features/subconscious-memory.md` and `.claude/hooks/hook_utils/memory_bridge.py`) already auto-recalls on `UserPromptSubmit`. Its `<thought>` injection runs before the agent's first tool call.
+- The implicit-context directive MUST be worded so it does NOT prescribe an unconditional `valor-telegram` call. Revised directive text:
+  ```
+  [CONTEXT DIRECTIVE] This message references context not in the current turn. If the auto-recalled memory below does not cover it, fetch additional context in this order: (1) valor-telegram read ..., (2) memory_search, (3) project knowledge base, (4) gh issue/gh pr. Skip this directive entirely if the prior context is obvious from the auto-recalled memory.
+  ```
+- This lets the agent early-exit when memory already covered the reference.
+
+### IN-11: Rollback procedure (previously claimed "High" without description)
+
+- **Rollback path:**
+  1. Set env `REPLY_CONTEXT_DIRECTIVE_DISABLED=1` to kill Change C without a deploy.
+  2. Revert the PR's changes to `_build_completed_resume_text` and handler resume branch to restore summary-only hydration.
+  3. `references_prior_context` and the header constant can stay — they are inert without the handler call sites.
+- All three changes are additive to existing behavior. A full revert restores pre-PR behavior bit-for-bit (no schema changes, no migrations).
+
+### IN-12: `references_prior_context(None)` locked to False
+
+- Explicit unit test: `assert references_prior_context(None) is False`.
+- Explicit unit test: `assert references_prior_context("") is False`.
+- Explicit unit test: `assert references_prior_context("   ") is False`.
+- Implementation: `if not text or not isinstance(text, str): return False` at the top of the function.
 
 ---
 
