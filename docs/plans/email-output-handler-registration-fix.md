@@ -188,9 +188,9 @@ New test class `TestDomainRoutedEmailReply` covering:
 
 ## Test Impact
 
-- [ ] `tests/unit/test_email_routing.py` — FIX + UPDATE: **9 of 15 tests in `TestBuildEmailToProjectMap` are currently failing on main** because `build_email_to_project_map()` now returns `tuple[dict, dict]` (addr_map, domain_map) but all tests treat the return as a single `dict`. Every call must be unpacked: `addr_map, domain_map = build_email_to_project_map(config)`. Assertions on contact tests use `addr_map`; new domain tests assert against `domain_map`. The `test_returns_empty_dict_for_empty_config` test becomes `assert addr_map == {} and domain_map == {}`. After fixing the 9 broken tests, add new domain-map tests for `build_email_to_project_map()` with `email.domains` config.
-- [ ] `tests/integration/test_email_bridge.py` — UPDATE: add `TestDomainRoutedEmailReply` class; existing tests unaffected
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add transport-keyed callback resolution tests; existing tests unaffected
+- [x] `tests/unit/test_email_routing.py` — FIX + UPDATE: **9 of 15 tests in `TestBuildEmailToProjectMap` are currently failing on main** because `build_email_to_project_map()` now returns `tuple[dict, dict]` (addr_map, domain_map) but all tests treat the return as a single `dict`. Every call must be unpacked: `addr_map, domain_map = build_email_to_project_map(config)`. Assertions on contact tests use `addr_map`; new domain tests assert against `domain_map`. The `test_returns_empty_dict_for_empty_config` test becomes `assert addr_map == {} and domain_map == {}`. After fixing the 9 broken tests, add new domain-map tests for `build_email_to_project_map()` with `email.domains` config.
+- [x] `tests/integration/test_email_bridge.py` — UPDATE: add `TestDomainRoutedEmailReply` class; existing tests unaffected
+- [x] `tests/unit/test_agent_session_queue.py` — UPDATE: add transport-keyed callback resolution tests; existing tests unaffected
 
 ## Rabbit Holes
 
@@ -234,24 +234,24 @@ The fix is entirely within the worker's initialization path.
 
 ## Documentation
 
-- [ ] Update `docs/features/email-bridge.md` — the "Configuration" section currently only documents `email.contacts` routing; add a parallel `email.domains` configuration example and explain that either field (or both) enables `EmailOutputHandler` registration and inbound routing
-- [ ] Update `docs/features/email-bridge.md` — add or expand a "Worker Registration" section that explicitly states the registration gate condition: handler is registered when `email.contacts` OR `email.domains` is non-empty, explaining why this matches the inbound routing logic in `bridge/routing.py`
-- [ ] Update `docs/features/README.md` — the existing entry for `email-bridge.md` mentions "sender-based project routing"; update to clarify it covers both contact-based and domain-based routing
+- [x] Update `docs/features/email-bridge.md` — the "Configuration" section currently only documents `email.contacts` routing; add a parallel `email.domains` configuration example and explain that either field (or both) enables `EmailOutputHandler` registration and inbound routing
+- [x] Update `docs/features/email-bridge.md` — add or expand a "Worker Registration" section that explicitly states the registration gate condition: handler is registered when `email.contacts` OR `email.domains` is non-empty, explaining why this matches the inbound routing logic in `bridge/routing.py`
+- [x] Update `docs/features/README.md` — the existing entry for `email-bridge.md` mentions "sender-based project routing"; update to clarify it covers both contact-based and domain-based routing
 
 ## Success Criteria
 
-- [ ] Worker registers `EmailOutputHandler` for projects with `email.domains` only
-- [ ] Worker registers `EmailOutputHandler` for projects with `email.contacts` only (no regression)
-- [ ] Worker registers `EmailOutputHandler` for projects with both
-- [ ] Worker does NOT register for projects with neither
-- [ ] SMTP reply has correct `In-Reply-To` and `References` headers for threading
-- [ ] "No bridge callbacks registered" log line is NOT emitted for email sessions
-- [ ] Unit tests: all four registration permutations covered
-- [ ] Domain routing unit tests added to `test_email_routing.py`
-- [ ] Integration test: domain-routed inbound → `_send_smtp` called with correct headers
-- [ ] Existing email tests still pass (no regressions)
-- [ ] Tests pass (`pytest tests/unit/test_worker_startup.py tests/unit/test_email_routing.py tests/integration/test_email_bridge.py -q`)
-- [ ] Lint clean (`python -m ruff check .`)
+- [x] Worker registers `EmailOutputHandler` for projects with `email.domains` only
+- [x] Worker registers `EmailOutputHandler` for projects with `email.contacts` only (no regression)
+- [x] Worker registers `EmailOutputHandler` for projects with both
+- [x] Worker does NOT register for projects with neither
+- [x] SMTP reply has correct `In-Reply-To` and `References` headers for threading
+- [x] "No bridge callbacks registered" log line is NOT emitted for email sessions
+- [x] Unit tests: all four registration permutations covered
+- [x] Domain routing unit tests added to `test_email_routing.py`
+- [x] Integration test: domain-routed inbound → `_send_smtp` called with correct headers
+- [x] Existing email tests still pass (no regressions)
+- [x] Tests pass (`pytest tests/unit/test_worker_startup.py tests/unit/test_email_routing.py tests/integration/test_email_bridge.py -q`)
+- [x] Lint clean (`python -m ruff check .`)
 
 ## Team Orchestration
 
