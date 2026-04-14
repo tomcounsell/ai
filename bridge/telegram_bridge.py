@@ -98,6 +98,10 @@ from bridge.context import (  # noqa: E402
     references_prior_context,
     resolve_root_session_id,
 )
+from bridge.dispatch import (  # noqa: E402
+    dispatch_telegram_session,
+    record_telegram_message_handled,
+)
 from bridge.media import (  # noqa: E402
     MEDIA_DIR,  # noqa: F401
     VISION_EXTENSIONS,  # noqa: F401
@@ -1166,7 +1170,6 @@ async def main():
         import re as _re
 
         from agent.agent_session_queue import (
-            enqueue_agent_session,
             maybe_send_revival_prompt,
             queue_revival_agent_session,
         )
@@ -1336,10 +1339,7 @@ async def main():
                         # tightens the window for Race 2 (concurrent rapid-fire
                         # replies resolving to the same completed session).
                         # Plan IN-4.
-                        from bridge.dedup import (
-                            is_duplicate_message,
-                            record_message_processed,
-                        )
+                        from bridge.dedup import is_duplicate_message
 
                         if await is_duplicate_message(event.chat_id, message.id):
                             logger.debug(
@@ -1422,7 +1422,7 @@ async def main():
                         _completed_extra_overrides: dict | None = None
                         if reply_chain_context:
                             _completed_extra_overrides = {"reply_chain_hydrated": True}
-                        await enqueue_agent_session(
+                        await dispatch_telegram_session(
                             project_key=project_key,
                             session_id=session_id,
                             working_dir=_completed_working_dir,
@@ -1442,8 +1442,6 @@ async def main():
                             f"{session_id} with prior context "
                             f"(reply_chain={'yes' if reply_chain_context else 'no'})"
                         )
-
-                        await record_message_processed(event.chat_id, message.id)
                         return
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback
@@ -1524,9 +1522,7 @@ async def main():
                             )
                             # Record as processed so bridge restart
                             # catch-up doesn't reprocess this message
-                            from bridge.dedup import record_message_processed
-
-                            await record_message_processed(event.chat_id, message.id)
+                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
                         else:
                             # AgentSession still not in Redis after retry — fall through
@@ -1634,9 +1630,7 @@ async def main():
                                 sender_name,
                             )
                             # Record as processed and return
-                            from bridge.dedup import record_message_processed
-
-                            await record_message_processed(event.chat_id, message.id)
+                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
                         else:
                             logger.info(
@@ -1666,9 +1660,7 @@ async def main():
                                 f"acknowledged session "
                                 f"{target_session.session_id} as complete"
                             )
-                            from bridge.dedup import record_message_processed
-
-                            await record_message_processed(event.chat_id, message.id)
+                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
                         else:
                             logger.info(
@@ -1845,7 +1837,9 @@ async def main():
 
         # Enqueue: session_type drives PM vs Dev session creation.
         # Pass full project config so the session carries it through the pipeline.
-        depth = await enqueue_agent_session(
+        # dispatch_telegram_session wraps enqueue_agent_session + dedup record so
+        # every live-handler enqueue site has dedup recorded atomically.
+        depth = await dispatch_telegram_session(
             project_key=project_key,
             session_id=session_id,
             working_dir=working_dir_str,
@@ -1865,11 +1859,6 @@ async def main():
         logger.info(
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
         )
-
-        # Record message as processed (dedup for catch_up replays)
-        from bridge.dedup import record_message_processed
-
-        await record_message_processed(event.chat_id, message.id)
 
     # Mutable ref for knowledge watcher (populated later, read by shutdown handler)
     _knowledge_watcher_ref: list = [None]
