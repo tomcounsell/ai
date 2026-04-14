@@ -155,25 +155,25 @@ No prerequisites — this work has no external dependencies. The hotfix `e422fc4
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `bridge/dispatch.py` must not have `except Exception: pass`. If it wraps `enqueue_agent_session` with any try/except, the handler must log at warning and re-raise (or return the same exception-shape that today's inline code produces — today's inline code does not catch, it just propagates).
-- [ ] `bridge/dedup.py::record_message_processed` already has `except Exception: logger.debug(...)`. No changes needed; existing `tests/unit/test_dedup.py::test_record_does_not_raise_on_error` covers this.
+- [x] `bridge/dispatch.py` must not have `except Exception: pass`. If it wraps `enqueue_agent_session` with any try/except, the handler must log at warning and re-raise (or return the same exception-shape that today's inline code produces — today's inline code does not catch, it just propagates).
+- [x] `bridge/dedup.py::record_message_processed` already has `except Exception: logger.debug(...)`. No changes needed; existing `tests/unit/test_dedup.py::test_record_does_not_raise_on_error` covers this.
 
 ### Empty/Invalid Input Handling
-- [ ] `dispatch_telegram_session` with `telegram_message_id=None` or `chat_id=None` — today `enqueue_agent_session` takes `telegram_message_id: int` and `chat_id: str`. The wrapper should type-hint the same way. No new validation needed because the live handler always supplies real values; defensive handling would be clutter.
-- [ ] Empty `message_text` — passed through to `enqueue_agent_session`, which handles it today. Not in scope.
+- [x] `dispatch_telegram_session` with `telegram_message_id=None` or `chat_id=None` — today `enqueue_agent_session` takes `telegram_message_id: int` and `chat_id: str`. The wrapper should type-hint the same way. No new validation needed because the live handler always supplies real values; defensive handling would be clutter.
+- [x] Empty `message_text` — passed through to `enqueue_agent_session`, which handles it today. Not in scope.
 
 ### Error State Rendering
-- [ ] Not applicable. The dispatch wrapper has no user-visible output; user-visible errors flow through the existing agent session execution path.
+- [x] Not applicable. The dispatch wrapper has no user-visible output; user-visible errors flow through the existing agent session execution path.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_duplicate_delivery.py::TestCatchupCodeStructure::test_dedup_record_after_enqueue` — KEEP. This test verifies `bridge/catchup.py`'s ordering, which is not changed by this plan. The reconciler and catchup continue to call the two functions explicitly in order.
-- [ ] `tests/unit/test_dedup.py` — KEEP. `bridge/dedup.py` surface area is unchanged.
-- [ ] `tests/unit/test_reconciler.py` — KEEP. Reconciler is not refactored here; it still calls `record_message_processed` directly.
-- [ ] `tests/integration/test_reconciler.py` — KEEP. Same reason.
-- [ ] `tests/integration/test_catchup_revival.py` — KEEP. Catchup is not refactored here.
-- [ ] `tests/e2e/test_session_continuity.py`, `tests/e2e/test_session_lifecycle.py`, `tests/e2e/test_message_pipeline.py` — KEEP. They import `record_message_processed` directly for test setup; the symbol still exists.
-- [ ] `tests/unit/test_bridge_dispatch_contract.py` — CREATE. New regression test asserting the live handler contains no direct `enqueue_agent_session(` or `record_message_processed(` calls.
+- [x] `tests/unit/test_duplicate_delivery.py::TestCatchupCodeStructure::test_dedup_record_after_enqueue` — KEEP. This test verifies `bridge/catchup.py`'s ordering, which is not changed by this plan. The reconciler and catchup continue to call the two functions explicitly in order.
+- [x] `tests/unit/test_dedup.py` — KEEP. `bridge/dedup.py` surface area is unchanged.
+- [x] `tests/unit/test_reconciler.py` — KEEP. Reconciler is not refactored here; it still calls `record_message_processed` directly.
+- [x] `tests/integration/test_reconciler.py` — KEEP. Same reason.
+- [x] `tests/integration/test_catchup_revival.py` — KEEP. Catchup is not refactored here.
+- [x] `tests/e2e/test_session_continuity.py`, `tests/e2e/test_session_lifecycle.py`, `tests/e2e/test_message_pipeline.py` — KEEP. They import `record_message_processed` directly for test setup; the symbol still exists.
+- [x] `tests/unit/test_bridge_dispatch_contract.py` — CREATE. New regression test asserting the live handler contains no direct `enqueue_agent_session(` or `record_message_processed(` calls.
 
 No existing tests need UPDATE, DELETE, or REPLACE — this is purely an internal refactor that preserves all observable behavior. The only ADD is the new contract test.
 
@@ -240,33 +240,33 @@ No agent integration required. This is a bridge-internal change. `dispatch_teleg
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/message-reconciler.md`:
+- [x] Update `docs/features/message-reconciler.md`:
   - Replace the "benign race" paragraph (current lines 83-85) with a precise race-condition analysis covering both the canonical path (queue coalesces) and the resume-completed path (different session_ids, no coalescing, now mitigated by centralized dedup).
   - Add a Mermaid flow diagram showing live handler ingestion, reconciler ingestion, and the shared `DedupRecord` gate. Diagram must include every live-handler early-return branch.
-- [ ] Update `docs/features/bridge-module-architecture.md`:
+- [x] Update `docs/features/bridge-module-architecture.md`:
   - Add a "Message Ingestion Flow" section with a Mermaid diagram of `handler()`'s branches (reply-to-valor, in-memory coalescing, intake classifier sub-branches, canonical path) and the single `dispatch_telegram_session` entry point.
   - Reference `bridge/dispatch.py` in the sub-module responsibility table.
 
 ### External Documentation Site
-- [ ] Not applicable — this repo does not use Sphinx/MkDocs/ReadTheDocs.
+- [x] Not applicable — this repo does not use Sphinx/MkDocs/ReadTheDocs.
 
 ### Inline Documentation
-- [ ] Module docstring for `bridge/dispatch.py` stating the contract: "Every Telegram-originating session enqueue goes through `dispatch_telegram_session`, which enqueues and then records dedup atomically from the caller's perspective."
-- [ ] Docstring for `dispatch_telegram_session` noting that it does NOT catch exceptions from `enqueue_agent_session`; a failed enqueue leaves dedup unrecorded so the reconciler can retry.
-- [ ] Docstring for `record_telegram_message_handled` noting that this is the non-enqueue counterpart (message was steered or finalized, not enqueued).
+- [x] Module docstring for `bridge/dispatch.py` stating the contract: "Every Telegram-originating session enqueue goes through `dispatch_telegram_session`, which enqueues and then records dedup atomically from the caller's perspective."
+- [x] Docstring for `dispatch_telegram_session` noting that it does NOT catch exceptions from `enqueue_agent_session`; a failed enqueue leaves dedup unrecorded so the reconciler can retry.
+- [x] Docstring for `record_telegram_message_handled` noting that this is the non-enqueue counterpart (message was steered or finalized, not enqueued).
 
 ## Success Criteria
 
-- [ ] `bridge/dispatch.py` exists with `dispatch_telegram_session` and `record_telegram_message_handled`.
-- [ ] `bridge/telegram_bridge.py::handler` contains zero direct calls to `enqueue_agent_session(` or `record_message_processed(`. All 5 Telegram-originating enqueue/steer sites go through the new helpers.
-- [ ] `tests/unit/test_bridge_dispatch_contract.py` exists, uses AST (or regex fallback) to enforce the contract, and fails when the live handler violates it.
-- [ ] All existing tests pass: `pytest tests/ -x -q`.
-- [ ] Lint clean: `python -m ruff check .` and `python -m ruff format --check .`.
-- [ ] `docs/features/message-reconciler.md` no longer contains the "benign race" paragraph; replacement text matches the solution section; Mermaid diagram renders on GitHub.
-- [ ] `docs/features/bridge-module-architecture.md` includes the Message Ingestion Flow section and Mermaid diagram.
-- [ ] Reasoning walkthrough (documented in the PR description): given the 2026-04-14 11:54 incident's exact code path, trace through the new centralized implementation and confirm the second reconciler-driven session cannot occur. This is a reasoning check against the refactored code, not a replay of the incident.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] `bridge/dispatch.py` exists with `dispatch_telegram_session` and `record_telegram_message_handled`.
+- [x] `bridge/telegram_bridge.py::handler` contains zero direct calls to `enqueue_agent_session(` or `record_message_processed(`. All 5 Telegram-originating enqueue/steer sites go through the new helpers.
+- [x] `tests/unit/test_bridge_dispatch_contract.py` exists, uses AST (or regex fallback) to enforce the contract, and fails when the live handler violates it.
+- [x] All existing tests pass: `pytest tests/ -x -q`.
+- [x] Lint clean: `python -m ruff check .` and `python -m ruff format --check .`.
+- [x] `docs/features/message-reconciler.md` no longer contains the "benign race" paragraph; replacement text matches the solution section; Mermaid diagram renders on GitHub.
+- [x] `docs/features/bridge-module-architecture.md` includes the Message Ingestion Flow section and Mermaid diagram.
+- [x] Reasoning walkthrough (documented in the PR description): given the 2026-04-14 11:54 incident's exact code path, trace through the new centralized implementation and confirm the second reconciler-driven session cannot occur. This is a reasoning check against the refactored code, not a replay of the incident.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
