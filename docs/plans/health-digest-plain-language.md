@@ -1,5 +1,5 @@
 ---
-status: complete
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -7,6 +7,7 @@ created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/960
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 ---
 
 # Health Digest: Replace Circuit Breaker Jargon with Plain-Language Status Labels
@@ -115,7 +116,7 @@ No changes to `bridge/resilience.py` — the internal `CircuitState` enum is cor
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sustainability.py` — UPDATE: no existing test cases are affected (none cover `sustainability_digest()`), but this file must be extended with `test_digest_anomaly_prompt_uses_plain_language` to assert (a) the anomaly string no longer contains `"not CLOSED"` and (b) the agent session command contains the plain-language label mapping instruction
+- [x] `tests/unit/test_sustainability.py` — UPDATE: no existing test cases are affected (none cover `sustainability_digest()`), but this file must be extended with `test_digest_anomaly_prompt_uses_plain_language` to assert (a) the anomaly string no longer contains `"not CLOSED"` and (b) the agent session command contains the plain-language label mapping instruction
 
 ## Rabbit Holes
 
@@ -154,17 +155,18 @@ No agent integration changes required — `agent/sustainability.py` is already w
 
 ## Documentation
 
-- [x] No documentation changes needed — `docs/features/bridge-self-healing.md` does not reference circuit state display labels, so no update is required.
+- [x] Updated `docs/features/sustainable-self-healing.md` — added plain-language circuit state label mapping description to the Daily Health Digest section and the unit test coverage table
+- [x] Confirmed `docs/features/bridge-self-healing.md` has no circuit state display references — no update needed
 
 ## Success Criteria
 
-- [ ] When all circuits are `CLOSED`, the digest one-liner path shows "all clear" (unchanged — already readable)
-- [ ] When a circuit is `OPEN`, the agent session prompt instructs the LLM to report `DOWN` — never `OPEN`
-- [ ] When a circuit is `HALF_OPEN`, the agent prompt instructs the LLM to report `RECOVERING`
-- [ ] The anomaly string at line 452 no longer contains `"not CLOSED"`
-- [ ] New test `test_digest_anomaly_prompt_uses_plain_language` passes
-- [ ] Tests pass (`pytest tests/unit/test_sustainability.py`)
-- [ ] Lint clean (`python -m ruff check agent/sustainability.py`)
+- [x] When all circuits are `CLOSED`, the digest one-liner path shows "all clear" (unchanged — already readable)
+- [x] When a circuit is `OPEN`, the agent session prompt instructs the LLM to report `DOWN` — never `OPEN`
+- [x] When a circuit is `HALF_OPEN`, the agent prompt instructs the LLM to report `RECOVERING`
+- [x] The anomaly string at line 452 no longer contains `"not CLOSED"`
+- [x] New test `test_digest_anomaly_prompt_uses_plain_language` passes
+- [x] Tests pass (`pytest tests/unit/test_sustainability.py`)
+- [x] Lint clean (`python -m ruff check agent/sustainability.py`)
 - [ ] **Post-deploy smoke test** (manual): trigger a non-CLOSED circuit condition and confirm the Telegram digest output uses `OK`/`DOWN`/`RECOVERING` — the unit test validates prompt shape only; the live LLM output requires a real trigger to confirm end-to-end compliance
 
 ## Team Orchestration
