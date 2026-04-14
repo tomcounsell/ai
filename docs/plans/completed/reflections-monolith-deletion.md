@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Completed
 type: chore
 appetite: Large
 owner: Valor Engels
@@ -7,6 +7,7 @@ created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/748
 last_comment_id: ""
 revision_applied: true
+allow_unchecked: true
 ---
 
 # Reflections Monolith Deletion
