@@ -408,7 +408,7 @@ def checkpoint_branch_state(session: AgentSession) -> None:
             commit_sha = commit.stdout.strip()
             session.branch_name = branch_name
             session.commit_sha = commit_sha
-            session.save(update_fields=["branch_name", "commit_sha", "updated_at"])
+            session.save(update_fields=["branch_name", "session_events", "updated_at"])
             logger.info(
                 f"[checkpoint] Saved branch={branch_name} commit={commit_sha[:8]} "
                 f"for session {session.session_id}"
