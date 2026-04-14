@@ -481,8 +481,10 @@ async def classify_needs_response_async(text: str) -> bool:
     return await loop.run_in_executor(None, classify_needs_response, text)
 
 
-# Regex for standalone "?" — excludes query-string params like ?q=1 or &page=2
-_STANDALONE_QUESTION_RE = re.compile(r"(?<![=&])\?")
+# Regex for standalone "?" — excludes URL query-string params like ?q=1 or &page=2
+# Lookbehind: not preceded by =, &, or word chars (domain path before ?)
+# Lookahead: not followed by \w+= (query param name=value pattern)
+_STANDALONE_QUESTION_RE = re.compile(r"(?<![=&\w])\?|(?<![=&])\?(?!\w+=)")
 
 
 async def classify_conversation_terminus(
