@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/960
 last_comment_id:
+revision_applied: true
 ---
 
 # Health Digest: Replace Circuit Breaker Jargon with Plain-Language Status Labels
@@ -92,7 +93,9 @@ Two targeted changes in `agent/sustainability.py`:
    ```
 
 2. **Agent session prompt (lines ~464–477)** — Add explicit label mapping instruction after the circuit state data-collection step:
-   > Use plain-language status labels in the Telegram report: `OK` when a circuit is CLOSED (normal), `DOWN` when OPEN (dependency unreachable), `RECOVERING` when HALF_OPEN (testing recovery). Never use the internal state names CLOSED, OPEN, or HALF_OPEN in the user-facing message.
+   > Circuit states appear as 'closed'/'CLOSED' → report as OK, 'open'/'OPEN' → report as DOWN, 'half_open'/'HALF_OPEN' → report as RECOVERING. Never output any of these raw state strings in the user-facing message.
+
+   **Implementation Note (from critique):** The mapping must cover **both** forms: the uppercase enum names (`CLOSED`, `OPEN`, `HALF_OPEN`) and the lowercase `.value` strings (`"closed"`, `"open"`, `"half_open"`). When the LLM uses tools to inspect live circuit state, it receives `cb.state.value` — the lowercase string form — not the enum name. Covering only uppercase forms would leave the lowercase variants unaddressed, allowing `closed`/`open`/`half_open` to leak into the output. The prompt instruction must reference both: `'closed'/'CLOSED'`, `'open'/'OPEN'`, `'half_open'/'HALF_OPEN'`.
 
 No changes to `bridge/resilience.py` — the internal `CircuitState` enum is correct and should remain unchanged.
 
@@ -163,6 +166,7 @@ No agent integration changes required — `agent/sustainability.py` is already w
 - [ ] New test `test_digest_anomaly_prompt_uses_plain_language` passes
 - [ ] Tests pass (`pytest tests/unit/test_sustainability.py`)
 - [ ] Lint clean (`python -m ruff check agent/sustainability.py`)
+- [ ] **Post-deploy smoke test** (manual): trigger a non-CLOSED circuit condition and confirm the Telegram digest output uses `OK`/`DOWN`/`RECOVERING` — the unit test validates prompt shape only; the live LLM output requires a real trigger to confirm end-to-end compliance
 
 ## Team Orchestration
 
@@ -176,7 +180,7 @@ No agent integration changes required — `agent/sustainability.py` is already w
 
 - **Validator (sustainability-labels)**
   - Name: sustainability-validator
-  - Role: Verify the changes are correct, no regressions, tests pass
+  - Role: Verify the changes are correct — full unit suite, ruff, all success criteria
   - Agent Type: validator
   - Resume: true
 
@@ -190,7 +194,7 @@ No agent integration changes required — `agent/sustainability.py` is already w
 - **Agent Type**: builder
 - **Parallel**: true
 - In `agent/sustainability.py:452`, replace `"one or more circuits are not CLOSED"` with `"one or more service circuits are not healthy"`
-- In the agent session `command` string (lines ~464–477), add after the circuit-data-collection step: an explicit instruction to translate states to plain-language labels (`OK` for CLOSED, `DOWN` for OPEN, `RECOVERING` for HALF_OPEN) and never use internal state names in the Telegram report
+- In the agent session `command` string (lines ~464–477), add after the circuit-data-collection step: an explicit instruction to translate states to plain-language labels — must cover **both** the lowercase `.value` strings and uppercase enum names: `'closed'/'CLOSED'` → `OK`, `'open'/'OPEN'` → `DOWN`, `'half_open'/'HALF_OPEN'` → `RECOVERING`. Never output any raw state string in the user-facing message.
 - Add `test_digest_anomaly_prompt_uses_plain_language` to `tests/unit/test_sustainability.py` asserting (a) the anomaly string does not contain `"not CLOSED"` and (b) the command string contains the plain-language label mapping instruction
 
 ### 2. Validate changes
@@ -199,19 +203,10 @@ No agent integration changes required — `agent/sustainability.py` is already w
 - **Assigned To**: sustainability-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_sustainability.py -v` and confirm all tests pass including the new one
-- Run `python -m ruff check agent/sustainability.py` and confirm lint is clean
-- Confirm `agent/sustainability.py:452` no longer contains `"not CLOSED"`
-- Confirm the agent session command string contains the plain-language label instruction
-
-### 3. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: validate-plain-labels
-- **Assigned To**: sustainability-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run `pytest tests/unit/ -x -q` to confirm no regressions
+- Run `pytest tests/unit/ -x -q` to confirm all tests pass (including the new one) with no regressions
 - Run `python -m ruff check .` and `python -m ruff format --check .` for full lint/format pass
+- Confirm `agent/sustainability.py:452` no longer contains `"not CLOSED"`
+- Confirm the agent session command string contains the plain-language label instruction covering both lowercase and uppercase forms
 - Verify all success criteria are met
 
 ## Verification
@@ -223,13 +218,15 @@ No agent integration changes required — `agent/sustainability.py` is already w
 | Lint clean | `python -m ruff check agent/sustainability.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/sustainability.py` | exit code 0 |
 | Anomaly string updated | `grep -n "not CLOSED" agent/sustainability.py` | exit code 1 |
-| Plain-language instruction present | `grep -n "plain-language\|plain language\|OK.*DOWN.*RECOVERING\|CLOSED.*OK" agent/sustainability.py` | exit code 0 |
+| Plain-language instruction present | `grep -n "closed.*OK\|CLOSED.*OK\|open.*DOWN\|OPEN.*DOWN\|half_open.*RECOVERING\|HALF_OPEN.*RECOVERING" agent/sustainability.py` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Adversary | Prompt covers uppercase enum names but `CircuitState.value` returns lowercase strings (`"closed"`, `"open"`, `"half_open"`); lowercase forms would still leak into output | Technical Approach + Task 1 | Prompt instruction updated to cover both forms: `'closed'/'CLOSED'` → OK, `'open'/'OPEN'` → DOWN, `'half_open'/'HALF_OPEN'` → RECOVERING |
+| NIT | Skeptic | Unit test validates prompt shape only, not actual LLM output — no end-to-end signal | Success Criteria | Added post-deploy smoke-test note: trigger a non-CLOSED circuit and read Telegram output to confirm LLM compliance |
+| NIT | Simplifier | Tasks 2 and 3 both assigned to same validator agent — redundant for a 2-string change | Tasks | Merged into single Task 2 covering full unit suite + ruff in one step |
 
 ---
 
