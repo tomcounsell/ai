@@ -197,6 +197,8 @@ class TestMemoryModel:
             content="Test memory with rationale",
             importance=2.0,
         )
-        rationale = "These two memories express the same instruction with negligible semantic difference."
+        rationale = (
+            "These two memories express the same instruction with negligible semantic difference."
+        )
         m.superseded_by_rationale = rationale
         assert m.superseded_by_rationale == rationale

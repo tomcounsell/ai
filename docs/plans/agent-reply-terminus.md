@@ -150,24 +150,24 @@ if replied_msg and replied_msg.out:
 
 ### Exception Handling Coverage
 
-- [ ] `classify_conversation_terminus` must catch Ollama + Haiku API failures and return `"RESPOND"` (conservative default — never silently drop a genuine question due to classifier error)
-- [ ] The existing `classify_needs_response` sets the pattern: `except Exception: return True` — mirror this
+- [x] `classify_conversation_terminus` must catch Ollama + Haiku API failures and return `"RESPOND"` (conservative default — never silently drop a genuine question due to classifier error)
+- [x] The existing `classify_needs_response` sets the pattern: `except Exception: return True` — mirror this
 
 ### Empty/Invalid Input Handling
 
-- [ ] `text=""` or `text=None` → treat as potential continuation, return `"RESPOND"`
-- [ ] `thread_messages=[]` → reduce confidence in terminus detection; lean toward `"RESPOND"`
-- [ ] `sender_is_bot=False` (unknown) → do not apply stricter bot terminus rules
+- [x] `text=""` or `text=None` → treat as potential continuation, return `"RESPOND"`
+- [x] `thread_messages=[]` → reduce confidence in terminus detection; lean toward `"RESPOND"`
+- [x] `sender_is_bot=False` (unknown) → do not apply stricter bot terminus rules
 
 ### Error State Rendering
 
-- [ ] When reaction emoji fails (`set_reaction` returns `False`), log at DEBUG level and continue — reaction failure must never bubble up to crash the routing layer
+- [x] When reaction emoji fails (`set_reaction` returns `False`), log at DEBUG level and continue — reaction failure must never bubble up to crash the routing layer
 
 ## Test Impact
 
-- [ ] `tests/unit/test_routing.py` — UPDATE: add `classify_conversation_terminus` test cases (new function; existing tests unaffected)
-- [ ] `tests/unit/test_routing.py::test_no_legacy_valor_usernames_constant` — UNCHANGED: no impact
-- [ ] No existing tests test `should_respond_async` — no existing tests break
+- [x] `tests/unit/test_routing.py` — UPDATE: add `classify_conversation_terminus` test cases (new function; existing tests unaffected)
+- [x] `tests/unit/test_routing.py::test_no_legacy_valor_usernames_constant` — UNCHANGED: no impact
+- [x] No existing tests test `should_respond_async` — no existing tests break
 
 New tests to add (in `tests/unit/test_routing.py`):
 
@@ -218,24 +218,24 @@ No agent integration required — this is a bridge-internal routing decision. Th
 
 ## Documentation
 
-- [ ] Create `docs/features/agent-reply-terminus.md` describing the conversation terminus detection system (signifiers, RESPOND/REACT/SILENT semantics, wire-up point)
-- [ ] Add entry to `docs/features/README.md` index table under "Bridge"
+- [x] Create `docs/features/agent-reply-terminus.md` describing the conversation terminus detection system (signifiers, RESPOND/REACT/SILENT semantics, wire-up point)
+- [x] Add entry to `docs/features/README.md` index table under "Bridge"
 
 ## Success Criteria
 
-- [ ] `classify_conversation_terminus(text, thread_messages, sender_is_bot) -> str` exists in `bridge/routing.py` — no `chat_title` parameter
-- [ ] Reply-to-Valor path in `should_respond_async` calls `classify_conversation_terminus` before deciding to respond
-- [ ] When `sender_is_bot=True` AND message has no question, result is SILENT (not RESPOND, not REACT)
-- [ ] `_ACKNOWLEDGMENT_TOKENS` fast-path fires AFTER `sender_is_bot` check — never before
-- [ ] Standalone `?` in text triggers RESPOND fast-path; `?` inside URL query strings (preceded by `=` or `&`) does NOT
-- [ ] When terminus is REACT and sender is human (not bot), a reaction emoji is set via `set_reaction` using a deferred local import (not top-level)
-- [ ] No top-level `from bridge.response import` in `bridge/routing.py` — circular import prevented
-- [ ] Terminus decisions log at INFO level (not DEBUG)
-- [ ] Existing behavior for human reply chains is NOT degraded (genuine questions still get responses)
-- [ ] `classify_conversation_terminus` returns `"RESPOND"` on any classifier failure (conservative)
-- [ ] Unit tests pass: bot-sender + no-question → SILENT; human-sender + question → RESPOND; acknowledgment token → SILENT; URL with query param → not RESPOND for bot sender; classifier failure → RESPOND; empty text → RESPOND; bot REACT collapses to SILENT
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `classify_conversation_terminus(text, thread_messages, sender_is_bot) -> str` exists in `bridge/routing.py` — no `chat_title` parameter
+- [x] Reply-to-Valor path in `should_respond_async` calls `classify_conversation_terminus` before deciding to respond
+- [x] When `sender_is_bot=True` AND message has no question, result is SILENT (not RESPOND, not REACT)
+- [x] `_ACKNOWLEDGMENT_TOKENS` fast-path fires AFTER `sender_is_bot` check — never before
+- [x] Standalone `?` in text triggers RESPOND fast-path; `?` inside URL query strings (preceded by `=` or `&`) does NOT
+- [x] When terminus is REACT and sender is human (not bot), a reaction emoji is set via `set_reaction` using a deferred local import (not top-level)
+- [x] No top-level `from bridge.response import` in `bridge/routing.py` — circular import prevented
+- [x] Terminus decisions log at INFO level (not DEBUG)
+- [x] Existing behavior for human reply chains is NOT degraded (genuine questions still get responses)
+- [x] `classify_conversation_terminus` returns `"RESPOND"` on any classifier failure (conservative)
+- [x] Unit tests pass: bot-sender + no-question → SILENT; human-sender + question → RESPOND; acknowledgment token → SILENT; URL with query param → not RESPOND for bot sender; classifier failure → RESPOND; empty text → RESPOND; bot REACT collapses to SILENT
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

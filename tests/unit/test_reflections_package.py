@@ -12,10 +12,7 @@ and do not require Redis, GitHub CLI, or Anthropic API access.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
+from unittest.mock import MagicMock, patch
 
 # --- Shared helpers ---
 
@@ -32,8 +29,8 @@ def assert_valid_result(result: dict, expected_status: str = "ok") -> None:
     assert "findings" in result, f"Missing 'findings' key in {result}"
     assert "summary" in result, f"Missing 'summary' key in {result}"
     assert result["status"] in ("ok", "error", "skipped"), f"Invalid status: {result['status']}"
-    assert isinstance(result["findings"], list), f"'findings' must be a list"
-    assert isinstance(result["summary"], str), f"'summary' must be a str"
+    assert isinstance(result["findings"], list), "'findings' must be a list"
+    assert isinstance(result["summary"], str), "'summary' must be a str"
 
 
 # ============================================================
@@ -54,8 +51,12 @@ class TestReflectionsUtils:
         config_file = tmp_path / "projects.json"
         config_file.write_text(json.dumps(config))
 
-        with patch("reflections.utils.AI_ROOT", tmp_path), patch(
-            "os.environ.get", side_effect=lambda k, d=None: str(config_file) if k == "PROJECTS_CONFIG_PATH" else d
+        def _env_get(k, d=None):
+            return str(config_file) if k == "PROJECTS_CONFIG_PATH" else d
+
+        with (
+            patch("reflections.utils.AI_ROOT", tmp_path),
+            patch("os.environ.get", side_effect=_env_get),
         ):
             projects = load_local_projects()
         assert isinstance(projects, list)
@@ -116,9 +117,7 @@ class TestMaintenanceCallables:
         from reflections.maintenance import run_legacy_code_scan
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="", stderr=""
-            )
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = run_async(run_legacy_code_scan())
         assert_valid_result(result)
 
@@ -126,13 +125,14 @@ class TestMaintenanceCallables:
         """run_redis_ttl_cleanup() returns valid dict with mocked models."""
         from reflections.maintenance import run_redis_ttl_cleanup
 
-        with patch("models.telegram.TelegramMessage") as mock_tm, \
-             patch("models.link.Link") as mock_link, \
-             patch("models.chat.Chat") as mock_chat, \
-             patch("models.agent_session.AgentSession") as mock_as, \
-             patch("models.bridge_event.BridgeEvent") as mock_be, \
-             patch("models.reflections.ReflectionIgnore") as mock_ri:
-
+        with (
+            patch("models.telegram.TelegramMessage") as mock_tm,
+            patch("models.link.Link") as mock_link,
+            patch("models.chat.Chat") as mock_chat,
+            patch("models.agent_session.AgentSession") as mock_as,
+            patch("models.bridge_event.BridgeEvent") as mock_be,
+            patch("models.reflections.ReflectionIgnore") as mock_ri,
+        ):
             mock_tm.cleanup_expired.return_value = 0
             mock_link.cleanup_expired.return_value = 0
             mock_chat.cleanup_expired.return_value = 0
@@ -147,11 +147,12 @@ class TestMaintenanceCallables:
         """run_redis_data_quality() handles empty querysets without error."""
         from reflections.maintenance import run_redis_data_quality
 
-        with patch("models.link.Link") as mock_link, \
-             patch("models.chat.Chat") as mock_chat, \
-             patch("models.agent_session.AgentSession") as mock_as, \
-             patch("models.telegram.TelegramMessage") as mock_tm:
-
+        with (
+            patch("models.link.Link") as mock_link,
+            patch("models.chat.Chat") as mock_chat,
+            patch("models.agent_session.AgentSession") as mock_as,
+            patch("models.telegram.TelegramMessage") as mock_tm,
+        ):
             mock_link.query.all.return_value = []
             mock_chat.query.all.return_value = []
             mock_as.query.all.return_value = []
@@ -162,8 +163,8 @@ class TestMaintenanceCallables:
 
     def test_run_disk_space_check_returns_valid(self):
         """run_disk_space_check() returns valid dict."""
+
         from reflections.maintenance import run_disk_space_check
-        import shutil
 
         mock_usage = MagicMock()
         mock_usage.free = 20 * (1024**3)  # 20 GB free
@@ -219,8 +220,10 @@ class TestAuditingCallables:
         """run_log_review() returns valid dict with no projects."""
         from reflections.auditing import run_log_review
 
-        with patch("reflections.auditing.load_local_projects", return_value=[]), \
-             patch("models.bridge_event.BridgeEvent") as mock_be:
+        with (
+            patch("reflections.auditing.load_local_projects", return_value=[]),
+            patch("models.bridge_event.BridgeEvent") as mock_be,
+        ):
             mock_be.query.filter.return_value = []
             result = run_async(run_log_review())
         assert_valid_result(result)
@@ -273,8 +276,10 @@ class TestAuditingCallables:
         """run_pr_review_audit() returns valid dict with no projects."""
         from reflections.auditing import run_pr_review_audit
 
-        with patch("reflections.auditing.load_local_projects", return_value=[]), \
-             patch("models.reflections.PRReviewAudit") as mock_pra:
+        with (
+            patch("reflections.auditing.load_local_projects", return_value=[]),
+            patch("models.reflections.PRReviewAudit") as mock_pra,
+        ):
             mock_pra.last_successful_run.return_value = None
             result = run_async(run_pr_review_audit())
         assert_valid_result(result)
@@ -332,9 +337,11 @@ class TestSessionIntelligenceCallable:
         """run() returns valid dict when no sessions exist."""
         from reflections.session_intelligence import run
 
-        with patch("models.agent_session.AgentSession") as mock_as, \
-             patch("models.bridge_event.BridgeEvent") as mock_be, \
-             patch("reflections.session_intelligence.load_local_projects", return_value=[]):
+        with (
+            patch("models.agent_session.AgentSession") as mock_as,
+            patch("models.bridge_event.BridgeEvent") as mock_be,
+            patch("reflections.session_intelligence.load_local_projects", return_value=[]),
+        ):
             mock_as.query.all.return_value = []
             mock_be.query.filter.return_value = []
             result = run_async(run())
@@ -348,9 +355,11 @@ class TestSessionIntelligenceCallable:
         mock_session.started_at = None  # skip by date filter
         mock_session.session_id = "test123"
 
-        with patch("models.agent_session.AgentSession") as mock_as, \
-             patch("models.bridge_event.BridgeEvent") as mock_be, \
-             patch("reflections.session_intelligence.load_local_projects", return_value=[]):
+        with (
+            patch("models.agent_session.AgentSession") as mock_as,
+            patch("models.bridge_event.BridgeEvent") as mock_be,
+            patch("reflections.session_intelligence.load_local_projects", return_value=[]),
+        ):
             mock_as.query.all.return_value = [mock_session]
             mock_be.query.filter.return_value = []
             result = run_async(run())
@@ -367,9 +376,10 @@ class TestBehavioralLearningCallable:
 
     def test_run_skips_when_cyclic_episode_missing(self):
         """run() returns skipped result when models.cyclic_episode is unavailable."""
+        import sys
+
         from reflections.behavioral_learning import run
 
-        import sys
         with patch.dict(sys.modules, {"models.cyclic_episode": None}):
             result = run_async(run())
         assert_valid_result(result)
@@ -388,8 +398,10 @@ class TestDailyReportCallable:
         """run() returns valid dict when no reflections have run today."""
         from reflections.daily_report import run
 
-        with patch("models.reflection.Reflection") as mock_ref, \
-             patch("reflections.daily_report.load_local_projects", return_value=[]):
+        with (
+            patch("models.reflection.Reflection") as mock_ref,
+            patch("reflections.daily_report.load_local_projects", return_value=[]),
+        ):
             mock_ref.query.all.return_value = []
             result = run_async(run())
         assert_valid_result(result)
