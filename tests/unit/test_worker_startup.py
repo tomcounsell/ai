@@ -5,7 +5,6 @@ EmailOutputHandler should be registered for a project. Imported directly
 from worker.__main__ — no worker startup, no Redis, no callback dicts touched.
 """
 
-
 from worker.__main__ import _should_register_email_handler
 
 
