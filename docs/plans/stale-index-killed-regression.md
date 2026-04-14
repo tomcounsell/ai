@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/950
 last_comment_id:
+revision_applied: true
 ---
 
 # Stale Index Regression: Pending Index Entry Survives Pending-to-Killed Transitions
@@ -178,16 +179,21 @@ After the main `session.save()` in `finalize_session` (line 361), add a defensiv
 
 ```python
 # In finalize_session, after session.save():
+# NOTE: Two Popoto coupling points that must be re-verified on Popoto upgrade:
+#   1. _saved_field_values["status"] backfill in finalize_session/transition_status
+#   2. Defensive srem index key construction below (get_special_use_field_db_key + DB_key)
 try:
     from popoto.redis_db import POPOTO_REDIS_DB
     from popoto.models.db_key import DB_key
     member_key = session.db_key.redis_key
     status_field = session._meta.fields["status"]
+    # get_special_use_field_db_key is a classmethod — call on the field's class, not the instance
+    field_cls = type(status_field)
     for other_status in ALL_STATUSES:
         if other_status == status:
             continue
         idx_key = DB_key(
-            status_field.get_special_use_field_db_key(session, "status"),
+            field_cls.get_special_use_field_db_key(session, "status"),
             other_status,
         )
         POPOTO_REDIS_DB.srem(idx_key.redis_key, member_key)
@@ -195,16 +201,26 @@ except Exception as e:
     logger.debug(f"[lifecycle] Defensive srem failed (non-fatal): {e}")
 ```
 
-**Layer 3: Audit all remaining full-save sites in agent_session_queue.py**
+**Layer 1b: Convert heartbeat save to partial save (primary re-pollution vector)**
 
-Scan all `session.save()` and `agent_session.save()` calls in `agent_session_queue.py` for sites that operate on the worker's stale session reference. Convert any that modify only companion fields to partial saves. The key sites are:
+The heartbeat save at `agent_session_queue.py:3702` fires every ~60 seconds inside `_heartbeat_loop` for every running session. On a stale worker reference (where in-memory status has diverged from on-disk status), each tick writes the stale status back to Redis, re-creating the orphan index entry after `rebuild_indexes()` cleans it up. This is the highest-frequency stale-save vector and the primary reason orphans persist across rebuild cycles. Convert to:
 
-- `agent_session_queue.py:792` — `await chosen.async_save()` after steering message drain — should use `update_fields=["message_text"]`
-- `agent_session_queue.py:923` — same for sync fallback path — should use `update_fields=["message_text"]`
-- `agent_session_queue.py:3043` — `agent_session.save()` inside `_execute_agent_session` — audit what fields are modified
-- `agent_session_queue.py:3291` — `agent_session.save()` — audit context
-- `agent_session_queue.py:3500` — `agent_session.save()` — audit context
-- `agent_session_queue.py:3702` — `agent_session.save()` — audit context
+```python
+agent_session.save(update_fields=["updated_at"])
+```
+
+This MUST be the first conversion in the build, ahead of all other `agent_session_queue.py` sites.
+
+**Layer 3: Convert all remaining full-save sites in agent_session_queue.py**
+
+Convert ALL `session.save()` and `agent_session.save()` calls in `agent_session_queue.py` that operate on the worker's stale session reference to partial saves. `async_save()` supports `update_fields` with identical signature to `save()` (verified at `popoto/models/base.py:2290`). The six sites to convert:
+
+- `agent_session_queue.py:792` — `await chosen.async_save()` after steering message drain — convert to `await chosen.async_save(update_fields=["message_text", "updated_at"])`
+- `agent_session_queue.py:923` — same for sync fallback path — convert to `chosen.save(update_fields=["message_text", "updated_at"])`
+- `agent_session_queue.py:3043` — `agent_session.save()` inside `_execute_agent_session` — convert to partial save with only the fields modified at that site
+- `agent_session_queue.py:3291` — `agent_session.save()` — convert to partial save with only the fields modified at that site
+- `agent_session_queue.py:3500` — `agent_session.save()` — convert to partial save with only the fields modified at that site
+- `agent_session_queue.py:3702` — `agent_session.save()` in `_heartbeat_loop` — convert to `agent_session.save(update_fields=["updated_at"])` (elevated to Layer 1b above)
 
 ## Failure Path Test Strategy
 
@@ -305,18 +321,23 @@ No agent integration required — this is a session-lifecycle-internal change. N
 
 ## Step by Step Tasks
 
-### 1. Convert companion-field saves to partial saves
+### 1. Convert all full-save sites to partial saves
 - **Task ID**: build-partial-saves
 - **Depends On**: none
 - **Validates**: tests/unit/test_agent_session_index_corruption.py (update), tests/integration/test_nudge_stomp_regression.py (update)
-- **Informed By**: spike-1 (confirmed: set_link, push_steering_message, pop_steering_messages do full saves)
+- **Informed By**: spike-1 (confirmed: set_link, push_steering_message, pop_steering_messages do full saves), critique concern-3 (heartbeat is primary re-pollution vector)
 - **Assigned To**: lifecycle-builder
 - **Agent Type**: builder
 - **Parallel**: true
+- **FIRST**: Convert heartbeat save at `agent_session_queue.py:3702` (`_heartbeat_loop`) to `agent_session.save(update_fields=["updated_at"])` — this is the highest-frequency re-pollution vector (fires every 60s per session)
 - Convert `set_link()` at `models/agent_session.py:1338` to `self.save(update_fields=[field_name, "updated_at"])`
 - Convert `push_steering_message()` at `models/agent_session.py:1441` to `self.save(update_fields=["queued_steering_messages", "updated_at"])`
 - Convert `pop_steering_messages()` at `models/agent_session.py:1453` to `self.save(update_fields=["queued_steering_messages", "updated_at"])`
-- Audit all `session.save()` / `agent_session.save()` calls in `agent_session_queue.py` that operate on the worker's session reference; convert companion-field saves to partial saves with `update_fields`
+- Convert `agent_session_queue.py:792` to `await chosen.async_save(update_fields=["message_text", "updated_at"])` — `async_save()` supports `update_fields` identically to `save()` (verified at `popoto/models/base.py:2290`)
+- Convert `agent_session_queue.py:923` to `chosen.save(update_fields=["message_text", "updated_at"])` (sync fallback path)
+- Convert `agent_session_queue.py:3043` to partial save with only the fields modified at that site
+- Convert `agent_session_queue.py:3291` to partial save with only the fields modified at that site
+- Convert `agent_session_queue.py:3500` to partial save with only the fields modified at that site
 - Ensure `updated_at` is included in all partial-save `update_fields` lists
 
 ### 2. Add defensive srem to finalize_session

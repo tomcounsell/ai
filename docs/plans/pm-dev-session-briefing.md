@@ -1,5 +1,5 @@
 ---
-status: Approved
+status: docs_complete
 type: enhancement
 appetite: Small
 owner: Valor
@@ -188,14 +188,14 @@ The following sections remain UNCHANGED:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] PM persona is a markdown file -- no exception paths. The only failure mode is the PM ignoring the template, which is advisory and not enforceable.
+- [x] PM persona is a markdown file -- no exception paths. The only failure mode is the PM ignoring the template, which is advisory and not enforceable.
 
 ### Empty/Invalid Input Handling
-- [ ] Verify the template handles "first stage" case (Prior Stage Findings = "None")
-- [ ] Verify the template handles "no PR yet" case (Current State references no PR)
+- [x] Verify the template handles "first stage" case (Prior Stage Findings = "None")
+- [x] Verify the template handles "no PR yet" case (Current State references no PR)
 
 ### Error State Rendering
-- [ ] N/A -- this is a persona document, not executable code
+- [x] N/A -- this is a persona document, not executable code
 
 ## Test Impact
 
@@ -241,19 +241,19 @@ No agent integration required -- this is a persona document change. The PM sessi
 
 ## Documentation
 
-- [ ] The plan document itself (`docs/plans/pm-dev-session-briefing.md`) serves as documentation
-- [ ] Update `docs/features/README.md` index table if a feature doc for PM dispatch quality doesn't exist
-- [ ] No separate feature doc needed -- the persona file IS the documentation
+- [x] The plan document itself (`docs/plans/pm-dev-session-briefing.md`) serves as documentation
+- [x] Update `docs/features/README.md` index table if a feature doc for PM dispatch quality doesn't exist
+- [x] No separate feature doc needed -- the persona file IS the documentation
 
 ## Success Criteria
 
-- [ ] `config/personas/project-manager.md` "Dispatch Message Format" section replaced with structured briefing template
-- [ ] Template includes all six fields: Problem Summary, Key Files, Prior Stage Findings, Constraints, Current State, Acceptance Criteria
-- [ ] `--model` shown as required in the invocation example with cross-reference to dispatch table
-- [ ] Invocation note clarifies `python -m tools.valor_session create` (no subshell activate)
-- [ ] Calibration example for PLAN stage included
-- [ ] Existing gate rules, escalation policy, and dispatch table UNCHANGED
-- [ ] Lint clean: `python -m ruff check config/` passes (markdown file, should be no-op)
+- [x] `config/personas/project-manager.md` "Dispatch Message Format" section replaced with structured briefing template
+- [x] Template includes all six fields: Problem Summary, Key Files, Prior Stage Findings, Constraints, Current State, Acceptance Criteria
+- [x] `--model` shown as required in the invocation example with cross-reference to dispatch table
+- [x] Invocation note clarifies `python -m tools.valor_session create` (no subshell activate)
+- [x] Calibration example for PLAN stage included
+- [x] Existing gate rules, escalation policy, and dispatch table UNCHANGED
+- [x] Lint clean: `python -m ruff check config/` passes (markdown file, should be no-op)
 
 ## Team Orchestration
 
