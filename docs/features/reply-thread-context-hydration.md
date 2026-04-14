@@ -37,7 +37,7 @@ Three coordinated changes across `bridge/context.py`,
 | Change | Scope | Effect |
 |--------|-------|--------|
 | **A** | Resume-completed branch | Always fetches the reply thread and appends it to the summary preamble. Short 3-second sync timeout with clean fallback. |
-| **B** | Layered preamble | `_build_completed_resume_text` accepts an optional `reply_chain_context` parameter and places it between the summary and the follow-up text. Empty/None is a no-op so legacy callers are unchanged. |
+| **B** | Layered preamble | `_build_completed_resume_text` accepts an optional `reply_chain_context` parameter and places it between the summary and the follow-up text. Empty/None is a no-op so prior call sites continue to emit the single-line preamble. |
 | **C** | Implicit-context directive | `references_prior_context(text)` predicate + a `[CONTEXT DIRECTIVE]` block prepended when the predicate matches and the message has no `reply_to_msg_id`. |
 
 ## The Canonical Header
