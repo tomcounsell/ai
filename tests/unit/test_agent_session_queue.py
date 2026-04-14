@@ -589,3 +589,319 @@ def test_append_event_succeeds_with_bad_response_delivered_at():
     bad_val = session.response_delivered_at
     session.response_delivered_at = bad_val
     assert session.response_delivered_at is None
+
+
+class TestHealthCheckNoProgressRecovery:
+    """Tests for the no-progress recovery branch in _agent_session_health_check (#944).
+
+    When a slugless dev session shares ``worker_key`` with a co-running PM session,
+    ``worker_alive=True`` alone is insufficient to prove the dev session is being
+    handled. The health check must inspect ``turn_count``, ``log_path``, and
+    ``claude_session_uuid`` — if none is set and the 300s startup guard has
+    elapsed, the session is orphaned and must be recovered.
+    """
+
+    def _make_stuck_dev_session(
+        self,
+        *,
+        project_key: str = "test",
+        agent_session_id: str = "stuck-dev-1",
+        turn_count: int = 0,
+        log_path=None,
+        claude_session_uuid=None,
+        started_seconds_ago: int = 600,
+        response_delivered_at=None,
+    ) -> AgentSession:
+        """Build an unsaved slugless dev session stuck in ``running``."""
+        import time as _time
+
+        started_at = datetime.fromtimestamp(_time.time() - started_seconds_ago, tz=UTC)
+        session = _make_session(
+            project_key=project_key,
+            status="running",
+            session_type="dev",
+            chat_id="some-chat-id",
+            started_at=started_at,
+        )
+        # Slugless dev → worker_key == project_key
+        session.slug = None
+        session.agent_session_id = agent_session_id
+        session.turn_count = turn_count
+        session.log_path = log_path
+        session.claude_session_uuid = claude_session_uuid
+        if response_delivered_at is not None:
+            session.response_delivered_at = response_delivered_at
+        return session
+
+    def _patch_lifecycle(self):
+        """Return (mock_finalize, mock_transition, context_manager).
+
+        The context manager patches both finalize_session and transition_status
+        in models.session_lifecycle and restores them on exit.
+        """
+        import contextlib
+
+        mock_finalize = MagicMock()
+        mock_transition = MagicMock()
+
+        @contextlib.contextmanager
+        def _ctx():
+            import models.session_lifecycle as lifecycle_mod
+
+            original_finalize = lifecycle_mod.finalize_session
+            original_transition = lifecycle_mod.transition_status
+            lifecycle_mod.finalize_session = mock_finalize
+            lifecycle_mod.transition_status = mock_transition
+            try:
+                yield
+            finally:
+                lifecycle_mod.finalize_session = original_finalize
+                lifecycle_mod.transition_status = original_transition
+
+        return mock_finalize, mock_transition, _ctx()
+
+    @pytest.mark.asyncio
+    async def test_no_progress_project_keyed_recovered_to_pending(self):
+        """Slugless dev session with no progress and a live project-keyed worker
+        must be recovered to ``pending`` after the 300s guard."""
+        session = self._make_stuck_dev_session(
+            project_key="valor",
+            agent_session_id="no-prog-proj-1",
+        )
+        # worker_key for a slugless dev session == project_key
+        assert session.worker_key == "valor"
+
+        mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
+        live_worker = MagicMock(done=MagicMock(return_value=False))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
+            patch("agent.agent_session_queue._ensure_worker"),
+            lifecycle_ctx,
+        ):
+            mock_cls.query.filter.return_value = [session]
+            from agent.agent_session_queue import _agent_session_health_check
+
+            await _agent_session_health_check()
+
+        mock_transition.assert_called_once()
+        assert mock_transition.call_args[0][1] == "pending"
+        mock_finalize.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_progress_local_session_abandoned(self):
+        """Local dev session (worker_key starts with ``local``) with no progress
+        and a live worker must be finalized as ``abandoned``."""
+        session = self._make_stuck_dev_session(
+            project_key="local-valor",
+            agent_session_id="no-prog-local-1",
+        )
+        assert session.worker_key == "local-valor"
+
+        mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
+        live_worker = MagicMock(done=MagicMock(return_value=False))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.agent_session_queue._active_workers", {"local-valor": live_worker}),
+            lifecycle_ctx,
+        ):
+            mock_cls.query.filter.return_value = [session]
+            from agent.agent_session_queue import _agent_session_health_check
+
+            await _agent_session_health_check()
+
+        mock_finalize.assert_called_once()
+        assert mock_finalize.call_args[0][1] == "abandoned"
+        mock_transition.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "turn_count,log_path,claude_session_uuid",
+        [
+            (2, None, None),
+            (2, "/tmp/x.jsonl", None),
+            (0, "/tmp/x.jsonl", None),
+            (0, None, "uuid-abc-123"),
+            (0, "", "uuid-abc-123"),
+        ],
+    )
+    async def test_with_progress_not_recovered_parametrized(
+        self, turn_count, log_path, claude_session_uuid
+    ):
+        """Any single progress signal (turn_count / log_path / claude_session_uuid)
+        is sufficient to keep a session from being recovered by the no-progress branch."""
+        session = self._make_stuck_dev_session(
+            project_key="valor",
+            agent_session_id=f"progress-{turn_count}-{bool(log_path)}-{bool(claude_session_uuid)}",
+            turn_count=turn_count,
+            log_path=log_path,
+            claude_session_uuid=claude_session_uuid,
+            started_seconds_ago=600,  # past the 300s guard but under the 45m timeout
+        )
+
+        mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
+        live_worker = MagicMock(done=MagicMock(return_value=False))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
+            patch("agent.agent_session_queue._ensure_worker"),
+            lifecycle_ctx,
+        ):
+            mock_cls.query.filter.return_value = [session]
+            from agent.agent_session_queue import _agent_session_health_check
+
+            await _agent_session_health_check()
+
+        mock_finalize.assert_not_called()
+        mock_transition.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_progress_under_guard_not_recovered(self):
+        """No-progress session that has only been running 60s is under the
+        300s startup guard and must NOT be recovered."""
+        session = self._make_stuck_dev_session(
+            project_key="valor",
+            agent_session_id="under-guard-1",
+            started_seconds_ago=60,
+        )
+
+        mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
+        live_worker = MagicMock(done=MagicMock(return_value=False))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
+            patch("agent.agent_session_queue._ensure_worker"),
+            lifecycle_ctx,
+        ):
+            mock_cls.query.filter.return_value = [session]
+            from agent.agent_session_queue import _agent_session_health_check
+
+            await _agent_session_health_check()
+
+        mock_finalize.assert_not_called()
+        mock_transition.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_progress_with_delivered_response_finalized_completed(self):
+        """Defensive: a no-progress session with response_delivered_at set must
+        still hit the delivery guard first and finalize as ``completed``."""
+        session = self._make_stuck_dev_session(
+            project_key="valor",
+            agent_session_id="no-prog-delivered-1",
+            response_delivered_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+
+        mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
+        live_worker = MagicMock(done=MagicMock(return_value=False))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
+            patch("agent.agent_session_queue._ensure_worker"),
+            lifecycle_ctx,
+        ):
+            mock_cls.query.filter.return_value = [session]
+            from agent.agent_session_queue import _agent_session_health_check
+
+            await _agent_session_health_check()
+
+        mock_finalize.assert_called_once()
+        assert mock_finalize.call_args[0][1] == "completed"
+        mock_transition.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recovered_dev_session_popped_by_shared_pm_worker(self):
+        """AD2 regression: _pop_agent_session must not filter by session_type.
+
+        After a no-progress recovery transitions a slugless dev session to
+        ``pending``, the PM-associated project-keyed worker loop must be able
+        to pop and execute it. This locks in the assumption that
+        ``_pop_agent_session(worker_key, is_project_keyed=True)`` selects by
+        project_key/status only — no session_type filter.
+        """
+        session = self._make_stuck_dev_session(
+            project_key="valor",
+            agent_session_id="ad2-regression-1",
+        )
+        session.status = "pending"
+        session.priority = "high"
+
+        async def _mock_async_filter(**kwargs):
+            if kwargs.get("status") == "pending" and kwargs.get("project_key") == "valor":
+                return [session]
+            return []
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.agent_session_queue._acquire_pop_lock", return_value=True),
+            patch("agent.agent_session_queue._release_pop_lock"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+        ):
+            # Redis sustainability guards return falsy → proceed normally.
+            mock_redis.get.return_value = None
+            mock_cls.query.async_filter = AsyncMock(side_effect=_mock_async_filter)
+            # transition_status is called via save() internally; mock save to no-op.
+            session.save = MagicMock()
+
+            result = await _pop_agent_session("valor", is_project_keyed=True)
+
+        assert result is not None, "PM-associated project-keyed worker must pop the recovered dev session"
+        assert result.agent_session_id == "ad2-regression-1"
+        assert result.session_type == "dev"
+
+    @pytest.mark.asyncio
+    async def test_progress_written_between_check_and_transition_is_lost_but_session_retries(self):
+        """AD1 race acceptance: a worker writing progress AFTER ``entry`` is
+        loaded but BEFORE ``transition_status`` runs is NOT protected by the
+        status CAS. The session is re-queued regardless — accepted behavior.
+        """
+        session = self._make_stuck_dev_session(
+            project_key="valor",
+            agent_session_id="race-1",
+        )
+
+        def _set_progress_then_record(entry, new_status, **_):
+            # Simulate a concurrent progress write landing on the in-memory
+            # entry mid-recovery. The status CAS does not inspect progress
+            # fields, so the transition still proceeds.
+            entry.turn_count = 1
+
+        mock_finalize = MagicMock()
+        mock_transition = MagicMock(side_effect=_set_progress_then_record)
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def _ctx():
+            import models.session_lifecycle as lifecycle_mod
+
+            orig_f = lifecycle_mod.finalize_session
+            orig_t = lifecycle_mod.transition_status
+            lifecycle_mod.finalize_session = mock_finalize
+            lifecycle_mod.transition_status = mock_transition
+            try:
+                yield
+            finally:
+                lifecycle_mod.finalize_session = orig_f
+                lifecycle_mod.transition_status = orig_t
+
+        live_worker = MagicMock(done=MagicMock(return_value=False))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
+            patch("agent.agent_session_queue._ensure_worker"),
+            _ctx(),
+        ):
+            mock_cls.query.filter.return_value = [session]
+            from agent.agent_session_queue import _agent_session_health_check
+
+            await _agent_session_health_check()
+
+        mock_transition.assert_called_once()
+        assert mock_transition.call_args[0][1] == "pending"
+        mock_finalize.assert_not_called()

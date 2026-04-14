@@ -1350,6 +1350,28 @@ def _get_agent_session_timeout(session) -> int:
     return AGENT_SESSION_TIMEOUT_DEFAULT
 
 
+def _has_progress(entry: AgentSession) -> bool:
+    """Return True iff the session shows any signal that real work has begun.
+
+    Three fields cover the SDK subprocess warmup arc from auth to first turn:
+    - ``claude_session_uuid`` is populated when the SDK subprocess authenticates
+      with the Claude API (seconds after launch, long before the first turn).
+    - ``log_path`` is written once the session emits its first log entry
+      (typically on the first tool call).
+    - ``turn_count`` increments on each full agent turn completion.
+
+    Any one of the three is sufficient evidence that the session is in flight.
+    Used by ``_agent_session_health_check`` to distinguish stuck slugless dev
+    sessions (worker_alive via a co-running PM, but no progress) from healthy
+    long-warmup BUILD sessions. See issue #944.
+    """
+    return (
+        (entry.turn_count or 0) > 0
+        or bool((entry.log_path or "").strip())
+        or bool(entry.claude_session_uuid)
+    )
+
+
 async def _agent_session_health_check() -> None:
     """Health check for worker-managed sessions (running and pending).
 
@@ -1361,11 +1383,16 @@ async def _agent_session_health_check() -> None:
 
     For RUNNING sessions:
     1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover.
-    2. If exceeded timeout: recover regardless of worker state.
-    3. Legacy sessions without started_at and no worker: recover.
+    2. If worker appears alive but running > AGENT_SESSION_HEALTH_MIN_RUNNING AND
+       the session has no progress signal (``turn_count``, ``log_path``,
+       ``claude_session_uuid`` all empty): recover. Slugless dev sessions share
+       ``worker_key`` with co-running PM sessions, so ``worker_alive`` alone
+       does not prove the dev session is being handled (#944).
+    3. If exceeded timeout: recover regardless of worker state.
+    4. Legacy sessions without started_at and no worker: recover.
 
     For PENDING sessions:
-    4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
+    5. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
     **Delivery guard (#918):** Before recovering a running session to pending,
@@ -1420,6 +1447,21 @@ async def _agent_session_health_check() -> None:
                         int(running_seconds) if running_seconds else "?",
                         AGENT_SESSION_HEALTH_MIN_RUNNING,
                     )
+            # Project-keyed dev sessions share worker_key with PM; without a
+            # progress signal, worker_alive alone doesn't prove the dev session
+            # is being handled (#944).
+            elif (
+                running_seconds is not None
+                and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
+                and not _has_progress(entry)
+            ):
+                should_recover = True
+                reason = (
+                    f"worker alive but no progress signal, running for "
+                    f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, "
+                    f"turn_count={entry.turn_count}, log_path={entry.log_path!r}, "
+                    f"claude_session_uuid={entry.claude_session_uuid!r})"
+                )
             elif started_ts is not None:
                 timeout = _get_agent_session_timeout(entry)
                 if running_seconds is not None and running_seconds > timeout:
@@ -1427,6 +1469,25 @@ async def _agent_session_health_check() -> None:
                     reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
 
             if should_recover:
+                # O1: observability counter — classify the recovery reason and
+                # increment a project-scoped Redis counter for dashboards.
+                # Failure to write the counter must never block recovery.
+                try:
+                    if "no progress signal" in reason:
+                        _reason_kind = "no_progress"
+                    elif "exceeded timeout" in reason:
+                        _reason_kind = "timeout"
+                    else:
+                        _reason_kind = "worker_dead"
+                    from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+                    _R.incr(f"{entry.project_key}:session-health:recoveries:{_reason_kind}")
+                except Exception as _counter_err:
+                    logger.debug(
+                        "[session-health] recovery counter increment failed (non-fatal): %s",
+                        _counter_err,
+                    )
+
                 # Guard: if response was already delivered, finalize instead
                 # of recovering to pending (prevents duplicate delivery, #918)
                 if getattr(entry, "response_delivered_at", None) is not None:
