@@ -134,8 +134,6 @@ async def test_classify_terminus_acknowledgment_fires_after_bot_check():
 @pytest.mark.asyncio
 async def test_classify_terminus_ollama_failure_defaults_to_respond(monkeypatch):
     """When both Ollama and Haiku fail, classifier returns RESPOND (conservative)."""
-    import anthropic
-
     # Patch Ollama to raise
     monkeypatch.setattr(routing, "OLLAMA_LOCAL_MODEL", "nonexistent-model-xyz")
     # Patch Haiku to raise (return no API key)
@@ -166,7 +164,6 @@ async def test_classify_terminus_bot_react_collapses_to_silent(monkeypatch):
     # Force the LLM path to return REACT by making Ollama return it
     # We do this by making both Ollama and Haiku unavailable so fallback = RESPOND,
     # but test the collapse logic directly using a monkeypatched inner helper.
-    import anthropic as _anthropic
 
     # Simulate Ollama returning "REACT"
     class FakeOllamaResponse:
