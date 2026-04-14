@@ -137,13 +137,20 @@ class TestBridgeDispatchContract:
         record_line: int | None = None
         for call in _direct_calls(fn):
             f = call.func
-            name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+            if isinstance(f, ast.Name):
+                name = f.id
+            elif isinstance(f, ast.Attribute):
+                name = f.attr
+            else:
+                name = None
             if name == "enqueue_agent_session" and enqueue_line is None:
                 enqueue_line = call.lineno
             elif name == "record_message_processed" and record_line is None:
                 record_line = call.lineno
         assert enqueue_line is not None, "dispatch_telegram_session must call enqueue_agent_session"
-        assert record_line is not None, "dispatch_telegram_session must call record_message_processed"
+        assert record_line is not None, (
+            "dispatch_telegram_session must call record_message_processed"
+        )
         assert enqueue_line < record_line, (
             f"dispatch_telegram_session must call enqueue_agent_session "
             f"BEFORE record_message_processed (got enqueue at line "
@@ -191,7 +198,15 @@ class client:
 async def handler(event):
     # routes through the wrapper; no banned direct call
     from bridge.dispatch import dispatch_telegram_session
-    await dispatch_telegram_session(project_key='x', session_id='y', telegram_message_id=1, chat_id='c', working_dir='', message_text='', sender_name='')
+    await dispatch_telegram_session(
+        project_key='x',
+        session_id='y',
+        telegram_message_id=1,
+        chat_id='c',
+        working_dir='',
+        message_text='',
+        sender_name='',
+    )
 """
         tree = ast.parse(clean_source)
         handler = _find_telethon_handler(tree)
@@ -224,10 +239,7 @@ async def handler(event):
         handler = _find_telethon_handler(tree)
         assert handler is not None
         hits = _banned_calls_in(handler)
-        assert hits == [], (
-            f"walker must not descend into nested FunctionDef; "
-            f"spurious hits: {hits}"
-        )
+        assert hits == [], f"walker must not descend into nested FunctionDef; spurious hits: {hits}"
 
 
 class TestDedupWarningLogging:
@@ -235,8 +247,6 @@ class TestDedupWarningLogging:
 
     def test_record_logs_warning_on_redis_failure(self, caplog):
         import logging
-
-        import pytest
         from unittest.mock import patch
 
         from bridge.dedup import record_message_processed
@@ -254,7 +264,8 @@ class TestDedupWarningLogging:
         asyncio.run(_run())
 
         warnings = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.levelno == logging.WARNING and "dedup record failed" in r.getMessage()
         ]
         assert warnings, (
