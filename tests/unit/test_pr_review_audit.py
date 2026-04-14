@@ -1,18 +1,27 @@
 """Tests for PR review audit reflection step (step 20).
 
 Tests the finding parser, severity classification, address detection,
-issue body formatting, and step registration.
+issue body formatting, and PRReviewAudit model interface.
+
+Previously tested ReflectionRunner step registration — those tests are
+removed because ReflectionRunner (scripts/reflections.py) was deleted
+as part of issue #748. The helpers now live in reflections/auditing.py.
 """
 
 from __future__ import annotations
 
-from scripts.reflections import (
+from reflections.auditing import (
     SEVERITY_LABELS,
     SEVERITY_MAP,
-    ReflectionRunner,
-    check_finding_addressed,
-    format_audit_issue_body,
-    parse_review_findings,
+)
+from reflections.auditing import (
+    _check_finding_addressed as check_finding_addressed,
+)
+from reflections.auditing import (
+    _format_audit_issue_body as format_audit_issue_body,
+)
+from reflections.auditing import (
+    _parse_review_findings as parse_review_findings,
 )
 
 # --- parse_review_findings tests ---
@@ -119,7 +128,7 @@ class TestParseReviewFindings:
         findings = parse_review_findings(body)
         assert len(findings) == 2
 
-        # Simulate key generation as done in step_20_pr_review_audit
+        # Simulate key generation as done in run_pr_review_audit
         repo = "owner/repo"
         pr_number = 42
         comment_id = 999
@@ -242,7 +251,6 @@ class TestFormatAuditIssueBody:
         assert "No rate limiting" in body
         assert "Add rate limiter" in body
         assert "Critical" in body
-        assert "step 20" in body
 
     def test_multiple_severities_grouped(self):
         findings = [
@@ -279,46 +287,6 @@ class TestFormatAuditIssueBody:
         body = format_audit_issue_body(3, "PR title", "https://url", findings)
         assert "Some issue" in body
         assert "Standard" in body
-
-
-# --- ReflectionRunner registration tests ---
-
-
-class TestReflectionsStateDryRun:
-    """Verify dry_run is a proper public field on ReflectionsState."""
-
-    def test_dry_run_default_false(self):
-        from scripts.reflections import ReflectionsState
-
-        state = ReflectionsState()
-        assert state.dry_run is False
-
-    def test_dry_run_settable(self):
-        from scripts.reflections import ReflectionsState
-
-        state = ReflectionsState()
-        state.dry_run = True
-        assert state.dry_run is True
-
-
-class TestStepRegistration:
-    def test_pr_review_audit_registered(self):
-        """PR Review Audit step must be in the steps list."""
-        runner = ReflectionRunner()
-        step_keys = [s[0] for s in runner.steps]
-        assert "pr_review_audit" in step_keys
-
-    def test_pr_review_audit_name(self):
-        runner = ReflectionRunner()
-        step = [s for s in runner.steps if s[0] == "pr_review_audit"][0]
-        assert step[1] == "PR Review Audit"
-
-    def test_pr_review_audit_callable(self):
-        runner = ReflectionRunner()
-        step = [s for s in runner.steps if s[0] == "pr_review_audit"][0]
-        import asyncio
-
-        assert asyncio.iscoroutinefunction(step[2])
 
 
 # --- PRReviewAudit model tests ---

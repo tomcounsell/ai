@@ -15,6 +15,10 @@ from unittest.mock import patch
 
 import pytest
 
+from reflections.session_intelligence import (
+    _analyze_sessions_from_redis as analyze_sessions_from_redis,
+)
+
 # ===================================================================
 # sdk_client.py: error summary in crash guard
 # ===================================================================
@@ -98,8 +102,6 @@ class TestReflectionsEmptySummaryGuard:
         self, mock_agent_session, mock_bridge_event, caplog
     ):
         """Failed sessions with empty summary are skipped with a warning."""
-        from scripts.reflections import analyze_sessions_from_redis
-
         session = self._make_session("sess-empty", "failed", summary="", started_at=1710000000)
         mock_agent_session.query.all.return_value = [session]
         mock_bridge_event.query.filter.return_value = []
@@ -116,8 +118,6 @@ class TestReflectionsEmptySummaryGuard:
     @patch("models.agent_session.AgentSession")
     def test_skips_none_summary_failed_session(self, mock_agent_session, mock_bridge_event, caplog):
         """Failed sessions with None summary are skipped."""
-        from scripts.reflections import analyze_sessions_from_redis
-
         session = self._make_session("sess-none", "failed", summary=None, started_at=1710000000)
         mock_agent_session.query.all.return_value = [session]
         mock_bridge_event.query.filter.return_value = []
@@ -132,8 +132,6 @@ class TestReflectionsEmptySummaryGuard:
     @patch("models.agent_session.AgentSession")
     def test_includes_nonempty_summary_failed_session(self, mock_agent_session, mock_bridge_event):
         """Failed sessions with a populated summary are included normally."""
-        from scripts.reflections import analyze_sessions_from_redis
-
         session = self._make_session(
             "sess-good", "failed", summary="ConnectionError: Redis refused", started_at=1710000000
         )
@@ -150,8 +148,6 @@ class TestReflectionsEmptySummaryGuard:
     @patch("models.agent_session.AgentSession")
     def test_skips_whitespace_only_summary(self, mock_agent_session, mock_bridge_event, caplog):
         """Failed sessions with whitespace-only summary are skipped."""
-        from scripts.reflections import analyze_sessions_from_redis
-
         session = self._make_session("sess-ws", "failed", summary="   \n  ", started_at=1710000000)
         mock_agent_session.query.all.return_value = [session]
         mock_bridge_event.query.filter.return_value = []
