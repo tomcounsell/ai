@@ -238,6 +238,10 @@ def retrieve_memories(
             except Exception:
                 continue
 
+        # Filter out superseded records — archived memories remain in Redis for audit
+        # but must not surface in recall. Handles both "" and None safely.
+        records = [r for r in records if not r.superseded_by]
+
         # Analytics: record recall attempt with hit count
         try:
             from analytics.collector import record_metric

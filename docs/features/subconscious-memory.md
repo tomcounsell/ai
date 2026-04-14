@@ -240,6 +240,78 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 |-----------|-------------|-----------|--------|
 | Prompt ingestion (auto-save user input) | Yes (UserPromptSubmit hook) | No (Telegram messages only) | Add ingestion hook or equivalent to SDK path |
 
+## Memory Consolidation
+
+The nightly `memory-dedup` reflection runs LLM-based semantic consolidation to prevent the memory store from accumulating near-duplicate entries and contradictions over time.
+
+### Problem
+
+Four write paths (human Telegram messages at 6.0 importance, post-session Haiku extraction at 1.0–4.0, intentional saves at 7.0–8.0, post-merge learning at 7.0) produce records without any dedup beyond hash equality. The same correction phrased differently across sessions — "don't mock the DB" / "use real integration tests" / "mocks burned us last quarter" — accumulates as three separate records that should be one.
+
+### `superseded_by` and `superseded_by_rationale` Fields
+
+Two additive `StringField(default="")` fields on the `Memory` model track consolidation state:
+
+| Field | Empty = | Non-empty = |
+|-------|---------|-------------|
+| `superseded_by` | Active record | `memory_id` of the merged replacement |
+| `superseded_by_rationale` | Not superseded | One-sentence rationale from Haiku explaining the merge |
+
+Original records are **never deleted** — they remain in Redis for audit. The recall pipeline excludes superseded records via a one-line filter in `retrieve_memories()`:
+
+```python
+records = [r for r in records if not r.superseded_by]
+```
+
+To re-activate a superseded record, clear its `superseded_by` field. The ExistenceFilter bloom is not modified — superseded records remain in the bloom (false positives are harmless; the full retrieval step filters them out).
+
+### Consolidation Algorithm
+
+`scripts/memory_consolidation.py::run_consolidation()` is the reflection callable:
+
+1. Load all active Memory records for the project (`superseded_by == ""`).
+2. Group by `metadata.category` and `metadata.tags` overlap. Batches capped at 50 records.
+3. Call Claude Haiku per batch with a structured prompt. Haiku returns merge/flag-contradiction JSON.
+4. Validate: reject merges with `importance >= 7.0`, fewer than 2 IDs, or unknown IDs.
+5. **Dry-run mode (default):** log proposed actions to `logs/reflections.log`, no Redis writes.
+6. **Apply mode:** write merged record via `Memory.safe_save(agent_id="consolidation", source="system")`, then mark originals superseded. Guard `m.save()` return value — `WriteFilterMixin` may return `False` silently.
+7. Contradictions: send Telegram notification via `valor-telegram send`; fall back to `logs/memory-contradictions.log` if bridge is down.
+
+### Safety Rails
+
+| Rail | Value |
+|------|-------|
+| Importance exemption | Records with `importance >= 7.0` are never merged |
+| Max merges per run | 10 (`MAX_MERGES_PER_RUN`) |
+| Dry-run default | `dry_run=True` — 14-day observe-only period before enabling apply |
+| Contradiction handling | Flag-only, never auto-resolved |
+| Canary set | 10 hand-curated corrections tested automatically (see `tests/unit/test_memory_consolidation.py`) |
+
+### Rollout Phases
+
+- **Phase 0 (current):** Dry-run mode. Review `logs/reflections.log` daily for proposed merges.
+- **Phase 1 (≥95% human agreement):** Enable apply mode by passing `apply=True` or `--apply` flag.
+- **Phase 2 (30-day audit):** Verify all `importance >= 7.0` records still exist (possibly superseded but retrievable).
+
+### Manual Invocation
+
+```bash
+# Observe proposed merges (safe, no writes)
+python scripts/memory_consolidation.py --dry-run
+
+# Apply merges (use after 14-day dry-run review)
+python scripts/memory_consolidation.py --apply
+
+# Target a specific project
+python scripts/memory_consolidation.py --dry-run --project-key valor
+```
+
+### Reversibility
+
+To disable consolidation: remove the `memory-dedup` entry from `config/reflections.yaml`. Superseded records remain in Redis and can be re-activated by clearing their `superseded_by` field. No records are ever deleted by this feature.
+
+Pruning of superseded records is delegated to the future `memory-decay-prune` reflection slot from issue #748.
+
 ## Key Files
 
 | File | Purpose |
@@ -247,7 +319,8 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 | `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer) |
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
-| `agent/memory_retrieval.py` | BM25 + RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, ranked signal accessors |
+| `agent/memory_retrieval.py` | BM25 + RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, ranked signal accessors. Includes superseded-by filter to exclude archived records from recall. |
+| `scripts/memory_consolidation.py` | Nightly `memory-dedup` reflection callable: `run_consolidation(project_key=None, dry_run=True, max_merges=10)`. Haiku-based semantic dedup with dry-run/apply modes, rate cap, importance exemption, and contradiction flagging. |
 | `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
@@ -361,6 +434,8 @@ The memory system has high reversibility:
 
 No schema migrations are involved. Redis keys can be flushed without side effects.
 
+**Consolidation reversibility:** Superseded records (marked by the `memory-dedup` reflection) are never deleted. To re-activate a superseded record, clear its `superseded_by` field. Remove the `memory-dedup` entry from `config/reflections.yaml` to stop future consolidation runs.
+
 ## Tracking
 
 - Issue: [#514](https://github.com/tomcounsell/ai/issues/514)
@@ -371,3 +446,4 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Trigger training: [#613](https://github.com/tomcounsell/ai/issues/613) -- LLM-judged outcome detection, outcome history, act rate tracking
 - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)
 - Project key isolation: [#811](https://github.com/tomcounsell/ai/issues/811) (PR [#820](https://github.com/tomcounsell/ai/pull/820)) -- DEFAULT_PROJECT_KEY changed from "dm" to "default", cwd threading, migration script
+- Memory consolidation: [#795](https://github.com/tomcounsell/ai/issues/795) -- `memory-dedup` reflection, `superseded_by` fields, recall filter, semantic dedup via Haiku

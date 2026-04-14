@@ -321,6 +321,7 @@ class TestRetrieveMemories:
 
         mock_record = MagicMock()
         mock_record.memory_id = "test-123"
+        mock_record.superseded_by = ""  # active record, must pass superseded filter
 
         bm25_results = [("Memory:test-123:proj", 5.0)]
         relevance_results = [("Memory:test-123:proj", 1000.0)]
@@ -348,6 +349,7 @@ class TestRetrieveMemories:
 
         mock_record = MagicMock()
         mock_record.memory_id = "test-123"
+        mock_record.superseded_by = ""  # active
 
         key = "Memory:test-123:proj"
         bm25_results = [(key, 5.0)]
@@ -374,6 +376,7 @@ class TestRetrieveMemories:
 
         mock_record = MagicMock()
         mock_record.memory_id = "test-456"
+        mock_record.superseded_by = ""  # active
 
         key = "Memory:test-456:proj"
         relevance_results = [(key, 1000.0)]
@@ -412,6 +415,7 @@ class TestRetrieveMemories:
 
         mock_record = MagicMock()
         mock_record.memory_id = "test-789"
+        mock_record.superseded_by = ""  # active
 
         key = "Memory:test-789:proj"
 
@@ -454,6 +458,7 @@ class TestRetrieveMemories:
 
         mock_record = MagicMock()
         mock_record.memory_id = "owned"
+        mock_record.superseded_by = ""  # active
 
         # BM25 returns results from two projects -- only projA should survive
         bm25_results = [
@@ -491,6 +496,7 @@ class TestRetrieveMemories:
 
         owned_record = MagicMock()
         owned_record.memory_id = "owned"
+        owned_record.superseded_by = ""  # active
 
         # BM25 returns global results including foreign project
         bm25_results = [
@@ -524,3 +530,72 @@ class TestRetrieveMemories:
         hydrated_keys = [call.args[0] for call in mock_memory_cls.query.get.call_args_list]
         assert len(hydrated_keys) == 1
         assert "projA" in hydrated_keys[0]
+
+
+class TestSupersededFilter:
+    """Test that superseded records are excluded from retrieve_memories() results."""
+
+    def test_superseded_records_excluded_from_recall(self):
+        """Records with non-empty superseded_by must not appear in results."""
+        from agent.memory_retrieval import retrieve_memories
+
+        active_record = MagicMock()
+        active_record.memory_id = "active-id"
+        active_record.superseded_by = ""  # active
+
+        superseded_record = MagicMock()
+        superseded_record.memory_id = "superseded-id"
+        superseded_record.superseded_by = "active-id"  # archived
+
+        key_active = "Memory:agent:testproj:active-id"
+        key_superseded = "Memory:agent:testproj:superseded-id"
+
+        bm25_results = [(key_active, 0.8), (key_superseded, 0.7)]
+
+        def mock_get(key):
+            if key == key_active:
+                return active_record
+            if key == key_superseded:
+                return superseded_record
+            return None
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.side_effect = mock_get
+
+            result = retrieve_memories("test query", "testproj", limit=10)
+
+        # Only the active record should be returned; superseded filtered out
+        result_ids = [r.memory_id for r in result]
+        assert "active-id" in result_ids
+        assert "superseded-id" not in result_ids
+
+    def test_none_superseded_by_treated_as_active(self):
+        """Records with superseded_by=None are treated as active (falsy check)."""
+        from agent.memory_retrieval import retrieve_memories
+
+        none_superseded_record = MagicMock()
+        none_superseded_record.memory_id = "none-superseded-id"
+        none_superseded_record.superseded_by = None  # falsy → treated as active
+
+        key = "Memory:agent:testproj:none-superseded-id"
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = [(key, 0.9)]
+            mock_memory_cls.query.get.return_value = none_superseded_record
+
+            result = retrieve_memories("test query", "testproj", limit=10)
+
+        # None superseded_by is falsy -> treated as active, should be included
+        result_ids = [r.memory_id for r in result]
+        assert "none-superseded-id" in result_ids
