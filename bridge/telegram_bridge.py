@@ -1413,6 +1413,15 @@ async def main():
                         # YouTube, and link summaries. The reply-chain step is
                         # idempotent against the header this handler already
                         # prepended (see agent_session_queue enrichment).
+                        # Plan IN-1: when the handler successfully hydrated the
+                        # reply chain, stamp an explicit reply_chain_hydrated
+                        # flag on extra_context. The deferred enrichment
+                        # consults this flag first (primary guard) and falls
+                        # back to the REPLY_THREAD_CONTEXT_HEADER substring
+                        # check (defensive). Belt-and-suspenders.
+                        _completed_extra_overrides: dict | None = None
+                        if reply_chain_context:
+                            _completed_extra_overrides = {"reply_chain_hydrated": True}
                         await enqueue_agent_session(
                             project_key=project_key,
                             session_id=session_id,
@@ -1426,6 +1435,7 @@ async def main():
                             sender_id=sender_id,
                             telegram_message_key=stored_msg_id,
                             project_config=project,
+                            extra_context_overrides=_completed_extra_overrides,
                         )
                         logger.info(
                             f"[{project_name}] Resumed completed session "
@@ -1826,13 +1836,11 @@ async def main():
             )
             enqueued_message_text = f"{context_directive}\n\n{clean_text}"
             logger.info(
-                "implicit_context_directive_injected",
-                extra={
-                    "session_id": session_id,
-                    "chat_id": telegram_chat_id,
-                    "matched_patterns": matched_patterns,
-                    "text_preview": clean_text[:80],
-                },
+                "implicit_context_directive_injected "
+                f"session_id={session_id} "
+                f"chat_id={telegram_chat_id} "
+                f"matched_patterns={matched_patterns} "
+                f"text_preview={clean_text[:80]!r}"
             )
 
         # Enqueue: session_type drives PM vs Dev session creation.

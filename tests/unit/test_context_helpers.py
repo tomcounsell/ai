@@ -187,10 +187,7 @@ class TestBuildCompletedResumeText:
         from bridge.telegram_bridge import _build_completed_resume_text
 
         result = _build_completed_resume_text(self._fake_session(None), "hi")
-        assert (
-            "[Prior session context: This continues a previously completed session.]"
-            in result
-        )
+        assert "[Prior session context: This continues a previously completed session.]" in result
         assert result.endswith("hi")
 
     def test_reply_chain_appears_between_summary_and_follow_up(self):

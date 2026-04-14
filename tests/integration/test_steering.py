@@ -932,9 +932,11 @@ class TestResolveRootSessionId:
         # Exactly one header — Race 1 / IN-1 guard
         assert with_chain.count(REPLY_THREAD_CONTEXT_HEADER) == 1
         # Order: summary -> chain -> follow_up
-        assert with_chain.index("[Prior session context:") < with_chain.index(
-            REPLY_THREAD_CONTEXT_HEADER
-        ) < with_chain.index(follow_up_text)
+        assert (
+            with_chain.index("[Prior session context:")
+            < with_chain.index(REPLY_THREAD_CONTEXT_HEADER)
+            < with_chain.index(follow_up_text)
+        )
 
     @pytest.mark.asyncio
     async def test_reply_to_completed_session_fallback_without_summary(self):
@@ -1017,28 +1019,47 @@ class TestResolveRootSessionId:
         assert "can you verify" in augmented
 
     def test_no_double_hydration_when_handler_prehydrates(self):
-        """Race 1 / IN-7: if handler prepended the canonical header, the deferred
-        enrichment short-circuits and does not add a second one.
+        """Race 1 / IN-1 / IN-7: belt-and-suspenders idempotency guard.
 
-        Guards the idempotency check in agent/agent_session_queue.py against
-        being accidentally removed or re-ordered.
+        The deferred enrichment must skip the reply-chain fetch when either:
+          - Primary:   extra_context["reply_chain_hydrated"] flag is set by
+                       the bridge handler at enqueue time.
+          - Defensive: REPLY_THREAD_CONTEXT_HEADER substring is present in
+                       message_text.
+
+        Guards both the flag-based and header-based checks in
+        agent/agent_session_queue.py against being accidentally removed or
+        re-ordered. Also guards the bridge handler call site against
+        regressing on the extra_context stamp.
         """
-        from bridge.context import REPLY_THREAD_CONTEXT_HEADER
-
-        # Read the source and assert the guard is in place. This is a
-        # structural test -- simulating the full worker path would pull in
-        # Claude SDK / Popoto queues. The guard is a handful of lines and
-        # regresses only by deletion, which this test catches.
         import pathlib
 
-        src = pathlib.Path(__file__).resolve().parents[2] / "agent" / "agent_session_queue.py"
-        content = src.read_text()
-        assert "REPLY_THREAD_CONTEXT_HEADER" in content, (
-            "Idempotency guard removed — reply chain may double-hydrate"
+        from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+
+        # Read the source and assert the guards are in place. This is a
+        # structural test -- simulating the full worker path would pull in
+        # Claude SDK / Popoto queues. The guards are a handful of lines and
+        # regress only by deletion, which this test catches.
+        queue_src = pathlib.Path(__file__).resolve().parents[2] / "agent" / "agent_session_queue.py"
+        queue_content = queue_src.read_text()
+        assert "REPLY_THREAD_CONTEXT_HEADER" in queue_content, (
+            "Defensive header guard removed — reply chain may double-hydrate"
+        )
+        assert "reply_chain_hydrated" in queue_content, (
+            "Primary flag guard (IN-1 belt-and-suspenders) removed from worker enrichment"
         )
         # Must do the check AGAINST enrich_reply_to_msg_id so the fetch is skipped
-        assert "enrich_reply_to_msg_id = None" in content
+        assert "enrich_reply_to_msg_id = None" in queue_content
         assert REPLY_THREAD_CONTEXT_HEADER  # sanity check the import
+
+        # The bridge handler must stamp the primary flag when it hydrates
+        # the reply chain synchronously on the resume-completed branch.
+        bridge_src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        bridge_content = bridge_src.read_text()
+        assert '"reply_chain_hydrated": True' in bridge_content, (
+            "Handler stopped stamping reply_chain_hydrated=True on extra_context — "
+            "primary IN-1 guard is no longer populated"
+        )
 
     def test_implicit_context_directive_injected(self):
         """Plan Change C: messages that reference prior context without reply-to
