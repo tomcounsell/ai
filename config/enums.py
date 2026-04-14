@@ -28,6 +28,7 @@ class PersonaType(StrEnum):
     DEVELOPER = "developer"
     PROJECT_MANAGER = "project-manager"
     TEAMMATE = "teammate"
+    CUSTOMER_SERVICE = "customer-service"
 
 
 class ClassificationType(StrEnum):

@@ -1883,6 +1883,7 @@ async def get_agent_response_sdk(
     # PM sessions orchestrate via dev-session subagent
     _session_type = None
     _session_model = None
+    _session_extra_context: dict = {}
     if session_id:
         try:
             from models.agent_session import AgentSession as _AgentSession
@@ -1891,6 +1892,7 @@ async def get_agent_response_sdk(
             if _sessions:
                 _session_type = getattr(_sessions[0], "session_type", None)
                 _session_model = getattr(_sessions[0], "model", None)
+                _session_extra_context = getattr(_sessions[0], "extra_context", None) or {}
         except Exception:
             pass
 
@@ -2253,6 +2255,14 @@ async def get_agent_response_sdk(
         persona = PersonaType.PROJECT_MANAGER
     elif _session_type == SessionType.TEAMMATE:
         persona = PersonaType.TEAMMATE
+        # Email sessions may use a project-specific persona (e.g. customer-service)
+        if _session_extra_context.get("transport") == "email" and project:
+            _email_persona_str = project.get("email", {}).get("persona", "")
+            if _email_persona_str and _email_persona_str != "teammate":
+                try:
+                    persona = PersonaType(_email_persona_str)
+                except ValueError:
+                    pass  # Unknown persona value — stay with TEAMMATE
     else:
         persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
@@ -2285,6 +2295,16 @@ async def get_agent_response_sdk(
         elif project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
+        elif persona == PersonaType.CUSTOMER_SERVICE:
+            # Customer-service persona: action-oriented, can run tools/skills, no code writes
+            try:
+                custom_system_prompt = load_persona_prompt("customer-service")
+            except FileNotFoundError:
+                logger.warning("Customer-service persona not available, falling back to teammate")
+                try:
+                    custom_system_prompt = load_persona_prompt("teammate")
+                except FileNotFoundError:
+                    pass
         elif persona == PersonaType.TEAMMATE:
             # Teammate persona: casual mode, no WORKER_RULES
             try:
