@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/946
 last_comment_id:
+revision_applied: true
 ---
 
 # Email Bridge: Fix OutputHandler Registration for Domain-Only Projects
@@ -47,7 +48,7 @@ threading.
 
 **Active plans in `docs/plans/` overlapping this area:** none
 
-**Notes:** All cited line numbers and code claims remain accurate against current main.
+**Notes:** All cited line numbers and code claims remain accurate against current main. Post-critique discovery: `build_email_to_project_map()` in `bridge/routing.py` was updated to return `tuple[dict, dict]` at some point after the tests were written — 9/15 `TestBuildEmailToProjectMap` tests now fail with `TypeError: tuple indices must be integers or slices, not str`. These pre-existing failures must be fixed as part of this plan's build step.
 
 ## Prior Art
 
@@ -128,22 +129,42 @@ if email_cfg.get("contacts") or email_cfg.get("domains"):
 This is the narrow fix preferred over unconditional registration — it preserves the audit
 signal that a project expects email routing, and keeps the log message informative.
 
-**New unit tests in `tests/unit/test_worker_startup.py`:**
-- Project with `email.contacts` only → handler registered (regression guard for current behavior)
-- Project with `email.domains` only → handler registered (the failing case)
-- Project with both contacts and domains → handler registered
-- Project with neither → handler NOT registered
-- Project with empty dicts `{"email": {"contacts": {}, "domains": []}}` → NOT registered
+**New unit tests in `tests/unit/test_worker_startup.py` — isolation strategy:**
+
+The test must target only the gate condition, not the full worker startup. The narrowest approach is to extract the condition into a testable helper:
+```python
+def _should_register_email_handler(project_cfg: dict) -> bool:
+    email_cfg = project_cfg.get("email", {}) or {}
+    return bool(email_cfg.get("contacts") or email_cfg.get("domains"))
+```
+Tests call this helper directly — no Redis, no worker imports, no callback dict pollution. This avoids the cross-test bleeding that arises when `register_callbacks()` writes into module-level dicts `_send_callbacks` and `_reaction_callbacks` in `agent/agent_session_queue.py`. If the builder prefers testing `register_callbacks()` directly instead, each test must add `monkeypatch.setattr("agent.agent_session_queue._send_callbacks", {})` in a fixture to reset state.
+
+Tests to cover:
+- Project with `email.contacts` only → `True` (regression guard for current behavior)
+- Project with `email.domains` only → `True` (the failing case)
+- Project with both contacts and domains → `True`
+- Project with neither → `False`
+- Project with empty dicts `{"email": {"contacts": {}, "domains": []}}` → `False`
+- Project with `"email": None` → `False` (the `or {}` guard)
 
 **Extended domain tests in `tests/unit/test_email_routing.py`:**
-- `build_email_to_project_map()` returns correct domain_map for domain-only projects
-- `find_project_for_email()` domain fallback lookup works correctly
-  (Note: `test_email_routing.py` currently only tests contacts; domain path is untested)
+
+After fixing the 9 broken `TestBuildEmailToProjectMap` tests (tuple unpacking), add:
+- `build_email_to_project_map()` returns correct domain_map for domain-only projects (assert `domain_map["psyoptimal.com"]["_key"] == "psyoptimal"`)
+- `build_email_to_project_map()` returns empty addr_map and populated domain_map when only domains configured
+- `find_project_for_email()` domain fallback: use `monkeypatch.setattr(routing_module, "EMAIL_DOMAIN_TO_PROJECT", {"psyoptimal.com": project})` and verify sender from `@psyoptimal.com` resolves to the project
 
 **Integration test extension in `tests/integration/test_email_bridge.py`:**
-- New test class `TestDomainRoutedEmailReply` covering:
-  - Domain-routed sender → `EmailOutputHandler._send_smtp` called once with correct `To`, `In-Reply-To`, `Re:` subject
-  - Regression guard: "No bridge callbacks registered" log line NOT emitted for email sessions
+
+Patch strategy: mirror the existing `test_email_bridge.py` pattern for contacts (`EMAIL_TO_PROJECT`), but for domains:
+```python
+monkeypatch.setattr(routing_module, "EMAIL_DOMAIN_TO_PROJECT", {"psyoptimal.com": domain_project})
+```
+This ensures the actual domain lookup code path in `find_project_for_email()` is exercised, not a mocked-too-early shortcut. A separate unit test in `test_worker_startup.py` validates the registration gate; the integration test validates the outbound path once routing works.
+
+New test class `TestDomainRoutedEmailReply` covering:
+- Domain-routed sender → `EmailOutputHandler._send_smtp` called once with correct `To`, `In-Reply-To`, `Re:` subject
+- Regression guard: "No bridge callbacks registered" log line NOT emitted for email sessions
 
 **Callback resolution test in `tests/unit/test_agent_session_queue.py`:**
 - `register_callbacks("proj", transport="email", handler=h)` then `_resolve_callbacks("proj", "email")` returns `(h.send, h.react)`
@@ -167,7 +188,7 @@ signal that a project expects email routing, and keeps the log message informati
 
 ## Test Impact
 
-- [ ] `tests/unit/test_email_routing.py` — UPDATE: add domain-map tests (currently no domain test coverage); existing contact tests unaffected
+- [ ] `tests/unit/test_email_routing.py` — FIX + UPDATE: **9 of 15 tests in `TestBuildEmailToProjectMap` are currently failing on main** because `build_email_to_project_map()` now returns `tuple[dict, dict]` (addr_map, domain_map) but all tests treat the return as a single `dict`. Every call must be unpacked: `addr_map, domain_map = build_email_to_project_map(config)`. Assertions on contact tests use `addr_map`; new domain tests assert against `domain_map`. The `test_returns_empty_dict_for_empty_config` test becomes `assert addr_map == {} and domain_map == {}`. After fixing the 9 broken tests, add new domain-map tests for `build_email_to_project_map()` with `email.domains` config.
 - [ ] `tests/integration/test_email_bridge.py` — UPDATE: add `TestDomainRoutedEmailReply` class; existing tests unaffected
 - [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add transport-keyed callback resolution tests; existing tests unaffected
 
@@ -253,14 +274,15 @@ The fix is entirely within the worker's initialization path.
 ### 1. Apply Fix and Write Tests
 - **Task ID**: build-fix
 - **Depends On**: none
-- **Validates**: tests/unit/test_worker_startup.py (create), tests/unit/test_email_routing.py (update), tests/integration/test_email_bridge.py (update), tests/unit/test_agent_session_queue.py (update)
+- **Validates**: tests/unit/test_worker_startup.py (create), tests/unit/test_email_routing.py (fix + update), tests/integration/test_email_bridge.py (update), tests/unit/test_agent_session_queue.py (update)
 - **Assigned To**: worker-fix-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Change `worker/__main__.py:237-238` to widen the gate condition
-- Create `tests/unit/test_worker_startup.py` with all four registration permutations
-- Add domain tests to `tests/unit/test_email_routing.py`
-- Add `TestDomainRoutedEmailReply` to `tests/integration/test_email_bridge.py`
+- **Fix 9 broken `TestBuildEmailToProjectMap` tests** in `tests/unit/test_email_routing.py`: unpack tuple return (`addr_map, domain_map = build_email_to_project_map(config)`) in all 9 failing test methods; contact assertions use `addr_map`, `test_returns_empty_dict_for_empty_config` becomes `assert addr_map == {} and domain_map == {}`
+- Add domain-map tests to `tests/unit/test_email_routing.py` (domain_map population, `find_project_for_email()` domain fallback via `monkeypatch.setattr(routing_module, "EMAIL_DOMAIN_TO_PROJECT", ...)`)
+- Create `tests/unit/test_worker_startup.py` with `_should_register_email_handler()` helper and all six gate permutations (contacts-only, domains-only, both, neither, empty dicts, None email config)
+- Add `TestDomainRoutedEmailReply` to `tests/integration/test_email_bridge.py` using `monkeypatch.setattr(routing_module, "EMAIL_DOMAIN_TO_PROJECT", ...)` patch strategy
 - Add transport-keyed callback resolution tests to `tests/unit/test_agent_session_queue.py`
 
 ### 2. Update Documentation
@@ -295,9 +317,12 @@ The fix is entirely within the worker's initialization path.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist, Skeptic | 9/15 `TestBuildEmailToProjectMap` tests failing on main — `build_email_to_project_map()` returns `tuple[dict, dict]` but tests treat it as `dict` | Task 1 (build-fix): fix all 9 broken tests before adding domain tests | Unpack: `addr_map, domain_map = build_email_to_project_map(config)`; contact assertions use `addr_map`; `test_returns_empty_dict_for_empty_config` becomes `assert addr_map == {} and domain_map == {}` |
+| CONCERN | Skeptic, Operator | Integration test must patch at correct level (`EMAIL_DOMAIN_TO_PROJECT`) not mock routing too early | Task 1 (build-fix): use `monkeypatch.setattr(routing_module, "EMAIL_DOMAIN_TO_PROJECT", ...)` | Matches existing `EMAIL_TO_PROJECT` pattern; exercises actual domain lookup code path in `find_project_for_email()` |
+| CONCERN | Adversary, Operator | `test_worker_startup.py` callback dict isolation — `register_callbacks()` writes into module-level dicts; cross-test bleed if not cleared | Task 1 (build-fix): extract gate to `_should_register_email_handler()` helper and test that directly | No worker imports, no Redis, no callback dict pollution; alternatively `monkeypatch.setattr("agent.agent_session_queue._send_callbacks", {})` per test |
+| NIT | — | Verification table missing `test_agent_session_queue.py` row | Already present at line 291 of original plan | No change needed |
 
 ---
 
