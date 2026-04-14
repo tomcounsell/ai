@@ -169,3 +169,67 @@ async def test_build_harness_turn_input_none_sender():
 
     assert "FROM: None" not in result
     assert "FROM:" not in result
+
+
+class TestApplyContextBudget:
+    """Tests for _apply_context_budget() harness input trimming (issue #958)."""
+
+    def test_noop_when_under_budget(self):
+        """Messages under the budget are returned unchanged."""
+        from agent.sdk_client import _apply_context_budget
+
+        msg = "SHORT MESSAGE"
+        assert _apply_context_budget(msg, max_chars=1000) == msg
+
+    def test_trim_removes_oldest_prefix(self):
+        """When over budget, oldest content (start of string) is trimmed."""
+        from agent.sdk_client import _apply_context_budget
+
+        msg = "A" * 500 + "\nMESSAGE: keep this"
+        result = _apply_context_budget(msg, max_chars=100)
+        assert "keep this" in result
+        assert len(result) <= 100 + len(
+            "[CONTEXT TRIMMED — oldest context omitted to fit harness budget]\n"
+        )
+
+    def test_message_boundary_preserved(self):
+        """Everything from the final MESSAGE: marker onward is preserved."""
+        from agent.sdk_client import _apply_context_budget
+
+        prefix = "X" * 1000
+        tail = "\nMESSAGE: do the thing"
+        msg = prefix + tail
+        result = _apply_context_budget(msg, max_chars=100)
+        assert result.endswith(tail)
+
+    def test_trim_marker_injected(self):
+        """Trimmed messages get a trim marker prepended."""
+        from agent.sdk_client import _apply_context_budget
+
+        msg = "A" * 500 + "\nMESSAGE: keep"
+        result = _apply_context_budget(msg, max_chars=100)
+        assert result.startswith("[CONTEXT TRIMMED")
+
+    def test_empty_input_passthrough(self):
+        """Empty string returns empty string."""
+        from agent.sdk_client import _apply_context_budget
+
+        assert _apply_context_budget("", max_chars=100) == ""
+
+    def test_steering_only_exceeds_budget_passthrough(self):
+        """If MESSAGE: tail alone exceeds budget, pass through unchanged."""
+        from agent.sdk_client import _apply_context_budget
+
+        msg = "CTX\nMESSAGE: " + "B" * 200
+        result = _apply_context_budget(msg, max_chars=50)
+        # Should pass through unchanged because tail alone exceeds budget
+        assert result == msg
+
+    def test_no_marker_trim_from_start(self):
+        """Without a MESSAGE: marker, trim from start of string."""
+        from agent.sdk_client import _apply_context_budget
+
+        msg = "A" * 200
+        result = _apply_context_budget(msg, max_chars=50)
+        assert result.startswith("[CONTEXT TRIMMED]")
+        assert len(result) <= 50 + len("[CONTEXT TRIMMED]\n")

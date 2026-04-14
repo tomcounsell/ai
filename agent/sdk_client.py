@@ -1483,6 +1483,50 @@ def _resolve_persona(
 _HARNESS_FLUSH_INTERVAL = 3.0  # seconds between flushes
 _HARNESS_FLUSH_CHAR_THRESHOLD = 2000  # chars before forced flush
 
+# Maximum input chars for CLI harness arguments. Conservative cap below the
+# claude binary's internal chunk limit (~200KB+). Prevents "Separator is not
+# found, and chunk exceed the limit" crashes on long PM session resumes.
+HARNESS_MAX_INPUT_CHARS = 100_000
+
+
+def _apply_context_budget(message: str, max_chars: int = HARNESS_MAX_INPUT_CHARS) -> str:
+    """Trim oldest context from harness input if it exceeds max_chars.
+
+    Preserves everything from the final 'MESSAGE:' marker onward -- the
+    steering message must never be truncated. If no MESSAGE: marker exists,
+    trims from the start of the string.
+
+    Returns the original string unchanged if within budget.
+    """
+    if len(message) <= max_chars:
+        return message
+
+    # Find the MESSAGE: boundary -- steering message must be preserved in full
+    marker = "\nMESSAGE: "
+    idx = message.rfind(marker)
+    if idx != -1:
+        tail = message[idx:]  # "\nMESSAGE: ..." must stay intact
+        budget_for_prefix = max_chars - len(tail)
+        if budget_for_prefix <= 0:
+            # Steering message alone exceeds budget -- pass through unchanged
+            # (harness may still fail, but we preserve message fidelity)
+            return message
+        # Take the end of the prefix (newest context) that fits the budget
+        trim_marker = "[CONTEXT TRIMMED — oldest context omitted to fit harness budget]\n"
+        available = budget_for_prefix - len(trim_marker)
+        if available <= 0:
+            return trim_marker + tail
+        trimmed_prefix = message[idx - available : idx]
+        return trim_marker + trimmed_prefix + tail
+    else:
+        # No MESSAGE: marker -- trim from start
+        trim_marker = "[CONTEXT TRIMMED]\n"
+        available = max_chars - len(trim_marker)
+        if available <= 0:
+            return trim_marker
+        return trim_marker + message[len(message) - available :]
+
+
 # Map harness names to CLI command templates
 _HARNESS_COMMANDS: dict[str, list[str]] = {
     "claude-cli": [
@@ -1528,6 +1572,14 @@ async def get_response_via_harness(
     if env:
         proc_env.update(env)
         proc_env.pop("ANTHROPIC_API_KEY", None)
+
+    # Apply context budget to prevent "Separator" crashes in claude binary
+    original_len = len(message)
+    message = _apply_context_budget(message)
+    if len(message) < original_len:
+        logger.info(
+            f"[harness] Context budget applied: trimmed {original_len} → {len(message)} chars"
+        )
 
     cmd = harness_cmd + [message]
 

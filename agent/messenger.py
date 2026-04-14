@@ -165,7 +165,20 @@ class BackgroundTask:
         except Exception as e:
             self._error = e
             self._completed_at = utc_now()
-            logger.error(f"[{self.messenger.session_id}] Background task failed: {e}")
+
+            err_str = str(e)
+            if any(
+                sig in err_str
+                for sig in (
+                    "Separator is not found, and chunk exceed the limit",
+                    "Separator is found, but chunk is longer than limit",
+                )
+            ):
+                logger.warning(
+                    f"[{self.messenger.session_id}] Harness context overflow: {err_str[:120]}"
+                )
+            else:
+                logger.error(f"[{self.messenger.session_id}] Background task failed: {e}")
 
             # Send error notification
             await self.messenger.send(
