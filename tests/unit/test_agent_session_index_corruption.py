@@ -364,3 +364,71 @@ class TestStaleSaveThenKillOrphanPrevention:
         assert "update_fields" in call_kwargs
         assert "queued_steering_messages" in call_kwargs["update_fields"]
         assert "status" not in call_kwargs["update_fields"]
+
+
+# ---------------------------------------------------------------------------
+# Killed transition path tests (#950)
+# ---------------------------------------------------------------------------
+
+
+class TestKilledTransitionPathBackfill:
+    """The killed transition path must backfill _saved_field_values['status']
+    so that Popoto's on_save() srem targets the correct old index set.
+
+    Prior to #950, only the completed transition was tested. The killed path
+    exercises the same backfill logic in finalize_session but through a
+    different caller (valor-session kill vs worker completion).
+    """
+
+    def test_backfills_for_pending_to_killed(self):
+        """finalize_session backfills for pending -> killed transition.
+
+        This is the exact path that caused the #950 regression: a session
+        that was pending when killed must have srem(pending) fire correctly.
+        """
+        from models.session_lifecycle import finalize_session
+
+        session = _make_lazy_session(status="pending")
+
+        with (
+            patch.object(session, "log_lifecycle_transition"),
+            patch("models.session_lifecycle._finalize_parent_sync"),
+        ):
+            finalize_session(
+                session,
+                "killed",
+                reason="valor-session kill --all",
+                skip_auto_tag=True,
+                skip_checkpoint=True,
+                skip_parent=True,
+            )
+
+        # The key assertion: _saved_field_values["status"] must be set to "pending"
+        # (the old status) before save() is called, so on_save() fires srem(pending).
+        assert session._saved_field_values["status"] == "pending"
+        session.save.assert_called_once()
+        assert session.status == "killed"
+
+    @pytest.mark.parametrize("old_status", ["pending", "running", "active", "dormant"])
+    def test_backfills_from_any_non_terminal_to_killed(self, old_status):
+        """finalize_session backfills correctly from any non-terminal status to killed."""
+        from models.session_lifecycle import finalize_session
+
+        session = _make_lazy_session(status=old_status)
+
+        with (
+            patch.object(session, "log_lifecycle_transition"),
+            patch("models.session_lifecycle._finalize_parent_sync"),
+        ):
+            finalize_session(
+                session,
+                "killed",
+                reason="test kill",
+                skip_auto_tag=True,
+                skip_checkpoint=True,
+                skip_parent=True,
+            )
+
+        assert session._saved_field_values["status"] == old_status
+        assert session.status == "killed"
+        session.save.assert_called_once()
