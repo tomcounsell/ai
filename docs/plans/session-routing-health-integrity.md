@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -153,7 +153,7 @@ The four unguarded steering paths are:
 
 The existing `test_handler_contains_no_direct_banned_calls` test ensures no bare `enqueue_agent_session` or `record_message_processed` calls exist in handler. A new test, `test_steering_paths_record_dedup`, uses the AST walker to verify that every call to `push_steering_message` in handler is followed (in linear branch order) by a call to `record_telegram_message_handled` before the next `return`. This is the structural analogue of the existing enqueue-dedup ordering test in `dispatch.py`.
 
-Implementation note: The AST-level "followed by" check is simpler as a branch-linear walk (visit each `If` branch independently, check that a `return` statement is not preceded by `push_steering_message` without a `record_telegram_message_handled` in between). This is testable with a synthetic violating source per the existing C5 pattern in the test file.
+Implementation note: The AST walker must handle nested branches correctly. When visiting an `ast.If` node, each branch (`body`, `orelse`) must inherit the parent scope's "pending push" flag — a `return` inside a nested `if` must check whether any ancestor scope has a pending `push_steering_message`. The synthetic violating source should include a nested-branch violation (`push_steering_message()` inside `if cond1: if cond2:` with `return` but no `record_telegram_message_handled`) to verify the walker catches nested cases. This follows the existing C5 pattern in the test file.
 
 **Bug 2 — `_has_progress()` extension:**
 
@@ -167,15 +167,11 @@ def _has_progress(entry: AgentSession) -> bool:
     if bool(entry.claude_session_uuid):
         return True
     # Child-progress check: a PM session with active children is not stuck
-    try:
-        children = entry.get_children()
-        active_child = any(
-            c.status not in _TERMINAL_STATUSES for c in children
-        )
-        if active_child:
-            return True
-    except Exception:
-        pass  # get_children() failure is non-fatal; fall through to False
+    # get_children() queries via Popoto parent_agent_session_id index (not string session_id)
+    # and already returns [] on failure with a WARNING log — no outer try/except needed
+    children = entry.get_children()
+    if any(c.status not in _TERMINAL_STATUSES for c in children):
+        return True
     return False
 ```
 
@@ -187,7 +183,7 @@ The docstring must be updated to document: (a) the original three own-fields, (b
 
 ### Exception Handling Coverage
 
-- The `get_children()` call in `_has_progress()` is wrapped in `try/except Exception: pass`. Test: assert that when `get_children()` raises, `_has_progress()` returns `False` (falls through to original behavior, does not crash health check).
+- `get_children()` already handles exceptions internally and returns `[]` on failure (models/agent_session.py:1487-1493). No outer try/except needed in `_has_progress()`. The `any(...)` on an empty list correctly returns `False`.
 - `record_telegram_message_handled` internally calls `record_message_processed`, which already swallows exceptions and logs at WARNING. No additional exception handling needed at the call sites in `telegram_bridge.py`. Test: existing `test_dedup.py` covers the warning emission on Redis failure.
 
 ### Empty/Invalid Input Handling
@@ -202,7 +198,7 @@ The docstring must be updated to document: (a) the original three own-fields, (b
 ## Test Impact
 
 - [ ] `tests/unit/test_bridge_dispatch_contract.py` — UPDATE: add `test_steering_paths_record_dedup` test class with AST-level assertion that every `push_steering_message` call in handler is followed by `record_telegram_message_handled` before `return`. Existing contract tests (`test_handler_contains_no_direct_banned_calls`, `test_dispatch_calls_enqueue_before_record`) are unaffected and must remain green.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE: add test cases for the extended `_has_progress()` predicate: (a) returns `True` when session has a child with `status="running"`, (b) returns `True` when child has `status="pending"`, (c) returns `False` when all children are terminal, (d) returns `False` when `get_children()` raises. Existing tests for `response_delivered_at` guard are unaffected.
+- [ ] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE: add test cases for the extended `_has_progress()` predicate: (a) returns `True` when session has a child with `status="running"`, (b) returns `True` when child has `status="pending"`, (c) returns `False` when all children are terminal, (d) returns `False` when no children exist. Existing tests for `response_delivered_at` guard are unaffected.
 - [ ] `tests/unit/test_reconciler.py` — No existing test cases break; dedup additions make the fix transparent to the reconciler (it already skips messages with a dedup record). No structural changes needed.
 - [ ] `tests/unit/test_steering_mechanism.py` — No existing test cases break; changes are additive (new dedup call after existing push). No structural changes needed.
 
@@ -278,7 +274,7 @@ No agent integration required — these are bridge-internal and worker-internal 
 - [ ] A PM session with at least one running/pending child dev session is not reset to `pending` by the health check
 - [ ] The AST contract test (or new test) covers all four steering paths for dedup presence
 - [ ] Unit test for `_has_progress()` with a child in a non-terminal state returns `True`
-- [ ] Unit test for `_has_progress()` when `get_children()` raises returns `False` (non-fatal)
+- [ ] Unit test for `_has_progress()` when no children exist returns `False`
 - [ ] `pytest tests/unit/test_bridge_dispatch_contract.py tests/unit/test_health_check_recovery_finalization.py tests/unit/test_reconciler.py tests/unit/test_steering_mechanism.py -q` passes
 - [ ] `python -m ruff check . && python -m ruff format --check .` passes
 
@@ -323,9 +319,9 @@ No agent integration required — these are bridge-internal and worker-internal 
 - **Assigned To**: health-check-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `agent/agent_session_queue.py`, extend `_has_progress()` to call `entry.get_children()` and return `True` if any child has `status not in _TERMINAL_STATUSES`. Wrap the child lookup in `try/except Exception: pass`.
-- Update `_has_progress()` docstring to document the child-activity check, the non-fatal exception clause, and the behavioral contract for PM sessions.
-- Add unit tests: (a) `_has_progress()` returns `True` when a child session has `status="running"`, (b) returns `True` when child has `status="pending"`, (c) returns `False` when all children are terminal, (d) returns `False` when `get_children()` raises, (e) returns `False` when no children exist.
+- In `agent/agent_session_queue.py`, extend `_has_progress()` to call `entry.get_children()` and return `True` if any child has `status not in _TERMINAL_STATUSES`. No outer try/except needed — `get_children()` already returns `[]` on failure with a WARNING log.
+- Update `_has_progress()` docstring to document the child-activity check (queries children via Popoto `parent_agent_session_id` index) and the behavioral contract for PM sessions.
+- Add unit tests: (a) `_has_progress()` returns `True` when a child session has `status="running"`, (b) returns `True` when child has `status="pending"`, (c) returns `False` when all children are terminal, (d) returns `False` when no children exist.
 
 ### 3. Final validation
 - **Task ID**: validate-all
@@ -353,6 +349,9 @@ No agent integration required — these are bridge-internal and worker-internal 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Redundant try/except in `_has_progress()` — `get_children()` already returns `[]` on failure | Removed outer try/except from plan code and task descriptions | `get_children()` at models/agent_session.py:1487-1493 has internal exception handling |
+| CONCERN | Adversary | AST contract test underspecified for nested branches | Updated implementation note with nested-branch walker guidance | Synthetic violating source must include nested `if cond1: if cond2:` case |
+| NIT | Adversary | `get_children()` uses Popoto internal ID, not string session_id | Added parenthetical to plan code comment | Clarifies relationship type for code reviewers |
 
 ---
 
