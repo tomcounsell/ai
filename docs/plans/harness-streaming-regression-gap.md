@@ -142,8 +142,8 @@ final = result_text if result_text is not None else full_text
 
 ## Test Impact
 
-- [ ] `tests/unit/test_harness_streaming.py` — UPDATE: All 18 tests that pass `send_cb=AsyncMock()` to `get_response_via_harness` must be updated to omit `send_cb` (removed parameter). `assert send_cb.call_count >= 1/2` assertions are removed. Add module-level comment block explaining isolation scope vs. production contract.
-- [ ] No other existing tests are affected — `_harness_send_cb` is an internal function in `agent_session_queue.py` with no direct test coverage today.
+- [x] `tests/unit/test_harness_streaming.py` — UPDATE: All 18 tests that pass `send_cb=AsyncMock()` to `get_response_via_harness` must be updated to omit `send_cb` (removed parameter). `assert send_cb.call_count >= 1/2` assertions are removed. Add module-level comment block explaining isolation scope vs. production contract.
+- [x] No other existing tests are affected — `_harness_send_cb` is an internal function in `agent_session_queue.py` with no direct test coverage today.
 
 ## Rabbit Holes
 
@@ -184,22 +184,22 @@ No agent integration required — this is an internal harness pipeline fix. No M
 
 ## Documentation
 
-- [ ] Update `docs/features/harness-abstraction.md` — Streaming Chunk Suppression section: add explicit mention that `EmailOutputHandler` is equally affected by the no-op suppression. Remove the stale "Batched text delivery via send_cb" flowchart entry (it implied streaming was active).
-- [ ] Update `docs/features/harness-abstraction.md` — Streaming and Batching section: remove or strike through the flush trigger bullets (`_HARNESS_FLUSH_INTERVAL`, `_HARNESS_FLUSH_CHAR_THRESHOLD`) since those constants are removed by this work.
-- [ ] Update `docs/features/harness-abstraction.md` — Key Files table: reflect that `test_harness_streaming.py` now covers isolation only, and note the new `tests/integration/test_harness_no_op_contract.py` file.
-- [ ] Add inline docstring to `get_response_via_harness` clarifying that it returns the final result string only — no streaming callback, no intermediate delivery.
+- [x] Update `docs/features/harness-abstraction.md` — Streaming Chunk Suppression section: add explicit mention that `EmailOutputHandler` is equally affected by the no-op suppression. Remove the stale "Batched text delivery via send_cb" flowchart entry (it implied streaming was active).
+- [x] Update `docs/features/harness-abstraction.md` — Streaming and Batching section: remove or strike through the flush trigger bullets (`_HARNESS_FLUSH_INTERVAL`, `_HARNESS_FLUSH_CHAR_THRESHOLD`) since those constants are removed by this work.
+- [x] Update `docs/features/harness-abstraction.md` — Key Files table: reflect that `test_harness_streaming.py` now covers isolation only, and note the new `tests/integration/test_harness_no_op_contract.py` file.
+- [x] Add inline docstring to `get_response_via_harness` clarifying that it returns the final result string only — no streaming callback, no intermediate delivery.
 
 ## Success Criteria
 
-- [ ] Integration test in `tests/integration/test_harness_no_op_contract.py` passes: `TelegramRelayOutputHandler.send` called exactly once (final result), zero calls during harness streaming event emission.
-- [ ] `get_response_via_harness` no longer has a `send_cb` parameter; `_HARNESS_FLUSH_INTERVAL` and `_HARNESS_FLUSH_CHAR_THRESHOLD` are removed.
-- [ ] `full_text` fallback path at `sdk_client.py` logs a `WARNING` when activated.
-- [ ] `_harness_send_cb` comment in `agent_session_queue.py` mentions email transport.
-- [ ] `docs/features/harness-abstraction.md` Streaming Chunk Suppression section mentions email transport.
-- [ ] `tests/unit/test_harness_streaming.py` has a module-level comment block explaining isolation scope.
-- [ ] `pytest tests/unit/test_harness_streaming.py` passes after `send_cb` parameter removal.
-- [ ] `pytest tests/integration/test_harness_no_op_contract.py` passes.
-- [ ] `python -m ruff check . && python -m ruff format --check .` clean.
+- [x] Integration test in `tests/integration/test_harness_no_op_contract.py` passes: `TelegramRelayOutputHandler.send` called exactly once (final result), zero calls during harness streaming event emission.
+- [x] `get_response_via_harness` no longer has a `send_cb` parameter; `_HARNESS_FLUSH_INTERVAL` and `_HARNESS_FLUSH_CHAR_THRESHOLD` are removed.
+- [x] `full_text` fallback path at `sdk_client.py` logs a `WARNING` when activated.
+- [x] `_harness_send_cb` comment in `agent_session_queue.py` mentions email transport.
+- [x] `docs/features/harness-abstraction.md` Streaming Chunk Suppression section mentions email transport.
+- [x] `tests/unit/test_harness_streaming.py` has a module-level comment block explaining isolation scope.
+- [x] `pytest tests/unit/test_harness_streaming.py` passes after `send_cb` parameter removal.
+- [x] `pytest tests/integration/test_harness_no_op_contract.py` passes.
+- [x] `python -m ruff check . && python -m ruff format --check .` clean.
 
 ## Team Orchestration
 
