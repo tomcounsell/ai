@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -154,8 +154,7 @@ No agent integration changes required — `agent/sustainability.py` is already w
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-self-healing.md` to note the plain-language label mapping (if the feature doc references circuit state display)
-- [ ] If no reference exists in `docs/features/bridge-self-healing.md`, no documentation changes are needed
+- [x] No documentation changes needed — `docs/features/bridge-self-healing.md` does not reference circuit state display labels, so no update is required.
 
 ## Success Criteria
 
