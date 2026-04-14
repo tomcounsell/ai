@@ -129,6 +129,11 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_reflections.sh` | Install reflections launchd schedule |
 | `tail -f logs/reflections.log` | Stream reflections logs |
+| `python scripts/sdlc_reflection.py` | Run SDLC reflection manually |
+| `python scripts/sdlc_reflection.py --dry-run` | Preview SDLC reflection without writing |
+| `python scripts/sdlc_reflection.py --days 14` | Run with larger lookback window |
+| `./scripts/install_sdlc_reflection.sh` | Install SDLC reflection launchd schedule |
+| `tail -f logs/sdlc_reflection.log` | Stream SDLC reflection logs |
 | `python scripts/autoexperiment.py --target observer --iterations 50` | Run autoexperiment on observer prompt |
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
