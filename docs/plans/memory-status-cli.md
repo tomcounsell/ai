@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -178,9 +178,11 @@ No changes to `bridge/telegram_bridge.py`. No new MCP server registration.
 
 ## Documentation
 
-- [ ] Update `CLAUDE.md` command table: add `python -m tools.memory_search status` row with description "Check memory system health (Redis, counts, superseded ratio)"
-- [ ] Update `docs/features/subconscious-memory.md`: add a "Health Checks" subsection that references the new `status` subcommand
-- [ ] Add entry to `docs/features/README.md` index table if memory-status is considered a discrete feature (or append to the existing subconscious-memory row)
+- [x] Update `CLAUDE.md` command table: add `python -m tools.memory_search status` row with description "Check memory system health (Redis, counts, superseded ratio)"
+- [x] Update `docs/features/subconscious-memory.md`: add a "Health Checks" subsection that references the new `status` subcommand
+- [x] Add entry to `docs/features/README.md` index table if memory-status is considered a discrete feature (or append to the existing subconscious-memory row)
+- [x] Update `docs/features/memory-search-tool.md`: add `status()` API and CLI usage
+- [x] Update `docs/tools-reference.md`: add `status` to Memory Search section
 
 ## Success Criteria
 

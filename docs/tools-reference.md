@@ -39,19 +39,23 @@ results = search_messages(query="deployment", limit=10)
 
 ### Memory Search (`tools.memory_search`)
 
-Search, save, inspect, and forget memories from the Memory model.
+Search, save, inspect, forget, and health-check memories from the Memory model.
 
 ```python
-from tools.memory_search import search, save, inspect, forget
+from tools.memory_search import search, save, inspect, forget, status
 
 results = search("deploy patterns", project_key="dm", limit=5)
 saved = save("API X requires auth header Y", importance=6.0)
 details = inspect(memory_id="abc123")
 deleted = forget("abc123")
+health = status()  # {"healthy": True, "total": 80, "superseded": 3, ...}
 ```
 
 ```bash
 # CLI
+python -m tools.memory_search status              # memory system health check
+python -m tools.memory_search status --json       # machine-readable JSON
+python -m tools.memory_search status --deep       # adds orphan count + per-category confidence
 python -m tools.memory_search search "deploy patterns"
 python -m tools.memory_search save "important note" --importance 6.0
 python -m tools.memory_search inspect --stats --project dm
