@@ -99,6 +99,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, MERGE pipeline stage, and structured review comment enforcement | Shipped |
+| [SDLC Pipeline State](sdlc-pipeline-state.md) | Local Claude Code session state tracking via `--issue-number` flag and `sdlc_session_ensure` tool, enabling stage markers to write to Redis without bridge env vars | Shipped |
 | [SDLC Repo Addenda](sdlc-repo-addenda.md) | Per-stage `docs/sdlc/` notes injected into global SDLC skills at runtime; reflection agent proposes updates every 3 days | Shipped |
 | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
 | [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |

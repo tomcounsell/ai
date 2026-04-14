@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -191,9 +191,12 @@ No agent integration required — this is a change to SDLC skill infrastructure 
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-pipeline-state.md` (if it exists) or create it, describing local session state tracking
-- [ ] Update inline docstrings in `tools/sdlc_stage_marker.py` and `tools/sdlc_session_ensure.py`
-- [ ] No changes needed to `docs/features/README.md` index (this is a bug fix, not a new feature)
+- [x] Update `docs/features/sdlc-pipeline-state.md` (if it exists) or create it, describing local session state tracking
+- [x] Update inline docstrings in `tools/sdlc_stage_marker.py` and `tools/sdlc_session_ensure.py`
+- [x] Update `docs/features/README.md` index with new SDLC Pipeline State entry
+- [x] Update `docs/features/sdlc-stage-tracking.md` with `--issue-number` flag and local session creation
+- [x] Update `docs/features/pipeline-state-machine.md` with new files and `--issue-number` support
+- [x] Update `docs/tools-reference.md` with `sdlc_stage_marker` and `sdlc_session_ensure` tool entries
 
 ## Success Criteria
 
