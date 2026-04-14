@@ -126,7 +126,7 @@ _handle_dev_session_completion()  [dev sessions only]
     |-- steer_session(parent_pm_session)
 ```
 
-PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for full details on streaming, batching, health checks, and configuration.
+PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for full details on stream-json parsing, chunk suppression, health checks, and configuration.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 
