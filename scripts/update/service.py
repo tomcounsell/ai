@@ -370,6 +370,73 @@ def restart_webui(project_dir: Path) -> bool:
         return False
 
 
+def heal_plist_paths(project_dir: Path) -> list[str]:
+    """Check installed service plists for missing PATH entries and fix them.
+
+    Specifically ensures ~/.local/bin is in the PATH of bridge, watchdog, and
+    update plists — required for the claude CLI harness to be found at runtime.
+
+    Returns list of plist labels that were healed (empty if none needed fixing).
+    """
+    import plistlib
+
+    local_bin = str(Path.home() / ".local" / "bin")
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    healed: list[str] = []
+
+    # Service plists that run subprocesses requiring CLI tools on PATH
+    plist_names = [
+        f"{SERVICE_PREFIX}.bridge",
+        f"{SERVICE_PREFIX}.update",
+        f"{SERVICE_PREFIX}.bridge-watchdog",
+    ]
+
+    uid = os.getuid()
+    try:
+        launchctl_list = run_cmd(["launchctl", "list"]).stdout
+    except Exception:
+        launchctl_list = ""
+
+    for label in plist_names:
+        plist_path = launch_agents / f"{label}.plist"
+        if not plist_path.exists():
+            continue
+
+        try:
+            with open(plist_path, "rb") as f:
+                plist = plistlib.load(f)
+        except Exception:
+            continue
+
+        env = plist.get("EnvironmentVariables", {})
+        current_path = env.get("PATH", "")
+        path_parts = current_path.split(":")
+
+        if local_bin not in path_parts:
+            # Prepend .local/bin after the venv bin (first entry)
+            if path_parts and path_parts[0].endswith("/bin") and ".venv" in path_parts[0]:
+                new_path_parts = [path_parts[0], local_bin] + path_parts[1:]
+            else:
+                new_path_parts = [local_bin] + path_parts
+            env["PATH"] = ":".join(new_path_parts)
+            plist.setdefault("EnvironmentVariables", {})["PATH"] = env["PATH"]
+
+            try:
+                with open(plist_path, "wb") as f:
+                    plistlib.dump(plist, f)
+
+                # Reload if currently loaded so the fix takes effect immediately
+                if label in launchctl_list:
+                    run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
+                    run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])
+
+                healed.append(label)
+            except Exception:
+                pass
+
+    return healed
+
+
 def install_caffeinate() -> bool:
     """Install caffeinate service. Returns True if successful."""
     label = f"{SERVICE_PREFIX}.caffeinate"

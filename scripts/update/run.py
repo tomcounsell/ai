@@ -325,6 +325,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"WARN: Failed to link {action.dst}: {action.error}", v)
                 result.warnings.append(f"Hardlink failed: {action.dst}")
 
+    # Step 1.55: Heal launchd plist PATH entries (ensure ~/.local/bin is present)
+    healed_plists = service.heal_plist_paths(project_dir)
+    if healed_plists:
+        for label in healed_plists:
+            log(f"Healed PATH in {label}.plist (added ~/.local/bin)", v, always=True)
+        result.warnings.append(
+            f"Healed {len(healed_plists)} plist(s) missing ~/.local/bin in PATH — "
+            "services reloaded automatically"
+        )
+
     # Step 1.6: Verify .env symlink
     log("Verifying .env symlink...", v)
     result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
