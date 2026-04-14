@@ -177,13 +177,15 @@ class BackgroundTask:
                 logger.warning(
                     f"[{self.messenger.session_id}] Harness context overflow: {err_str[:120]}"
                 )
+                await self.messenger.send(
+                    "Context too long — please resend your request.",
+                    message_type="error",
+                )
             else:
                 logger.error(f"[{self.messenger.session_id}] Background task failed: {e}")
-
-            # Send error notification
-            await self.messenger.send(
-                f"I encountered an error: {str(e)[:200]}", message_type="error"
-            )
+                await self.messenger.send(
+                    f"I encountered an error: {str(e)[:200]}", message_type="error"
+                )
         finally:
             # Cancel watchdog if still running
             if self._watchdog_task and not self._watchdog_task.done():

@@ -239,6 +239,67 @@ class TestBackgroundTask:
         assert len(sent_messages) == 0  # Nothing sent
 
     @pytest.mark.asyncio
+    async def test_separator_error_sends_user_friendly_message(self):
+        """Separator errors must send a friendly message, not the raw error string."""
+        sent_messages = []
+
+        async def mock_send(msg: str, **kwargs):
+            sent_messages.append(msg)
+
+        messenger = BossMessenger(
+            _send_callback=mock_send,
+            chat_id="test_chat",
+            session_id="test_session",
+        )
+
+        task = BackgroundTask(
+            messenger=messenger,
+            acknowledgment_timeout=1.0,
+        )
+
+        async def separator_failing_work():
+            raise RuntimeError("Separator is not found, and chunk exceed the limit")
+
+        await task.run(separator_failing_work(), send_result=True)
+        await asyncio.sleep(0.3)
+
+        assert task.is_complete
+        assert task.error is not None
+        assert len(sent_messages) == 1
+        assert sent_messages[0] == "Context too long — please resend your request."
+        assert "Separator is not found" not in sent_messages[0]
+
+    @pytest.mark.asyncio
+    async def test_non_separator_error_sends_raw_error(self):
+        """Non-separator errors must send the raw error string to preserve existing behavior."""
+        sent_messages = []
+
+        async def mock_send(msg: str, **kwargs):
+            sent_messages.append(msg)
+
+        messenger = BossMessenger(
+            _send_callback=mock_send,
+            chat_id="test_chat",
+            session_id="test_session",
+        )
+
+        task = BackgroundTask(
+            messenger=messenger,
+            acknowledgment_timeout=1.0,
+        )
+
+        async def generic_failing_work():
+            raise ValueError("Some other error occurred")
+
+        await task.run(generic_failing_work(), send_result=True)
+        await asyncio.sleep(0.3)
+
+        assert task.is_complete
+        assert task.error is not None
+        assert len(sent_messages) == 1
+        assert "Some other error occurred" in sent_messages[0]
+
+    @pytest.mark.asyncio
     async def test_is_running_property(self):
         """Test the is_running property."""
 
