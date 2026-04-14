@@ -140,6 +140,28 @@ Both the delivery stamp and the health-check guard are wrapped in `try/except` s
 - `AgentSession.response_delivered_at` — nullable `DatetimeField`, set once on successful delivery
 - Health-check path: `_agent_session_health_check()` → `should_recover` → delivery guard → `finalize_session()`
 
+#### 8a. No-Progress Recovery for Shared-Worker-Key Sessions (#944)
+
+**Problem**: A slugless dev session shares `worker_key` with any co-running PM session under the same project (both resolve to `project_key` via `AgentSession.worker_key`). `_agent_session_health_check` determined liveness via `worker_alive = _active_workers.get(worker_key) is not None and not worker.done()`. When a PM was alive under the same project, `worker_alive = True` even though the stuck dev session was not actually being handled — so the `not worker_alive` branch was skipped, and the dev session was only recovered after the 45-minute timeout (`AGENT_SESSION_TIMEOUT_DEFAULT` / `AGENT_SESSION_TIMEOUT_BUILD`) — 9x the intended 5-minute cadence.
+
+**Solution**: A new `elif` branch in `_agent_session_health_check` recovers sessions that are `worker_alive=True`, past the `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) startup guard, AND have no progress signal. Progress is evaluated by `_has_progress(entry)` which returns True if ANY of three fields is set: `turn_count > 0`, a non-empty `log_path`, or a non-empty `claude_session_uuid`. Together these cover the full SDK subprocess warmup arc:
+
+- `claude_session_uuid` — set when the SDK subprocess authenticates with the Claude API (seconds after launch)
+- `log_path` — set once the session writes its first log entry (first tool call)
+- `turn_count` — incremented on each full agent turn completion
+
+A legitimately slow-starting BUILD session that takes 600s before its first turn will still have `claude_session_uuid` populated within seconds of auth, so the no-progress branch does not fire. The recovered session routes through the existing delivery guard, then the `is_local` split: local sessions become `abandoned`, project-keyed sessions become `pending` (re-queued with `priority=high` and a fresh `_ensure_worker` call). The PM-associated project-keyed worker will pop and execute the re-queued dev session because `_pop_agent_session` filters only by `project_key`/`status`, not by `session_type`.
+
+**Observability**: Each recovery increments a project-scoped Redis counter keyed `{project_key}:session-health:recoveries:{reason_kind}` where `reason_kind` is one of `worker_dead`, `no_progress`, or `timeout`. The counter write is wrapped in `try/except` — failure cannot block recovery.
+
+**Diagnosing no-progress recoveries**:
+
+- Log grep: `grep "worker alive but no progress signal" logs/worker.log` — each hit is one no-progress recovery and includes `turn_count`, `log_path`, and `claude_session_uuid` for the affected session.
+- Expected rate ceiling: ≤ 1 no-progress recovery per project per hour under normal operation. Bursts of no-progress recoveries for sessions that should be healthy indicate the `AGENT_SESSION_HEALTH_MIN_RUNNING` guard is too short or the progress signal is too narrow.
+- Redis counter: `redis-cli GET {project_key}:session-health:recoveries:no_progress` (note: reading via `redis-cli` is observability-only; never mutate Popoto-managed keys directly).
+
+**Accepted race**: The recovery path does NOT protect progress fields under CAS — only `status`. In the tight window between reading `entry` and calling `transition_status("pending")`, a worker writing progress can have its in-flight work re-queued. This is rare and benign: the worker pops the re-queued session and runs from scratch. See the `test_progress_written_between_check_and_transition_is_lost_but_session_retries` unit test for the locked-in behavior.
+
 ### 9. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
 
 **Problem**: The Perplexity search provider had a bare `except Exception` that silently swallowed all errors, including 401 Unauthorized responses from expired API keys.
