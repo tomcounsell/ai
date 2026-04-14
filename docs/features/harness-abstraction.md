@@ -51,7 +51,7 @@ The function returns the final result text only — it has no streaming callback
 
 ### Streaming Chunk Suppression
 
-`get_response_via_harness()` does not accept a streaming callback. Intermediate `content_block_delta` chunks are accumulated internally and never forwarded to any output transport mid-session. This applies equally to all transports — `TelegramRelayOutputHandler` and `EmailOutputHandler` — no transport receives real-time streaming output.
+`get_response_via_harness()` does not accept a streaming callback. Intermediate `content_block_delta` chunks are accumulated internally and never forwarded to any output transport mid-session. This applies equally to all transports — Telegram (`TelegramRelayOutputHandler`) and email (`EmailOutputHandler`) — no transport receives real-time streaming output.
 
 Forwarding streaming chunks would bypass the nudge loop and cause mid-sentence message fragments to appear as discrete messages. The final result is delivered by `BackgroundTask` through the nudge loop, ensuring complete, coherent messages reach the user regardless of session type (PM, Teammate, or Dev).
 
@@ -137,14 +137,14 @@ instead of `Agent(subagent_type="dev-session", ...)`. The Agent tool dispatch pa
 
 `get_definition()` in `agent_definitions.py` returns an actionable error for stale callers that still request `"dev-session"` from the Agent tool.
 
-## Legacy Hook Cleanup (Phase 5)
+## Hook Cleanup (Phase 5)
 
-The following are removed in PR #902:
+PR #902 simplified hook infrastructure as part of the harness migration:
 
 - **`agent/hooks/session_registry.py`** deleted (250 lines) — UUID-to-bridge-session mapping no longer needed; hooks now use `AGENT_SESSION_ID` env var directly
-- **`subagent_stop.py`** stripped to logging only — `_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion` removed; SDLC tracking moved to worker post-completion handler
-- **`pre_tool_use.py`** — `_maybe_start_pipeline_stage` and Agent tool interception removed; `_handle_skill_tool_start()` now uses `AGENT_SESSION_ID` env var instead of `session_registry.resolve()`
-- **`dev-session` entry removed** from `agent_definitions.py` — dev sessions are created as AgentSession records, not via the Agent tool
+- **`subagent_stop.py`** stripped to logging only — `_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion` deleted; SDLC tracking moved to worker post-completion handler
+- **`pre_tool_use.py`** — `_maybe_start_pipeline_stage` and Agent tool interception deleted; `_handle_skill_tool_start()` now uses `AGENT_SESSION_ID` env var instead of `session_registry.resolve()`
+- **`dev-session` entry** deleted from `agent_definitions.py` — dev sessions are created as AgentSession records, not via the Agent tool
 - `bridge/pipeline_state.py` and `bridge/pipeline_graph.py` are now shims that re-export from `agent/pipeline_state.py` and `agent/pipeline_graph.py` (canonical locations after Phase 3 move)
 
 ## Pending Work (Phase 6)
