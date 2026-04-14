@@ -48,6 +48,17 @@ LINK_SUMMARY_CACHE_HOURS = 24  # Don't re-summarize URLs within 24 hours
 
 
 # =============================================================================
+# Reply Thread Context Header (canonical constant — single source of truth)
+# =============================================================================
+
+# Canonical header used by `format_reply_chain` and pre-hydration paths.
+# Importing from a single location lets deferred enrichment do an idempotency
+# check (skip the fetch if this header is already present in message_text).
+# Any change to this string must also update `format_reply_chain` below.
+REPLY_THREAD_CONTEXT_HEADER = "REPLY THREAD CONTEXT"
+
+
+# =============================================================================
 # Status Question Patterns
 # =============================================================================
 
@@ -62,6 +73,26 @@ STATUS_QUESTION_PATTERNS = [
     re.compile(r"what.*been doing", re.IGNORECASE),
     re.compile(r"catch me up", re.IGNORECASE),
     re.compile(r"what.*happening", re.IGNORECASE),
+]
+
+
+# =============================================================================
+# Implicit-Context (Deictic) Patterns
+# =============================================================================
+
+# Patterns that indicate the message references prior context without using
+# Telegram's native reply-to feature. Narrow and high-precision -- false
+# positives cost one agent turn (a valor-telegram read) at most.
+#
+# Keep this list short. Expansion requires empirical data on missed cases.
+DEICTIC_CONTEXT_PATTERNS = [
+    re.compile(r"\b(the|that)\s+(bug|issue|ticket|pr|pull request)\b", re.IGNORECASE),
+    re.compile(r"\bstill\s+(broken|failing|crashing)\b", re.IGNORECASE),
+    re.compile(r"\bwe\s+(fixed|shipped|merged|resolved)\b", re.IGNORECASE),
+    re.compile(r"\blast\s+time\b", re.IGNORECASE),
+    re.compile(r"\bas\s+i\s+(mentioned|said)\b", re.IGNORECASE),
+    re.compile(r"\bdid\s+we\s+", re.IGNORECASE),
+    re.compile(r"\bwhat\s+about\s+(that|the)\b", re.IGNORECASE),
 ]
 
 
@@ -164,6 +195,72 @@ def is_status_question(text: str) -> bool:
     return any(pattern.search(text) for pattern in STATUS_QUESTION_PATTERNS)
 
 
+def references_prior_context(text: str) -> bool:
+    """Return True if the message text appears to reference prior conversation.
+
+    Used by the bridge handler to decide whether to prepend a
+    `[CONTEXT DIRECTIVE]` block to messages that lack a Telegram reply-to
+    but still reference earlier state (deictic pronouns, status phrasing,
+    or back-references like "the bug", "we fixed", "last time").
+
+    The check composes `STATUS_QUESTION_PATTERNS` (already in use for status
+    intent) with a small, narrow list of deictic patterns in
+    `DEICTIC_CONTEXT_PATTERNS`. Any single pattern match wins (OR).
+
+    Input contract:
+    - `None`, non-string, empty, or whitespace-only input returns `False`.
+    - Never raises on unexpected input.
+
+    Args:
+        text: The user message text.
+
+    Returns:
+        True if any pattern matches; False otherwise.
+
+    Examples:
+        >>> references_prior_context("did we get that fixed?")
+        True
+        >>> references_prior_context("the bug is still broken")
+        True
+        >>> references_prior_context("hello")
+        False
+        >>> references_prior_context("")
+        False
+        >>> references_prior_context(None)
+        False
+    """
+    if not text or not isinstance(text, str):
+        return False
+    if not text.strip():
+        return False
+    for pattern in STATUS_QUESTION_PATTERNS:
+        if pattern.search(text):
+            return True
+    for pattern in DEICTIC_CONTEXT_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
+def matched_context_patterns(text: str) -> list[str]:
+    """Return the list of pattern source-strings that matched `text`.
+
+    Companion to `references_prior_context` used for structured audit logging
+    so we can aggregate false-positive rates post-ship. Returns an empty list
+    for non-string/empty/whitespace-only input.
+    """
+    if not text or not isinstance(text, str) or not text.strip():
+        return []
+    matched: list[str] = []
+    for pattern in STATUS_QUESTION_PATTERNS:
+        if pattern.search(text):
+            matched.append(pattern.pattern)
+    for pattern in DEICTIC_CONTEXT_PATTERNS:
+        if pattern.search(text):
+            matched.append(pattern.pattern)
+    return matched
+
+
 def build_activity_context(working_dir: str | None = None) -> str:
     """
     Build context about recent project activity.
@@ -238,11 +335,16 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     """
     Build recent conversation history for context.
 
-    NOTE: This is NOT called by default. The agent should use the valor-telegram
-    CLI tool to fetch relevant history when context cues suggest prior messages
-    may be relevant (e.g., "what do you think of these", "as I mentioned",
-    references to recent discussions, etc.). For explicit threading, users
-    can use Telegram's reply-to feature.
+    This is invoked on-demand. When the bridge handler detects that a message
+    references prior context (via `references_prior_context`), it prepends a
+    `[CONTEXT DIRECTIVE]` to the prompt that instructs the agent to reach for
+    the `valor-telegram` CLI (or this helper) before answering. The directive
+    is tool-order guidance, not a forced call -- the agent may early-exit if
+    auto-recalled memory already covers the reference.
+
+    For explicit threading, users can still use Telegram's reply-to feature;
+    that path is handled by `fetch_reply_chain` / `format_reply_chain` and is
+    hydrated into the prompt by the bridge handler directly.
 
     Args:
         chat_id: Telegram chat ID (numeric, without prefix)
@@ -371,7 +473,7 @@ def format_reply_chain(chain: list[dict]) -> str:
     if not chain:
         return ""
 
-    lines = ["REPLY THREAD CONTEXT (oldest to newest):"]
+    lines = [f"{REPLY_THREAD_CONTEXT_HEADER} (oldest to newest):"]
     lines.append("-" * 40)
 
     for msg in chain:

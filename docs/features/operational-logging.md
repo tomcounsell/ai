@@ -11,6 +11,8 @@ All operational log lines use a consistent prefix tag enclosed in brackets. Filt
 | `[routing]` | `bridge/routing.py`, `bridge/telegram_bridge.py` | Classification result (sdlc/question/passthrough), session continuity decision, semantic routing match/miss |
 | `[nudge]` | `agent/agent_session_queue.py` | Nudge loop routing decisions (deliver or nudge) with reason |
 | `[enrichment]` | `bridge/enrichment.py` | Single summary line after all enrichment steps: media, youtube, links, reply chain counts, result length, failed steps |
+| `RESUME_REPLY_CHAIN_FAIL` | `bridge/telegram_bridge.py` | WARNING emitted when the resume-completed branch's synchronous reply-chain fetch times out or raises. Includes `session_id`, `chat_id`, `reply_to_msg_id`, and error/timeout marker. Session still enqueues with the summary-only preamble. See [Reply-Thread Context Hydration](reply-thread-context-hydration.md). |
+| `implicit_context_directive_injected` | `bridge/telegram_bridge.py` | INFO emitted (with `extra={session_id, chat_id, matched_patterns, text_preview}`) whenever the implicit-context `[CONTEXT DIRECTIVE]` is prepended to a message. Useful for auditing false-positive rates of the `references_prior_context` heuristic. |
 | `[prompt-summary]` | `agent/sdk_client.py` | Message length, classification, workflow presence, task list ID, session context sections |
 
 ## Log Format

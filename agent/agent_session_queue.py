@@ -3543,6 +3543,29 @@ async def _execute_agent_session(session: AgentSession) -> None:
         except Exception as e:
             logger.debug(f"[{session.project_key}] TelegramMessage lookup failed: {e}")
 
+    # Idempotency guard (Plan IN-1 / Race 1): belt-and-suspenders against
+    # double-hydration when the handler already prepended a REPLY THREAD
+    # CONTEXT block (e.g. resume-completed branch pre-hydrates synchronously).
+    #   Primary:   extra_context["reply_chain_hydrated"] flag stamped by the
+    #              bridge handler at enqueue time — explicit and reviewable.
+    #   Defensive: REPLY_THREAD_CONTEXT_HEADER substring scan of message_text
+    #              — catches sessions enqueued before the flag shipped and
+    #              any future code path that pre-hydrates without the flag.
+    # Either guard triggering skips the deferred reply-chain fetch.
+    from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+
+    if enrich_reply_to_msg_id:
+        _extra_ctx = getattr(session, "extra_context", None) or {}
+        _flag_hydrated = bool(_extra_ctx.get("reply_chain_hydrated"))
+        _header_present = REPLY_THREAD_CONTEXT_HEADER in (session.message_text or "")
+        if _flag_hydrated or _header_present:
+            logger.debug(
+                f"[{session.project_key}] Reply chain already hydrated by handler; "
+                f"skipping deferred fetch (session={session.session_id}, "
+                f"flag={_flag_hydrated}, header={_header_present})"
+            )
+            enrich_reply_to_msg_id = None
+
     if enrich_has_media or enrich_youtube_urls or enrich_non_youtube_urls or enrich_reply_to_msg_id:
         try:
             from bridge.enrichment import enrich_message, get_telegram_client

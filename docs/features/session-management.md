@@ -126,23 +126,61 @@ through and created a blank-slate re-enqueue with no prior context. The new beha
 
 1. The steering check at `bridge/telegram_bridge.py` inspects `completed` sessions after
    the `running`/`active`/`pending` checks find nothing.
-2. If a completed session is found, its `context_summary` field is prepended to the new
-   message text:
+2. If a completed session is found, the handler builds a **layered preamble** that carries
+   both the prior session's `context_summary` and the live Telegram reply thread. The order
+   is fixed so the agent always sees the same shape:
    ```
    [Prior session context: {summary}]
 
+   REPLY THREAD CONTEXT (oldest to newest):
+   ----------------------------------------
+   Tom: did we get that fixed?
+   Valor: yes, shipped yesterday
+   ----------------------------------------
+
    {new message}
    ```
-3. A fresh `AgentSession` is enqueued with the **same `session_id`** (preserving thread
-   continuity) and the augmented message as its task.
-4. No ack is sent. The PM behaves like a human PM resuming a conversation with their CEO:
+3. The reply-thread block is fetched synchronously via `fetch_reply_chain` +
+   `format_reply_chain` with a 3-second timeout. On timeout, network error, or any
+   exception the handler logs `RESUME_REPLY_CHAIN_FAIL` and falls back to the
+   summary-only preamble — the session always enqueues.
+4. A fresh `AgentSession` is enqueued with the **same `session_id`** (preserving thread
+   continuity), the augmented message as its task, and `telegram_message_key` set so the
+   worker's deferred enrichment still hydrates media, YouTube, and link summaries. The
+   deferred enrichment is idempotent: it checks for the canonical `REPLY THREAD CONTEXT`
+   header (constant `REPLY_THREAD_CONTEXT_HEADER` in `bridge/context.py`) and skips its
+   own reply-chain fetch if the handler already prepended one.
+5. No ack is sent. The PM behaves like a human PM resuming a conversation with their CEO:
    they don't announce "picking up where we left off" — they just respond to the substance
    of the new message. The resumed session's actual reply is the only user-visible signal.
-5. If `context_summary` is `None` (session completed without generating a summary), a generic
-   fallback string is used: `"This continues a previously completed session."`
+6. If `context_summary` is `None` (session completed without generating a summary), a generic
+   fallback string is used: `"This continues a previously completed session."` The reply
+   thread is still hydrated when available — this is the primary carry for sessions whose
+   summary was never written.
 
 This eliminates the "context orphan" scenario where the agent starts from scratch on a task
 that was already partially completed.
+
+### Implicit-Context Directive
+
+Messages that reference prior conversation without using Telegram's native reply-to feature
+("did we get that fixed?", "the bug is still broken") are detected by the heuristic
+`references_prior_context(text)` in `bridge/context.py`. When the predicate matches and the
+message has no `reply_to_msg_id`, the handler prepends a `[CONTEXT DIRECTIVE]` block to the
+prompt. The directive is advisory tool-order guidance — it instructs the agent to consult
+`valor-telegram`, `memory_search`, the project knowledge base, and `gh issue/pr` in that
+order, and to skip the directive entirely if the auto-recalled subconscious memory already
+covers the reference.
+
+The heuristic is narrow and high-precision (deictic patterns like `the bug`, `that issue`,
+`still broken`, `we fixed`, `last time`, `as I mentioned`, `did we`, `what about that`,
+combined with the existing `STATUS_QUESTION_PATTERNS`). False positives cost one agent turn
+at most. Set the env var `REPLY_CONTEXT_DIRECTIVE_DISABLED=1` to turn the directive off
+without a code deploy. Every injection emits a structured log entry
+(`implicit_context_directive_injected`) with `session_id`, `chat_id`, `matched_patterns`,
+and a text preview so false-positive rates can be audited from logs.
+
+See [Reply-Thread Context Hydration](reply-thread-context-hydration.md) for the full design.
 
 ## Race Conditions
 
