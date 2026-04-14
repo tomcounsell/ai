@@ -93,6 +93,10 @@ State is stored in `data/sdlc_reflection_last_run.json`.
 | `scripts/update/migrations.py` | Added `create_sdlc_stubs` migration |
 | `tests/unit/test_sdlc_stubs.py` | Unit tests for migration and stubs |
 
+## Adding a New SDLC Stage
+
+Adding a 9th (or later) SDLC stage requires a new named migration entry in `scripts/update/migrations.py`. The `create_sdlc_stubs` migration is recorded once in `data/migrations_completed.json` — a new stage stub will NOT be auto-created unless a new migration is registered and run.
+
 ## See Also
 
 - `docs/features/README.md` — Feature index
