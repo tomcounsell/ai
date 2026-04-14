@@ -154,3 +154,178 @@ reflections:
       Send a summary to the 'Dev: Valor' Telegram chat.
       Skip projects without SENTRY_DSN silently.
     enabled: false
+
+  # === Monolith extraction (issue #748) ===
+  # All entries below were extracted from scripts/reflections.py into reflections/ package.
+  # enabled: false during Phase A — enabled in Phase C after monolith is deleted.
+  # This prevents the transition-window race where both paths execute the same logical unit.
+
+  # --- Maintenance group ---
+
+  - name: legacy-code-scan
+    description: "Scan for TODO comments and deprecated typing imports"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_legacy_code_scan"
+    enabled: false
+
+  - name: redis-ttl-cleanup
+    description: "Run TTL cleanup on all Redis models: TelegramMessage, Link, Chat, AgentSession, BridgeEvent, ReflectionIgnore"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_redis_ttl_cleanup"
+    enabled: false
+
+  - name: redis-data-quality
+    description: "Check Redis data quality: unsummarized links, dead channels, session error patterns, message volumes"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_redis_data_quality"
+    enabled: false
+
+  - name: branch-plan-cleanup
+    description: "Delete merged git branches and audit docs/plans/ for complete/orphaned/stale plans"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_branch_plan_cleanup"
+    enabled: false
+
+  - name: disk-space-check
+    description: "Check available disk space; warn if below 10 GB on project volume"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_disk_space_check"
+    enabled: false
+
+  - name: analytics-rollup
+    description: "Run daily analytics rollup: aggregate metrics and purge old data"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_analytics_rollup"
+    enabled: false
+
+  # --- Auditing group ---
+
+  - name: log-review
+    description: "Review previous day's logs per project: file sizes, error counts, regression markers"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_log_review"
+    enabled: false
+
+  - name: documentation-audit
+    description: "Audit documentation against codebase via DocsAuditor"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_documentation_audit"
+    enabled: false
+
+  - name: skills-audit
+    description: "Validate all SKILL.md files for required sections and quality"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_skills_audit"
+    enabled: false
+
+  - name: hooks-audit
+    description: "Audit Claude Code hooks: check hooks.log for errors, settings.json for configuration issues"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_hooks_audit"
+    enabled: false
+
+  - name: feature-docs-audit
+    description: "Audit docs/features/ for stale terms, stub docs, dead code refs, and README index mismatches"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_feature_docs_audit"
+    enabled: false
+
+  - name: pr-review-audit
+    description: "Audit merged PRs for unaddressed review findings; file GitHub issues for unaddressed items"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_pr_review_audit"
+    enabled: false
+
+  # --- Task management group ---
+
+  - name: task-management
+    description: "Check open bug issues per project and local TODO files"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.task_management.run_task_management"
+    enabled: false
+
+  - name: principal-staleness
+    description: "Check if config/PRINCIPAL.md is stale (>90 days since last modification)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.task_management.run_principal_staleness"
+    enabled: false
+
+  # --- Pipeline callables ---
+
+  - name: session-intelligence
+    description: "Pipeline: Session Analysis → LLM Reflection → Bug Issue Filing"
+    interval: 86400  # daily
+    priority: normal
+    execution_type: function
+    callable: "reflections.session_intelligence.run"
+    enabled: false
+
+  - name: behavioral-learning
+    description: "Pipeline: Episode Cycle-Close → Pattern Crystallization (skips if models.cyclic_episode unavailable)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.behavioral_learning.run"
+    enabled: false
+
+  - name: daily-report-and-notify
+    description: "Pipeline: Produce daily report → Create GitHub issues → Telegram notification (run last)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.daily_report.run"
+    enabled: false
+
+  # --- Memory management group (new, no monolith equivalent) ---
+
+  - name: memory-decay-prune
+    description: "Delete below-threshold memories with zero access (dry_run default; set MEMORY_DECAY_PRUNE_APPLY=true to enable)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.memory_management.run_memory_decay_prune"
+    enabled: true
+
+  - name: memory-quality-audit
+    description: "Flag memories with quality issues: zero-access after 30 days, chronically low confidence"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.memory_management.run_memory_quality_audit"
+    enabled: true
+
+  - name: knowledge-reindex
+    description: "Re-index ~/src/work-vault/ docs into KnowledgeDocument records (stub if #728 not yet merged)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.memory_management.run_knowledge_reindex"
+    enabled: true
