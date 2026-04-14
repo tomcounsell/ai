@@ -116,6 +116,9 @@ _execute_agent_session(session)
 build_harness_turn_input()  -- enriches message with context headers
     |
     v
+_apply_context_budget()     -- trims oldest context if input exceeds HARNESS_MAX_INPUT_CHARS (100K)
+    |
+    v
 get_response_via_harness()  -- spawns claude -p subprocess
     |
     v

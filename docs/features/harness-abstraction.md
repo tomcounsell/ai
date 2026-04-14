@@ -50,6 +50,12 @@ Final result string returned
 
 The function returns the final result text only — it has no streaming callback parameter.
 
+### Context Budget Cap (issue #958)
+
+Before launching the subprocess, `get_response_via_harness()` calls `_apply_context_budget(message)`. If the assembled input exceeds `HARNESS_MAX_INPUT_CHARS` (100,000 characters), the oldest context is trimmed from the start of the string. The `MESSAGE:` boundary is preserved unconditionally — the steering message is never truncated. A `[CONTEXT TRIMMED]` marker is prepended so the agent is aware context was omitted.
+
+This prevents `Separator is not found, and chunk exceed the limit` crashes in the `claude` binary that occur when PM sessions accumulate large resume-hydration + reply-chain contexts across multiple Telegram turns. The cap is a module-level constant in `agent/sdk_client.py` and can be raised by editing it without other code changes.
+
 ### Streaming Chunk Suppression
 
 `get_response_via_harness()` does not accept a streaming callback. Intermediate `content_block_delta` chunks are accumulated internally and never forwarded to any output transport mid-session. This applies equally to all transports — Telegram (`TelegramRelayOutputHandler`) and email (`EmailOutputHandler`) — no transport receives real-time streaming output.
@@ -99,7 +105,7 @@ No changes to the `AgentSession` model are needed. Harness selection is purely a
 
 | File | What changed |
 |------|-------------|
-| `agent/sdk_client.py` | Added `get_response_via_harness()`, `verify_harness_health()`, `_HARNESS_COMMANDS` registry |
+| `agent/sdk_client.py` | Added `get_response_via_harness()`, `verify_harness_health()`, `_HARNESS_COMMANDS` registry, `_apply_context_budget()`, `HARNESS_MAX_INPUT_CHARS` |
 | `agent/agent_session_queue.py` | Routing logic in `_execute_agent_session()`: checks `DEV_SESSION_HARNESS` env var for dev sessions |
 | `worker/__main__.py` | Startup health check when harness is non-`sdk` |
 | `agent/__init__.py` | Exports `get_response_via_harness` and `verify_harness_health` |
