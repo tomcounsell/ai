@@ -3678,15 +3678,22 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # directly to Telegram. BackgroundTask delivers the final result instead.
         pass
 
+    # PM and Teammate sessions set VALOR_PARENT_SESSION_ID so child subprocesses
+    # (spawned via valor_session create --parent or via Agent tool) can link their
+    # AgentSession records back to this session in user_prompt_submit.py.
+    _harness_env: dict[str, str] = {
+        "AGENT_SESSION_ID": session.agent_session_id or "",
+        "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
+    }
+    if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
+        _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
+
     async def do_work() -> str:
         return await get_response_via_harness(
             message=_harness_input,
             send_cb=_harness_send_cb,
             working_dir=str(working_dir),
-            env={
-                "AGENT_SESSION_ID": session.agent_session_id or "",
-                "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
-            },
+            env=_harness_env,
         )
 
     task = BackgroundTask(messenger=messenger)
