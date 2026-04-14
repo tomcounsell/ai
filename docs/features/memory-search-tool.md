@@ -4,9 +4,27 @@ Direct interface for searching, saving, inspecting, and forgetting memories from
 
 ## Overview
 
-The memory system previously had no direct interface -- memories accumulated silently and surfaced automatically via `<thought>` injection in the PostToolUse hook. This tool provides intentional access to the Memory model through four operations: search, save, inspect, and forget.
+The memory system previously had no direct interface -- memories accumulated silently and surfaced automatically via `<thought>` injection in the PostToolUse hook. This tool provides intentional access to the Memory model through five operations: search, save, inspect, forget, and status.
 
 ## API
+
+### `status(project_key=None, deep=False)`
+
+Return a health summary of the memory system. Fast path (<1s): Redis ping, total count, category breakdown, superseded count, avg confidence, last-write timestamp, EmbeddingField detection. Deep path (behind `deep=True`): orphan index count and per-category confidence averages.
+
+```python
+from tools.memory_search import status
+
+result = status(project_key="default")
+# {"healthy": True, "redis": {"ok": True}, "total": 80, "by_category": {...},
+#  "superseded": 3, "avg_confidence": 0.71, "last_write": "2026-04-15T02:37:04",
+#  "embedding_field": "not_configured"}
+
+result = status(deep=True)
+# adds: "orphan_index_count": 0, "by_category_confidence": {"correction": {"count": 5, "avg_confidence": 0.80}}
+```
+
+Returns `{"healthy": False, "error": "Redis unreachable: ..."}` when Redis is down.
 
 ### `search(query, project_key=None, limit=10)`
 
@@ -64,6 +82,12 @@ result = forget("abc123")
 ## CLI Usage
 
 ```bash
+# Status (health check)
+python -m tools.memory_search status
+python -m tools.memory_search status --json
+python -m tools.memory_search status --deep
+python -m tools.memory_search status --project dm
+
 # Search
 python -m tools.memory_search search "deploy patterns"
 python -m tools.memory_search search "deploy patterns" --project dm --limit 5 --json

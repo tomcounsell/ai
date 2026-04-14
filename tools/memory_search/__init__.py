@@ -18,6 +18,26 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _fetch_all_records(project_key: str) -> list:
+    """Fetch all memory records for a project key.
+
+    Shared helper used by inspect(stats=True) and status() to avoid
+    duplicating the Memory.query.filter(...) call.
+
+    Args:
+        project_key: Project partition key.
+
+    Returns:
+        List of Memory records, or empty list on error.
+    """
+    from models.memory import Memory
+
+    try:
+        return list(Memory.query.filter(project_key=project_key))
+    except Exception:
+        return []
+
+
 def _resolve_project_key(project_key: str | None = None) -> str:
     """Resolve project_key from argument or environment."""
     if project_key:
@@ -231,10 +251,7 @@ def inspect(
         if stats:
             project_key = _resolve_project_key(project_key)
             # Aggregate stats across project
-            try:
-                all_records = list(Memory.query.filter(project_key=project_key))
-            except Exception:
-                all_records = []
+            all_records = _fetch_all_records(project_key)
 
             if not all_records:
                 return {
@@ -323,6 +340,136 @@ def outcome_stats(
     except Exception as e:
         logger.warning(f"[memory_search] outcome_stats failed (non-fatal): {e}")
         return {"error": str(e)}
+
+
+def status(
+    project_key: str | None = None,
+    deep: bool = False,
+) -> dict[str, Any]:
+    """Return a health summary of the memory system.
+
+    Fast path (<1s): Redis ping, total count, category breakdown, superseded
+    count, average confidence, last-write timestamp, EmbeddingField detection.
+
+    Deep path (behind deep=True): orphan index count using _count_orphans()
+    from scripts/popoto_index_cleanup, per-category confidence averages.
+
+    Args:
+        project_key: Project partition key. Resolved from env if not provided.
+        deep: If True, run slow checks (orphan scan, per-category confidence).
+
+    Returns:
+        Dict with keys: healthy, redis, total, by_category, superseded,
+        avg_confidence, last_write, embedding_field. On Redis failure:
+        {"healthy": False, "error": "Redis unreachable: ..."}.
+    """
+    try:
+        from models.memory import Memory
+
+        # Redis ping — fail-fast
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            POPOTO_REDIS_DB.ping()
+            redis_ok = True
+        except Exception as e:
+            return {"healthy": False, "error": f"Redis unreachable: {e}"}
+
+        project_key = _resolve_project_key(project_key)
+        all_records = _fetch_all_records(project_key)
+
+        total = len(all_records)
+
+        # Category breakdown
+        known_categories = {"correction", "decision", "pattern", "surprise"}
+        by_category: dict[str, int] = {}
+        superseded_count = 0
+        total_confidence = 0.0
+        last_relevance = 0.0
+
+        for record in all_records:
+            meta = getattr(record, "metadata", None) or {}
+            cat = meta.get("category") or ""
+            key = cat if cat in known_categories else "other"
+            by_category[key] = by_category.get(key, 0) + 1
+
+            if getattr(record, "superseded_by", "") != "":
+                superseded_count += 1
+
+            total_confidence += getattr(record, "confidence", 0.0)
+
+            rel = getattr(record, "relevance", 0.0) or 0.0
+            if rel > last_relevance:
+                last_relevance = rel
+
+        avg_confidence = total_confidence / total if total > 0 else 0.0
+
+        # last_write: relevance stores Unix timestamp float (last relevance update)
+        # NOTE: this reflects last relevance update, not creation time — decay/boost
+        # operations on old records can make them appear recent here.
+        if last_relevance > 0:
+            from datetime import datetime
+
+            last_write = datetime.fromtimestamp(last_relevance).isoformat()
+        else:
+            last_write = None
+
+        # EmbeddingField detection
+        embedding_field = Memory._meta.fields.get("embedding")
+        embedding_status = "configured" if embedding_field is not None else "not_configured"
+
+        result: dict[str, Any] = {
+            "healthy": True,
+            "redis": {"ok": redis_ok},
+            "project_key": project_key,
+            "total": total,
+            "by_category": by_category,
+            "superseded": superseded_count,
+            "avg_confidence": round(avg_confidence, 4),
+            "last_write": last_write,
+            "embedding_field": embedding_status,
+        }
+
+        if deep:
+            # Orphan detection — import from scripts/
+            orphan_count: int | str = "unavailable"
+            try:
+                import sys
+                from pathlib import Path
+
+                scripts_dir = str(Path(__file__).parents[2] / "scripts")
+                if scripts_dir not in sys.path:
+                    sys.path.insert(0, scripts_dir)
+                from popoto_index_cleanup import _count_orphans
+
+                orphan_count = _count_orphans(Memory)
+            except Exception as e:
+                logger.warning(f"[memory_search] orphan count failed: {e}")
+                orphan_count = f"error: {e}"
+
+            # Per-category confidence averages
+            cat_confidence: dict[str, dict[str, Any]] = {}
+            cat_totals: dict[str, list[float]] = {}
+            for record in all_records:
+                meta = getattr(record, "metadata", None) or {}
+                cat = meta.get("category") or ""
+                key = cat if cat in known_categories else "other"
+                conf = getattr(record, "confidence", 0.0)
+                cat_totals.setdefault(key, []).append(conf)
+            for cat_key, confs in cat_totals.items():
+                cat_confidence[cat_key] = {
+                    "count": len(confs),
+                    "avg_confidence": round(sum(confs) / len(confs), 4) if confs else 0.0,
+                }
+
+            result["orphan_index_count"] = orphan_count
+            result["by_category_confidence"] = cat_confidence
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"[memory_search] status failed (non-fatal): {e}")
+        return {"healthy": False, "error": str(e)}
 
 
 def forget(memory_id: str) -> dict[str, Any]:

@@ -63,7 +63,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Local Doctor](local-doctor.md) | Unified health check CLI consolidating environment, service, auth, and resource checks into `python -m tools.doctor` | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
-| [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
+| [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, forgetting, and health-checking memories from the Memory model (`status` subcommand: Redis ping, counts, superseded ratio, category breakdown) | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |
 | [Mid-Session Steering](mid-session-steering.md) | End-to-end steering flow for injecting reply-to messages into running agent sessions | Shipped |
