@@ -1,5 +1,5 @@
 ---
-status: Approved
+status: docs_complete
 type: enhancement
 appetite: Small
 owner: Valor
