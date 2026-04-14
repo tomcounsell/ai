@@ -1818,7 +1818,7 @@ async def main():
                 "[CONTEXT DIRECTIVE] This message references context not in "
                 "the current turn. If the auto-recalled memory below does not "
                 "cover it, fetch additional context in this order: "
-                "(1) `valor-telegram read --chat \"<chat>\" --limit 20` for "
+                '(1) `valor-telegram read --chat "<chat>" --limit 20` for '
                 "recent chat history, (2) `memory_search` for prior decisions, "
                 "(3) project knowledge base, (4) `gh issue list` / `gh pr list` "
                 "if an issue or PR is implied. Skip this directive entirely if "
