@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Needs Revision
 type: feature
 appetite: Medium
 owner: valorengels
@@ -514,7 +514,23 @@ No agent integration required beyond the existing memory recall pipeline — thi
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict: NEEDS REVISION** — 2 blockers, 4 concerns, 2 nits. Critique run: 2026-04-14.
+
+### Blockers (must resolve before build)
+
+**B1: Callable signature incompatible with scheduler** — `run_consolidation(project_key, dry_run=True, max_merges=10)` will raise `TypeError` at runtime because `execute_function_reflection()` calls `func()` with zero arguments (confirmed in `agent/reflection_scheduler.py`). Fix: make `project_key` optional (`project_key=None`) with env-var fallback: `if project_key is None: project_key = os.environ.get("PROJECT_KEY", "valor")`.
+
+**B2: WriteFilter silently drops superseded_by writes** — `m.superseded_by = new_id; m.save()` does not check the return value. `WriteFilterMixin` runs on every `save()`; if it returns `False`, the record is never marked superseded with no error raised. Fix: `if m.save() is False: logger.warning(...)` and add a test for this failure path.
+
+### Concerns (embed Implementation Notes before build)
+
+**C1: Canary set tests only adjacent pairs** — Task 4 specifies adjacent pairs only (9 pairs); non-adjacent merges (e.g., items 1+5) go untested. Fix: create all 10 canary records in one batch, assert `proposed_merges == 0`.
+
+**C2: project_key resolution undocumented for multi-project envs** — Data Flow step 2 does not specify whether consolidation runs once per project or for a single configured project. Fix: document resolution strategy; consider iterating `load_local_projects()`.
+
+**C3: Contradiction notification has no fallback if bridge is down** — `valor-telegram send` subprocess has no fallback on `CalledProcessError`. Fix: catch subprocess failure and write to `logs/memory-contradictions.log`.
+
+**C4: Merged record KeyFields not specified** — `Memory.safe_save()` requires `agent_id` and `project_key` (both KeyFields). Plan doesn't specify what values to use for the merged record. Fix: document `agent_id="consolidation"`, `project_key=<originals>`, `source="system"` in Task 3.
 
 ---
 
