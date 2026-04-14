@@ -8,7 +8,6 @@ Provides fast, queryable Redis models for all persistent data:
 - BridgeEvent: structured bridge events for analytics
 - DeadLetter: failed message queue
 - Reflection: per-reflection scheduler state (unified recurring task tracking)
-- ReflectionRun: per-day reflection execution state
 - ReflectionIgnore: ignored bug patterns with TTL-based expiry
 - DedupRecord: per-chat message deduplication tracking
 - Memory: subconscious memory records (human instructions, agent observations)
@@ -30,7 +29,6 @@ from models.memory import Memory
 from models.pr_review_audit import PRReviewAudit
 from models.reflection import Reflection
 from models.reflection_ignore import ReflectionIgnore
-from models.reflection_run import ReflectionRun
 from models.teammate_metrics import TeammateMetrics
 from models.telegram import TelegramMessage
 
@@ -48,7 +46,6 @@ __all__ = [
     "PRReviewAudit",
     "Reflection",
     "ReflectionIgnore",
-    "ReflectionRun",
     "TeammateMetrics",
     "TelegramMessage",
     "Chat",

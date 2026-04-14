@@ -39,8 +39,34 @@ logger = logging.getLogger(__name__)
 # Scheduler tick interval in seconds
 SCHEDULER_TICK_INTERVAL = 60
 
-# Path to the reflections registry
-REGISTRY_PATH = Path(__file__).parent.parent / "config" / "reflections.yaml"
+
+# Path to the reflections registry.
+# Resolution order: REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml → config/
+def _resolve_registry_path() -> Path:
+    """Resolve the reflections YAML path using vault-first fallback logic.
+
+    Priority:
+    1. REFLECTIONS_YAML env var (explicit override, e.g., for testing)
+    2. ~/Desktop/Valor/reflections.yaml (iCloud-synced vault, private config)
+    3. config/reflections.yaml (in-repo fallback, always present)
+    """
+    import os
+
+    env_path = os.environ.get("REFLECTIONS_YAML")
+    if env_path:
+        p = Path(env_path).expanduser()
+        if p.exists():
+            return p
+        logger.warning("REFLECTIONS_YAML env var points to non-existent path: %s", env_path)
+
+    vault_path = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
+    if vault_path.exists():
+        return vault_path
+
+    return Path(__file__).parent.parent / "config" / "reflections.yaml"
+
+
+REGISTRY_PATH = _resolve_registry_path()
 
 
 @dataclass
@@ -93,13 +119,15 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
     """Load and validate the reflections registry from YAML.
 
     Args:
-        path: Path to the YAML file. Defaults to config/reflections.yaml.
+        path: Path to the YAML file. Defaults to vault-first resolution:
+              REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml →
+              config/reflections.yaml.
 
     Returns:
         List of validated ReflectionEntry objects. Invalid entries are
         logged and skipped.
     """
-    path = path or REGISTRY_PATH
+    path = path or _resolve_registry_path()
     if not path.exists():
         logger.warning("Reflections registry not found at %s", path)
         return []

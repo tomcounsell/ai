@@ -951,37 +951,36 @@ CORRECTIONS:
             return False
 
     def _load_state(self) -> dict[str, Any]:
-        """Load audit state from Redis via ReflectionRun model.
+        """Load audit state from Redis using a plain key.
 
-        Uses a ReflectionRun with date='__docs_audit_meta__' as a singleton
-        to store cross-run metadata like last_audit_date.
+        Stores last_audit_date as a plain Redis string at
+        key 'docs_auditor:last_audit_date' to avoid dependency on ReflectionRun.
         """
         try:
-            from models.reflections import ReflectionRun
+            import redis as _redis
 
-            runs = ReflectionRun.query.filter(date="__docs_audit_meta__")
-            if runs:
-                return runs[0].step_progress or {}
+            from config.settings import settings
+
+            r = _redis.Redis.from_url(settings.REDIS_URL)
+            raw = r.get("docs_auditor:last_audit_date")
+            if raw:
+                return {"last_audit_date": raw.decode()}
             return {}
         except Exception:
             return {}
 
     def _record_audit_date(self) -> None:
-        """Write today's date as last_audit_date in Redis via ReflectionRun."""
-        try:
-            from models.reflections import ReflectionRun
+        """Write today's date as last_audit_date to a plain Redis key.
 
-            state = self._load_state()
-            state["last_audit_date"] = utc_now().isoformat()
-            # Delete existing singleton and recreate with updated state
-            existing = ReflectionRun.query.filter(date="__docs_audit_meta__")
-            for run in existing:
-                run.delete()
-            ReflectionRun.create(
-                date="__docs_audit_meta__",
-                step_progress=state,
-                started_at=0.0,
-            )
+        Stores at 'docs_auditor:last_audit_date' (global, not per-project).
+        """
+        try:
+            import redis as _redis
+
+            from config.settings import settings
+
+            r = _redis.Redis.from_url(settings.REDIS_URL)
+            r.set("docs_auditor:last_audit_date", utc_now().isoformat())
         except Exception:
             logger.warning("Failed to record audit date to Redis", exc_info=True)
 
