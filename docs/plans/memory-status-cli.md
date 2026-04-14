@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -120,17 +120,17 @@ python -m tools.memory_search status
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `status()` wraps all Redis/Popoto calls in try/except; on Redis-down, returns `{"error": "Redis unreachable: ...", "healthy": False}`.
-- [ ] `cmd_status()` checks the `error` key and prints a clear message to stderr before exiting 1.
-- [ ] Tests must assert: (a) exit code 1 when Redis mock raises `ConnectionError`, (b) error text visible on stderr.
+- [x] `status()` wraps all Redis/Popoto calls in try/except; on Redis-down, returns `{"error": "Redis unreachable: ...", "healthy": False}`.
+- [x] `cmd_status()` checks the `error` key and prints a clear message to stderr before exiting 1.
+- [x] Tests must assert: (a) exit code 1 when Redis mock raises `ConnectionError`, (b) error text visible on stderr.
 
 ### Empty/Invalid Input Handling
-- [ ] `status()` with no memories in Redis returns zero counts gracefully (not a crash or KeyError).
-- [ ] `--project` with an unknown project key returns zero counts (not an error).
+- [x] `status()` with no memories in Redis returns zero counts gracefully (not a crash or KeyError).
+- [x] `--project` with an unknown project key returns zero counts (not an error).
 
 ### Error State Rendering
-- [ ] Human-readable output renders correctly when Redis is down (shows error, not empty table).
-- [ ] `--json` output when Redis is down emits `{"healthy": false, "error": "..."}` — not a stack trace.
+- [x] Human-readable output renders correctly when Redis is down (shows error, not empty table).
+- [x] `--json` output when Redis is down emits `{"healthy": false, "error": "..."}` — not a stack trace.
 
 ## Test Impact
 
@@ -178,21 +178,23 @@ No changes to `bridge/telegram_bridge.py`. No new MCP server registration.
 
 ## Documentation
 
-- [ ] Update `CLAUDE.md` command table: add `python -m tools.memory_search status` row with description "Check memory system health (Redis, counts, superseded ratio)"
-- [ ] Update `docs/features/subconscious-memory.md`: add a "Health Checks" subsection that references the new `status` subcommand
-- [ ] Add entry to `docs/features/README.md` index table if memory-status is considered a discrete feature (or append to the existing subconscious-memory row)
+- [x] Update `CLAUDE.md` command table: add `python -m tools.memory_search status` row with description "Check memory system health (Redis, counts, superseded ratio)"
+- [x] Update `docs/features/subconscious-memory.md`: add a "Health Checks" subsection that references the new `status` subcommand
+- [x] Add entry to `docs/features/README.md` index table if memory-status is considered a discrete feature (or append to the existing subconscious-memory row)
+- [x] Update `docs/features/memory-search-tool.md`: add `status()` API and CLI usage
+- [x] Update `docs/tools-reference.md`: add `status` to Memory Search section
 
 ## Success Criteria
 
-- [ ] `python -m tools.memory_search status` prints a human-readable health summary in <1s for typical memory sizes
-- [ ] `--json` flag emits `{"healthy": true/false, "redis": {...}, "total": N, "by_category": {...}, "superseded": N, "avg_confidence": 0.NN, "last_write": "...", "embedding_field": "configured|not_configured"}` structure
-- [ ] `--deep` flag adds `orphan_index_count` to the output
-- [ ] `--project <name>` scopes all counts to the specified project
-- [ ] Redis-down exits with code 1 and prints a human-readable error to stderr
-- [ ] `CLAUDE.md` command table updated
-- [ ] `tests/unit/test_memory_search_cli.py` created with coverage for: happy path, Redis-down, empty project, `--json`, `--deep`
-- [ ] Tests pass (`pytest tests/unit/test_memory_search_cli.py -v`)
-- [ ] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`)
+- [x] `python -m tools.memory_search status` prints a human-readable health summary in <1s for typical memory sizes
+- [x] `--json` flag emits `{"healthy": true/false, "redis": {...}, "total": N, "by_category": {...}, "superseded": N, "avg_confidence": 0.NN, "last_write": "...", "embedding_field": "configured|not_configured"}` structure
+- [x] `--deep` flag adds `orphan_index_count` to the output
+- [x] `--project <name>` scopes all counts to the specified project
+- [x] Redis-down exits with code 1 and prints a human-readable error to stderr
+- [x] `CLAUDE.md` command table updated
+- [x] `tests/unit/test_memory_search_cli.py` created with coverage for: happy path, Redis-down, empty project, `--json`, `--deep`
+- [x] Tests pass (`pytest tests/unit/test_memory_search_cli.py -v`)
+- [x] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`)
 
 ## Team Orchestration
 
