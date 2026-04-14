@@ -26,10 +26,12 @@ The session system has 8 mechanisms that can revive, recover, or re-enqueue sess
 | Property | Value |
 |----------|-------|
 | Location | `agent/agent_session_queue.py` |
-| Trigger | Periodic timer (every 60s) |
-| What it does | Recovers stuck `running` sessions (dead worker, timeout) back to `pending`; starts workers for stalled `pending` sessions |
+| Trigger | Periodic timer (every 5 min, `AGENT_SESSION_HEALTH_CHECK_INTERVAL`) |
+| What it does | Recovers stuck `running` sessions back to `pending` on three signals: (1) dead/missing worker, (2) worker alive but no progress after the 300s startup guard (issue #944), (3) exceeded session timeout. Starts workers for stalled `pending` sessions. |
+| Progress signal | `_has_progress(entry)` returns True iff ANY of `turn_count > 0`, non-empty `log_path`, or non-empty `claude_session_uuid`. Covers the full SDK subprocess warmup arc so long-warmup BUILD sessions are not misclassified. |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"` and `status="pending"` |
 | Guard | Query filter (only non-terminal statuses) + `transition_status()` with default `reject_from_terminal=True` |
+| Observability | Each recovery increments `{project_key}:session-health:recoveries:{worker_dead\|no_progress\|timeout}` in Redis (counter write is non-fatal) |
 
 #### Finalization gap on re-execution (issue #917)
 

@@ -29,6 +29,7 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     migrations,
+    newsyslog,
     npm_tools,
     officecli,
     rodney,
@@ -746,6 +747,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         result.warnings.append("Worker not running after install")
             else:
                 result.warnings.append("Worker plist install failed")
+
+        # Check newsyslog log rotation config — bridge/worker stderr logs bypass
+        # Python's RotatingFileHandler, so newsyslog is the only rotator for them.
+        # Install attempts a passwordless sudo; when that fails, surface an
+        # actionable one-liner so the user knows exactly what to run manually.
+        ns_status = newsyslog.check_newsyslog(project_dir)
+        if ns_status.installed:
+            log(f"newsyslog config installed at {newsyslog.NEWSYSLOG_DST}", v, always=True)
+        elif ns_status.needs_sudo:
+            log(f"ACTION REQUIRED: {ns_status.action_message}", v, always=True)
+            result.warnings.append(ns_status.action_message)
 
     elif result.git_result and result.git_result.commit_count > 0:
         # Cron mode: set restart flag instead of restarting

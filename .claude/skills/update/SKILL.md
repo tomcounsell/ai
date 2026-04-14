@@ -38,6 +38,8 @@ The orchestrator will:
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
+**Newsyslog ACTION REQUIRED:** The orchestrator checks `/etc/newsyslog.d/valor.conf` against the rendered template on every `--full` run. If missing or stale it tries a passwordless `sudo -n` install. When sudo needs a password the run prints `ACTION REQUIRED: ... Run: sudo cp <(sed ...) /etc/newsyslog.d/valor.conf`. **Always surface this line verbatim to the user** — without it, `bridge.error.log` and `worker_error.log` grow unbounded (observed 18+ MB).
+
 The orchestrator automatically cleans up sessions as part of Step 5.5:
 - Corrupted sessions (invalid IDs, unsaveable records) are deleted and indexes rebuilt
 - Running/pending sessions older than 120 min with no live process are transitioned to `killed`

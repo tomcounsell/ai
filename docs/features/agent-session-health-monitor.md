@@ -18,7 +18,8 @@ When a stuck running session is detected, it is automatically recovered by delet
 
 ### Detection
 
-- **Dead worker detection**: Checks `_active_workers[chat_id]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the session is considered orphaned.
+- **Dead worker detection**: Checks `_active_workers[worker_key]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the session is considered orphaned.
+- **No-progress detection (issue #944)**: Even when the worker is alive, a running session past the 300s startup guard is recovered if it shows no progress signal. `_has_progress(entry)` returns True iff ANY of `turn_count > 0`, non-empty `log_path`, or non-empty `claude_session_uuid` is set — together these cover the SDK subprocess warmup arc from auth to first turn. This catches slugless dev sessions stuck behind a co-running PM session (both share `worker_key == project_key`).
 - **Timeout detection**: Compares `started_at` timestamp against the configured max duration for the session type.
 - **Race condition guard**: Jobs must be running for at least 5 minutes (`AGENT_SESSION_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
 
@@ -35,10 +36,11 @@ Timeouts are measured from `started_at` (when the session begins processing), no
 
 When a stuck session is found:
 
-1. Log a warning with the session ID, project key, and reason (dead worker or timeout)
-2. Delete the orphaned AgentSession from Redis
-3. Re-create it as `pending` with all original data preserved
-4. Call `_ensure_worker()` to restart the processing loop for that project
+1. Log a warning with the session ID, project key, and reason (dead worker, no progress signal, or timeout)
+2. Increment the project-scoped Redis counter `{project_key}:session-health:recoveries:{worker_dead|no_progress|timeout}` for observability (non-fatal on failure)
+3. Delete the orphaned AgentSession from Redis
+4. Re-create it as `pending` with all original data preserved (local sessions finalize as `abandoned` instead)
+5. Call `_ensure_worker()` to restart the processing loop for that project
 
 ### Startup Integration
 
@@ -108,3 +110,4 @@ Constants in `agent/agent_session_queue.py`:
 - [agent-session-model.md](agent-session-model.md) -- AgentSession model fields and lifecycle
 - `agent/agent_session_queue.py` -- Implementation source
 - Issue #127 -- Original tracking issue
+- Issue #944 -- No-progress recovery for sessions stuck behind a shared-worker-key PM

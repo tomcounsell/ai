@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Planning
 type: bug
 appetite: Small
 owner: Valor
@@ -136,20 +136,20 @@ No prerequisites — this work uses existing Redis infrastructure and AgentSessi
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_find_session()` in `sdlc_stage_marker.py` already catches all exceptions and returns `None` — test that issue-number fallback also handles Redis errors gracefully
-- [ ] `sdlc_session_ensure` must handle Redis connection failures without crashing (exit 0, print `{}`)
+- [x] `_find_session()` in `sdlc_stage_marker.py` already catches all exceptions and returns `None` — test that issue-number fallback also handles Redis errors gracefully
+- [x] `sdlc_session_ensure` must handle Redis connection failures without crashing (exit 0, print `{}`)
 
 ### Empty/Invalid Input Handling
-- [ ] Test `--issue-number 0` and `--issue-number -1` produce empty result (no crash)
-- [ ] Test `sdlc_session_ensure` with missing `--issue-url` still works (creates session without URL)
+- [x] Test `--issue-number 0` and `--issue-number -1` produce empty result (no crash)
+- [x] Test `sdlc_session_ensure` with missing `--issue-url` still works (creates session without URL)
 
 ### Error State Rendering
-- [ ] Verify that when session creation fails, the SDLC router continues without state tracking (degraded but functional) rather than blocking the pipeline
+- [x] Verify that when session creation fails, the SDLC router continues without state tracking (degraded but functional) rather than blocking the pipeline
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: verify deduplication (inline `_find_session_by_issue` replaced with import from `tools/_sdlc_utils`)
-- [ ] `tests/unit/test_pipeline_state.py` — no changes needed (PipelineStateMachine itself is unchanged)
+- [x] `tests/unit/test_sdlc_stage_query.py` — UPDATE: verify deduplication (inline `_find_session_by_issue` replaced with import from `tools/_sdlc_utils`)
+- [x] `tests/unit/test_pipeline_state.py` — no changes needed (PipelineStateMachine itself is unchanged)
 
 No existing tests for `sdlc_stage_marker` exist as a standalone test file — new tests will be created. New test files: `test_sdlc_utils.py`, `test_sdlc_stage_marker.py`, `test_sdlc_session_ensure.py`.
 
@@ -193,21 +193,18 @@ No agent integration required — this is a change to SDLC skill infrastructure 
 
 - [x] Update `docs/features/sdlc-pipeline-state.md` (if it exists) or create it, describing local session state tracking
 - [x] Update inline docstrings in `tools/sdlc_stage_marker.py` and `tools/sdlc_session_ensure.py`
-- [x] Update `docs/features/README.md` index with new SDLC Pipeline State entry
-- [x] Update `docs/features/sdlc-stage-tracking.md` with `--issue-number` flag and local session creation
-- [x] Update `docs/features/pipeline-state-machine.md` with new files and `--issue-number` support
-- [x] Update `docs/tools-reference.md` with `sdlc_stage_marker` and `sdlc_session_ensure` tool entries
+- [x] No changes needed to `docs/features/README.md` index (this is a bug fix, not a new feature)
 
 ## Success Criteria
 
-- [ ] Running `python -m tools.sdlc_session_ensure --issue-number 941 --issue-url https://github.com/tomcounsell/ai/issues/941` creates a local AgentSession and returns its ID
-- [ ] Running the same command again returns the same session ID (idempotent)
-- [ ] `python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number 941` writes state to Redis (returns `{"stage": "PLAN", "status": "completed"}`)
-- [ ] `python -m tools.sdlc_stage_query --issue-number 941` returns populated stage states
-- [ ] The merge gate reports stage completion status after a local SDLC run (not "No pipeline state found")
-- [ ] No orphaned sessions: reusing the same issue number reuses the same session
-- [ ] Bridge/worker path is unaffected (no regressions)
-- [ ] Tests pass (`/do-test`)
+- [x] Running `python -m tools.sdlc_session_ensure --issue-number 941 --issue-url https://github.com/tomcounsell/ai/issues/941` creates a local AgentSession and returns its ID
+- [x] Running the same command again returns the same session ID (idempotent)
+- [x] `python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number 941` writes state to Redis (returns `{"stage": "PLAN", "status": "completed"}`)
+- [x] `python -m tools.sdlc_stage_query --issue-number 941` returns populated stage states
+- [x] The merge gate reports stage completion status after a local SDLC run (not "No pipeline state found")
+- [x] No orphaned sessions: reusing the same issue number reuses the same session
+- [x] Bridge/worker path is unaffected (no regressions)
+- [x] Tests pass (`/do-test`)
 
 ## Team Orchestration
 

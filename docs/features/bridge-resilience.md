@@ -42,8 +42,9 @@ The six competing recovery mechanisms from the old system were replaced with one
 **`_agent_session_health_check()`** in `agent/agent_session_queue.py` scans both `running` and `pending` sessions:
 
 - **Running sessions**: If the worker for `session.worker_key` is dead/missing and the session has been running longer than the minimum threshold, recover it (reset to pending)
+- **Running sessions with no progress (#944)**: If the worker appears alive but the session has been running past `AGENT_SESSION_HEALTH_MIN_RUNNING` with no progress signal (`turn_count`, `log_path`, and `claude_session_uuid` all empty), recover it. Slugless dev sessions share `worker_key` with co-running PM sessions under the same project, so `worker_alive=True` alone does not prove the dev session is being handled. See [bridge-self-healing.md §8a](bridge-self-healing.md#8a-no-progress-recovery-for-shared-worker-key-sessions-944).
 - **Pending sessions**: If no live worker exists for `session.worker_key` and the session has been pending longer than the minimum threshold, start a worker
-- **Key invariant**: Sessions with a live worker on the same `worker_key` are never touched
+- **Key invariant**: Sessions with a live worker AND at least one progress signal are never touched
 
 ### Startup Recovery
 

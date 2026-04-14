@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -234,12 +234,12 @@ No agent integration required. This is a worker-internal change. The health chec
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-self-healing.md` (or the closest doc on the health-check system) with one paragraph describing the no-progress recovery path. If no existing doc describes `_agent_session_health_check` in detail, add a short section to `docs/features/bridge-worker-architecture.md` under the worker's responsibilities.
-- [ ] Grep `docs/` for references to `AGENT_SESSION_HEALTH_MIN_RUNNING` and `_agent_session_health_check` and update any that describe the recovery decision tree.
+- [x] Update `docs/features/bridge-self-healing.md` with subsection 8a describing the no-progress recovery path (landed in PR #947).
+- [x] Cascade updates to `docs/features/bridge-resilience.md`, `docs/features/session-recovery-mechanisms.md`, and `docs/features/agent-session-health-monitor.md` — all decision-tree descriptions now include the no-progress branch.
 
 ### Inline Documentation
-- [ ] Update the docstring of `_agent_session_health_check` at `agent/agent_session_queue.py:1353-1381` to list the new no-progress branch as item 2 (renumber existing items).
-- [ ] Add a one-line comment above the new branch explaining the rationale: "Project-keyed dev sessions share worker_key with PM; without a progress signal, worker_alive alone doesn't prove the dev session is being handled."
+- [x] Updated the docstring of `_agent_session_health_check` to list the new no-progress branch as item 2 (renumbered existing items).
+- [x] Added a one-line comment above the new branch explaining the shared-worker-key rationale.
 
 ### External Documentation Site
 
