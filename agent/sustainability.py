@@ -449,7 +449,7 @@ def sustainability_digest() -> None:
             # Something noteworthy — spin up an agent to investigate and report
             anomalies = []
             if not circuits_ok:
-                anomalies.append("one or more circuits are not CLOSED")
+                anomalies.append("one or more service circuits are not healthy")
             if throttle_level != "none":
                 anomalies.append(f"throttle level is {throttle_level}")
             if queue_paused:
@@ -471,6 +471,11 @@ def sustainability_digest() -> None:
                 "2. Current throttle level and queue paused status from Redis\n"
                 "3. Session counts and failure details from last 24 hours\n"
                 "4. Active failure cluster count\n\n"
+                "When reporting circuit states, translate as follows"
+                " — never output the raw state string:\n"
+                "- 'closed' or 'CLOSED' → OK\n"
+                "- 'open' or 'OPEN' → DOWN\n"
+                "- 'half_open' or 'HALF_OPEN' → RECOVERING\n\n"
                 "Format as a concise Telegram message highlighting what's wrong. "
                 "Send via valor-telegram to the 'Dev: Valor' chat. "
                 "Subject line: ⚠️ Daily Health Digest — anomalies detected."

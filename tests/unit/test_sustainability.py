@@ -400,5 +400,72 @@ class TestFailureLoopDetector(unittest.TestCase):
         mock_subprocess.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# TestDigestAnomalyPromptPlainLanguage
+# ---------------------------------------------------------------------------
+
+
+class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
+    """Verify that sustainability_digest() uses plain-language labels, not raw enum names."""
+
+    def test_digest_anomaly_prompt_uses_plain_language(self):
+        """sustainability_digest() must NOT use 'not CLOSED' and MUST include RECOVERING label."""
+        import models.agent_session as asm
+        from agent.sustainability import sustainability_digest
+
+        # Use an OPEN circuit so circuits_ok=False, which triggers the anomaly path
+        health_mod, resilience_mod, _cb = _build_health_stubs("open")
+
+        r = MagicMock()
+        r.get.return_value = b"none"  # throttle_level = "none"
+        r.exists.return_value = 0  # queue not paused
+        r.scard.return_value = 0  # no fingerprint clusters
+
+        captured_command = {}
+
+        # Replace AgentSession on the module so the local `from models.agent_session import
+        # AgentSession` inside sustainability_digest() picks up the stub.
+        fake_session_cls = MagicMock()
+
+        def capture_enqueue(**kwargs):
+            captured_command["command"] = kwargs.get("message_text", "")
+
+        fake_session_cls.create_and_enqueue.side_effect = capture_enqueue
+        fake_session_cls.query.filter.return_value = []  # no sessions → failed_24h = 0
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(asm, "AgentSession", fake_session_cls),
+            patch.dict(
+                sys.modules,
+                {
+                    "bridge.health": health_mod,
+                    "bridge.resilience": resilience_mod,
+                },
+            ),
+        ):
+            sustainability_digest()
+
+        command = captured_command.get("command", "")
+        self.assertNotEqual(
+            command, "", "create_and_enqueue was not called — anomaly path not reached"
+        )
+
+        # (a) The anomaly text must NOT contain the raw "not CLOSED" enum string
+        self.assertNotIn(
+            "not CLOSED",
+            command,
+            "anomaly string must not expose raw circuit enum name 'not CLOSED'",
+        )
+
+        # (b) The command prompt MUST contain the plain-language label mapping (RECOVERING as proxy)
+        self.assertIn(
+            "RECOVERING",
+            command,
+            "command prompt must include plain-language label mapping containing 'RECOVERING'",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
