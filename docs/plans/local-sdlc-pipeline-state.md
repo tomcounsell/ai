@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-14
 tracking: https://github.com/tomcounsell/ai/issues/941
 last_comment_id:
+revision_applied: true
 ---
 
 # Local SDLC Pipeline State Tracking
@@ -67,8 +68,9 @@ Stage progress is tracked in Redis for local `/sdlc` runs, and the merge gate re
 ## Architectural Impact
 
 - **New dependencies**: None — uses existing `AgentSession.create_local()` factory and existing `_find_session_by_issue()` pattern
-- **Interface changes**: `sdlc_stage_marker` CLI gains `--issue-number` flag; `_find_session()` gains issue-number fallback
-- **Coupling**: No increase — reuses existing patterns from `sdlc_stage_query`
+- **New shared module**: `tools/_sdlc_utils.py` — extracts `find_session_by_issue()` to avoid duplicating across 3 CLI tools
+- **Interface changes**: `sdlc_stage_marker` and `sdlc_stage_query` CLIs gain `--issue-number` flag; `_find_session()` gains issue-number resolution via shared utils
+- **Coupling**: Slight reduction — deduplicates session lookup logic into one shared module
 - **Data ownership**: No change — stage_states remain owned by the PM/local session in Redis
 - **Reversibility**: Fully reversible — removing the fallback restores original silent-no-op behavior
 
@@ -90,35 +92,43 @@ No prerequisites — this work uses existing Redis infrastructure and AgentSessi
 
 ### Key Elements
 
-- **Session auto-creation in SDLC router**: Before dispatching sub-skills, the SDLC router creates a local AgentSession keyed by `sdlc-local-{issue_number}` and exports `AGENT_SESSION_ID` for downstream tools
-- **Issue-number fallback in stage_marker**: When no session ID is available via env vars, `_find_session()` accepts an `--issue-number` argument and resolves via issue URL matching (same pattern as `sdlc_stage_query._find_session_by_issue()`)
+- **Session auto-creation in SDLC router**: Before dispatching sub-skills, the SDLC router creates a local AgentSession keyed by `sdlc-local-{issue_number}` via the `sdlc_session_ensure` tool
+- **`--issue-number` as primary resolution mechanism**: Each `sdlc_stage_marker` and `sdlc_stage_query` invocation receives `--issue-number` directly — env var export is NOT used because each bash block in Claude Code runs in a separate shell process and exported variables do not propagate
+- **Shared session lookup in `tools/_sdlc_utils.py`**: The `find_session_by_issue()` function is extracted to a shared module, imported by `sdlc_stage_marker`, `sdlc_stage_query`, and `sdlc_session_ensure` — no code duplication
 - **Idempotent session lookup**: Running `/sdlc` multiple times on the same issue reuses the same local session (keyed by issue number)
 
 ### Flow
 
-**`/sdlc` invoked locally** → Check for AGENT_SESSION_ID → Not found → Create/find local AgentSession by issue number → Export AGENT_SESSION_ID → Dispatch sub-skill → Sub-skill calls `sdlc_stage_marker` → Marker finds session via env var → Writes stage_states to Redis → Merge gate reads populated state
+**`/sdlc` invoked locally** → Create/find local AgentSession by issue number via `sdlc_session_ensure` → Dispatch sub-skill → Sub-skill calls `sdlc_stage_marker --issue-number N` → Marker resolves session via `find_session_by_issue(N)` from shared utils → Writes stage_states to Redis → Merge gate reads populated state
 
 ### Technical Approach
 
-1. **`tools/sdlc_stage_marker.py` changes**:
-   - Add `--issue-number` CLI argument
+1. **`tools/_sdlc_utils.py`** (new shared module):
+   - Extract `find_session_by_issue(issue_number: int)` from `sdlc_stage_query.py`
+   - Single implementation, imported by all three CLI tools (marker, query, session_ensure)
+   - No circular import risk — this module only imports `models.agent_session`
+
+2. **`tools/sdlc_stage_marker.py` changes**:
+   - Add `--issue-number` CLI argument (optional, type=int)
    - Extend `_find_session()` to accept optional `issue_number` parameter
-   - When no session found via ID/env vars, try `_find_session_by_issue(issue_number)` (extract the function from `sdlc_stage_query.py` into a shared location, or duplicate the simple lookup)
-   - To avoid circular imports, duplicate the `_find_session_by_issue()` pattern directly in `sdlc_stage_marker.py` (it's 15 lines)
+   - After env var lookup fails, if `issue_number` is provided, call `find_session_by_issue(issue_number)` from `tools/_sdlc_utils`
+   - This is the **primary local resolution path** — not a fallback
 
-2. **`tools/sdlc_stage_query.py` changes**:
-   - Add issue-number auto-detection: when no session ID is available, parse the current git branch or plan files to infer the issue number
-   - This is a nice-to-have; the primary fix is the marker side
+3. **`tools/sdlc_stage_query.py` changes**:
+   - Replace inline `_find_session_by_issue()` with import from `tools/_sdlc_utils`
+   - No functional change, just deduplication
 
-3. **SDLC router skill (`SKILL.md`) changes**:
-   - After Step 1 (resolve issue), add a session-ensure step: run a small Python snippet that creates or finds a local AgentSession for this issue
-   - Export `AGENT_SESSION_ID` so all downstream marker calls find the session
-   - Pass `--issue-number` to stage marker calls as a belt-and-suspenders fallback
+4. **SDLC router skill (`SKILL.md`) changes**:
+   - After Step 1 (resolve issue), add a session-ensure step that calls `python -m tools.sdlc_session_ensure --issue-number N`
+   - **Do NOT export `AGENT_SESSION_ID`** — env vars do not persist across Claude Code bash blocks (each bash invocation is a separate shell process)
+   - Instead, pass `--issue-number` to every `sdlc_stage_marker` and `sdlc_stage_query` invocation in all skill SKILL.md files
+   - Update `sdlc_stage_query` invocation in Step 2.0 to pass `--issue-number`
 
-4. **Session creation helper** (`tools/sdlc_session_ensure.py`):
+5. **Session creation helper** (`tools/sdlc_session_ensure.py`):
    - New CLI tool: `python -m tools.sdlc_session_ensure --issue-number 941 --issue-url https://github.com/tomcounsell/ai/issues/941`
-   - Creates an AgentSession via `create_local()` if none exists for this issue
-   - Returns the session ID (for `AGENT_SESSION_ID` export)
+   - Uses `find_session_by_issue()` from `tools/_sdlc_utils` to check for existing session
+   - If none found, creates via `AgentSession.create_local()` with **default `pending` status**, then calls `transition_status(session, "running", "local SDLC session started")` from `models/session_lifecycle.py` — this respects the lifecycle module's status transition constraints
+   - Returns the session ID as JSON
    - Idempotent: if a session already exists for this issue URL, returns its ID
    - Sets `session_type="pm"` so `PipelineStateMachine` and stage queries work correctly
    - Sets `issue_url` for issue-number-based lookups
@@ -138,10 +148,10 @@ No prerequisites — this work uses existing Redis infrastructure and AgentSessi
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: add tests for issue-number auto-detection path
+- [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: verify deduplication (inline `_find_session_by_issue` replaced with import from `tools/_sdlc_utils`)
 - [ ] `tests/unit/test_pipeline_state.py` — no changes needed (PipelineStateMachine itself is unchanged)
 
-No existing tests for `sdlc_stage_marker` exist as a standalone test file — new tests will be created.
+No existing tests for `sdlc_stage_marker` exist as a standalone test file — new tests will be created. New test files: `test_sdlc_utils.py`, `test_sdlc_stage_marker.py`, `test_sdlc_session_ensure.py`.
 
 ## Rabbit Holes
 
@@ -214,51 +224,73 @@ No agent integration required — this is a change to SDLC skill infrastructure 
 
 ## Step by Step Tasks
 
-### 1. Create `tools/sdlc_session_ensure.py`
-- **Task ID**: build-session-ensure
+### 1. Create `tools/_sdlc_utils.py` (shared session lookup)
+- **Task ID**: build-sdlc-utils
 - **Depends On**: none
+- **Validates**: tests/unit/test_sdlc_session_ensure.py (create)
+- **Assigned To**: sdlc-tools-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create new shared module `tools/_sdlc_utils.py`
+- Extract `find_session_by_issue(issue_number: int)` from `tools/sdlc_stage_query.py` — same logic: scan PM sessions for `issue_url` ending in `/issues/{issue_number}`
+- Single function, no CLI — pure import target for the three CLI tools
+
+### 2. Create `tools/sdlc_session_ensure.py`
+- **Task ID**: build-session-ensure
+- **Depends On**: build-sdlc-utils
 - **Validates**: tests/unit/test_sdlc_session_ensure.py (create)
 - **Assigned To**: sdlc-tools-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Create new CLI tool `tools/sdlc_session_ensure.py`
 - Accept `--issue-number` (required) and `--issue-url` (optional) arguments
-- Search for existing AgentSession with matching `issue_url` ending in `/issues/{issue_number}` (PM sessions first)
+- Use `find_session_by_issue()` from `tools/_sdlc_utils` to check for existing session
 - If found, print JSON `{"session_id": "<id>", "created": false}` and exit
-- If not found, create via `AgentSession.create_local(session_id="sdlc-local-{issue_number}", project_key="ai", working_dir=os.getcwd(), session_type="pm", issue_url=issue_url, status="running")`
+- If not found, create via `AgentSession.create_local(session_id="sdlc-local-{issue_number}", project_key="ai", working_dir=os.getcwd(), session_type="pm", issue_url=issue_url)` — note: NO `status="running"` — use default pending status
+- Then call `transition_status(session, "running", "local SDLC session started")` from `models/session_lifecycle.py` to respect the lifecycle module's status transition constraints
 - Print JSON `{"session_id": "<id>", "created": true}` and exit
 - Handle all errors gracefully (print `{}`, exit 0)
 
-### 2. Update `tools/sdlc_stage_marker.py`
+### 3. Update `tools/sdlc_stage_marker.py`
 - **Task ID**: build-stage-marker
-- **Depends On**: none
+- **Depends On**: build-sdlc-utils
 - **Validates**: tests/unit/test_sdlc_stage_marker.py (create)
 - **Assigned To**: sdlc-tools-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `--issue-number` CLI argument (optional, type=int)
 - Extend `_find_session()` to accept optional `issue_number` parameter
-- After env var lookup fails, if `issue_number` is provided, search for AgentSession with matching `issue_url` suffix `/issues/{issue_number}` (same pattern as `sdlc_stage_query._find_session_by_issue()`)
+- After env var lookup fails, if `issue_number` is provided, call `find_session_by_issue(issue_number)` from `tools/_sdlc_utils` (NOT a duplicated implementation)
 - Pass `issue_number` from `args.issue_number` to `write_marker()`'s `_find_session()` call
 
-### 3. Update SDLC router skill
+### 4. Update `tools/sdlc_stage_query.py`
+- **Task ID**: build-stage-query-dedup
+- **Depends On**: build-sdlc-utils
+- **Validates**: tests/unit/test_sdlc_stage_query.py
+- **Assigned To**: sdlc-tools-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Replace inline `_find_session_by_issue()` with import from `tools._sdlc_utils.find_session_by_issue`
+- No functional change — pure deduplication
+
+### 5. Update SDLC router skill and sub-skill markers
 - **Task ID**: build-sdlc-skill
-- **Depends On**: build-session-ensure, build-stage-marker
+- **Depends On**: build-session-ensure, build-stage-marker, build-stage-query-dedup
 - **Validates**: manual verification via `/sdlc` invocation
 - **Assigned To**: sdlc-tools-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - In `.claude/skills/sdlc/SKILL.md`, after Step 1 (resolve issue), add a session-ensure step:
   ```bash
-  SESSION_JSON=$(python -m tools.sdlc_session_ensure --issue-number {issue_number} --issue-url "https://github.com/{repo}/issues/{issue_number}" 2>/dev/null)
-  export AGENT_SESSION_ID=$(echo "$SESSION_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null)
+  python -m tools.sdlc_session_ensure --issue-number {issue_number} --issue-url "https://github.com/{repo}/issues/{issue_number}" 2>/dev/null || true
   ```
-- Update stage query invocation to pass `--issue-number` as fallback
-- Update stage marker calls in other skill SKILL.md files to pass `--issue-number` when available (belt-and-suspenders)
+- **Do NOT export `AGENT_SESSION_ID`** — env vars do not persist across Claude Code bash blocks
+- Update `sdlc_stage_query` invocation in Step 2.0 to pass `--issue-number {issue_number}`
+- Update `sdlc_stage_marker` calls in all sub-skill SKILL.md files to pass `--issue-number {issue_number}` when the issue number is known
 
-### 4. Write tests
+### 6. Write tests
 - **Task ID**: build-tests
-- **Depends On**: build-session-ensure, build-stage-marker
+- **Depends On**: build-session-ensure, build-stage-marker, build-stage-query-dedup
 - **Validates**: pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_stage_marker.py
 - **Assigned To**: sdlc-tools-builder
 - **Agent Type**: test-engineer
@@ -266,21 +298,26 @@ No agent integration required — this is a change to SDLC skill infrastructure 
 - Create `tests/unit/test_sdlc_session_ensure.py`:
   - Test creates session when none exists
   - Test returns existing session (idempotent)
+  - Test verifies session is created with `pending` then transitioned to `running` (not created directly as `running`)
   - Test handles Redis errors gracefully
   - Test CLI output format
 - Create `tests/unit/test_sdlc_stage_marker.py`:
-  - Test `_find_session()` with issue-number fallback
+  - Test `_find_session()` with `--issue-number` as primary local resolution path
   - Test `write_marker()` with issue-number resolution
   - Test CLI `--issue-number` argument parsing
   - Test backward compatibility (existing env var path still works)
+- Create `tests/unit/test_sdlc_utils.py`:
+  - Test `find_session_by_issue()` finds matching PM session
+  - Test returns None when no match
+  - Test handles Redis errors gracefully
 
-### 5. Final Validation
+### 7. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: build-tests, build-sdlc-skill
 - **Assigned To**: sdlc-tools-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_stage_marker.py tests/unit/test_sdlc_stage_query.py -v`
+- Run `pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_stage_marker.py tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_utils.py -v`
 - Verify bridge/worker path unaffected: `pytest tests/unit/test_pipeline_state_machine.py -v`
 - Verify all success criteria met
 
@@ -288,17 +325,20 @@ No agent integration required — this is a change to SDLC skill infrastructure 
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_stage_marker.py tests/unit/test_sdlc_stage_query.py -x -q` | exit code 0 |
-| Lint clean | `python -m ruff check tools/sdlc_session_ensure.py tools/sdlc_stage_marker.py` | exit code 0 |
-| Format clean | `python -m ruff format --check tools/sdlc_session_ensure.py tools/sdlc_stage_marker.py` | exit code 0 |
+| Tests pass | `pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_stage_marker.py tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_utils.py -x -q` | exit code 0 |
+| Lint clean | `python -m ruff check tools/sdlc_session_ensure.py tools/sdlc_stage_marker.py tools/_sdlc_utils.py` | exit code 0 |
+| Format clean | `python -m ruff format --check tools/sdlc_session_ensure.py tools/sdlc_stage_marker.py tools/_sdlc_utils.py` | exit code 0 |
 | Session ensure idempotent | `python -m tools.sdlc_session_ensure --issue-number 99999 --issue-url "https://github.com/test/test/issues/99999" && python -m tools.sdlc_session_ensure --issue-number 99999` | output contains "created" |
 | Pipeline state unaffected | `pytest tests/unit/test_pipeline_state_machine.py -x -q` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-14 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Operator | Shell env vars do not persist across Claude Code bash blocks — `export AGENT_SESSION_ID` in SKILL.md will not propagate to downstream marker calls | Task 5 (revised) | **APPLIED**: `--issue-number` is now the primary mechanism. Env var export removed from SKILL.md. All marker/query invocations pass `--issue-number` directly. |
+| CONCERN | Adversary, Archaeologist | `create_local(..., status="running")` bypasses the lifecycle module (`session_lifecycle.py`) which prohibits direct status mutations | Task 2 (revised) | **APPLIED**: `sdlc_session_ensure` now creates with default `pending` status, then calls `transition_status(session, "running", ...)` from `models/session_lifecycle.py`. |
+| CONCERN | Simplifier | Plan duplicates `_find_session_by_issue()` across 3 files instead of extracting to shared module | Task 1 (new) | **APPLIED**: New `tools/_sdlc_utils.py` module with `find_session_by_issue()`. Imported by all three CLI tools. Task 4 deduplicates `sdlc_stage_query.py`. |
 
 ---
 
