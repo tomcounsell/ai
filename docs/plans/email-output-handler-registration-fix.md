@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -234,9 +234,9 @@ The fix is entirely within the worker's initialization path.
 
 ## Documentation
 
-- [ ] Update `docs/features/email-bridge.md` — the "Configuration" section currently only documents `email.contacts` routing; add a parallel `email.domains` configuration example and explain that either field (or both) enables `EmailOutputHandler` registration and inbound routing
-- [ ] Update `docs/features/email-bridge.md` — add or expand a "Worker Registration" section that explicitly states the registration gate condition: handler is registered when `email.contacts` OR `email.domains` is non-empty, explaining why this matches the inbound routing logic in `bridge/routing.py`
-- [ ] Update `docs/features/README.md` — the existing entry for `email-bridge.md` mentions "sender-based project routing"; update to clarify it covers both contact-based and domain-based routing
+- [x] Update `docs/features/email-bridge.md` — the "Configuration" section currently only documents `email.contacts` routing; add a parallel `email.domains` configuration example and explain that either field (or both) enables `EmailOutputHandler` registration and inbound routing
+- [x] Update `docs/features/email-bridge.md` — add or expand a "Worker Registration" section that explicitly states the registration gate condition: handler is registered when `email.contacts` OR `email.domains` is non-empty, explaining why this matches the inbound routing logic in `bridge/routing.py`
+- [x] Update `docs/features/README.md` — the existing entry for `email-bridge.md` mentions "sender-based project routing"; update to clarify it covers both contact-based and domain-based routing
 
 ## Success Criteria
 
