@@ -1043,6 +1043,7 @@ async def main():
                                 f"into {matched_session.status} session {matched_id} "
                                 f"({action}, confidence: {confidence:.2f})"
                             )
+                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
                     except Exception as e:
                         # Steering into active session failed — fall through
@@ -1257,6 +1258,7 @@ async def main():
                         f"{matching_session.status} session "
                         f"{session_id} ({action})"
                     )
+                    await record_telegram_message_handled(event.chat_id, message.id)
                     return
                 else:
                     # No running/active session found -- check for pending.
@@ -1296,6 +1298,7 @@ async def main():
                             f"[{project_name}] Steered reply-to into "
                             f"pending session {session_id} (age={age:.1f}s)"
                         )
+                        await record_telegram_message_handled(event.chat_id, message.id)
                         return
 
                     # Check for completed session — re-enqueue with prior context.
@@ -1331,6 +1334,7 @@ async def main():
                             await send_markdown(
                                 client, event.chat_id, ack_text, reply_to=message.id
                             )
+                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
 
                         # Early short-circuit: if this exact (chat_id, msg_id) was

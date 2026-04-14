@@ -1353,7 +1353,8 @@ def _get_agent_session_timeout(session) -> int:
 def _has_progress(entry: AgentSession) -> bool:
     """Return True iff the session shows any signal that real work has begun.
 
-    Three fields cover the SDK subprocess warmup arc from auth to first turn:
+    Three own-progress fields cover the SDK subprocess warmup arc from auth
+    to first turn:
     - ``claude_session_uuid`` is populated when the SDK subprocess authenticates
       with the Claude API (seconds after launch, long before the first turn).
     - ``log_path`` is written once the session emits its first log entry
@@ -1361,15 +1362,31 @@ def _has_progress(entry: AgentSession) -> bool:
     - ``turn_count`` increments on each full agent turn completion.
 
     Any one of the three is sufficient evidence that the session is in flight.
+
+    Additionally, a session with active children (e.g. a PM session that has
+    spawned a dev child) is considered to have progress even if it has no
+    own-progress signals. The child lookup uses ``get_children()`` which queries
+    via the Popoto ``parent_agent_session_id`` index. ``get_children()`` already
+    returns ``[]`` on failure with a WARNING log, so no outer try/except is
+    needed.
+
     Used by ``_agent_session_health_check`` to distinguish stuck slugless dev
     sessions (worker_alive via a co-running PM, but no progress) from healthy
-    long-warmup BUILD sessions. See issue #944.
+    long-warmup BUILD sessions. See issues #944 and #963.
     """
-    return (
-        (entry.turn_count or 0) > 0
-        or bool((entry.log_path or "").strip())
-        or bool(entry.claude_session_uuid)
-    )
+    if (entry.turn_count or 0) > 0:
+        return True
+    if bool((entry.log_path or "").strip()):
+        return True
+    if bool(entry.claude_session_uuid):
+        return True
+    # Child-progress check: a PM session with active children is not stuck
+    # get_children() queries via Popoto parent_agent_session_id index (not string session_id)
+    # and already returns [] on failure with a WARNING log — no outer try/except needed
+    children = entry.get_children()
+    if any(c.status not in _TERMINAL_STATUSES for c in children):
+        return True
+    return False
 
 
 async def _agent_session_health_check() -> None:

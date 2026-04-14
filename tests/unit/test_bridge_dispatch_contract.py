@@ -242,6 +242,177 @@ async def handler(event):
         assert hits == [], f"walker must not descend into nested FunctionDef; spurious hits: {hits}"
 
 
+class TestSteeringPathsRecordDedup:
+    """Every push_steering_message call in handler must be followed by
+    record_telegram_message_handled (or dispatch_telegram_session) before
+    the branch's return statement.
+
+    This prevents the reconciler from re-dispatching steered messages as
+    duplicates (issue #963, Bug 1).
+    """
+
+    @staticmethod
+    def _find_steering_dedup_violations(
+        fn: ast.AsyncFunctionDef,
+    ) -> list[tuple[int, str]]:
+        """Walk ``fn``'s body and find push_steering_message calls that are
+        NOT followed by record_telegram_message_handled or
+        dispatch_telegram_session before a return in the same branch.
+
+        Returns [(lineno, description), ...] for each violation.
+        """
+        violations: list[tuple[int, str]] = []
+
+        def _get_call_name(node: ast.Call) -> str | None:
+            f = node.func
+            if isinstance(f, ast.Name):
+                return f.id
+            if isinstance(f, ast.Attribute):
+                return f.attr
+            return None
+
+        dedup_calls = frozenset({"record_telegram_message_handled", "dispatch_telegram_session"})
+
+        def _check_stmts(stmts: list[ast.stmt], pending_push_line: int | None = None):
+            """Walk a list of statements, tracking pending push_steering_message calls.
+
+            pending_push_line: line number of an unresolved push from an ancestor scope.
+            """
+            local_pending = pending_push_line
+
+            for stmt in stmts:
+                # Check all calls in this statement (but not nested functions)
+                for node in ast.walk(stmt):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        continue
+                    if isinstance(node, ast.Call):
+                        name = _get_call_name(node)
+                        if name == "push_steering_message":
+                            local_pending = node.lineno
+                        elif name in dedup_calls:
+                            local_pending = None
+
+                # If this statement is an If, recurse into branches
+                if isinstance(stmt, ast.If):
+                    _check_stmts(stmt.body, local_pending)
+                    _check_stmts(stmt.orelse, local_pending)
+                    # After an if/else, the pending state is complex; reset
+                    # only if both branches clear it. For simplicity, keep
+                    # the current pending state (conservative: may produce
+                    # false positives but never false negatives).
+                elif isinstance(stmt, (ast.For, ast.While)):
+                    _check_stmts(stmt.body, local_pending)
+                    _check_stmts(stmt.orelse, local_pending)
+                elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                    _check_stmts(stmt.body, local_pending)
+                elif isinstance(stmt, (ast.Try, ast.ExceptHandler)):
+                    if isinstance(stmt, ast.Try):
+                        _check_stmts(stmt.body, local_pending)
+                        for handler_node in stmt.handlers:
+                            _check_stmts(handler_node.body, local_pending)
+                        _check_stmts(stmt.orelse, local_pending)
+                        _check_stmts(stmt.finalbody, local_pending)
+
+                # Check for return with pending push
+                if isinstance(stmt, ast.Return) and local_pending is not None:
+                    violations.append(
+                        (
+                            local_pending,
+                            f"push_steering_message at line {local_pending} "
+                            f"not followed by dedup before return at line {stmt.lineno}",
+                        )
+                    )
+
+        # Filter out nested functions, then check the full body as one scope
+        top_stmts = [
+            s for s in fn.body if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        _check_stmts(top_stmts)
+
+        return violations
+
+    def test_all_steering_paths_have_dedup_in_handler(self):
+        """Every push_steering_message in handler must be followed by dedup."""
+        tree = ast.parse(BRIDGE_SRC.read_text())
+        handler = _find_telethon_handler(tree)
+        assert handler is not None
+        violations = self._find_steering_dedup_violations(handler)
+        assert not violations, (
+            "push_steering_message calls without subsequent "
+            "record_telegram_message_handled before return:\n"
+            + "\n".join(f"  - {desc}" for _, desc in violations)
+        )
+
+    def test_detects_violation_in_synthetic_source(self):
+        """Walker must flag a push_steering_message without dedup before return."""
+        violating_source = """
+class client:
+    @staticmethod
+    def on(_):
+        def deco(fn):
+            return fn
+        return deco
+
+@client.on(None)
+async def handler(event):
+    push_steering_message("sid", "text", "sender")
+    return
+"""
+        tree = ast.parse(violating_source)
+        handler = _find_telethon_handler(tree)
+        assert handler is not None
+        violations = self._find_steering_dedup_violations(handler)
+        assert violations, "walker failed to detect missing dedup after push_steering_message"
+
+    def test_detects_nested_branch_violation(self):
+        """Walker must detect violation inside nested if branches."""
+        violating_source = """
+class client:
+    @staticmethod
+    def on(_):
+        def deco(fn):
+            return fn
+        return deco
+
+@client.on(None)
+async def handler(event):
+    if cond1:
+        push_steering_message("sid", "text", "sender")
+        if cond2:
+            return
+"""
+        tree = ast.parse(violating_source)
+        handler = _find_telethon_handler(tree)
+        assert handler is not None
+        violations = self._find_steering_dedup_violations(handler)
+        assert violations, (
+            "walker failed to detect nested-branch violation: "
+            "push_steering_message in outer if, return in nested if, no dedup"
+        )
+
+    def test_clean_source_has_no_violations(self):
+        """A properly guarded push_steering_message must not trigger a violation."""
+        clean_source = """
+class client:
+    @staticmethod
+    def on(_):
+        def deco(fn):
+            return fn
+        return deco
+
+@client.on(None)
+async def handler(event):
+    push_steering_message("sid", "text", "sender")
+    await record_telegram_message_handled(chat_id, msg_id)
+    return
+"""
+        tree = ast.parse(clean_source)
+        handler = _find_telethon_handler(tree)
+        assert handler is not None
+        violations = self._find_steering_dedup_violations(handler)
+        assert not violations, f"false positive on clean source: {violations}"
+
+
 class TestDedupWarningLogging:
     """C4: dedup failures must log at WARNING level (not debug)."""
 

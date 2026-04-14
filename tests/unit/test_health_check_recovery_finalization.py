@@ -182,3 +182,68 @@ class TestFallbackExistsInSource:
         assert "agent_session was None" in source, (
             "Expected 'agent_session was None' log message in agent_session_queue.py"
         )
+
+
+class TestHasProgressChildActivity:
+    """Tests for _has_progress() child-activity awareness (issue #963, Bug 2).
+
+    A PM session with active children should not be declared stuck by the
+    health check, even if it has no own-progress signals (turn_count,
+    log_path, claude_session_uuid).
+    """
+
+    @staticmethod
+    def _make_entry(**overrides):
+        """Create a minimal AgentSession-like object for _has_progress."""
+        defaults = {
+            "turn_count": 0,
+            "log_path": "",
+            "claude_session_uuid": None,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    @staticmethod
+    def _make_child(status="running"):
+        return SimpleNamespace(status=status)
+
+    def test_returns_true_when_child_running(self):
+        """_has_progress returns True when a child session is running."""
+
+        entry = self._make_entry()
+        entry.get_children = lambda: [self._make_child(status="running")]
+
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_returns_true_when_child_pending(self):
+        """_has_progress returns True when a child session is pending."""
+        entry = self._make_entry()
+        entry.get_children = lambda: [self._make_child(status="pending")]
+
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_returns_false_when_all_children_terminal(self):
+        """_has_progress returns False when all children are in terminal status."""
+        entry = self._make_entry()
+        entry.get_children = lambda: [
+            self._make_child(status="completed"),
+            self._make_child(status="failed"),
+            self._make_child(status="killed"),
+        ]
+
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is False
+
+    def test_returns_false_when_no_children(self):
+        """_has_progress returns False when no children exist."""
+        entry = self._make_entry()
+        entry.get_children = lambda: []
+
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is False
