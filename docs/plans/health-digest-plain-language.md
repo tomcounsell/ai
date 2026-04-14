@@ -1,5 +1,5 @@
 ---
-status: complete
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -154,7 +154,8 @@ No agent integration changes required — `agent/sustainability.py` is already w
 
 ## Documentation
 
-- [x] No documentation changes needed — `docs/features/bridge-self-healing.md` does not reference circuit state display labels, so no update is required.
+- [x] Updated `docs/features/sustainable-self-healing.md` — added plain-language circuit state label mapping description to the Daily Health Digest section and the unit test coverage table
+- [x] Confirmed `docs/features/bridge-self-healing.md` has no circuit state display references — no update needed
 
 ## Success Criteria
 
