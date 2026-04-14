@@ -111,8 +111,9 @@ python -m tools.memory_search status
 - Reuse `_resolve_project_key()` for project scoping, same pattern as all other subcommands.
 - Category breakdown: iterate records and accumulate `metadata.get("category")` counts. Four known categories: correction, decision, pattern, surprise. Uncategorized records go under `"other"`.
 - Superseded count: filter records where `superseded_by != ""`.
-- Last-write timestamp: `DecayingSortedField` (`relevance`) uses `importance` as the base score. The most recently added record has the highest raw score — but `created_at` is not a stored field. Instead, scan `memory_id` (which is an AutoKeyField using a timestamp-based UUID) and parse the leading timestamp bytes to find the newest record. If AutoKeyField is not timestamp-based, fall back to scanning `relevance` sorted set for max score timestamp.
-- Orphan detection: import `_count_orphans` from `scripts/popoto_index_cleanup` directly (no subprocess) — it already returns an integer count.
+- Last-write timestamp: The `relevance` field stores a Unix timestamp float (confirmed live: `1776184081.54`). Use `max(getattr(r, "relevance", 0) for r in all_records)` → `datetime.fromtimestamp(...)`. Do NOT attempt UUID/AutoKeyField timestamp parsing — AutoKeyField is UUID4 (random), not timestamp-based.
+- Shared record fetch: extract `_fetch_all_records(project_key)` helper in `__init__.py` to avoid duplicating the `Memory.query.filter(...)` call between `status()` and `inspect(stats=True)`. Both functions call this helper.
+- Orphan detection: import `_count_orphans` from `scripts/popoto_index_cleanup` directly (no subprocess). Use `sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))` at the top of the `--deep` branch, then `from popoto_index_cleanup import _count_orphans`.
 - EmbeddingField detection: `Memory._meta.fields.get("embedding")` — if `None`, report "not configured".
 - All errors wrapped in `try/except`; status subcommand follows the existing fail-silent contract of the module but surfaces Redis-down as an explicit non-zero exit.
 
@@ -145,13 +146,13 @@ No existing tests affected — `tests/unit/test_memory_search_cli.py` does not y
 
 ## Risks
 
-### Risk 1: AutoKeyField timestamp parsing
-**Impact:** `last_write` timestamp is wrong or missing if AutoKeyField format changes.
-**Mitigation:** Use a `try/except` around timestamp parsing; fall back to `"unknown"` rather than crashing. Document the assumption in a code comment.
+### Risk 1: `relevance` field timestamp accuracy
+**Impact:** `last_write` reflects relevance score update time, not creation time. Decay or boost operations could update `relevance` on old records, making them appear recent.
+**Mitigation:** Document in a code comment that `last_write` is "last relevance update" not "last created". This is acceptable for health-check purposes.
 
 ### Risk 2: `_count_orphans` import path
 **Impact:** `scripts/popoto_index_cleanup.py` is in `scripts/`, which may not be in the Python path during tests.
-**Mitigation:** Add `scripts/` to `sys.path` inside the import, or copy the three-line orphan-check logic inline if the import is fragile. Check at build time.
+**Mitigation:** Use `sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))` inside the `--deep` branch before the import. This is a deliberate, committed approach — not a "check at build time" decision.
 
 ## Race Conditions
 
@@ -285,6 +286,10 @@ No changes to `bridge/telegram_bridge.py`. No new MCP server registration.
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist | AutoKeyField is UUID4 (random), not timestamp-based — UUID parsing for `last_write` is wrong | Plan revision | Use `max(getattr(r, "relevance", 0) for r in records)` → `datetime.fromtimestamp(...)` |
+| CONCERN | Skeptic | `_count_orphans` import path leaves "check at build time" decision open | Plan revision | Committed to `sys.path.insert(0, ...)` approach in `--deep` branch |
+| CONCERN | Simplifier | `status()` duplicates `inspect(stats=True)` record-fetching | Plan revision | Extract shared `_fetch_all_records(project_key)` helper |
+| NIT | Operator | `avg_confidence` scope (overall vs per-category) was ambiguous | Plan revision | Fast path: overall only; `--deep` adds per-category breakdown |
 
 ---
 
