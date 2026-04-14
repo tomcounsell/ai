@@ -35,25 +35,25 @@ claude -p subprocess
 stream-json stdout parsing
     |
     v
-Batched text delivery via send_cb
+Final result string returned
 ```
 
 ### Streaming and Batching
 
 `get_response_via_harness()` in `agent/sdk_client.py` spawns `claude -p --output-format stream-json` as an async subprocess and parses stdout line-by-line:
 
-- **`content_block_delta` events**: Text chunks are accumulated in a buffer
-- **Flush triggers**: Buffer is flushed internally when it reaches 2000 characters or 3 seconds have elapsed since the last flush
+- **`content_block_delta` events**: Text chunks are accumulated internally in a full-text buffer
 - **`result` event**: Contains the final response text and a `session_id` for potential future resume support
+- **Fallback**: If no `result` event fires (e.g. subprocess crash), the accumulated text is returned and a `WARNING` is logged
 - **Error handling**: Malformed JSON lines are skipped; non-zero exit codes are logged with stderr
 
-The function returns the final result text (from the `result` event if present, otherwise accumulated text).
+The function returns the final result text only — it has no streaming callback parameter.
 
 ### Streaming Chunk Suppression
 
-`_harness_send_cb` in `agent/agent_session_queue.py` is a **no-op for all session types**. Streaming text chunks from the CLI harness subprocess are not forwarded to Telegram mid-session. Forwarding them bypasses the nudge loop and causes mid-sentence message fragments to appear in Telegram as discrete messages.
+`get_response_via_harness()` does not accept a streaming callback. Intermediate `content_block_delta` chunks are accumulated internally and never forwarded to any output transport mid-session. This applies equally to all transports — Telegram (`TelegramRelayOutputHandler`) and email (`EmailOutputHandler`) — no transport receives real-time streaming output.
 
-The final result is delivered by `BackgroundTask` through the nudge loop, which ensures complete, coherent messages reach the user. This applies equally to PM, Teammate, and Dev sessions — no session type receives real-time streaming output in Telegram.
+Forwarding streaming chunks would bypass the nudge loop and cause mid-sentence message fragments to appear as discrete messages. The final result is delivered by `BackgroundTask` through the nudge loop, ensuring complete, coherent messages reach the user regardless of session type (PM, Teammate, or Dev).
 
 ### Startup Health Check
 
@@ -102,7 +102,8 @@ No changes to the `AgentSession` model are needed. Harness selection is purely a
 | `agent/agent_session_queue.py` | Routing logic in `_execute_agent_session()`: checks `DEV_SESSION_HARNESS` env var for dev sessions |
 | `worker/__main__.py` | Startup health check when harness is non-`sdk` |
 | `agent/__init__.py` | Exports `get_response_via_harness` and `verify_harness_health` |
-| `tests/unit/test_harness_streaming.py` | 18 unit tests covering streaming, batching, error paths, health checks |
+| `tests/unit/test_harness_streaming.py` | Unit tests covering NDJSON parsing, text accumulation, error paths, health checks (isolation scope only — no send_cb) |
+| `tests/integration/test_harness_no_op_contract.py` | Integration test asserting the no-op delivery contract: output handler called exactly once (final result), never during streaming |
 
 ## Post-Completion SDLC Handler (Phase 3)
 
@@ -136,14 +137,14 @@ instead of `Agent(subagent_type="dev-session", ...)`. The Agent tool dispatch pa
 
 `get_definition()` in `agent_definitions.py` returns an actionable error for stale callers that still request `"dev-session"` from the Agent tool.
 
-## Legacy Hook Cleanup (Phase 5)
+## Hook Cleanup (Phase 5)
 
-The following are removed in PR #902:
+PR #902 simplified hook infrastructure as part of the harness migration:
 
 - **`agent/hooks/session_registry.py`** deleted (250 lines) — UUID-to-bridge-session mapping no longer needed; hooks now use `AGENT_SESSION_ID` env var directly
-- **`subagent_stop.py`** stripped to logging only — `_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion` removed; SDLC tracking moved to worker post-completion handler
-- **`pre_tool_use.py`** — `_maybe_start_pipeline_stage` and Agent tool interception removed; `_handle_skill_tool_start()` now uses `AGENT_SESSION_ID` env var instead of `session_registry.resolve()`
-- **`dev-session` entry removed** from `agent_definitions.py` — dev sessions are created as AgentSession records, not via the Agent tool
+- **`subagent_stop.py`** stripped to logging only — `_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion` deleted; SDLC tracking moved to worker post-completion handler
+- **`pre_tool_use.py`** — `_maybe_start_pipeline_stage` and Agent tool interception deleted; `_handle_skill_tool_start()` now uses `AGENT_SESSION_ID` env var instead of `session_registry.resolve()`
+- **`dev-session` entry** deleted from `agent_definitions.py` — dev sessions are created as AgentSession records, not via the Agent tool
 - `bridge/pipeline_state.py` and `bridge/pipeline_graph.py` are now shims that re-export from `agent/pipeline_state.py` and `agent/pipeline_graph.py` (canonical locations after Phase 3 move)
 
 ## Pending Work (Phase 6)
