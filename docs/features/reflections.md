@@ -47,10 +47,19 @@ reflections:
 
 | Name | Interval | Priority | Type | Description |
 |------|----------|----------|------|-------------|
-| `health-check` | 5 min | high | function | Check running jobs for liveness, recover stuck ones |
+| `health-check` | 5 min | high | function | Check running sessions for liveness and timeout, recover stuck ones |
 | `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records (invalid IDs, unsaveable) and rebuild indexes |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
 | `popoto-index-cleanup` | daily | low | function | Rebuild Popoto model indexes to remove orphaned entries (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
+| `api-health-gate` | 1 min | high | function | Check Anthropic circuit state; set/clear `queue_paused` flag to block/allow session dequeue |
+| `session-count-throttle` | 1 hour | normal | function | Count sessions started in last hour; write throttle level (none/moderate/suspended) |
+| `failure-loop-detector` | 1 hour | normal | function | Scan failed sessions for repeated error fingerprints; file one GitHub issue per novel cluster |
+| `recovery-drip` | 30 sec | high | function | Drip one paused_circuit session back to pending per tick (only when recovery:active) |
+| `worker-health-gate` | 1 min | high | function | Check Anthropic circuit; renew/clear worker:hibernating flag; trigger drip resume on recovery |
+| `session-resume-drip` | 30 sec | high | function | Drip one paused session back to pending per tick (only when worker:recovering) |
+| `sustainability-digest` | daily | low | agent | Daily Telegram health summary: circuit states, throttle level, session counts, failure clusters |
+| `sentry-issue-triage` | daily | low | agent | Triage unresolved Sentry issues for all projects with SENTRY_DSN configured (disabled) |
+| `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation: merge near-duplicate memories, flag contradictions (dry-run default — see [Subconscious Memory](subconscious-memory.md#memory-consolidation)) |
 
 ### State Model (`models/reflection.py`)
 

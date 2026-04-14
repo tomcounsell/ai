@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 revision_applied: true
 type: feature
 appetite: Medium

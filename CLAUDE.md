@@ -297,6 +297,7 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - Multi-query decomposition splits large keyword sets into clusters for broader retrieval coverage
 - **Claude Code hooks** extend memory to CLI sessions via `.claude/hooks/hook_utils/memory_bridge.py` (see `docs/features/claude-code-memory.md`): UserPromptSubmit ingests prompts, PostToolUse recalls with file-based sliding window, Stop extracts observations
 - All memory operations fail silently -- memory system never crashes the agent or hooks
+- **Memory consolidation** (`memory-dedup` nightly reflection): Haiku-based semantic dedup merges near-duplicate records, sets `superseded_by` on originals (never deleted), filters superseded records from recall. Dry-run default — see `docs/features/subconscious-memory.md#memory-consolidation`
 
 **Key Directories:**
 - `.claude/commands/` - Slash command skills
