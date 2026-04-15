@@ -6,6 +6,7 @@ owner: valorengels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/987
 last_comment_id:
+revision_applied: true
 ---
 
 # SDLC Pipeline Continuation Race: `_handle_dev_session_completion` vs `_finalize_parent_sync`
@@ -124,32 +125,39 @@ Dev session harness completes → `complete_transcript` runs → `_finalize_pare
 In `_execute_agent_session`, the current call order is:
 
 ```python
-# line ~3839 (CURRENT — wrong order)
+# line ~3919 (CURRENT — wrong order, before complete_transcript)
 if _session_type == "dev" and not task.error:
     await _handle_dev_session_completion(...)
 
-# line ~3851
-from bridge.session_transcript import complete_transcript
-complete_transcript(session.session_id, status=final_status)
+# if agent_session: branch
+if agent_session:
+    complete_transcript(session.session_id, status=final_status)   # line ~3938
+else:
+    complete_transcript(session.session_id, status=final_status)   # line ~3964
 ```
+
+There are TWO `complete_transcript` calls — one inside the `if agent_session:` branch (~line 3938) and one inside the `else:` branch (~line 3964). The correct placement for `_handle_dev_session_completion` is **after the entire `if agent_session / else` block closes** (~line 3982), not between the two branches. Moving the call between the branches would leave Path B (the `agent_session is None` path) still racing.
 
 After the fix:
 
 ```python
-# line ~3851
-from bridge.session_transcript import complete_transcript
-complete_transcript(session.session_id, status=final_status)
+# if agent_session: branch (lines ~3928–3949, unchanged)
+if agent_session:
+    complete_transcript(session.session_id, status=final_status)   # line ~3938
+else:
+    complete_transcript(session.session_id, status=final_status)   # line ~3964
+# --- entire if/else block ends here (~line 3982) ---
 
-# AFTER complete_transcript (new order — correct)
+# AFTER the entire if/else block (new placement — correct for both paths)
 if _session_type == "dev" and not task.error:
     await _handle_dev_session_completion(...)
 ```
 
-This ensures `_finalize_parent_sync` has run by the time `_handle_dev_session_completion` executes its re-check. The re-check at lines 3142-3163 will now observe the PM as terminal and call `_create_continuation_pm` unconditionally.
+**Why this ordering is safe:** `complete_transcript` is a synchronous function (`bridge/session_transcript.py:252`) — it calls `finalize_session` directly at line 292, which calls `_finalize_parent_sync` inline. There is no async gap between `complete_transcript` returning and `_finalize_parent_sync` having completed. By the time `_handle_dev_session_completion` runs after the `if/else` block, `_finalize_parent_sync` has already finished on both the `if agent_session:` and `else:` paths. The re-check at lines 3206-3209 will now correctly observe the PM as terminal and call `_create_continuation_pm`.
 
 **Fix 2 — Path B (`agent_session is None`) fallback:**
 
-In `_handle_dev_session_completion` at line 3052-3059:
+In `_handle_dev_session_completion` at line 3115-3122:
 
 ```python
 # CURRENT — returns silently when agent_session is None
@@ -180,9 +188,7 @@ if not parent_id:
 
 The outer `session` parameter is always the full `AgentSession` object (populated at enqueue time), so `session.parent_agent_session_id` is reliable even when the `status="running"` lookup returns `None`.
 
-**Note on `complete_transcript` placement:** The move must respect the `chat_state.defer_reaction` guard that already gates `complete_transcript`. The `_handle_dev_session_completion` call should only be moved to after the `complete_transcript` block (inside the same `if agent_session:` branch or its equivalent), not after the entire `if agent_session / else` block. Specifically, the placement should be after the `complete_transcript` call at line 3859 but still guarded by `not task.error` (the same guard as the current call at line 3840).
-
-**Handling the error path:** The current guard `if _session_type == "dev" and not task.error` should remain. When `task.error` is truthy, the dev session failed and `_handle_dev_session_completion` should still run — the PSM will classify it as `fail` and the continuation PM will carry that outcome. Consider whether to drop the `not task.error` guard entirely since the continuation PM path handles failures too. This is a scope question — the plan conservatively keeps the guard to match existing behavior; the builder can widen it in the next patch cycle.
+**Handling the error path:** The current guard `if _session_type == "dev" and not task.error` should remain. Widening the guard to handle failed dev sessions is out of scope — tracked separately. The plan conservatively keeps the guard to match existing behavior.
 
 ## Failure Path Test Strategy
 
@@ -199,9 +205,10 @@ The outer `session` parameter is always the full `AgentSession` object (populate
 
 ## Test Impact
 
-- [ ] `tests/unit/test_continuation_pm.py::TestHandleCompletionContinuationFallback::test_steer_success_no_continuation` — UPDATE: after the fix, steer still "succeeds" (accepted into queue) but the PM will be terminal by the time the re-check runs. The test must simulate the PM being terminal at re-check time to assert continuation PM IS created. New behavior: when steer is accepted but PM is terminal, continuation PM is created.
-- [ ] `tests/unit/test_continuation_pm.py` — ADD new test class `TestHandleCompletionOrderingRace` with a test that calls `_handle_dev_session_completion` with a PM already in terminal status (simulating post-`_finalize_parent_sync` state) and asserts a continuation PM is created.
-- [ ] `tests/unit/test_continuation_pm.py` — ADD new test `test_agent_session_none_uses_session_parent_id` asserting that when `agent_session=None`, the function uses `session.parent_agent_session_id` to look up the parent and create a continuation PM.
+- [ ] `tests/unit/test_continuation_pm.py::TestHandleCompletionContinuationFallback::test_steer_success_no_continuation` — UPDATE (rename to `test_steer_accepted_pm_terminal_creates_continuation`): after the fix, steer "succeeds" (accepted) but the PM is terminal at re-check time — assert continuation PM IS created. Old assertion was "no continuation PM" — this inverts it.
+- [ ] `tests/unit/test_continuation_pm.py::TestHandleCompletionContinuationFallback` — ADD `test_steer_accepted_pm_non_terminal_no_continuation`: steer accepted + PM non-terminal at re-check → assert no continuation PM (happy path — PM will consume the steering message).
+- [ ] `tests/unit/test_continuation_pm.py` — ADD new test class `TestHandleCompletionOrderingRace` with `test_pm_terminal_at_recheck_creates_continuation`: calls `_handle_dev_session_completion` with a PM already in terminal status (simulating post-`_finalize_parent_sync` state) and asserts a continuation PM is created.
+- [ ] `tests/unit/test_continuation_pm.py` — ADD `test_agent_session_none_uses_session_parent_id`: when `agent_session=None`, function uses `session.parent_agent_session_id` to look up parent and create continuation PM.
 
 ## Rabbit Holes
 
@@ -266,8 +273,9 @@ No agent integration required — this is an internal worker fix to `agent/agent
 - [ ] Running SDLC on an issue progresses all the way through PLAN → CRITIQUE → BUILD → TEST → REVIEW → DOCS → MERGE without stopping after the first dev session
 - [ ] When a PM is finalized by `_finalize_parent_sync` between the steer call and the re-check, a continuation PM is created and the pipeline resumes
 - [ ] When `agent_session` is `None` in `_handle_dev_session_completion`, a continuation PM is still created (not a silent no-op)
-- [ ] `test_steer_success_no_continuation` updated to reflect new behavior (steer accepted + PM terminal → continuation PM created)
-- [ ] New test `TestHandleCompletionOrderingRace` passes: calling handler with already-terminal PM creates continuation PM
+- [ ] `test_steer_success_no_continuation` renamed to `test_steer_accepted_pm_terminal_creates_continuation` and updated to assert continuation PM IS created when steer accepted but PM terminal
+- [ ] New test `test_steer_accepted_pm_non_terminal_no_continuation` passes: steer accepted + PM non-terminal → no continuation PM
+- [ ] New test class `TestHandleCompletionOrderingRace::test_pm_terminal_at_recheck_creates_continuation` passes
 - [ ] New test `test_agent_session_none_uses_session_parent_id` passes
 - [ ] `pytest tests/unit/test_continuation_pm.py` — all tests pass
 - [ ] `pytest tests/unit/ -x -q` — all unit tests pass
@@ -315,9 +323,9 @@ builder, test-engineer, documentarian, validator
 - **Assigned To**: queue-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `_execute_agent_session`, move the `_handle_dev_session_completion` call block (currently at line 3840-3845) to after the `complete_transcript` call block (currently lines 3851-3870). Keep the `if _session_type == "dev" and not task.error` guard.
-- In `_handle_dev_session_completion` at the `parent_id` extraction (line 3052-3059), change the fallback: `parent_id = getattr(agent_session, "parent_agent_session_id", None) or getattr(session, "parent_agent_session_id", None)`. Update the debug log message accordingly.
-- Ensure the `_handle_dev_session_completion` call still runs on the nudge (`defer_reaction`) path (verify the placement is correct).
+- In `_execute_agent_session`, move the `_handle_dev_session_completion` call block (currently at line ~3919) to **after the entire `if agent_session / else` block closes** (~line 3982). There are TWO `complete_transcript` calls — one inside `if agent_session:` (~line 3938) and one inside `else:` (~line 3964). The call must go after both. Keep the `if _session_type == "dev" and not task.error` guard.
+- In `_handle_dev_session_completion` at the `parent_id` extraction (line ~3115-3122), change the fallback: `parent_id = getattr(agent_session, "parent_agent_session_id", None) or getattr(session, "parent_agent_session_id", None)`. Update the debug log message accordingly.
+- Verify the nudge (`defer_reaction`) path: on the nudge path, `complete_transcript` is skipped inside the `if agent_session:` branch. Confirm that `_handle_dev_session_completion` is still reached after the `if/else` block (it is — the `if _session_type == "dev"` guard is independent of `defer_reaction`). Add an inline comment noting this invariant.
 
 ### 2. Update and add tests in test_continuation_pm.py
 - **Task ID**: build-tests
@@ -326,9 +334,10 @@ builder, test-engineer, documentarian, validator
 - **Assigned To**: test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: true
-- Update `TestHandleCompletionContinuationFallback::test_steer_success_no_continuation`: the PM must be in a terminal status at the time the re-check runs. Adjust the test so `steer_session` returns `success: True` but the `get_by_id` re-read returns a terminal PM. Assert a continuation PM IS created (the new behavior).
-- Add class `TestHandleCompletionOrderingRace` with test `test_pm_terminal_at_recheck_creates_continuation`: call `_handle_dev_session_completion` with `steer_session` returning `success: True` and `get_by_id` returning a PM in `completed` status. Assert a continuation PM is created and logged.
-- Add test `test_agent_session_none_uses_session_parent_id`: call `_handle_dev_session_completion` with `agent_session=None` but `session.parent_agent_session_id` set to a valid terminal PM. Assert a continuation PM is created.
+- **Rename** `TestHandleCompletionContinuationFallback::test_steer_success_no_continuation` → `test_steer_accepted_pm_terminal_creates_continuation`: adjust the test so `steer_session` returns `success: True` but the `get_by_id` re-read returns a PM in `completed` status. Assert a continuation PM IS created. This inverts the old assertion — under the new ordering the steer is accepted but the PM is terminal; a continuation PM must be created.
+- **Add** a companion test `test_steer_accepted_pm_non_terminal_no_continuation` in the same class: `steer_session` returns `success: True` and `get_by_id` re-read returns a PM in `running` status. Assert no continuation PM is created (the happy path — PM is alive and will process the steering message).
+- **Add class** `TestHandleCompletionOrderingRace` with test `test_pm_terminal_at_recheck_creates_continuation`: call `_handle_dev_session_completion` with `steer_session` returning `success: True` and `get_by_id` returning a PM in `completed` status. Assert a continuation PM is created and logged.
+- **Add test** `test_agent_session_none_uses_session_parent_id`: call `_handle_dev_session_completion` with `agent_session=None` but `session.parent_agent_session_id` set to a valid terminal PM. Assert a continuation PM is created.
 
 ### 3. Update documentation
 - **Task ID**: document-fix
@@ -362,12 +371,18 @@ builder, test-engineer, documentarian, validator
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Race test present | `grep -r "TestHandleCompletionOrderingRace" tests/` | output contains TestHandleCompletionOrderingRace |
 | Path B test present | `grep -r "test_agent_session_none_uses_session_parent_id" tests/` | output contains test_agent_session_none_uses_session_parent_id |
+| Non-terminal happy-path test present | `grep -r "test_steer_accepted_pm_non_terminal_no_continuation" tests/` | output contains test name |
+| Nudge path: `_handle_dev_session_completion` still reachable when `defer_reaction=True` | `grep -n "defer_reaction" agent/agent_session_queue.py \| grep -A2 -B2 "_handle_dev_session_completion"` | call is outside the `defer_reaction` guard (not gated by it) |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic | Fix 1 placement ambiguity: two `complete_transcript` calls exist (`if agent_session:` branch ~line 3938 and `else:` branch ~line 3964); placing `_handle_dev_session_completion` between them leaves Path B still racing | Technical Approach Fix 1 rewritten | Move call after entire `if agent_session / else` block closes (~line 3982); add comment in Step 1 task. `complete_transcript` confirmed synchronous at `bridge/session_transcript.py:252` — `_finalize_parent_sync` completes inline before the call returns on both branches. |
+| CONCERN | Operator | Nudge path verification missing from Verification table | Verification table | Added row: grep confirms `_handle_dev_session_completion` call is not gated by `defer_reaction` (it is outside the defer_reaction guard). |
+| CONCERN | Archaeologist | `test_steer_success_no_continuation` name contradicts new assertion (continuation PM IS created) | Test Impact + Step 2 task + Success Criteria | Renamed to `test_steer_accepted_pm_terminal_creates_continuation`; added companion `test_steer_accepted_pm_non_terminal_no_continuation` for the true no-continuation (happy) path. |
+| CONCERN | Adversary | No citation confirming `complete_transcript → _finalize_parent_sync` is synchronous (implicit ordering assumption) | Technical Approach Fix 1 | Cited `bridge/session_transcript.py:252` and line 292 where `finalize_session` (and thus `_finalize_parent_sync`) is called inline synchronously. |
+| NIT | Skeptic | Line numbers in plan referenced the old pre-#934 positions (3841, 3859, 3052) | Technical Approach Fix 1 and Fix 2 | Updated to actual post-merge positions (~3919, ~3938/3964, ~3115) verified against current code. |
 
 ---
 
