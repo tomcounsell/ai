@@ -22,25 +22,27 @@ Startup recovery skips local CLI sessions — sessions whose `worker_key` starts
 
 ## Freshness Check
 
-**Baseline commit:** `d2b3b4658dc4e3a2f7640c8b10f8a5698bc3a2e6`
+**Baseline commit:** `99bf051d9b31ec454a85f17a5befb59293de3830`
 **Issue filed at:** 2026-04-15T06:46:11Z
-**Disposition:** Unchanged
+**Disposition:** Minor drift (line numbers shifted; all claims still hold)
 
 **File:line references re-verified:**
-- `agent/agent_session_queue.py:1256-1335` — `_recover_interrupted_agent_sessions_startup()` — still holds; no changes since filing
-- `agent/agent_session_queue.py:1534` — health check's `is_local = worker_key.startswith("local")` guard — still holds
-- `.claude/hooks/user_prompt_submit.py:89` — local session creation with `session_id=f"local-{session_id}"` — still holds
+- `agent/agent_session_queue.py:1319-1398` — `_recover_interrupted_agent_sessions_startup()` — confirmed; no local-session guard present (issue claim holds)
+- `agent/agent_session_queue.py:1597` — health check's `is_local = worker_key.startswith("local")` guard — confirmed at line 1597; logic is correct and is the model for the fix
+- `agent/agent_session_queue.py:1673` — health check pending-session local guard — confirmed at line 1673; same pattern
+- `.claude/hooks/user_prompt_submit.py:89` — local session creation with `session_id=f"local-{session_id}"` — not re-read (creation convention unchanged)
 
 **Cited sibling issues/PRs re-checked:**
 - PR #745 (merged 2026-04-06) — Added 300s timing guard to startup recovery; did NOT address local-session identity distinction; confirmed by reading the PR body
 
-**Commits on main since issue was filed (touching referenced files):**
-- `c1b30c8d` fix(harness): add session continuity via --resume (#976) — touches harness execution path in agent_session_queue.py but NOT the startup recovery function; irrelevant to this bug
+**Commits on main since issue was filed (touching `agent/agent_session_queue.py`):**
+- `e7baf24e` refactor: extract `_handle_harness_not_found` helper — irrelevant (harness path, not startup recovery)
+- `f3b8db7b` refactor: extract `_HARNESS_EXHAUSTION_MSG` constant — irrelevant (harness path)
+- `23bf0090` fix: guard transition_status conflict, move `_harness_requeued` guard — irrelevant (harness path)
 
-**Active plans in `docs/plans/` overlapping this area:**
-- `session-recovery-coverage.md` (issue #871, status: Building) — addresses docstring inaccuracy in health check; complementary, not conflicting
+**Active plans in `docs/plans/` overlapping this area:** none found
 
-**Notes:** Code at every cited line is exactly as described in the issue. No drift.
+**Notes:** Issue cited line 1256-1335 for the function and line 1534 for the health check guard; actual current lines are 1319-1398 and 1597 respectively. Claims remain accurate.
 
 ## Prior Art
 
