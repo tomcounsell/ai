@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/260
 last_comment_id:
+revision_applied: true
 ---
 
 # YouTube Search Tool
@@ -51,7 +52,7 @@ The agent can search YouTube by query string and return structured results (titl
 
 1. **Entry point**: User asks agent to search YouTube (e.g., "find YouTube videos about Python async")
 2. **CLI invocation**: Agent calls `valor-youtube-search "Python async"` (or `valor-youtube-search --limit 5 "Python async"`)
-3. **Search function**: `youtube_search()` in `tools/youtube_search/__init__.py` invokes `yt-dlp --dump-json --flat-playlist "ytsearchN:query"`
+3. **Search function**: `youtube_search_sync()` in `tools/youtube_search/__init__.py` invokes `yt_dlp.YoutubeDL.extract_info()` with `flat_playlist=True` and `socket_timeout=30`, wrapped in a `ThreadPoolExecutor` with a 30-second hard timeout
 4. **yt-dlp**: Queries YouTube's search API internally, returns JSON metadata per result
 5. **Output**: Structured results printed to stdout as formatted text (title, URL, duration, views, uploader, description snippet)
 
@@ -85,9 +86,10 @@ No prerequisites — `yt-dlp` is already a project dependency and requires no AP
 
 ### Key Elements
 
-- **YouTube search module** (`tools/youtube_search/`): Python module that wraps `yt-dlp`'s search capability using the Python API (not subprocess) for reliability
+- **YouTube search module** (`tools/youtube_search/`): Python module that wraps `yt-dlp`'s search capability using the Python API (not subprocess) for reliability. Sync-first design with async wrapper via `run_in_executor()`.
 - **CLI entry point** (`valor-youtube-search`): Command-line interface registered in `pyproject.toml` for agent invocation
-- **Structured output**: Returns title, URL, duration, view count, uploader, and description snippet per result
+- **Structured output**: Returns title, URL, duration, view count, uploader, and description snippet per result. Fields like duration and view_count are best-effort (may be None with `flat_playlist`).
+- **Logging**: Module-level logger for search attempts, result counts, and errors
 
 ### Flow
 
@@ -99,8 +101,11 @@ No prerequisites — `yt-dlp` is already a project dependency and requires no AP
 - Use `extract_info()` with `download=False` to get metadata only
 - Search URL format: `ytsearchN:query` where N is the result limit (default 5)
 - Use `flat_playlist=True` in yt-dlp options to avoid extracting full video info (faster, metadata-only)
-- Return results as formatted text for CLI, with a Python API (`youtube_search()` / `youtube_search_sync()`) for programmatic use
-- Timeout: 30 seconds per search (consistent with existing `get_youtube_video_info` timeout pattern)
+- **Sync-first API** _(critique concern 1)_: `youtube_search_sync()` is the primary implementation. `youtube_search()` is an async wrapper using `loop.run_in_executor()`, matching the pattern at `tools/link_analysis/__init__.py:248-254` (`download_youtube_audio_async`). `yt_dlp.YoutubeDL.extract_info()` is blocking I/O and must not run on an event loop directly.
+- **Timeout** _(critique concern 2)_: Pass `{'socket_timeout': 30}` in `ydl_opts` to cap individual network operations. Additionally, wrap the `extract_info()` call in `concurrent.futures.ThreadPoolExecutor` with `future.result(timeout=30)` for a hard total-time cap. `socket_timeout` alone prevents indefinite hangs per connection but does not cap total extraction time across yt-dlp's internal retries.
+- Return results as formatted text for CLI, with both sync and async Python APIs for programmatic use
+- **Logging** _(critique nit 3)_: Add `logging.getLogger(__name__)` to the search module. Log search attempts (query, limit), result counts, and errors at appropriate levels (info/warning/error), matching `tools/link_analysis/__init__.py` patterns.
+- **Nullable fields** _(critique nit 4)_: With `flat_playlist=True`, fields like `upload_date`, `duration`, and `view_count` may be `None` for some results. The formatter must handle `None` gracefully (display "N/A" or omit the field). Document which fields are guaranteed (title, url, video_id) vs. best-effort (duration, view_count, upload_date, description).
 
 ## Failure Path Test Strategy
 
@@ -177,6 +182,7 @@ No update system changes required — `yt-dlp` is already a dependency. The new 
 - [ ] Unit tests pass covering search function, CLI args, and error handling
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
+- [ ] End-to-end: agent can respond to a YouTube search request with clickable result URLs
 
 ## Team Orchestration
 
@@ -204,10 +210,11 @@ No update system changes required — `yt-dlp` is already a dependency. The new 
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tools/youtube_search/__init__.py` with:
-  - `youtube_search(query: str, limit: int = 5) -> list[dict]` — async function using `yt_dlp.YoutubeDL` with `extract_info(f"ytsearch{limit}:{query}", download=False)` and `flat_playlist=True`
-  - `youtube_search_sync(query: str, limit: int = 5) -> list[dict]` — sync wrapper
-  - Each result dict: `{title, url, duration, view_count, uploader, description, video_id, upload_date}`
-  - 30-second timeout, clear error handling
+  - `youtube_search_sync(query: str, limit: int = 5) -> list[dict]` — **primary sync implementation** using `yt_dlp.YoutubeDL` with `extract_info(f"ytsearch{limit}:{query}", download=False)`, `flat_playlist=True`, and `socket_timeout=30` in ydl_opts. Wrap the `extract_info()` call in `concurrent.futures.ThreadPoolExecutor` with `future.result(timeout=30)` for a hard total-time cap.
+  - `youtube_search(query: str, limit: int = 5) -> list[dict]` — **async wrapper** using `asyncio.get_event_loop().run_in_executor(None, youtube_search_sync, query, limit)`, matching the pattern at `tools/link_analysis/__init__.py:248-254`
+  - Each result dict: `{title, url, video_id}` (guaranteed) + `{duration, view_count, uploader, description, upload_date}` (best-effort, may be None with flat_playlist)
+  - Handle None values gracefully — omit or display "N/A" in formatted output
+  - `logging.getLogger(__name__)` — log search attempts (query, limit), result counts, and errors
 - Create `tools/youtube_search/cli.py` with:
   - `main()` CLI entry point: parse `--limit N` flag and positional query argument
   - Print formatted results to stdout
@@ -228,8 +235,10 @@ No update system changes required — `yt-dlp` is already a dependency. The new 
   - `test_search_returns_results` — real search, verify result structure
   - `test_search_limit` — verify limit parameter works
   - `test_search_empty_query` — verify empty query handling
-  - `test_search_result_fields` — verify each result has required fields
+  - `test_search_result_fields` — verify each result has guaranteed fields (title, url, video_id) and handles None gracefully for best-effort fields
+  - `test_search_nullable_fields` — verify formatter handles None duration/view_count/upload_date without crashing
   - `test_cli_usage_on_empty_args` — verify CLI prints usage on no args
+  - `test_async_wrapper_callable` — verify `youtube_search()` async wrapper is awaitable and returns same structure as sync
 - Mark integration-dependent tests with `@pytest.mark.integration` if they require network
 
 ### 3. Validate
@@ -276,9 +285,14 @@ No update system changes required — `yt-dlp` is already a dependency. The new 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Async function wraps synchronous blocking call without executor | Revision: sync-first API, async wrapper via run_in_executor | Embedded in Technical Approach and Task 1 |
+| CONCERN | Adversary | yt-dlp Python API timeout not straightforward | Revision: socket_timeout + ThreadPoolExecutor hard timeout | Embedded in Technical Approach and Task 1 |
+| NIT | Operator | No logging specified for search function | Revision: added logging requirement | Embedded in Technical Approach and Task 1 |
+| NIT | Adversary | flat_playlist result fields may be incomplete | Revision: guaranteed vs best-effort field distinction | Embedded in Technical Approach, Key Elements, Task 1 |
+| NIT | User | Success criteria are all technical | Revision: added user-facing criterion | Added to Success Criteria |
 
 ---
 
