@@ -421,7 +421,69 @@ The build is small enough that one builder + one validator handles it cleanly.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique run:** 2026-04-15
+**Critics:** Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings:** 5 total (1 blocker, 3 concerns, 1 nit)
+
+### Blockers
+
+#### Stale UUID causes hard error, not silent fallback
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Adversary
+- **Location**: Risk 1 / Failure Path Test Strategy / "Error State Rendering"
+- **Finding**: The plan states in Risk 1 that `claude -p --resume <stale_uuid>` "may either silently start a new session (best case) or error out (worst case)" and defers the determination to the integration test. Empirical testing (2026-04-15) confirms the binary **errors**: `Error: --resume requires a valid session ID or session title when used with --print. Provided value "nonexistent-uuid" is not a UUID and does not match any session title.` This is not a "may" -- it is the actual behavior. The plan's conditional fallback ("if the binary errors, add the fallback") must be unconditional.
+- **Suggestion**: Promote the retry-without-`--resume` fallback from conditional to mandatory in the implementation. In `get_response_via_harness()`, when `prior_uuid` is set and the process exits with non-zero return code AND stderr contains "resume" or "session", retry the call once without `--resume` (full first-turn path). Add this as an explicit sub-step in Task 1 rather than leaving it to discovery during the integration test.
+- **Implementation Note**: After `proc.communicate()`, if `proc.returncode != 0` and `prior_uuid` is set, check `stderr_text` for the substring `"--resume"`. If found, log a warning (`"Stale UUID {prior_uuid}, falling back to first-turn path"`), then re-enter the function recursively (or inline) with `prior_uuid=None` — which means re-applying `_apply_context_budget()` to the original full message. The caller must pass the original un-skipped message for this fallback, so `get_response_via_harness` needs access to both the full message and the minimal message, or the retry must reconstruct the full-context path. Simplest approach: accept both `message` (always the full context) and `prior_uuid`; when `prior_uuid` is set, ignore `message` and use a separately-passed `resume_message` (just the new user text). On fallback, use `message` with `_apply_context_budget()`.
+
+### Concerns
+
+#### UUID validity not checked before subprocess spawn
+- **Severity**: CONCERN
+- **Critics**: Adversary
+- **Location**: Solution / Change 2
+- **Finding**: The plan injects `--resume <prior_uuid>` directly into the subprocess argv without validating that `prior_uuid` is a well-formed UUID. If the Popoto record contains a corrupted or non-UUID string (e.g., from a bug in a future code path), this could cause unexpected CLI behavior or argument injection.
+- **Suggestion**: Add a UUID format check (regex or `uuid.UUID()` parse) before injecting `--resume`. If the value is not a valid UUID, treat it as `None` and take the first-turn path.
+- **Implementation Note**: Guard in `get_response_via_harness()` right after the empty-string check: `try: uuid.UUID(prior_uuid); except ValueError: prior_uuid = None`. Import `uuid` from stdlib. This is a 3-line defensive check that prevents argument injection and corrupted-data issues.
+
+#### Dual message paths require careful orchestration at call site
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Solution / Change 3 / `_execute_agent_session` call site
+- **Finding**: When `prior_uuid` is set, `build_harness_turn_input(skip_prefix=True)` returns just the raw message, and this is what gets passed to `get_response_via_harness()`. But if the stale-UUID fallback fires (see Blocker above), the function needs the full-context message to retry. The plan does not specify how the full-context message is preserved for the fallback path.
+- **Suggestion**: Always call `build_harness_turn_input()` with `skip_prefix=False` to get the full context message. Pass both the full message and the minimal message (just `_turn_input`) to `get_response_via_harness()`. On first attempt with `--resume`, use the minimal message. On fallback, use the full message with `_apply_context_budget()`.
+- **Implementation Note**: In `_execute_agent_session()`, always build `_harness_input_full = await build_harness_turn_input(skip_prefix=False, ...)`. When `_prior_uuid` is set, also prepare `_harness_input_minimal = _turn_input` (the raw steering/user message). Pass both to `get_response_via_harness(message=_harness_input_full, resume_message=_harness_input_minimal, prior_uuid=_prior_uuid, ...)`. This ensures the fallback path has the full context without needing to call `build_harness_turn_input` again.
+
+#### `get_response_via_harness` return type is `str` but UUID must be persisted
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Solution / Change 1
+- **Finding**: The plan adds `session_id` as a parameter to `get_response_via_harness()` and calls `_store_claude_session_uuid()` inside the function. This couples a side-effecting Popoto write into a function whose current contract is "run CLI, return text." The function currently returns `str`; callers (including tests) expect pure string return. Embedding the store call inside means tests of `get_response_via_harness` now need Popoto/Redis mocked or available.
+- **Suggestion**: This is acceptable given the existing pattern (the SDK path does the same inside `get_agent_response_sdk`), but the docstring and test setup must explicitly note the side effect. Ensure the new unit tests mock `_store_claude_session_uuid` to verify it is called without requiring Redis.
+- **Implementation Note**: In each new test case in `test_harness_streaming.py`, patch `agent.sdk_client._store_claude_session_uuid` as a `MagicMock` and assert `mock.assert_called_once_with(session_id, expected_uuid)`. The mock prevents Redis dependency in unit tests. The side effect is already fail-silent (line 228 `except Exception`), so even if the mock is misconfigured the test won't hang.
+
+### Nits
+
+#### Redundant success criteria
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Success Criteria
+- **Finding**: "Tests pass (`/do-test`)" and "All pre-existing tests continue to pass (`pytest tests/` exits 0)" are redundant -- `/do-test` runs `pytest tests/`. Similarly "No new lint or format violations" is covered by `/do-test` which runs ruff.
+- **Suggestion**: Consolidate into a single "All tests, lint, and format checks pass" criterion to reduce noise.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Tasks 1-5, sequential, no gaps |
+| Dependencies valid | PASS | All `Depends On` references resolve to defined Task IDs |
+| File paths exist | PASS | 10 of 10 referenced source files exist; `tests/integration/test_harness_resume.py` correctly marked as CREATE |
+| Prerequisites met | PASS/WARN | `claude` binary on PATH (PASS); `--resume` flag recognized (PASS but errors on invalid UUID -- see Blocker); Popoto not tested |
+| Cross-references | PASS | All success criteria map to tasks; no No-Gos appear in Solution as planned work |
+
+### Verdict
+
+**READY TO BUILD (with concerns)** -- No BLOCKERs after the stale-UUID fallback is promoted from conditional to mandatory. The 1 BLOCKER finding identifies behavior that the plan already anticipated as a possibility but must now be treated as certain (empirically confirmed). A revision pass should embed the Implementation Notes from the 1 blocker and 3 concerns into the plan text before build proceeds.
 
 ---
 
