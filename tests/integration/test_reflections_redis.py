@@ -162,11 +162,11 @@ class TestIgnoreLogRedis:
         assert len(ReflectionIgnore.query.all()) == 0
 
 
-class TestPopotoIndexCleanupReflection:
-    """Tests for popoto-index-cleanup reflection registration."""
+class TestRedisIndexCleanupReflection:
+    """Tests for redis-index-cleanup reflection registration."""
 
     def test_reflection_registered_in_yaml(self):
-        """Verify popoto-index-cleanup exists in reflections.yaml."""
+        """Verify redis-index-cleanup exists in reflections.yaml."""
         from pathlib import Path
 
         import yaml
@@ -176,7 +176,7 @@ class TestPopotoIndexCleanupReflection:
             config = yaml.safe_load(f)
 
         names = [r["name"] for r in config["reflections"]]
-        assert "popoto-index-cleanup" in names
+        assert "redis-index-cleanup" in names
 
     def test_reflection_entry_structure(self):
         """Verify the reflection entry has required fields."""
@@ -188,7 +188,7 @@ class TestPopotoIndexCleanupReflection:
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
-        entry = next(r for r in config["reflections"] if r["name"] == "popoto-index-cleanup")
+        entry = next(r for r in config["reflections"] if r["name"] == "redis-index-cleanup")
         assert entry["execution_type"] == "function"
         assert entry["callable"] == "scripts.popoto_index_cleanup.run_cleanup"
         assert entry["enabled"] is True

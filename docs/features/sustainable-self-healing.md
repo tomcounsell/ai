@@ -4,20 +4,21 @@ Queue governance layer that keeps the Valor AI system running reliably under API
 
 ## What It Does
 
-### 1. Circuit-Gated Queue Pause (`api_health_gate`)
+### 1. Circuit-Gated Queue Pause and Hibernation (`circuit_health_gate`)
 
-When the Anthropic circuit breaker transitions to OPEN or HALF_OPEN state, the session queue is paused immediately. No new sessions are dequeued until the circuit closes. On recovery, a `recovery:active` flag is set to trigger the drip resume.
+When the Anthropic circuit breaker transitions to OPEN or HALF_OPEN state, the session queue is paused immediately and the worker enters hibernation. Both `queue_paused` and `worker:hibernating` flags are managed atomically in a single reflection. On recovery, both `recovery:active` and `worker:recovering` flags are set to trigger the drip resume.
 
 - **Interval:** 60s
-- **Redis keys written:** `{project_key}:sustainability:queue_paused`, `{project_key}:recovery:active`
-- **Queue guard:** `_pop_agent_session()` in `agent/agent_session_queue.py` checks `queue_paused` on every dequeue attempt
+- **Redis keys written:** `{project_key}:sustainability:queue_paused`, `{project_key}:worker:hibernating`, `{project_key}:recovery:active`, `{project_key}:worker:recovering`
+- **Queue guard:** `_pop_agent_session()` in `agent/agent_session_queue.py` checks both `queue_paused` and `worker:hibernating` with OR logic
+- **Notification:** Sends Telegram notification on first transition into/out of hibernation
 
-### 2. Drip Resume (`recovery_drip`)
+### 2. Unified Drip Resume (`session_recovery_drip`)
 
-When `recovery:active` is set (circuit just closed), resumes sessions paused with status `paused_circuit` at a controlled rate — one session every 30 seconds. Clears the `recovery:active` flag when the queue drains.
+When either `recovery:active` or `worker:recovering` is set (circuit just closed), resumes paused sessions at a controlled rate — one session every 30 seconds. `paused_circuit` sessions (blocked before dequeue) are dripped first; `paused` sessions (interrupted mid-execution) are dripped second. Clears both recovery flags when both queues drain.
 
 - **Interval:** 30s
-- **Session status:** `paused_circuit` (non-terminal, restorable)
+- **Session statuses:** `paused_circuit` (priority), then `paused` (non-terminal, restorable)
 
 ### 3. Session-Count Throttle (`session_count_throttle`)
 
@@ -45,7 +46,7 @@ Scans failed/abandoned sessions from the last 4 hours. Groups them by error fing
 - **Redis key:** `{project_key}:sustainability:seen_fingerprints` (TTL 7 days)
 - **Skips:** during active API outage (`queue_paused` set)
 
-### 5. Daily Health Digest (`sustainability_digest`)
+### 5. Daily Health Digest (`sustainability_digest` / `system-health-digest`)
 
 Enqueues a dev-role AgentSession that generates and sends a daily Telegram health summary to the `Dev: Valor` chat. The digest includes circuit state, throttle level, session counts, and active failure cluster count.
 
@@ -79,24 +80,24 @@ A new non-terminal status `paused_circuit` was added to `models/session_lifecycl
 In `config/reflections.yaml`:
 
 ```yaml
-- name: api-health-gate
-  function: agent.sustainability:api_health_gate
+- name: circuit-health-gate
+  callable: agent.sustainability.circuit_health_gate
   interval: 60
 
 - name: session-count-throttle
-  function: agent.sustainability:session_count_throttle
+  callable: agent.sustainability.session_count_throttle
   interval: 3600
 
 - name: failure-loop-detector
-  function: agent.sustainability:failure_loop_detector
+  callable: agent.sustainability.failure_loop_detector
   interval: 3600
 
-- name: recovery-drip
-  function: agent.sustainability:recovery_drip
+- name: session-recovery-drip
+  callable: agent.sustainability.session_recovery_drip
   interval: 30
 
-- name: sustainability-digest
-  function: agent.sustainability:sustainability_digest
+- name: system-health-digest
+  execution_type: agent
   interval: 86400
 ```
 
@@ -129,15 +130,15 @@ python scripts/reflections.py  # runs all registered reflections
 
 **Run a specific reflection:**
 ```python
-from agent.sustainability import api_health_gate
-api_health_gate()
+from agent.sustainability import circuit_health_gate
+circuit_health_gate()
 ```
 
 ## Test Coverage
 
 Unit tests in `tests/unit/test_sustainability.py`:
-- `api_health_gate`: OPEN → pause, CLOSED → clear + recovery, unregistered circuit → no-op
+- `circuit_health_gate`: OPEN/HALF_OPEN → both flags set; CLOSED → both flags cleared + recovery keys + notification; neither was set → no-op; unregistered circuit → no-op; exception guard
+- `session_recovery_drip`: paused_circuit-first priority; paused fallback; both queues empty → both flags cleared; neither flag set → no-op; one-per-tick; exception guard
 - `_pop_agent_session`: queue_paused set → returns None
-- `recovery_drip`: transitions session, clears flag when empty, no-op when flag absent
 - `failure_loop_detector`: 3+ same-fingerprint failures → issue filed; already seen → no duplicate; < 3 → no issue
 - `sustainability_digest`: anomaly string uses plain language (no raw enum names); agent prompt maps all six circuit state forms to `OK`/`DOWN`/`RECOVERING`

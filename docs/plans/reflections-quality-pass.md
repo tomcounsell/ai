@@ -209,7 +209,7 @@ The `/update` skill runs `./scripts/valor-service.sh restart` which cycles the b
 
 ## Agent Integration
 
-No agent integration required -- this is an internal refactoring of models, scheduler placement, and dashboard data layer. No new tools, MCP servers, or bridge changes are needed. The agent-type reflections (`sustainability-digest`, `sentry-issue-triage`) continue to work unchanged since the scheduler API is not modified.
+No agent integration required -- this is an internal refactoring of models, scheduler placement, and dashboard data layer. No new tools, MCP servers, or bridge changes are needed. The agent-type reflections (`system-health-digest`, `sentry-issue-triage`) continue to work unchanged since the scheduler API is not modified.
 
 ## Documentation
 

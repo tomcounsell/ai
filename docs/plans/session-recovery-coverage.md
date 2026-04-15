@@ -125,7 +125,7 @@ Rationale:
        "waiting_for_children": "worker",  # _agent_session_hierarchy_health_check
        "superseded": "none",         # transitional; superseded sessions are finalized immediately
        "paused_circuit": "bridge-watchdog",  # agent/sustainability.py circuit breaker drip
-       "paused": "bridge-watchdog",  # agent/hibernation.py session-resume-drip
+       "paused": "bridge-watchdog",  # agent/sustainability.py session-recovery-drip
    }
    ```
 

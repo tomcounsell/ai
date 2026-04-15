@@ -28,7 +28,7 @@ Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebu
 
 ### Cleanup Reflection (Scheduler)
 
-`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `popoto-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` (bridge-hosted) dispatches this daily when the bridge is running.
+`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` (bridge-hosted) dispatches this daily when the bridge is running.
 
 ### Cleanup Reflection (Runner)
 

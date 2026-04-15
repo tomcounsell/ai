@@ -1,14 +1,21 @@
 """Sustainable self-healing reflections for queue governance.
 
-Five standalone reflection functions, each registered in config/reflections.yaml:
-- api_health_gate: pause/resume queue based on Anthropic circuit state
+Seven standalone reflection functions, each registered in config/reflections.yaml:
+- circuit_health_gate: pause/resume queue and manage hibernation based on Anthropic circuit state
+- session_recovery_drip: drip paused_circuit and paused sessions back to pending one at a time
 - session_count_throttle: throttle sessions per hour to prevent runaway execution
 - failure_loop_detector: deduplicate GitHub issues for repeated error patterns
-- recovery_drip: drip paused_circuit sessions back to pending one at a time
 - sustainability_digest: daily Telegram health summary
+- send_hibernation_notification: enqueue a Telegram notification for hibernation entry or wake
 
 All functions are synchronous (run in executor by the reflection scheduler).
 All functions catch all exceptions and log — never crash the reflection tick.
+
+Redis key schema:
+- {project_key}:sustainability:queue_paused — set when circuit is OPEN/HALF_OPEN (TTL 3600s)
+- {project_key}:worker:hibernating — set when worker enters hibernation (TTL 600s)
+- {project_key}:recovery:active — set when circuit recovers from queue_paused state (TTL 3600s)
+- {project_key}:worker:recovering — set when circuit recovers from hibernation (TTL 3600s)
 """
 
 import hashlib
@@ -32,14 +39,18 @@ def _get_redis():
     return POPOTO_REDIS_DB
 
 
-def api_health_gate() -> None:
-    """Check Anthropic circuit state and pause/resume the session queue.
+def circuit_health_gate() -> None:
+    """Check Anthropic circuit state and manage all circuit-related flags atomically.
 
-    - OPEN or HALF_OPEN → set queue_paused flag (TTL 3600s)
-    - CLOSED → clear queue_paused, set recovery:active flag (TTL 3600s)
+    Replaces api_health_gate (sustainability.py) and worker_health_gate (hibernation.py).
 
-    Logs at WARNING on first transition to paused state.
+    - OPEN or HALF_OPEN → renew queue_paused (TTL 3600s) AND worker:hibernating (TTL 600s)
+    - CLOSED → delete both flags; if either was set, set recovery:active AND worker:recovering
+      (TTL 3600s each) and call send_hibernation_notification("waking")
+
+    Logs at WARNING on first transition to hibernated/paused state.
     Guards against cold-start / test environments where circuit is not registered.
+    Never raises — all exceptions are caught and logged.
     """
     try:
         from bridge.health import get_health
@@ -48,40 +59,205 @@ def api_health_gate() -> None:
         r = _get_redis()
         project_key = _get_project_key()
         pause_key = f"{project_key}:sustainability:queue_paused"
+        hib_key = f"{project_key}:worker:hibernating"
         recovery_key = f"{project_key}:recovery:active"
+        rec_key = f"{project_key}:worker:recovering"
 
         cb = get_health().get("anthropic")
         if cb is None:
-            logger.debug("[api-health-gate] Anthropic circuit not registered — skipping")
+            logger.debug("[circuit-health-gate] Anthropic circuit not registered — skipping")
             return
 
         if cb.state == CircuitState.CLOSED:
-            # Circuit closed — clear pause, signal recovery drip
+            # Circuit closed — clear both flags atomically
             was_paused = r.exists(pause_key)
+            was_hibernating = r.exists(hib_key)
             r.delete(pause_key)
-            if was_paused:
+            r.delete(hib_key)
+            was_either_flag_set = was_paused or was_hibernating
+            if was_either_flag_set:
                 logger.info(
-                    "[api-health-gate] Anthropic circuit CLOSED — queue unpaused,"
-                    " starting recovery drip"
+                    "[circuit-health-gate] Anthropic circuit CLOSED — queue unpaused,"
+                    " hibernation cleared, starting recovery drip"
                 )
                 r.set(recovery_key, "1", ex=3600)
+                r.set(rec_key, "1", ex=3600)
+                # Enqueue wake notification (best-effort)
+                try:
+                    send_hibernation_notification("waking", project_key=project_key)
+                except Exception as _notif_err:
+                    logger.error(
+                        "[circuit-health-gate] Failed to enqueue wake notification: %s", _notif_err
+                    )
             else:
-                logger.debug("[api-health-gate] Anthropic circuit CLOSED — queue was not paused")
+                logger.debug(
+                    "[circuit-health-gate] Anthropic circuit CLOSED — queue was not paused,"
+                    " worker was not hibernating"
+                )
         else:
-            # OPEN or HALF_OPEN — pause the queue
+            # OPEN or HALF_OPEN — renew both flags
             was_paused = r.exists(pause_key)
+            was_hibernating = r.exists(hib_key)
             r.set(pause_key, "1", ex=3600)
-            if not was_paused:
+            r.set(hib_key, "1", ex=600)
+            if not was_paused and not was_hibernating:
                 logger.warning(
-                    "[api-health-gate] Queue paused — Anthropic circuit %s", cb.state.value.upper()
+                    "[circuit-health-gate] Queue paused, worker hibernating — Anthropic circuit %s",
+                    cb.state.value.upper(),
                 )
             else:
                 logger.debug(
-                    "[api-health-gate] Queue remains paused — Anthropic circuit %s",
+                    "[circuit-health-gate] Queue remains paused, worker remains hibernating"
+                    " — Anthropic circuit %s",
                     cb.state.value.upper(),
                 )
     except Exception:
-        logger.exception("[api-health-gate] Unhandled exception — skipping tick")
+        logger.exception("[circuit-health-gate] Unhandled exception — skipping tick")
+
+
+def session_recovery_drip() -> None:
+    """Drip one paused session back to pending per tick.
+
+    Replaces recovery_drip (sustainability.py) and session_resume_drip (hibernation.py).
+
+    Only active when recovery:active OR worker:recovering flag is set in Redis.
+    Drips paused_circuit sessions first (FIFO), then paused sessions (FIFO).
+    Clears BOTH recovery:active AND worker:recovering when both queues are empty.
+
+    Rate: called every 30s by the scheduler → at most 1 session per 30s.
+    Never raises — all exceptions are caught and logged.
+    """
+    try:
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import transition_status
+
+        r = _get_redis()
+        project_key = _get_project_key()
+        recovery_key = f"{project_key}:recovery:active"
+        rec_key = f"{project_key}:worker:recovering"
+
+        if not r.exists(recovery_key) and not r.exists(rec_key):
+            logger.debug("[session-recovery-drip] neither recovery flag set — no-op")
+            return
+
+        paused_circuit = list(
+            AgentSession.query.filter(project_key=project_key, status="paused_circuit")
+        )
+        paused = list(AgentSession.query.filter(project_key=project_key, status="paused"))
+
+        if not paused_circuit and not paused:
+            r.delete(recovery_key)
+            r.delete(rec_key)
+            logger.info(
+                "[session-recovery-drip] both queues empty — clearing recovery:active"
+                " and worker:recovering flags"
+            )
+            return
+
+        # Pop oldest session (FIFO by created_at) — paused_circuit has priority
+        def _ts(session):
+            ca = getattr(session, "created_at", None)
+            if ca is None:
+                return 0.0
+            if isinstance(ca, int | float):
+                return float(ca)
+            try:
+                return ca.timestamp()
+            except Exception:
+                return 0.0
+
+        if paused_circuit:
+            paused_circuit.sort(key=_ts)
+            candidate = paused_circuit[0]
+            drip_reason = "session-recovery-drip: API circuit recovered"
+        else:
+            paused.sort(key=_ts)
+            candidate = paused[0]
+            drip_reason = "session-recovery-drip: worker recovered"
+
+        remaining = len(paused_circuit) + len(paused) - 1
+
+        try:
+            transition_status(
+                candidate,
+                "pending",
+                reason=drip_reason,
+            )
+            logger.info(
+                "[session-recovery-drip] Dripped session %s → pending (%d remaining paused)",
+                getattr(candidate, "session_id", "?"),
+                remaining,
+            )
+        except Exception as e:
+            logger.warning(
+                "[session-recovery-drip] Could not transition session %s to pending: %s",
+                getattr(candidate, "session_id", "?"),
+                e,
+            )
+    except Exception:
+        logger.exception("[session-recovery-drip] Unhandled exception — skipping tick")
+
+
+def send_hibernation_notification(event: str, project_key: str | None = None) -> None:
+    """Enqueue a Telegram notification session for hibernation entry or wake.
+
+    Absorbed from the former hibernation module (send_hibernation_notification).
+
+    Args:
+        event: Either "hibernating" or "waking".
+        project_key: Project key for the notification session. Defaults to env var.
+
+    Enqueues a lightweight agent session with a pre-composed notification message.
+    Wrapped in try/except — never raises.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        pk = project_key or _get_project_key()
+
+        if event == "hibernating":
+            # Count paused sessions for context
+            try:
+                paused = list(AgentSession.query.filter(project_key=pk, status="paused"))
+                count = len(paused)
+            except Exception:
+                count = 0
+            command = (
+                f"Send a Telegram message to the 'Dev: Valor' chat with this exact text:\n"
+                f"Worker hibernating: Anthropic circuit open. "
+                f"{count} session(s) paused. Will resume automatically when circuit closes."
+            )
+        elif event == "waking":
+            try:
+                paused = list(AgentSession.query.filter(project_key=pk, status="paused"))
+                count = len(paused)
+            except Exception:
+                count = 0
+            command = (
+                f"Send a Telegram message to the 'Dev: Valor' chat with this exact text:\n"
+                f"Worker waking: Anthropic circuit closed. "
+                f"Beginning drip resume — {count} session(s) queued to restore."
+            )
+        else:
+            logger.warning(
+                "[circuit-health-gate] Unknown event type %r — skipping notification", event
+            )
+            return
+
+        notification_session = AgentSession(
+            role="teammate",
+            session_type="teammate",
+            project_key=pk,
+            command=command,
+        )
+        notification_session.save()
+        logger.info(
+            "[circuit-health-gate] Enqueued %s notification session %s",
+            event,
+            getattr(notification_session, "agent_session_id", "?"),
+        )
+    except Exception as e:
+        logger.error("[circuit-health-gate] Failed to enqueue %s notification: %s", event, e)
 
 
 def session_count_throttle() -> None:
@@ -308,71 +484,6 @@ def _file_github_issue(fingerprint: str, sessions: list, session_ids: list) -> N
         logger.error("[failure-loop-detector] Failed to file GitHub issue: %s", e)
 
 
-def recovery_drip() -> None:
-    """Drip one paused_circuit session back to pending per tick.
-
-    Only active when {project_key}:recovery:active flag is set in Redis.
-    Clears the recovery flag when the paused_circuit queue is empty.
-
-    Rate: called every 30s by the scheduler → at most 1 session per 30s.
-    """
-    try:
-        from models.agent_session import AgentSession
-        from models.session_lifecycle import transition_status
-
-        r = _get_redis()
-        project_key = _get_project_key()
-        recovery_key = f"{project_key}:recovery:active"
-
-        if not r.exists(recovery_key):
-            logger.debug("[recovery-drip] recovery:active flag not set — no-op")
-            return
-
-        paused = list(AgentSession.query.filter(project_key=project_key, status="paused_circuit"))
-
-        if not paused:
-            r.delete(recovery_key)
-            logger.info(
-                "[recovery-drip] paused_circuit queue empty — clearing recovery:active flag"
-            )
-            return
-
-        # Pop oldest session (FIFO by created_at)
-        def _ts(session):
-            ca = getattr(session, "created_at", None)
-            if ca is None:
-                return 0.0
-            if isinstance(ca, int | float):
-                return float(ca)
-            try:
-                return ca.timestamp()
-            except Exception:
-                return 0.0
-
-        paused.sort(key=_ts)
-        candidate = paused[0]
-
-        try:
-            transition_status(
-                candidate,
-                "pending",
-                reason="recovery-drip: API circuit recovered",
-            )
-            logger.info(
-                "[recovery-drip] Dripped session %s → pending (%d remaining paused)",
-                getattr(candidate, "session_id", "?"),
-                len(paused) - 1,
-            )
-        except Exception as e:
-            logger.warning(
-                "[recovery-drip] Could not transition session %s to pending: %s",
-                getattr(candidate, "session_id", "?"),
-                e,
-            )
-    except Exception:
-        logger.exception("[recovery-drip] Unhandled exception — skipping tick")
-
-
 def sustainability_digest() -> None:
     """Send a daily health summary to Telegram.
 
@@ -444,7 +555,7 @@ def sustainability_digest() -> None:
         if is_nominal:
             # Send a one-liner directly — no agent session needed
             _send_telegram("🩺 Daily health check — all clear, no surprises.")
-            logger.info("[sustainability-digest] All nominal — sent one-liner")
+            logger.info("[system-health-digest] All nominal — sent one-liner")
         else:
             # Something noteworthy — spin up an agent to investigate and report
             anomalies = []
@@ -489,11 +600,11 @@ def sustainability_digest() -> None:
                 extra_context={"digest_type": "sustainability_digest"},
             )
             logger.info(
-                "[sustainability-digest] Anomalies detected (%s) — enqueued agent session",
+                "[system-health-digest] Anomalies detected (%s) — enqueued agent session",
                 ", ".join(anomalies),
             )
     except Exception:
-        logger.exception("[sustainability-digest] Unhandled exception — skipping tick")
+        logger.exception("[system-health-digest] Unhandled exception — skipping tick")
 
 
 def _send_telegram(message: str) -> None:
@@ -507,9 +618,9 @@ def _send_telegram(message: str) -> None:
         )
         if result.returncode != 0:
             logger.error(
-                "[sustainability-digest] valor-telegram send failed (rc=%d): %s",
+                "[system-health-digest] valor-telegram send failed (rc=%d): %s",
                 result.returncode,
                 result.stderr.strip(),
             )
     except Exception as e:
-        logger.error("[sustainability-digest] Failed to send Telegram message: %s", e)
+        logger.error("[system-health-digest] Failed to send Telegram message: %s", e)
