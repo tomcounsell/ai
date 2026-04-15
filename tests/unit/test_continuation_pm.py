@@ -559,7 +559,7 @@ class TestHandleCompletionPathBFallback:
 
     @pytest.mark.asyncio
     async def test_agent_session_none_uses_session_parent_id(self, redis_test_db):
-        """When agent_session=None, session.parent_agent_session_id is used to create continuation PM.
+        """When agent_session is None, session.parent_agent_session_id creates continuation PM.
 
         Before fix 2, agent_session=None caused an early return with no continuation PM.
         After fix 2, the outer session object's parent_agent_session_id is used as fallback.
