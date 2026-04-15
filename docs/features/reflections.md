@@ -23,12 +23,12 @@ Worker startup (worker/__main__.py)
 
 ```yaml
 reflections:
-  - name: health-check
-    description: "Check running jobs for liveness and timeout"
+  - name: session-liveness-check
+    description: "Check running sessions for liveness and timeout, recover stuck ones"
     interval: 300       # 5 minutes
     priority: high
     execution_type: function
-    callable: "agent.agent_session_queue._job_health_check"
+    callable: "agent.agent_session_queue._agent_session_health_check"
     enabled: true
 ```
 
@@ -61,17 +61,15 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Interval | Priority | Type | Description |
 |------|----------|----------|------|-------------|
-| `health-check` | 5 min | high | function | Check running sessions for liveness and timeout, recover stuck ones |
+| `session-liveness-check` | 5 min | high | function | Check running sessions for liveness and timeout, recover stuck ones |
 | `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records and rebuild indexes |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours (disabled) |
-| `popoto-index-cleanup` | daily | low | function | Rebuild Popoto model indexes to remove orphaned entries |
-| `api-health-gate` | 1 min | high | function | Check Anthropic circuit state; set/clear `queue_paused` flag |
+| `redis-index-cleanup` | daily | low | function | Rebuild Redis model indexes to remove orphaned entries |
+| `circuit-health-gate` | 1 min | high | function | Check Anthropic circuit state; manage `queue_paused` and `worker:hibernating` flags atomically |
 | `session-count-throttle` | 1 hour | normal | function | Count sessions in last hour; write throttle level |
 | `failure-loop-detector` | 1 hour | normal | function | Scan failed sessions; file one GitHub issue per novel error cluster |
-| `recovery-drip` | 30 sec | high | function | Drip one paused_circuit session back to pending per tick |
-| `worker-health-gate` | 1 min | high | function | Check circuit; manage worker:hibernating flag |
-| `session-resume-drip` | 30 sec | high | function | Drip one paused session back to pending on recovery |
-| `sustainability-digest` | daily | low | agent | Daily Telegram health summary |
+| `session-recovery-drip` | 30 sec | high | function | Drip one paused_circuit or paused session back to pending per tick (paused_circuit first) |
+| `system-health-digest` | daily | low | agent | Daily Telegram health summary |
 | `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation (dry-run default) |
 | `sentry-issue-triage` | daily | low | agent | Triage unresolved Sentry issues across projects (disabled) |
 
@@ -79,10 +77,10 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `legacy-code-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and deprecated typing imports |
+| `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and deprecated typing imports |
 | `redis-ttl-cleanup` | `reflections.maintenance.run_redis_ttl_cleanup` | Prune expired records across all Redis models |
-| `redis-data-quality` | `reflections.maintenance.run_redis_data_quality` | Check data quality: unsummarized links, dead channels, error patterns |
-| `branch-plan-cleanup` | `reflections.maintenance.run_branch_plan_cleanup` | Delete merged branches; audit docs/plans/ for stale/orphaned plans |
+| `redis-quality-audit` | `reflections.maintenance.run_redis_data_quality` | Audit data quality: unsummarized links, dead channels, error patterns |
+| `merged-branch-cleanup` | `reflections.maintenance.run_branch_plan_cleanup` | Delete merged branches; audit docs/plans/ for stale/orphaned plans |
 | `disk-space-check` | `reflections.maintenance.run_disk_space_check` | Check free disk space; warn if below 10 GB |
 | `analytics-rollup` | `reflections.maintenance.run_analytics_rollup` | Aggregate daily analytics; purge old records |
 
@@ -90,7 +88,7 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `log-review` | `reflections.auditing.run_log_review` | Review previous day's logs per project |
+| `daily-log-review` | `reflections.auditing.run_log_review` | Review previous day's logs per project |
 | `documentation-audit` | `reflections.auditing.run_documentation_audit` | LLM-powered docs accuracy audit (see [Documentation Audit](documentation-audit.md)) |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
 | `hooks-audit` | `reflections.auditing.run_hooks_audit` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
@@ -101,7 +99,7 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `task-management` | `reflections.task_management.run_task_management` | Check open bug issues per project and local TODO files |
+| `task-backlog-check` | `reflections.task_management.run_task_management` | Check open bug issues per project and local TODO files |
 | `principal-staleness` | `reflections.task_management.run_principal_staleness` | Check if config/PRINCIPAL.md is stale (>90 days) |
 
 **Pipelines:**
@@ -462,7 +460,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | PyYAML | Registry loader | Yes — reads `config/reflections.yaml` |
 | psutil | Memory instrumentation | Optional — memory snapshots degrade gracefully if missing |
 | `ANTHROPIC_API_KEY` | `documentation-audit`, `session-intelligence` | Conditional — LLM reflection and docs audit |
-| `gh` CLI (authenticated) | `task-management`, `session-intelligence`, `daily-report-and-notify`, `branch-plan-cleanup`, `pr-review-audit` | Conditional |
+| `gh` CLI (authenticated) | `task-backlog-check`, `session-intelligence`, `daily-report-and-notify`, `merged-branch-cleanup`, `pr-review-audit` | Conditional |
 | `telethon` | `daily-report-and-notify` | Conditional — Telegram notifications |
 | `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
 
