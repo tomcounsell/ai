@@ -129,13 +129,13 @@ Every custom emoji code path has automatic fallback:
 
 The caller never needs to handle standard vs custom emoji explicitly. The `EmojiResult` type and dispatch logic handle all branching internally.
 
-## What Was Removed
+## Migration from Ollama Intent Classification
 
-This feature removed the following legacy code:
+The embedding-based system replaced the Ollama-based intent classifier. The following code is no longer in the codebase:
 
-- **`intent/__init__.py`** -- the entire module was deleted. It contained Ollama-based intent classification with heuristic fallback, used solely by `get_processing_emoji` for reaction selection.
-- **`INTENT_REACTIONS` dict** from `bridge/response.py` -- hardcoded mapping of 10 intent strings to emojis
-- **`get_processing_emoji()` and `get_processing_emoji_async()`** from `bridge/response.py` -- Ollama classification wrappers
+- **`intent/__init__.py`** -- deleted module. Contained Ollama-based intent classification with heuristic fallback, used solely by `get_processing_emoji` for reaction selection.
+- **`INTENT_REACTIONS` dict** -- hardcoded mapping of 10 intent strings to emojis, previously in `bridge/response.py`
+- **`get_processing_emoji()` and `get_processing_emoji_async()`** -- Ollama classification wrappers, previously in `bridge/response.py`
 
 The work-type classifier (`tools/classifier.py` / `classify_request_async`) was preserved and now runs as its own independent async task.
 
