@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/984
 last_comment_id:
+revision_applied: true
 ---
 
 # Worker Lifecycle Fixes: Stale Restart Flag + Zombie PID Status
@@ -106,17 +107,20 @@ User runs `worker-status` → PID found → heartbeat file read → age > 360s �
 - Otherwise proceed as before
 
 **Fix 2 (`status_worker` in `valor-service.sh`):**
-- After confirming PID exists, compute heartbeat age:
+- After confirming PID exists, compute heartbeat age using a portable `python3` one-liner (avoids `stat -f %m` which is macOS-only):
   ```bash
   HEARTBEAT_FILE="$PROJECT_DIR/data/last_worker_connected"
   if [ -f "$HEARTBEAT_FILE" ]; then
-      HEARTBEAT_AGE=$(( $(date +%s) - $(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || echo 0) ))
+      HEARTBEAT_AGE=$(python3 -c "import os,time; print(int(time.time()-os.path.getmtime('$HEARTBEAT_FILE')))" 2>/dev/null || echo 9999)
   else
       HEARTBEAT_AGE=9999
   fi
   ```
+  Note: the outer double-quotes let bash expand `$HEARTBEAT_FILE` before calling python3; the single-quotes protect the inner Python string literal.
 - If `HEARTBEAT_AGE > 360`: print `Worker Status: STALE` + uptime + `Heartbeat: ${HEARTBEAT_AGE}s ago (threshold: 360s)` + return exit code 2
 - If `HEARTBEAT_AGE <= 360`: existing RUNNING output unchanged
+
+**Implementation Note (from critique):** Use only the `python3 -c` form above — do NOT use `stat -f %m` (macOS-only) or `stat -c %Y` (Linux-only). The python3 one-liner is the single unambiguous cross-platform path.
 
 **No new files. No new config. No new environment variables.**
 
@@ -136,6 +140,7 @@ User runs `worker-status` → PID found → heartbeat file read → age > 360s �
 ## Test Impact
 
 - [ ] `tests/integration/test_remote_update.py::TestRestartFlag::test_check_restart_flag_returns_true_when_flag_exists_and_no_jobs` — UPDATE: test currently writes a flag with a past timestamp from 2026-02-02; this will now return `False` (TTL expired). Rewrite to write a fresh timestamp to confirm the happy path, and add a new test case for the stale path.
+- [ ] `tests/integration/test_remote_update.py::TestRestartFlag::test_check_restart_flag_defers_when_jobs_running` — UPDATE: test writes `"2026-02-02T10:00:00Z 1 commit(s)"` — a stale flag. After the TTL fix, this test could accidentally pass for the wrong reason (TTL expiry instead of deferral). Update to write a fresh timestamp so the test verifies deferral-due-to-running-sessions independently of TTL.
 - [ ] `tests/integration/test_remote_update.py::TestRestartFlag` — ADD new test: `test_check_restart_flag_ignores_stale_flag` with a timestamp >1h old.
 - [ ] `tests/integration/test_remote_update.py::TestRestartFlag` — ADD new test: `test_check_restart_flag_handles_malformed_flag_content`.
 
@@ -234,10 +239,11 @@ builder, validator, documentarian
 ### 2. Implement heartbeat-aware worker-status
 - **Task ID**: build-worker-status-heartbeat
 - **Depends On**: none
+- **Validates**: A new shell-level or Python subprocess test that invokes `./scripts/valor-service.sh worker-status` with a stale (or absent) heartbeat file and asserts the output contains "STALE" and the exit code is 2. Add as `tests/integration/test_worker_status_heartbeat.py` or as a bash-level smoke test in the Verification table.
 - **Assigned To**: worker-fixes-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `scripts/valor-service.sh`, modify `status_worker()`: after PID is confirmed, read `data/last_worker_connected` mtime using `python3 -c "..."` one-liner for cross-platform portability; if age > 360s print `Worker Status: STALE` with uptime and heartbeat age, return exit code 2; otherwise existing RUNNING output unchanged
+- In `scripts/valor-service.sh`, modify `status_worker()`: after PID is confirmed, read `data/last_worker_connected` mtime using `python3 -c "import os,time; print(int(time.time()-os.path.getmtime('$HEARTBEAT_FILE')))" 2>/dev/null || echo 9999` one-liner for cross-platform portability; if age > 360s print `Worker Status: STALE` with uptime and heartbeat age, return exit code 2; otherwise existing RUNNING output unchanged
 
 ### 3. Update bridge-self-healing docs
 - **Task ID**: document-fixes
@@ -271,9 +277,11 @@ builder, validator, documentarian
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Technical Approach Fix 2 code block used macOS-only `stat -f %m` while Risk 2 and Task 2 called for the portable `python3 -c` one-liner — contradiction would lead builder to ship macOS-only code | Technical Approach Fix 2 rewritten; Task 2 updated | Use `python3 -c "import os,time; print(int(time.time()-os.path.getmtime('$HEARTBEAT_FILE')))" 2>/dev/null \|\| echo 9999` exclusively — drop `stat` entirely |
+| NIT | User, Adversary | `test_check_restart_flag_defers_when_jobs_running` writes a stale timestamp; after TTL fix it could pass for wrong reason (TTL expiry not deferral) | Test Impact updated with UPDATE disposition | Write fresh timestamp in that test so deferral-due-to-running-sessions is tested independently of TTL |
+| NIT | Operator | Task 2 had no `Validates` field — no automated test fixture for STALE output path | Task 2 updated | Add shell-level or Python subprocess test asserting STALE output and exit code 2 |
 
 ---
 
