@@ -61,8 +61,13 @@ async def _invoke_do_work(harness_return: str, agent_session):
 
     SYNC WARNING: This helper re-implements the production do_work() closure
     verbatim. Any change to the retry block in do_work() (agent_session_queue.py)
-    MUST be reflected here. If the two diverge, tests will pass against this
-    helper while the real behavior drifts silently.
+    MUST be reflected here, specifically the block bounded by:
+        ``if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):`` ... ``return raw``
+    in ``agent/agent_session_queue.py``. If the two diverge, tests will pass
+    against this helper while the real behavior drifts silently.
+
+    Maintenance rule: when you modify the harness retry block in production,
+    search for ``_invoke_do_work`` in this file and apply the equivalent change.
     """
     from models.session_lifecycle import transition_status  # noqa: PLC0415
 
