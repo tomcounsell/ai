@@ -55,6 +55,24 @@ If nothing found, state "No prior issues found related to this work."]
 - **[Issue/PR #N]**: [Title] -- [What it did, outcome, relevance to current work]
 - **[Issue/PR #N]**: [Title] -- [What it did, outcome, relevance to current work]
 
+## Research
+
+<!-- Phase 0.7 of /do-plan uses WebSearch to gather external context before planning.
+     Skip if the work is purely internal (no external libraries, APIs, or ecosystem patterns involved).
+     Findings are saved as memories for future plan reuse. -->
+
+[External research findings from WebSearch that inform the technical approach.]
+
+**Queries used:**
+- [Search query 1]
+- [Search query 2]
+
+**Key findings:**
+- [Finding 1 — source URL, how it informs the plan]
+- [Finding 2 — source URL, how it informs the plan]
+
+[If no useful results: "No relevant external findings — proceeding with codebase context and training data."]
+
 ## Spike Results
 
 <!-- CONDITIONAL: Only include if Phase 1.5 ran spike tasks to validate assumptions.
