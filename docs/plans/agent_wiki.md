@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/728
 last_comment_id: none
+revision_applied: true
 ---
 
 # Agent-Maintained Knowledge Wiki (LLM Wiki Pattern)
@@ -135,19 +136,15 @@ No new external services. All dependencies are already in the stack.
 
 ### Key Elements
 
-- **WikiWriter** (`tools/wiki/writer.py`): Constructs and writes structured wiki pages to the vault. Handles YAML frontmatter, wikilink injection, page type templates (entity, concept, decision, synthesis). Enforces NDA isolation via `scope_resolver`. Updates `_index.md` and `_log.md`.
+- **WikiWriter** (`tools/wiki/writer.py`): Constructs and writes structured wiki pages to the vault. Handles YAML frontmatter, wikilink injection, page type templates (entity, concept, decision, synthesis). Enforces NDA isolation via `scope_resolver`. Updates `_index.md` and `_log.md`. Uses **synchronous file I/O only** — no `aiofiles`, no async methods (required by hook call site).
 - **WikiIndex** (`tools/wiki/index.py`): Maintains per-project `_index.md` (content catalog with one-line summaries) and `_log.md` (chronological ingest/lint record). Idempotent upserts.
-- **WikiLint** (`reflections/wiki_lint.py`): Async callable for the reflection scheduler. Reads all pages, finds orphans (not in index), detects contradictions (Haiku pairwise check), flags stale claims, reports coverage gaps.
-- **Post-merge Wiki Integration**: Extend `agent/memory_extraction.py::extract_post_merge_learning()` to optionally write a wiki page when the extracted observation is a decision or pattern.
-- **MCP exposure**: Expose `wiki_write` and `wiki_query` via `mcp_servers/` so the agent can invoke wiki operations from Telegram conversations.
+- **WikiLint** (`reflections/wiki_lint.py`): Async callable for the reflection scheduler. Reads all pages, finds orphans (not in index), detects contradictions (Haiku pairwise check), flags stale claims, reports coverage gaps. Writes JSON result to `logs/wiki_lint.log`.
+- **Post-merge Wiki Integration**: Extend `agent/memory_extraction.py::extract_post_merge_learning()` to optionally write a wiki page when the extracted observation is a decision or pattern. MCP exposure of wiki operations is deferred to a follow-on issue — v1 agents invoke wiki writes via the post-merge hook only.
 
 ### Flow
 
 **Post-merge ingest flow:**
 PR merged → `extract_post_merge_learning()` fires → Haiku extracts observation → if category is "decision" or "pattern" → `WikiWriter.write_page()` → vault file written → KnowledgeWatcher picks up → indexed into memory system → companion Memory at importance 3.0 → flat Memory also saved (unchanged behavior)
-
-**Manual ingest flow:**
-Agent calls `wiki_write` MCP tool → `WikiWriter.write_page()` → same downstream path
 
 **Lint flow (weekly):**
 `ReflectionScheduler` fires `wiki_lint.run_wiki_lint` → reads all pages via `full_scan()` → pairwise contradiction check (sample, not exhaustive) → orphan detection → stale page detection → findings returned → if findings > threshold → GitHub issue created
@@ -156,11 +153,14 @@ Agent calls `wiki_write` MCP tool → `WikiWriter.write_page()` → same downstr
 
 - **Page templates**: Entity pages (people, systems, tools), Concept pages (patterns, conventions, decisions), Synthesis pages (cross-source summaries). Each template has a fixed YAML frontmatter schema.
 - **YAML frontmatter**: `tags`, `created`, `updated`, `source_count`, `project_key`, `page_type`. Dataview-compatible.
-- **Wikilinks**: WikiWriter scans `_index.md` for existing page titles and auto-inserts `[[Page Title]]` links for mentions in new content. No manual link maintenance required.
+- **Slug sanitization (MANDATORY)**: Before any path construction, slugs MUST be sanitized via strict allowlist: `slug = re.sub(r'[^a-z0-9\-_]', '-', slug.lower())`. This prevents path traversal — `pathlib.Path(vault_dir) / f".{slug}.md.tmp"` does NOT block `..` segments in Python's pathlib. Test assertion required: `assert slugify("fix: config/../secrets") == "fix-config---secrets"`.
+- **Synchronous I/O only**: WikiWriter uses synchronous file I/O exclusively — no `aiofiles`, no `async def` methods, no `await`. Required because `extract_post_merge_learning()` is called via `asyncio.run()` in `.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()`; an async WikiWriter inside `asyncio.run()` raises `RuntimeError: This event loop is already running`.
+- **Startup temp file sweep**: At the start of `write_page()`, WikiWriter sweeps the target vault directory for `*.md.tmp` files older than 5 minutes and removes them. This cleans up orphaned temp files left by SIGKILL or power loss, since `os.rename()` is atomic within the same filesystem but orphans accumulate across crashes.
+- **Wikilinks**: WikiWriter scans `_index.md` for existing page titles AND verifies the corresponding `.md` file exists on disk before auto-inserting `[[Page Title]]` links. Links are only injected for titles with confirmed on-disk presence to prevent dead links in Obsidian.
 - **NDA isolation**: All write operations call `scope_resolver.resolve_scope(target_path)` before writing. If scope is `"client"`, the write must be triggered from within that project's session context (verified via `project_key` parameter). Company-wide paths are writable from any context.
 - **Lint contradiction detection**: Haiku prompt comparing two page excerpts. Runs on a sample (up to 20 page pairs per lint pass) to bound token cost. Full coverage over time via random sampling.
 - **Feature flag**: `WIKI_WRITE_ENABLED` env var (default `true`). Set to `false` to disable post-merge wiki writing without code changes.
-- **Idempotency**: WikiWriter checks if a page with the same title already exists. If it does, it updates the existing page (merge strategy: append to body, update frontmatter `updated` + `source_count`) rather than creating a duplicate.
+- **Idempotency**: WikiWriter checks for existing page by slug-based file existence (`{project}/{slug}.md`) — not title string matching (which would require scanning all files). If the file exists, the update strategy is: append new content as a dated section to the body, update frontmatter `updated` and `source_count`. Wikilinks are de-duplicated after merge to prevent accumulation across successive writes.
 
 ## Failure Path Test Strategy
 
@@ -184,10 +184,9 @@ Agent calls `wiki_write` MCP tool → `WikiWriter.write_page()` → same downstr
 - [ ] `agent/memory_extraction.py` integration tests (if any) — UPDATE: verify wiki page is written for "decision" category extractions
 
 New tests to create:
-- `tests/unit/test_wiki_writer.py` — NEW: test page creation, idempotent upsert, YAML frontmatter, wikilink injection, NDA isolation enforcement
-- `tests/unit/test_wiki_index.py` — NEW: test `_index.md` upsert, `_log.md` append, idempotency
-- `tests/unit/test_wiki_lint.py` — NEW: test orphan detection, stale page detection, empty vault handling
-- `tests/integration/test_wiki_post_merge.py` — NEW: test full post-merge → wiki write → KnowledgeWatcher picks up flow
+- `tests/unit/test_wiki_writer.py` — NEW: test page creation, idempotent slug-based upsert (no duplicate wikilinks), slug sanitization assertion, YAML frontmatter, wikilink injection (only for files confirmed on disk), NDA isolation enforcement, atomic write, startup temp sweep
+- `tests/unit/test_wiki_index.py` — NEW: test `_index.md` upsert, `_log.md` append, idempotency, empty vault
+- `tests/unit/test_wiki_lint.py` — NEW: test orphan detection, stale page detection, empty vault handling, exception contract (never raises), log output written
 
 ## Rabbit Holes
 
@@ -235,6 +234,7 @@ New tests to create:
 - Embedding-based wiki search (v2)
 - Obsidian plugin development
 - Wiki page deletion (pages are append-only in v1; deprecation is handled by frontmatter `deprecated: true` field)
+- MCP exposure of wiki tools (`wiki_write`, `wiki_query`) — the `mcp_servers/` directory does not exist; creating entire MCP infrastructure is out of scope for v1. The write pipeline is triggered automatically via the post-merge hook. MCP integration is a follow-on issue.
 
 ## Update System
 
@@ -247,14 +247,11 @@ The wiki write feature is local to the bridge machine where `~/work-vault/` live
 
 ## Agent Integration
 
-The wiki write and query operations must be exposed to the agent via MCP so it can trigger wiki ingests from Telegram conversations (e.g., "write a wiki page about this architectural decision we just made").
+No agent integration required for v1. The wiki write pipeline is triggered automatically via the post-merge hook in `.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()` — no explicit agent invocation is needed for the core write path.
 
-- **MCP server**: Extend an existing MCP server in `mcp_servers/` (likely `mcp_servers/memory_server.py` or a new `mcp_servers/wiki_server.py`) with `wiki_write` and `wiki_query` tools.
-- **`.mcp.json`**: Register the server if new, or add tools to existing registration.
-- **`wiki_write` tool**: Accepts `title`, `content`, `page_type`, `project_key` parameters. Returns `{"file_path": str, "status": "created"|"updated"}`.
-- **`wiki_query` tool**: Accepts `query` string, returns top matching wiki page titles + summaries from `_index.md` (fast, no embedding needed for v1).
-- **Integration tests**: `tests/integration/test_wiki_mcp.py` — verify agent can call `wiki_write`, page appears in vault, KnowledgeWatcher indexes it.
-- **Bridge**: No direct bridge changes needed. Wiki writes route through MCP.
+The `mcp_servers/` directory does not currently exist in this repo. Creating MCP infrastructure to expose `wiki_write` and `wiki_query` tools would require building an entire new server layer, which is out of scope for v1. Agents can observe wiki content through the existing companion Memory recall (KnowledgeWatcher auto-indexes written pages within seconds, creating Memory records that surface via bloom filter recall).
+
+MCP tool exposure (`wiki_write`, `wiki_query`) is scoped to a follow-on issue after the write pipeline is validated in production.
 
 ## Documentation
 
@@ -266,16 +263,22 @@ The wiki write and query operations must be exposed to the agent via MCP so it c
 
 ## Success Criteria
 
+### Technical Criteria
 - [ ] `tools/wiki/writer.py` creates well-formed Obsidian pages with YAML frontmatter, wikilinks, and correct project_key isolation
-- [ ] Agent-written pages render correctly in Obsidian with working wikilinks and appear in graph view
+- [ ] Slug sanitization enforced: `slugify("fix: config/../secrets")` returns a safe string with no `/` or `..` components
+- [ ] WikiWriter is synchronous-only: no `aiofiles`, no `async def` methods — verified by `grep -n "async def\|aiofiles" tools/wiki/writer.py` returning no results
 - [ ] Post-merge learning extraction writes a wiki page for "decision" and "pattern" category extractions (when `WIKI_WRITE_ENABLED=true`)
 - [ ] `_index.md` and `_log.md` are maintained per project with correct entries after each ingest
-- [ ] `reflections/wiki_lint.py` reports orphan pages, stale pages, and (via sampling) contradictions
+- [ ] `reflections/wiki_lint.py` reports orphan pages, stale pages, and (via sampling) contradictions; results written to `logs/wiki_lint.log`
 - [ ] NDA isolation is enforced: writing to a client project's folder from a different project context raises a logged error and no file is written
 - [ ] Existing knowledge indexer continues working — agent-written pages appear in `KnowledgeDocument` and companion `Memory` records within 5 seconds of write
-- [ ] `wiki_write` MCP tool is callable from agent context
-- [ ] All new tests pass (`pytest tests/unit/test_wiki_*.py tests/integration/test_wiki_*.py`)
+- [ ] All new tests pass (`pytest tests/unit/test_wiki_*.py tests/unit/test_memory_extraction.py`)
 - [ ] Lint clean (`python -m ruff check .`)
+
+### User-Facing Criteria
+- [ ] After a PR merges with a "decision" or "pattern" extraction, a structured wiki page appears in Obsidian within 30 seconds (visible in Obsidian's file explorer and graph view)
+- [ ] Weekly wiki lint produces a `logs/wiki_lint.log` entry with at least one actionable finding (orphan, stale page, or potential contradiction) within the first month of active wiki use
+- [ ] Agent-written pages render correctly in Obsidian: YAML frontmatter is parsed (visible in Properties panel), wikilinks resolve to existing pages (no unresolved purple links for auto-injected links)
 
 ## Team Orchestration
 
@@ -299,12 +302,6 @@ The wiki write and query operations must be exposed to the agent via MCP so it c
   - Agent Type: builder
   - Resume: true
 
-- **Builder (mcp-server)**
-  - Name: wiki-mcp-builder
-  - Role: Add `wiki_write` and `wiki_query` tools to an MCP server; update `.mcp.json`
-  - Agent Type: mcp-specialist
-  - Resume: true
-
 - **Validator (wiki-core)**
   - Name: wiki-core-validator
   - Role: Verify wiki writer creates correct pages, enforces NDA isolation, and maintains index/log correctly
@@ -313,7 +310,7 @@ The wiki write and query operations must be exposed to the agent via MCP so it c
 
 - **Validator (integration)**
   - Name: wiki-integration-validator
-  - Role: Verify end-to-end flow: post-merge → wiki write → KnowledgeWatcher → memory indexed; MCP tool callable
+  - Role: Verify end-to-end flow: post-merge → wiki write → KnowledgeWatcher → memory indexed; page renders in Obsidian
   - Agent Type: validator
   - Resume: true
 
@@ -325,7 +322,7 @@ The wiki write and query operations must be exposed to the agent via MCP so it c
 
 ### Available Agent Types
 
-Tier 1 — Core: builder, validator, documentarian, mcp-specialist
+Tier 1 — Core: builder, validator, documentarian
 
 ## Step by Step Tasks
 
@@ -339,9 +336,9 @@ Tier 1 — Core: builder, validator, documentarian, mcp-specialist
 - **Parallel**: true
 - Create `tools/wiki/__init__.py` with `write_page()` and `query_index()` public API
 - Create `tools/wiki/templates.py` with page type templates (entity, concept, decision, synthesis) — YAML frontmatter schema per type
-- Create `tools/wiki/writer.py`: `write_page(title, content, page_type, project_key, source_ref)` — resolves vault path via scope_resolver, writes with atomic temp+rename, updates `_index.md` and `_log.md`, enforces NDA isolation
+- Create `tools/wiki/writer.py`: `write_page(title, content, page_type, project_key, source_ref)` — sanitizes slug via `re.sub(r'[^a-z0-9\-_]', '-', slug.lower())` before any path construction; resolves vault path via scope_resolver; runs startup sweep removing `*.md.tmp` older than 5 min; writes with atomic temp+rename; updates `_index.md` and `_log.md`; enforces NDA isolation; uses synchronous file I/O only (no aiofiles)
 - Create `tools/wiki/index.py`: `upsert_index_entry(project_key, title, summary, file_path)`, `append_log_entry(project_key, event_type, detail)` — idempotent, creates `_index.md`/`_log.md` if absent
-- Create `tests/unit/test_wiki_writer.py` — test creation, idempotent update, NDA isolation enforcement, atomic write
+- Create `tests/unit/test_wiki_writer.py` — test creation, idempotent slug-based update (verify no wikilink duplication), slug sanitization assertion (`slugify("fix: config/../secrets")` has no `/` or `..`), NDA isolation enforcement, atomic write, startup temp sweep
 - Create `tests/unit/test_wiki_index.py` — test index upsert, log append, idempotency, empty vault
 
 ### 2. Build Wiki Lint Reflection
@@ -369,22 +366,9 @@ Tier 1 — Core: builder, validator, documentarian, mcp-specialist
 - Add `WIKI_WRITE_ENABLED=true` to `.env.example`
 - Update `tests/unit/test_memory_extraction.py`: add test for wiki write path enabled (verify `write_page` called), wiki write path disabled (verify `write_page` not called), and wiki write failure (verify memory still saved)
 
-### 4. Build MCP Server Tools
-- **Task ID**: build-wiki-mcp
-- **Depends On**: build-wiki-core
-- **Validates**: `tests/integration/test_wiki_mcp.py` (create)
-- **Informed By**: spike-4 (NDA isolation)
-- **Assigned To**: wiki-mcp-builder
-- **Agent Type**: mcp-specialist
-- **Parallel**: false
-- Add `wiki_write` tool to appropriate MCP server: accepts `title`, `content`, `page_type`, `project_key` — calls `tools.wiki.writer.write_page()`
-- Add `wiki_query` tool: accepts `query` string, returns matching entries from `_index.md` (string match, no embedding)
-- Update `.mcp.json` if a new server is created
-- Create `tests/integration/test_wiki_mcp.py` — verify `wiki_write` creates a vault file, verify `wiki_query` returns index entries
-
-### 5. Validate Wiki Core
+### 4. Validate Wiki Core
 - **Task ID**: validate-wiki-core
-- **Depends On**: build-wiki-core, build-wiki-lint, build-post-merge-integration, build-wiki-mcp
+- **Depends On**: build-wiki-core, build-wiki-lint, build-post-merge-integration
 - **Assigned To**: wiki-core-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -393,19 +377,20 @@ Tier 1 — Core: builder, validator, documentarian, mcp-specialist
 - Verify atomic write: confirm temp file cleaned up, final file is complete
 - Report pass/fail
 
-### 6. Validate Integration
+### 5. Validate Integration
 - **Task ID**: validate-integration
 - **Depends On**: validate-wiki-core
 - **Assigned To**: wiki-integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_memory_extraction.py tests/integration/test_wiki_mcp.py -v`
+- Run `pytest tests/unit/test_memory_extraction.py -v`
 - Write a test page via `tools.wiki.writer.write_page()`, wait 5s, verify `KnowledgeDocument` record exists and companion `Memory` record exists
 - Verify `_index.md` entry present and `_log.md` entry appended
-- Open a test page in Obsidian (or verify YAML frontmatter is well-formed via `python -c "import yaml; yaml.safe_load(open(...))"`)
+- Verify YAML frontmatter is well-formed: `python -c "import yaml; yaml.safe_load(open(path))"` returns without error
+- Verify `logs/wiki_lint.log` is written after a manual `run_wiki_lint()` call
 - Report pass/fail
 
-### 7. Documentation
+### 6. Documentation
 - **Task ID**: document-wiki
 - **Depends On**: validate-integration
 - **Assigned To**: wiki-documentarian
@@ -417,13 +402,13 @@ Tier 1 — Core: builder, validator, documentarian, mcp-specialist
 - Add entry to `docs/features/README.md` index table
 - Add `WIKI_WRITE_ENABLED=true  # Enable agent wiki page writing on post-merge` to `.env.example`
 
-### 8. Final Validation
+### 7. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-wiki
 - **Assigned To**: wiki-integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run full test suite: `pytest tests/unit/test_wiki_*.py tests/integration/test_wiki_*.py tests/unit/test_memory_extraction.py -v`
+- Run full test suite: `pytest tests/unit/test_wiki_*.py tests/unit/test_memory_extraction.py -v`
 - Lint: `python -m ruff check .`
 - Format: `python -m ruff format --check .`
 - Verify all success criteria checked
@@ -434,13 +419,13 @@ Tier 1 — Core: builder, validator, documentarian, mcp-specialist
 | Check | Command | Expected |
 |-------|---------|----------|
 | Tests pass | `pytest tests/unit/test_wiki_writer.py tests/unit/test_wiki_index.py tests/unit/test_wiki_lint.py tests/unit/test_memory_extraction.py -x -q` | exit code 0 |
-| Integration tests pass | `pytest tests/integration/test_wiki_mcp.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Wiki write feature flag exists | `grep -r "WIKI_WRITE_ENABLED" config/settings.py` | output > 0 |
 | Wiki writer module exists | `python -c "from tools.wiki.writer import write_page; print('ok')"` | output contains ok |
 | Wiki lint callable exists | `python -c "from reflections.wiki_lint import run_wiki_lint; print('ok')"` | output contains ok |
-| NDA isolation enforced | `python -c "from tools.wiki.writer import write_page; print('ok')"` | exit code 0 |
+| Slug sanitization enforced | `grep -n "re.sub" tools/wiki/writer.py` | output contains `[^a-z0-9` |
+| No async I/O in WikiWriter | `grep -n "async def\|aiofiles" tools/wiki/writer.py` | no output |
 
 ## Critique Results
 
