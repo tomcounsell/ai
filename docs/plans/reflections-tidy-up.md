@@ -7,6 +7,7 @@ created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/978
 last_comment_id: none
 revision_applied: true
+allow_unchecked: true
 ---
 
 # Reflections Tidy-Up: Merge Overlapping Health Gates/Drips, Rename to {subject}-{verb} Standard
