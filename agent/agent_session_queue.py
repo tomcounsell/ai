@@ -1328,8 +1328,17 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     where a worker transitions a session to running, then startup recovery resets it
     back to pending -- orphaning the already-spawned SDK subprocess.
 
+    Local CLI sessions (session_id starts with "local") are never re-queued. They are
+    marked "abandoned" instead. The worker cannot deliver output for local sessions, so
+    re-queuing them would spawn a second harness competing with the interactive CLI.
+
+    Note: The timing guard (AGENT_SESSION_HEALTH_MIN_RUNNING) is the primary defense
+    against the hook-reactivation race. Hook reactivation transitions running→running
+    (same status), so CAS via finalize_session(expected_status) does NOT protect against
+    it — but truly stale sessions (>300s old) predate any active typing activity.
+
     Status is an IndexedField, so direct mutation and save is safe.
-    Returns the number of recovered sessions.
+    Returns the number of recovered bridge sessions (local sessions are not counted).
     """
     running_sessions = list(AgentSession.query.filter(status="running"))
     if not running_sessions:
@@ -1360,41 +1369,88 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     if not stale_sessions:
         return 0
 
+    logger.warning("[startup-recovery] Found %d stale session(s) to process", len(stale_sessions))
+
     count = 0
+    abandoned = 0
     for entry in stale_sessions:
         wk = entry.worker_key
-        logger.warning(
-            "[startup-recovery] Recovering interrupted session %s "
-            "(session=%s, worker=%s, msg=%.80r...)",
-            entry.agent_session_id,
-            entry.session_id,
-            wk,
-            entry.message_text or "",
-        )
-        try:
-            from models.session_lifecycle import update_session
+        is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator
 
-            update_session(
-                entry.session_id,
-                new_status="pending",
-                fields={"priority": "high", "started_at": None},
-                expected_status="running",
-                reason="startup recovery",
-            )
-            logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
-            count += 1
-        except Exception as e:
+        if is_local:
+            # Local CLI sessions cannot be resumed by the bridge worker.
+            # Mark abandoned so the originating CLI can reclaim on next turn.
+            try:
+                from models.session_lifecycle import StatusConflictError, finalize_session
+
+                finalize_session(
+                    entry,
+                    "abandoned",
+                    reason="startup recovery: local session cannot be resumed by worker",
+                    skip_auto_tag=True,
+                )
+                abandoned += 1
+                logger.info(
+                    "[startup-recovery] Abandoned local session %s (session_id=%s, worker_key=%s)",
+                    entry.agent_session_id,
+                    entry.session_id,
+                    wk,
+                )
+            except StatusConflictError as e:
+                # Another concurrent modification (not hook reactivation — timing guard handles
+                # that race). Log at INFO and skip — session is being handled elsewhere.
+                logger.info(
+                    "[startup-recovery] Status conflict abandoning local session %s, skipping: %s",
+                    entry.session_id,
+                    e,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[startup-recovery] Failed to abandon local session %s, deleting: %s",
+                    entry.session_id,
+                    e,
+                )
+                try:
+                    entry.delete()
+                except Exception:
+                    pass
+        else:
             logger.warning(
-                "[startup-recovery] Failed to recover session %s, deleting corrupted session: %s",
+                "[startup-recovery] Recovering interrupted session %s "
+                "(session=%s, worker=%s, msg=%.80r...)",
+                entry.agent_session_id,
                 entry.session_id,
-                e,
+                wk,
+                entry.message_text or "",
             )
             try:
-                entry.delete()
-            except Exception:
-                pass
+                from models.session_lifecycle import update_session
 
-    logger.warning("[startup-recovery] Recovered %d interrupted session(s)", count)
+                update_session(
+                    entry.session_id,
+                    new_status="pending",
+                    fields={"priority": "high", "started_at": None},
+                    expected_status="running",
+                    reason="startup recovery",
+                )
+                logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
+                count += 1
+            except Exception as e:
+                logger.warning(
+                    "[startup-recovery] Failed to recover session %s, deleting: %s",
+                    entry.session_id,
+                    e,
+                )
+                try:
+                    entry.delete()
+                except Exception:
+                    pass
+
+    logger.warning(
+        "[startup-recovery] Recovered %d bridge session(s), abandoned %d local session(s)",
+        count,
+        abandoned,
+    )
     return count
 
 

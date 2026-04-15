@@ -16,10 +16,11 @@ The session system has 9 mechanisms that can revive, recover, or re-enqueue sess
 |----------|-------|
 | Location | `agent/agent_session_queue.py` |
 | Trigger | Worker process startup (`worker/__main__.py`) |
-| What it does | Resets stale `running` sessions to `pending` (orphaned from previous process) |
+| What it does | Resets stale `running` bridge sessions to `pending` (orphaned from previous process); abandons stale local CLI sessions |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
-| Guard | Query filter (`status="running"`) + timing guard (`AGENT_SESSION_HEALTH_MIN_RUNNING`, 300s) |
+| Guard | Query filter (`status="running"`) + timing guard (`AGENT_SESSION_HEALTH_MIN_RUNNING`, 300s) + local session guard |
 | Timing guard | Sessions with `started_at` within the last 300s are skipped -- they were likely started by a worker in the current process, not orphaned from the previous one. Sessions with `started_at=None` are always recovered. Matches the same guard used by the periodic health check (mechanism 2). Added by issue #727 to fix a race where a worker picks up a session before startup recovery fires. |
+| Local session guard | Sessions with `session_id.startswith("local")` are finalized as `"abandoned"` instead of being reset to `"pending"`. The bridge worker cannot deliver output for local CLI sessions; re-queuing them would spawn a second harness (`claude --resume <uuid>`) competing with the interactive CLI that already holds the session UUID — causing garbled transcripts and duplicate tool calls. `session_id` is the reliable discriminator: `create_local()` always sets `session_id=f"local-{uuid}"`. Using `worker_key` would be unreliable (DEV sessions without a slug return `project_key` as `worker_key`). Added by issue #986. |
 
 ### 2. Health Check (`_agent_session_health_check`)
 
@@ -208,10 +209,14 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 | `test_revival_skips_completed_session_branch` | check_revival | Branches with terminal siblings filtered out |
 | `test_rejects_from_terminal_by_default` | transition_status | Default rejects all 5 terminal->non-terminal |
 | `test_allows_from_terminal_when_explicitly_permitted` | transition_status | Explicit opt-out works |
-| `test_startup_recovery_only_queries_running` | startup recovery | Only queries running, not terminal |
+| `test_startup_recovery_only_queries_running` | startup recovery | Only queries running, not terminal; local sessions are not re-queued |
+| `test_startup_recovery_does_not_requeue_local_session` | startup recovery | `update_session("pending")` never called for local sessions |
+| `test_startup_recovery_abandons_local_sessions` | startup recovery (local guard) | Local session finalized as "abandoned", count=0 |
+| `test_startup_recovery_recovers_bridge_sessions` | startup recovery (local guard) | Bridge session reset to "pending", count=1 |
+| `test_startup_recovery_mixed_local_and_bridge` | startup recovery (local guard) | Mixed set: local→abandoned, bridge→pending, count=1 |
 | `test_recent_session_skipped_by_timing_guard` | startup recovery | Sessions started <300s ago are skipped |
 | `test_old_session_recovered_by_timing_guard` | startup recovery | Sessions started >300s ago are recovered |
-| `test_none_started_at_is_recovered` | startup recovery | Legacy sessions (no started_at) are recovered |
+| `test_none_started_at_is_recovered` | startup recovery | Sessions with no started_at are always recovered |
 | `test_mixed_recent_and_stale_sessions` | startup recovery | Only stale sessions recovered, recent skipped |
 | `test_watchdog_unhealthy_flag_routes_to_deliver` | session watchdog | Flag routes to deliver, not nudge |
 | `test_bridge_watchdog_has_no_agent_session_import` | bridge watchdog | No AgentSession imports |
@@ -246,3 +251,4 @@ Additional coverage in `tests/unit/test_health_check_recovery_finalization.py` (
 - PR #703 -- Zombie loop fix (hierarchy health check vector)
 - PR #721 -- Lifecycle consolidation
 - Issue #917 -- Health-check recovery finalization gap (fallback else branch)
+- Issue #986 -- Startup recovery local session guard (do not hijack interactive CLI sessions)
