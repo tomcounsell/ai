@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: merge_ready
 type: feature
 appetite: Small
 owner: Valor
@@ -110,18 +110,18 @@ No prerequisites — `yt-dlp` is already a project dependency and requires no AP
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Test that network errors (timeout, DNS failure) return a clear error message to stderr and exit code 1
-- [ ] Test that yt-dlp extraction errors (e.g., YouTube blocking) are caught and reported
+- [x] Test that network errors (timeout, DNS failure) return a clear error message to stderr and exit code 1
+- [x] Test that yt-dlp extraction errors (e.g., YouTube blocking) are caught and reported
 - No existing `except Exception: pass` blocks in scope — this is greenfield code
 
 ### Empty/Invalid Input Handling
-- [ ] Empty query string prints usage and exits with code 1
-- [ ] Query returning zero results prints "No results found" message
-- [ ] Whitespace-only query treated as empty
+- [x] Empty query string prints usage and exits with code 1
+- [x] Query returning zero results prints "No results found" message
+- [x] Whitespace-only query treated as empty
 
 ### Error State Rendering
-- [ ] All error paths print to stderr (not stdout) so agent can distinguish errors from results
-- [ ] Non-zero exit code on any failure
+- [x] All error paths print to stderr (not stdout) so agent can distinguish errors from results
+- [x] Non-zero exit code on any failure
 
 ## Test Impact
 
@@ -175,14 +175,14 @@ No update system changes required — `yt-dlp` is already a dependency. The new 
 
 ## Success Criteria
 
-- [ ] `valor-youtube-search "python tutorial"` returns structured results with title, URL, duration, view count, uploader
-- [ ] `valor-youtube-search --limit 3 "python tutorial"` limits results to 3
-- [ ] Empty query prints usage and exits with code 1
-- [ ] Network/extraction errors print to stderr and exit with code 1
-- [ ] Unit tests pass covering search function, CLI args, and error handling
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] End-to-end: agent can respond to a YouTube search request with clickable result URLs
+- [x] `valor-youtube-search "python tutorial"` returns structured results with title, URL, duration, view count, uploader
+- [x] `valor-youtube-search --limit 3 "python tutorial"` limits results to 3
+- [x] Empty query prints usage and exits with code 1
+- [x] Network/extraction errors print to stderr and exit with code 1
+- [x] Unit tests pass covering search function, CLI args, and error handling
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] End-to-end: agent can respond to a YouTube search request with clickable result URLs
 
 ## Team Orchestration
 
