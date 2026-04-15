@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/849
 last_comment_id: null
+revision_applied: true
 ---
 
 # Open-Source Readiness: CONTRIBUTING.md, README Polish, and CHANGELOG
@@ -127,8 +128,8 @@ No prerequisites — this work has no external dependencies.
    - Getting help (point to CLAUDE.md, docs/features/, GitHub Issues)
 
 2. `README.md` additions (additive only, no rewrite):
-   - Insert a "Why Valor?" section between the title/tagline and "What Is This?" — 3–5 bullet points mapping to real use cases
-   - Insert a demo placeholder `<!-- TODO: Add demo GIF here once system is running -->` with a link to `docs/assets/` where the file should land
+   - Insert a "Why Valor?" section immediately after the opening sentence (`An autonomous AI coworker...`) and before `## What Is This?` — 3–5 bullet points mapping to real use cases. Note: the README has no separate "tagline" line; the opening sentence IS the tagline, so insert directly after it.
+   - Insert a demo placeholder after the architecture diagram as a visible blockquote: `> **📸 TODO**: Add demo GIF or screenshot here — see [docs/assets/](docs/assets/) for placement instructions.` (not an HTML comment — HTML comments are invisible in rendered GitHub markdown)
    - No structural changes to existing sections
 
 3. `CHANGELOG.md` using Keep a Changelog v1.1.0:
@@ -210,7 +211,7 @@ This work IS the documentation. No additional feature docs needed.
 - [ ] README contains a clearly marked placeholder for demo media with instructions for how to produce it
 - [ ] `CHANGELOG.md` exists with at least 6 versioned entries covering major feature milestones, following Keep a Changelog v1.1.0 format
 - [ ] All new markdown files contain no broken links to nonexistent repo paths
-- [ ] `python -m ruff check .` passes (no ruff rules apply to .md but verify no accidentally modified .py files)
+- [ ] No new ruff failures introduced by this PR — verify by diffing `python -m ruff check .` output against baseline commit `71e2f70e` (a pre-existing `F841` in `test_recovery_respawn_safety.py` is excluded from this gate)
 - [ ] No existing test files are broken
 
 ## Team Orchestration
@@ -266,8 +267,8 @@ Documentarian for writing, validator for link/quality verification.
 - **Assigned To**: docs-builder
 - **Agent Type**: documentarian
 - **Parallel**: true
-- Insert "Why Valor?" section between title/tagline and "What Is This?" with 3–5 bullet points mapping to real use cases
-- Insert demo media placeholder `<!-- TODO: Add demo GIF — see docs/assets/ for instructions -->` after the architecture diagram
+- Insert "Why Valor?" section immediately after the opening sentence (`An autonomous AI coworker...`) and before `## What Is This?` — with 3–5 bullet points mapping to real use cases. The README has no separate "tagline" line; the opening sentence IS the tagline, so insert directly after it.
+- Insert demo media placeholder after the architecture diagram as a visible blockquote: `> **📸 TODO**: Add demo GIF or screenshot here — see [docs/assets/](docs/assets/) for placement instructions.` (HTML comments are invisible in rendered GitHub markdown — use a blockquote so the placeholder is actionable)
 - No structural changes to existing README sections
 
 ### 4. Validate all docs
@@ -288,14 +289,17 @@ Documentarian for writing, validator for link/quality verification.
 | CONTRIBUTING.md exists | `test -f CONTRIBUTING.md` | exit code 0 |
 | CHANGELOG.md exists | `test -f CHANGELOG.md` | exit code 0 |
 | README has value-prop | `grep -q "Why Valor" README.md` | exit code 0 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
+| No new ruff failures | diff `python -m ruff check .` against baseline `71e2f70e` | no new entries |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Run: 2026-04-15 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | User | HTML comment demo placeholder is invisible in rendered GitHub markdown | Task 3 | Replace `<!-- TODO: ... -->` with a visible blockquote: `> **📸 TODO**: Add demo GIF or screenshot here — see [docs/assets/](docs/assets/) for placement instructions.` |
+| CONCERN | Skeptic | Success criterion "`ruff check .` passes" will fail on pre-existing `F841` in `test_recovery_respawn_safety.py` | Task 4 / validate-docs | Change success criterion to: "No *new* ruff failures introduced by this PR" — verify by diffing ruff output against baseline commit `71e2f70e`. |
+| NIT | Skeptic | README has no "tagline" line; opening sentence IS the tagline — insertion point for "Why Valor?" may confuse builder | Task 3 | Builder should insert "Why Valor?" section immediately after the opening sentence `An autonomous AI coworker...` and before `## What Is This?`. |
 
 ---
 
