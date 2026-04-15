@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/977
 last_comment_id: null
+revision_applied: true
 ---
 
 # Harness Startup Failure Retry with Persona-Aligned Messages
@@ -68,17 +69,18 @@ No prior attempts to add retry logic for `FileNotFoundError` specifically.
 **After the fix:**
 - Step 4 returns a sentinel tuple indicating a transient failure (e.g., `returncode=None`)
 - Step 5 detects the sentinel and checks `cli_retry_count` stored in `extra_context`
-- If `cli_retry_count < 3`: re-queue session via `_extract_agent_session_fields()` + `AgentSession.async_create()`, increment counter, return `""` (BackgroundTask skips send on empty)
+- If `agent_session is None`: return raw unchanged (preserve existing behavior — no retry without a session record)
+- If `cli_retry_count < 3`: update `extra_context["cli_retry_count"]`, call `transition_status(agent_session, "pending", "harness-retry")` to reuse the existing record, log a warning, return `""` (BackgroundTask skips send on empty)
 - If `cli_retry_count >= 3`: return the persona-aligned message string
 - Step 6 delivers persona-aligned message (or skips on empty)
 
 ## Architectural Impact
 
 - **New field on `AgentSession.extra_context`**: `cli_retry_count` stored as an integer. Uses the existing `extra_context` DictField — no model schema change needed.
-- **No new imports**: The retry path reuses `_extract_agent_session_fields()` and `AgentSession.async_create()` already imported in the queue module.
+- **One new import**: `transition_status` from `models.session_lifecycle`. Already used elsewhere in the module.
 - **No interface changes**: `get_response_via_harness()` signature unchanged. The detection and retry logic lives in `agent_session_queue.py` (the caller), not inside `sdk_client.py`.
-- **Coupling**: No new coupling introduced. The retry path mirrors the existing `_enqueue_nudge()` delete-and-recreate pattern.
-- **Reversibility**: Removing the change requires reverting the `_run_work` interception and the re-queue call. Low risk.
+- **Coupling**: No new coupling introduced. The retry path uses `transition_status()` — the same mechanism used for all non-terminal status moves throughout the codebase.
+- **Reversibility**: Removing the change requires reverting the `do_work()` interception and the `transition_status()` call. Low risk.
 
 ## Appetite
 
@@ -100,13 +102,13 @@ No prerequisites — this is a pure Python change to existing internal modules w
 
 - **Transient error sentinel**: `_run_harness_subprocess()` already returns `(error_string, None, None)` (returncode=None) for `FileNotFoundError`. This `returncode=None` is the sentinel — no new sentinel type needed.
 - **Retry counter in `extra_context`**: `cli_retry_count` key stored in `AgentSession.extra_context`. Reading and writing uses the same dict-field pattern as `revival_context` and `classification_type`.
-- **Re-queue on retry**: If `cli_retry_count < 3`, extract session fields, set `cli_retry_count += 1`, set `status = "pending"`, call `AgentSession.async_create()`. Return `""` from `do_work()` so `BackgroundTask` skips the send.
+- **Re-queue on retry**: If `agent_session is None`, return `raw` immediately (B1 guard). If `cli_retry_count < 3`, update `extra_context["cli_retry_count"]`, call `transition_status(agent_session, "pending", "harness-retry")` to move the existing record back to pending (B2 — no new record created), then return `""` from `do_work()` so `BackgroundTask` skips the send.
 - **Persona message on exhaustion**: If `cli_retry_count >= 3`, return the human-voiced message from `do_work()` so it is delivered normally.
 - **Deterministic (non-transient) failures**: Any other harness result that is a raw error string (starts with `"Error:"`) gets mapped to a persona-aligned message regardless of retry — they never retry because the binary exists but produced a bad result.
 
 ### Flow
 
-Telegram message → AgentSession created → Worker pops → harness fails with FileNotFoundError → `cli_retry_count` checked → if < 3: silent re-queue + counter increment → worker pops again on next cycle → if >= 3: persona-aligned message delivered to Telegram
+Telegram message → AgentSession created → Worker pops → harness fails with FileNotFoundError → guard: `agent_session is None`? → return raw if None → `cli_retry_count` checked → if < 3: `transition_status("pending", "harness-retry")` + counter increment + warning log → worker pops same record again → if >= 3: persona-aligned message delivered to Telegram
 
 ### Technical Approach
 
@@ -114,25 +116,37 @@ The fix is concentrated in one place: the `do_work()` coroutine and the post-com
 
 **Change 1 — Intercept harness error result in the caller (`agent_session_queue.py`)**
 
-Wrap `get_response_via_harness()` in a small helper that checks the returned string. If it starts with `"Error: CLI harness not found"` (returncode=None from `_run_harness_subprocess`), it means a transient startup failure:
+Wrap `get_response_via_harness()` in a check that runs before sending. If the result starts with `"Error: CLI harness not found"` (returncode=None from `_run_harness_subprocess`), it is a transient startup failure.
+
+**Critical guard (B1):** `agent_session` is initialized to `None` at line 3328 and only set if the Redis query finds a running session. All accesses to `agent_session` in the retry block must be guarded. If `agent_session is None`, skip the retry path and return `raw` unchanged — preserving the existing behavior:
 
 ```python
 _HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"
+_HARNESS_NOT_FOUND_MAX_RETRIES = 3
 
 async def do_work() -> str:
     raw = await get_response_via_harness(...)
     if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
+        # Guard: agent_session may be None if Redis lookup failed (race/recovery path)
+        if agent_session is None:
+            return raw
         # transient — attempt silent retry
         ec = agent_session.extra_context or {}
         retry_count = int(ec.get("cli_retry_count", 0))
-        if retry_count < 3:
-            # re-queue silently
+        if retry_count < _HARNESS_NOT_FOUND_MAX_RETRIES:
             ec["cli_retry_count"] = retry_count + 1
-            fields = _extract_agent_session_fields(agent_session)
-            fields["status"] = "pending"
-            fields["extra_context"] = ec
-            await AgentSession.async_create(**fields)
+            # Re-queue by transitioning the existing record (B2 — do NOT create a new one)
+            agent_session.extra_context = ec
+            await asyncio.to_thread(
+                transition_status, agent_session, "pending", "harness-retry"
+            )
             _ensure_worker(agent_session.worker_key, ...)
+            logger.warning(
+                "[%s] Harness not found — retry %d/%d",
+                agent_session.session_id,
+                retry_count + 1,
+                _HARNESS_NOT_FOUND_MAX_RETRIES,
+            )
             return ""  # BackgroundTask.send skips empty result
         else:
             return (
@@ -143,11 +157,15 @@ async def do_work() -> str:
     return raw
 ```
 
+Import `transition_status` from `models.session_lifecycle` alongside existing imports at the top of `agent_session_queue.py`.
+
+**Why `transition_status` instead of `async_create` (B2):** `async_create()` would create a second Redis record while leaving the original in `status="running"`. The health monitor would eventually find the ghost running record and may spawn a duplicate execution or mark it permanently zombie. `transition_status()` updates the existing record in-place, updating secondary indexes correctly and keeping a single canonical record — matching the established contract for non-terminal status moves (e.g., `_enqueue_nudge()` at line 2712–2726).
+
 **Change 2 — Skip finalization when silently re-queuing**
 
-When `do_work()` returns `""` after a re-queue, the post-task code must NOT finalize the session to `"completed"` — it is now re-queued as `"pending"`. Guard with a flag or check the re-queued state. The simplest approach: if `task._result == ""` AND no error occurred AND agent_session status was just re-set to pending via async_create, skip `complete_transcript()`.
+When `do_work()` returns `""` after a re-queue, the post-task code must NOT finalize the session to `"completed"` — it has already been transitioned to `"pending"` by `transition_status()`. Guard with a bool flag:
 
-Implementation: use a `bool` flag `_harness_requeued` set inside `do_work()` scope and read in the finalization block.
+Implementation: use a `bool` flag `_harness_requeued` set inside `do_work()` scope and read in the finalization block. The flag is set synchronously before returning `""`, so no race is possible.
 
 **Change 3 — No changes to `sdk_client.py`**
 
@@ -169,8 +187,8 @@ The error return from `_run_harness_subprocess()` is already correct: `(error_st
 
 ## Test Impact
 
-- [ ] `tests/unit/test_harness_streaming.py::TestHarnessStreaming::test_binary_not_found` — UPDATE: assert the error string is returned by `get_response_via_harness()` unchanged (that is still correct — the interception happens in the caller, not `sdk_client.py`). No change needed to this specific test.
-- [ ] `tests/unit/test_harness_streaming.py` — ADD new test class `TestHarnessRetry` with three cases: (a) retry counter increments on first failure, (b) retry counter increments again on second failure, (c) persona message delivered on third failure.
+- [ ] `tests/unit/test_harness_streaming.py::TestHarnessStreaming::test_binary_not_found` — UPDATE: add an inline comment clarifying that this test validates the raw error string returned by `sdk_client.py` (i.e., the return value of `get_response_via_harness()`), NOT the post-interception behavior in `agent_session_queue.py`. This distinguishes it from the new `TestHarnessRetry` tests and prevents future readers from thinking the test covers retry behavior (N1). The assertion itself is still correct and does not need to change.
+- [ ] `tests/unit/test_harness_retry.py` — CREATE new test file with `TestHarnessRetry` class covering: (a) retry counter increments on first failure and `do_work()` returns `""`, (b) retry counter increments on second failure, (c) persona message delivered on third failure, (d) `agent_session=None` case returns raw error string without retry.
 - [ ] No integration tests touch this code path directly — the retry path requires an `agent_session` object in Redis, which is out of scope for existing unit tests.
 
 ## Rabbit Holes
@@ -183,16 +201,16 @@ The error return from `_run_harness_subprocess()` is already correct: `(error_st
 ## Risks
 
 ### Risk 1: Infinite re-queue loop
-**Impact:** If `cli_retry_count` is not reliably preserved across delete-and-recreate, the counter resets to 0 each time and the session loops forever.
-**Mitigation:** `extra_context` is in `_AGENT_SESSION_FIELDS` and is preserved by `_extract_agent_session_fields()`. The counter is stored inside that dict. Verify in test by asserting `cli_retry_count` on the recreated session record.
+**Impact:** If `cli_retry_count` is not reliably preserved across re-queues, the counter resets to 0 each time and the session loops forever.
+**Mitigation:** `transition_status()` updates the existing record in-place — the same `extra_context` dict with the incremented `cli_retry_count` is written before the transition call. No delete-and-recreate means no field loss. Verify in test by asserting `cli_retry_count` on the re-queued session record after each retry.
 
 ### Risk 2: Finalization race on re-queued session
-**Impact:** If `complete_transcript()` is called after `async_create()` sets status to `"pending"`, the re-queued session is immediately finalized to `"completed"`, making it invisible to the worker.
+**Impact:** If `complete_transcript()` is called after `transition_status()` sets status to `"pending"`, the re-queued session is immediately finalized to `"completed"`, making it invisible to the worker.
 **Mitigation:** Use the `_harness_requeued` flag to gate the `complete_transcript()` call. The flag is set synchronously inside `do_work()` before returning, so no race is possible within the same asyncio task.
 
 ### Risk 3: Worker not notified after re-queue
 **Impact:** Re-queued session sits in Redis but no worker picks it up.
-**Mitigation:** Call `_ensure_worker(agent_session.worker_key, ...)` after `async_create()`, matching the pattern used in `_enqueue_nudge()` fallback path.
+**Mitigation:** Call `_ensure_worker(agent_session.worker_key, ...)` after `transition_status()`, matching the pattern used in `_enqueue_nudge()` fallback path.
 
 ## Race Conditions
 
@@ -227,12 +245,12 @@ No agent integration required — this is a bridge/worker-internal change. The f
 ## Success Criteria
 
 - [ ] When `claude` binary is not found, session is silently re-queued up to 3 times before any Telegram message is sent
-- [ ] Retry counter (`cli_retry_count` in `extra_context`) increments on each retry and is preserved across delete-and-recreate
+- [ ] Retry counter (`cli_retry_count` in `extra_context`) increments on each retry and is preserved across re-queues
 - [ ] The final failure message after 3 retries is persona-aligned (no raw exception strings)
 - [ ] Session is NOT finalized to `"completed"` after a silent re-queue — it remains `"pending"` for the worker to pop
 - [ ] Non-`FileNotFoundError` harness result strings do NOT trigger retry — they are mapped to persona-aligned messages on first occurrence
 - [ ] `tests/unit/test_harness_streaming.py` existing tests still pass
-- [ ] New unit tests cover: retry counter increment, retry exhaustion message, finalization skip on re-queue
+- [ ] New unit tests cover: retry counter increment, retry exhaustion message, finalization skip on re-queue, `agent_session=None` bypass
 - [ ] `python -m ruff check . && python -m ruff format --check .` passes
 
 ## Team Orchestration
@@ -272,12 +290,14 @@ See plan template.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"` and `_HARNESS_NOT_FOUND_MAX_RETRIES = 3` constants near top of `agent_session_queue.py`
+- Import `transition_status` from `models.session_lifecycle` at the top of `agent_session_queue.py`
 - Wrap `get_response_via_harness()` return value in the `do_work()` coroutine to detect the prefix
+- Guard: if `agent_session is None`, return `raw` immediately (B1 — preserve existing behavior when Redis lookup failed)
 - Read `cli_retry_count` from `agent_session.extra_context` (default 0)
-- If count < 3: update `extra_context["cli_retry_count"]`, extract fields, `async_create()` with status=pending, call `_ensure_worker()`, set `_harness_requeued = True`, return `""`
-- If count >= 3: return persona-aligned message string
+- If count < `_HARNESS_NOT_FOUND_MAX_RETRIES`: update `extra_context["cli_retry_count"]`, call `await asyncio.to_thread(transition_status, agent_session, "pending", "harness-retry")` (B2 — reuse existing record, no new `async_create()`), call `_ensure_worker()`, log `logger.warning("[%s] Harness not found — retry %d/%d", ...)` (C1), set `_harness_requeued = True`, return `""`
+- If count >= `_HARNESS_NOT_FOUND_MAX_RETRIES`: return persona-aligned message string
 - Add `_harness_requeued` flag to finalization block guard (skip `complete_transcript()` when True)
-- Create `tests/unit/test_harness_retry.py` with tests for: (a) first retry increments counter and returns `""`, (b) third retry returns persona message, (c) non-FileNotFoundError error does not retry
+- Create `tests/unit/test_harness_retry.py` with tests for: (a) first retry increments counter and returns `""`, (b) third retry returns persona message, (c) non-FileNotFoundError error does not retry, (d) agent_session=None bypasses retry and returns raw string
 
 ### 2. Validate retry logic
 - **Task ID**: validate-retry-logic
@@ -286,7 +306,7 @@ See plan template.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run `pytest tests/unit/test_harness_retry.py tests/unit/test_harness_streaming.py -v`
-- Verify `cli_retry_count` is preserved in the recreated session's `extra_context`
+- Verify `cli_retry_count` is preserved in the re-queued session's `extra_context`
 - Verify `complete_transcript()` is NOT called when `_harness_requeued=True`
 - Run `python -m ruff check agent/agent_session_queue.py && python -m ruff format --check agent/agent_session_queue.py`
 
@@ -323,9 +343,12 @@ See plan template.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Adversary | B1: `agent_session` may be `None` in retry block — `AttributeError` if Redis lookup failed | Technical Approach Change 1, Task 1 | Added `if agent_session is None: return raw` guard at top of retry detection block, before any `agent_session` access |
+| BLOCKER | Adversary, Operator | B2: Original `status="running"` session left orphaned after re-queue — health monitor may spawn duplicate or zombie | Technical Approach Change 1 and Change 2, Architectural Impact | Replaced `AgentSession.async_create()` with `transition_status(agent_session, "pending", "harness-retry")` — existing record reused, no ghost running record |
+| CONCERN | Operator | C1: No `logger.warning` in retry branch — retry events invisible in production | Technical Approach Change 1, Task 1 | Added `logger.warning("[%s] Harness not found — retry %d/%d", session_id, retry+1, max)` immediately before `return ""` |
+| NIT | — | N1: `test_binary_not_found` note could mislead future readers | Test Impact section | Added clarifying inline comment distinguishing raw-string validation (sdk_client.py) from retry-interception tests (agent_session_queue.py) |
 
 ---
 
