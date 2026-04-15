@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -174,22 +174,22 @@ The error return from `_run_harness_subprocess()` is already correct: `(error_st
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The `except FileNotFoundError` block in `_run_harness_subprocess()` is already tested by `test_binary_not_found` in `test_harness_streaming.py` — that test asserts the error string is returned. After this change, the test must be updated to assert the string is NOT sent to Telegram when `cli_retry_count < 3`.
-- [ ] The finalization skip path (re-queued session must not be marked `completed`) must have a test asserting `complete_transcript()` is NOT called when `_harness_requeued=True`.
+- [x] The `except FileNotFoundError` block in `_run_harness_subprocess()` is already tested by `test_binary_not_found` in `test_harness_streaming.py` — that test asserts the error string is returned. After this change, the test must be updated to assert the string is NOT sent to Telegram when `cli_retry_count < 3`.
+- [x] The finalization skip path (re-queued session must not be marked `completed`) must have a test asserting `complete_transcript()` is NOT called when `_harness_requeued=True`.
 
 ### Empty/Invalid Input Handling
-- [ ] `do_work()` returning `""` must not trigger `BackgroundTask.send()` — verified by existing check `if send_result and self._result:` in `messenger.py:151` (empty string is falsy, already safe).
-- [ ] `cli_retry_count` missing from `extra_context` defaults to 0 — tested via `int(ec.get("cli_retry_count", 0))`.
+- [x] `do_work()` returning `""` must not trigger `BackgroundTask.send()` — verified by existing check `if send_result and self._result:` in `messenger.py:151` (empty string is falsy, already safe).
+- [x] `cli_retry_count` missing from `extra_context` defaults to 0 — tested via `int(ec.get("cli_retry_count", 0))`.
 
 ### Error State Rendering
-- [ ] After 3 retries, exactly one persona-aligned message is sent — tested by asserting `messenger.send` called once with the persona string.
-- [ ] Raw `"Error: CLI harness not found"` string must never appear in Telegram output after the fix.
+- [x] After 3 retries, exactly one persona-aligned message is sent — tested by asserting `messenger.send` called once with the persona string.
+- [x] Raw `"Error: CLI harness not found"` string must never appear in Telegram output after the fix.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_harness_streaming.py::TestHarnessStreaming::test_binary_not_found` — UPDATE: add an inline comment clarifying that this test validates the raw error string returned by `sdk_client.py` (i.e., the return value of `get_response_via_harness()`), NOT the post-interception behavior in `agent_session_queue.py`. This distinguishes it from the new `TestHarnessRetry` tests and prevents future readers from thinking the test covers retry behavior (N1). The assertion itself is still correct and does not need to change.
-- [ ] `tests/unit/test_harness_retry.py` — CREATE new test file with `TestHarnessRetry` class covering: (a) retry counter increments on first failure and `do_work()` returns `""`, (b) retry counter increments on second failure, (c) persona message delivered on third failure, (d) `agent_session=None` case returns raw error string without retry.
-- [ ] No integration tests touch this code path directly — the retry path requires an `agent_session` object in Redis, which is out of scope for existing unit tests.
+- [x] `tests/unit/test_harness_streaming.py::TestHarnessStreaming::test_binary_not_found` — UPDATE: add an inline comment clarifying that this test validates the raw error string returned by `sdk_client.py` (i.e., the return value of `get_response_via_harness()`), NOT the post-interception behavior in `agent_session_queue.py`. This distinguishes it from the new `TestHarnessRetry` tests and prevents future readers from thinking the test covers retry behavior (N1). The assertion itself is still correct and does not need to change.
+- [x] `tests/unit/test_harness_retry.py` — CREATE new test file with `TestHarnessRetry` class covering: (a) retry counter increments on first failure and `do_work()` returns `""`, (b) retry counter increments on second failure, (c) persona message delivered on third failure, (d) `agent_session=None` case returns raw error string without retry.
+- [x] No integration tests touch this code path directly — the retry path requires an `agent_session` object in Redis, which is out of scope for existing unit tests.
 
 ## Rabbit Holes
 
@@ -239,19 +239,19 @@ No agent integration required — this is a bridge/worker-internal change. The f
 
 ## Documentation
 
-- [ ] Update `docs/features/stall-retry.md` to add a brief note distinguishing stall-retry (sessions that hang) from harness startup retry (sessions that fail instantly with FileNotFoundError). One paragraph is sufficient.
-- [ ] Add `## Harness Startup Retry` subsection to `docs/features/agent-session-health-monitor.md` or create `docs/features/harness-startup-retry.md` describing the new retry behavior.
+- [x] Update `docs/features/stall-retry.md` to add a brief note distinguishing stall-retry (sessions that hang) from harness startup retry (sessions that fail instantly with FileNotFoundError). One paragraph is sufficient.
+- [x] Add `## Harness Startup Retry` subsection to `docs/features/agent-session-health-monitor.md` or create `docs/features/harness-startup-retry.md` describing the new retry behavior.
 
 ## Success Criteria
 
-- [ ] When `claude` binary is not found, session is silently re-queued up to 3 times before any Telegram message is sent
-- [ ] Retry counter (`cli_retry_count` in `extra_context`) increments on each retry and is preserved across re-queues
-- [ ] The final failure message after 3 retries is persona-aligned (no raw exception strings)
-- [ ] Session is NOT finalized to `"completed"` after a silent re-queue — it remains `"pending"` for the worker to pop
-- [ ] Non-`FileNotFoundError` harness result strings do NOT trigger retry — they are mapped to persona-aligned messages on first occurrence
-- [ ] `tests/unit/test_harness_streaming.py` existing tests still pass
-- [ ] New unit tests cover: retry counter increment, retry exhaustion message, finalization skip on re-queue, `agent_session=None` bypass
-- [ ] `python -m ruff check . && python -m ruff format --check .` passes
+- [x] When `claude` binary is not found, session is silently re-queued up to 3 times before any Telegram message is sent
+- [x] Retry counter (`cli_retry_count` in `extra_context`) increments on each retry and is preserved across re-queues
+- [x] The final failure message after 3 retries is persona-aligned (no raw exception strings)
+- [x] Session is NOT finalized to `"completed"` after a silent re-queue — it remains `"pending"` for the worker to pop
+- [x] Non-`FileNotFoundError` harness result strings do NOT trigger retry — they are mapped to persona-aligned messages on first occurrence
+- [x] `tests/unit/test_harness_streaming.py` existing tests still pass
+- [x] New unit tests cover: retry counter increment, retry exhaustion message, finalization skip on re-queue, `agent_session=None` bypass
+- [x] `python -m ruff check . && python -m ruff format --check .` passes
 
 ## Team Orchestration
 
