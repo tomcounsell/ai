@@ -107,7 +107,7 @@ The worker's startup sequence is deterministic:
 
 ### Execution Harness Routing
 
-All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was removed in issue #912.
+All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was eliminated in issue #912.
 
 ```
 _execute_agent_session(session)
