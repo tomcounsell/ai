@@ -7,6 +7,9 @@ created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/976
 last_comment_id:
 revision_applied: true
+revision_rounds: 2
+last_revision: 2026-04-15
+critique_archive: docs/plans/critiques/harness-session-continuity-2026-04-15.md
 ---
 
 # Harness Session Continuity (--resume / --continue)
@@ -110,11 +113,11 @@ End-to-end trace of a single harness turn, with the proposed change:
 4. **Subprocess invocation**: `get_response_via_harness(message, working_dir, env, prior_uuid=..., full_context_message=...)` is called.
    - **Validates `prior_uuid` format** (UUID regex check). If invalid, logs warning and treats as `None`.
    - Constructs `cmd = ["claude", "-p", ...base_flags...]`.
-   - **If `prior_uuid` set and valid (NEW)**: appends `["--resume", prior_uuid]` to `cmd` and skips `_apply_context_budget()` (the message is already small — just the new user input).
-   - **If `prior_uuid is None`**: applies `_apply_context_budget()` as today (safety net for first turns).
+   - **If `prior_uuid` set and valid (NEW)**: appends `["--resume", prior_uuid]` to `cmd` and emits an INFO log (`"[harness] Resuming Claude session ..."`) so production can grep the resume hit-rate.
+   - **Applies `_apply_context_budget()` unconditionally** to `message` (regardless of `--resume` state). On the typical resume path this is a no-op; on first turns and on pathological large single messages it bounds argv.
    - Appends `[message]` as final positional argv.
    - Spawns `asyncio.create_subprocess_exec(*cmd, ...)`.
-   - **Mandatory stale-UUID fallback (NEW)**: if the subprocess exits non-zero with "requires a valid session" in stderr, retries once using `full_context_message` (with `_apply_context_budget()` applied), without `--resume`. This handles deleted session files.
+   - **Mandatory stale-UUID fallback (NEW)**: if `prior_uuid` was set and the subprocess exits with **any** non-zero return code, emits a WARNING log and retries once using `full_context_message` without `--resume`. The fallback does NOT gate on a stderr substring — substring matching is brittle across CLI versions and locales, and an unnecessary retry on a non-stale-UUID error costs only one extra subprocess spawn vs. a silent stuck-empty turn.
 5. **Stream parsing**: As today — reads stream-json line-by-line, captures `session_id_from_harness` from the `result` event.
 6. **UUID storage (NEW)**: After the `result` event is parsed (whether or not `--resume` was used), if `session_id_from_harness` is set, call `_store_claude_session_uuid(session_id, session_id_from_harness)`. This persists the UUID on the AgentSession Popoto record so the next turn finds it via step 2.
 7. **Output**: `result_text` returned to caller, BackgroundTask delivers it.
@@ -158,7 +161,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/harness-sessio
 - **Harness UUID persistence**: After every successful harness turn, store the `session_id_from_harness` value (already captured) on the `AgentSession` record via the existing `_store_claude_session_uuid()` helper.
 - **Harness UUID reuse**: Before each harness turn, look up the prior UUID via the existing `_get_prior_session_uuid()` helper. When found, inject `--resume <uuid>` into the subprocess argv.
 - **Resumed-turn message minimization**: When resuming, skip the context-prefix construction in `build_harness_turn_input()` and pass only the raw new user message as the positional argv. The binary already has all prior context in its session file.
-- **Retain the safety net**: `_apply_context_budget()` continues to run on first-turn (no-prior-UUID) calls. It is bypassed on resumed turns where the message is already minimal.
+- **Retain the safety net unconditionally**: `_apply_context_budget()` runs on every harness call regardless of `--resume` state. On first turns it bounds the reconstructed-context argv; on resumed turns it bounds pathological single mega-messages (pasted transcripts, large forwarded payloads). The function is a no-op when input fits, so the only cost on the typical resume path is one length check.
 
 ### Flow
 
@@ -181,8 +184,9 @@ The store call must succeed-or-fail-silent (the helper already does this interna
 Add optional keyword-only parameters `prior_uuid: str | None = None` and `full_context_message: str | None = None` to `get_response_via_harness()`. When `prior_uuid` is set:
 - **Validate UUID format** before injection: check `prior_uuid` matches the pattern `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` (standard UUID v4). If validation fails, treat as `None` (log warning, fall through to first-turn path). This prevents corrupted Popoto records from injecting garbage into subprocess argv.
 - Insert `["--resume", prior_uuid]` into `cmd` *after* the base flags but *before* the final positional message arg.
-- Skip the `_apply_context_budget()` call. The message at this point is just the new user input — it cannot overflow.
-- **Mandatory stale-UUID fallback**: if the subprocess exits with non-zero return code AND stderr contains "requires a valid session" (the empirically confirmed error from `claude -p --resume <bad-uuid>`), retry **once** without `--resume` using `full_context_message` (the full-context first-turn message). This retry applies `_apply_context_budget()` to `full_context_message` before passing it. The fallback is not conditional — empirical testing (2026-04-15) confirms the claude binary **always** errors with a non-existent UUID.
+- **Apply `_apply_context_budget()` unconditionally** to the final argv message regardless of `--resume` state. The function is a no-op when `len(message) <= max_chars`, so it adds one length comparison to the typical-small resume path. This guards against single mega-messages (forwarded transcripts, pasted logs, large media-enriched bodies) that could re-create the original "Separator is found" overflow even on a resumed turn.
+- **Emit observability log**: immediately after the format-validation guards and before subprocess spawn, when `--resume` is being injected, log at INFO: `logger.info(f"[harness] Resuming Claude session {prior_uuid} for session_id={session_id}")`. This makes the resume hit-rate grep-able in production logs.
+- **Mandatory stale-UUID fallback (any non-zero exit)**: if the subprocess exits with **any** non-zero return code while `prior_uuid` was set, retry **once** without `--resume` using `full_context_message` (the full-context first-turn message). The fallback does NOT gate on a stderr substring — substring matching is fragile across CLI versions and locales, and the cost of an unnecessary retry on a real (non-stale-UUID) error is one extra subprocess spawn vs. a silent stuck-empty turn. Before retry, log at WARNING: `logger.warning(f"[harness] Stale UUID {prior_uuid} for session_id={session_id}, falling back to first-turn path")`. The retry path applies `_apply_context_budget()` to `full_context_message` (already covered by the unconditional budget rule above).
 
 When `prior_uuid` is unset or empty: current behavior — apply the budget, no `--resume`, full reconstructed context as the positional arg. Treat empty-string `prior_uuid` as `None`.
 
@@ -219,8 +223,8 @@ backward-compatible. Existing tests (`test_cross_repo_gh_resolution.py` calls
 - [ ] If `build_harness_turn_input(skip_prefix=True, message="")` is called with empty message, return `""` unchanged (do not crash). Add a unit test.
 
 ### Error State Rendering
-- [ ] When the harness exits with a non-zero return code on a resumed turn AND stderr contains "requires a valid session", the mandatory fallback retries once without `--resume` using `full_context_message`. Add a unit test that mocks this scenario and asserts the fallback fires and returns a valid result.
-- [ ] When the harness exits with a non-zero return code on a resumed turn for a DIFFERENT error (not stale UUID), the existing error path (`sdk_client.py:1635`) logs and returns `""`; this behavior must be preserved. Add a unit test confirming no retry for non-stale-UUID errors.
+- [ ] When the harness exits with **any** non-zero return code on a resumed turn (`prior_uuid` was set), the mandatory fallback retries once without `--resume` using `full_context_message`. The fallback does NOT inspect stderr — substring matching is brittle across CLI versions and locales. Add a unit test that mocks a non-zero exit and asserts the fallback fires and returns a valid result.
+- [ ] When the harness exits with a non-zero return code on a **first turn** (no `prior_uuid`), the existing error path (`sdk_client.py:1635`) logs and returns `""` with no retry; this behavior must be preserved. Add a unit test confirming no retry on first-turn failures.
 - [ ] When `full_context_message` is `None` and the stale-UUID fallback would fire, log an error and return `""` (cannot retry without the full context). Add a unit test for this defensive path.
 
 ## Test Impact
@@ -229,15 +233,16 @@ backward-compatible. Existing tests (`test_cross_repo_gh_resolution.py` calls
 - [ ] `tests/unit/test_harness_streaming.py` — UPDATE: add new test cases:
   - `test_get_response_via_harness_includes_resume_when_prior_uuid_set` — assert `--resume <uuid>` appears in the spawned subprocess argv when `prior_uuid` is provided.
   - `test_get_response_via_harness_omits_resume_when_prior_uuid_none` — assert `--resume` does NOT appear in argv when `prior_uuid is None` (regression guard).
-  - `test_get_response_via_harness_skips_context_budget_on_resume` — assert `_apply_context_budget` is not invoked when `prior_uuid` is set.
-  - `test_get_response_via_harness_applies_context_budget_on_first_turn` — regression guard for #958's fix.
+  - `test_get_response_via_harness_applies_context_budget_unconditionally` — assert `_apply_context_budget` IS invoked on every call, including resumed turns (replaces the prior `skips_context_budget_on_resume` test, which contradicted the unconditional-budget design).
+  - `test_get_response_via_harness_applies_context_budget_on_first_turn` — regression guard for #958's fix (kept as separate explicit case).
   - `test_get_response_via_harness_stores_uuid_after_result` — assert `_store_claude_session_uuid` is called with the captured UUID after a successful turn.
   - `test_get_response_via_harness_no_store_when_uuid_missing` — assert no store call when `result` event lacks `session_id`.
   - `test_get_response_via_harness_treats_empty_prior_uuid_as_none` — assert `--resume ""` is not emitted.
   - `test_get_response_via_harness_rejects_invalid_uuid_format` — assert corrupted UUID (e.g. `not-a-uuid`) is treated as None, no `--resume` emitted.
-  - `test_get_response_via_harness_stale_uuid_fallback` — mock subprocess returning non-zero with "requires a valid session" in stderr; assert retry fires with `full_context_message` and `_apply_context_budget`.
-  - `test_get_response_via_harness_no_retry_on_other_errors` — mock subprocess returning non-zero with different stderr; assert no retry, returns `""`.
-  - `test_get_response_via_harness_fallback_without_full_context` — assert that when `full_context_message` is None and stale-UUID fallback triggers, returns `""` with logged error.
+  - `test_get_response_via_harness_logs_resume_at_info` — assert `logger.info` is called with the `"[harness] Resuming Claude session ..."` message when `--resume` is injected (observability guard for production grep).
+  - `test_get_response_via_harness_stale_uuid_fallback_on_any_nonzero_exit` — mock subprocess returning non-zero (stderr text irrelevant); assert retry fires with `full_context_message` and emits the `"[harness] Stale UUID ..."` WARNING log. Replaces the prior substring-gated test — the fallback no longer inspects stderr.
+  - `test_get_response_via_harness_no_retry_on_first_turn_failure` — mock subprocess returning non-zero with `prior_uuid=None`; assert no retry, returns `""` (preserves existing first-turn error semantics).
+  - `test_get_response_via_harness_fallback_without_full_context` — assert that when `full_context_message` is None and stale-UUID fallback would fire, returns `""` with logged error.
 - [ ] `tests/unit/test_cross_wire_fixes.py` — REVIEW (no change expected): the SDK-path UUID-storage tests should still pass; the harness path changes do not touch SDK code paths.
 - [ ] New file `tests/integration/test_harness_resume.py` (CREATE) — REPLACE the absence of integration coverage. Two sequential `get_response_via_harness` calls on the same `session_id`: assert the second call's argv contains `--resume <uuid_from_first_call>` and the body argv is small (just the new message, not a reconstructed prefix). Mark with `@pytest.mark.integration` and gate on `claude` binary availability.
 
@@ -253,7 +258,7 @@ backward-compatible. Existing tests (`test_cross_repo_gh_resolution.py` calls
 
 ### Risk 1: Stale UUID points to a deleted session file
 **Impact:** `claude -p --resume <stale_uuid>` errors with "Error: --resume requires a valid session ID or session title" (empirically confirmed 2026-04-15). The turn fails if not caught.
-**Mitigation:** The implementation includes a **mandatory** retry-without-`--resume` fallback. When the subprocess exits non-zero and stderr contains "requires a valid session", `get_response_via_harness()` retries once using `full_context_message` (the full-context first-turn message, passed by the caller). This fallback is not conditional — it is always wired in. The integration test exercises this path explicitly with a known-bad UUID.
+**Mitigation:** The implementation includes a **mandatory** retry-without-`--resume` fallback that triggers on **any** non-zero exit when `prior_uuid` was set — no stderr substring gate. When the subprocess fails, `get_response_via_harness()` retries once using `full_context_message` (the full-context first-turn message, passed by the caller). The fallback is unconditional precisely because substring matching against the CLI's error text is brittle (future CLI version changes, locale variations) and would silently break the recovery path. The integration test exercises this path explicitly with a known-bad UUID. Cost: one extra subprocess spawn on real (non-stale-UUID) errors — acceptable vs. silent stuck-empty turns.
 
 ### Risk 2: First-turn classification fails (UUID lookup returns a value when it shouldn't)
 **Impact:** A truly fresh session would skip the context prefix and the binary would have no project / scope / sender info on the first turn.
@@ -266,6 +271,10 @@ backward-compatible. Existing tests (`test_cross_repo_gh_resolution.py` calls
 ### Risk 4: Storing the UUID on every turn writes to Popoto under load
 **Impact:** Long-running sessions could generate hundreds of writes; if Popoto throttles, latency increases.
 **Mitigation:** `_store_claude_session_uuid()` is the same helper PR #909 uses on the SDK path, which has been in production since 2026-04-13 without throughput issues. Plus, the value being written is the same UUID 99% of the time (the binary keeps the same `session_id` across `--resume` calls), so an idempotent write is fine. If profiling later shows the write to be hot, a "skip if unchanged" check is trivial to add. Not blocking the initial fix.
+
+### Risk 5: A single resumed-turn user message is itself larger than `HARNESS_MAX_INPUT_CHARS`
+**Impact:** A Telegram message can carry a forwarded transcript, a pasted log, or a large media-enriched body. On a resumed turn, that single message is the positional argv. If the message itself exceeds the chunk limit, the subprocess crashes with the original "Separator is found" error — exactly the bug this plan is fixing.
+**Mitigation:** `_apply_context_budget()` is applied to the final argv message **unconditionally**, regardless of `--resume` state. On the typical resume path the message is small and the function is a no-op (one length comparison). On the pathological mega-message path the function trims to the safe ceiling, preserving the fix. The optimization "skip the budget when resuming" is explicitly rejected because it saves nothing on small messages and reintroduces the original crash on large ones.
 
 ## Race Conditions
 
@@ -287,11 +296,11 @@ backward-compatible. Existing tests (`test_cross_repo_gh_resolution.py` calls
 
 - BaseHarness abstraction (#780)
 - Pi harness adoption of the same pattern (#838) — that's its own work item
-- Removing `_apply_context_budget()` — keep as the first-turn safety net
+- Removing `_apply_context_budget()` — applied unconditionally on every harness call
 - Refactoring `build_harness_turn_input()` beyond adding `skip_prefix`
 - Touching the SDK path (`get_agent_response_sdk` / `_create_options`)
 - Cross-process UUID coordination (Popoto handles it)
-- Telemetry / metrics for resume hit-rate (worth tracking but not on the critical path; can be added in a follow-up chore)
+- Structured metrics / dashboards for resume hit-rate (the plan ships two log lines for grep-based observability; full metrics infrastructure is a follow-up chore if needed)
 - Migration of existing in-flight sessions — they will simply use the new path on their next turn after deploy; no backfill needed
 
 ## Update System
@@ -322,15 +331,14 @@ No external doc site changes — repo doesn't ship Sphinx/MkDocs.
 - [ ] `_execute_agent_session()` passes `prior_uuid = _get_prior_session_uuid(session.session_id)`, `session_id`, and `full_context_message` to the harness. Both full-context and minimal messages are built at the call site.
 - [ ] When `prior_uuid` is set and valid, the spawned argv contains `--resume <prior_uuid>` and the message arg is just the new user message (no reconstructed prefix)
 - [ ] When `prior_uuid` is unset, empty, or fails UUID format validation, the spawned argv does not contain `--resume` and the message arg is the full reconstructed context (current behavior preserved)
-- [ ] `_apply_context_budget()` is retained, applied on first-turn calls and on stale-UUID fallback retries, and bypassed on resumed turns
-- [ ] Stale-UUID fallback is mandatory: when `--resume` fails with "requires a valid session", the function retries once using `full_context_message`
+- [ ] `_apply_context_budget()` is applied to the final argv on every harness call, regardless of `--resume` state (no bypass on resumed turns)
+- [ ] Stale-UUID fallback is mandatory and triggers on **any** non-zero exit when `prior_uuid` was set (no stderr substring gate); the function retries once using `full_context_message` without `--resume`
+- [ ] An INFO log (`"[harness] Resuming Claude session ..."`) is emitted on every resumed turn, and a WARNING log (`"[harness] Stale UUID ..."`) is emitted on every fallback — verifiable via `grep -c` against `logs/worker.log`
 - [ ] A previously-overflowing session (long reply chain) successfully completes after this fix (manual verification with a reproducer thread)
 - [ ] All new and updated unit tests pass (see Test Impact)
 - [ ] New integration test (`tests/integration/test_harness_resume.py`) passes with the actual `claude` binary available
-- [ ] All pre-existing tests continue to pass (`pytest tests/` exits 0)
-- [ ] Tests pass (`/do-test`)
+- [ ] All tests, lint, and format checks pass (`/do-test` runs `pytest tests/` plus `python -m ruff check .` and `python -m ruff format --check .`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] No new lint or format violations (`python -m ruff check . && python -m ruff format --check .`)
 
 ## Team Orchestration
 
@@ -366,7 +374,7 @@ The build is small enough that one builder + one validator handles it cleanly.
 - **Assigned To**: harness-resume-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `prior_uuid`, `session_id`, and `full_context_message` keyword-only params to `get_response_via_harness()` (`agent/sdk_client.py:1543`). Validate `prior_uuid` against UUID regex before injection. Inject `--resume <uuid>` into `cmd` when valid; bypass `_apply_context_budget()` on resumed turns; call `_store_claude_session_uuid()` after the `result` event when `session_id` is provided and the captured UUID is non-empty (document this as a side effect in the docstring). Implement mandatory stale-UUID fallback: if subprocess exits non-zero with "requires a valid session" in stderr, retry once using `full_context_message` with `_apply_context_budget()` applied.
+- Add `prior_uuid`, `session_id`, and `full_context_message` keyword-only params to `get_response_via_harness()` (`agent/sdk_client.py:1543`). Validate `prior_uuid` against UUID regex before injection. Inject `--resume <uuid>` into `cmd` when valid and emit an INFO log (`"[harness] Resuming Claude session ..."`); apply `_apply_context_budget()` to the message **unconditionally** (regardless of `--resume` state); call `_store_claude_session_uuid()` after the `result` event when `session_id` is provided and the captured UUID is non-empty (document this as a side effect in the docstring). Implement mandatory stale-UUID fallback: if `prior_uuid` was set and the subprocess exits with **any** non-zero return code, emit a WARNING log (`"[harness] Stale UUID ..."`) and retry once using `full_context_message` without `--resume` (no stderr substring gate).
 - Add `skip_prefix` keyword-only param to `build_harness_turn_input()` (`agent/sdk_client.py:1725`); when True, return the raw message unchanged.
 - In `_execute_agent_session()` (`agent/agent_session_queue.py:3727`), look up `_prior_uuid = _get_prior_session_uuid(session.session_id)` before constructing the turn input. **Always build the full-context message** via `build_harness_turn_input(skip_prefix=False)`. When `_prior_uuid` is set, also build the minimal message via `build_harness_turn_input(skip_prefix=True)`. Pass both to `get_response_via_harness(prior_uuid=_prior_uuid, session_id=session.session_id, full_context_message=_full_context_input)`.
 - Treat empty-string `prior_uuid` as `None` inside `get_response_via_harness` (don't emit `--resume ""`). Treat UUID-format-invalid `prior_uuid` as `None` (log warning).
@@ -432,78 +440,15 @@ The build is small enough that one builder + one validator handles it cleanly.
 | Context budget retained | `grep -n 'def _apply_context_budget' agent/sdk_client.py` | output contains def |
 | UUID storage call added in harness | `grep -n '_store_claude_session_uuid' agent/sdk_client.py` | output > 4 (2 existing + new) |
 | UUID validation present | `grep -n 'uuid.UUID\|UUID_PATTERN' agent/sdk_client.py` | output > 0 |
-| Stale-UUID fallback present | `grep -n 'requires a valid session' agent/sdk_client.py` | output > 0 |
+| Stale-UUID fallback present (any-non-zero gate) | `grep -n 'falling back to first-turn path' agent/sdk_client.py` | output > 0 |
+| Resume hit log present | `grep -n 'Resuming Claude session' agent/sdk_client.py` | output > 0 |
+| Resume hit logged in production reproducer | `grep -c 'Resuming Claude session' logs/worker.log` (after a manual two-turn reproducer on a long-thread session) | output > 0 |
 | Prior UUID lookup added in dispatcher | `grep -n '_get_prior_session_uuid' agent/agent_session_queue.py` | output > 0 |
 | Files touched (count) | `git diff --name-only main \| wc -l` | output ≤ 6 (the 2 source files, up to 3 test files, up to 1 docs file) |
 
-## Critique Results
+## Critique History
 
-**Critique run:** 2026-04-15
-**Critics:** Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
-**Findings:** 5 total (1 blocker, 3 concerns, 1 nit)
-**Revision applied:** 2026-04-15 — All findings addressed in plan text (see Change 1 side-effect note, Change 2 mandatory fallback + UUID validation, Data Flow step 3/4, Risk 1, Failure Path Test Strategy, Test Impact, Step by Step Tasks, Success Criteria).
-
-### Blockers
-
-#### Stale UUID causes hard error, not silent fallback
-- **Severity**: BLOCKER
-- **Critics**: Skeptic, Adversary
-- **Location**: Risk 1 / Failure Path Test Strategy / "Error State Rendering"
-- **Finding**: The plan states in Risk 1 that `claude -p --resume <stale_uuid>` "may either silently start a new session (best case) or error out (worst case)" and defers the determination to the integration test. Empirical testing (2026-04-15) confirms the binary **errors**: `Error: --resume requires a valid session ID or session title when used with --print. Provided value "nonexistent-uuid" is not a UUID and does not match any session title.` This is not a "may" -- it is the actual behavior. The plan's conditional fallback ("if the binary errors, add the fallback") must be unconditional.
-- **Suggestion**: Promote the retry-without-`--resume` fallback from conditional to mandatory in the implementation. In `get_response_via_harness()`, when `prior_uuid` is set and the process exits with non-zero return code AND stderr contains "resume" or "session", retry the call once without `--resume` (full first-turn path). Add this as an explicit sub-step in Task 1 rather than leaving it to discovery during the integration test.
-- **Implementation Note**: After `proc.communicate()`, if `proc.returncode != 0` and `prior_uuid` is set, check `stderr_text` for the substring `"--resume"`. If found, log a warning (`"Stale UUID {prior_uuid}, falling back to first-turn path"`), then re-enter the function recursively (or inline) with `prior_uuid=None` — which means re-applying `_apply_context_budget()` to the original full message. The caller must pass the original un-skipped message for this fallback, so `get_response_via_harness` needs access to both the full message and the minimal message, or the retry must reconstruct the full-context path. Simplest approach: accept both `message` (always the full context) and `prior_uuid`; when `prior_uuid` is set, ignore `message` and use a separately-passed `resume_message` (just the new user text). On fallback, use `message` with `_apply_context_budget()`.
-
-### Concerns
-
-#### UUID validity not checked before subprocess spawn
-- **Severity**: CONCERN
-- **Critics**: Adversary
-- **Location**: Solution / Change 2
-- **Finding**: The plan injects `--resume <prior_uuid>` directly into the subprocess argv without validating that `prior_uuid` is a well-formed UUID. If the Popoto record contains a corrupted or non-UUID string (e.g., from a bug in a future code path), this could cause unexpected CLI behavior or argument injection.
-- **Suggestion**: Add a UUID format check (regex or `uuid.UUID()` parse) before injecting `--resume`. If the value is not a valid UUID, treat it as `None` and take the first-turn path.
-- **Implementation Note**: Guard in `get_response_via_harness()` right after the empty-string check: `try: uuid.UUID(prior_uuid); except ValueError: prior_uuid = None`. Import `uuid` from stdlib. This is a 3-line defensive check that prevents argument injection and corrupted-data issues.
-
-#### Dual message paths require careful orchestration at call site
-- **Severity**: CONCERN
-- **Critics**: Operator
-- **Location**: Solution / Change 3 / `_execute_agent_session` call site
-- **Finding**: When `prior_uuid` is set, `build_harness_turn_input(skip_prefix=True)` returns just the raw message, and this is what gets passed to `get_response_via_harness()`. But if the stale-UUID fallback fires (see Blocker above), the function needs the full-context message to retry. The plan does not specify how the full-context message is preserved for the fallback path.
-- **Suggestion**: Always call `build_harness_turn_input()` with `skip_prefix=False` to get the full context message. Pass both the full message and the minimal message (just `_turn_input`) to `get_response_via_harness()`. On first attempt with `--resume`, use the minimal message. On fallback, use the full message with `_apply_context_budget()`.
-- **Implementation Note**: In `_execute_agent_session()`, always build `_harness_input_full = await build_harness_turn_input(skip_prefix=False, ...)`. When `_prior_uuid` is set, also prepare `_harness_input_minimal = _turn_input` (the raw steering/user message). Pass both to `get_response_via_harness(message=_harness_input_full, resume_message=_harness_input_minimal, prior_uuid=_prior_uuid, ...)`. This ensures the fallback path has the full context without needing to call `build_harness_turn_input` again.
-
-#### `get_response_via_harness` return type is `str` but UUID must be persisted
-- **Severity**: CONCERN
-- **Critics**: Skeptic
-- **Location**: Solution / Change 1
-- **Finding**: The plan adds `session_id` as a parameter to `get_response_via_harness()` and calls `_store_claude_session_uuid()` inside the function. This couples a side-effecting Popoto write into a function whose current contract is "run CLI, return text." The function currently returns `str`; callers (including tests) expect pure string return. Embedding the store call inside means tests of `get_response_via_harness` now need Popoto/Redis mocked or available.
-- **Suggestion**: This is acceptable given the existing pattern (the SDK path does the same inside `get_agent_response_sdk`), but the docstring and test setup must explicitly note the side effect. Ensure the new unit tests mock `_store_claude_session_uuid` to verify it is called without requiring Redis.
-- **Implementation Note**: In each new test case in `test_harness_streaming.py`, patch `agent.sdk_client._store_claude_session_uuid` as a `MagicMock` and assert `mock.assert_called_once_with(session_id, expected_uuid)`. The mock prevents Redis dependency in unit tests. The side effect is already fail-silent (line 228 `except Exception`), so even if the mock is misconfigured the test won't hang.
-
-### Nits
-
-#### Redundant success criteria
-- **Severity**: NIT
-- **Critics**: Simplifier
-- **Location**: Success Criteria
-- **Finding**: "Tests pass (`/do-test`)" and "All pre-existing tests continue to pass (`pytest tests/` exits 0)" are redundant -- `/do-test` runs `pytest tests/`. Similarly "No new lint or format violations" is covered by `/do-test` which runs ruff.
-- **Suggestion**: Consolidate into a single "All tests, lint, and format checks pass" criterion to reduce noise.
-
-### Structural Check Results
-
-| Check | Status | Detail |
-|-------|--------|--------|
-| Required sections | PASS | All 4 required sections present and non-empty |
-| Task numbering | PASS | Tasks 1-5, sequential, no gaps |
-| Dependencies valid | PASS | All `Depends On` references resolve to defined Task IDs |
-| File paths exist | PASS | 10 of 10 referenced source files exist; `tests/integration/test_harness_resume.py` correctly marked as CREATE |
-| Prerequisites met | PASS/WARN | `claude` binary on PATH (PASS); `--resume` flag recognized (PASS but errors on invalid UUID -- see Blocker); Popoto not tested |
-| Cross-references | PASS | All success criteria map to tasks; no No-Gos appear in Solution as planned work |
-
-### Verdict
-
-**READY TO BUILD (with concerns)** -- No BLOCKERs after the stale-UUID fallback is promoted from conditional to mandatory. The 1 BLOCKER finding identifies behavior that the plan already anticipated as a possibility but must now be treated as certain (empirically confirmed). A revision pass should embed the Implementation Notes from the 1 blocker and 3 concerns into the plan text before build proceeds.
-
----
+Critique cycles for this plan (findings, suggestions, and per-round verdicts) are archived in [`docs/plans/critiques/harness-session-continuity-2026-04-15.md`](critiques/harness-session-continuity-2026-04-15.md). Two critique rounds ran on 2026-04-15; both verdicts were **READY TO BUILD (with concerns)**. All concern findings have been embedded into the plan body above (Change 2, Risks, Failure Path Test Strategy, Test Impact, Step by Step Tasks, Success Criteria, Verification). No open BLOCKERs.
 
 ## Open Questions
 
