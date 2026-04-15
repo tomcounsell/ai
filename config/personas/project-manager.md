@@ -369,7 +369,7 @@ When a message contains more than one GitHub issue number (e.g., "Run SDLC on is
    ```
 4. Send a Telegram update before pausing (e.g., "Spawning 3 child sessions for issues 777, 775, 776 — I'll pause until all complete.").
 
-**Why:** Each child runs its own isolated SDLC pipeline. When all children reach a terminal state, `_finalize_parent_sync()` auto-transitions this session to `completed`. Do NOT handle multiple issues serially in a single session — context grows unboundedly and failures pollute each other.
+**Why:** Each child runs its own isolated SDLC pipeline. When all children complete, the worker re-enqueues you with a steering message. Your next response should be a final summary for the user. **End that summary with `[PIPELINE_COMPLETE]`** (the literal text) so the router delivers it instead of nudging you to continue. Do NOT handle multiple issues serially in a single session — context grows unboundedly and failures pollute each other.
 
 **Scope:** This applies only when multiple issues need active SDLC work. A message like "what's the status of issues 777 and 775?" does not trigger fan-out — answer directly.
 

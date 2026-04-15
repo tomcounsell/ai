@@ -32,6 +32,11 @@ MAX_NUDGE_COUNT = 50
 # The PM session owns SDLC intelligence; the bridge just keeps the agent working.
 NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
 
+# Marker the PM includes at the end of a final completion message to break out
+# of the nudge loop and deliver to the user. The router strips this marker
+# before delivery so it never appears in the Telegram message.
+PIPELINE_COMPLETE_MARKER = "[PIPELINE_COMPLETE]"
+
 
 # ---------------------------------------------------------------------------
 # State dataclass
@@ -72,12 +77,13 @@ def determine_delivery_action(
     """Pure function: decide what send_to_chat should do with agent output.
 
     Returns one of:
-        "deliver"                  — send to Telegram
-        "deliver_fallback"         — send fallback message (empty output, cap reached)
-        "nudge_rate_limited"       — backoff then nudge (rate limited)
-        "nudge_empty"              — nudge (empty output)
-        "nudge_continue"           — nudge (PM/SDLC session, continue pipeline)
-        "drop"                     — drop output (completion already sent)
+        "deliver"                   — send to Telegram
+        "deliver_fallback"          — send fallback message (empty output, cap reached)
+        "deliver_pipeline_complete" — PM included PIPELINE_COMPLETE_MARKER; strip and deliver
+        "nudge_rate_limited"        — backoff then nudge (rate limited)
+        "nudge_empty"               — nudge (empty output)
+        "nudge_continue"            — nudge (PM/SDLC session, continue pipeline)
+        "drop"                      — drop output (completion already sent)
         "deliver_already_completed" — deliver without nudge (session already done)
     """
     from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
@@ -100,7 +106,10 @@ def determine_delivery_action(
     # PM sessions running SDLC work should continue through pipeline stages
     # rather than delivering after the first skill completes.
     # The PM decides when to stop; the bridge just keeps it working.
+    # Exception: if the PM includes PIPELINE_COMPLETE_MARKER, deliver immediately.
     if session_type == "pm" and classification_type == "sdlc":
+        if PIPELINE_COMPLETE_MARKER in msg:
+            return "deliver_pipeline_complete"
         return "nudge_continue"
     if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
         return "deliver"

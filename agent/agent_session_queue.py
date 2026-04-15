@@ -1706,12 +1706,40 @@ async def _agent_session_hierarchy_health_check() -> None:
                 any_failed = any(c.status == "failed" for c in children)
                 new_status = "failed" if any_failed else "completed"
                 logger.warning(
-                    "[session-health] Stuck parent %s: all %d children terminal — finalizing as %s",
+                    "[session-health] Stuck parent %s: all %d children terminal — "
+                    "re-enqueuing for final summary (target=%s)",
                     parent.agent_session_id,
                     len(children),
                     new_status,
                 )
-                _transition_parent(parent, new_status)
+                if new_status == "completed":
+                    # Re-enqueue parent so PM can compose and deliver a final summary.
+                    # The PM must include [PIPELINE_COMPLETE] to break out of nudge loop.
+                    n_ok = sum(1 for c in children if c.status == "completed")
+                    n_fail = sum(1 for c in children if c.status == "failed")
+                    child_lines = "\n".join(
+                        f"  - {getattr(c, 'agent_session_id', '?')}: {c.status}" for c in children
+                    )
+                    from agent.output_router import PIPELINE_COMPLETE_MARKER
+                    from agent.steering import push_steering_message
+                    from models.session_lifecycle import transition_status
+
+                    steering_msg = (
+                        f"All {len(children)} child pipeline sessions have completed "
+                        f"({n_ok} succeeded, {n_fail} failed).\n"
+                        f"Children:\n{child_lines}\n\n"
+                        f"Compose a final summary for the user covering what was accomplished "
+                        f"across all child pipelines. "
+                        f"End your response with the literal text `{PIPELINE_COMPLETE_MARKER}` "
+                        f"so it is delivered to the user instead of nudged."
+                    )
+                    push_steering_message(parent.session_id, steering_msg, sender="worker")
+                    transition_status(
+                        parent, "pending", reason="children completed, sending final summary"
+                    )
+                else:
+                    # Failed parent: finalize immediately (no point composing a summary)
+                    _transition_parent(parent, new_status)
                 stuck_fixed += 1
     except Exception as e:
         logger.error("[session-health] Stuck parent detection failed: %s", e, exc_info=True)
@@ -3470,6 +3498,33 @@ async def _execute_agent_session(session: AgentSession) -> None:
             )
             chat_state.completion_sent = True
             chat_state.defer_reaction = True
+
+        elif action == "deliver_pipeline_complete":
+            from agent.output_router import PIPELINE_COMPLETE_MARKER
+
+            clean_msg = msg.replace(PIPELINE_COMPLETE_MARKER, "").rstrip()
+            logger.info(
+                f"[{session.project_key}] PM pipeline complete — delivering final summary "
+                f"({len(clean_msg)} chars)"
+            )
+            if session.session_id:
+                try:
+                    from bridge.telegram_relay import get_outbox_length
+
+                    for _drain_i in range(20):
+                        if get_outbox_length(session.session_id) == 0:
+                            break
+                        await asyncio.sleep(0.1)
+                except Exception as drain_err:
+                    logger.debug(f"[{session.project_key}] Outbox drain check failed: {drain_err}")
+            await send_cb(session.chat_id, clean_msg, session.telegram_message_id, agent_session)
+            chat_state.completion_sent = True
+            try:
+                if agent_session is not None:
+                    agent_session.response_delivered_at = datetime.now(UTC)
+                    agent_session.save(update_fields=["response_delivered_at", "updated_at"])
+            except Exception as e:
+                logger.warning(f"Failed to stamp response_delivered_at: {e}")
 
         elif action == "deliver_fallback":
             logger.warning(
