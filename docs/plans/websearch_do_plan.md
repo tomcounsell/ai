@@ -100,8 +100,8 @@ No prerequisites — `tools/web/` requires `PERPLEXITY_API_KEY` or `TAVILY_API_K
 - No exception handlers in scope — WebSearch failures are handled by the "skip gracefully" instruction in the skill text.
 
 ### Empty/Invalid Input Handling
-- [ ] If WebSearch returns no results or empty content, the plan proceeds with "No relevant external findings" in the Research section
-- [ ] If memory save fails (Redis down, bad input), it fails silently — memory saves are never blocking
+- [x] If WebSearch returns no results or empty content, the plan proceeds with "No relevant external findings" in the Research section
+- [x] If memory save fails (Redis down, bad input), it fails silently — memory saves are never blocking
 
 ### Error State Rendering
 - Not applicable — no user-visible UI; the plan document is the output.
@@ -149,19 +149,19 @@ No agent integration required — this modifies the `/do-plan` skill's instructi
 
 ## Documentation
 
-- [ ] Update `docs/features/README.md` index table with a note about WebSearch in /do-plan
-- [ ] Add inline documentation in SKILL.md describing the research phase behavior and skip conditions
+- [x] Update `docs/features/README.md` index table with a note about WebSearch in /do-plan
+- [x] Add inline documentation in SKILL.md describing the research phase behavior and skip conditions
 
 ## Success Criteria
 
-- [ ] `/do-plan` SKILL.md contains a Phase 0.7 research step with WebSearch instructions (including ToolSearch load step)
-- [ ] `allowed-tools` in SKILL.md frontmatter includes `ToolSearch, WebSearch`
-- [ ] PLAN_TEMPLATE.md contains a `## Research` section with skip-if guidance
-- [ ] Research phase instructions include memory save commands (`python -m tools.memory_search save ... --source agent`)
-- [ ] Research phase includes graceful skip when results are empty or irrelevant
-- [ ] Existing plan structure and required sections are preserved
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `/do-plan` SKILL.md contains a Phase 0.7 research step with WebSearch instructions (including ToolSearch load step)
+- [x] `allowed-tools` in SKILL.md frontmatter includes `ToolSearch, WebSearch`
+- [x] PLAN_TEMPLATE.md contains a `## Research` section with skip-if guidance
+- [x] Research phase instructions include memory save commands (`python -m tools.memory_search save ... --source agent`)
+- [x] Research phase includes graceful skip when results are empty or irrelevant
+- [x] Existing plan structure and required sections are preserved
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
