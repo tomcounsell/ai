@@ -482,6 +482,19 @@ def cmd_status(args: argparse.Namespace) -> int:
         if killed:
             result["killed_sessions"] = [_format_agent_session_info(j) for j in killed]
 
+        # Inline worker health check — avoids cross-file import coupling
+        try:
+            _hb = Path(__file__).parent.parent / "data" / "last_worker_connected"
+            _age_s = int(time.time() - _hb.stat().st_mtime)
+            result["worker_healthy"] = _age_s < 360
+            result["worker_heartbeat_age_s"] = _age_s
+        except OSError:
+            result["worker_healthy"] = False
+            result["worker_heartbeat_age_s"] = None
+        except Exception:
+            result["worker_healthy"] = False
+            result["worker_heartbeat_age_s"] = None
+
         _output(result)
         return 0
 
