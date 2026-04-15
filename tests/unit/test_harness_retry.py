@@ -72,10 +72,18 @@ async def _invoke_do_work(harness_return: str, agent_session):
         retry_count_actual = int(ec.get("cli_retry_count", 0))
 
         if retry_count_actual < _HARNESS_NOT_FOUND_MAX_RETRIES:
+            from models.session_lifecycle import StatusConflictError  # noqa: PLC0415
+
             ec["cli_retry_count"] = retry_count_actual + 1
             agent_session.extra_context = ec
 
-            await asyncio.to_thread(transition_status, agent_session, "pending", "harness-retry")
+            try:
+                await asyncio.to_thread(
+                    transition_status, agent_session, "pending", "harness-retry"
+                )
+            except (StatusConflictError, ValueError):
+                return PERSONA_MSG, False
+
             _ensure_worker(
                 agent_session.worker_key,
                 is_project_keyed=agent_session.is_project_keyed,
@@ -218,6 +226,27 @@ class TestHarnessRetry:
         assert captured_extra_context.get("cli_retry_count") == 3, (
             "cli_retry_count must be written to agent_session before transition_status is called"
         )
+
+    @pytest.mark.asyncio
+    async def test_transition_status_conflict_falls_through_to_persona_message(self):
+        """When transition_status raises StatusConflictError, persona message is returned."""
+        from models.session_lifecycle import StatusConflictError  # noqa: PLC0415
+
+        agent_session = _make_agent_session(extra_context={"cli_retry_count": 0})
+
+        with (
+            patch("agent.agent_session_queue._ensure_worker") as mock_ensure_worker,
+            patch(
+                "models.session_lifecycle.transition_status",
+                side_effect=StatusConflictError("tg_test_123_456", "running", "completed"),
+            ),
+        ):
+            result, requeued = await _invoke_do_work(HARNESS_NOT_FOUND_MSG, agent_session)
+
+        # Must NOT leak "StatusConflictError" to Telegram — fall through to persona message
+        assert result == PERSONA_MSG, f"Expected persona message on conflict, got: {result!r}"
+        assert requeued is False
+        mock_ensure_worker.assert_not_called()
 
     def test_empty_string_is_falsy_for_background_task(self):
         """Empty string must be falsy so BackgroundTask skips sending (line 151 in messenger.py)."""

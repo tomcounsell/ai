@@ -25,7 +25,7 @@ When the `claude` binary is missing from PATH (e.g., after a bridge restart in a
 **Desired outcome:**
 - Transient `FileNotFoundError` failures are retried silently up to 3 times before any Telegram message is sent
 - After 3 failures, exactly one persona-aligned message is delivered: "Tried a few times but couldn't get Claude to start — looks like the CLI may not be on PATH. You can resend once that's sorted."
-- Other harness failures (non-FileNotFoundError) also produce persona-aligned messages, not raw exception strings
+- Other harness failures (non-FileNotFoundError) also produce persona-aligned messages, not raw exception strings _(de-scoped: only FileNotFoundError is retried; other errors surface as-is — see No-Gos)_
 
 ## Freshness Check
 

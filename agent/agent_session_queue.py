@@ -3808,14 +3808,29 @@ async def _execute_agent_session(session: AgentSession) -> None:
             ec = agent_session.extra_context or {}
             retry_count = int(ec.get("cli_retry_count", 0))
             if retry_count < _HARNESS_NOT_FOUND_MAX_RETRIES:
-                from models.session_lifecycle import transition_status
+                from models.session_lifecycle import StatusConflictError, transition_status
 
                 ec["cli_retry_count"] = retry_count + 1
                 agent_session.extra_context = ec
                 # B2: reuse existing record in-place — no new async_create()
-                await asyncio.to_thread(
-                    transition_status, agent_session, "pending", "harness-retry"
-                )
+                try:
+                    await asyncio.to_thread(
+                        transition_status, agent_session, "pending", "harness-retry"
+                    )
+                except (StatusConflictError, ValueError) as conflict_err:
+                    # Health monitor or another process raced and changed status.
+                    # Fall through to the exhaustion message rather than leaking a
+                    # raw StatusConflictError string to Telegram.
+                    logger.warning(
+                        "[%s] Harness retry: status conflict (%s) — sending exhaustion msg",
+                        session.session_id,
+                        conflict_err,
+                    )
+                    return (
+                        "Tried a few times but couldn't get Claude to start — "
+                        "looks like the CLI may not be on PATH. "
+                        "You can resend once that's sorted."
+                    )
                 _ensure_worker(
                     agent_session.worker_key,
                     is_project_keyed=agent_session.is_project_keyed,
@@ -3878,6 +3893,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
         heartbeat.cancel()
 
     # Post-completion SDLC handling for dev sessions (Phase 3)
+    # Skip if the session was silently re-queued for harness retry — the re-queued
+    # session hasn't run yet, so calling _handle_dev_session_completion with an empty
+    # result would emit a spurious "fail" outcome to the PM pipeline before the retry
+    # has a chance to succeed.
+    if _harness_requeued:
+        return
+
     if _session_type == "dev" and not task.error:
         await _handle_dev_session_completion(
             session=session,
@@ -3887,11 +3909,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
     # Update session status in Redis via AgentSession
     # When auto-continue deferred, session is still active (not completed)
-    # Skip finalization entirely when the session was silently re-queued for
-    # harness retry — transition_status() already moved it back to "pending".
-    if _harness_requeued:
-        return
-
     if agent_session:
         try:
             from bridge.session_transcript import complete_transcript
