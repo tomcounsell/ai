@@ -152,7 +152,7 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
 | `python -m tools.valor_session kill --id <ID>` | Kill a session |
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
-| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session (warns to stderr if no worker is running) |
+| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session |
 | `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation |
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed BUILD session (hard-PATCH path) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
