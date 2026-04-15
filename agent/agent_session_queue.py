@@ -3095,29 +3095,46 @@ async def _handle_dev_session_completion(
 ) -> None:
     """Handle SDLC post-completion for dev role sessions run via CLI harness.
 
-    Called after _get_response_via_harness() returns. Classifies the outcome,
-    updates PipelineStateMachine, posts a stage comment to the tracking issue,
-    and steers the parent PM session with the completion status.
+    Called after complete_transcript() (which calls _finalize_parent_sync()) has
+    already run. This ordering invariant is critical: by the time this function
+    executes, _finalize_parent_sync has already transitioned the PM parent to its
+    terminal status. The re-check guard below will therefore correctly detect a
+    terminal PM and create a continuation PM rather than treating the orphaned
+    steering message as successful delivery.
 
-    If steering fails (parent already terminal), creates a continuation PM
-    session to carry the pipeline forward. This is the guaranteed fallback
-    that ensures pipeline progression regardless of PM lifecycle.
+    Must be called after complete_transcript() — NOT before. Calling before
+    complete_transcript() causes the race described in issue #987: steer is
+    accepted, then _finalize_parent_sync runs and orphans the steering message.
+
+    Classifies the outcome, updates PipelineStateMachine, posts a stage comment
+    to the tracking issue, and steers the parent PM session with the completion
+    status. If steering fails (parent already terminal), creates a continuation
+    PM session to carry the pipeline forward.
 
     All operations are wrapped in try/except -- failures never crash the worker.
 
     Args:
         session: The lightweight session record (from _send_callbacks key).
-        agent_session: The AgentSession popoto model instance (may be None).
+            Always populated from the queue entry — reliable even when
+            agent_session is None.
+        agent_session: The AgentSession popoto model instance (may be None
+            if the status="running" filter raced with a status transition).
         result: Final result text from the harness.
     """
     try:
-        # Get parent PM session
-        parent_id = (
-            getattr(agent_session, "parent_agent_session_id", None) if agent_session else None
+        # Get parent PM session.
+        # Path B fallback: when agent_session is None (status="running" filter
+        # returned nothing due to a race with health-check recovery or fast
+        # finalization), fall back to session.parent_agent_session_id. The outer
+        # `session` param is populated from the queue entry at enqueue time and
+        # is reliable regardless of the agent_session lookup result.
+        parent_id = getattr(agent_session, "parent_agent_session_id", None) or getattr(
+            session, "parent_agent_session_id", None
         )
         if not parent_id:
             logger.debug(
-                "[harness] No parent_agent_session_id on dev session, skipping PM steering"
+                "[harness] No parent_agent_session_id on dev session or session object, "
+                "skipping PM steering"
             )
             return
 
@@ -3916,13 +3933,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
     if _harness_requeued:
         return
 
-    if _session_type == "dev" and not task.error:
-        await _handle_dev_session_completion(
-            session=session,
-            agent_session=agent_session,
-            result=task._result or "",
-        )
-
     # Update session status in Redis via AgentSession
     # When auto-continue deferred, session is still active (not completed)
     if agent_session:
@@ -3980,6 +3990,35 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     session.agent_session_id,
                     e,
                 )
+
+    # Post-completion SDLC handling for dev sessions (Phase 3)
+    # IMPORTANT ORDERING INVARIANT: This call is placed AFTER the entire
+    # `if agent_session / else` block above. That block calls complete_transcript(),
+    # which calls finalize_session() → _finalize_parent_sync() synchronously
+    # (bridge/session_transcript.py:252, line 292). By the time
+    # _handle_dev_session_completion runs here, _finalize_parent_sync has already
+    # completed on BOTH the `if agent_session:` and `else:` paths. The re-check
+    # guard inside _handle_dev_session_completion will therefore correctly observe
+    # the PM's post-finalization (terminal) status and create a continuation PM.
+    # Moving this call earlier (before complete_transcript) causes the race
+    # described in issue #987: steer is accepted, then _finalize_parent_sync runs
+    # and the PM goes terminal, orphaning the steering message.
+    #
+    # Nudge path note: on the nudge path (defer_reaction=True), complete_transcript
+    # is skipped above, but _finalize_parent_sync still runs via the nudge path's
+    # own finalize_session call. This call is guarded by `_session_type == "dev"`,
+    # not by `defer_reaction`, so it executes on both the nudge and non-nudge paths.
+    #
+    # Skip if the session was silently re-queued for harness retry — the re-queued
+    # session hasn't run yet, so calling _handle_dev_session_completion with an empty
+    # result would emit a spurious "fail" outcome to the PM pipeline before the retry
+    # has a chance to succeed. (The _harness_requeued early-return above handles this.)
+    if _session_type == "dev" and not task.error:
+        await _handle_dev_session_completion(
+            session=session,
+            agent_session=agent_session,
+            result=task._result or "",
+        )
 
     # Save session snapshot for error cases
     if task.error:

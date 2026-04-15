@@ -107,7 +107,7 @@ The worker's startup sequence is deterministic:
 
 ### Execution Harness Routing
 
-All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was removed in issue #912.
+All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was eliminated in issue #912.
 
 ```
 _execute_agent_session(session)
@@ -130,12 +130,24 @@ get_response_via_harness(prior_uuid=..., session_id=..., full_context_message=..
     |   -- after success: persists captured session_id to AgentSession.claude_session_uuid
     |
     v
-_handle_dev_session_completion()  [dev sessions only]
+complete_transcript(session_id, status=final_status)
+    |   -- synchronous call: calls finalize_session() → _finalize_parent_sync() inline
+    |   -- transitions PM parent: running → waiting_for_children → completed
+    |   -- ORDERING INVARIANT: must complete before _handle_dev_session_completion runs
+    |
+    v
+_handle_dev_session_completion()  [dev sessions only, called AFTER complete_transcript]
     |-- PipelineStateMachine.classify_outcome()
     |-- complete_stage() or fail_stage()
     |-- post_stage_comment() -> GitHub issue
     |-- steer_session(parent_pm_session)
+    |-- re-check: if PM terminal at re-check → _create_continuation_pm()
+    |   (steer was accepted but PM finalized before it could process the message)
+    |-- Path B fallback: if agent_session=None, uses session.parent_agent_session_id
+    |   to look up parent and create continuation PM (no silent skip)
 ```
+
+**Dev session completion ordering** (fix for issue #987): `complete_transcript()` is called first (synchronously invoking `_finalize_parent_sync()` to transition the PM parent to its terminal status), then `_handle_dev_session_completion()` runs. This ordering ensures the re-check guard inside `_handle_dev_session_completion` reads the PM's post-finalization status correctly. If the PM is already terminal at re-check time, a continuation PM is created immediately. Calling `_handle_dev_session_completion` before `complete_transcript()` causes a race: the steer is accepted, then `_finalize_parent_sync` runs and orphans the steering message (the PM is terminal and will never consume it).
 
 PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
 
