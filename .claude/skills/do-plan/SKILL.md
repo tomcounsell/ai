@@ -142,7 +142,6 @@ Gather relevant external context before planning. This surfaces current document
 
 7. **Proceed to Phase 1** with the research context available.
 
-
 ### Phase 1: Flesh Out at High Level
 
 1. **Understand the request** - What's being asked?
