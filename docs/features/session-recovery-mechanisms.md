@@ -1,14 +1,14 @@
 # Session Recovery Mechanisms
 
-Catalogue of all 8 session recovery mechanisms, their triggers, terminal status safety, and guard implementations.
+Catalogue of all 9 session recovery mechanisms, their triggers, terminal status safety, and guard implementations.
 
 ## Overview
 
-The session system has 8 mechanisms that can revive, recover, or re-enqueue sessions. After the zombie loop fix (PR #703) and lifecycle consolidation (PR #721), a systematic audit (issue #723) verified that all mechanisms respect terminal session states. PR #730 added the intake path terminal guard (8th mechanism).
+The session system has 9 mechanisms that can revive, recover, or re-enqueue sessions. After the zombie loop fix (PR #703) and lifecycle consolidation (PR #721), a systematic audit (issue #723) verified that all mechanisms respect terminal session states. PR #730 added the intake path terminal guard (8th mechanism). Issue #977 added harness startup retry (9th mechanism).
 
 **Terminal statuses**: `completed`, `failed`, `killed`, `abandoned`, `cancelled`
 
-## Active Mechanisms (6)
+## Active Mechanisms (7)
 
 ### 1. Startup Recovery (`_recover_interrupted_agent_sessions_startup`)
 
@@ -100,6 +100,20 @@ When the health check recovers a session (`running → pending → running`), th
 | What it does | Monitors bridge process health, restarts if unresponsive |
 | Terminal safety | **Safe by design** -- has no `AgentSession` imports, operates at process level only |
 | Guard | N/A (no session awareness) |
+
+### 9. Harness Startup Retry (`_handle_harness_not_found`)
+
+| Property | Value |
+|----------|-------|
+| Location | `agent/agent_session_queue.py` |
+| Trigger | `get_response_via_harness()` returns a string starting with `"Error: CLI harness not found"` (i.e., `FileNotFoundError` on `claude` binary) |
+| What it does | Silently re-queues the session up to 3 times using `transition_status()` in-place. After 3 failures, delivers one persona-aligned message instead of a raw Python exception string. |
+| Terminal safety | **Guarded** -- `transition_status()` default `reject_from_terminal=True` prevents re-queuing a terminal session. B1 guard returns raw early when `agent_session is None`. |
+| Guard | `transition_status()` raises `StatusConflictError` on concurrent mutation; caught and treated as exhaustion (delivers persona message instead of re-queuing). |
+| Counter | `cli_retry_count` stored in `AgentSession.extra_context`; written before `transition_status()` to guarantee the incremented count is present on the re-queued record. |
+| Re-queue method | `transition_status()` in-place (not delete-and-recreate) — preserves `extra_context` without a second write and leaves no orphan `running` record. |
+
+See [Harness Startup Retry](harness-startup-retry.md) for full design details.
 
 ## Recovery Ownership
 

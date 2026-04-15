@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -239,8 +239,8 @@ No agent integration required — this is a bridge/worker-internal change. The f
 
 ## Documentation
 
-- [ ] Update `docs/features/stall-retry.md` to add a brief note distinguishing stall-retry (sessions that hang) from harness startup retry (sessions that fail instantly with FileNotFoundError). One paragraph is sufficient.
-- [ ] Add `## Harness Startup Retry` subsection to `docs/features/agent-session-health-monitor.md` or create `docs/features/harness-startup-retry.md` describing the new retry behavior.
+- [x] Update `docs/features/stall-retry.md` to add a brief note distinguishing stall-retry (sessions that hang) from harness startup retry (sessions that fail instantly with FileNotFoundError). One paragraph is sufficient.
+- [x] Add `## Harness Startup Retry` subsection to `docs/features/agent-session-health-monitor.md` or create `docs/features/harness-startup-retry.md` describing the new retry behavior.
 
 ## Success Criteria
 
