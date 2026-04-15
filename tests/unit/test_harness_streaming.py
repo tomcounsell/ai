@@ -270,7 +270,7 @@ class TestGetResponseViaHarness:
 
     @pytest.mark.asyncio
     async def test_empty_output(self):
-        """Returns fallback message when no output is produced."""
+        """Returns empty string when no output is produced."""
         from agent.sdk_client import get_response_via_harness
 
         with patch("asyncio.create_subprocess_exec") as mock_exec:
@@ -282,7 +282,7 @@ class TestGetResponseViaHarness:
 
             result = await get_response_via_harness(message="test", working_dir="/tmp")
 
-        assert "no output" in result.lower()
+        assert result == ""
 
     @pytest.mark.asyncio
     async def test_custom_harness_cmd(self):
@@ -358,6 +358,245 @@ class TestGetResponseViaHarness:
 
             call_kwargs = mock_exec.call_args.kwargs
             assert "ANTHROPIC_API_KEY" not in call_kwargs["env"]
+
+
+# --- Phase 1b: Harness session resume tests (#976) ---
+
+
+class TestHarnessResume:
+    """Tests for --resume injection, UUID storage, and stale-UUID fallback."""
+
+    def _make_result_stdout(self, result="done", session_id="sess-abc-123"):
+        """Build stream-json stdout with a result event."""
+        lines = []
+        if session_id:
+            lines.append(json.dumps({"type": "result", "result": result, "session_id": session_id}))
+        else:
+            lines.append(json.dumps({"type": "result", "result": result}))
+        return "\n".join(lines) + "\n"
+
+    def _mock_proc(self, stdout_data, returncode=0, stderr=b""):
+        mock_proc = AsyncMock()
+        mock_proc.stdout = _async_lines(stdout_data)
+        mock_proc.communicate = AsyncMock(return_value=(b"", stderr))
+        mock_proc.returncode = returncode
+        return mock_proc
+
+    @pytest.mark.asyncio
+    async def test_includes_resume_when_prior_uuid_set(self):
+        """--resume <uuid> appears in argv when prior_uuid is provided."""
+        from agent.sdk_client import get_response_via_harness
+
+        uuid = "483d0525-8d68-474e-9f1e-89cadd91e263"
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(self._make_result_stdout())
+            with patch("agent.sdk_client._store_claude_session_uuid"):
+                await get_response_via_harness(
+                    message="new message",
+                    working_dir="/tmp",
+                    prior_uuid=uuid,
+                    session_id="test-session",
+                )
+
+        call_args = mock_exec.call_args.args
+        assert "--resume" in call_args
+        assert uuid in call_args
+
+    @pytest.mark.asyncio
+    async def test_omits_resume_when_prior_uuid_none(self):
+        """--resume does NOT appear in argv when prior_uuid is None."""
+        from agent.sdk_client import get_response_via_harness
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(self._make_result_stdout())
+            await get_response_via_harness(
+                message="test",
+                working_dir="/tmp",
+                prior_uuid=None,
+            )
+
+        call_args = mock_exec.call_args.args
+        assert "--resume" not in call_args
+
+    @pytest.mark.asyncio
+    async def test_skips_context_budget_on_resume(self):
+        """_apply_context_budget is not invoked when prior_uuid is set."""
+        from agent.sdk_client import get_response_via_harness
+
+        uuid = "483d0525-8d68-474e-9f1e-89cadd91e263"
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(self._make_result_stdout())
+            with patch("agent.sdk_client._apply_context_budget") as mock_budget:
+                with patch("agent.sdk_client._store_claude_session_uuid"):
+                    await get_response_via_harness(
+                        message="short msg",
+                        working_dir="/tmp",
+                        prior_uuid=uuid,
+                        session_id="test-session",
+                    )
+            mock_budget.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_applies_context_budget_on_first_turn(self):
+        """_apply_context_budget is applied when prior_uuid is None (regression guard for #958)."""
+        from agent.sdk_client import get_response_via_harness
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(self._make_result_stdout())
+            budget_patch = "agent.sdk_client._apply_context_budget"
+            with patch(budget_patch, side_effect=lambda m, **kw: m) as mock_budget:
+                await get_response_via_harness(
+                    message="test",
+                    working_dir="/tmp",
+                    prior_uuid=None,
+                )
+            mock_budget.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stores_uuid_after_result(self):
+        """_store_claude_session_uuid is called with the captured UUID after a successful turn."""
+        from agent.sdk_client import get_response_via_harness
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(
+                self._make_result_stdout(session_id="new-uuid-456")
+            )
+            with patch("agent.sdk_client._store_claude_session_uuid") as mock_store:
+                await get_response_via_harness(
+                    message="test",
+                    working_dir="/tmp",
+                    session_id="my-session",
+                )
+            mock_store.assert_called_once_with("my-session", "new-uuid-456")
+
+    @pytest.mark.asyncio
+    async def test_no_store_when_uuid_missing(self):
+        """No store call when result event lacks session_id."""
+        from agent.sdk_client import get_response_via_harness
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(self._make_result_stdout(session_id=None))
+            with patch("agent.sdk_client._store_claude_session_uuid") as mock_store:
+                await get_response_via_harness(
+                    message="test",
+                    working_dir="/tmp",
+                    session_id="my-session",
+                )
+            mock_store.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_treats_empty_prior_uuid_as_none(self):
+        """--resume is not emitted when prior_uuid is empty string."""
+        from agent.sdk_client import get_response_via_harness
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(self._make_result_stdout())
+            await get_response_via_harness(
+                message="test",
+                working_dir="/tmp",
+                prior_uuid="",
+            )
+
+        call_args = mock_exec.call_args.args
+        assert "--resume" not in call_args
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_uuid_format(self):
+        """Corrupted UUID is treated as None; no --resume emitted."""
+        from agent.sdk_client import get_response_via_harness
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(self._make_result_stdout())
+            await get_response_via_harness(
+                message="test",
+                working_dir="/tmp",
+                prior_uuid="not-a-valid-uuid",
+            )
+
+        call_args = mock_exec.call_args.args
+        assert "--resume" not in call_args
+
+    @pytest.mark.asyncio
+    async def test_stale_uuid_fallback(self):
+        """When --resume fails with stale UUID error, retries without --resume."""
+        from agent.sdk_client import get_response_via_harness
+
+        uuid = "483d0525-8d68-474e-9f1e-89cadd91e263"
+        call_count = 0
+
+        async def mock_exec(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return self._mock_proc(
+                    "",
+                    returncode=1,
+                    stderr=b"Error: --resume requires a valid session ID or session title",
+                )
+            else:
+                return self._mock_proc(self._make_result_stdout(result="fallback result"))
+
+        with patch("asyncio.create_subprocess_exec", side_effect=mock_exec):
+            with patch("agent.sdk_client._store_claude_session_uuid"):
+                result = await get_response_via_harness(
+                    message="new msg",
+                    working_dir="/tmp",
+                    prior_uuid=uuid,
+                    session_id="test-session",
+                    full_context_message="FULL CONTEXT MESSAGE",
+                )
+
+        assert result == "fallback result"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_other_errors(self):
+        """Non-stale-UUID errors do not trigger a retry."""
+        from agent.sdk_client import get_response_via_harness
+
+        uuid = "483d0525-8d68-474e-9f1e-89cadd91e263"
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(
+                "",
+                returncode=1,
+                stderr=b"Error: something else went wrong",
+            )
+            with patch("agent.sdk_client._store_claude_session_uuid"):
+                result = await get_response_via_harness(
+                    message="test",
+                    working_dir="/tmp",
+                    prior_uuid=uuid,
+                    session_id="test-session",
+                    full_context_message="FULL CONTEXT",
+                )
+
+        assert result == ""
+        mock_exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fallback_without_full_context(self):
+        """When full_context_message is None and stale-UUID fallback triggers, returns empty."""
+        from agent.sdk_client import get_response_via_harness
+
+        uuid = "483d0525-8d68-474e-9f1e-89cadd91e263"
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = self._mock_proc(
+                "",
+                returncode=1,
+                stderr=b"Error: --resume requires a valid session ID or session title",
+            )
+            with patch("agent.sdk_client._store_claude_session_uuid"):
+                result = await get_response_via_harness(
+                    message="test",
+                    working_dir="/tmp",
+                    prior_uuid=uuid,
+                    session_id="test-session",
+                    full_context_message=None,
+                )
+
+        assert result == ""
 
 
 # --- Phase 2: Worker routing tests ---

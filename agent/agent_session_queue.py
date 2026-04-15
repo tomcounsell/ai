@@ -3724,10 +3724,17 @@ async def _execute_agent_session(session: AgentSession) -> None:
             logger.debug(f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}")
 
     # All session types route to CLI harness (claude -p)
-    from agent.sdk_client import build_harness_turn_input, get_response_via_harness
+    from agent.sdk_client import (
+        _get_prior_session_uuid,
+        build_harness_turn_input,
+        get_response_via_harness,
+    )
 
     project_key = project_config.get("_key", "valor") if project_config else "valor"
     _classification = getattr(agent_session, "classification_type", None) if agent_session else None
+
+    # Look up prior Claude Code session UUID for --resume (#976, extends PR #909 pattern)
+    _prior_uuid = _get_prior_session_uuid(session.session_id)
 
     _harness_input = await build_harness_turn_input(
         message=_turn_input,
@@ -3742,7 +3749,27 @@ async def _execute_agent_session(session: AgentSession) -> None:
         is_cross_repo=(project_key != "valor"),
     )
 
-    logger.info(f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness")
+    # On resumed turns, also build the minimal message (no context prefix)
+    _minimal_input = None
+    if _prior_uuid:
+        _minimal_input = await build_harness_turn_input(
+            message=_turn_input,
+            session_id=session.session_id,
+            sender_name=session.sender_name,
+            chat_title=session.chat_title,
+            project=project_config,
+            task_list_id=task_list_id,
+            session_type=_session_type,
+            sender_id=session.sender_id,
+            classification=_classification,
+            is_cross_repo=(project_key != "valor"),
+            skip_prefix=True,
+        )
+
+    logger.info(
+        f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness"
+        + (f" (--resume {_prior_uuid[:8]}...)" if _prior_uuid else " (first turn)")
+    )
 
     # Streaming chunks from the CLI harness are suppressed for all session types
     # (Telegram and email). Forwarding them bypasses the nudge loop and sends
@@ -3760,9 +3787,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
     async def do_work() -> str:
         return await get_response_via_harness(
-            message=_harness_input,
+            message=_minimal_input if _prior_uuid else _harness_input,
             working_dir=str(working_dir),
             env=_harness_env,
+            prior_uuid=_prior_uuid,
+            session_id=session.session_id,
+            full_context_message=_harness_input,
         )
 
     task = BackgroundTask(messenger=messenger)

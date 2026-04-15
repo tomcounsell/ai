@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -1540,11 +1541,18 @@ _HARNESS_COMMANDS: dict[str, list[str]] = {
 }
 
 
+_UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
 async def get_response_via_harness(
     message: str,
     working_dir: str,
     harness_cmd: list[str] | None = None,
     env: dict[str, str] | None = None,
+    *,
+    prior_uuid: str | None = None,
+    session_id: str | None = None,
+    full_context_message: str | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
 
@@ -1553,12 +1561,30 @@ async def get_response_via_harness(
     text if no result event fires. No streaming callback is used — intermediate
     chunks are accumulated internally and never delivered mid-session.
 
+    When ``prior_uuid`` is provided and valid, injects ``--resume <uuid>`` into
+    the subprocess argv and skips ``_apply_context_budget()`` (the message is
+    already minimal). If the resumed session fails with a stale UUID error,
+    retries once using ``full_context_message`` without ``--resume``.
+
+    When ``session_id`` is provided, stores the captured Claude Code UUID on
+    the AgentSession record after a successful turn (Popoto/Redis side effect).
+
     Args:
         message: The prompt to send to the CLI.
         working_dir: Working directory for the subprocess.
         harness_cmd: Override CLI command (default: claude -p stream-json).
         env: Extra environment variables for the subprocess.
+        prior_uuid: Claude Code session UUID from a prior turn (enables --resume).
+        session_id: Bridge/Telegram session ID for UUID storage after the turn.
+        full_context_message: Full-context first-turn message for stale-UUID fallback.
     """
+    # Validate prior_uuid format; treat empty or invalid as None
+    if prior_uuid and not _UUID_PATTERN.match(prior_uuid):
+        logger.warning(f"[harness] Invalid prior_uuid format, ignoring: {prior_uuid!r}")
+        prior_uuid = None
+    if not prior_uuid:
+        prior_uuid = None
+
     if harness_cmd is None:
         harness_cmd = list(_HARNESS_COMMANDS["claude-cli"])
 
@@ -1569,16 +1595,61 @@ async def get_response_via_harness(
         proc_env.update(env)
         proc_env.pop("ANTHROPIC_API_KEY", None)
 
-    # Apply context budget to prevent "Separator" crashes in claude binary
-    original_len = len(message)
-    message = _apply_context_budget(message)
-    if len(message) < original_len:
-        logger.info(
-            f"[harness] Context budget applied: trimmed {original_len} → {len(message)} chars"
-        )
+    if prior_uuid:
+        cmd = harness_cmd + ["--resume", prior_uuid, message]
+    else:
+        original_len = len(message)
+        message = _apply_context_budget(message)
+        if len(message) < original_len:
+            logger.info(
+                f"[harness] Context budget applied: trimmed {original_len} → {len(message)} chars"
+            )
+        cmd = harness_cmd + [message]
 
-    cmd = harness_cmd + [message]
+    result_text, session_id_from_harness = await _run_harness_subprocess(cmd, working_dir, proc_env)
 
+    # Stale-UUID fallback: if --resume failed with stale UUID error, retry without it
+    if result_text == _STALE_UUID_SENTINEL and prior_uuid:
+        if full_context_message is not None:
+            logger.warning(
+                "[harness] --resume failed, retrying without --resume (stale UUID fallback)"
+            )
+            original_len = len(full_context_message)
+            fallback_msg = _apply_context_budget(full_context_message)
+            if len(fallback_msg) < original_len:
+                logger.info(
+                    f"[harness] Fallback budget: {original_len} → {len(fallback_msg)} chars"
+                )
+            fallback_cmd = harness_cmd + [fallback_msg]
+            result_text, session_id_from_harness = await _run_harness_subprocess(
+                fallback_cmd, working_dir, proc_env
+            )
+        else:
+            logger.error("[harness] --resume failed and no full_context_message for fallback")
+
+    # Store the Claude Code UUID for next-turn --resume (#976)
+    if session_id and session_id_from_harness:
+        _store_claude_session_uuid(session_id, session_id_from_harness)
+
+    if result_text is not None and result_text != _STALE_UUID_SENTINEL:
+        return result_text
+    return ""
+
+
+_STALE_UUID_SENTINEL = "__stale_uuid__"
+
+
+async def _run_harness_subprocess(
+    cmd: list[str],
+    working_dir: str,
+    proc_env: dict[str, str],
+) -> tuple[str | None, str | None]:
+    """Execute a harness subprocess and parse stream-json output.
+
+    Returns (result_text, session_id_from_harness). result_text is
+    ``_STALE_UUID_SENTINEL`` when the process fails with a stale-UUID error,
+    ``None`` for other failures without a result event.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1589,7 +1660,7 @@ async def get_response_via_harness(
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
-        return f"Error: CLI harness not found — {e}"
+        return (f"Error: CLI harness not found — {e}", None)
 
     full_text = ""
     result_text = None
@@ -1618,7 +1689,6 @@ async def get_response_via_harness(
         if event_type == "stream_event":
             event = data.get("event", {})
             if event.get("type") == "content_block_start":
-                # Reset on each new block so full_text holds only the last block
                 full_text = ""
             elif (
                 event.get("type") == "content_block_delta"
@@ -1628,21 +1698,23 @@ async def get_response_via_harness(
                 if chunk:
                     full_text += chunk
 
-    # Wait for process to finish and capture stderr
     _, stderr_data = await proc.communicate()
     if proc.returncode and proc.returncode != 0:
         stderr_text = stderr_data.decode("utf-8", errors="replace") if stderr_data else ""
         logger.warning(f"Harness exited with code {proc.returncode}: {stderr_text[:500]}")
+        if "requires a valid session" in stderr_text:
+            return (_STALE_UUID_SENTINEL, None)
 
     if result_text is not None:
-        return result_text
-    # No result event — process was interrupted before completing; return empty
-    # string so BackgroundTask skips the send (falsy check at messenger.py:151)
-    logger.error(
-        "Harness exited without a result event (interrupted mid-run, %d chars discarded)",
-        len(full_text),
-    )
-    return ""
+        return (result_text, session_id_from_harness)
+    if full_text:
+        logger.warning(
+            "Harness exited without result event, returning %d chars of accumulated text",
+            len(full_text),
+        )
+        return (full_text, session_id_from_harness)
+    logger.error("Harness exited without a result event and no accumulated text")
+    return (None, session_id_from_harness)
 
 
 async def verify_harness_health(harness_name: str) -> bool:
@@ -1733,6 +1805,8 @@ async def build_harness_turn_input(
     sender_id: int | None,
     classification: str | None = None,
     is_cross_repo: bool = False,
+    *,
+    skip_prefix: bool = False,
 ) -> str:
     """Build context-enriched message for CLI harness execution.
 
@@ -1740,6 +1814,10 @@ async def build_harness_turn_input(
     get_agent_response_sdk() into a standalone function. Produces a
     context-prefixed message with PROJECT, FROM, SESSION_ID, TASK_SCOPE,
     and SCOPE headers suitable for any session type.
+
+    When ``skip_prefix`` is True, returns the raw ``message`` unchanged.
+    Used on resumed turns where the CLI binary already has prior context
+    from its session file (#976).
 
     Args:
         message: Raw message text (already media-enriched by process_session).
@@ -1752,10 +1830,14 @@ async def build_harness_turn_input(
         sender_id: Telegram user ID for permission checking.
         classification: Classification type from bridge (e.g., "sdlc", "question").
         is_cross_repo: Whether this is a cross-repo project (project_key != "valor").
+        skip_prefix: If True, return raw message without context headers.
 
     Returns:
-        Enriched message string with context headers prepended.
+        Enriched message string with context headers prepended, or raw message
+        if skip_prefix is True.
     """
+    if skip_prefix:
+        return message
     from bridge.context import build_context_prefix
 
     enriched = build_context_prefix(project, session_type, sender_id)

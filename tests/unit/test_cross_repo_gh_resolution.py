@@ -236,3 +236,62 @@ class TestSessionProjectConfig:
         )
         # DictField with null=True defaults to None
         assert session.project_config is None or session.project_config == {}
+
+
+class TestBuildHarnessTurnInputSkipPrefix:
+    """Test skip_prefix parameter returns raw message without context headers (#976)."""
+
+    @pytest.mark.asyncio
+    async def test_skip_prefix_returns_raw_message(self):
+        """When skip_prefix=True, returns the raw message unchanged."""
+        from agent.sdk_client import build_harness_turn_input
+
+        raw_msg = "Just the new user message"
+        result = await build_harness_turn_input(
+            message=raw_msg,
+            session_id="test-session",
+            sender_name="Test User",
+            chat_title="Test Chat",
+            project={"name": "test", "mode": "dev"},
+            task_list_id="task-123",
+            session_type="dev",
+            sender_id=12345,
+            skip_prefix=True,
+        )
+        assert result == raw_msg
+
+    @pytest.mark.asyncio
+    async def test_skip_prefix_false_includes_headers(self):
+        """When skip_prefix=False (default), returns enriched message with headers."""
+        from agent.sdk_client import build_harness_turn_input
+
+        result = await build_harness_turn_input(
+            message="test message",
+            session_id="test-session",
+            sender_name="Test User",
+            chat_title="Test Chat",
+            project={"name": "test", "mode": "dev"},
+            task_list_id="task-123",
+            session_type="dev",
+            sender_id=12345,
+        )
+        assert "SESSION_ID:" in result
+        assert "MESSAGE: test message" in result
+
+    @pytest.mark.asyncio
+    async def test_skip_prefix_with_empty_message(self):
+        """skip_prefix=True with empty message returns empty string."""
+        from agent.sdk_client import build_harness_turn_input
+
+        result = await build_harness_turn_input(
+            message="",
+            session_id="test-session",
+            sender_name=None,
+            chat_title=None,
+            project=None,
+            task_list_id=None,
+            session_type=None,
+            sender_id=None,
+            skip_prefix=True,
+        )
+        assert result == ""
