@@ -77,8 +77,6 @@ def _check_worker_health() -> tuple[bool, int | None]:
         mtime = _WORKER_HEARTBEAT_FILE.stat().st_mtime
         age_s = int(time.time() - mtime)
         return (age_s < _WORKER_HEALTHY_THRESHOLD_S, age_s)
-    except OSError:
-        return (False, None)
     except Exception:
         return (False, None)
 

@@ -488,9 +488,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             _age_s = int(time.time() - _hb.stat().st_mtime)
             result["worker_healthy"] = _age_s < 360
             result["worker_heartbeat_age_s"] = _age_s
-        except OSError:
-            result["worker_healthy"] = False
-            result["worker_heartbeat_age_s"] = None
         except Exception:
             result["worker_healthy"] = False
             result["worker_heartbeat_age_s"] = None
