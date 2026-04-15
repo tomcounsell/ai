@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/728
-last_comment_id:
+last_comment_id: none
 ---
 
 # Agent-Maintained Knowledge Wiki (LLM Wiki Pattern)
