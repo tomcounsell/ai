@@ -2109,14 +2109,6 @@ async def main():
         if cleaned:
             logger.info(f"[{_pkey}] Cleaned {len(cleaned)} stale session branches")
 
-    # Register "dm" callback so DM responses actually get sent
-    register_queue_callbacks(
-        "dm",
-        await _make_send_cb(),
-        await _make_react_cb(),
-    )
-    logger.info("[dm] Registered session queue callbacks")
-
     # Clear stale restart flag from previous update (bridge has already restarted with new code)
     from agent.agent_session_queue import clear_restart_flag
 
