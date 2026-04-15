@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/973
 last_comment_id:
+revision_applied: true
 ---
 
 # Worktree-Parallel SDLC: Concurrent Pipelines with Redis Key Namespacing
@@ -89,7 +90,7 @@ No relevant external findings — this is purely internal. The concurrency and R
 1. **Operator sets** `MAX_CONCURRENT_DEV_SESSIONS=2` in `.env`
 2. **Worker startup** (`worker/__main__.py:_run_worker`) reads the new env var and initializes a dedicated `_dev_session_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DEV_SESSIONS)` alongside the existing global semaphore.
 3. **Session enqueued** via `valor_session create --role dev --slug feat-A`
-4. **`_worker_loop`** pops the session, acquires the global `_global_session_semaphore` slot (as before), then also acquires `_dev_session_semaphore` if the session is a slugged dev session (`session.session_type == DEV and session.slug`)
+4. **`_worker_loop`** pops the session; if it is a slugged dev session, releases the global semaphore slot, acquires the `_dev_session_semaphore` slot (waiting if at cap), then re-acquires the global slot. This ensures PM/teammate sessions are not starved while dev sessions wait for a dev slot.
 5. **Session executes** in its worktree (`.worktrees/feat-A/`), isolated by the existing `worktree_manager`
 6. **Second pipeline** for `feat-B` can start immediately if `MAX_CONCURRENT_DEV_SESSIONS >= 2`
 7. **Dashboard** reads `_dev_session_semaphore._value` vs capacity and renders "Dev sessions: N/M running" in `dashboard.json` under `health`
@@ -101,6 +102,7 @@ No relevant external findings — this is purely internal. The concurrency and R
 - **Interface changes**: `_worker_loop` gains a second optional semaphore acquire path (conditioned on `session.session_type == DEV and session.slug`). No external API changes.
 - **Coupling**: Minimal. The new semaphore is internal to `agent_session_queue.py`. Worker startup writes it; `_worker_loop` reads it.
 - **Reversibility**: High. Setting `MAX_CONCURRENT_DEV_SESSIONS=1` restores sequential behavior. The new code path is only exercised when the value exceeds 1.
+- **Global slot hold during dev semaphore wait**: The dev semaphore is acquired AFTER the global semaphore and AFTER `_pop_agent_session` (when the session type is known). While a slugged dev session waits for a dev semaphore slot to open, it holds a global semaphore slot. This effectively reduces the global cap by the number of slugged dev sessions blocked on the dev semaphore, potentially starving PM/teammate sessions. **Mitigation**: Release the global semaphore slot before `await _dev_session_semaphore.acquire()`, then immediately re-acquire it after. Follow the existing acquire/release pattern at `agent/agent_session_queue.py:2359-2375`. The re-acquire must be wrapped in its own `try/except BaseException` matching the existing pattern at lines 2366-2369.
 
 ## Appetite
 
@@ -132,7 +134,7 @@ No prerequisites — this work has no external dependencies. It builds on the `M
 
 1. Add `_dev_session_semaphore: asyncio.Semaphore | None = None` module-level in `agent_session_queue.py`, initialized to `None` (same sentinel pattern as `_global_session_semaphore`).
 2. In `worker/__main__.py:_run_worker`, after the global semaphore is initialized, read `MAX_CONCURRENT_DEV_SESSIONS` (default 1) and assign `_queue._dev_session_semaphore = asyncio.Semaphore(max_dev)`.
-3. In `_worker_loop`, after the global semaphore acquire, add a conditional acquire: `if session is not None and session.session_type == DEV and session.slug and _dev_session_semaphore is not None: await _dev_session_semaphore.acquire()`. Track whether it was acquired in a `_dev_semaphore_acquired` flag. Release it in the `finally` block.
+3. In `_worker_loop`, AFTER `_pop_agent_session` returns and the session is confirmed as a slugged dev session (`session.session_type == DEV and session.slug`), and `_dev_session_semaphore is not None`: release the global semaphore (`semaphore.release(); _semaphore_acquired = False`), then `await _dev_session_semaphore.acquire(); _dev_semaphore_acquired = True`, then re-acquire the global semaphore (`await semaphore.acquire(); _semaphore_acquired = True`) inside a `try/except BaseException` block matching the pattern at lines 2366-2369. Initialize `_dev_semaphore_acquired = False` at the same location as `session_failed` and `finalized_by_execute`. Release in the `finally` block: `if _dev_semaphore_acquired and _dev_session_semaphore is not None: _dev_session_semaphore.release()`.
 4. Export `_dev_session_semaphore` from `agent_session_queue` for dashboard access (already exported as module attr).
 5. In `ui/app.py:dashboard_json`, import `_dev_session_semaphore` and include `dev_sessions_running` and `dev_sessions_cap` in the `health` response.
 6. Update `docs/features/bridge-worker-architecture.md` with the new dev session cap.
@@ -154,6 +156,7 @@ No prerequisites — this work has no external dependencies. It builds on the `M
 
 - [ ] `tests/integration/test_worker_concurrency.py::TestDevWorktreeParallelism::test_two_slugged_dev_sessions_execute_concurrently` — UPDATE: currently asserts `peak_running == 2` with global semaphore at 5. After this change, the test must also set `_queue._dev_session_semaphore = asyncio.Semaphore(2)` in setup, otherwise the new dev semaphore would block the second session at default cap=1.
 - [ ] `tests/integration/test_worker_concurrency.py::TestGlobalSemaphore::test_semaphore_limits_concurrent_sessions` — UPDATE: must set `_queue._dev_session_semaphore = asyncio.Semaphore(10)` in setup to prevent the new dev cap from interfering with the global semaphore test isolation.
+- [ ] `tests/unit/test_worker_startup.py` — ADD: test that `MAX_CONCURRENT_DEV_SESSIONS=0` is clamped to minimum 1; test that `MAX_CONCURRENT_DEV_SESSIONS=3` initializes `_queue._dev_session_semaphore` with `._value == 3`. Use monkeypatch to set env var and call the relevant startup initialization path. Mirror the equivalent test pattern for `MAX_CONCURRENT_SESSIONS` if one exists.
 
 ## Rabbit Holes
 
@@ -175,6 +178,10 @@ No prerequisites — this work has no external dependencies. It builds on the `M
 ### Risk 3: Dashboard reading None semaphore
 **Impact:** `dashboard.json` endpoint 500s if worker hasn't started.
 **Mitigation:** Check `if _dev_session_semaphore is not None` before reading `._value`. Return `null` values for `dev_sessions_running` and `dev_sessions_cap` when worker hasn't initialized. No 500.
+
+### Risk 4: Global semaphore slot held while awaiting dev semaphore (session starvation)
+**Impact:** A slugged dev session blocked on the dev semaphore holds a global semaphore slot, preventing PM or teammate sessions from starting. With `MAX_CONCURRENT_SESSIONS=3` and two slugged dev sessions waiting on a full dev semaphore (cap=1), all three global slots could be consumed — no PM sessions can run.
+**Mitigation:** Release the global semaphore slot before awaiting the dev semaphore, then re-acquire it immediately after. Concretely: `semaphore.release(); _semaphore_acquired = False` before `await _dev_session_semaphore.acquire()`, then `await semaphore.acquire(); _semaphore_acquired = True` after. The re-acquire must be wrapped in `try/except BaseException` matching the existing pattern at `agent/agent_session_queue.py:2366-2369`. This ensures only the dev semaphore slot is held during the wait — global capacity is freed for PM/teammate sessions.
 
 ## Race Conditions
 
@@ -254,14 +261,14 @@ See PLAN_TEMPLATE.md for full list.
 
 - **Task ID**: build-dev-semaphore
 - **Depends On**: none
-- **Validates**: `tests/integration/test_worker_concurrency.py::TestDevWorktreeParallelism`, `tests/unit/test_worker_startup.py`
+- **Validates**: `tests/integration/test_worker_concurrency.py::TestDevWorktreeParallelism`
 - **Assigned To**: concurrency-builder
 - **Agent Type**: async-specialist
 - **Parallel**: true
 - Add `_dev_session_semaphore: asyncio.Semaphore | None = None` module-level to `agent/agent_session_queue.py` (beside `_global_session_semaphore`)
 - In `worker/__main__.py:_run_worker`, after global semaphore initialization, read `MAX_CONCURRENT_DEV_SESSIONS` (default 1, clamp to min 1) and assign `_queue._dev_session_semaphore = asyncio.Semaphore(max_dev)`. Log the cap value.
-- In `_worker_loop`, after global semaphore acquire and before `_pop_agent_session`, add: if the popped session is a slugged dev session (`session_type == DEV and session.slug`) and `_dev_session_semaphore is not None`, `await _dev_session_semaphore.acquire()`, track `_dev_semaphore_acquired = True`.
-- In the `_worker_loop` `finally` block, add: `if _dev_semaphore_acquired: _dev_session_semaphore.release()`.
+- In `_worker_loop`, AFTER `_pop_agent_session` returns a confirmed slugged dev session (i.e., after the `if session is None: ... continue` guard, where `session.session_type == SessionType.DEV and session.slug` is known to be true): initialize `_dev_semaphore_acquired = False` alongside `session_failed` and `finalized_by_execute` flags; release the global semaphore (`semaphore.release(); _semaphore_acquired = False`); then `await _dev_session_semaphore.acquire(); _dev_semaphore_acquired = True`; then immediately re-acquire the global semaphore (`await semaphore.acquire(); _semaphore_acquired = True`) using a `try/except BaseException` block matching the pattern at `agent/agent_session_queue.py:2366-2369`. This prevents PM/teammate session starvation while a dev session waits for a dev slot.
+- In the `_worker_loop` `finally` block, add: `if _dev_semaphore_acquired and _dev_session_semaphore is not None: _dev_session_semaphore.release()`.
 - Update `TestDevWorktreeParallelism` in `tests/integration/test_worker_concurrency.py` to set `_queue._dev_session_semaphore = asyncio.Semaphore(2)` in setup and restore `None` in teardown.
 - Update `TestGlobalSemaphore` tests to set `_queue._dev_session_semaphore = asyncio.Semaphore(10)` (high value) so global semaphore tests are not affected by the new dev cap.
 
@@ -324,9 +331,12 @@ See PLAN_TEMPLATE.md for full list.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Operator, Adversary | Global semaphore held while awaiting dev semaphore causes PM/teammate session starvation | Risk 4 (Risks section), Task 1 (updated procedure), Architectural Impact bullet | Release global slot before `await _dev_session_semaphore.acquire()`, re-acquire after; pattern at `agent_session_queue.py:2366-2369` |
+| CONCERN | Skeptic | Task 1 says "before `_pop_agent_session`" but session type is only known after pop — contradictory | Task 1 description corrected to "after `_pop_agent_session` returns a confirmed slugged dev session" | `_dev_semaphore_acquired = False` initialized alongside `session_failed` and `finalized_by_execute` |
+| CONCERN | Skeptic | `test_worker_startup.py` listed in Task 1 Validates field but has no dev semaphore tests | Task 1 Validates field updated (file removed); Test Impact ADD entry added for `test_worker_startup.py` | New test: `MAX_CONCURRENT_DEV_SESSIONS=0` clamped to 1; semaphore initialized with correct cap |
+| NIT | Simplifier | Team Orchestration section duplicates task info for a solo/medium plan | Acknowledged; left in place for template compliance | No action required |
 
 ---
 
