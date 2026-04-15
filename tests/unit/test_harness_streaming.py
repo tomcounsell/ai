@@ -196,7 +196,14 @@ class TestGetResponseViaHarness:
 
     @pytest.mark.asyncio
     async def test_binary_not_found(self):
-        """Returns error message when CLI binary is not on PATH."""
+        """Returns error message when CLI binary is not on PATH.
+
+        NOTE: This test validates the raw error string returned by sdk_client.py
+        (i.e., the return value of get_response_via_harness()). It does NOT cover
+        the retry-interception behavior in agent_session_queue.py, which intercepts
+        this string before it reaches Telegram. See tests/unit/test_harness_retry.py
+        for the retry behavior tests.
+        """
         from agent.sdk_client import get_response_via_harness
 
         with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("not found")):

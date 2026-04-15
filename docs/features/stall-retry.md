@@ -148,6 +148,14 @@ In `monitoring/session_watchdog.py`. Called from the watchdog loop after `check_
 - **Stale save guard** (#342): When `defer_reaction=True`, the epilogue skips `agent_session.save()` to prevent resurrecting deleted sessions.
 - **Pending recovery** (#402): `_recover_stalled_pending()` kills the stuck worker before re-enqueuing, preventing the no-op scenario where `_ensure_worker()` sees an alive-but-stuck worker. The `_enqueue_stall_retry()` delete-and-recreate pattern handles concurrent modifications safely.
 
+## Distinction: Stall-Retry vs. Harness Startup Retry
+
+**Stall-retry** (this document) handles sessions that hang *mid-execution* — the Claude Code subprocess starts successfully but then stops producing output. The watchdog detects this after a timeout threshold (default 600s) and re-enqueues via delete-and-recreate with exponential backoff.
+
+**Harness startup retry** (see [Harness Startup Retry](harness-startup-retry.md)) handles sessions that fail *instantly at startup* — the `claude` binary is not found on PATH and `_run_harness_subprocess()` raises `FileNotFoundError` before any agent output is produced. These retries are silent (no Telegram message until exhaustion), use `transition_status()` in-place (no delete-and-recreate), and apply no backoff delay since the failure is typically resolved within seconds by a shell PATH fix.
+
+The two systems are independent and complementary: a session that cannot even start goes through harness startup retry; a session that starts and stalls goes through this stall-retry path.
+
 ## Related Features
 
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md): Foundation for stall detection (`LIFECYCLE_STALL` log entries)
@@ -155,3 +163,4 @@ In `monitoring/session_watchdog.py`. Called from the watchdog loop after `check_
 - [Agent Session Health Monitor](agent-session-health-monitor.md): Complementary liveness monitor for running sessions with dead workers
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md): Auto-continue mechanism that retry builds upon
 - [Session Watchdog Reliability](session-watchdog-reliability.md): Activity-based stall detection and observer circuit breaker
+- [Harness Startup Retry](harness-startup-retry.md): Retry for instant startup failures (FileNotFoundError, binary not on PATH)

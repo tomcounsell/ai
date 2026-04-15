@@ -55,6 +55,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Happy Path Testing Pipeline](happy-path-testing-pipeline.md) | Three-stage pipeline (discover, generate, run) for deterministic browser regression tests without LLM tokens | Shipped |
 | [Harness Abstraction](harness-abstraction.md) | CLI harness execution for dev sessions via `claude -p` with env-var routing (`DEV_SESSION_HARNESS`), stream-json parsing, and startup health checks (Phases 1-2 of #780) | Shipped |
 | [Harness Session Continuity](harness-session-continuity.md) | Native `claude -p --resume <uuid>` continuity — persists the CLI session UUID on `AgentSession` after each turn, reuses it on next turn, falls back to full-context on any non-zero exit (#976) | Shipped |
+| [Harness Startup Retry](harness-startup-retry.md) | Silent re-queue up to 3 times when `claude` binary is missing from PATH, with persona-aligned exhaustion message after retries are exhausted; uses `transition_status()` in-place (no delete-and-recreate) | Shipped |
 | [Hooks Best Practices & Audit](hooks-best-practices.md) | `/audit-hooks` skill, codified hook safety patterns, and daily reflections integration | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |

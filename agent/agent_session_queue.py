@@ -58,6 +58,69 @@ logger = logging.getLogger(__name__)
 PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
 
+# Harness startup retry constants
+_HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"
+_HARNESS_NOT_FOUND_MAX_RETRIES = 3
+_HARNESS_EXHAUSTION_MSG = (
+    "Tried a few times but couldn't get Claude to start — "
+    "looks like the CLI may not be on PATH. "
+    "You can resend once that's sorted."
+)
+
+
+async def _handle_harness_not_found(raw: str, agent_session) -> tuple[str, bool]:
+    """Handle a FileNotFoundError harness result with silent retry and persona-aligned exhaustion.
+
+    Called from do_work() when the harness returns a string starting with
+    _HARNESS_NOT_FOUND_PREFIX. Returns (result_string, harness_requeued).
+
+    Extracted so both production do_work() and tests call the same code path.
+    Tests that mock transition_status / _ensure_worker patch at the module level.
+
+    Returns:
+        (raw, False)   — B1 guard: agent_session is None, return raw unchanged
+        ("", True)     — silently re-queued; BackgroundTask skips send on empty string
+        (persona, False) — retries exhausted or status conflict; deliver exhaustion message
+    """
+    from models.session_lifecycle import StatusConflictError, transition_status  # noqa: PLC0415
+
+    if agent_session is None:
+        return raw, False
+
+    ec = agent_session.extra_context or {}
+    retry_count = int(ec.get("cli_retry_count", 0))
+
+    if retry_count < _HARNESS_NOT_FOUND_MAX_RETRIES:
+        ec["cli_retry_count"] = retry_count + 1
+        agent_session.extra_context = ec
+        # B2: reuse existing record in-place — no new async_create()
+        try:
+            await asyncio.to_thread(transition_status, agent_session, "pending", "harness-retry")
+        except (StatusConflictError, ValueError) as conflict_err:
+            # Health monitor or another process raced and changed status.
+            # Fall through to the exhaustion message rather than leaking a
+            # raw StatusConflictError string to Telegram.
+            logger.warning(
+                "[%s] Harness retry: status conflict (%s) — sending exhaustion msg",
+                agent_session.session_id,
+                conflict_err,
+            )
+            return _HARNESS_EXHAUSTION_MSG, False
+        _ensure_worker(
+            agent_session.worker_key,
+            is_project_keyed=agent_session.is_project_keyed,
+        )
+        logger.warning(
+            "[%s] Harness not found — retry %d/%d",
+            agent_session.session_id,
+            retry_count + 1,
+            _HARNESS_NOT_FOUND_MAX_RETRIES,
+        )
+        return "", True  # harness_requeued=True; BackgroundTask skips send on empty string
+    else:
+        return _HARNESS_EXHAUSTION_MSG, False
+
+
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 AGENT_SESSION_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard sessions
@@ -3785,8 +3848,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
     if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
         _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
 
+    _harness_requeued = False
+
     async def do_work() -> str:
-        return await get_response_via_harness(
+        nonlocal _harness_requeued
+        raw = await get_response_via_harness(
             message=_minimal_input if _prior_uuid else _harness_input,
             working_dir=str(working_dir),
             env=_harness_env,
@@ -3794,6 +3860,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
             session_id=session.session_id,
             full_context_message=_harness_input,
         )
+        if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
+            result, requeued = await _handle_harness_not_found(raw, agent_session)
+            if requeued:
+                _harness_requeued = True
+            return result
+        return raw
 
     task = BackgroundTask(messenger=messenger)
     await task.run(do_work(), send_result=True)
@@ -3837,6 +3909,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
         heartbeat.cancel()
 
     # Post-completion SDLC handling for dev sessions (Phase 3)
+    # Skip if the session was silently re-queued for harness retry — the re-queued
+    # session hasn't run yet, so calling _handle_dev_session_completion with an empty
+    # result would emit a spurious "fail" outcome to the PM pipeline before the retry
+    # has a chance to succeed.
+    if _harness_requeued:
+        return
+
     if _session_type == "dev" and not task.error:
         await _handle_dev_session_completion(
             session=session,
