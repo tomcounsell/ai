@@ -317,6 +317,10 @@ Builder, validator, documentarian (see template for full list).
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Adversary | `worker_key.startswith("local")` fails for default DEV sessions (worker_key = project_key) | Replace discriminator with `entry.session_id.startswith("local")` | `create_local()` always sets `session_id=f"local-{uuid}"` — session_id is the reliable discriminator; `worker_key` for session_type=DEV without slug returns `project_key`, not `chat_id` |
+| CONCERN | Adversary | Race 1 mitigation description is incorrect: hook reactivation transitions "running" → "running" (same status), CAS in finalize_session would NOT conflict and would proceed to abandon a live session | Add guard: after `finalize_session` is called, check `StatusConflictError` AND add a pre-call re-read to confirm status is still "running" before abandoning | `finalize_session` CAS compares in-memory status to on-disk status at call time; if hook has already re-activated (status still "running" on disk), CAS passes and the live session gets abandoned. Guard: `from models.session_lifecycle import StatusConflictError` then catch it, but also add idempotency check against hook reactivation by checking `entry.session_id` in running sessions post-finalize. |
+| NIT | Simplifier | Pre-loop WARNING log of all stale session IDs is redundant — each session is already logged at WARNING inside the loop | Optionally keep a single "N stale sessions found" count log instead of full ID list; remove per-session duplication | N/A |
+| NIT | User | All success criteria are purely technical; no human-observable acceptance criterion | Add: "Worker restart log shows `[startup-recovery] Abandoned local session <id>`" as acceptance signal | N/A |
 
 ---
 
