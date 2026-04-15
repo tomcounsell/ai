@@ -6,6 +6,8 @@ owner: Valor
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/980
 last_comment_id:
+revision_applied: true
+
 ---
 
 # Worker Health Check on Enqueue
@@ -101,11 +103,12 @@ No prerequisites — this work has no external dependencies. The heartbeat file 
 
 ### Technical Approach
 
-- **Single helper module**: Extract `_check_worker_health()` into `tools/valor_session.py` (self-contained). The function reads `data/last_worker_connected`, computes age, returns `(healthy, age_s)`. Threshold: `age_s < 360` = healthy (same as dashboard).
+- **Single helper in valor_session.py**: Add `_check_worker_health() -> tuple[bool, int | None]` to `tools/valor_session.py` (self-contained). The function reads the heartbeat file's modification time via `heartbeat_file.stat().st_mtime`, computes age as `int(time.time() - mtime)`, and returns `(True, age_s)` if age < 360 else `(False, age_s)`. Returns `(False, None)` if file missing or any exception. This matches the established pattern in `ui/app.py:_get_worker_health()` — no ISO string parsing, no format dependency.
+- **Duplicate inline in agent_session_scheduler.py**: Do NOT import `_check_worker_health` from `tools/valor_session`. Instead, add an equivalent 5-line inline check directly in `agent_session_scheduler.py:cmd_status`. Using `stat().st_mtime` means there is no string parsing, so malformed content handling is no longer needed. Avoids coupling two independent tool files.
 - **Warning only on `create`** — do not fail. The `--force` flag mentioned in the issue as a future escape hatch is a rabbit hole for v1; the warning is enough.
-- **Same helper reused** in `agent_session_scheduler.py` — import the helper or duplicate the 5-line check inline (prefer duplicate to avoid coupling two tool files).
 - **Heartbeat file path** is relative to repo root (`data/last_worker_connected`). Resolve via `Path(__file__).parent.parent / "data" / "last_worker_connected"` same as `agent_session_queue.py`.
 - **Missing file == unhealthy**: if the file doesn't exist, the worker has never run on this machine — treat as unhealthy.
+- **JSON mode guards for cmd_status**: In `cmd_status`, the plain-text warning is guarded by `if not args.json:` before printing to stderr. The `worker_healthy` field is always added to the JSON dict regardless of health state. This prevents automated pollers from having stderr flooded on every status check.
 
 ## Failure Path Test Strategy
 
@@ -114,12 +117,13 @@ No prerequisites — this work has no external dependencies. The heartbeat file 
 - [ ] If Redis is unavailable, the status command already handles it; the added health check is file-based and independent
 
 ### Empty/Invalid Input Handling
-- [ ] If `data/last_worker_connected` contains malformed content, `datetime.fromisoformat()` will raise — wrap in `try/except` and treat as unhealthy
+- [ ] `_check_worker_health()` uses `stat().st_mtime` — no string parsing, so malformed file content cannot raise; only `OSError` (missing/permission) and unexpected exceptions need catching
 - [ ] `age_s` returns `None` when file is missing; callers must handle `None` (treat as unhealthy)
 
 ### Error State Rendering
 - [ ] Warning must print to stderr (not stdout) so JSON output mode (`--json`) is not polluted
-- [ ] In JSON output mode (`--json`), add `worker_healthy` field to the JSON dict rather than printing a plain-text warning
+- [ ] In `cmd_create`: JSON mode adds `worker_healthy` to the output dict instead of printing a plain-text warning to stderr
+- [ ] In `cmd_status`: plain-text warning is guarded by `if not args.json:` — automated pollers using `--json` receive no stderr noise; `worker_healthy` field is always present in the JSON dict
 - [ ] `agent_session_scheduler status` always emits `worker_healthy` in the JSON result regardless of health state
 
 ## Test Impact
@@ -210,11 +214,11 @@ builder, validator
 - **Assigned To**: cli-health-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_check_worker_health() -> tuple[bool, int | None]` to `tools/valor_session.py`. Read `data/last_worker_connected`, parse ISO timestamp, compute age in seconds. Return `(True, age_s)` if age < 360 else `(False, age_s)`. Return `(False, None)` if file missing or parse error. Wrap all in try/except.
-- In `cmd_create` (after `asyncio.run(_create())`): call `_check_worker_health()`. If not healthy, print `"WARNING: no active worker detected — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)"` to stderr. In JSON mode, add `"worker_healthy": False` to the output dict.
-- In `cmd_status`: after determining `session.status`, if status is `"pending"`, call `_check_worker_health()`. If not healthy, print a warning line `"  WARNING: No active worker — session may wait indefinitely."` In JSON mode, add `"worker_healthy"` field to the output dict.
-- In `tools/agent_session_scheduler.py` `cmd_status` function: add a 5-line inline version of the health check (read the file, compute age, compare threshold). Add `"worker_healthy": bool` and `"worker_heartbeat_age_s": int | None` fields to the `result` dict before `_output(result)`.
-- Write unit tests in `tests/unit/test_valor_session.py`: mock the heartbeat file using `tmp_path`; test (a) healthy case, (b) stale case, (c) missing file, (d) malformed content. Assert warning appears in stderr for stale/missing, not for healthy. Assert JSON output includes `worker_healthy` field.
+- Add `_check_worker_health() -> tuple[bool, int | None]` to `tools/valor_session.py`. Use `heartbeat_file.stat().st_mtime` to read modification time, compute `age_s = int(time.time() - mtime)`. Return `(True, age_s)` if age_s < 360 else `(False, age_s)`. Return `(False, None)` if file missing or any exception. Wrap all in try/except. Do NOT import this helper into `agent_session_scheduler.py` — add an equivalent 5-line inline there instead to keep tool files decoupled.
+- In `cmd_create` (after `asyncio.run(_create())`): call `_check_worker_health()`. If not healthy and not JSON mode, print `"WARNING: no active worker detected — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)"` to stderr. In JSON mode, add `"worker_healthy": False` to the output dict instead of printing.
+- In `cmd_status`: after determining `session.status`, if status is `"pending"`, call `_check_worker_health()`. Guard the plain-text warning with `if not args.json:` — print `"  WARNING: No active worker — session may wait indefinitely."` to stderr only in non-JSON mode. Always add `"worker_healthy"` field to the JSON dict regardless.
+- In `tools/agent_session_scheduler.py` `cmd_status` function: add an inline 5-line version of the health check using `stat().st_mtime` (do not import from `valor_session`). Add `"worker_healthy": bool` and `"worker_heartbeat_age_s": int | None` fields to the `result` dict before `_output(result)`.
+- Write unit tests in `tests/unit/test_valor_session.py`: mock the heartbeat file using `tmp_path`; test (a) healthy case, (b) stale case (mtime older than 360s), (c) missing file. Assert warning appears in stderr for stale/missing, not for healthy. Assert JSON output includes `worker_healthy` field. Note: no malformed-content test needed since `stat().st_mtime` doesn't parse file content.
 
 ### 2. Validate
 
@@ -232,8 +236,8 @@ builder, validator
 
 - **Task ID**: document-feature
 - **Depends On**: validate-worker-health-check
-- **Assigned To**: documentarian
-- **Agent Type**: documentarian
+- **Assigned To**: cli-health-builder
+- **Agent Type**: builder
 - **Parallel**: false
 - Update or create `docs/features/session-management.md` with a section on worker health checks
 - Add note to CLAUDE.md Quick Commands that `valor_session create` warns when no worker is running
@@ -258,13 +262,17 @@ builder, validator
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | scheduler status has worker_healthy | `python -m tools.agent_session_scheduler status --json` | output contains worker_healthy |
-| valor_session warns on missing file | `python -c "import subprocess,os,json; os.rename('data/last_worker_connected','data/last_worker_connected.bak') if os.path.exists('data/last_worker_connected') else None"` | exit code 0 |
+| valor_session warns on missing file | `mv data/last_worker_connected data/last_worker_connected.bak 2>/dev/null; python -m tools.valor_session create --role pm --message "test" 2>&1 | grep -i "WARNING.*worker"; mv data/last_worker_connected.bak data/last_worker_connected 2>/dev/null` | stdout contains "WARNING" |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Simplifier | Task 3 references `documentarian` agent type not listed in Available Agent Types | Task 3 updated | Changed `Agent Type: documentarian` → `builder`, `Assigned To` → `cli-health-builder` |
+| CONCERN | User | Verification table row 5 merely renames file and exits 0 — never actually tests the warning | Verification table updated | Replaced with real end-to-end command: rename file, run `valor_session create`, grep stdout for WARNING, restore file |
+| CONCERN | Operator | Noisy stderr on repeated automated `status` polls when worker is unhealthy | Technical Approach + Task 1 + Failure Path updated | `cmd_status` plain-text warning now guarded by `if not args.json:` — automated `--json` callers receive no stderr noise |
+| NIT | Skeptic | Technical Approach contradicts itself: "extract helper" vs "prefer duplicate" | Technical Approach clarified | Stated explicitly: helper lives in `valor_session.py`, 5-line inline duplicate in `agent_session_scheduler.py` — no cross-file import |
+| NIT | Adversary | Plan uses `datetime.fromisoformat()` but dashboard uses `stat().st_mtime` | Technical Approach + Task 1 + Failure Path updated | Switched to `stat().st_mtime` throughout — simpler, no string parsing, consistent with `ui/app.py` pattern |
 
 ---
 
