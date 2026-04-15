@@ -162,7 +162,7 @@ python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12
 # Push arbitrary session
 python -m tools.agent_session_scheduler push --message "What is the architecture?"
 
-# Queue status
+# Queue status (JSON output always includes worker_healthy and worker_heartbeat_age_s)
 python -m tools.agent_session_scheduler status
 
 # Queue manipulation
@@ -210,6 +210,7 @@ python -m tools.valor_session children --id <SESSION_ID>
 python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"
 
 # Create a new session (project_key derived from cwd via projects.json)
+# Warns to stderr if no active worker is running; --json adds worker_healthy field
 python -m tools.valor_session create --role pm --message "Plan issue #735"
 python -m tools.valor_session create --role dev --message "Fix the bug" --parent <PARENT_ID>
 # Explicit project key override (useful in scripts/CI where cwd may not match)
