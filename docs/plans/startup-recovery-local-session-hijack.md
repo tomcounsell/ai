@@ -155,8 +155,8 @@ The `finalize_session` import already lives in the health check section of the s
 
 ## Test Impact
 
-- [ ] `tests/unit/test_recovery_respawn_safety.py::TestStartupRecoverySkipsTerminal::test_startup_recovery_only_queries_running` — UPDATE: currently only asserts the function queries `status="running"`; extend to assert local sessions are abandoned and bridge sessions are recovered
-- [ ] `tests/unit/test_agent_session_scheduler_kill.py::test_recover_interrupted_agent_sessions_startup_filters_running` — UPDATE: extend mock to include a local-keyed session; assert it is abandoned not re-queued to pending
+- [x] `tests/unit/test_recovery_respawn_safety.py::TestStartupRecoverySkipsTerminal::test_startup_recovery_only_queries_running` — UPDATE: currently only asserts the function queries `status="running"`; extend to assert local sessions are abandoned and bridge sessions are recovered
+- [x] `tests/unit/test_agent_session_scheduler_kill.py::test_recover_interrupted_agent_sessions_startup_filters_running` — UPDATE: extend mock to include a local-keyed session; assert it is abandoned not re-queued to pending
 
 New tests to add to `tests/unit/test_recovery_respawn_safety.py` (greenfield, not listed as UPDATE/DELETE/REPLACE):
 - `test_startup_recovery_abandons_local_sessions` — mock a stale local session; assert `finalize_session("abandoned")` called, count not incremented
@@ -209,20 +209,20 @@ No agent integration required — this is a worker-internal change. The bridge, 
 
 ## Documentation
 
-- [ ] Update `docs/features/session-recovery-mechanisms.md` — Mechanism 1 table entry for Startup Recovery: add "Local session guard" row describing the `session_id.startswith("local")` check and `"abandoned"` disposition for local sessions
-- [ ] Add inline docstring note to `_recover_interrupted_agent_sessions_startup()` in `agent/agent_session_queue.py` explaining the local-session guard and why local sessions are abandoned rather than re-queued
+- [x] Update `docs/features/session-recovery-mechanisms.md` — Mechanism 1 table entry for Startup Recovery: add "Local session guard" row describing the `session_id.startswith("local")` check and `"abandoned"` disposition for local sessions
+- [x] Add inline docstring note to `_recover_interrupted_agent_sessions_startup()` in `agent/agent_session_queue.py` explaining the local-session guard and why local sessions are abandoned rather than re-queued
 
 ## Success Criteria
 
-- [ ] `_recover_interrupted_agent_sessions_startup()` never calls `update_session(..., "pending")` for sessions with `session_id.startswith("local")`
-- [ ] Local stale sessions are finalized as `"abandoned"` with `skip_auto_tag=True`
-- [ ] Bridge sessions are recovered exactly as before (no regression)
-- [ ] Startup log shows stale session count before loop executes
-- [ ] Worker restart log shows `[startup-recovery] Abandoned local session <id>` when a local session was stale at startup (human-observable acceptance signal)
-- [ ] New unit tests pass: `test_startup_recovery_abandons_local_sessions`, `test_startup_recovery_recovers_bridge_sessions`, `test_startup_recovery_mixed_local_and_bridge`
-- [ ] Updated tests pass: `test_startup_recovery_only_queries_running`, `test_recover_interrupted_agent_sessions_startup_filters_running`
-- [ ] `docs/features/session-recovery-mechanisms.md` updated
-- [ ] Tests pass (`/do-test`)
+- [x] `_recover_interrupted_agent_sessions_startup()` never calls `update_session(..., "pending")` for sessions with `session_id.startswith("local")`
+- [x] Local stale sessions are finalized as `"abandoned"` with `skip_auto_tag=True`
+- [x] Bridge sessions are recovered exactly as before (no regression)
+- [x] Startup log shows stale session count before loop executes
+- [x] Worker restart log shows `[startup-recovery] Abandoned local session <id>` when a local session was stale at startup (human-observable acceptance signal)
+- [x] New unit tests pass: `test_startup_recovery_abandons_local_sessions`, `test_startup_recovery_recovers_bridge_sessions`, `test_startup_recovery_mixed_local_and_bridge`
+- [x] Updated tests pass: `test_startup_recovery_only_queries_running`, `test_recover_interrupted_agent_sessions_startup_filters_running`
+- [x] `docs/features/session-recovery-mechanisms.md` updated
+- [x] Tests pass (`/do-test`)
 
 ## Team Orchestration
 
