@@ -44,17 +44,20 @@ Final result string returned
 
 - **`content_block_start` events**: Resets the internal text buffer — only the current block is retained, never a concatenation across blocks or turns
 - **`content_block_delta` events**: Text chunks accumulate into the current block buffer
-- **`result` event**: Contains the final response text and a `session_id` for potential future resume support
+- **`result` event**: Contains the final response text and a `session_id`. The session_id is persisted on the `AgentSession.claude_session_uuid` field and reused on the next turn via `--resume` (see [Harness Session Continuity](harness-session-continuity.md))
 - **Interruption (no `result` event)**: If the subprocess is killed before emitting `result` (e.g. crash or SIGTERM), the function returns `""` and logs at `ERROR` level. `BackgroundTask` skips the send on empty string — nothing reaches Telegram
 - **Error handling**: Malformed JSON lines are skipped; non-zero exit codes are logged with stderr
 
 The function returns the final result text only — it has no streaming callback parameter.
 
-### Context Budget Cap (issue #958)
+### Session Continuity and Context Budget (issues #958, #976)
 
-Before launching the subprocess, `get_response_via_harness()` calls `_apply_context_budget(message)`. If the assembled input exceeds `HARNESS_MAX_INPUT_CHARS` (100,000 characters), the oldest context is trimmed from the start of the string. The `MESSAGE:` boundary is preserved unconditionally — the steering message is never truncated. A `[CONTEXT TRIMMED]` marker is prepended so the agent is aware context was omitted.
+`get_response_via_harness()` uses two complementary mechanisms to keep the subprocess argv bounded:
 
-This prevents `Separator is not found, and chunk exceed the limit` crashes in the `claude` binary that occur when PM sessions accumulate large resume-hydration + reply-chain contexts across multiple Telegram turns. The cap is a module-level constant in `agent/sdk_client.py` and can be raised by editing it without other code changes.
+1. **Native `--resume` continuity (#976)** — On the first turn the captured `session_id` is persisted to `AgentSession.claude_session_uuid`. On subsequent turns the harness looks up the prior UUID and spawns `claude -p --resume <uuid> ... [raw_new_message]`; the binary loads prior context from its on-disk session file and the positional argv is just the new user message. Context overflow becomes structurally impossible for resumed turns. See [Harness Session Continuity](harness-session-continuity.md) for the two argv shapes, the stale-UUID fallback, and observability log lines.
+2. **Context budget cap (#958)** — `_apply_context_budget(message)` runs unconditionally before every spawn (first and resumed turns alike). If the assembled input exceeds `HARNESS_MAX_INPUT_CHARS` (100,000 characters), the oldest context is trimmed from the start of the string. The `MESSAGE:` boundary is preserved unconditionally — the steering message is never truncated. A `[CONTEXT TRIMMED]` marker is prepended so the agent is aware context was omitted.
+
+The budget remains in place even on resumed turns because a single new user message can still carry a forwarded transcript or pasted log that alone exceeds the chunk limit. Together the two mechanisms eliminated the `Separator is found, but chunk is longer than limit` crashes that previously affected long Telegram threads. The cap is a module-level constant in `agent/sdk_client.py` and can be raised by editing it without other code changes.
 
 ### Streaming Chunk Suppression
 
@@ -105,8 +108,8 @@ No changes to the `AgentSession` model are needed. Harness selection is purely a
 
 | File | What changed |
 |------|-------------|
-| `agent/sdk_client.py` | Added `get_response_via_harness()`, `verify_harness_health()`, `_HARNESS_COMMANDS` registry, `_apply_context_budget()`, `HARNESS_MAX_INPUT_CHARS` |
-| `agent/agent_session_queue.py` | Routing logic in `_execute_agent_session()`: checks `DEV_SESSION_HARNESS` env var for dev sessions |
+| `agent/sdk_client.py` | `get_response_via_harness()`, `verify_harness_health()`, `_HARNESS_COMMANDS` registry, `_apply_context_budget()`, `HARNESS_MAX_INPUT_CHARS`; `_get_prior_session_uuid()` / `_store_claude_session_uuid()` / `_UUID_PATTERN` for `--resume` continuity (#976); `build_harness_turn_input(skip_prefix=...)` for the two argv shapes |
+| `agent/agent_session_queue.py` | Routing logic in `_execute_agent_session()`: all session types go through the CLI harness; looks up prior UUID via `_get_prior_session_uuid()` and passes both full-context and minimal message forms to `get_response_via_harness()` so the stale-UUID fallback can retry without `--resume` |
 | `worker/__main__.py` | Startup health check when harness is non-`sdk` |
 | `agent/__init__.py` | Exports `get_response_via_harness` and `verify_harness_health` |
 | `tests/unit/test_harness_streaming.py` | Unit tests covering NDJSON parsing, text accumulation, error paths, health checks (isolation scope only — no send_cb) |

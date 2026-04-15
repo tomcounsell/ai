@@ -112,14 +112,22 @@ All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`).
 ```
 _execute_agent_session(session)
     |
-    v
-build_harness_turn_input()  -- enriches message with context headers
+    |-- _get_prior_session_uuid(session_id)  -- Popoto lookup of claude_session_uuid (#976)
     |
     v
-_apply_context_budget()     -- trims oldest context if input exceeds HARNESS_MAX_INPUT_CHARS (100K)
+build_harness_turn_input(skip_prefix=bool(prior_uuid))
+    |   -- first turn: full PROJECT/FROM/SCOPE/MESSAGE headers
+    |   -- resumed turn: raw new message only (binary has context from its session file)
     |
     v
-get_response_via_harness()  -- spawns claude -p subprocess
+_apply_context_budget()     -- trims if input exceeds HARNESS_MAX_INPUT_CHARS (100K); runs on every call
+    |
+    v
+get_response_via_harness(prior_uuid=..., session_id=..., full_context_message=...)
+    |   -- resumed turn: spawns `claude -p --resume <uuid> [raw_message]`
+    |   -- first turn:   spawns `claude -p [full_context_message]`
+    |   -- stale UUID:   on any non-zero exit with prior_uuid set, retries once without --resume
+    |   -- after success: persists captured session_id to AgentSession.claude_session_uuid
     |
     v
 _handle_dev_session_completion()  [dev sessions only]
@@ -129,7 +137,7 @@ _handle_dev_session_completion()  [dev sessions only]
     |-- steer_session(parent_pm_session)
 ```
 
-PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for full details on stream-json parsing, chunk suppression, health checks, and configuration.
+PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 

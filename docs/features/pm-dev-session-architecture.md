@@ -309,7 +309,10 @@ Worker picks up Dev session from Redis queue
     |
     v
 _execute_agent_session() routes all session types to CLI harness
-    |-- get_response_via_harness()  <- claude -p subprocess
+    |-- _get_prior_session_uuid(session_id)  <- Popoto lookup (#976)
+    |-- build_harness_turn_input(..., skip_prefix=<bool>)  <- two shapes
+    |-- get_response_via_harness()  <- claude -p [--resume <uuid>] subprocess
+    |       (see docs/features/harness-session-continuity.md)
     |
     v
 Dev session executes assigned work
