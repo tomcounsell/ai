@@ -193,22 +193,22 @@ The outer `session` parameter is always the full `AgentSession` object (populate
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_handle_dev_session_completion` wraps everything in `try/except Exception` at line 3195 — existing tests cover the steer-failure path. The new re-ordering does not add new exception handlers; coverage is unchanged.
-- [ ] Path B fix adds no new exception handlers. The fallback to `session.parent_agent_session_id` can only fail if `session` itself is unexpectedly missing the field — treated as a debug-level non-event (returns early as before).
+- [x] `_handle_dev_session_completion` wraps everything in `try/except Exception` at line 3195 — existing tests cover the steer-failure path. The new re-ordering does not add new exception handlers; coverage is unchanged.
+- [x] Path B fix adds no new exception handlers. The fallback to `session.parent_agent_session_id` can only fail if `session` itself is unexpectedly missing the field — treated as a debug-level non-event (returns early as before).
 
 ### Empty/Invalid Input Handling
-- [ ] `session.parent_agent_session_id` may be `None` (non-child dev sessions). The existing `if not parent_id: return` guard handles this correctly after the fix.
-- [ ] `agent_session` being `None` is now a non-fatal degraded path (creates continuation PM from `session` fields) rather than a silent skip.
+- [x] `session.parent_agent_session_id` may be `None` (non-child dev sessions). The existing `if not parent_id: return` guard handles this correctly after the fix.
+- [x] `agent_session` being `None` is now a non-fatal degraded path (creates continuation PM from `session` fields) rather than a silent skip.
 
 ### Error State Rendering
-- [ ] The continuation PM creation is the user-visible outcome. Existing tests in `test_continuation_pm.py` cover message text and session creation. No new user-visible rendering.
+- [x] The continuation PM creation is the user-visible outcome. Existing tests in `test_continuation_pm.py` cover message text and session creation. No new user-visible rendering.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_continuation_pm.py::TestHandleCompletionContinuationFallback::test_steer_success_no_continuation` — UPDATE (rename to `test_steer_accepted_pm_terminal_creates_continuation`): after the fix, steer "succeeds" (accepted) but the PM is terminal at re-check time — assert continuation PM IS created. Old assertion was "no continuation PM" — this inverts it.
-- [ ] `tests/unit/test_continuation_pm.py::TestHandleCompletionContinuationFallback` — ADD `test_steer_accepted_pm_non_terminal_no_continuation`: steer accepted + PM non-terminal at re-check → assert no continuation PM (happy path — PM will consume the steering message).
-- [ ] `tests/unit/test_continuation_pm.py` — ADD new test class `TestHandleCompletionOrderingRace` with `test_pm_terminal_at_recheck_creates_continuation`: calls `_handle_dev_session_completion` with a PM already in terminal status (simulating post-`_finalize_parent_sync` state) and asserts a continuation PM is created.
-- [ ] `tests/unit/test_continuation_pm.py` — ADD `test_agent_session_none_uses_session_parent_id`: when `agent_session=None`, function uses `session.parent_agent_session_id` to look up parent and create continuation PM.
+- [x] `tests/unit/test_continuation_pm.py::TestHandleCompletionContinuationFallback::test_steer_success_no_continuation` — UPDATE (rename to `test_steer_accepted_pm_terminal_creates_continuation`): after the fix, steer "succeeds" (accepted) but the PM is terminal at re-check time — assert continuation PM IS created. Old assertion was "no continuation PM" — this inverts it.
+- [x] `tests/unit/test_continuation_pm.py::TestHandleCompletionContinuationFallback` — ADD `test_steer_accepted_pm_non_terminal_no_continuation`: steer accepted + PM non-terminal at re-check → assert no continuation PM (happy path — PM will consume the steering message).
+- [x] `tests/unit/test_continuation_pm.py` — ADD new test class `TestHandleCompletionOrderingRace` with `test_pm_terminal_at_recheck_creates_continuation`: calls `_handle_dev_session_completion` with a PM already in terminal status (simulating post-`_finalize_parent_sync` state) and asserts a continuation PM is created.
+- [x] `tests/unit/test_continuation_pm.py` — ADD `test_agent_session_none_uses_session_parent_id`: when `agent_session=None`, function uses `session.parent_agent_session_id` to look up parent and create continuation PM.
 
 ## Rabbit Holes
 
@@ -265,21 +265,21 @@ No agent integration required — this is an internal worker fix to `agent/agent
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` — add a note in the "Dev session completion" section describing the correct ordering: `complete_transcript` runs first, then `_handle_dev_session_completion`, ensuring `_finalize_parent_sync` has completed before the steering re-check.
-- [ ] Update inline docstring on `_handle_dev_session_completion` to document the ordering invariant: "Must be called after `complete_transcript` to ensure `_finalize_parent_sync` has run before the re-check guard executes."
+- [x] Update `docs/features/bridge-worker-architecture.md` — add a note in the "Dev session completion" section describing the correct ordering: `complete_transcript` runs first, then `_handle_dev_session_completion`, ensuring `_finalize_parent_sync` has completed before the steering re-check.
+- [x] Update inline docstring on `_handle_dev_session_completion` to document the ordering invariant: "Must be called after `complete_transcript` to ensure `_finalize_parent_sync` has run before the re-check guard executes."
 
 ## Success Criteria
 
-- [ ] Running SDLC on an issue progresses all the way through PLAN → CRITIQUE → BUILD → TEST → REVIEW → DOCS → MERGE without stopping after the first dev session
-- [ ] When a PM is finalized by `_finalize_parent_sync` between the steer call and the re-check, a continuation PM is created and the pipeline resumes
-- [ ] When `agent_session` is `None` in `_handle_dev_session_completion`, a continuation PM is still created (not a silent no-op)
-- [ ] `test_steer_success_no_continuation` renamed to `test_steer_accepted_pm_terminal_creates_continuation` and updated to assert continuation PM IS created when steer accepted but PM terminal
-- [ ] New test `test_steer_accepted_pm_non_terminal_no_continuation` passes: steer accepted + PM non-terminal → no continuation PM
-- [ ] New test class `TestHandleCompletionOrderingRace::test_pm_terminal_at_recheck_creates_continuation` passes
-- [ ] New test `test_agent_session_none_uses_session_parent_id` passes
-- [ ] `pytest tests/unit/test_continuation_pm.py` — all tests pass
-- [ ] `pytest tests/unit/ -x -q` — all unit tests pass
-- [ ] `python -m ruff check . && python -m ruff format --check .` — clean
+- [x] Running SDLC on an issue progresses all the way through PLAN → CRITIQUE → BUILD → TEST → REVIEW → DOCS → MERGE without stopping after the first dev session
+- [x] When a PM is finalized by `_finalize_parent_sync` between the steer call and the re-check, a continuation PM is created and the pipeline resumes
+- [x] When `agent_session` is `None` in `_handle_dev_session_completion`, a continuation PM is still created (not a silent no-op)
+- [x] `test_steer_success_no_continuation` renamed to `test_steer_accepted_pm_terminal_creates_continuation` and updated to assert continuation PM IS created when steer accepted but PM terminal
+- [x] New test `test_steer_accepted_pm_non_terminal_no_continuation` passes: steer accepted + PM non-terminal → no continuation PM
+- [x] New test class `TestHandleCompletionOrderingRace::test_pm_terminal_at_recheck_creates_continuation` passes
+- [x] New test `test_agent_session_none_uses_session_parent_id` passes
+- [x] `pytest tests/unit/test_continuation_pm.py` — all tests pass
+- [x] `pytest tests/unit/ -x -q` — all unit tests pass
+- [x] `python -m ruff check . && python -m ruff format --check .` — clean
 
 ## Team Orchestration
 
