@@ -152,7 +152,7 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | 8 | PR review has findings (blockers, nits, OR tech debt) | `/do-patch` | ALL findings must be addressed |
 | 8b | Patch applied after review findings | `/do-pr-review {pr_number}` | Re-review is REQUIRED after every patch |
 | 9 | Review APPROVED with zero findings, docs NOT done (see Step 3) | `/do-docs` | Docs are required before merge |
-| 10 | Review APPROVED with zero findings, docs done, AND all display stages show `completed` in stage_states (or stage_states unavailable), ready to merge | Report done | PM delivers to human |
+| 10 | Review APPROVED with zero findings, docs done, AND all display stages show `completed` in stage_states (or stage_states unavailable), ready to merge | `/do-merge {pr_number}` | Execute programmatic merge gate |
 
 **Row 10 merge gate**: ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). If stage_states is unavailable, use conversation dispatch history — if DOCS was never dispatched in this session, dispatch it.
 
@@ -200,7 +200,7 @@ Cycles:     CRITIQUE(fail) -> PLAN -> CRITIQUE (max 2 cycles)
 | PATCH | /do-patch | sonnet | Targeted fix (see resume rules in PM persona) |
 | REVIEW | /do-pr-review | opus | Code review judgment |
 | DOCS | /do-docs | sonnet | Structured writing |
-| MERGE | — | — | Human decision (PM reports completion) |
+| MERGE | /do-merge {pr_number} | sonnet | Programmatic gate: verifies all stages, then merges |
 
 The **Dev Model** column shows the model the PM should pass via `--model` when spawning a dev session for that stage (see Stage→Model Dispatch Table in PM persona).
 
