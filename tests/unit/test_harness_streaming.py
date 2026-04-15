@@ -608,7 +608,8 @@ class TestHarnessResume:
 
         # Assert an INFO call was made containing "Resuming Claude session"
         info_calls = [
-            call for call in mock_logger.info.call_args_list
+            call
+            for call in mock_logger.info.call_args_list
             if "Resuming Claude session" in str(call)
         ]
         assert info_calls, "Expected logger.info with 'Resuming Claude session' to be called"
@@ -643,10 +644,13 @@ class TestHarnessResume:
                     )
 
         warning_calls = [
-            call for call in mock_logger.warning.call_args_list
+            call
+            for call in mock_logger.warning.call_args_list
             if "Stale UUID" in str(call) and "falling back to first-turn path" in str(call)
         ]
-        assert warning_calls, "Expected logger.warning with 'Stale UUID ... falling back to first-turn path'"
+        assert warning_calls, (
+            "Expected logger.warning with 'Stale UUID ... falling back to first-turn path'"
+        )
 
     @pytest.mark.asyncio
     async def test_fallback_without_full_context(self):
