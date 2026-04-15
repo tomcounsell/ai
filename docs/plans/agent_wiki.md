@@ -444,17 +444,26 @@ Tier 1 — Core: builder, validator, documentarian, mcp-specialist
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-15 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | [agent-type] | [The concern raised] | [How/whether addressed] | [Guard condition or gotcha] |
+| BLOCKER | Adversary | Slug path traversal in temp file naming — slug containing `..` or `/` can escape vault directory | Task build-wiki-core must sanitize slug: `re.sub(r'[^a-z0-9\-_]', '-', slug.lower())` before any path construction | `pathlib.Path(vault_dir) / f".{slug}.md.tmp"` does NOT prevent traversal if slug contains `..` — Python's pathlib resolves `..` |
+| CONCERN | Simplifier + Structural | MCP server layer (mcp_servers/ dir) does not exist; issue Recon Summary already stated "no MCP needed for v1" — plan contradicts its own recon | Remove wiki_write/wiki_query MCP tools from v1; scope to follow-on issue | mcp_servers/ directory and .mcp.json both absent; creating entire MCP infrastructure is multi-hour unresolved work |
+| CONCERN | Skeptic | WikiWriter idempotent merge strategy (append to body, update frontmatter) not spiked — naive append will duplicate wikilinks and corrupt frontmatter | Spike the merge strategy: write test with two sequential writes to same slug before build | Idempotency check must use slug-based file existence, not title string matching (which requires scanning all files on every write) |
+| CONCERN | Archaeologist | extract_post_merge_learning() is called inside asyncio.run() in .claude/hooks/hook_utils/memory_bridge.py::post_merge_extract() — WikiWriter must be synchronous only | Explicitly constrain WikiWriter to synchronous file I/O in the Technical Approach section | async WikiWriter inside asyncio.run() in a hook process raises RuntimeError: This event loop is already running |
+| CONCERN | Operator | Orphaned temp files (.{slug}.md.tmp) accumulate if process is killed between write and rename — no cleanup specified | Add startup sweep in WikiWriter: remove *.md.tmp files older than 5 minutes from vault before each write | os.rename() is atomic within same filesystem — temp files orphan only on SIGKILL or power loss |
+| CONCERN | User | No user-facing acceptance criteria — all success criteria are technical (tests pass, lint clean) | Add 2-3 user-facing criteria: e.g., wiki page appears in Obsidian within 30s of PR merge; lint report surfaces actionable finding | Without user criteria, build could ship technically-complete code that delivers no observable value to Valor |
+| NIT | Operator | WikiLint has no log output or dashboard integration — operator cannot know if it ran or errored silently | WikiLint should write JSON result to logs/wiki_lint.log; daily-report reflection should surface summary if findings non-empty | N/A |
+| NIT | Archaeologist | Companion Memory importance for wiki-written pages (3.0) should be confirmed against indexer's value for vault docs | Confirm tools/knowledge/indexer.py KNOWLEDGE_IMPORTANCE before setting wiki page companion Memory importance | Indexer uses KNOWLEDGE_IMPORTANCE = 3.0 — consistent, no conflict |
+| NIT | Simplifier | WikiIndex (tools/wiki/index.py) may not justify a standalone module — two 10-line operations that WikiWriter could handle directly | Inline index/log update into WikiWriter unless WikiLint needs to call WikiIndex independently | Only extract if second consumer appears; WikiLint reads pages directly, not through index writer |
+| NIT | User | WikiWriter auto-inserts wikilinks for entries in _index.md even if the target .md file doesn't exist yet — produces dead links in Obsidian | Only auto-inject wikilinks for titles with corresponding .md files, or suppress wikilink injection until vault has >50 pages | Dead links show as unresolved purple in Obsidian graph view |
 
 ---
 
 ## Open Questions
 
-1. **Reflections YAML config location**: Where is the reflections scheduler YAML config file that wiki lint should be registered in? The plan references it but didn't locate the exact file path. Builder should `grep -r "wiki_lint\|reflection.*schedule\|scheduler.*yaml" config/` to find it before implementing.
+1. **Reflections YAML config location**: RESOLVED — `config/reflections.yaml`. Builder must add `wiki-lint` entry with `callable: "reflections.wiki_lint.run_wiki_lint"`, `interval: 604800` (weekly), `priority: low`, `execution_type: function`.
 
-2. **MCP server target**: Should `wiki_write` and `wiki_query` be added to an existing MCP server (e.g., memory-related MCP) or create a new `mcp_servers/wiki_server.py`? Builder should check `.mcp.json` for currently registered servers and pick the most natural home.
+2. **MCP server target**: RESOLVED by critique — MCP exposure removed from v1 scope. The `mcp_servers/` directory does not exist; creating it is out of scope. Agents invoke wiki operations via `python -m tools.wiki.writer` CLI or direct file tools. MCP integration is a follow-on issue.
 
-3. **Post-merge hook trigger**: `extract_post_merge_learning()` is defined in `agent/memory_extraction.py` but where is it called (bridge event handler, reflections callable, or claude code hook)? Builder should trace the call site before modifying. A `grep -r "extract_post_merge_learning"` will find it.
+3. **Post-merge hook trigger**: RESOLVED — `.claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()` calls `asyncio.run(extract_post_merge_learning(...))`. WikiWriter MUST use synchronous file I/O only (no aiofiles, no async) to avoid RuntimeError inside asyncio.run().
