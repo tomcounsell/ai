@@ -129,13 +129,13 @@ Every custom emoji code path has automatic fallback:
 
 The caller never needs to handle standard vs custom emoji explicitly. The `EmojiResult` type and dispatch logic handle all branching internally.
 
-## What Was Removed
+## Migration from Ollama Intent Classification
 
-This feature removed the following legacy code:
+The embedding-based system replaced the Ollama-based intent classifier. The following code is no longer in the codebase:
 
-- **`intent/__init__.py`** -- the entire module was deleted. It contained Ollama-based intent classification with heuristic fallback, used solely by `get_processing_emoji` for reaction selection.
-- **`INTENT_REACTIONS` dict** from `bridge/response.py` -- hardcoded mapping of 10 intent strings to emojis
-- **`get_processing_emoji()` and `get_processing_emoji_async()`** from `bridge/response.py` -- Ollama classification wrappers
+- **`intent/__init__.py`** -- deleted module. Contained Ollama-based intent classification with heuristic fallback, used solely by `get_processing_emoji` for reaction selection.
+- **`INTENT_REACTIONS` dict** -- hardcoded mapping of 10 intent strings to emojis, previously in `bridge/response.py`
+- **`get_processing_emoji()` and `get_processing_emoji_async()`** -- Ollama classification wrappers, previously in `bridge/response.py`
 
 The work-type classifier (`tools/classifier.py` / `classify_request_async`) was preserved and now runs as its own independent async task.
 
@@ -162,6 +162,22 @@ The work-type classifier (`tools/classifier.py` / `classify_request_async`) was 
 | `tests/unit/test_emoji_embedding.py` | Embedding index and EmojiResult tests |
 | `tests/unit/test_custom_emoji_index.py` | Custom emoji index building and cache tests |
 | `tests/unit/test_send_telegram.py` | Reaction and emoji flag tests |
+
+## Terminal Reactions
+
+Session lifecycle events are reported back to Telegram via three terminal reaction constants defined in `agent/constants.py`:
+
+| Constant | Semantic | Feeling String | Fallback Emoji |
+|----------|----------|----------------|----------------|
+| `REACTION_SUCCESS` | Silent ack — no text reply sent | `"acknowledged received silently noted"` | 👌 |
+| `REACTION_COMPLETE` | Work done — text reply attached | `"task completed successfully work done"` | 👏 |
+| `REACTION_ERROR` | Something went wrong | `"error occurred something went wrong"` | 😢 |
+
+These constants are `EmojiResult` objects, **not** plain strings. They are resolved lazily via `find_best_emoji()` using the feeling strings above on first access inside a live request handler. The resolved value is cached in a module-level dict (`_TERMINAL_EMOJI_CACHE`) — no HTTP call is made at import time and no retry occurs after the first resolution.
+
+When `find_best_emoji()` is unavailable (missing `OPENROUTER_API_KEY`, absent embeddings file, or the function returns the default thinking emoji), `_resolve_terminal_emoji()` substitutes the hardcoded fallback `EmojiResult` listed in the table above. All three fallback emojis are confirmed in `VALIDATED_REACTIONS` and are distinct from each other, ensuring correct behavior in degraded environments.
+
+`bridge/response.py` re-exports these constants for backward compatibility. The `set_reaction()` call site already accepts `EmojiResult` objects transparently via the existing standard/custom emoji dispatch logic.
 
 ## See Also
 

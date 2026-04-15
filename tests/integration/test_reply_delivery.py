@@ -127,22 +127,22 @@ class TestReactionEmojiSelection:
     """Test that the correct reaction emojis are in validated/invalid lists."""
 
     def test_reaction_complete_in_validated_list(self):
-        """REACTION_COMPLETE (🏆) must be in the validated reactions list."""
+        """REACTION_COMPLETE must be an EmojiResult whose .emoji is in VALIDATED_REACTIONS."""
         from bridge.response import REACTION_COMPLETE, VALIDATED_REACTIONS
 
-        assert REACTION_COMPLETE in VALIDATED_REACTIONS
+        assert REACTION_COMPLETE.emoji in VALIDATED_REACTIONS
 
     def test_reaction_error_in_validated_list(self):
-        """REACTION_ERROR (😱) must be in the validated reactions list."""
+        """REACTION_ERROR must be an EmojiResult whose .emoji is in VALIDATED_REACTIONS."""
         from bridge.response import REACTION_ERROR, VALIDATED_REACTIONS
 
-        assert REACTION_ERROR in VALIDATED_REACTIONS
+        assert REACTION_ERROR.emoji in VALIDATED_REACTIONS
 
     def test_reaction_success_in_validated_list(self):
-        """REACTION_SUCCESS (👍) must be in the validated reactions list."""
+        """REACTION_SUCCESS must be an EmojiResult whose .emoji is in VALIDATED_REACTIONS."""
         from bridge.response import REACTION_SUCCESS, VALIDATED_REACTIONS
 
-        assert REACTION_SUCCESS in VALIDATED_REACTIONS
+        assert REACTION_SUCCESS.emoji in VALIDATED_REACTIONS
 
     def test_reaction_received_in_validated_list(self):
         """REACTION_RECEIVED (👀) must be in the validated reactions list."""
@@ -157,7 +157,11 @@ class TestReactionEmojiSelection:
         assert "❌" in INVALID_REACTIONS
 
     def test_reaction_constants_are_distinct(self):
-        """All reaction constants should be different emojis."""
+        """All reaction constants should be different emojis.
+
+        REACTION_SUCCESS/COMPLETE/ERROR are EmojiResult objects (unhashable),
+        so we compare by .emoji string value rather than using set() directly.
+        """
         from bridge.response import (
             REACTION_COMPLETE,
             REACTION_ERROR,
@@ -166,14 +170,15 @@ class TestReactionEmojiSelection:
             REACTION_SUCCESS,
         )
 
-        all_reactions = [
-            REACTION_RECEIVED,
-            REACTION_PROCESSING,
-            REACTION_SUCCESS,
-            REACTION_COMPLETE,
-            REACTION_ERROR,
+        # Extract string representations — EmojiResult objects are unhashable
+        all_reaction_strs = [
+            REACTION_RECEIVED,  # plain string
+            REACTION_PROCESSING,  # plain string
+            str(REACTION_SUCCESS),  # EmojiResult -> str via __str__
+            str(REACTION_COMPLETE),  # EmojiResult -> str via __str__
+            str(REACTION_ERROR),  # EmojiResult -> str via __str__
         ]
-        assert len(set(all_reactions)) == len(all_reactions)
+        assert len(set(all_reaction_strs)) == len(all_reaction_strs)
 
     def test_no_validated_reaction_in_invalid_list(self):
         """No emoji should be in both VALIDATED_REACTIONS and INVALID_REACTIONS."""

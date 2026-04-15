@@ -165,7 +165,8 @@ REACTION_PROCESSING = "🤔"  # Default thinking emoji
 
 # REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS are re-exported from
 # agent.constants (canonical location) — imported at top of file for
-# backward compatibility with existing imports.
+# backward compatibility with existing imports. These are EmojiResult objects,
+# resolved lazily via find_best_emoji() on first access with hardcoded fallbacks.
 
 
 def filter_tool_logs(response: str) -> str:
