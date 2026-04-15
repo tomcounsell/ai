@@ -270,13 +270,87 @@ class TestHandleCompletionContinuationFallback:
         assert "CONTINUATION" in cont.message_text
 
     @pytest.mark.asyncio
-    async def test_steer_success_no_continuation(self, redis_test_db):
-        """When steer_session succeeds and parent is still active, no continuation PM."""
+    async def test_steer_accepted_pm_terminal_creates_continuation(self, redis_test_db):
+        """When steer is accepted but PM is terminal at re-check, a continuation PM is created.
+
+        Under the new ordering (issue #987 fix), _handle_dev_session_completion is called
+        after complete_transcript() which has already run _finalize_parent_sync(). So when
+        the steer is accepted but the PM is in a terminal status at re-check time, a
+        continuation PM must be created — the steer message is orphaned and the PM will
+        never consume it.
+        """
         from agent.agent_session_queue import _handle_dev_session_completion
 
-        # Create an active parent
+        # Create a PM that is in terminal (completed) status — simulates the state
+        # after _finalize_parent_sync has already run.
+        terminal_pm_for_steer = AgentSession.create(
+            session_id="pm-terminal-steer-001",
+            session_type="pm",
+            project_key="test",
+            status="completed",
+            chat_id="999",
+            message_text="Run SDLC on issue #934 (issues/934)",
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+        dev = AgentSession.create(
+            session_id="dev-terminal-steer-001",
+            session_type="dev",
+            project_key="test",
+            status="completed",
+            chat_id="999",
+            message_text="Stage: BUILD",
+            parent_agent_session_id=terminal_pm_for_steer.agent_session_id,
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        with (
+            patch(
+                "agent.agent_session_queue.steer_session",
+                return_value={
+                    "success": True,
+                    "session_id": terminal_pm_for_steer.session_id,
+                    "error": None,
+                },
+            ),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=934),
+        ):
+            await _handle_dev_session_completion(
+                session=terminal_pm_for_steer,
+                agent_session=dev,
+                result="BUILD complete.",
+            )
+
+        # A continuation PM must be created — the steer was accepted but the PM
+        # is terminal and will never consume the message.
+        pm_children = [
+            c
+            for c in AgentSession.query.filter(
+                parent_agent_session_id=terminal_pm_for_steer.agent_session_id
+            )
+            if c.session_type == "pm"
+        ]
+        assert len(pm_children) >= 1
+        cont = pm_children[0]
+        assert cont.status == "pending"
+        assert "CONTINUATION" in cont.message_text
+
+    @pytest.mark.asyncio
+    async def test_steer_accepted_pm_non_terminal_no_continuation(self, redis_test_db):
+        """When steer is accepted and PM is still active at re-check, no continuation PM.
+
+        This is the happy path: the steer message was accepted and the PM is still
+        alive to process it. No continuation PM is needed.
+        """
+        from agent.agent_session_queue import _handle_dev_session_completion
+
+        # Create an active parent — still alive, will process the steering message
         active_pm = AgentSession.create(
-            session_id="pm-active-steer-001",
+            session_id="pm-active-steer-002",
             session_type="pm",
             project_key="test",
             status="active",
@@ -288,7 +362,7 @@ class TestHandleCompletionContinuationFallback:
             tool_call_count=0,
         )
         dev = AgentSession.create(
-            session_id="dev-active-steer-001",
+            session_id="dev-active-steer-002",
             session_type="dev",
             project_key="test",
             status="active",
@@ -313,7 +387,7 @@ class TestHandleCompletionContinuationFallback:
                 result="BUILD complete.",
             )
 
-        # No continuation PM should exist
+        # No continuation PM — the active PM will consume the steering message
         pm_children = [
             c
             for c in AgentSession.query.filter(parent_agent_session_id=active_pm.agent_session_id)
@@ -386,3 +460,165 @@ class TestContinuationDedup:
         ]
         # Only one continuation should exist despite two calls
         assert len(pm_children) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Ordering race — PM terminal at re-check creates continuation PM
+# ---------------------------------------------------------------------------
+
+
+class TestHandleCompletionOrderingRace:
+    """Tests for the issue #987 ordering race fix.
+
+    After fix 1, _handle_dev_session_completion is called AFTER complete_transcript()
+    (which runs _finalize_parent_sync() inline). These tests verify that when the PM
+    is already terminal at the time of the re-check guard, a continuation PM is
+    unconditionally created regardless of whether the steer was accepted or rejected.
+    """
+
+    @pytest.mark.asyncio
+    async def test_pm_terminal_at_recheck_creates_continuation(self, redis_test_db):
+        """Steer accepted + PM terminal at re-check → continuation PM created.
+
+        This directly simulates the post-fix scenario: _handle_dev_session_completion
+        is called after _finalize_parent_sync has already run, so the PM is already
+        in a terminal state. The re-check guard must detect this and create a
+        continuation PM.
+        """
+        from agent.agent_session_queue import _handle_dev_session_completion
+
+        # Parent is already terminal — simulates state after _finalize_parent_sync ran
+        completed_pm = AgentSession.create(
+            session_id="pm-ordering-race-001",
+            session_type="pm",
+            project_key="test",
+            status="completed",
+            chat_id="999",
+            message_text="Run SDLC on issue #987 (issues/987)",
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+        dev = AgentSession.create(
+            session_id="dev-ordering-race-001",
+            session_type="dev",
+            project_key="test",
+            status="completed",
+            chat_id="999",
+            message_text="Stage: PLAN",
+            parent_agent_session_id=completed_pm.agent_session_id,
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        with (
+            patch(
+                "agent.agent_session_queue.steer_session",
+                return_value={
+                    "success": True,
+                    "session_id": completed_pm.session_id,
+                    "error": None,
+                },
+            ),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=987),
+        ):
+            await _handle_dev_session_completion(
+                session=completed_pm,
+                agent_session=dev,
+                result="PLAN complete. Critique stage next.",
+            )
+
+        # Continuation PM must be created — steer was accepted but PM is terminal
+        pm_children = [
+            c
+            for c in AgentSession.query.filter(
+                parent_agent_session_id=completed_pm.agent_session_id
+            )
+            if c.session_type == "pm"
+        ]
+        assert len(pm_children) >= 1
+        cont = pm_children[0]
+        assert cont.status == "pending"
+        assert "CONTINUATION" in cont.message_text
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Path B — agent_session is None, uses session.parent_agent_session_id
+# ---------------------------------------------------------------------------
+
+
+class TestHandleCompletionPathBFallback:
+    """Tests for the Path B fix (issue #987 Fix 2).
+
+    When agent_session is None (status='running' filter returned nothing due to a
+    race with health-check recovery or fast finalization), _handle_dev_session_completion
+    must fall back to session.parent_agent_session_id rather than returning silently.
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_session_none_uses_session_parent_id(self, redis_test_db):
+        """When agent_session=None, session.parent_agent_session_id is used to create continuation PM.
+
+        Before fix 2, agent_session=None caused an early return with no continuation PM.
+        After fix 2, the outer session object's parent_agent_session_id is used as fallback.
+        """
+        from agent.agent_session_queue import _handle_dev_session_completion
+
+        # Parent is in terminal status
+        terminal_pm_path_b = AgentSession.create(
+            session_id="pm-path-b-001",
+            session_type="pm",
+            project_key="test",
+            status="completed",
+            chat_id="999",
+            message_text="Run SDLC on issue #987 (issues/987)",
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+        # The outer session object (populated from queue entry) has parent_agent_session_id set
+        outer_session = AgentSession.create(
+            session_id="dev-path-b-001",
+            session_type="dev",
+            project_key="test",
+            status="completed",
+            chat_id="999",
+            message_text="Stage: PLAN",
+            parent_agent_session_id=terminal_pm_path_b.agent_session_id,
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        with (
+            patch(
+                "agent.agent_session_queue.steer_session",
+                return_value={
+                    "success": False,
+                    "error": "Session is in terminal status 'completed' — steering rejected",
+                },
+            ),
+            patch("agent.agent_session_queue._extract_issue_number", return_value=987),
+        ):
+            # agent_session=None simulates the status="running" filter returning nothing
+            await _handle_dev_session_completion(
+                session=outer_session,
+                agent_session=None,
+                result="PLAN complete.",
+            )
+
+        # Continuation PM must be created via session.parent_agent_session_id fallback
+        pm_children = [
+            c
+            for c in AgentSession.query.filter(
+                parent_agent_session_id=terminal_pm_path_b.agent_session_id
+            )
+            if c.session_type == "pm"
+        ]
+        assert len(pm_children) >= 1
+        cont = pm_children[0]
+        assert cont.status == "pending"
+        assert "CONTINUATION" in cont.message_text
