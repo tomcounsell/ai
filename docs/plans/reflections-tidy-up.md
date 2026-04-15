@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/978
 last_comment_id: none
+revision_applied: true
 ---
 
 # Reflections Tidy-Up: Merge Overlapping Health Gates/Drips, Rename to {subject}-{verb} Standard
@@ -23,8 +24,8 @@ Two pairs of reflections have overlapping scope — they read identical data sou
 - `circuit-health-gate` replaces both health gates, reading `get_health().get("anthropic")` once and managing all circuit-related flags atomically.
 - `session-recovery-drip` replaces both drip reflections, handling both `paused_circuit` and `paused` session statuses (priority order: `paused_circuit` first, FIFO within each group).
 - All 8 renamed reflections follow `{subject}-{verb}` and are self-descriptive.
-- `agent/hibernation.py` deleted (all content absorbed into `agent/sustainability.py`).
-- `config/reflections.yaml` has 24 entries (was 26).
+- `agent/hibernation.py` deleted (all content absorbed into `agent/sustainability.py`); `agent/agent_session_queue.py:2549` import updated.
+- `config/reflections.yaml` has 31 entries (was 33).
 
 ## Freshness Check
 
@@ -114,7 +115,7 @@ No prerequisites — this work has no external dependencies.
 |---|---|---|
 | `health-check` | `session-liveness-check` | `agent.agent_session_queue._agent_session_health_check` |
 | `popoto-index-cleanup` | `redis-index-cleanup` | `scripts.popoto_index_cleanup.run_cleanup` |
-| `sustainability-digest` | `health-digest` | agent (no callable) |
+| `sustainability-digest` | `system-health-digest` | agent (no callable) |
 | `legacy-code-scan` | `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` |
 | `redis-data-quality` | `redis-quality-audit` | `reflections.maintenance.run_redis_data_quality` |
 | `log-review` | `daily-log-review` | `reflections.auditing.run_log_review` |
@@ -128,6 +129,7 @@ No prerequisites — this work has no external dependencies.
   - OPEN/HALF_OPEN: renew `queue_paused` (TTL 3600s) AND `worker:hibernating` (TTL 600s); send hibernation notification on first entry (was_both_clear)
   - CLOSED: delete both flags; if either was set, set `recovery:active` AND `worker:recovering` (TTL 3600s), call `send_hibernation_notification("waking")`
 - Copy `send_hibernation_notification()` from `hibernation.py` into `sustainability.py`
+- Update `agent/agent_session_queue.py:2549`: change `from agent.hibernation import send_hibernation_notification` → `from agent.sustainability import send_hibernation_notification` (the hibernating-event caller is the only caller of the `"hibernating"` variant; `circuit_health_gate` calls the `"waking"` variant)
 - Update module docstring
 
 **Step 2 — Merge `session-recovery-drip` into `agent/sustainability.py`:**
@@ -175,7 +177,7 @@ No prerequisites — this work has no external dependencies.
 
 - [ ] `tests/unit/test_sustainability.py` — UPDATE: replace `api_health_gate` / `recovery_drip` imports and tests with `circuit_health_gate` / `session_recovery_drip` tests; add tests for combined flag management and combined session drip
 - [ ] `tests/unit/test_hibernation.py` — DELETE: all tests are superseded by updated test_sustainability.py tests for circuit_health_gate and session_recovery_drip
-- [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: change `worker-health-gate` → `circuit-health-gate` and `session-resume-drip` → `session-recovery-drip` in any registration assertions
+- [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: change `worker-health-gate` → `circuit-health-gate` and `session-resume-drip` → `session-recovery-drip` in any registration assertions; update hardcoded `"health-check"` strings at lines 49, 376, 397, 480, 489, 506 → `"session-liveness-check"`
 - [ ] `tests/unit/test_reflections_package.py` — UPDATE: no callable changes for the 8 renames; verify no reflection `name:` strings are hardcoded in these tests (if found, update to new names)
 - [ ] `tests/unit/test_hibernation.py::test_worker_health_gate_registered` — DELETE: superseded by `circuit-health-gate` registration test in test_sustainability.py
 - [ ] `tests/unit/test_hibernation.py::test_session_resume_drip_registered` — DELETE: superseded by `session-recovery-drip` registration test in test_sustainability.py
@@ -237,7 +239,7 @@ No agent integration required — reflections are internal scheduled functions. 
 
 ## Success Criteria
 
-- [ ] `config/reflections.yaml` has exactly 24 reflections (was 26)
+- [ ] `config/reflections.yaml` has exactly 31 reflections (was 33)
 - [ ] `api-health-gate`, `worker-health-gate`, `recovery-drip`, `session-resume-drip` are gone from YAML and Python
 - [ ] `circuit-health-gate` and `session-recovery-drip` exist in `config/reflections.yaml` and `agent/sustainability.py`
 - [ ] All 8 renamed reflections appear under their new names in `config/reflections.yaml`
@@ -282,7 +284,7 @@ No agent integration required — reflections are internal scheduled functions. 
 ### 2. Update config/reflections.yaml
 - **Task ID**: build-yaml
 - **Depends On**: build-sustainability
-- **Validates**: YAML count = 24
+- **Validates**: YAML count = 31
 - **Assigned To**: sustainability-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -309,7 +311,7 @@ No agent integration required — reflections are internal scheduled functions. 
 - **Assigned To**: final-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify `config/reflections.yaml` has exactly 24 entries
+- Verify `config/reflections.yaml` has exactly 31 entries
 - Verify no references to `api-health-gate`, `worker-health-gate`, `recovery-drip`, `session-resume-drip` anywhere in codebase (grep)
 - Run `pytest tests/unit/test_sustainability.py tests/unit/test_reflection_scheduler.py tests/unit/test_reflections_package.py -v`
 - Run `python -m ruff check . && python -m ruff format --check .`
@@ -319,18 +321,23 @@ No agent integration required — reflections are internal scheduled functions. 
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Reflection count | `python -c "import yaml; r=yaml.safe_load(open('config/reflections.yaml')); print(len(r['reflections']))"` | output contains 24 |
+| Reflection count | `python -c "import yaml; r=yaml.safe_load(open('config/reflections.yaml')); print(len(r['reflections']))"` | output contains 31 |
 | No old names | `grep -r "api-health-gate\|worker-health-gate\|recovery-drip\|session-resume-drip" config/ agent/ tests/ reflections/ --include="*.py" --include="*.yaml"` | exit code 1 |
 | Tests pass | `pytest tests/unit/test_sustainability.py tests/unit/test_reflection_scheduler.py tests/unit/test_reflections_package.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | hibernation deleted | `test ! -f agent/hibernation.py` | exit code 0 |
+| No hibernation imports | `grep -r "from agent.hibernation" . --include="*.py"` | exit code 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Archaeologist | `agent_session_queue.py:2549` imports `send_hibernation_notification` from `agent.hibernation` — deleting `agent/hibernation.py` without updating this line causes `ModuleNotFoundError` at runtime on circuit-open errors | Add to Task 1: update import to `from agent.sustainability import send_hibernation_notification`; add grep scan to Task 4 and Verification | Change `agent/agent_session_queue.py:2549` from `from agent.hibernation import send_hibernation_notification` to `from agent.sustainability import send_hibernation_notification` — function signature unchanged: `(event: str, project_key: str | None = None)` |
+| CONCERN | Operator, Skeptic | Reflection count claim is stale — plan says 24 (was 26) but current YAML has 33 entries; merge yields 31, not 24; Task 4 validator will fail its own check | Update success criteria, Task 4, and Verification table to expect 31 (= 33 − 4 + 2) | Lines 240, 285, 312, 322–323: replace all `24` with `31` and `was 26` with `was 33` |
+| CONCERN | Adversary, Skeptic | `circuit_health_gate` design omits that `agent_session_queue.py:2549` is a second independent caller of `send_hibernation_notification("hibernating")` — plan says notification is "absorbed from hibernation.py" but does not name this call site | Add explicit mention of `agent_session_queue.py` caller to Step 1 task description | In Step 1, add: "Update `agent/agent_session_queue.py:2549`: `from agent.hibernation import send_hibernation_notification` → `from agent.sustainability import send_hibernation_notification`" |
+| CONCERN | Skeptic | `test_reflection_scheduler.py` lines 49 and 506 hardcode `"health-check"` — rename to `session-liveness-check` will break these assertions; missing from Test Impact checklist | Add to Test Impact: `test_reflection_scheduler.py` lines 49 and 506 — UPDATE: `"health-check"` → `"session-liveness-check"` | Line 49: `assert "health-check" in all_names` → `assert "session-liveness-check" in all_names`; line 506: update `expected` set |
+| NIT | Simplifier | `health-digest` lacks a subject — violates the `{subject}-{verb}` standard the plan itself establishes; `system-health-digest` would be more consistent | Optional: rename to `system-health-digest` | No blocker — `health-digest` is still an improvement |
 
 ---
 
