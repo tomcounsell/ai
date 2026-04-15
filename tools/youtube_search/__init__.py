@@ -107,9 +107,7 @@ async def youtube_search(query: str, limit: int = 5) -> list[dict]:
     Returns:
         List of result dicts (same structure as youtube_search_sync).
     """
-    return await asyncio.get_running_loop().run_in_executor(
-        None, youtube_search_sync, query, limit
-    )
+    return await asyncio.get_running_loop().run_in_executor(None, youtube_search_sync, query, limit)
 
 
 def format_results(results: list[dict]) -> str:
