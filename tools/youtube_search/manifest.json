@@ -1,0 +1,41 @@
+{
+  "name": "youtube_search",
+  "version": "1.0.0",
+  "description": "Search YouTube videos by query using yt-dlp",
+  "type": "cli",
+  "status": "stable",
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": "valor-youtube-search"
+  },
+  "capabilities": [
+    "search"
+  ],
+  "requires": {
+    "env": [],
+    "python": ">=3.10",
+    "packages": ["yt-dlp"]
+  },
+  "commands": {
+    "verify": "valor-youtube-search \"test\" 2>&1 | head -5",
+    "test": "pytest tests/unit/test_youtube_search.py -v"
+  },
+  "workflows": [
+    {
+      "name": "search-videos",
+      "description": "Search YouTube for videos matching a query",
+      "steps": [
+        "valor-youtube-search \"python tutorial\""
+      ]
+    },
+    {
+      "name": "search-limited",
+      "description": "Search with limited results",
+      "steps": [
+        "valor-youtube-search --limit 3 \"machine learning basics\""
+      ]
+    }
+  ]
+}

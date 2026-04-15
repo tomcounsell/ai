@@ -158,3 +158,8 @@ YOUTUBE_MEDIA_DIR = Path("data/media/youtube")
 6. Send live stream → Should return "live stream" message
 7. Send private video → Should gracefully handle with error message
 8. Send same video twice → Should use cached audio file on second request (if Whisper path was used)
+
+## Related
+
+- [YouTube Search](youtube-search.md) — Search YouTube by query to discover videos (uses `valor-youtube-search` CLI)
+- `tools/link_analysis/` — Shared YouTube infrastructure (video metadata, audio download)
