@@ -39,8 +39,8 @@ Anthropic API recovers
 
 | Key | TTL | Writer | Reader |
 |-----|-----|--------|--------|
-| `{project_key}:worker:hibernating` | 600s | `_worker_loop()` catch, `worker-health-gate` | `_pop_agent_session()`, `worker-health-gate` |
-| `{project_key}:worker:recovering` | 3600s | `worker-health-gate` | `session-resume-drip` |
+| `{project_key}:worker:hibernating` | 600s | `_worker_loop()` catch, `circuit-health-gate` | `_pop_agent_session()`, `circuit-health-gate` |
+| `{project_key}:worker:recovering` | 3600s | `circuit-health-gate` | `session-recovery-drip` |
 
 The 600s TTL on `worker:hibernating` is a safety valve: if the reflection scheduler stops running, the flag expires automatically and the worker resumes popping sessions rather than staying blocked indefinitely.
 

@@ -162,11 +162,11 @@ class TestIgnoreLogRedis:
         assert len(ReflectionIgnore.query.all()) == 0
 
 
-class TestPopotoIndexCleanupReflection:
-    """Tests for popoto-index-cleanup reflection registration."""
+class TestRedisIndexCleanupReflection:
+    """Tests for redis-index-cleanup reflection registration."""
 
     def test_reflection_registered_in_yaml(self):
-        """Verify popoto-index-cleanup exists in reflections.yaml."""
+        """Verify redis-index-cleanup exists in reflections.yaml."""
         from pathlib import Path
 
         import yaml
