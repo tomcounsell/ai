@@ -17,7 +17,7 @@ DM access control is split across three sources: a separate `dm_whitelist.json` 
 **Current behavior:**
 
 1. `~/Desktop/Valor/dm_whitelist.json` stores user IDs, names, and per-user permission levels
-2. `projects.json` has a `dms` section with persona and working_directory (never actually read by the bridge)
+2. `projects.json` has a `dms` section with persona, working_directory, and whitelist (whitelist is read; persona/working_directory were not used by the bridge at the time this plan was written)
 3. `TELEGRAM_DM_WHITELIST` env var serves as fallback if the JSON file is missing
 4. `DM_WHITELIST_CONFIG` dict is propagated to three modules for per-user permission lookups
 5. `get_user_permissions()` exists in both `routing.py` and `context.py` but always returns `qa_only`
