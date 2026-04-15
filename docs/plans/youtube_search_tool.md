@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: feature
 appetite: Small
 owner: Valor
@@ -169,9 +169,9 @@ No update system changes required — `yt-dlp` is already a dependency. The new 
 
 ## Documentation
 
-- [ ] Create `docs/features/youtube-search.md` describing the YouTube search capability
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Add `valor-youtube-search` to the Quick Commands table in `CLAUDE.md`
+- [x] Create `docs/features/youtube-search.md` describing the YouTube search capability
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Add `valor-youtube-search` to the Quick Commands table in `CLAUDE.md`
 
 ## Success Criteria
 

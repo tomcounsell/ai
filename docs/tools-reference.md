@@ -126,6 +126,30 @@ python tools/send_telegram.py --emoji "sad"
 
 Requires `TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID`. Queues a `custom_emoji_message` payload to the Redis outbox. The relay renders it using `MessageEntityCustomEmoji` for Premium custom emoji, falling back to plain text if the send fails.
 
+### YouTube Search (`tools.youtube_search`)
+
+Search YouTube videos by query using yt-dlp. No API key required.
+
+```bash
+# Basic search (returns 5 results)
+valor-youtube-search "python tutorial"
+
+# Limit results
+valor-youtube-search --limit 3 "machine learning basics"
+```
+
+```python
+# Sync (primary)
+from tools.youtube_search import youtube_search_sync
+results = youtube_search_sync("python tutorial", limit=5)
+
+# Async (wraps sync via run_in_executor)
+from tools.youtube_search import youtube_search
+results = await youtube_search("python tutorial", limit=5)
+```
+
+Returns structured results with `title`, `url`, `video_id` (guaranteed) plus `duration`, `view_count`, `uploader`, `description`, `upload_date` (best-effort, may be None). See `docs/features/youtube-search.md` for full documentation.
+
 ### Link Analysis (`tools.link_analysis`)
 
 URL extraction and metadata analysis.
