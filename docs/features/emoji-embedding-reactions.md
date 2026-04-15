@@ -163,6 +163,22 @@ The work-type classifier (`tools/classifier.py` / `classify_request_async`) was 
 | `tests/unit/test_custom_emoji_index.py` | Custom emoji index building and cache tests |
 | `tests/unit/test_send_telegram.py` | Reaction and emoji flag tests |
 
+## Terminal Reactions
+
+Session lifecycle events are reported back to Telegram via three terminal reaction constants defined in `agent/constants.py`:
+
+| Constant | Semantic | Feeling String | Fallback Emoji |
+|----------|----------|----------------|----------------|
+| `REACTION_SUCCESS` | Silent ack — no text reply sent | `"acknowledged received silently noted"` | 👌 |
+| `REACTION_COMPLETE` | Work done — text reply attached | `"task completed successfully work done"` | 👏 |
+| `REACTION_ERROR` | Something went wrong | `"error occurred something went wrong"` | 😢 |
+
+These constants are `EmojiResult` objects, **not** plain strings. They are resolved lazily via `find_best_emoji()` using the feeling strings above on first access inside a live request handler. The resolved value is cached in a module-level dict (`_TERMINAL_EMOJI_CACHE`) — no HTTP call is made at import time and no retry occurs after the first resolution.
+
+When `find_best_emoji()` is unavailable (missing `OPENROUTER_API_KEY`, absent embeddings file, or the function returns the default thinking emoji), `_resolve_terminal_emoji()` substitutes the hardcoded fallback `EmojiResult` listed in the table above. All three fallback emojis are confirmed in `VALIDATED_REACTIONS` and are distinct from each other, ensuring correct behavior in degraded environments.
+
+`bridge/response.py` re-exports these constants for backward compatibility. The `set_reaction()` call site already accepts `EmojiResult` objects transparently via the existing standard/custom emoji dispatch logic.
+
 ## See Also
 
 - [Classification](classification.md) -- work-type classification (bug/feature/chore), which is separate from emoji reactions
