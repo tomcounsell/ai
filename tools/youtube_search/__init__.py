@@ -41,6 +41,8 @@ def youtube_search_sync(query: str, limit: int = 5) -> list[dict]:
     """
     if not query or not query.strip():
         raise ValueError("Search query must not be empty")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
 
     query = query.strip()
     logger.info("YouTube search: query=%r limit=%d", query, limit)
