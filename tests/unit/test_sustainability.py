@@ -40,7 +40,7 @@ def _circuit_state_closed():
 
 # ---------------------------------------------------------------------------
 # Shared patch context: minimal stubs for bridge.health / bridge.resilience
-# so we can import api_health_gate without the real bridge package.
+# so we can import callables without the real bridge package.
 # ---------------------------------------------------------------------------
 
 
@@ -76,23 +76,31 @@ def _build_health_stubs(circuit_state_value: str = "closed", anthropic_present: 
 
 
 # ---------------------------------------------------------------------------
-# TestApiHealthGate
+# TestCircuitHealthGate
 # ---------------------------------------------------------------------------
 
 
-class TestApiHealthGate(unittest.TestCase):
-    def _run(self, circuit_state: str, was_paused: bool, anthropic_present: bool = True):
-        """Run api_health_gate with mocked dependencies, return the redis mock."""
-        from agent.sustainability import api_health_gate
+class TestCircuitHealthGate(unittest.TestCase):
+    def _run(
+        self,
+        circuit_state: str,
+        was_paused: bool,
+        was_hibernating: bool,
+        anthropic_present: bool = True,
+    ):
+        """Run circuit_health_gate with mocked dependencies, return the redis mock."""
+        from agent.sustainability import circuit_health_gate
 
         health_mod, resilience_mod, _cb = _build_health_stubs(circuit_state, anthropic_present)
 
         r = MagicMock()
-        r.exists.return_value = int(was_paused)
+        # exists() is called twice: once for pause_key, once for hib_key
+        r.exists.side_effect = [int(was_paused), int(was_hibernating)]
 
         with (
             patch("agent.sustainability._get_redis", return_value=r),
             patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("agent.sustainability.send_hibernation_notification"),
             patch.dict(
                 sys.modules,
                 {
@@ -101,32 +109,293 @@ class TestApiHealthGate(unittest.TestCase):
                 },
             ),
         ):
-            api_health_gate()
+            circuit_health_gate()
 
         return r
 
-    def test_open_circuit_sets_queue_paused(self):
-        """OPEN circuit, not previously paused → queue_paused key written."""
-        r = self._run("open", was_paused=False)
-        r.set.assert_called_once_with("testproj:sustainability:queue_paused", "1", ex=3600)
+    def test_open_circuit_sets_both_flags(self):
+        """OPEN circuit → sets queue_paused (TTL 3600s) AND worker:hibernating (TTL 600s)."""
+        r = self._run("open", was_paused=False, was_hibernating=False)
+        assert r.set.call_count == 2
+        set_calls = r.set.call_args_list
+        assert set_calls[0].args == ("testproj:sustainability:queue_paused", "1")
+        assert set_calls[0].kwargs == {"ex": 3600}
+        assert set_calls[1].args == ("testproj:worker:hibernating", "1")
+        assert set_calls[1].kwargs == {"ex": 600}
 
-    def test_closed_circuit_clears_pause_and_sets_recovery(self):
-        """CLOSED circuit after OPEN → deletes pause key, sets recovery:active."""
-        r = self._run("closed", was_paused=True)
-        r.delete.assert_called_once_with("testproj:sustainability:queue_paused")
-        r.set.assert_called_once_with("testproj:recovery:active", "1", ex=3600)
+    def test_half_open_circuit_renews_both_flags(self):
+        """HALF_OPEN circuit → renews both flags even when already set."""
+        r = self._run("half_open", was_paused=True, was_hibernating=True)
+        assert r.set.call_count == 2
 
-    def test_closed_circuit_no_recovery_if_was_not_paused(self):
-        """CLOSED circuit when not previously paused → no recovery:active set."""
-        r = self._run("closed", was_paused=False)
-        r.delete.assert_called_once_with("testproj:sustainability:queue_paused")
+    def test_closed_circuit_deletes_both_flags_and_sets_recovery(self):
+        """CLOSED circuit after OPEN → deletes both flags, sets both recovery keys."""
+        from agent.sustainability import circuit_health_gate
+
+        health_mod, resilience_mod, _cb = _build_health_stubs("closed")
+
+        r = MagicMock()
+        r.exists.side_effect = [1, 1]  # was_paused=True, was_hibernating=True
+
+        notif_mock = MagicMock()
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("agent.sustainability.send_hibernation_notification", notif_mock),
+            patch.dict(
+                sys.modules,
+                {
+                    "bridge.health": health_mod,
+                    "bridge.resilience": resilience_mod,
+                },
+            ),
+        ):
+            circuit_health_gate()
+
+        delete_calls = [c.args[0] for c in r.delete.call_args_list]
+        assert "testproj:sustainability:queue_paused" in delete_calls
+        assert "testproj:worker:hibernating" in delete_calls
+        set_keys = [c.args[0] for c in r.set.call_args_list]
+        assert "testproj:recovery:active" in set_keys
+        assert "testproj:worker:recovering" in set_keys
+        notif_mock.assert_called_once_with("waking", project_key="testproj")
+
+    def test_closed_circuit_no_recovery_if_neither_flag_was_set(self):
+        """CLOSED circuit when neither flag was set → no recovery keys, no notification."""
+        from agent.sustainability import circuit_health_gate
+
+        health_mod, resilience_mod, _cb = _build_health_stubs("closed")
+
+        r = MagicMock()
+        r.exists.side_effect = [0, 0]  # neither flag was set
+
+        notif_mock = MagicMock()
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("agent.sustainability.send_hibernation_notification", notif_mock),
+            patch.dict(
+                sys.modules,
+                {
+                    "bridge.health": health_mod,
+                    "bridge.resilience": resilience_mod,
+                },
+            ),
+        ):
+            circuit_health_gate()
+
         r.set.assert_not_called()
+        notif_mock.assert_not_called()
 
     def test_unregistered_circuit_returns_without_error(self):
         """get_health() returns nothing for 'anthropic' → silent no-op."""
-        r = self._run("closed", was_paused=False, anthropic_present=False)
+        r = self._run("closed", was_paused=False, was_hibernating=False, anthropic_present=False)
         r.set.assert_not_called()
         r.delete.assert_not_called()
+
+    def test_exception_does_not_propagate(self):
+        """Any unhandled exception is caught; function does not raise."""
+        from agent.sustainability import circuit_health_gate
+
+        with patch("agent.sustainability._get_redis", side_effect=RuntimeError("redis down")):
+            circuit_health_gate()  # Should not raise
+
+    def test_closed_circuit_only_pause_flag_was_set(self):
+        """CLOSED circuit: only queue_paused was set → still triggers recovery and notification."""
+        from agent.sustainability import circuit_health_gate
+
+        health_mod, resilience_mod, _cb = _build_health_stubs("closed")
+
+        r = MagicMock()
+        r.exists.side_effect = [1, 0]  # was_paused=True, was_hibernating=False
+
+        notif_mock = MagicMock()
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch("agent.sustainability.send_hibernation_notification", notif_mock),
+            patch.dict(
+                sys.modules,
+                {
+                    "bridge.health": health_mod,
+                    "bridge.resilience": resilience_mod,
+                },
+            ),
+        ):
+            circuit_health_gate()
+
+        set_keys = [c.args[0] for c in r.set.call_args_list]
+        assert "testproj:recovery:active" in set_keys
+        notif_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestSessionRecoveryDrip
+# ---------------------------------------------------------------------------
+
+
+class TestSessionRecoveryDrip(unittest.TestCase):
+    def test_drip_paused_circuit_session_first(self):
+        """paused_circuit session exists alongside paused session → paused_circuit dripped first."""
+        import models.agent_session as asm
+        import models.session_lifecycle as lm
+        from agent.sustainability import session_recovery_drip
+
+        r = MagicMock()
+        # recovery:active is set, worker:recovering is not
+        r.exists.side_effect = [True, False]
+
+        circuit_session = MagicMock()
+        circuit_session.session_id = "sess-circuit"
+        circuit_session.created_at = 1000.0
+
+        paused_session = MagicMock()
+        paused_session.session_id = "sess-paused"
+        paused_session.created_at = 900.0  # older, but wrong bucket
+
+        def mock_filter(**kwargs):
+            status = kwargs.get("status")
+            if status == "paused_circuit":
+                return [circuit_session]
+            elif status == "paused":
+                return [paused_session]
+            return []
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
+            patch.object(lm, "transition_status") as mock_transition,
+        ):
+            mock_query.filter.side_effect = lambda **kw: mock_filter(**kw)
+            session_recovery_drip()
+
+        mock_transition.assert_called_once_with(
+            circuit_session,
+            "pending",
+            reason="session-recovery-drip: API circuit recovered",
+        )
+
+    def test_drip_paused_session_when_circuit_queue_empty(self):
+        """No paused_circuit sessions → drip the oldest paused session."""
+        import models.agent_session as asm
+        import models.session_lifecycle as lm
+        from agent.sustainability import session_recovery_drip
+
+        r = MagicMock()
+        r.exists.side_effect = [False, True]  # only worker:recovering set
+
+        paused_session = MagicMock()
+        paused_session.session_id = "sess-paused"
+        paused_session.created_at = 1000.0
+
+        def mock_filter(**kwargs):
+            status = kwargs.get("status")
+            if status == "paused_circuit":
+                return []
+            elif status == "paused":
+                return [paused_session]
+            return []
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
+            patch.object(lm, "transition_status") as mock_transition,
+        ):
+            mock_query.filter.side_effect = lambda **kw: mock_filter(**kw)
+            session_recovery_drip()
+
+        mock_transition.assert_called_once_with(
+            paused_session,
+            "pending",
+            reason="session-recovery-drip: worker recovered",
+        )
+
+    def test_clears_both_flags_when_both_queues_empty(self):
+        """Both queues empty → clears recovery:active AND worker:recovering."""
+        import models.agent_session as asm
+        from agent.sustainability import session_recovery_drip
+
+        r = MagicMock()
+        r.exists.side_effect = [True, True]
+
+        def mock_filter(**kwargs):
+            return []
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
+        ):
+            mock_query.filter.side_effect = lambda **kw: mock_filter(**kw)
+            session_recovery_drip()
+
+        delete_calls = [c.args[0] for c in r.delete.call_args_list]
+        assert "testproj:recovery:active" in delete_calls
+        assert "testproj:worker:recovering" in delete_calls
+
+    def test_no_op_when_neither_flag_set(self):
+        """Neither recovery flag set → no sessions modified."""
+        import models.session_lifecycle as lm
+        from agent.sustainability import session_recovery_drip
+
+        r = MagicMock()
+        r.exists.side_effect = [False, False]
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(lm, "transition_status") as mock_transition,
+        ):
+            session_recovery_drip()
+
+        mock_transition.assert_not_called()
+
+    def test_exception_does_not_propagate(self):
+        """Any unhandled exception is caught; function does not raise."""
+        from agent.sustainability import session_recovery_drip
+
+        with patch("agent.sustainability._get_redis", side_effect=RuntimeError("redis down")):
+            session_recovery_drip()  # Should not raise
+
+    def test_only_one_session_dripped_per_tick(self):
+        """Two paused_circuit sessions → only the oldest one is dripped per tick."""
+        import models.agent_session as asm
+        import models.session_lifecycle as lm
+        from agent.sustainability import session_recovery_drip
+
+        r = MagicMock()
+        r.exists.side_effect = [True, False]
+
+        session_older = MagicMock()
+        session_older.session_id = "sess-old"
+        session_older.created_at = 500.0
+
+        session_newer = MagicMock()
+        session_newer.session_id = "sess-new"
+        session_newer.created_at = 1000.0
+
+        def mock_filter(**kwargs):
+            status = kwargs.get("status")
+            if status == "paused_circuit":
+                return [session_newer, session_older]
+            return []
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
+            patch.object(lm, "transition_status") as mock_transition,
+        ):
+            mock_query.filter.side_effect = lambda **kw: mock_filter(**kw)
+            session_recovery_drip()
+
+        assert mock_transition.call_count == 1
+        assert mock_transition.call_args[0][0] is session_older
 
 
 # ---------------------------------------------------------------------------
@@ -227,76 +496,6 @@ class TestPopAgentSessionGuard(unittest.TestCase):
                 loop.close()
 
         self.assertIsNone(result)
-
-
-# ---------------------------------------------------------------------------
-# TestRecoveryDrip
-# ---------------------------------------------------------------------------
-
-
-class TestRecoveryDrip(unittest.TestCase):
-    def test_drip_transitions_oldest_paused_session(self):
-        """recovery:active set + one paused_circuit session → transition to pending."""
-        import models.agent_session as asm
-        import models.session_lifecycle as lm
-        from agent.sustainability import recovery_drip
-
-        r = MagicMock()
-        r.exists.return_value = True
-
-        mock_session = MagicMock()
-        mock_session.session_id = "sess-001"
-        mock_session.created_at = 1000.0
-
-        with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
-            patch.object(lm, "transition_status") as mock_transition,
-        ):
-            mock_query.filter.return_value = [mock_session]
-            recovery_drip()
-
-        mock_transition.assert_called_once_with(
-            mock_session,
-            "pending",
-            reason="recovery-drip: API circuit recovered",
-        )
-
-    def test_no_op_when_recovery_flag_absent(self):
-        """recovery:active flag not set → no sessions modified."""
-        import models.session_lifecycle as lm
-        from agent.sustainability import recovery_drip
-
-        r = MagicMock()
-        r.exists.return_value = False
-
-        with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch.object(lm, "transition_status") as mock_transition,
-        ):
-            recovery_drip()
-
-        mock_transition.assert_not_called()
-
-    def test_clears_recovery_flag_when_queue_empty(self):
-        """recovery:active set but no paused sessions → clears the flag."""
-        import models.agent_session as asm
-        from agent.sustainability import recovery_drip
-
-        r = MagicMock()
-        r.exists.return_value = True
-
-        with (
-            patch("agent.sustainability._get_redis", return_value=r),
-            patch("agent.sustainability._get_project_key", return_value="testproj"),
-            patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
-        ):
-            mock_query.filter.return_value = []
-            recovery_drip()
-
-        r.delete.assert_called_once_with("testproj:recovery:active")
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +664,29 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
             command,
             "command prompt must include plain-language label mapping containing 'RECOVERING'",
         )
+
+
+# ---------------------------------------------------------------------------
+# TestCircuitHealthGateRegistered
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitHealthGateRegistered(unittest.TestCase):
+    def test_circuit_health_gate_registered(self):
+        """circuit-health-gate must be present in the reflection registry."""
+        from agent.reflection_scheduler import load_registry
+
+        registry = load_registry()
+        names = [e.name for e in registry]
+        assert "circuit-health-gate" in names, f"circuit-health-gate not found in: {names}"
+
+    def test_session_recovery_drip_registered(self):
+        """session-recovery-drip must be present in the reflection registry."""
+        from agent.reflection_scheduler import load_registry
+
+        registry = load_registry()
+        names = [e.name for e in registry]
+        assert "session-recovery-drip" in names, f"session-recovery-drip not found in: {names}"
 
 
 if __name__ == "__main__":

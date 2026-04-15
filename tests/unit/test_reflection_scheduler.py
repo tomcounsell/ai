@@ -46,7 +46,7 @@ class TestRegistryLoading:
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         all_names = [r["name"] for r in data["reflections"]]
-        assert "health-check" in all_names
+        assert "session-liveness-check" in all_names
 
     def test_load_registry_returns_only_enabled(self):
         """load_registry() filters out disabled entries."""
@@ -373,7 +373,7 @@ class TestReflectionScheduler:
         # Inject a synthetic entry since all real ones may be disabled
         scheduler._entries = [
             ReflectionEntry(
-                name="health-check",
+                name="session-liveness-check",
                 description="Test entry",
                 interval=300,
                 priority="high",
@@ -394,7 +394,7 @@ class TestReflectionScheduler:
 
             result = scheduler.format_status()
             assert "Reflections:" in result
-            assert "health-check" in result
+            assert "session-liveness-check" in result
 
     @pytest.mark.asyncio
     async def test_scheduler_tick_skips_not_due(self):
@@ -477,7 +477,7 @@ class TestRegistryIntegrity:
         registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
         with open(registry_path) as f:
             data = yaml.safe_load(f)
-        health_entries = [e for e in data["reflections"] if e["name"] == "health-check"]
+        health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
         assert len(health_entries) == 1
         assert health_entries[0]["priority"] == "high"
 
@@ -486,7 +486,7 @@ class TestRegistryIntegrity:
         registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
         with open(registry_path) as f:
             data = yaml.safe_load(f)
-        health_entries = [e for e in data["reflections"] if e["name"] == "health-check"]
+        health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
         assert health_entries[0]["interval"] == 300
 
     def test_no_duplicate_names(self):
@@ -503,7 +503,7 @@ class TestRegistryIntegrity:
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = {e["name"] for e in data["reflections"]}
-        expected = {"health-check", "agent-session-cleanup", "stale-branch-cleanup"}
+        expected = {"session-liveness-check", "agent-session-cleanup", "stale-branch-cleanup"}
         assert expected.issubset(names), f"Missing reflections: {expected - names}"
 
 
