@@ -231,20 +231,29 @@ class TestImportDecoupling:
             )
 
     def test_reaction_constants_importable_from_agent(self):
-        """REACTION_* constants should be importable from agent.constants."""
+        """REACTION_* constants should be importable from agent.constants as EmojiResult objects."""
         from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+        from bridge.response import VALIDATED_REACTIONS
+        from tools.emoji_embedding import EmojiResult
 
-        assert REACTION_SUCCESS == "\U0001f44d"
-        assert REACTION_COMPLETE == "\U0001f3c6"
-        assert REACTION_ERROR == "\U0001f631"
+        assert isinstance(REACTION_SUCCESS, EmojiResult)
+        assert isinstance(REACTION_COMPLETE, EmojiResult)
+        assert isinstance(REACTION_ERROR, EmojiResult)
+        assert REACTION_SUCCESS.emoji in VALIDATED_REACTIONS
+        assert REACTION_COMPLETE.emoji in VALIDATED_REACTIONS
+        assert REACTION_ERROR.emoji in VALIDATED_REACTIONS
 
     def test_reaction_re_exports_from_bridge(self):
-        """REACTION_* should still be importable from bridge.response (backward compat)."""
-        from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+        """REACTION_* should still be importable from bridge.response (backward compat) as EmojiResult."""
+        from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS, VALIDATED_REACTIONS
+        from tools.emoji_embedding import EmojiResult
 
-        assert REACTION_SUCCESS == "\U0001f44d"
-        assert REACTION_COMPLETE == "\U0001f3c6"
-        assert REACTION_ERROR == "\U0001f631"
+        assert isinstance(REACTION_SUCCESS, EmojiResult)
+        assert isinstance(REACTION_COMPLETE, EmojiResult)
+        assert isinstance(REACTION_ERROR, EmojiResult)
+        assert REACTION_SUCCESS.emoji in VALIDATED_REACTIONS
+        assert REACTION_COMPLETE.emoji in VALIDATED_REACTIONS
+        assert REACTION_ERROR.emoji in VALIDATED_REACTIONS
 
     def test_session_logs_importable_from_agent(self):
         """save_session_snapshot should be importable from agent.session_logs."""
