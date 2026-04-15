@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/975
 last_comment_id: null
+revision_applied: true
 ---
 
 # Terminal Emoji Upgrade — Semantic Reactions via find_best_emoji
@@ -95,11 +96,13 @@ No prerequisites — all infrastructure (EmojiResult, set_reaction, find_best_em
 
 ### Technical Approach
 
-1. In `agent/constants.py`, replace the three hardcoded Unicode strings with a `_resolve_terminal_emoji(feeling, fallback)` helper that calls `find_best_emoji()` and catches all exceptions, returning a fallback `EmojiResult` on any failure.
-2. Call the helper three times with distinct feeling strings, caching the results as module-level `EmojiResult` constants.
-3. The helper is called at import time (module load), so results are available immediately. No async needed — `find_best_emoji()` is synchronous.
+**B2 addressed — lazy init via module `__getattr__`:** `find_best_emoji()` makes one synchronous HTTP call per invocation (to embed the feeling string) even when the embedding cache is warm. Calling it 3 times at module import adds 3 blocking HTTP round-trips to every process start. Instead, use Python's module-level `__getattr__` to defer resolution until the constant is first accessed inside a request handler — zero cost at import time.
+
+1. In `agent/constants.py`, replace the three hardcoded Unicode strings with private `_TERMINAL_EMOJI_CACHE: dict[str, EmojiResult] = {}` and a `_resolve_terminal_emoji(name, feeling, fallback)` helper.
+2. Define module-level `__getattr__(name)` that, for `REACTION_SUCCESS`, `REACTION_COMPLETE`, `REACTION_ERROR`, calls `_resolve_terminal_emoji()` on first access and caches the result. Subsequent accesses return the cached value directly (no second HTTP call).
+3. The helper calls `find_best_emoji(feeling)` and catches all exceptions, returning `EmojiResult(emoji=fallback)` on any failure.
 4. Update `bridge/response.py` comment (line 166) to reflect that re-exported constants are now `EmojiResult` objects.
-5. Update tests to assert: (a) constants are `EmojiResult` instances, (b) their `.emoji` fallback strings are in `VALIDATED_REACTIONS`, (c) all three are distinct.
+5. Update tests to assert: (a) constants are `EmojiResult` instances, (b) their `.emoji` fallback strings are in `VALIDATED_REACTIONS`, (c) all three are distinct — using `str(r)` or `.emoji` comparisons, not set membership on raw `EmojiResult` objects (B1 fix).
 
 ### Feeling Strings
 
@@ -130,7 +133,7 @@ No prerequisites — all infrastructure (EmojiResult, set_reaction, find_best_em
 - [ ] `tests/integration/test_reply_delivery.py::test_reaction_complete_in_validated_list` — UPDATE: extract `.emoji` from EmojiResult before checking VALIDATED_REACTIONS membership.
 - [ ] `tests/integration/test_reply_delivery.py::test_reaction_error_in_validated_list` — UPDATE: same — extract `.emoji`.
 - [ ] `tests/integration/test_reply_delivery.py::test_reaction_success_in_validated_list` — UPDATE: same — extract `.emoji`.
-- [ ] `tests/integration/test_reply_delivery.py::test_all_reaction_constants_unique` — UPDATE: compare `.emoji` attributes (or str(result)) rather than the EmojiResult objects directly.
+- [ ] `tests/integration/test_reply_delivery.py::test_reaction_constants_are_distinct` (B1 fix) — UPDATE: EmojiResult is unhashable (mutable dataclass, `__hash__ = None`), so `set(all_reactions)` raises `TypeError`. Replace with `set(str(r) for r in all_reactions)` or `set(r.emoji for r in all_reactions)` to compare by value.
 
 ## Rabbit Holes
 
@@ -141,9 +144,9 @@ No prerequisites — all infrastructure (EmojiResult, set_reaction, find_best_em
 
 ## Risks
 
-### Risk 1: Import-time HTTP call
-**Impact:** Bridge startup time increases if `find_best_emoji()` makes a live API call at module import.
-**Mitigation:** `find_best_emoji()` is called lazily via `_resolve_terminal_emoji()` at module import, but only if `OPENROUTER_API_KEY` is set. If not set, it returns immediately with the fallback. In practice the bridge already calls `find_best_emoji()` for in-flight reactions, so the embedding cache is already warm.
+### Risk 1: Import-time HTTP call (RESOLVED — B2 fix)
+**Impact:** 3 blocking HTTP round-trips at module import if `find_best_emoji()` is called eagerly.
+**Mitigation:** Module `__getattr__` defers `find_best_emoji()` to first access inside a live request handler. Import is instant — zero HTTP calls until the constant is first used. If the API is unavailable at that moment, `_resolve_terminal_emoji()` returns the fallback EmojiResult and caches it; no retry on subsequent accesses.
 
 ### Risk 2: Stale custom emoji document ID
 **Impact:** If the Premium custom emoji pack is updated, a cached document_id may become invalid, causing `set_reaction()` to fail the custom path and fall back to standard.
@@ -151,7 +154,7 @@ No prerequisites — all infrastructure (EmojiResult, set_reaction, find_best_em
 
 ## Race Conditions
 
-No race conditions identified. The module-level cache is set once at import time in a single-threaded import context. All subsequent accesses are read-only.
+The module-level `_TERMINAL_EMOJI_CACHE` dict is populated lazily on first access. Python's GIL ensures that dict reads and writes are thread-safe for CPython. In the unlikely event of two threads simultaneously triggering first-access for the same constant, both will call `_resolve_terminal_emoji()` and the second write will silently overwrite the first with an equivalent value — no corruption, no inconsistency. Acceptable for this use case.
 
 ## No-Gos (Out of Scope)
 
@@ -208,18 +211,20 @@ No agent integration required — terminal reactions are set by the session exec
 - **Assigned To**: constants-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace the three hardcoded Unicode reaction constants with `EmojiResult` objects resolved via a `_resolve_terminal_emoji(feeling, fallback_emoji)` helper.
-- The helper calls `find_best_emoji(feeling)` inside a broad try/except; on any failure returns `EmojiResult(emoji=fallback_emoji)`.
-- Fallback emojis: `👌` (SUCCESS), `👏` (COMPLETE), `😢` (ERROR) — all in VALIDATED_REACTIONS.
-- Update the module docstring to describe the new pattern.
-- Update `bridge/response.py` line 166 comment to note constants are now EmojiResult.
-- Update all six affected tests:
-  - `test_worker_entry.py::test_reaction_constants_importable_from_agent` — assert isinstance(REACTION_SUCCESS, EmojiResult), assert REACTION_SUCCESS.emoji in VALIDATED_REACTIONS.
+- Replace the three hardcoded Unicode reaction constants with lazy-resolved `EmojiResult` objects via module `__getattr__`.
+- Add `_TERMINAL_EMOJI_CACHE: dict[str, EmojiResult] = {}` at module level for first-access caching.
+- Add `_resolve_terminal_emoji(name, feeling, fallback_emoji)` helper that calls `find_best_emoji(feeling)` inside a broad try/except; on any failure returns `EmojiResult(emoji=fallback_emoji)` and caches it so there are zero retries.
+- Add `__getattr__(name)` at module level: for `REACTION_SUCCESS`, `REACTION_COMPLETE`, `REACTION_ERROR`, call `_resolve_terminal_emoji()` on first access; cache and return for subsequent accesses. Raise `AttributeError` for all other names.
+- Fallback emojis: `👌` (SUCCESS), `👏` (COMPLETE), `😢` (ERROR) — all confirmed in `VALIDATED_REACTIONS`.
+- Update the module docstring to describe the new lazy-init pattern.
+- Update `bridge/response.py` line 166 comment to note constants are now `EmojiResult` objects.
+- Update all six affected tests (no blocking import-time HTTP; tests may need to trigger access before asserting):
+  - `test_worker_entry.py::test_reaction_constants_importable_from_agent` — access constant, then assert isinstance(REACTION_SUCCESS, EmojiResult) and REACTION_SUCCESS.emoji in VALIDATED_REACTIONS.
   - `test_worker_entry.py::test_reaction_re_exports_from_bridge` — same.
   - `test_reply_delivery.py::test_reaction_complete_in_validated_list` — use REACTION_COMPLETE.emoji.
   - `test_reply_delivery.py::test_reaction_error_in_validated_list` — use REACTION_ERROR.emoji.
   - `test_reply_delivery.py::test_reaction_success_in_validated_list` — use REACTION_SUCCESS.emoji.
-  - `test_reply_delivery.py::test_all_reaction_constants_unique` — compare str(r) or .emoji values.
+  - `test_reply_delivery.py::test_reaction_constants_are_distinct` — use `set(str(r) for r in all_reactions)` or `set(r.emoji for r in all_reactions)` instead of `set(all_reactions)` (B1 fix — EmojiResult is unhashable).
 
 ### 2. Final Validation
 - **Task ID**: validate-all
@@ -238,7 +243,7 @@ No agent integration required — terminal reactions are set by the session exec
 - **Assigned To**: constants-builder
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/emoji-reactions.md` with terminal reaction upgrade details.
+- Update `docs/features/emoji-embedding-reactions.md` with terminal reaction upgrade details (add "Terminal Reactions" subsection per Documentation section above).
 
 ## Verification
 
@@ -252,9 +257,11 @@ No agent integration required — terminal reactions are set by the session exec
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist | B1: EmojiResult is unhashable (`__hash__ = None`). `test_reaction_constants_are_distinct` uses `set(all_reactions)` which raises `TypeError` at runtime. | Test Impact + Task 1 | Use `set(str(r) for r in all_reactions)` or `set(r.emoji for r in all_reactions)` in the uniqueness test. Added to Test Impact section with explicit fix. |
+| BLOCKER | Operator | B2: `find_best_emoji()` makes a synchronous HTTP call per invocation (embedding the feeling string). Calling it 3× at module import = 3 blocking HTTP round-trips on every process start. | Technical Approach + Task 1 | Replaced import-time calls with module `__getattr__` lazy init. Zero HTTP cost at import; resolution deferred to first access inside a live request handler. Result cached; no retry on failure. |
+| CONCERN | Adversary | Documentation section references `emoji-embedding-reactions.md` but Task 3 says `emoji-reactions.md` (does not exist). | Task 3 | Task 3 updated to use the correct filename `emoji-embedding-reactions.md` which exists on disk. |
 
 ---
 
