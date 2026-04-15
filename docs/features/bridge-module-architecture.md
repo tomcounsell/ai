@@ -5,7 +5,7 @@ The Telegram bridge (`bridge/telegram_bridge.py`) is organized into focused sub-
 | Module | Responsibility |
 |--------|---------------|
 | `bridge/media.py` | Media detection, download, transcription, image description |
-| `bridge/routing.py` | Message routing, project config, mention/response classification |
+| `bridge/routing.py` | Message routing, project config, mention/response classification; `find_project_for_chat()` (group title), `find_project_for_dm()` (DM sender ID), `find_project_for_email()` (email address) |
 | `bridge/context.py` | Context building, conversation history, reply chains, implicit-context heuristic (`references_prior_context`) |
 | `bridge/response.py` | Message formatting, reactions (re-exports from `agent/constants.py`), file extraction, sending |
 | `bridge/catchup.py` | Abandoned session revival and re-enqueueing |
@@ -32,7 +32,7 @@ New code should import directly from sub-modules:
 ```python
 # Preferred
 from bridge.media import get_media_type
-from bridge.routing import find_project_for_chat
+from bridge.routing import find_project_for_chat, find_project_for_dm, find_project_for_email
 from bridge.context import build_context_prefix
 
 # Still works (backward compat) but not preferred

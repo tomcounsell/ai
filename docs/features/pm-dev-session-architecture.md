@@ -436,15 +436,20 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 
 ## Project Config Propagation
 
-When a Telegram message arrives, `find_project_for_chat()` resolves the full project config from `projects.json` once. This config is passed through `enqueue_agent_session(project_config=config)` and stored on the `AgentSession.project_config` DictField. At execution time, `_execute_agent_session()` reads the config directly from the session -- no parallel registry or re-derivation needed.
+When a Telegram message arrives, the bridge resolves the full project config from `projects.json` once and passes it downstream. For group messages, `find_project_for_chat()` matches on chat title. For DMs, `find_project_for_dm(sender_id)` is tried first (looks up `dms.whitelist[].project` mapping), falling back to `find_project_for_chat()`. This config is passed through `enqueue_agent_session(project_config=config)` and stored on the `AgentSession.project_config` DictField. At execution time, `_execute_agent_session()` reads the config directly from the session -- no parallel registry or re-derivation needed.
 
 ```
-Telegram message
-    -> find_project_for_chat() resolves full project dict
+Telegram message (group)
+    -> find_project_for_chat() resolves full project dict by chat title
     -> enqueue_agent_session(project_config=project_dict)
     -> AgentSession.project_config stores the dict in Redis
     -> _execute_agent_session() reads session.project_config
     -> build_harness_turn_input() receives project dict with all fields
+
+Telegram message (DM)
+    -> find_project_for_dm(sender_id) looks up dms.whitelist[].project mapping
+    -> falls back to find_project_for_chat() if no per-user mapping
+    -> same downstream path as group messages
 ```
 
 **Cross-repo detection**: `sdk_client.py` uses `project_key != "valor"` to determine whether a session targets a cross-repo project, replacing the previous `project_working_dir != AI_REPO_ROOT` string comparisons.
