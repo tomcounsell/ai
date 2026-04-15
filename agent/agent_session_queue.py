@@ -67,6 +67,60 @@ _HARNESS_EXHAUSTION_MSG = (
     "You can resend once that's sorted."
 )
 
+
+async def _handle_harness_not_found(raw: str, agent_session) -> tuple[str, bool]:
+    """Handle a FileNotFoundError harness result with silent retry and persona-aligned exhaustion.
+
+    Called from do_work() when the harness returns a string starting with
+    _HARNESS_NOT_FOUND_PREFIX. Returns (result_string, harness_requeued).
+
+    Extracted so both production do_work() and tests call the same code path.
+    Tests that mock transition_status / _ensure_worker patch at the module level.
+
+    Returns:
+        (raw, False)   — B1 guard: agent_session is None, return raw unchanged
+        ("", True)     — silently re-queued; BackgroundTask skips send on empty string
+        (persona, False) — retries exhausted or status conflict; deliver exhaustion message
+    """
+    from models.session_lifecycle import StatusConflictError, transition_status  # noqa: PLC0415
+
+    if agent_session is None:
+        return raw, False
+
+    ec = agent_session.extra_context or {}
+    retry_count = int(ec.get("cli_retry_count", 0))
+
+    if retry_count < _HARNESS_NOT_FOUND_MAX_RETRIES:
+        ec["cli_retry_count"] = retry_count + 1
+        agent_session.extra_context = ec
+        # B2: reuse existing record in-place — no new async_create()
+        try:
+            await asyncio.to_thread(transition_status, agent_session, "pending", "harness-retry")
+        except (StatusConflictError, ValueError) as conflict_err:
+            # Health monitor or another process raced and changed status.
+            # Fall through to the exhaustion message rather than leaking a
+            # raw StatusConflictError string to Telegram.
+            logger.warning(
+                "[%s] Harness retry: status conflict (%s) — sending exhaustion msg",
+                agent_session.session_id,
+                conflict_err,
+            )
+            return _HARNESS_EXHAUSTION_MSG, False
+        _ensure_worker(
+            agent_session.worker_key,
+            is_project_keyed=agent_session.is_project_keyed,
+        )
+        logger.warning(
+            "[%s] Harness not found — retry %d/%d",
+            agent_session.session_id,
+            retry_count + 1,
+            _HARNESS_NOT_FOUND_MAX_RETRIES,
+        )
+        return "", True  # harness_requeued=True; BackgroundTask skips send on empty string
+    else:
+        return _HARNESS_EXHAUSTION_MSG, False
+
+
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 AGENT_SESSION_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard sessions
@@ -3807,45 +3861,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
             full_context_message=_harness_input,
         )
         if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
-            # Guard B1: agent_session may be None if Redis lookup failed
-            if agent_session is None:
-                return raw
-            ec = agent_session.extra_context or {}
-            retry_count = int(ec.get("cli_retry_count", 0))
-            if retry_count < _HARNESS_NOT_FOUND_MAX_RETRIES:
-                from models.session_lifecycle import StatusConflictError, transition_status
-
-                ec["cli_retry_count"] = retry_count + 1
-                agent_session.extra_context = ec
-                # B2: reuse existing record in-place — no new async_create()
-                try:
-                    await asyncio.to_thread(
-                        transition_status, agent_session, "pending", "harness-retry"
-                    )
-                except (StatusConflictError, ValueError) as conflict_err:
-                    # Health monitor or another process raced and changed status.
-                    # Fall through to the exhaustion message rather than leaking a
-                    # raw StatusConflictError string to Telegram.
-                    logger.warning(
-                        "[%s] Harness retry: status conflict (%s) — sending exhaustion msg",
-                        session.session_id,
-                        conflict_err,
-                    )
-                    return _HARNESS_EXHAUSTION_MSG
-                _ensure_worker(
-                    agent_session.worker_key,
-                    is_project_keyed=agent_session.is_project_keyed,
-                )
-                logger.warning(
-                    "[%s] Harness not found — retry %d/%d",
-                    session.session_id,
-                    retry_count + 1,
-                    _HARNESS_NOT_FOUND_MAX_RETRIES,
-                )
+            result, requeued = await _handle_harness_not_found(raw, agent_session)
+            if requeued:
                 _harness_requeued = True
-                return ""  # BackgroundTask skips send on empty string
-            else:
-                return _HARNESS_EXHAUSTION_MSG
+            return result
         return raw
 
     task = BackgroundTask(messenger=messenger)
