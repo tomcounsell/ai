@@ -61,6 +61,11 @@ PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 # Harness startup retry constants
 _HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"
 _HARNESS_NOT_FOUND_MAX_RETRIES = 3
+_HARNESS_EXHAUSTION_MSG = (
+    "Tried a few times but couldn't get Claude to start — "
+    "looks like the CLI may not be on PATH. "
+    "You can resend once that's sorted."
+)
 
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
@@ -3826,11 +3831,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         session.session_id,
                         conflict_err,
                     )
-                    return (
-                        "Tried a few times but couldn't get Claude to start — "
-                        "looks like the CLI may not be on PATH. "
-                        "You can resend once that's sorted."
-                    )
+                    return _HARNESS_EXHAUSTION_MSG
                 _ensure_worker(
                     agent_session.worker_key,
                     is_project_keyed=agent_session.is_project_keyed,
@@ -3844,11 +3845,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 _harness_requeued = True
                 return ""  # BackgroundTask skips send on empty string
             else:
-                return (
-                    "Tried a few times but couldn't get Claude to start — "
-                    "looks like the CLI may not be on PATH. "
-                    "You can resend once that's sorted."
-                )
+                return _HARNESS_EXHAUSTION_MSG
         return raw
 
     task = BackgroundTask(messenger=messenger)
