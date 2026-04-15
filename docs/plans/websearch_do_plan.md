@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/971
 last_comment_id:
+revision_applied: true
 ---
 
 # WebSearch Research Step for /do-plan
@@ -52,7 +53,7 @@ This is the feature that adds this section to future plans — no research findi
 ## Architectural Impact
 
 - **New dependencies**: None. `tools/web/` and `tools/memory_search/` already exist and are production-ready.
-- **Interface changes**: The `/do-plan` skill gains a new phase (Phase 0.7) and the plan template gains a new `## Research` section. The `allowed-tools` frontmatter in `SKILL.md` adds `WebSearch`.
+- **Interface changes**: The `/do-plan` skill gains a new phase (Phase 0.7) and the plan template gains a new `## Research` section. The `allowed-tools` frontmatter in `SKILL.md` adds `ToolSearch, WebSearch`.
 - **Coupling**: Minimal. The research phase is self-contained — if WebSearch fails or returns nothing, the plan proceeds without it. Memory saves are fire-and-forget.
 - **Data ownership**: Research findings are owned by the plan document (as a section) and optionally persisted as memories.
 - **Reversibility**: Trivially reversible — remove the phase from SKILL.md and the section from the template.
@@ -86,10 +87,10 @@ No prerequisites — `tools/web/` requires `PERPLEXITY_API_KEY` or `TAVILY_API_K
 
 ### Technical Approach
 
-- Use the built-in Claude Code `WebSearch` tool (deferred tool, already available in the environment) rather than the Python `tools/web/` module. The built-in tool is simpler — it's a direct tool call, no subprocess or import needed. The Python module would require `Bash` calls to invoke `valor-search`, adding unnecessary indirection.
-- Add `WebSearch` to the `allowed-tools` frontmatter in `SKILL.md` so the skill has permission to call it.
+- Use the built-in Claude Code `WebSearch` tool (deferred tool, available in the environment) rather than the Python `tools/web/` module. The built-in tool is simpler — it's a direct tool call, no subprocess or import needed. The Python module would require `Bash` calls to invoke `valor-search`, adding unnecessary indirection. Note: WebSearch is a deferred tool that requires `ToolSearch("select:WebSearch")` to load its schema before first use. The google-workspace skill uses the related `WebFetch` tool (for URL fetching, not searching) — WebSearch follows the same deferred-tool pattern.
+- Add `ToolSearch, WebSearch` to the `allowed-tools` frontmatter in `SKILL.md`. WebSearch is a deferred tool — its schema must be loaded via `ToolSearch("select:WebSearch")` before it can be called. Both tools must be listed in `allowed-tools`.
 - The research phase generates search queries by extracting key technical terms from the issue title, problem statement, and desired outcome. Queries should target: (a) library/API documentation, (b) ecosystem best practices, (c) known pitfalls.
-- Memory saves use `python -m tools.memory_search save "finding" --importance 5.0 --source research` via Bash. This is already a supported pattern.
+- Memory saves use `python -m tools.memory_search save "finding" --importance 5.0 --source agent` via Bash. The `--source` flag only accepts `human`, `agent`, or `system` — agent-initiated saves during planning use `agent`.
 - The `## Research` section in the template includes a skip-if annotation: "Skip if the work is purely internal (no external libraries, APIs, or patterns involved)."
 - Query generation is LLM-native — the skill instructions tell the planner how to derive queries from context. No code is needed for query generation.
 
@@ -153,10 +154,10 @@ No agent integration required — this modifies the `/do-plan` skill's instructi
 
 ## Success Criteria
 
-- [ ] `/do-plan` SKILL.md contains a Phase 0.7 research step with WebSearch instructions
-- [ ] `allowed-tools` in SKILL.md frontmatter includes `WebSearch`
+- [ ] `/do-plan` SKILL.md contains a Phase 0.7 research step with WebSearch instructions (including ToolSearch load step)
+- [ ] `allowed-tools` in SKILL.md frontmatter includes `ToolSearch, WebSearch`
 - [ ] PLAN_TEMPLATE.md contains a `## Research` section with skip-if guidance
-- [ ] Research phase instructions include memory save commands (`python -m tools.memory_search save`)
+- [ ] Research phase instructions include memory save commands (`python -m tools.memory_search save ... --source agent`)
 - [ ] Research phase includes graceful skip when results are empty or irrelevant
 - [ ] Existing plan structure and required sections are preserved
 - [ ] Tests pass (`/do-test`)
@@ -187,9 +188,9 @@ No agent integration required — this modifies the `/do-plan` skill's instructi
 - **Assigned To**: skill-updater
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `WebSearch` to the `allowed-tools` frontmatter in `.claude/skills/do-plan/SKILL.md`
+- Add `ToolSearch, WebSearch` to the `allowed-tools` frontmatter in `.claude/skills/do-plan/SKILL.md`
 - Insert Phase 0.7 (Research) between Phase 0.5 (Freshness Check) and Phase 1 (Flesh Out)
-- Phase 0.7 instructions should cover: (a) generating 1-3 search queries from issue context, (b) calling WebSearch for each query, (c) filtering results for relevance, (d) saving valuable findings as memories via `python -m tools.memory_search save "finding" --importance 5.0 --source research`, (e) skip-if guidance for purely internal work
+- Phase 0.7 instructions should cover: (a) loading WebSearch via `ToolSearch("select:WebSearch")`, (b) generating 1-3 search queries from issue context, (c) calling WebSearch for each query, (d) filtering results for relevance, (e) saving valuable findings as memories via `python -m tools.memory_search save "finding" --importance 5.0 --source agent`, (f) skip-if guidance for purely internal work
 - Ensure the phase references the `## Research` section in the template
 
 ### 2. Add Research Section to PLAN_TEMPLATE.md
@@ -242,14 +243,17 @@ No agent integration required — this modifies the `/do-plan` skill's instructi
 | Tests pass | `pytest tests/unit/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| WebSearch in allowed-tools | `grep -c 'WebSearch' .claude/skills/do-plan/SKILL.md` | output > 0 |
+| WebSearch in allowed-tools | `grep -c 'ToolSearch, WebSearch' .claude/skills/do-plan/SKILL.md` | output > 0 |
 | Research section in template | `grep -c '## Research' .claude/skills/do-plan/PLAN_TEMPLATE.md` | output > 0 |
 | Phase 0.7 in skill | `grep -c 'Phase 0.7' .claude/skills/do-plan/SKILL.md` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic | `--source research` is not a valid choice for `python -m tools.memory_search save`; CLI only accepts `human`, `agent`, or `system` (cli.py:330) | Task 1 must use `--source agent` instead | The argparse choices are `["human", "agent", "system"]` at cli.py:330. Using `--source research` will raise a SystemExit with argparse validation error. Use `--source agent` since the save is agent-initiated. |
+| CONCERN | Skeptic | Plan assumes adding `WebSearch` to `allowed-tools` is sufficient, but `WebSearch` is a deferred tool requiring `ToolSearch` to load its schema before invocation | Task 1 skill instructions must include a ToolSearch step before WebSearch calls | Deferred tools appear by name only until fetched via `ToolSearch`. Without `ToolSearch("select:WebSearch")` first, calling WebSearch will fail with `InputValidationError`. The Phase 0.7 instructions must tell the planner to call ToolSearch before WebSearch. Also add `ToolSearch` to `allowed-tools`. |
+| CONCERN | Archaeologist | Issue recon claims WebSearch is "already used by google-workspace skill" but google-workspace actually uses `WebFetch` (a different tool). Plan should verify WebSearch tool availability independently. | Builder should verify WebSearch works via ToolSearch during implementation | `google-workspace/SKILL.md` line 4 shows `allowed-tools: Read, Write, Edit, Bash, WebFetch`. The recon confused WebFetch with WebSearch. The plan's approach is still valid since WebSearch does exist as a deferred tool, but this should be verified. |
 
 ---
