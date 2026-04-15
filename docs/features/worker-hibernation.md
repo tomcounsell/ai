@@ -14,8 +14,8 @@ Two reflections plus a catch-block patch create a coordinated hibernate-and-drip
 
 1. `_worker_loop()` catches `CircuitOpenError`, transitions the session to `paused`, and writes `{project_key}:worker:hibernating` (TTL 600s)
 2. `_pop_agent_session()` checks the flag before acquiring the pop lock — returns `None` if set
-3. `worker-health-gate` (60s reflection) checks the Anthropic circuit; when CLOSED, clears `hibernating` and writes `worker:recovering`
-4. `session-resume-drip` (30s reflection) transitions one `paused` session to `pending` per tick until the queue drains
+3. `circuit-health-gate` (60s reflection) checks the Anthropic circuit; when CLOSED, clears both `worker:hibernating` and `queue_paused` atomically, then writes `worker:recovering` and `recovery:active`
+4. `session-recovery-drip` (30s reflection) transitions one `paused_circuit` or `paused` session to `pending` per tick (`paused_circuit` first) until both queues drain
 
 ## Hibernation Flow
 
@@ -28,10 +28,11 @@ Anthropic API down
   → worker waits (no sessions consumed)
 
 Anthropic API recovers
-  → worker-health-gate (60s): circuit CLOSED → delete hibernating, write recovering (TTL 3600s)
+  → circuit-health-gate (60s): circuit CLOSED → delete hibernating + queue_paused,
+    write recovering + recovery:active (TTL 3600s each)
   → Telegram notification enqueued: "Worker waking"
-  → session-resume-drip (30s): one paused → pending per tick (~2 sessions/min)
-  → when paused list empty: delete recovering flag
+  → session-recovery-drip (30s): one paused_circuit/paused → pending per tick (~2 sessions/min)
+  → when both queues empty: delete both recovering + recovery:active flags
 ```
 
 ## Redis Key Schema
@@ -51,37 +52,36 @@ Contrast with `paused_circuit` (added by issue #773): `paused_circuit` means the
 
 | Status | Meaning | Written By | Restored By |
 |--------|---------|-----------|-------------|
-| `paused_circuit` | Blocked before dequeue (circuit gate) | `api_health_gate` (sustainability.py) | `recovery_drip` (sustainability.py) |
-| `paused` | Interrupted mid-execution (circuit open) | `_worker_loop()` catch block | `session_resume_drip` (hibernation.py) |
+| `paused_circuit` | Blocked before dequeue (circuit gate) | `circuit_health_gate` (sustainability.py) | `session_recovery_drip` (sustainability.py) |
+| `paused` | Interrupted mid-execution (circuit open) | `_worker_loop()` catch block | `session_recovery_drip` (sustainability.py) |
 
 ## Relationship to Sustainable Self-Healing (#773)
 
-Issue #773 adds a separate but complementary queue governance system:
+Issues #773 and #839 originally added separate modules, but were merged into `agent/sustainability.py` (issue #978). The two session pause statuses are now handled by a single unified pair of reflections:
 
-| Concern | #773 (sustainability.py) | #839 (hibernation.py) |
-|---------|--------------------------|----------------------|
-| Status | `paused_circuit` | `paused` |
-| Redis gate key | `{pk}:sustainability:queue_paused` (TTL 3600s) | `{pk}:worker:hibernating` (TTL 600s) |
-| Gate written by | `api_health_gate` reflection | `_worker_loop()` catch + `worker_health_gate` reflection |
-| Drip recovery | `recovery_drip` (30s) | `session_resume_drip` (30s) |
-| Recovery flag | `{pk}:recovery:active` | `{pk}:worker:recovering` |
+| Concern | Unified (sustainability.py) |
+|---------|----------------------------|
+| `paused_circuit` status | `circuit_health_gate` sets `queue_paused`; `session_recovery_drip` drains |
+| `paused` status | `_worker_loop()` catch sets `worker:hibernating`; `session_recovery_drip` drains |
+| Health gate | `circuit-health-gate` (60s) manages both `queue_paused` and `worker:hibernating` atomically |
+| Drip | `session-recovery-drip` (30s) drips `paused_circuit` first then `paused`, clears both flags |
 
-`_pop_agent_session()` checks both flags with OR logic — if either is set, the pop returns `None`. The two recovery drips are independent: each only transitions its own status type.
+`_pop_agent_session()` checks both flags with OR logic — if either is set, the pop returns `None`.
 
 ## Reflections
 
-Both reflections are registered in `config/reflections.yaml`:
+Both reflections are registered in `config/reflections.yaml` and implemented in `agent/sustainability.py`:
 
 ```yaml
-- name: worker-health-gate
+- name: circuit-health-gate
   interval: 60  # 1 minute
   priority: high
-  callable: "agent.hibernation.worker_health_gate"
+  callable: "agent.sustainability.circuit_health_gate"
 
-- name: session-resume-drip
+- name: session-recovery-drip
   interval: 30  # 30 seconds
   priority: high
-  callable: "agent.hibernation.session_resume_drip"
+  callable: "agent.sustainability.session_recovery_drip"
 ```
 
 ## Telegram Notifications
@@ -90,10 +90,10 @@ On hibernation entry and on wake, a lightweight `teammate` session is enqueued t
 
 ## Implementation
 
-- `agent/hibernation.py` — `worker_health_gate()`, `session_resume_drip()`, `send_hibernation_notification()`
+- `agent/sustainability.py` — `circuit_health_gate()`, `session_recovery_drip()`, `send_hibernation_notification()`
 - `agent/agent_session_queue.py` — `_pop_agent_session()` hibernation guard, `_worker_loop()` catch block update
 - `models/session_lifecycle.py` — `"paused"` added to `NON_TERMINAL_STATUSES`
-- `config/reflections.yaml` — two new reflection entries
+- `config/reflections.yaml` — `circuit-health-gate` and `session-recovery-drip` reflection entries
 
 ## Verification
 
@@ -102,10 +102,10 @@ On hibernation entry and on wake, a lightweight `teammate` session is enqueued t
 python -c "from models.session_lifecycle import NON_TERMINAL_STATUSES; assert 'paused' in NON_TERMINAL_STATUSES"
 
 # Check module imports cleanly
-python -c "from agent.hibernation import worker_health_gate, session_resume_drip"
+python -c "from agent.sustainability import circuit_health_gate, session_recovery_drip, send_hibernation_notification"
 
 # Check reflections are registered
-python -c "from agent.reflection_scheduler import load_registry; r=load_registry(); names=[e.name for e in r]; assert 'worker-health-gate' in names; assert 'session-resume-drip' in names"
+python -c "from agent.reflection_scheduler import load_registry; r=load_registry(); names=[e.name for e in r]; assert 'circuit-health-gate' in names; assert 'session-recovery-drip' in names"
 
 # List paused sessions
 python -m tools.valor_session list --status paused

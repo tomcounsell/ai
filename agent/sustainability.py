@@ -201,7 +201,7 @@ def session_recovery_drip() -> None:
 def send_hibernation_notification(event: str, project_key: str | None = None) -> None:
     """Enqueue a Telegram notification session for hibernation entry or wake.
 
-    Absorbed from agent/hibernation.py (send_hibernation_notification).
+    Absorbed from the former hibernation module (send_hibernation_notification).
 
     Args:
         event: Either "hibernating" or "waking".
