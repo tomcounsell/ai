@@ -216,7 +216,7 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 | `test_startup_recovery_mixed_local_and_bridge` | startup recovery (local guard) | Mixed set: local→abandoned, bridge→pending, count=1 |
 | `test_recent_session_skipped_by_timing_guard` | startup recovery | Sessions started <300s ago are skipped |
 | `test_old_session_recovered_by_timing_guard` | startup recovery | Sessions started >300s ago are recovered |
-| `test_none_started_at_is_recovered` | startup recovery | Legacy sessions (no started_at) are recovered |
+| `test_none_started_at_is_recovered` | startup recovery | Sessions with no started_at are always recovered |
 | `test_mixed_recent_and_stale_sessions` | startup recovery | Only stale sessions recovered, recent skipped |
 | `test_watchdog_unhealthy_flag_routes_to_deliver` | session watchdog | Flag routes to deliver, not nudge |
 | `test_bridge_watchdog_has_no_agent_session_import` | bridge watchdog | No AgentSession imports |
