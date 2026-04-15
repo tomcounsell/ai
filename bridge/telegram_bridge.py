@@ -129,6 +129,7 @@ from bridge.routing import (  # noqa: E402
     classify_needs_response_async,  # noqa: F401
     extract_at_mentions,  # noqa: F401
     find_project_for_chat,
+    find_project_for_dm,
     get_valor_usernames,  # noqa: F401
     is_message_for_others,  # noqa: F401
     is_message_for_valor,  # noqa: F401
@@ -586,10 +587,17 @@ RESPOND_TO_DMS = any(
 # Loaded from projects.json dms.whitelist array
 # All DM users get uniform qa_only access (no per-user permission levels)
 DM_WHITELIST: set[int] = set()
+DM_USER_TO_PROJECT: dict[int, dict] = {}
 _whitelist_entries = CONFIG.get("dms", {}).get("whitelist", [])
 for _entry in _whitelist_entries:
     if isinstance(_entry, dict) and "id" in _entry:
         DM_WHITELIST.add(int(_entry["id"]))
+        if "project" in _entry:
+            _proj_key = _entry["project"]
+            _proj_cfg = CONFIG.get("projects", {}).get(_proj_key, {})
+            _proj_cfg = dict(_proj_cfg)
+            _proj_cfg["_key"] = _proj_key
+            DM_USER_TO_PROJECT[int(_entry["id"])] = _proj_cfg
 
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
@@ -598,6 +606,7 @@ _routing_module.GROUP_TO_PROJECT = GROUP_TO_PROJECT
 _routing_module.ALL_MONITORED_GROUPS = ALL_MONITORED_GROUPS
 _routing_module.RESPOND_TO_DMS = RESPOND_TO_DMS
 _routing_module.DM_WHITELIST = DM_WHITELIST
+_routing_module.DM_USER_TO_PROJECT = DM_USER_TO_PROJECT
 _routing_module.DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
     "mention_triggers", ["@valor", "valor", "valorengels", "hey valor"]
 )
@@ -842,12 +851,16 @@ async def main():
         sender = await event.get_sender()
         sender_name = getattr(sender, "first_name", "Unknown")
 
-        # Find which project this chat belongs to
-        project = find_project_for_chat(chat_title) if chat_title else None
-
         # Get sender username and ID for whitelist check
         sender_username = getattr(sender, "username", None)
         sender_id = getattr(sender, "id", None)
+
+        # Find which project this chat belongs to
+        # For DMs, check per-user mapping first (projects.json dms.whitelist[].project)
+        if is_dm and sender_id:
+            project = find_project_for_dm(sender_id) or find_project_for_chat(chat_title)
+        else:
+            project = find_project_for_chat(chat_title) if chat_title else None
 
         # Store ALL incoming messages for history (regardless of whether we respond)
         _early_project_key = project.get("_key", "dm") if project else "dm"

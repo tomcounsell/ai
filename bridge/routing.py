@@ -21,6 +21,7 @@ DEFAULTS = {}
 GROUP_TO_PROJECT = {}
 EMAIL_TO_PROJECT: dict[str, dict] = {}
 EMAIL_DOMAIN_TO_PROJECT: dict[str, dict] = {}  # domain -> project config
+DM_USER_TO_PROJECT: dict[int, dict] = {}  # sender_id -> project config
 ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
 RESPOND_TO_DMS = True
@@ -225,6 +226,19 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
             return project
 
     return None
+
+
+def find_project_for_dm(sender_id: int | None) -> dict | None:
+    """Find which project a DM sender belongs to.
+
+    Looks up the sender_id in DM_USER_TO_PROJECT, built from whitelist entries
+    that have a 'project' field in projects.json dms.whitelist.
+
+    Returns the project config dict with '_key' set, or None if no mapping.
+    """
+    if not sender_id:
+        return None
+    return DM_USER_TO_PROJECT.get(sender_id)
 
 
 def find_project_for_email(sender_email: str | None) -> dict | None:
