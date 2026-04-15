@@ -2546,7 +2546,7 @@ async def _worker_loop(
                             )
                             # Enqueue notification asynchronously (best-effort)
                             try:
-                                from agent.hibernation import send_hibernation_notification
+                                from agent.sustainability import send_hibernation_notification
 
                                 send_hibernation_notification("hibernating", project_key=_pk)
                             except Exception as _notif_err:
