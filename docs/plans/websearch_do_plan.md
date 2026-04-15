@@ -160,8 +160,8 @@ No agent integration required — this modifies the `/do-plan` skill's instructi
 - [x] Research phase instructions include memory save commands (`python -m tools.memory_search save ... --source agent`)
 - [x] Research phase includes graceful skip when results are empty or irrelevant
 - [x] Existing plan structure and required sections are preserved
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
