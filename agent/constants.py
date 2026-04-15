@@ -17,16 +17,12 @@ All fallback emojis are confirmed in VALIDATED_REACTIONS.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from tools.emoji_embedding import EmojiResult
 
 logger = logging.getLogger(__name__)
 
 # Cache for lazily-resolved terminal reaction EmojiResult objects.
 # Populated on first access; never retried after failure.
-_TERMINAL_EMOJI_CACHE: dict[str, "EmojiResult"] = {}
+_TERMINAL_EMOJI_CACHE: dict[str, object] = {}
 
 # Feeling strings and fallback emojis for each terminal reaction constant.
 _TERMINAL_EMOJI_CONFIG: dict[str, tuple[str, str]] = {
@@ -36,7 +32,7 @@ _TERMINAL_EMOJI_CONFIG: dict[str, tuple[str, str]] = {
 }
 
 
-def _resolve_terminal_emoji(name: str, feeling: str, fallback_emoji: str) -> "EmojiResult":
+def _resolve_terminal_emoji(name: str, feeling: str, fallback_emoji: str) -> object:
     """Resolve a terminal reaction emoji, caching the result.
 
     Calls find_best_emoji(feeling) and caches the EmojiResult in
@@ -74,7 +70,7 @@ def _resolve_terminal_emoji(name: str, feeling: str, fallback_emoji: str) -> "Em
         return fallback
 
 
-def __getattr__(name: str) -> "EmojiResult":
+def __getattr__(name: str) -> object:
     """Lazily resolve terminal reaction constants on first access.
 
     Handles REACTION_SUCCESS, REACTION_COMPLETE, and REACTION_ERROR.

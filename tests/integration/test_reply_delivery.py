@@ -127,19 +127,19 @@ class TestReactionEmojiSelection:
     """Test that the correct reaction emojis are in validated/invalid lists."""
 
     def test_reaction_complete_in_validated_list(self):
-        """REACTION_COMPLETE must be an EmojiResult whose .emoji is in the validated reactions list."""
+        """REACTION_COMPLETE must be an EmojiResult whose .emoji is in VALIDATED_REACTIONS."""
         from bridge.response import REACTION_COMPLETE, VALIDATED_REACTIONS
 
         assert REACTION_COMPLETE.emoji in VALIDATED_REACTIONS
 
     def test_reaction_error_in_validated_list(self):
-        """REACTION_ERROR must be an EmojiResult whose .emoji is in the validated reactions list."""
+        """REACTION_ERROR must be an EmojiResult whose .emoji is in VALIDATED_REACTIONS."""
         from bridge.response import REACTION_ERROR, VALIDATED_REACTIONS
 
         assert REACTION_ERROR.emoji in VALIDATED_REACTIONS
 
     def test_reaction_success_in_validated_list(self):
-        """REACTION_SUCCESS must be an EmojiResult whose .emoji is in the validated reactions list."""
+        """REACTION_SUCCESS must be an EmojiResult whose .emoji is in VALIDATED_REACTIONS."""
         from bridge.response import REACTION_SUCCESS, VALIDATED_REACTIONS
 
         assert REACTION_SUCCESS.emoji in VALIDATED_REACTIONS

@@ -244,8 +244,13 @@ class TestImportDecoupling:
         assert REACTION_ERROR.emoji in VALIDATED_REACTIONS
 
     def test_reaction_re_exports_from_bridge(self):
-        """REACTION_* should still be importable from bridge.response (backward compat) as EmojiResult."""
-        from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS, VALIDATED_REACTIONS
+        """REACTION_* should be importable from bridge.response (backward compat) as EmojiResult."""
+        from bridge.response import (
+            REACTION_COMPLETE,
+            REACTION_ERROR,
+            REACTION_SUCCESS,
+            VALIDATED_REACTIONS,
+        )
         from tools.emoji_embedding import EmojiResult
 
         assert isinstance(REACTION_SUCCESS, EmojiResult)
