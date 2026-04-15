@@ -38,6 +38,7 @@ session lifecycle without requiring bridge access.
 import argparse
 import json
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -56,6 +57,28 @@ def _load_env() -> None:
         load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
     except Exception:
         pass
+
+
+_WORKER_HEARTBEAT_FILE = _repo_root / "data" / "last_worker_connected"
+_WORKER_HEALTHY_THRESHOLD_S = 360  # seconds — matches ui/app.py _get_worker_health()
+
+
+def _check_worker_health() -> tuple[bool, int | None]:
+    """Check worker health by reading the heartbeat file modification time.
+
+    Returns (healthy, age_s) where:
+      - healthy is True if the heartbeat was updated within the last 360 seconds
+      - age_s is the integer age in seconds, or None if the file is missing or unreadable
+
+    Never raises — all OSError and unexpected exceptions are caught silently.
+    Missing file == unhealthy (worker has never run on this machine).
+    """
+    try:
+        mtime = _WORKER_HEARTBEAT_FILE.stat().st_mtime
+        age_s = int(time.time() - mtime)
+        return (age_s < _WORKER_HEALTHY_THRESHOLD_S, age_s)
+    except Exception:
+        return (False, None)
 
 
 def resolve_project_key(cwd: str) -> str:
@@ -195,6 +218,9 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         result = asyncio.run(_create())
 
+        # Check worker health after enqueue — warn if no active worker
+        worker_healthy, worker_age_s = _check_worker_health()
+
         if args.json:
             print(
                 json.dumps(
@@ -203,6 +229,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                         "status": "created",
                         "project_key": project_key,
                         "model": model,
+                        "worker_healthy": worker_healthy,
                     },
                     indent=2,
                 )
@@ -215,6 +242,12 @@ def cmd_create(args: argparse.Namespace) -> int:
                 print(f"  Model:       {model}")
             print(f"  Message: {message[:80]}")
             print(f"  Chat ID: {chat_id}")
+            if not worker_healthy:
+                print(
+                    "WARNING: no active worker detected — session will stay pending until a "
+                    "worker is started (run: ./scripts/valor-service.sh worker-start)",
+                    file=sys.stderr,
+                )
         return 0
 
     except Exception as e:
@@ -357,6 +390,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         session = sessions[0]
         full_message = getattr(args, "full_message", False)
 
+        # Check worker health when session is pending
+        worker_healthy: bool | None = None
+        if session.status == "pending":
+            worker_healthy, _ = _check_worker_health()
+
         if args.json:
             data = {
                 "agent_session_id": session.agent_session_id,
@@ -379,11 +417,15 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "pr_url": getattr(session, "pr_url", None),
                 "parent_agent_session_id": getattr(session, "parent_agent_session_id", None),
             }
+            if worker_healthy is not None:
+                data["worker_healthy"] = worker_healthy
             print(json.dumps(data, indent=2, default=str))
             return 0
 
         print(f"Session: {session.session_id}")
         print(f"  Status:        {session.status}")
+        if worker_healthy is False:
+            print("  WARNING: No active worker — session may wait indefinitely.", file=sys.stderr)
         stype = getattr(session, "session_type", "—")
         srole = getattr(session, "role", "—")
         print(f"  Type/Role:     {stype} / {srole}")

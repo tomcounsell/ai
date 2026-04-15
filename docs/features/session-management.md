@@ -206,6 +206,52 @@ Both surfaces use UTC. The `_format_ts()` helper in `tools/valor_session.py` app
 
 This avoids the 7-hour offset error that occurs when mixing `valor_session status` (which stores UTC) with worker.log lines that previously used local time (UTC+7).
 
+## Worker Health Check at Enqueue
+
+When `valor_session create` is called on a machine where the worker is stopped, the session sits in `pending` indefinitely with no feedback. As of issue #980, worker health is checked at three surfaces:
+
+### At session creation (`valor_session create`)
+
+After enqueuing, the CLI reads `data/last_worker_connected` and checks its modification age:
+
+- **Plain-text mode**: prints a warning to stderr if the heartbeat is stale or absent
+  ```
+  WARNING: no active worker detected — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)
+  ```
+- **JSON mode** (`--json`): adds `"worker_healthy": false` to the output dict instead of printing to stderr
+
+### At status check (`valor_session status --id <ID>`)
+
+When a session has `status: pending`, the CLI also checks worker health:
+
+- **Plain-text mode**: prints `WARNING: No active worker — session may wait indefinitely.` to stderr
+- **JSON mode** (`--json`): adds `"worker_healthy"` field to the JSON dict (always present for pending sessions)
+
+Automated pollers using `--json` receive no stderr noise — only clean JSON.
+
+### At queue status (`agent_session_scheduler status`)
+
+The scheduler's `status` command (which always outputs JSON via `_output()`) now includes two fields in every response:
+
+```json
+{
+  "worker_healthy": false,
+  "worker_heartbeat_age_s": null
+}
+```
+
+- `worker_healthy`: `true` if heartbeat age < 360s, `false` otherwise
+- `worker_heartbeat_age_s`: integer age in seconds, or `null` if the file is missing/unreadable
+
+This allows automated shepherding scripts to detect the no-worker condition programmatically.
+
+### Implementation
+
+The health check reads `data/last_worker_connected` via `stat().st_mtime` — matching the pattern already in `ui/app.py:_get_worker_health()`. Threshold is 360 seconds. Missing file equals unhealthy. All `OSError` paths are caught silently; the check never raises.
+
+- `_check_worker_health()` in `tools/valor_session.py` — canonical helper
+- Equivalent inline 5-line check in `tools/agent_session_scheduler.py:cmd_status` — no cross-file import coupling
+
 ## Related Features
 
 - [Mid-Session Steering](mid-session-steering.md) — Steering check that routes replies to running sessions uses the same canonical session_id.

@@ -84,6 +84,13 @@ async def _send_queued_reaction(
         logger.warning(f"Relay: skipping malformed reaction payload: {message}")
         return False
 
+    # Drop reactions for non-Telegram (local) session IDs
+    try:
+        int(chat_id)
+    except (ValueError, TypeError):
+        logger.debug(f"Relay: dropping reaction for non-Telegram chat_id '{chat_id}'")
+        return False
+
     try:
         from bridge.response import set_reaction
 
@@ -223,6 +230,14 @@ async def _send_queued_message(
         logger.warning(f"Relay: skipping malformed message (no chat_id): {message}")
         return None
 
+    # Local session IDs (e.g. "local-<uuid>") are not Telegram chat IDs.
+    # Drop them silently — their output was already written by FileOutputHandler.
+    try:
+        int(chat_id)
+    except (ValueError, TypeError):
+        logger.debug(f"Relay: dropping non-Telegram chat_id '{chat_id}' (local session)")
+        return None
+
     # Must have either text or files
     if not text and not file_paths:
         logger.warning(f"Relay: skipping malformed message (no text or files): {message}")
@@ -342,11 +357,18 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
     text = message.get("text", "")
     reply_to = message.get("reply_to")
     if chat_id and text:
+        # Skip dead-lettering for non-Telegram (local) session IDs
+        try:
+            chat_id_int = int(chat_id)
+        except (ValueError, TypeError):
+            logger.debug(f"Relay: discarding dead letter for non-Telegram chat_id '{chat_id}'")
+            return
+
         try:
             from bridge.dead_letters import persist_failed_delivery
 
             await persist_failed_delivery(
-                chat_id=int(chat_id),
+                chat_id=chat_id_int,
                 reply_to=int(reply_to) if reply_to else None,
                 text=text,
             )
