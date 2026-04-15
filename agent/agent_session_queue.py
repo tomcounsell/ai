@@ -58,6 +58,10 @@ logger = logging.getLogger(__name__)
 PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
 
+# Harness startup retry constants
+_HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"
+_HARNESS_NOT_FOUND_MAX_RETRIES = 3
+
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 AGENT_SESSION_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard sessions
@@ -3785,8 +3789,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
     if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
         _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
 
+    _harness_requeued = False
+
     async def do_work() -> str:
-        return await get_response_via_harness(
+        nonlocal _harness_requeued
+        raw = await get_response_via_harness(
             message=_minimal_input if _prior_uuid else _harness_input,
             working_dir=str(working_dir),
             env=_harness_env,
@@ -3794,6 +3801,40 @@ async def _execute_agent_session(session: AgentSession) -> None:
             session_id=session.session_id,
             full_context_message=_harness_input,
         )
+        if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
+            # Guard B1: agent_session may be None if Redis lookup failed
+            if agent_session is None:
+                return raw
+            ec = agent_session.extra_context or {}
+            retry_count = int(ec.get("cli_retry_count", 0))
+            if retry_count < _HARNESS_NOT_FOUND_MAX_RETRIES:
+                from models.session_lifecycle import transition_status
+
+                ec["cli_retry_count"] = retry_count + 1
+                agent_session.extra_context = ec
+                # B2: reuse existing record in-place — no new async_create()
+                await asyncio.to_thread(
+                    transition_status, agent_session, "pending", "harness-retry"
+                )
+                _ensure_worker(
+                    agent_session.worker_key,
+                    is_project_keyed=agent_session.is_project_keyed,
+                )
+                logger.warning(
+                    "[%s] Harness not found — retry %d/%d",
+                    session.session_id,
+                    retry_count + 1,
+                    _HARNESS_NOT_FOUND_MAX_RETRIES,
+                )
+                _harness_requeued = True
+                return ""  # BackgroundTask skips send on empty string
+            else:
+                return (
+                    "Tried a few times but couldn't get Claude to start — "
+                    "looks like the CLI may not be on PATH. "
+                    "You can resend once that's sorted."
+                )
+        return raw
 
     task = BackgroundTask(messenger=messenger)
     await task.run(do_work(), send_result=True)
@@ -3846,6 +3887,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
     # Update session status in Redis via AgentSession
     # When auto-continue deferred, session is still active (not completed)
+    # Skip finalization entirely when the session was silently re-queued for
+    # harness retry — transition_status() already moved it back to "pending".
+    if _harness_requeued:
+        return
+
     if agent_session:
         try:
             from bridge.session_transcript import complete_transcript
