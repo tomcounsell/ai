@@ -128,12 +128,12 @@ No prerequisites — all infrastructure (EmojiResult, set_reaction, find_best_em
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_entry.py::test_reaction_constants_importable_from_agent` — UPDATE: assert constants are EmojiResult instances; assert `.emoji` attr is in VALIDATED_REACTIONS rather than hardcoded specific emoji values.
-- [ ] `tests/unit/test_worker_entry.py::test_reaction_re_exports_from_bridge` — UPDATE: same update — EmojiResult instances, not hardcoded strings.
-- [ ] `tests/integration/test_reply_delivery.py::test_reaction_complete_in_validated_list` — UPDATE: extract `.emoji` from EmojiResult before checking VALIDATED_REACTIONS membership.
-- [ ] `tests/integration/test_reply_delivery.py::test_reaction_error_in_validated_list` — UPDATE: same — extract `.emoji`.
-- [ ] `tests/integration/test_reply_delivery.py::test_reaction_success_in_validated_list` — UPDATE: same — extract `.emoji`.
-- [ ] `tests/integration/test_reply_delivery.py::test_reaction_constants_are_distinct` (B1 fix) — UPDATE: EmojiResult is unhashable (mutable dataclass, `__hash__ = None`), so `set(all_reactions)` raises `TypeError`. Replace with `set(str(r) for r in all_reactions)` or `set(r.emoji for r in all_reactions)` to compare by value.
+- [x] `tests/unit/test_worker_entry.py::test_reaction_constants_importable_from_agent` — UPDATE: assert constants are EmojiResult instances; assert `.emoji` attr is in VALIDATED_REACTIONS rather than hardcoded specific emoji values.
+- [x] `tests/unit/test_worker_entry.py::test_reaction_re_exports_from_bridge` — UPDATE: same update — EmojiResult instances, not hardcoded strings.
+- [x] `tests/integration/test_reply_delivery.py::test_reaction_complete_in_validated_list` — UPDATE: extract `.emoji` from EmojiResult before checking VALIDATED_REACTIONS membership.
+- [x] `tests/integration/test_reply_delivery.py::test_reaction_error_in_validated_list` — UPDATE: same — extract `.emoji`.
+- [x] `tests/integration/test_reply_delivery.py::test_reaction_success_in_validated_list` — UPDATE: same — extract `.emoji`.
+- [x] `tests/integration/test_reply_delivery.py::test_reaction_constants_are_distinct` (B1 fix) — UPDATE: EmojiResult is unhashable (mutable dataclass, `__hash__ = None`), so `set(all_reactions)` raises `TypeError`. Replace with `set(str(r) for r in all_reactions)` or `set(r.emoji for r in all_reactions)` to compare by value.
 
 ## Rabbit Holes
 
@@ -174,17 +174,17 @@ No agent integration required — terminal reactions are set by the session exec
 
 ## Documentation
 
-- [ ] Update `docs/features/emoji-embedding-reactions.md` — add a "Terminal Reactions" subsection explaining that `REACTION_SUCCESS`, `REACTION_COMPLETE`, and `REACTION_ERROR` are now `EmojiResult` objects resolved via `find_best_emoji()` at import time, with the feeling strings used (`"acknowledged received silently noted"`, `"task completed successfully work done"`, `"error occurred something went wrong"`) and the hardcoded fallback emojis (`👌`, `👏`, `😢`).
-- [ ] Add an entry to `docs/features/README.md` index table for the terminal reactions section if one does not already reference `emoji-embedding-reactions.md`.
+- [x] Update `docs/features/emoji-embedding-reactions.md` — add a "Terminal Reactions" subsection explaining that `REACTION_SUCCESS`, `REACTION_COMPLETE`, and `REACTION_ERROR` are now `EmojiResult` objects resolved via `find_best_emoji()` at import time, with the feeling strings used (`"acknowledged received silently noted"`, `"task completed successfully work done"`, `"error occurred something went wrong"`) and the hardcoded fallback emojis (`👌`, `👏`, `😢`).
+- [x] Add an entry to `docs/features/README.md` index table for the terminal reactions section if one does not already reference `emoji-embedding-reactions.md`.
 
 ## Success Criteria
 
-- [ ] `REACTION_SUCCESS`, `REACTION_COMPLETE`, `REACTION_ERROR` are `EmojiResult` instances, not plain strings.
-- [ ] Each constant's `.emoji` fallback is in `VALIDATED_REACTIONS`.
-- [ ] All three constants have distinct `.emoji` values.
-- [ ] `_resolve_terminal_emoji()` returns a valid fallback EmojiResult when `find_best_emoji()` raises any exception.
-- [ ] All updated unit and integration tests pass (`pytest tests/unit/test_worker_entry.py tests/integration/test_reply_delivery.py`).
-- [ ] Ruff lint and format pass.
+- [x] `REACTION_SUCCESS`, `REACTION_COMPLETE`, `REACTION_ERROR` are `EmojiResult` instances, not plain strings.
+- [x] Each constant's `.emoji` fallback is in `VALIDATED_REACTIONS`.
+- [x] All three constants have distinct `.emoji` values.
+- [x] `_resolve_terminal_emoji()` returns a valid fallback EmojiResult when `find_best_emoji()` raises any exception.
+- [x] All updated unit and integration tests pass (`pytest tests/unit/test_worker_entry.py tests/integration/test_reply_delivery.py`).
+- [x] Ruff lint and format pass.
 
 ## Team Orchestration
 
