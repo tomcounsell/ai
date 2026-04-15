@@ -1,7 +1,7 @@
 ---
 name: do-plan
 description: "Use when creating or updating a feature plan document. Triggered by 'make a plan', 'plan this', 'flesh out the idea', or any request to scope and plan work before implementation."
-allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
+allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion, ToolSearch, WebSearch
 ---
 
 # Make a Plan (Shape Up Methodology)
@@ -106,6 +106,42 @@ git log --oneline --since="$ISSUE_CREATED" -- <file1> <file2> ...
 | **Overlap** | An active plan in `docs/plans/` is already addressing the same area. | Surface the overlap. Ask whether to merge into the existing plan or coordinate. |
 
 This section stays in the plan document as durable evidence of when and how the freshness check was performed — reviewers during critique and build can tell at a glance whether the plan's premises were verified at plan time.
+
+### Phase 0.7: External Research (WebSearch)
+
+Gather relevant external context before planning. This surfaces current documentation, ecosystem patterns, and known pitfalls that training data may not cover.
+
+**Skip if:** The work is purely internal (no external libraries, APIs, or ecosystem patterns involved) — e.g., refactoring internal code, fixing a typo, or reorganizing files.
+
+1. **Load the WebSearch tool** — WebSearch is a deferred tool; its schema must be loaded before use:
+   ```
+   ToolSearch("select:WebSearch")
+   ```
+
+2. **Generate 1-3 search queries** from the issue context. Extract key technical terms from the issue title, problem statement, and desired outcome. Target:
+   - (a) Library or API documentation relevant to the approach
+   - (b) Ecosystem best practices or recommended patterns
+   - (c) Known pitfalls, breaking changes, or migration guides
+
+3. **Execute each query** using the WebSearch tool. Review the results for relevance.
+
+4. **Filter results** — Only retain findings that are directly relevant to the technical approach. Discard generic results, marketing content, or tangentially related material.
+
+5. **Save valuable findings as memories** for future plan reuse:
+   ```bash
+   python -m tools.memory_search save "Finding: [concise description with source URL]" --importance 5.0 --source agent
+   ```
+   Memory saves are fire-and-forget — if they fail, continue without error.
+
+6. **Write the `## Research` section** in the plan document with the findings. Include:
+   - The search queries used
+   - Key findings with source URLs
+   - How each finding informs the plan's technical approach
+
+   If no useful results were found, write: "No relevant external findings — proceeding with codebase context and training data."
+
+7. **Proceed to Phase 1** with the research context available.
+
 
 ### Phase 1: Flesh Out at High Level
 
