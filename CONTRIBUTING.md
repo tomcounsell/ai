@@ -150,7 +150,7 @@ Skills live in [`.claude/skills/`](.claude/skills/). Each skill is a directory w
 Python tools live in [`tools/`](tools/). Tools callable by the agent must also be wired into an MCP server.
 
 1. Add your tool logic in `tools/my_tool.py`
-2. Expose it via an MCP server in `mcp_servers/` and register in [`.claude/settings.json`](.claude/settings.json)
+2. Register it as an MCP server in [`.claude/settings.json`](.claude/settings.json)
 3. Add integration tests in `tests/integration/`
 
 ### Adding a Bridge
