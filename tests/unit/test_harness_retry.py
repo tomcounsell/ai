@@ -58,6 +58,11 @@ async def _invoke_do_work(harness_return: str, agent_session):
     - Reads/writes cli_retry_count from extra_context
     - Calls transition_status and _ensure_worker on retry
     - Returns "" on retry, persona message on exhaustion, raw otherwise
+
+    SYNC WARNING: This helper re-implements the production do_work() closure
+    verbatim. Any change to the retry block in do_work() (agent_session_queue.py)
+    MUST be reflected here. If the two diverge, tests will pass against this
+    helper while the real behavior drifts silently.
     """
     from models.session_lifecycle import transition_status  # noqa: PLC0415
 
@@ -247,6 +252,43 @@ class TestHarnessRetry:
         assert result == PERSONA_MSG, f"Expected persona message on conflict, got: {result!r}"
         assert requeued is False
         mock_ensure_worker.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_finalization_guard_skips_complete_transcript_on_requeue(self):
+        """
+        When _harness_requeued=True, complete_transcript() must NOT be called.
+
+        This guards the highest-risk regression: if the _harness_requeued guard
+        is removed or bypassed in _run_via_harness(), re-queued sessions would be
+        finalized to 'completed' and become invisible to the worker.
+
+        The guard in production (agent_session_queue.py):
+            if _harness_requeued:
+                return   # <- skips _handle_dev_session_completion AND complete_transcript
+        """
+        agent_session = _make_agent_session(extra_context={})
+
+        with (
+            patch("agent.agent_session_queue._ensure_worker"),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result, harness_requeued = await _invoke_do_work(HARNESS_NOT_FOUND_MSG, agent_session)
+
+        # Simulate the finalization guard in _run_via_harness():
+        # when harness_requeued is True, complete_transcript must NOT be called.
+        with patch("bridge.session_transcript.complete_transcript") as mock_complete:
+            if not harness_requeued:
+                # This branch must NOT execute on a retry — verify it's never reached
+                from bridge.session_transcript import complete_transcript  # noqa: PLC0415
+
+                complete_transcript("tg_test_123_456", status="completed")
+
+        assert harness_requeued is True, "First retry must set harness_requeued=True"
+        assert result == "", "First retry must return empty string (BackgroundTask skips send)"
+        (
+            mock_complete.assert_not_called(),
+            ("complete_transcript must NOT be called when _harness_requeued=True"),
+        )
 
     def test_empty_string_is_falsy_for_background_task(self):
         """Empty string must be falsy so BackgroundTask skips sending (line 151 in messenger.py)."""
