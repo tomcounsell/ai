@@ -2,6 +2,14 @@
 
 An autonomous AI coworker. Not an assistant, not a chatbot — a colleague that owns its own machine and does real work.
 
+## Why Valor?
+
+- **Works where you work.** Receives tasks via Telegram or Email and replies in the same thread — no context switching, no dashboards to check.
+- **Ships code end-to-end.** Plans a feature, critiques the plan, writes the code, runs tests, opens a PR, and merges it — without being babysat through each step.
+- **Remembers across sessions.** A subconscious memory system injects relevant past decisions and corrections as `<thought>` blocks at exactly the right moment.
+- **Fixes itself.** A watchdog + self-healing pipeline restarts on crashes, hibernates on API failures, and escalates to you only when automation can't recover.
+- **Extensible by design.** Add a new skill in `.claude/skills/`, wire a tool in `tools/` + MCP, or connect a new comms channel in `bridge/` — the architecture absorbs extensions without surgery.
+
 ## What Is This?
 
 Valor wraps agent harnesses (like Claude Code) and bridges them to the comms channels humans actually use (Telegram, Email, LinkedIn, and more). The supervisor assigns work and provides direction. Valor executes autonomously on its own Mac, reaching out when necessary.
@@ -21,6 +29,8 @@ Three layers:
 </p>
 
 See [`docs/features/bridge-worker-architecture.md`](docs/features/bridge-worker-architecture.md) for the full design.
+
+> **📸 TODO**: Add demo GIF or screenshot here — see [docs/assets/](docs/assets/) for placement instructions.
 
 ## The SDLC Pipeline
 

@@ -200,19 +200,19 @@ No agent integration required — this is a documentation-only change. No new to
 
 This work IS the documentation. No additional feature docs needed.
 
-- [ ] `CONTRIBUTING.md` created at repo root
-- [ ] `CHANGELOG.md` created at repo root
-- [ ] `README.md` updated with value-prop section and demo placeholder
+- [x] `CONTRIBUTING.md` created at repo root
+- [x] `CHANGELOG.md` created at repo root
+- [x] `README.md` updated with value-prop section and demo placeholder
 
 ## Success Criteria
 
-- [ ] `CONTRIBUTING.md` exists at repo root and covers: PR process, code style (referencing ruff/mypy configs), test requirements (referencing pytest markers), commit conventions, and how to add skills/tools/agents
-- [ ] README contains a "Why Valor?" value-proposition section visible in the first scroll
-- [ ] README contains a clearly marked placeholder for demo media with instructions for how to produce it
-- [ ] `CHANGELOG.md` exists with at least 6 versioned entries covering major feature milestones, following Keep a Changelog v1.1.0 format
-- [ ] All new markdown files contain no broken links to nonexistent repo paths
-- [ ] No new ruff failures introduced by this PR — verify by diffing `python -m ruff check .` output against baseline commit `71e2f70e` (a pre-existing `F841` in `test_recovery_respawn_safety.py` is excluded from this gate)
-- [ ] No existing test files are broken
+- [x] `CONTRIBUTING.md` exists at repo root and covers: PR process, code style (referencing ruff/mypy configs), test requirements (referencing pytest markers), commit conventions, and how to add skills/tools/agents
+- [x] README contains a "Why Valor?" value-proposition section visible in the first scroll
+- [x] README contains a clearly marked placeholder for demo media with instructions for how to produce it
+- [x] `CHANGELOG.md` exists with at least 6 versioned entries covering major feature milestones, following Keep a Changelog v1.1.0 format
+- [x] All new markdown files contain no broken links to nonexistent repo paths
+- [x] No new ruff failures introduced by this PR — verify by diffing `python -m ruff check .` output against baseline commit `71e2f70e` (a pre-existing `F841` in `test_recovery_respawn_safety.py` is excluded from this gate)
+- [x] No existing test files are broken
 
 ## Team Orchestration
 
