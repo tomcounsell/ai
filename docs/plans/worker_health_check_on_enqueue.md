@@ -7,6 +7,7 @@ created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/980
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 
 ---
 
