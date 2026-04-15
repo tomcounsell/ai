@@ -507,8 +507,26 @@ class TestRecoveryExcludesKilled:
     """Verify that recovery functions query status='running', not killed."""
 
     def test_recover_interrupted_agent_sessions_startup_filters_running(self):
-        """_recover_interrupted_agent_sessions_startup queries running, not killed."""
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        """_recover_interrupted_agent_sessions_startup queries running, not killed.
+
+        Also verifies that a local session in the stale set is abandoned (not re-queued).
+        """
+        import time
+
+        from agent.agent_session_queue import (
+            AGENT_SESSION_HEALTH_MIN_RUNNING,
+            _recover_interrupted_agent_sessions_startup,
+        )
+
+        # Build a stale local session so we can assert it is abandoned, not re-queued
+        local_session = MagicMock()
+        local_session.session_id = "local-dead123"
+        local_session.agent_session_id = "agent-local-dead"
+        local_session.worker_key = "ai"
+        local_session.started_at = time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600
+        local_session.message_text = "test"
+        local_session.save = MagicMock()
+        local_session.delete = MagicMock()
 
         # Mock AgentSession.query.filter to capture the status argument
         calls = []
@@ -516,14 +534,29 @@ class TestRecoveryExcludesKilled:
         class CapturingQuery:
             def filter(self, **kwargs):
                 calls.append(kwargs)
-                return []
+                # Return the local session so the local-guard branch executes
+                return [local_session]
 
-        with patch("agent.agent_session_queue.AgentSession") as mock_cls:
+        finalize_calls = []
+
+        def fake_finalize(entry, status, **kwargs):
+            finalize_calls.append((entry, status, kwargs))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("models.session_lifecycle.finalize_session", side_effect=fake_finalize),
+            patch("models.session_lifecycle.update_session") as mock_update,
+        ):
             mock_cls.query = CapturingQuery()
             result = _recover_interrupted_agent_sessions_startup()
 
+        # Count is 0 — local sessions are abandoned, not recovered
         assert result == 0
         # The function should filter on status="running"
         assert any(c.get("status") == "running" for c in calls)
         # No call should filter on status="killed"
         assert not any(c.get("status") == "killed" for c in calls)
+        # Local session must be abandoned, not re-queued
+        assert len(finalize_calls) == 1, "finalize_session should be called for local session"
+        assert finalize_calls[0][1] == "abandoned"
+        mock_update.assert_not_called()

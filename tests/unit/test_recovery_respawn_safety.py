@@ -293,7 +293,11 @@ class TestStartupRecoverySkipsTerminal:
     """_recover_interrupted_agent_sessions_startup() only recovers running sessions."""
 
     def test_startup_recovery_only_queries_running(self):
-        """Startup recovery queries status='running' only — terminal sessions are untouched."""
+        """Startup recovery queries status='running' only — terminal sessions are untouched.
+
+        Also asserts that local sessions in the stale set are abandoned (not re-queued),
+        and that bridge sessions are recovered.
+        """
         from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
 
         # The function queries AgentSession.query.filter(status="running").
@@ -305,6 +309,163 @@ class TestStartupRecoverySkipsTerminal:
         assert count == 0
         # Verify it only queried "running" status
         mock_as.query.filter.assert_called_once_with(status="running")
+
+    def test_startup_recovery_does_not_requeue_local_session(self):
+        """Startup recovery does not call update_session('pending') for local sessions."""
+        import time
+
+        from agent.agent_session_queue import (
+            AGENT_SESSION_HEALTH_MIN_RUNNING,
+            _recover_interrupted_agent_sessions_startup,
+        )
+
+        # Build a stale local session (started_at well before the cutoff)
+        local_session = _mock_agent_session(
+            session_id="local-abc123",
+            agent_session_id="agent-local-001",
+            started_at=time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600,
+        )
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_as,
+            patch("agent.agent_session_queue.time") as mock_time,
+            patch(
+                "models.session_lifecycle.finalize_session"
+            ) as mock_finalize,
+            patch("models.session_lifecycle.update_session") as mock_update,
+        ):
+            mock_time.time.return_value = time.time()
+            mock_as.query.filter.return_value = [local_session]
+
+            count = _recover_interrupted_agent_sessions_startup()
+
+        # Local sessions do not increment the count
+        assert count == 0
+        # update_session (re-queue to pending) must NOT be called for local sessions
+        mock_update.assert_not_called()
+
+
+class TestStartupRecoveryLocalSessionGuard:
+    """_recover_interrupted_agent_sessions_startup() abandons local sessions, not bridge."""
+
+    def _stale_session(self, **kwargs):
+        """Create a mock session that is old enough to be considered stale."""
+        import time
+
+        from agent.agent_session_queue import AGENT_SESSION_HEALTH_MIN_RUNNING
+
+        defaults = dict(
+            session_id="test-session",
+            agent_session_id="agent-sess",
+            worker_key="ai",
+            started_at=time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600,
+            message_text="test",
+        )
+        defaults.update(kwargs)
+        return _mock_agent_session(**defaults)
+
+    def test_startup_recovery_abandons_local_sessions(self):
+        """Local session (session_id starts with 'local') is finalized as 'abandoned'."""
+        import time
+
+        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+
+        local_session = self._stale_session(
+            session_id="local-abc123",
+            agent_session_id="agent-local-001",
+        )
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_as,
+            patch("agent.agent_session_queue.time") as mock_time,
+            patch("models.session_lifecycle.finalize_session") as mock_finalize,
+        ):
+            mock_time.time.return_value = time.time()
+            mock_as.query.filter.return_value = [local_session]
+
+            count = _recover_interrupted_agent_sessions_startup()
+
+        # Count must be 0 — local sessions are not "recovered" (they are abandoned)
+        assert count == 0
+        # finalize_session must have been called with "abandoned"
+        mock_finalize.assert_called_once()
+        call_args = mock_finalize.call_args
+        assert call_args[0][1] == "abandoned" or call_args[1].get("status") == "abandoned" or (
+            len(call_args[0]) >= 2 and call_args[0][1] == "abandoned"
+        )
+
+    def test_startup_recovery_recovers_bridge_sessions(self):
+        """Bridge session (session_id does NOT start with 'local') is reset to pending."""
+        import time
+
+        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+
+        bridge_session = self._stale_session(
+            session_id="tg-xyz789",
+            agent_session_id="agent-bridge-001",
+        )
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_as,
+            patch("agent.agent_session_queue.time") as mock_time,
+            patch("models.session_lifecycle.update_session") as mock_update,
+        ):
+            mock_time.time.return_value = time.time()
+            mock_as.query.filter.return_value = [bridge_session]
+
+            count = _recover_interrupted_agent_sessions_startup()
+
+        # Bridge sessions increment the count
+        assert count == 1
+        mock_update.assert_called_once()
+        call_kwargs = mock_update.call_args[1]
+        assert call_kwargs.get("new_status") == "pending"
+
+    def test_startup_recovery_mixed_local_and_bridge(self):
+        """Mixed stale sessions: local → abandoned, bridge → pending, count=1."""
+        import time
+
+        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+
+        local_session = self._stale_session(
+            session_id="local-abc",
+            agent_session_id="agent-local-002",
+        )
+        bridge_session = self._stale_session(
+            session_id="tg-xyz",
+            agent_session_id="agent-bridge-002",
+        )
+
+        finalize_calls = []
+        update_calls = []
+
+        def fake_finalize(entry, status, **kwargs):
+            finalize_calls.append((entry, status, kwargs))
+
+        def fake_update(session_id, **kwargs):
+            update_calls.append((session_id, kwargs))
+
+        with (
+            patch("agent.agent_session_queue.AgentSession") as mock_as,
+            patch("agent.agent_session_queue.time") as mock_time,
+            patch("models.session_lifecycle.finalize_session", side_effect=fake_finalize),
+            patch("models.session_lifecycle.update_session", side_effect=fake_update),
+        ):
+            mock_time.time.return_value = time.time()
+            mock_as.query.filter.return_value = [local_session, bridge_session]
+
+            count = _recover_interrupted_agent_sessions_startup()
+
+        # Only the bridge session is counted as "recovered"
+        assert count == 1
+        # Local session finalized as abandoned
+        assert len(finalize_calls) == 1
+        assert finalize_calls[0][0] is local_session
+        assert finalize_calls[0][1] == "abandoned"
+        # Bridge session updated to pending
+        assert len(update_calls) == 1
+        assert update_calls[0][0] == "tg-xyz"
+        assert update_calls[0][1]["new_status"] == "pending"
 
 
 class TestSessionWatchdogSafe:
