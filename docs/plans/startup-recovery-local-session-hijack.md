@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-04-15
 tracking: https://github.com/tomcounsell/ai/issues/986
 last_comment_id:
+revision_applied: true
 ---
 
 # Startup Recovery Must Not Hijack Local CLI Sessions
@@ -18,7 +19,7 @@ On worker restart, `_recover_interrupted_agent_sessions_startup()` finds all ses
 When a worker dies while a local Claude Code session is running, the session row remains in `status="running"` in Redis. On worker restart, startup recovery resets it to `pending` and re-enqueues it. The worker then spawns `claude --resume <UUID>` against the same Claude session UUID that the interactive CLI is already using. Two harnesses are now driving the same Claude session UUID: garbled transcripts, duplicate tool calls, file system conflicts, and at worst a corrupted Claude session.
 
 **Desired outcome:**
-Startup recovery skips local CLI sessions — sessions whose `worker_key` starts with `"local"`. These are abandoned (marked `"abandoned"`) instead of reset to `"pending"`, which is exactly what the periodic health check already does.
+Startup recovery skips local CLI sessions — sessions whose `session_id` starts with `"local"`. These are abandoned (marked `"abandoned"`) instead of reset to `"pending"`, which is exactly what the periodic health check already does.
 
 ## Freshness Check
 
@@ -28,9 +29,9 @@ Startup recovery skips local CLI sessions — sessions whose `worker_key` starts
 
 **File:line references re-verified:**
 - `agent/agent_session_queue.py:1319-1398` — `_recover_interrupted_agent_sessions_startup()` — confirmed; no local-session guard present (issue claim holds)
-- `agent/agent_session_queue.py:1597` — health check's `is_local = worker_key.startswith("local")` guard — confirmed at line 1597; logic is correct and is the model for the fix
-- `agent/agent_session_queue.py:1673` — health check pending-session local guard — confirmed at line 1673; same pattern
-- `.claude/hooks/user_prompt_submit.py:89` — local session creation with `session_id=f"local-{session_id}"` — not re-read (creation convention unchanged)
+- `agent/agent_session_queue.py:1597` — health check's `is_local = worker_key.startswith("local")` guard — confirmed at line 1597; note: this uses `worker_key` as discriminator, which is also flawed (see BLOCKER in Critique Results). The fix in this plan uses `session_id` as the correct discriminator; the health check fix is a separate follow-up.
+- `agent/agent_session_queue.py:1673` — health check pending-session local guard — confirmed at line 1673; same flawed pattern as above
+- `.claude/hooks/user_prompt_submit.py:89` — local session creation with `session_id=f"local-{session_id}"` — confirmed; `session_id` always starts with `"local"` for all sessions created via `create_local()`
 
 **Cited sibling issues/PRs re-checked:**
 - PR #745 (merged 2026-04-06) — Added 300s timing guard to startup recovery; did NOT address local-session identity distinction; confirmed by reading the PR body
@@ -66,13 +67,13 @@ Failure data flow (the bug):
 Fixed data flow:
 
 1. **Worker restarts** — Same as above
-2. **Recovery loop** — For each stale session, checks `entry.worker_key.startswith("local")`
+2. **Recovery loop** — For each stale session, checks `entry.session_id.startswith("local")`
 3. **Local session path** — Calls `finalize_session(entry, "abandoned", ...)` — session is terminated, never re-queued
 4. **Bridge session path** — Existing behavior: reset to `pending` and re-execute
 
 ## Architectural Impact
 
-- **No new dependencies** — Uses existing `finalize_session` import and `worker_key` property
+- **No new dependencies** — Uses existing `finalize_session` import and `session_id` field (already present on every AgentSession)
 - **No interface changes** — `_recover_interrupted_agent_sessions_startup()` signature unchanged; return type (count of recovered sessions) counts only bridge sessions (local sessions abandoned, not "recovered")
 - **Coupling unchanged** — Same modules involved
 - **Reversibility** — One guard condition; trivially reverted
@@ -95,20 +96,20 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **Local-session guard in startup recovery** — Mirror the exact pattern from `_agent_session_health_check` at line 1534: check `entry.worker_key.startswith("local")` and call `finalize_session(entry, "abandoned", ...)` instead of resetting to `pending`
-- **Log improvement** — Log the list of session IDs and their dispositions (recovered vs. abandoned) before the loop executes, so a human can see what happened at startup
+- **Local-session guard in startup recovery** — Check `entry.session_id.startswith("local")` (NOT `worker_key`) and call `finalize_session(entry, "abandoned", ...)` instead of resetting to `pending`. Note: the health check at line 1597 uses `worker_key.startswith("local")` — that is a pre-existing flawed pattern; this plan fixes startup recovery with the correct discriminator (`session_id`). A follow-up ticket should fix the health check.
+- **Log improvement** — Log a summary count of stale sessions found before the loop executes, so a human can see what happened at startup
 
 ### Flow
 
-Worker restarts → startup recovery queries running sessions → for each stale session: is local? → YES: abandon with log → NO: reset to pending (existing behavior)
+Worker restarts → startup recovery queries running sessions → for each stale session: `session_id.startswith("local")`? → YES: abandon with log → NO: reset to pending (existing behavior)
 
 ### Technical Approach
 
-In `_recover_interrupted_agent_sessions_startup()` (agent/agent_session_queue.py:1300-1332), add a branch inside the stale session loop:
+In `_recover_interrupted_agent_sessions_startup()` (agent/agent_session_queue.py:1319-1398), add a branch inside the stale session loop:
 
 ```python
 wk = entry.worker_key
-is_local = wk.startswith("local")
+is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator
 
 if is_local:
     # Local CLI sessions cannot be resumed by the bridge worker.
@@ -121,8 +122,9 @@ if is_local:
         skip_auto_tag=True,
     )
     logger.info(
-        "[startup-recovery] Abandoned local session %s (worker_key=%s)",
+        "[startup-recovery] Abandoned local session %s (session_id=%s, worker_key=%s)",
         entry.agent_session_id,
+        entry.session_id,
         wk,
     )
 else:
@@ -133,7 +135,9 @@ else:
 
 The `finalize_session` import already lives in the health check section of the same file; the startup recovery function can use the same lazy import pattern.
 
-**Log improvement** — Before the loop, log the full list of stale session IDs with their worker_key values at WARNING level, so a human restarting the worker can audit what will be recovered vs. abandoned without needing to wait for individual log lines.
+**Why `session_id` not `worker_key`:** `worker_key` for DEV sessions without a slug returns `project_key` (e.g., `"ai"`), not `chat_id`. `create_local()` always sets `session_id=f"local-{uuid}"`, making `session_id` the only reliable discriminator for local sessions.
+
+**Log improvement** — Before the loop, log a single summary line: `logger.warning("[startup-recovery] Found %d stale session(s) to process", len(stale_sessions))`. This is sufficient — individual per-session disposition logs follow inside the loop.
 
 ## Failure Path Test Strategy
 
@@ -142,7 +146,8 @@ The `finalize_session` import already lives in the health check section of the s
 - Test: assert that a `finalize_session` failure for a local session triggers deletion fallback (not re-queue)
 
 ### Empty/Invalid Input Handling
-- `entry.worker_key` is a computed property that falls back to `project_key` — it never returns None. The `startswith("local")` check is safe.
+- `entry.session_id` is always set at session creation — it never returns None. The `startswith("local")` check is safe.
+- `entry.worker_key` is still fetched (for log context) — it is a computed property that falls back to `project_key` and also never returns None.
 - No empty input edge cases in scope
 
 ### Error State Rendering
@@ -161,7 +166,7 @@ New tests to add to `tests/unit/test_recovery_respawn_safety.py` (greenfield, no
 ## Rabbit Holes
 
 - **Lockfile / heartbeat detection** — The issue body suggests checking whether a `claude` process is actively writing to the session UUID. This is complex (process enumeration, file locking) and unnecessary: we don't care if the local CLI is still alive — we just don't want the worker to compete with it. Abandoning is always the right call for local sessions.
-- **Modifying `worker_key` logic** — The `startswith("local")` check is already established convention (used in health check). Do not introduce a new field or enum; use the same discriminator.
+- **Fixing the health check discriminator in this plan** — The health check at line 1597 also uses `worker_key.startswith("local")`, which is flawed for the same reason. Fixing that is a separate follow-up ticket; do not expand scope here.
 - **Auditing all 8 recovery mechanisms** — `session-recovery-coverage.md` (issue #871) is already handling this documentation gap. Stay focused on the startup recovery fix.
 
 ## Risks
@@ -177,11 +182,13 @@ New tests to add to `tests/unit/test_recovery_respawn_safety.py` (greenfield, no
 ## Race Conditions
 
 ### Race 1: Local session hook re-activates session while startup recovery is abandoning it
-**Location:** `agent/agent_session_queue.py:1300-1332` (startup recovery) vs `.claude/hooks/user_prompt_submit.py:61-84` (hook reactivation)
+**Location:** `agent/agent_session_queue.py:1319-1398` (startup recovery) vs `.claude/hooks/user_prompt_submit.py:61-84` (hook reactivation)
 **Trigger:** Human types a new prompt in Claude Code exactly as the worker restarts; hook calls `transition_status(agent_session, "running")` while startup recovery calls `finalize_session(entry, "abandoned")`
 **Data prerequisite:** Session must exist in Redis with `status="running"` for startup recovery to see it
 **State prerequisite:** Hook fires before startup recovery's loop iteration for this session
-**Mitigation:** `finalize_session` calls `transition_status` which uses CAS (compare-and-swap) semantics via `expected_status="running"`. If the hook has already transitioned the session to "running" from "abandoned" (or if the session was already re-activated), the CAS will conflict and `finalize_session` will raise or no-op. The session remains live. This is the correct outcome. Add a catch for `StatusConflictError` at INFO level — same pattern used elsewhere.
+**Mitigation:** The actual guard is **temporal**: the `AGENT_SESSION_HEALTH_MIN_RUNNING` timing guard (300s) means sessions started within 300s are skipped entirely. In practice this covers the hook-reactivation window — a user actively typing at the exact moment of a worker restart would have started the session recently, and startup recovery skips it. Sessions old enough to be considered stale (>300s) by definition predate the current typing activity.
+
+Note: CAS via `finalize_session(expected_status="running")` does NOT protect against this race. Hook reactivation transitions `"running" → "running"` (same status — the hook sets `running` again). So the CAS condition (in-memory `"running"` vs on-disk `"running"`) still matches, and `finalize_session` would proceed to abandon the live session. The CAS catch for `StatusConflictError` should still be included for other unexpected concurrent modifications, but it is NOT the defense for this specific race. The timing guard is.
 
 No other race conditions — startup recovery runs once, synchronously, before any worker loops are started.
 
@@ -202,15 +209,16 @@ No agent integration required — this is a worker-internal change. The bridge, 
 
 ## Documentation
 
-- [ ] Update `docs/features/session-recovery-mechanisms.md` — Mechanism 1 table entry for Startup Recovery: add "Local session guard" row describing the `worker_key.startswith("local")` check and `"abandoned"` disposition for local sessions
+- [ ] Update `docs/features/session-recovery-mechanisms.md` — Mechanism 1 table entry for Startup Recovery: add "Local session guard" row describing the `session_id.startswith("local")` check and `"abandoned"` disposition for local sessions
 - [ ] Add inline docstring note to `_recover_interrupted_agent_sessions_startup()` in `agent/agent_session_queue.py` explaining the local-session guard and why local sessions are abandoned rather than re-queued
 
 ## Success Criteria
 
-- [ ] `_recover_interrupted_agent_sessions_startup()` never calls `update_session(..., "pending")` for sessions with `worker_key.startswith("local")`
+- [ ] `_recover_interrupted_agent_sessions_startup()` never calls `update_session(..., "pending")` for sessions with `session_id.startswith("local")`
 - [ ] Local stale sessions are finalized as `"abandoned"` with `skip_auto_tag=True`
 - [ ] Bridge sessions are recovered exactly as before (no regression)
-- [ ] Startup log shows per-session disposition before loop executes
+- [ ] Startup log shows stale session count before loop executes
+- [ ] Worker restart log shows `[startup-recovery] Abandoned local session <id>` when a local session was stale at startup (human-observable acceptance signal)
 - [ ] New unit tests pass: `test_startup_recovery_abandons_local_sessions`, `test_startup_recovery_recovers_bridge_sessions`, `test_startup_recovery_mixed_local_and_bridge`
 - [ ] Updated tests pass: `test_startup_recovery_only_queries_running`, `test_recover_interrupted_agent_sessions_startup_filters_running`
 - [ ] `docs/features/session-recovery-mechanisms.md` updated
@@ -251,12 +259,12 @@ Builder, validator, documentarian (see template for full list).
 - **Assigned To**: startup-recovery-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `_recover_interrupted_agent_sessions_startup()` at agent/agent_session_queue.py:1300, add `is_local = entry.worker_key.startswith("local")` check before the existing try block
+- In `_recover_interrupted_agent_sessions_startup()` at agent/agent_session_queue.py:1319, add `is_local = entry.session_id.startswith("local")` check before the existing try block (use `session_id`, NOT `worker_key` — see Technical Approach for why)
 - If `is_local`: call `finalize_session(entry, "abandoned", reason="startup recovery: local session cannot be resumed by worker", skip_auto_tag=True)` and log at INFO; do NOT increment `count`; track in separate `abandoned` counter
-- Add a pre-loop log at WARNING level listing all stale session IDs and their worker_key values
+- Add a pre-loop summary log at WARNING level: `logger.warning("[startup-recovery] Found %d stale session(s) to process", len(stale_sessions))`; do NOT dump full ID list (redundant with per-session loop logs)
 - Log summary at end: "Recovered {count} bridge session(s), abandoned {abandoned} local session(s)"
 - Wrap `finalize_session` call in try/except; on failure, fall through to the existing deletion fallback
-- Catch `StatusConflictError` at INFO level (CAS conflict = session was concurrently reactivated = correct outcome)
+- Catch `StatusConflictError` at INFO level (other concurrent modifications — note: this does NOT protect against hook reactivation; timing guard is the actual defense for that race)
 
 ### 2. Write new unit tests
 - **Task ID**: build-tests
@@ -266,9 +274,9 @@ Builder, validator, documentarian (see template for full list).
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `TestStartupRecoveryLocalSessionGuard` class to `tests/unit/test_recovery_respawn_safety.py`
-- `test_startup_recovery_abandons_local_sessions`: mock stale local session (worker_key="local-abc"), assert `finalize_session` called with "abandoned", count returns 0
-- `test_startup_recovery_recovers_bridge_sessions`: mock stale bridge session (worker_key="myproject"), assert `update_session` called with "pending", count returns 1
-- `test_startup_recovery_mixed_local_and_bridge`: mock one of each; assert local→abandoned, bridge→pending, count=1
+- `test_startup_recovery_abandons_local_sessions`: mock stale local session (session_id="local-abc123", worker_key="ai"), assert `finalize_session` called with "abandoned", count returns 0
+- `test_startup_recovery_recovers_bridge_sessions`: mock stale bridge session (session_id="tg-xyz789", worker_key="ai"), assert `update_session` called with "pending", count returns 1
+- `test_startup_recovery_mixed_local_and_bridge`: mock one of each (local session_id="local-abc", bridge session_id="tg-xyz"); assert local→abandoned, bridge→pending, count=1
 - Update `TestStartupRecoverySkipsTerminal::test_startup_recovery_only_queries_running`: extend to also assert local sessions are not re-queued
 - Update `test_recover_interrupted_agent_sessions_startup_filters_running` in test_agent_session_scheduler_kill.py: add a local-session mock and assert abandoned disposition
 
@@ -289,7 +297,7 @@ Builder, validator, documentarian (see template for full list).
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/session-recovery-mechanisms.md` Mechanism 1 table: add "Local session guard" row with: check `worker_key.startswith("local")`, disposition "abandoned", reason "no bridge worker can deliver output for local sessions"
+- Update `docs/features/session-recovery-mechanisms.md` Mechanism 1 table: add "Local session guard" row with: check `session_id.startswith("local")`, disposition "abandoned", reason "no bridge worker can deliver output for local sessions"
 
 ### 5. Final Validation
 - **Task ID**: validate-all
@@ -309,18 +317,17 @@ Builder, validator, documentarian (see template for full list).
 | All unit tests | `pytest tests/unit/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/agent_session_queue.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/agent_session_queue.py` | exit code 0 |
-| Guard present | `grep -n "startswith.*local" agent/agent_session_queue.py` | output contains "startup" context |
+| Guard present | `grep -n "session_id.*startswith.*local" agent/agent_session_queue.py` | output contains "startup" context |
 | Docs updated | `grep "Local session guard" docs/features/session-recovery-mechanisms.md` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Skeptic, Adversary | `worker_key.startswith("local")` fails for default DEV sessions (worker_key = project_key) | Replace discriminator with `entry.session_id.startswith("local")` | `create_local()` always sets `session_id=f"local-{uuid}"` — session_id is the reliable discriminator; `worker_key` for session_type=DEV without slug returns `project_key`, not `chat_id` |
-| CONCERN | Adversary | Race 1 mitigation description is incorrect: hook reactivation transitions "running" → "running" (same status), CAS in finalize_session would NOT conflict and would proceed to abandon a live session | Add guard: after `finalize_session` is called, check `StatusConflictError` AND add a pre-call re-read to confirm status is still "running" before abandoning | `finalize_session` CAS compares in-memory status to on-disk status at call time; if hook has already re-activated (status still "running" on disk), CAS passes and the live session gets abandoned. Guard: `from models.session_lifecycle import StatusConflictError` then catch it, but also add idempotency check against hook reactivation by checking `entry.session_id` in running sessions post-finalize. |
-| NIT | Simplifier | Pre-loop WARNING log of all stale session IDs is redundant — each session is already logged at WARNING inside the loop | Optionally keep a single "N stale sessions found" count log instead of full ID list; remove per-session duplication | N/A |
-| NIT | User | All success criteria are purely technical; no human-observable acceptance criterion | Add: "Worker restart log shows `[startup-recovery] Abandoned local session <id>`" as acceptance signal | N/A |
+| BLOCKER ✅ | Skeptic, Adversary | `worker_key.startswith("local")` fails for default DEV sessions (worker_key = project_key) | Changed discriminator to `entry.session_id.startswith("local")` throughout plan | `create_local()` always sets `session_id=f"local-{uuid}"` — session_id is the reliable discriminator; `worker_key` for session_type=DEV without slug returns `project_key`, not `chat_id` |
+| CONCERN ✅ | Adversary | Race 1 mitigation description was incorrect: hook reactivation transitions "running" → "running" (same status), CAS in finalize_session would NOT conflict | Race Conditions section rewritten: timing guard (300s) is the actual defense; CAS catch kept for other concurrent modifications only | The timing guard means sessions old enough to be stale (>300s) predate any active typing; hook reactivation is implausible for truly stale sessions |
+| NIT ✅ | Simplifier | Pre-loop WARNING log of all stale session IDs is redundant | Replaced with single summary count log: `logger.warning("Found %d stale session(s) to process", len(stale_sessions))` | N/A |
+| NIT ✅ | User | All success criteria were purely technical; no human-observable acceptance criterion | Added: "Worker restart log shows `[startup-recovery] Abandoned local session <id>`" to Success Criteria | N/A |
 
 ---
 
