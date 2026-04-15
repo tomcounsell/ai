@@ -1562,12 +1562,19 @@ async def get_response_via_harness(
     chunks are accumulated internally and never delivered mid-session.
 
     When ``prior_uuid`` is provided and valid, injects ``--resume <uuid>`` into
-    the subprocess argv and skips ``_apply_context_budget()`` (the message is
-    already minimal). If the resumed session fails with a stale UUID error,
-    retries once using ``full_context_message`` without ``--resume``.
+    the subprocess argv. ``_apply_context_budget()`` is applied **unconditionally**
+    to the final argv message, regardless of ``--resume`` state. On the typical
+    resume path the message is small and the function is a no-op; on first turns
+    and pathological large single messages it bounds the argv to prevent the
+    binary's "Separator is found" overflow crash.
+
+    If the resumed subprocess exits with **any** non-zero return code, retries
+    once using ``full_context_message`` without ``--resume`` (no stderr substring
+    gate — substring matching is brittle across CLI versions and locales).
 
     When ``session_id`` is provided, stores the captured Claude Code UUID on
     the AgentSession record after a successful turn (Popoto/Redis side effect).
+    Tests that pass ``session_id`` must mock ``_store_claude_session_uuid``.
 
     Args:
         message: The prompt to send to the CLI.
@@ -1595,24 +1602,37 @@ async def get_response_via_harness(
         proc_env.update(env)
         proc_env.pop("ANTHROPIC_API_KEY", None)
 
+    # Apply context budget unconditionally. On resumed turns with a typical
+    # small message this is a no-op (one length comparison). On first turns
+    # and on pathological large single messages (pasted transcripts, forwarded
+    # logs) it bounds the argv to prevent the binary's chunk-limit crash.
+    original_len = len(message)
+    message = _apply_context_budget(message)
+    if len(message) < original_len:
+        logger.info(
+            f"[harness] Context budget applied: trimmed {original_len} → {len(message)} chars"
+        )
+
     if prior_uuid:
+        logger.info(f"[harness] Resuming Claude session {prior_uuid} for session_id={session_id}")
         cmd = harness_cmd + ["--resume", prior_uuid, message]
     else:
-        original_len = len(message)
-        message = _apply_context_budget(message)
-        if len(message) < original_len:
-            logger.info(
-                f"[harness] Context budget applied: trimmed {original_len} → {len(message)} chars"
-            )
         cmd = harness_cmd + [message]
 
-    result_text, session_id_from_harness = await _run_harness_subprocess(cmd, working_dir, proc_env)
+    result_text, session_id_from_harness, returncode = await _run_harness_subprocess(
+        cmd, working_dir, proc_env
+    )
 
-    # Stale-UUID fallback: if --resume failed with stale UUID error, retry without it
-    if result_text == _STALE_UUID_SENTINEL and prior_uuid:
+    # Mandatory stale-UUID fallback: when prior_uuid was set and the subprocess
+    # exits with ANY non-zero return code, retry once without --resume using the
+    # full-context message. The fallback does NOT inspect stderr — substring
+    # matching is brittle across CLI versions and locales, and an unnecessary
+    # retry on a non-stale-UUID error costs only one extra subprocess spawn.
+    if prior_uuid and returncode is not None and returncode != 0:
         if full_context_message is not None:
             logger.warning(
-                "[harness] --resume failed, retrying without --resume (stale UUID fallback)"
+                f"[harness] Stale UUID {prior_uuid} for session_id={session_id}, "
+                "falling back to first-turn path"
             )
             original_len = len(full_context_message)
             fallback_msg = _apply_context_budget(full_context_message)
@@ -1621,34 +1641,36 @@ async def get_response_via_harness(
                     f"[harness] Fallback budget: {original_len} → {len(fallback_msg)} chars"
                 )
             fallback_cmd = harness_cmd + [fallback_msg]
-            result_text, session_id_from_harness = await _run_harness_subprocess(
+            result_text, session_id_from_harness, _ = await _run_harness_subprocess(
                 fallback_cmd, working_dir, proc_env
             )
         else:
-            logger.error("[harness] --resume failed and no full_context_message for fallback")
+            logger.error(
+                f"[harness] Stale UUID {prior_uuid} for session_id={session_id}, "
+                "falling back to first-turn path — no full_context_message available"
+            )
+            result_text = None
 
     # Store the Claude Code UUID for next-turn --resume (#976)
     if session_id and session_id_from_harness:
         _store_claude_session_uuid(session_id, session_id_from_harness)
 
-    if result_text is not None and result_text != _STALE_UUID_SENTINEL:
+    if result_text is not None:
         return result_text
     return ""
-
-
-_STALE_UUID_SENTINEL = "__stale_uuid__"
 
 
 async def _run_harness_subprocess(
     cmd: list[str],
     working_dir: str,
     proc_env: dict[str, str],
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, int | None]:
     """Execute a harness subprocess and parse stream-json output.
 
-    Returns (result_text, session_id_from_harness). result_text is
-    ``_STALE_UUID_SENTINEL`` when the process fails with a stale-UUID error,
-    ``None`` for other failures without a result event.
+    Returns (result_text, session_id_from_harness, returncode). On binary-not-found,
+    returncode is None and result_text carries the error message. On stream-parse
+    success, result_text is the parsed result and returncode is the process exit
+    code (0 on success, non-zero on failure).
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1660,7 +1682,7 @@ async def _run_harness_subprocess(
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
-        return (f"Error: CLI harness not found — {e}", None)
+        return (f"Error: CLI harness not found — {e}", None, None)
 
     full_text = ""
     result_text = None
@@ -1699,22 +1721,21 @@ async def _run_harness_subprocess(
                     full_text += chunk
 
     _, stderr_data = await proc.communicate()
-    if proc.returncode and proc.returncode != 0:
+    returncode = proc.returncode if proc.returncode is not None else 0
+    if returncode != 0:
         stderr_text = stderr_data.decode("utf-8", errors="replace") if stderr_data else ""
-        logger.warning(f"Harness exited with code {proc.returncode}: {stderr_text[:500]}")
-        if "requires a valid session" in stderr_text:
-            return (_STALE_UUID_SENTINEL, None)
+        logger.warning(f"Harness exited with code {returncode}: {stderr_text[:500]}")
 
     if result_text is not None:
-        return (result_text, session_id_from_harness)
+        return (result_text, session_id_from_harness, returncode)
     if full_text:
         logger.warning(
             "Harness exited without result event, returning %d chars of accumulated text",
             len(full_text),
         )
-        return (full_text, session_id_from_harness)
+        return (full_text, session_id_from_harness, returncode)
     logger.error("Harness exited without a result event and no accumulated text")
-    return (None, session_id_from_harness)
+    return (None, session_id_from_harness, returncode)
 
 
 async def verify_harness_health(harness_name: str) -> bool:
