@@ -171,6 +171,8 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.doctor --quality` | Include code quality checks (ruff, pytest) |
 | `python -m tools.doctor --json` | Output health check results as JSON |
 | `python -m tools.doctor --install-hook` | Install git pre-push hook running doctor --quick |
+| `valor-youtube-search "query"` | Search YouTube for videos by query |
+| `valor-youtube-search --limit N "query"` | Search YouTube with limited results |
 
 ## Development Principles
 

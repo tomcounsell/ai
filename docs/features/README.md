@@ -153,6 +153,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
+| [YouTube Search](youtube-search.md) | Search YouTube by query using yt-dlp, returning structured results (title, URL, duration, views) via `valor-youtube-search` CLI | Shipped |
 | [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context | Shipped |
 
 ## Adding New Entries
