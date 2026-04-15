@@ -10,6 +10,7 @@ revision_applied: true
 revision_rounds: 2
 last_revision: 2026-04-15
 critique_archive: docs/plans/critiques/harness-session-continuity-2026-04-15.md
+allow_unchecked: true
 ---
 
 # Harness Session Continuity (--resume / --continue)
