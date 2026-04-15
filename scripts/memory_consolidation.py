@@ -42,8 +42,6 @@ import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
-from config.models import HAIKU
-
 logger = logging.getLogger(__name__)
 
 MAX_MERGES_PER_RUN = 10
@@ -197,7 +195,7 @@ def _call_haiku(memories_json: str) -> dict | None:
         client = anthropic.Anthropic()
         prompt = _build_haiku_prompt(memories_json)
         message = client.messages.create(
-            model=HAIKU,
+            model="claude-haiku-4-5",
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )

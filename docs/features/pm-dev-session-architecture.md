@@ -241,11 +241,12 @@ This keeps the SDK turn loop alive so `_handle_dev_session_completion()` can ste
 
 **2. Continuation PM (guaranteed fallback)**
 
-If the PM exits before the Dev session completes (the common case when the LLM ends its turn loop), `_handle_dev_session_completion()` detects this via the `steer_session()` return value:
+If the PM exits before the Dev session completes (the common case when the LLM ends its turn loop), `_handle_dev_session_completion()` detects this via the `steer_session()` return value. **Ordering invariant (issue #987)**: `_handle_dev_session_completion()` is always called *after* `complete_transcript()`, which synchronously runs `_finalize_parent_sync()` to completion. This means the re-check guard reads the PM's post-finalization status — avoiding the race where a steer was accepted but the PM then finalized before consuming it.
 
-- **Steer succeeds + parent still active**: Direct delivery (optimal path).
-- **Steer succeeds + parent finalized** (race with `_finalize_parent_sync`): Creates a continuation PM.
+- **Steer succeeds + parent still active at re-check**: Direct delivery (optimal path).
+- **Steer succeeds + parent terminal at re-check** (post-`_finalize_parent_sync` state): Creates a continuation PM immediately — the steering message is orphaned and the PM will never consume it.
 - **Steer fails** (parent already terminal): Creates a continuation PM.
+- **Path B (`agent_session=None`)**: When the `status="running"` filter returned `None` (race with health-check recovery), falls back to `session.parent_agent_session_id` to look up the parent and create a continuation PM — no silent skip.
 
 The continuation PM is a new `AgentSession(session_type="pm", status="pending")` containing:
 - The issue number, completed stage, outcome, and result preview.

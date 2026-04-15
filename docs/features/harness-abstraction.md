@@ -117,7 +117,7 @@ No changes to the `AgentSession` model are needed. Harness selection is purely a
 
 ## Post-Completion SDLC Handler (Phase 3)
 
-After `get_response_via_harness()` returns, the worker calls `_handle_dev_session_completion()` in `agent/agent_session_queue.py` to handle SDLC lifecycle:
+After `get_response_via_harness()` returns, the worker calls `complete_transcript()` first (which runs `_finalize_parent_sync()` synchronously), then calls `_handle_dev_session_completion()` in `agent/agent_session_queue.py` to handle SDLC lifecycle. This ordering ensures the re-check guard inside `_handle_dev_session_completion()` reads the PM's post-finalization status (ordering invariant fix for issue #987):
 
 1. Looks up the parent PM session via `parent_agent_session_id`
 2. Calls `PipelineStateMachine(parent).classify_outcome()` on the result text

@@ -152,7 +152,7 @@ All GitHub interactions use the `gh` CLI via subprocess with a 10-second timeout
 Extended with these functions for worker post-completion SDLC handling:
 
 - `_extract_issue_number(session, agent_session)` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or `issues/NNN` pattern in session message text. Returns int or None.
-- `_handle_dev_session_completion(session, agent_session, result)` -- Called after `get_response_via_harness()` (or SDK path) returns. Classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers parent PM session. All operations non-fatal.
+- `_handle_dev_session_completion(session, agent_session, result)` -- Called after `complete_transcript()` runs (which runs `_finalize_parent_sync()` synchronously). Classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers parent PM session. Re-checks parent status after steer — if terminal at re-check, creates a continuation PM (ordering invariant fix, issue #987). Path B: if `agent_session=None`, falls back to `session.parent_agent_session_id` instead of returning silently. All operations non-fatal.
 
 ### `agent/hooks/subagent_stop.py`
 
