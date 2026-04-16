@@ -1,12 +1,16 @@
 """BM25 + RRF fusion retrieval for the subconscious memory system.
 
-Replaces ContextAssembler with a three-signal Reciprocal Rank Fusion:
+Four-signal Reciprocal Rank Fusion:
   1. BM25 keyword match quality (via BM25Field.search)
   2. Temporal relevance (via DecayingSortedField sorted set)
   3. Historical confidence (via ConfidenceField companion hash)
+  4. Semantic similarity (via EmbeddingField cosine similarity)
 
 Each signal produces a ranked list of (redis_key, score) tuples.
 RRF fuses them into a single ranking: score = sum(1 / (k + rank_i)).
+
+Signal 4 (embedding) gracefully degrades: if no embeddings exist or the
+provider is unavailable, RRF fuses the remaining three signals as before.
 
 All functions are fail-silent -- retrieval failures never crash the agent.
 """
@@ -162,17 +166,83 @@ def get_confidence_ranked(
         return []
 
 
+def get_embedding_ranked(
+    query_text: str,
+    project_key: str,
+    limit: int = 50,
+) -> list[tuple[str, float]]:
+    """Get embedding-similarity-ranked memory keys via cosine similarity.
+
+    Embeds the query text using the configured provider, loads all stored
+    Memory embeddings from disk, computes cosine similarity (dot product
+    on pre-normalized vectors), filters to the given project_key, and
+    returns (redis_key, similarity) tuples sorted descending.
+
+    Gracefully degrades: returns [] if no provider is configured, no
+    embeddings exist on disk, or any error occurs.
+
+    Args:
+        query_text: Search query to embed and compare against.
+        project_key: Project partition key to filter results.
+        limit: Maximum entries to return.
+
+    Returns:
+        List of (redis_key, similarity_score) tuples. Empty list on any error.
+    """
+    try:
+        import numpy as np
+        from popoto.fields.embedding_field import EmbeddingField, get_default_provider
+
+        from models.memory import Memory
+
+        provider = get_default_provider()
+        if provider is None:
+            return []
+
+        # Embed the query
+        query_vectors = provider.embed([query_text], input_type="query")
+        if not query_vectors or not query_vectors[0]:
+            return []
+
+        query_vec = np.array(query_vectors[0], dtype=np.float32)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm == 0:
+            return []
+        query_vec = query_vec / query_norm
+
+        # Load all stored embeddings (pre-normalized matrix)
+        matrix, keys = EmbeddingField.load_embeddings(Memory)
+        if matrix is None or len(keys) == 0:
+            return []
+
+        # Cosine similarity via dot product (matrix is pre-normalized)
+        similarities = matrix @ query_vec
+
+        # Build (key, score) tuples and sort by similarity descending
+        entries = list(zip(keys, similarities.tolist()))
+        entries = _filter_by_project(entries, project_key)
+        entries.sort(key=lambda x: x[1], reverse=True)
+
+        # Filter out negative similarities (irrelevant results)
+        entries = [(k, s) for k, s in entries if s > 0]
+
+        return entries[:limit]
+    except Exception as e:
+        logger.warning(f"[memory_retrieval] embedding ranked fetch failed: {e}")
+        return []
+
+
 def retrieve_memories(
     query_text: str,
     project_key: str,
     limit: int = 10,
     rrf_k: int | None = None,
 ) -> list[Any]:
-    """Retrieve memories using BM25 + RRF fusion of three signals.
+    """Retrieve memories using four-signal RRF fusion.
 
-    Combines BM25 keyword match, temporal relevance, and confidence
-    via Reciprocal Rank Fusion. Returns hydrated Memory instances
-    with a `score` attribute set to the RRF fusion score.
+    Combines BM25 keyword match, temporal relevance, confidence, and
+    semantic similarity via Reciprocal Rank Fusion. Returns hydrated
+    Memory instances with a `score` attribute set to the RRF fusion score.
 
     Args:
         query_text: Search query string.
@@ -207,11 +277,19 @@ def retrieve_memories(
         # Signal 3: Confidence (global hash, post-filtered to project)
         confidence_results = get_confidence_ranked(project_key, limit=50)
 
-        # Fuse the three signals
+        # Signal 4: Semantic similarity (embedding cosine, post-filtered to project)
+        try:
+            embedding_results = get_embedding_ranked(query_text, project_key, limit=50)
+        except Exception as e:
+            logger.warning(f"[memory_retrieval] embedding search failed: {e}")
+            embedding_results = []
+
+        # Fuse all signals (embedding gracefully degrades to empty list)
         fused = rrf_fuse(
             bm25_results,
             relevance_results,
             confidence_results,
+            embedding_results,
             k=rrf_k,
             limit=limit,
         )
@@ -255,4 +333,107 @@ def retrieve_memories(
 
     except Exception as e:
         logger.warning(f"[memory_retrieval] retrieve_memories failed: {e}")
+        return []
+
+
+def get_memories_in_time_range(
+    project_key: str,
+    since: float | None = None,
+    until: float | None = None,
+    limit: int = 100,
+) -> list[Any]:
+    """Retrieve Memory instances for a project within a time range.
+
+    Uses the DecayingSortedField sorted set to build a score lookup (scores
+    approximate creation timestamps), then hydrates records via
+    Memory.query.filter. Records are filtered by score range and sorted
+    by score descending (most recent first).
+
+    Records marked as superseded are excluded.
+
+    Args:
+        project_key: Project partition key.
+        since: Unix timestamp lower bound (inclusive). None = no lower bound.
+        until: Unix timestamp upper bound (inclusive). None = no upper bound.
+        limit: Maximum records to return.
+
+    Returns:
+        List of Memory instances with _timeline_score attribute, sorted by
+        score descending (most recent first). Empty list on any error.
+    """
+    try:
+        from models.memory import Memory
+
+        # Build a score lookup from the relevance sorted set
+        score_map: dict[str, float] = {}
+        try:
+            from popoto import DecayingSortedField
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            sorted_set_key = DecayingSortedField.get_sortedset_db_key(
+                Memory, "relevance", project_key
+            )
+            min_score = since if since is not None else "-inf"
+            max_score = until if until is not None else "+inf"
+
+            raw_results = POPOTO_REDIS_DB.zrangebyscore(
+                sorted_set_key.redis_key,
+                min_score,
+                max_score,
+                withscores=True,
+            )
+
+            if raw_results:
+                for redis_key, score in raw_results:
+                    str_key = redis_key.decode() if isinstance(redis_key, bytes) else str(redis_key)
+                    score_map[str_key] = float(score)
+        except Exception as e:
+            logger.debug(f"[memory_retrieval] sorted set lookup failed: {e}")
+
+        # If we have no score map and time filters are set, return empty
+        # (we cannot filter by time without scores)
+        if not score_map and (since is not None or until is not None):
+            return []
+
+        # Hydrate all records for this project
+        try:
+            all_records = list(Memory.query.filter(project_key=project_key))
+        except Exception as e:
+            logger.warning(f"[memory_retrieval] time range query failed: {e}")
+            return []
+
+        # Filter out superseded records
+        active = [r for r in all_records if not getattr(r, "superseded_by", "")]
+
+        # If time filters are set, only include records whose Redis key
+        # appeared in the score_map (already filtered by ZRANGEBYSCORE)
+        if score_map:
+            filtered = []
+            for record in active:
+                # Match record to score_map by checking if its key contains the memory_id
+                mid = getattr(record, "memory_id", "")
+                matched_score = None
+                for skey, sval in score_map.items():
+                    if mid and mid in skey:
+                        matched_score = sval
+                        break
+                if matched_score is not None:
+                    record._timeline_score = matched_score
+                    filtered.append(record)
+                elif since is None and until is None:
+                    # No time filter — include all
+                    record._timeline_score = 0.0
+                    filtered.append(record)
+            active = filtered
+        else:
+            # No score map — attach zero scores
+            for record in active:
+                record._timeline_score = 0.0
+
+        # Sort by score descending (most recent first)
+        active.sort(key=lambda r: getattr(r, "_timeline_score", 0.0), reverse=True)
+        return active[:limit]
+
+    except Exception as e:
+        logger.warning(f"[memory_retrieval] get_memories_in_time_range failed: {e}")
         return []

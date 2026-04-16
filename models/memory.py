@@ -1,7 +1,7 @@
 """Memory model for the subconscious memory system.
 
 Level 3 popoto model with DecayingSortedField, ConfidenceField, BM25Field,
-WriteFilterMixin, AccessTrackerMixin, and ExistenceFilter.
+EmbeddingField, WriteFilterMixin, AccessTrackerMixin, and ExistenceFilter.
 
 Memories are partitioned by project_key for per-project isolation.
 Human messages are saved with high importance (InteractionWeight.HUMAN = 6.0),
@@ -9,6 +9,8 @@ agent observations with low importance (InteractionWeight.AGENT = 1.0).
 
 The ExistenceFilter fingerprints on content, enabling O(1) bloom checks
 for topic relevance before running the BM25 + RRF fusion retrieval.
+EmbeddingField generates vector embeddings via OllamaProvider on save,
+enabling semantic similarity as a fourth RRF signal in retrieval.
 """
 
 import logging
@@ -25,6 +27,7 @@ from popoto import (  # noqa: E402
     ConfidenceField,
     DecayingSortedField,
     DictField,
+    EmbeddingField,
     FloatField,
     KeyField,
     Model,
@@ -73,6 +76,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
         relevance: Decay-sorted index, partitioned by project_key.
         confidence: Bayesian confidence, updated by ObservationProtocol.
         bm25: BM25 keyword search index on content for ranked retrieval.
+        embedding: Vector embedding of content for semantic similarity search.
         bloom: ExistenceFilter for O(1) topic pre-checks.
     """
 
@@ -101,6 +105,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     )
     confidence = ConfidenceField(initial_confidence=0.5)
     bm25 = BM25Field(source="content")
+    embedding = EmbeddingField(source="content")
     bloom = ExistenceFilter(
         error_rate=0.01,
         capacity=100_000,
