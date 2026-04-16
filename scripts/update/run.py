@@ -808,8 +808,47 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                             "dashboard may show stale status briefly"
                         )
                     else:
-                        log("WARN: Worker not running after install", v, always=True)
-                        result.warnings.append("Worker not running after install")
+                        # Kickstart fallback: force-start the service if launchd
+                        # didn't auto-start after bootout+bootstrap.
+                        import subprocess
+
+                        uid = os.getuid()
+                        try:
+                            subprocess.run(
+                                ["launchctl", "kickstart", "-k", f"gui/{uid}/com.valor.worker"],
+                                capture_output=True,
+                            )
+                        except Exception as e:
+                            log(f"launchctl kickstart failed: {e}", v, always=True)
+                        # Re-poll for 15 more seconds
+                        for _ in range(8):
+                            _time.sleep(2)
+                            if service.is_worker_running():
+                                worker_pid = service.get_worker_pid()
+                                try:
+                                    if (
+                                        heartbeat_file.exists()
+                                        and heartbeat_file.stat().st_mtime > install_ts
+                                    ):
+                                        log(
+                                            f"Worker running after kickstart (PID: {worker_pid})",
+                                            v,
+                                            always=True,
+                                        )
+                                        worker_healthy = True
+                                        break
+                                except OSError:
+                                    pass
+                        if not worker_healthy:
+                            log(
+                                "ERROR: Worker not running after kickstart retry — system degraded",
+                                v,
+                                always=True,
+                            )
+                            result.warnings.append(
+                                "Worker not running after install and kickstart retry"
+                            )
+                            result.success = False
             else:
                 result.warnings.append("Worker plist install failed")
 

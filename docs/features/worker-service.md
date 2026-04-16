@@ -124,7 +124,7 @@ This installs `com.valor.worker` as a launchd service that auto-starts on boot.
 
 The `/update` command (`scripts/update/run.py`) automatically manages the worker service alongside the bridge:
 
-- **Full update** (`--full`): Installs worker plist, verifies worker starts (polls up to 10s)
+- **Full update** (`--full`): Installs worker plist, verifies worker starts (30s heartbeat poll + kickstart fallback with 15s re-poll; exits with error if worker still not running after 45s total)
 - **Cron update** (`scripts/remote-update.sh`): Bootout old worker, substitute paths, bootstrap new
 - **Python API**: `scripts/update/service.py` exposes `install_worker()`, `restart_worker()`, `get_worker_status()`, `is_worker_running()`
 

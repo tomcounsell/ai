@@ -176,7 +176,9 @@ class TestMaybeInjectResumeHydration:
         assert "<resumed-session-context>" in session.message_text
         assert "abc123 Fix bug" in session.message_text
         assert "original message" in session.message_text
-        session.async_save.assert_called_once()
+        session.async_save.assert_called_once_with(
+            update_fields=["initial_telegram_message", "updated_at"]
+        )
 
         # log_depth=10 was passed
         mock_git.assert_called_once_with(working_dir="/tmp/fake-worktree", log_depth=10)
@@ -202,6 +204,9 @@ class TestMaybeInjectResumeHydration:
         hydration_pos = session.message_text.index("<resumed-session-context>")
         original_pos = session.message_text.index("do the next stage")
         assert hydration_pos < original_pos
+        session.async_save.assert_called_once_with(
+            update_fields=["initial_telegram_message", "updated_at"]
+        )
 
     # -- Silent failure --
 
@@ -261,3 +266,6 @@ class TestMaybeInjectResumeHydration:
             self._run(session)
 
         assert "<resumed-session-context>" in session.message_text
+        session.async_save.assert_called_once_with(
+            update_fields=["initial_telegram_message", "updated_at"]
+        )
