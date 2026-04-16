@@ -141,21 +141,21 @@ No prerequisites — this work has no external dependencies.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `determine_delivery_action` is a pure function with no exception handlers — no coverage needed
-- [ ] `_pop_agent_session` has existing exception handling; the sort key change doesn't add new handlers
+- [x] `determine_delivery_action` is a pure function with no exception handlers — no coverage needed
+- [x] `_pop_agent_session` has existing exception handling; the sort key change doesn't add new handlers
 
 ### Empty/Invalid Input Handling
-- [ ] Test `determine_delivery_action` with `session_status=None` (default) — should not trigger `waiting_for_children` guard
-- [ ] Test `_pop_agent_session` sort with sessions where `parent_agent_session_id` is None vs set
+- [x] Test `determine_delivery_action` with `session_status=None` (default) — should not trigger `waiting_for_children` guard
+- [x] Test `_pop_agent_session` sort with sessions where `parent_agent_session_id` is None vs set
 
 ### Error State Rendering
-- [ ] When PM delivers (instead of nudging) while in `waiting_for_children`, the output reaches the user as a status message — verify this renders correctly
+- [x] When PM delivers (instead of nudging) while in `waiting_for_children`, the output reaches the user as a status message — verify this renders correctly
 
 ## Test Impact
 
-- [ ] `tests/unit/test_nudge_loop.py` — UPDATE: audit for tests that pass `session_status` or test PM+SDLC routing paths; add `waiting_for_children` guard test cases
-- [ ] `tests/unit/test_duplicate_delivery.py` — UPDATE: audit for tests that exercise `determine_delivery_action` with PM+SDLC inputs; verify they still pass with the new early return
-- [ ] `tests/unit/test_output_router.py` — UPDATE: add test cases for `waiting_for_children` guard
+- [x] `tests/unit/test_nudge_loop.py` — UPDATE: audit for tests that pass `session_status` or test PM+SDLC routing paths; add `waiting_for_children` guard test cases
+- [x] `tests/unit/test_duplicate_delivery.py` — UPDATE: audit for tests that exercise `determine_delivery_action` with PM+SDLC inputs; verify they still pass with the new early return
+- [x] `tests/unit/test_output_router.py` — UPDATE: add test cases for `waiting_for_children` guard
 
 ## Rabbit Holes
 
@@ -201,19 +201,19 @@ No agent integration required — this is a worker-internal change to the output
 
 ## Documentation
 
-- [ ] Update `docs/features/pm-dev-session-architecture.md` to document the `waiting_for_children` → deliver (no nudge) behavior
-- [ ] Add entry to `docs/features/README.md` index if a new section is created
+- [x] Update `docs/features/pm-dev-session-architecture.md` to document the `waiting_for_children` → deliver (no nudge) behavior
+- [x] Add entry to `docs/features/README.md` index if a new section is created
 
 ## Success Criteria
 
-- [ ] A PM session that creates a child dev session does not deadlock when `MAX_CONCURRENT_DEV_SESSIONS=1` and `MAX_CONCURRENT_SESSIONS=3`
-- [ ] Child dev sessions created by a running PM are executed within a bounded time (no indefinite pending state)
-- [ ] Existing concurrency limits continue to function as caps for unrelated sessions
-- [ ] The fix handles the case where multiple PMs each create child dev sessions simultaneously
-- [ ] Unit test demonstrates the output router returns `deliver` (not `nudge_continue`) for `waiting_for_children` PM sessions
-- [ ] Unit test demonstrates child sessions sort before parentless sessions at the same priority tier
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] A PM session that creates a child dev session does not deadlock when `MAX_CONCURRENT_DEV_SESSIONS=1` and `MAX_CONCURRENT_SESSIONS=3`
+- [x] Child dev sessions created by a running PM are executed within a bounded time (no indefinite pending state)
+- [x] Existing concurrency limits continue to function as caps for unrelated sessions
+- [x] The fix handles the case where multiple PMs each create child dev sessions simultaneously
+- [x] Unit test demonstrates the output router returns `deliver` (not `nudge_continue`) for `waiting_for_children` PM sessions
+- [x] Unit test demonstrates child sessions sort before parentless sessions at the same priority tier
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
