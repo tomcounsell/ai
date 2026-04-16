@@ -392,3 +392,131 @@ Even if you could run a recovery command, you SHOULD NOT — recovery is a human
 The 2026-04-10 incident that motivated issue #881 was a PM session treating a
 "repo missing" error as recoverable and running `rm -rf && git clone` four times until
 one attempt succeeded. That is not a valid recovery path.
+
+---
+
+## Child Session Monitoring
+
+After dispatching a child dev session (Rule 4), you MUST actively monitor its status
+rather than waiting indefinitely. Stuck children waste pipeline time and block progress.
+
+### Monitoring Protocol
+
+After calling `wait-for-children`, periodically check the child session's status:
+
+```bash
+python -m tools.valor_session status --id {child_session_id}
+```
+
+### Timeout Thresholds
+
+| Child Status | Threshold | Action |
+|-------------|-----------|--------|
+| `pending` | 5 minutes | Fallback or escalate (see below) |
+| `running` (no output for 15 min) | 15 minutes | Escalate to human |
+| `failed` or `killed` | Immediate | Assess failure, re-dispatch or escalate |
+
+### Fallback for Read-Only Stages
+
+If a child session remains `pending` for more than 5 minutes AND the stage does not require
+dev permissions, run the stage directly instead of waiting:
+
+**Stages you CAN run directly (read-only):**
+- PLAN (`/do-plan`) — plan document creation
+- CRITIQUE (`/do-plan-critique`) — plan review
+- DOCS (`/do-docs`) — documentation updates
+
+**Stages you CANNOT run directly (require dev permissions):**
+- BUILD (`/do-build`) — writes code, creates PRs
+- TEST (`/do-test`) — runs test suite
+- PATCH (`/do-patch`) — modifies code
+- REVIEW (`/do-pr-review`) — code review judgment
+
+### Escalation for Dev-Permission Stages
+
+If a child session for a dev-permission stage (BUILD, TEST, PATCH) remains `pending` for
+more than 5 minutes, escalate to the human with a specific message:
+
+> "Dev session {id} has been pending for {N} minutes. The worker may be unavailable or
+> at capacity. Options: (1) wait longer, (2) I can attempt the stage directly if you
+> grant permission, (3) kill the session and retry later."
+
+Do NOT silently wait for more than 5 minutes without reporting status.
+
+---
+
+## Pre-Completion Checklist
+
+Before exiting or marking yourself as complete, you MUST execute this checklist.
+Skipping any step is a hard failure.
+
+### Step 1: Check for Open PRs
+
+```bash
+gh pr list --head session/{slug} --state open
+```
+
+If any open PRs exist on the `session/{slug}` branch:
+1. Invoke `/do-merge {pr_number}` for each open PR.
+2. If `/do-merge` fails (gates not met), state the concrete blocker:
+   - "Review not approved — CHANGES_REQUESTED"
+   - "Tests failing — 3 checks red"
+   - "Docs stage incomplete — unchecked plan items"
+3. You MUST NOT exit with open PRs unless you have stated a specific, concrete blocker
+   for each one. "I'll handle it later" is not a valid blocker.
+
+**Do not exit with open PRs.** If you cannot merge and cannot state a blocker, dispatch
+the appropriate stage to resolve the issue before attempting exit again.
+
+### Step 2: Run Exit Validation (see next section)
+
+### Step 3: Send Final Summary
+
+Only after Steps 1 and 2 pass, send your final summary ending with `[PIPELINE_COMPLETE]`.
+
+---
+
+## Exit Validation
+
+Before exiting, you MUST validate that all pipeline stages were completed. This prevents
+silent stage-skipping where the PM exits after BUILD without running TEST, REVIEW, DOCS,
+or MERGE.
+
+### Validation Protocol
+
+Query the pipeline state:
+
+```bash
+python -m tools.sdlc_stage_query --session-id $AGENT_SESSION_ID
+```
+
+### Required Display Stages
+
+All of these stages must show `completed` in the stage_states output:
+
+- ISSUE
+- PLAN
+- CRITIQUE
+- BUILD
+- TEST
+- REVIEW
+- DOCS
+- MERGE
+
+### Decision Logic
+
+1. **All stages completed** — Proceed to exit. Pipeline is complete.
+2. **Stages incomplete but no blocker** — Dispatch the missing stage. Do not exit.
+3. **Stage legitimately skipped** — You must explain why the skip is justified.
+   Valid skip reasons include:
+   - "PATCH not needed — tests passed on first run"
+   - "CRITIQUE was run externally before this session started" (with evidence)
+   - "MERGE deferred — human requested manual merge"
+   Each skipped stage needs an explicit reason. Blanket "some stages were skipped" is
+   not acceptable.
+4. **Stage states unavailable** (empty `{}`) — Fall back to conversation history.
+   If you cannot confirm a stage was dispatched, you must dispatch it or justify the skip.
+
+**Do not exit with incomplete stages.** If the stage query shows stages that are not completed
+and you cannot provide a justified skip reason for each one, dispatch the missing stages
+before exiting.
