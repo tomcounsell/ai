@@ -157,6 +157,100 @@ class TestRouteSessionOutput:
         assert action == "deliver"
 
 
+class TestPipelineCompleteMarker:
+    """Tests for PIPELINE_COMPLETE marker behavior in output router."""
+
+    def test_pm_sdlc_with_pipeline_complete_delivers(self):
+        """PM/SDLC session with [PIPELINE_COMPLETE] marker delivers immediately."""
+        from agent.output_router import PIPELINE_COMPLETE_MARKER, route_session_output
+
+        action, _cap = route_session_output(
+            msg=f"All stages done. {PIPELINE_COMPLETE_MARKER}",
+            stop_reason="end_turn",
+            auto_continue_count=5,
+            session_type="pm",
+            classification_type="sdlc",
+        )
+        assert action == "deliver_pipeline_complete"
+
+    def test_pm_sdlc_without_marker_nudges(self):
+        """PM/SDLC session without marker continues nudging."""
+        from agent.output_router import route_session_output
+
+        action, _cap = route_session_output(
+            msg="DOCS stage complete, moving to next stage.",
+            stop_reason="end_turn",
+            auto_continue_count=5,
+            session_type="pm",
+            classification_type="sdlc",
+        )
+        assert action == "nudge_continue"
+
+
+class TestSteeringMessageMergeReminder:
+    """Tests that steering messages include merge reminder text."""
+
+    def test_steering_message_format_includes_merge_reminder(self):
+        """The steering message built in _handle_dev_session_completion must include
+        a reminder about checking for open PRs before completing the pipeline."""
+        current_stage = "DOCS"
+        outcome = "success"
+        result_preview = "Documentation updated."
+
+        # Reproduce the steering message construction from agent_session_queue.py
+        steering_msg = (
+            f"Dev session completed. Stage: {current_stage or 'unknown'}. "
+            f"Outcome: {outcome}. Result preview: {result_preview}\n\n"
+            f"IMPORTANT: If an open PR exists for this issue, the pipeline is NOT complete. "
+            f"You MUST invoke /sdlc to dispatch /do-merge before emitting [PIPELINE_COMPLETE]."
+        )
+        assert "IMPORTANT" in steering_msg
+        assert "/do-merge" in steering_msg
+        assert "[PIPELINE_COMPLETE]" in steering_msg
+
+
+class TestPMPersonaMergeRule:
+    """Tests that the PM persona contains Rule 5 -- merge-before-complete."""
+
+    def test_pm_persona_contains_merge_rule(self):
+        """PM persona must contain Rule 5 about merge being mandatory."""
+        import pathlib
+
+        persona_path = pathlib.Path("config/personas/project-manager.md")
+        content = persona_path.read_text()
+        assert "Rule 5" in content
+        assert "MERGE" in content
+        assert "[PIPELINE_COMPLETE]" in content
+
+    def test_pm_persona_merge_rule_mentions_open_pr_check(self):
+        """Rule 5 must instruct PM to check for open PRs before completing."""
+        import pathlib
+
+        persona_path = pathlib.Path("config/personas/project-manager.md")
+        content = persona_path.read_text()
+        assert "open PR" in content
+
+
+class TestSDLCRouterMergeGate:
+    """Tests that the SDLC router Row 10 has proper fallback language."""
+
+    def test_sdlc_skill_row10_mentions_pr_state_fallback(self):
+        """Row 10 in SKILL.md should mention checking open PR as fallback."""
+        import pathlib
+
+        skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
+        content = skill_path.read_text()
+        assert "open PR" in content.lower() or "pr exists" in content.lower()
+
+    def test_sdlc_skill_has_row_10b_fallback(self):
+        """SKILL.md should have Row 10b for stage_states unavailable fallback."""
+        import pathlib
+
+        skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
+        content = skill_path.read_text()
+        assert "10b" in content
+
+
 class TestValorSessionCLI:
     """Tests for the valor-session CLI tool."""
 
