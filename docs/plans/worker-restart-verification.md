@@ -180,9 +180,9 @@ session.async_save.assert_called_once_with(
 
 ## Test Impact
 
-- [ ] `tests/unit/test_resume_hydration.py::TestMaybeInjectResumeHydration::test_two_resume_files_triggers_hydration` — UPDATE: add `assert_called_once_with(update_fields=["initial_telegram_message", "updated_at"])` to verify the correct field is saved
-- [ ] `tests/unit/test_resume_hydration.py::TestMaybeInjectResumeHydration::test_hydration_prepends_before_original` — UPDATE: same assertion on `async_save` call args
-- [ ] `tests/unit/test_resume_hydration.py::TestMaybeInjectResumeHydration::test_three_resume_files_triggers_hydration` — UPDATE: same assertion
+- [x] `tests/unit/test_resume_hydration.py::TestMaybeInjectResumeHydration::test_two_resume_files_triggers_hydration` — UPDATE: add `assert_called_once_with(update_fields=["initial_telegram_message", "updated_at"])` to verify the correct field is saved
+- [x] `tests/unit/test_resume_hydration.py::TestMaybeInjectResumeHydration::test_hydration_prepends_before_original` — UPDATE: same assertion on `async_save` call args
+- [x] `tests/unit/test_resume_hydration.py::TestMaybeInjectResumeHydration::test_three_resume_files_triggers_hydration` — UPDATE: same assertion
 
 No integration tests for `scripts/update/run.py` worker-start verification exist — this is greenfield coverage.
 
@@ -229,19 +229,19 @@ No agent integration required — both changes are in the update orchestrator an
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` to note that `/update` now retries worker start via `launchctl kickstart` if the 30-second heartbeat window expires.
-- [ ] No new feature doc needed — this is a bug fix to existing infrastructure.
+- [x] Update `docs/features/bridge-worker-architecture.md` to note that `/update` now retries worker start via `launchctl kickstart` if the 30-second heartbeat window expires.
+- [x] No new feature doc needed — this is a bug fix to existing infrastructure.
 
 ## Success Criteria
 
-- [ ] Running `/update` with a simulated slow-start worker triggers `launchctl kickstart` in the fallback path (visible in update output)
-- [ ] If worker is still dead after kickstart retry, update exits with non-zero code and `ERROR:` line in output
-- [ ] The "Unknown field 'message_text' in update_fields" warning no longer appears in worker logs during resume hydration
-- [ ] `test_two_resume_files_triggers_hydration` asserts `update_fields=["initial_telegram_message", "updated_at"]` and passes
-- [ ] `pytest tests/unit/test_resume_hydration.py` passes
-- [ ] `pytest tests/ -x -q` passes
-- [ ] Resume hydration persistence: `async_save` with `update_fields=["initial_telegram_message", "updated_at"]` correctly persists the hydration block (verified by unit test mock assertions; full end-to-end persistence validation is out of scope for this Small fix but should be covered by a future integration test)
-- [ ] `python -m ruff check .` exits 0
+- [x] Running `/update` with a simulated slow-start worker triggers `launchctl kickstart` in the fallback path (visible in update output)
+- [x] If worker is still dead after kickstart retry, update exits with non-zero code and `ERROR:` line in output
+- [x] The "Unknown field 'message_text' in update_fields" warning no longer appears in worker logs during resume hydration
+- [x] `test_two_resume_files_triggers_hydration` asserts `update_fields=["initial_telegram_message", "updated_at"]` and passes
+- [x] `pytest tests/unit/test_resume_hydration.py` passes
+- [x] `pytest tests/ -x -q` passes
+- [x] Resume hydration persistence: `async_save` with `update_fields=["initial_telegram_message", "updated_at"]` correctly persists the hydration block (verified by unit test mock assertions; full end-to-end persistence validation is out of scope for this Small fix but should be covered by a future integration test)
+- [x] `python -m ruff check .` exits 0
 
 ## Team Orchestration
 
