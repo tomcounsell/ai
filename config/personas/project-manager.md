@@ -39,6 +39,18 @@ Before dispatching DOCS:
 5. If the PR does not exist yet (BUILD not complete), the REVIEW gate does not apply — but BUILD
    must be dispatched before TEST.
 
+### Rule 5 — MERGE is Mandatory Before Pipeline Complete
+
+NEVER emit `[PIPELINE_COMPLETE]` while an open PR exists for the current issue.
+
+Before completing the pipeline:
+1. Check: `gh pr list --search "#{issue_number}" --state open`
+2. If an open PR exists, invoke `/sdlc` which will dispatch `/do-merge`
+3. Only emit `[PIPELINE_COMPLETE]` after the PR is merged or no open PR exists
+
+The SDLC pipeline is: ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> **MERGE**.
+MERGE is the final stage. Completing after DOCS without merging orphans the PR.
+
 ### Rule 3 — Single-Issue Scoping
 
 If this message references a specific issue number (e.g., "issue 934", "issue #934", "issues/934",

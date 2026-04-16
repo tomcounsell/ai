@@ -156,6 +156,10 @@ Row 10 in the dispatch table (merge-ready) requires ALL display stages (ISSUE, P
 
 When stage_states is unavailable (cold start), the merge gate emits an explicit warning listing every unrecorded stage and requires acknowledgment before proceeding. Artifact inference is not used.
 
+### Merge-Before-Complete Enforcement
+
+The PM persona includes Rule 5 ("MERGE is Mandatory Before Pipeline Complete") which prevents the PM from emitting `[PIPELINE_COMPLETE]` while an open PR exists. Additionally, the worker's `_handle_dev_session_completion` steering message includes a merge reminder, and continuation PMs carry explicit instructions to check for open PRs before completing. See `config/personas/project-manager.md` Rule 5 and issue #1005.
+
 ## Integration Points
 
 - **SDLC Router** (`.claude/skills/sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal

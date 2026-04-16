@@ -835,10 +835,13 @@ async def _pop_agent_session(
                 if not rebuilt:
                     rebuilt = True
                     try:
-                        AgentSession.rebuild_indexes()
-                        logger.info(f"[worker:{worker_key}] Rebuilt indexes to repair stale entry")
+                        # Use repair_indexes() instead of rebuild_indexes() (#1006):
+                        # repair_indexes() clears IndexedField ($IndexF:) sets before
+                        # rebuilding, ensuring stale entries are actually removed.
+                        AgentSession.repair_indexes()
+                        logger.info(f"[worker:{worker_key}] Repaired indexes to fix stale entry")
                     except Exception as rebuild_err:
-                        logger.warning(f"[worker:{worker_key}] Index rebuild failed: {rebuild_err}")
+                        logger.warning(f"[worker:{worker_key}] Index repair failed: {rebuild_err}")
                 continue
             chosen = candidate
             break
@@ -973,10 +976,13 @@ async def _pop_agent_session_with_fallback(
                 if not rebuilt:
                     rebuilt = True
                     try:
-                        AgentSession.rebuild_indexes()
-                        logger.info(f"[worker:{worker_key}] Rebuilt indexes to repair stale entry")
+                        # Use repair_indexes() instead of rebuild_indexes() (#1006):
+                        # repair_indexes() clears IndexedField ($IndexF:) sets before
+                        # rebuilding, ensuring stale entries are actually removed.
+                        AgentSession.repair_indexes()
+                        logger.info(f"[worker:{worker_key}] Repaired indexes to fix stale entry")
                     except Exception as rebuild_err:
-                        logger.warning(f"[worker:{worker_key}] Index rebuild failed: {rebuild_err}")
+                        logger.warning(f"[worker:{worker_key}] Index repair failed: {rebuild_err}")
                 continue
             chosen = candidate
             break
@@ -1395,6 +1401,34 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     if not stale_sessions:
         return 0
 
+    # Filter out terminal sessions that appear in the running index due to stale
+    # IndexedField entries (#1006). These are zombie entries — the session hash
+    # says killed/completed/failed but the index set still contains them.
+    # Re-promoting these to pending creates an infinite resurrection cycle.
+    non_terminal = []
+    terminal_skipped = 0
+    for entry in stale_sessions:
+        actual_status = getattr(entry, "status", None)
+        if actual_status in _TERMINAL_STATUSES:
+            terminal_skipped += 1
+            logger.warning(
+                "[startup-recovery] Skipping terminal session %s "
+                "(hash status=%s, stale running index entry — zombie #1006)",
+                entry.agent_session_id,
+                actual_status,
+            )
+        else:
+            non_terminal.append(entry)
+    if terminal_skipped:
+        logger.warning(
+            "[startup-recovery] Skipped %d terminal session(s) with stale running index entries",
+            terminal_skipped,
+        )
+    stale_sessions = non_terminal
+
+    if not stale_sessions:
+        return 0
+
     logger.warning("[startup-recovery] Found %d stale session(s) to process", len(stale_sessions))
 
     count = 0
@@ -1577,6 +1611,21 @@ async def _agent_session_health_check() -> None:
     running_sessions = list(AgentSession.query.filter(status="running"))
     for entry in running_sessions:
         checked += 1
+
+        # Terminal-status guard (#1006): skip sessions whose hash status is
+        # terminal but still appear in the running index due to stale
+        # IndexedField entries. Without this, killed/completed sessions get
+        # re-promoted to pending in an infinite resurrection cycle.
+        actual_status = getattr(entry, "status", None)
+        if actual_status in _TERMINAL_STATUSES:
+            logger.warning(
+                "[session-health] Skipping terminal session %s "
+                "(hash status=%s, stale running index entry — zombie #1006)",
+                entry.agent_session_id,
+                actual_status,
+            )
+            continue
+
         try:
             worker_key = entry.worker_key
             worker = _active_workers.get(worker_key)
@@ -3189,7 +3238,10 @@ def _create_continuation_pm(
             f"but stage {stage_ref} just finished with outcome: {outcome}.\n\n"
             f"Result preview:\n{result_preview}\n\n"
             f"Resume the SDLC pipeline for {issue_ref}. Assess the current state "
-            f"and dispatch the next stage."
+            f"and dispatch the next stage.\n\n"
+            f"IMPORTANT: Check for open PRs. If a PR exists and is unmerged, "
+            f"the next stage is MERGE (/do-merge). Do NOT emit [PIPELINE_COMPLETE] "
+            f"until the PR is merged or closed."
         )
         if issue_number:
             message += f"\n\nTracking: https://github.com/tomcounsell/ai/issues/{issue_number}"
@@ -3365,7 +3417,9 @@ async def _handle_dev_session_completion(
             result_preview = result[:500] if result else "(no result)"
             steering_msg = (
                 f"Dev session completed. Stage: {current_stage or 'unknown'}. "
-                f"Outcome: {outcome}. Result preview: {result_preview}"
+                f"Outcome: {outcome}. Result preview: {result_preview}\n\n"
+                f"IMPORTANT: If an open PR exists for this issue, the pipeline is NOT complete. "
+                f"You MUST invoke /sdlc to dispatch /do-merge before emitting [PIPELINE_COMPLETE]."
             )
             steer_result = steer_session(parent.session_id, steering_msg)
             if steer_result.get("success"):
