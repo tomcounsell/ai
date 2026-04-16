@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Shipped
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -177,13 +177,13 @@ No existing tests affected — this is a standalone script. Unit tests for `load
 
 ## Success Criteria
 
-- [ ] `~/Library/LaunchAgents/com.valor.nightly-tests.plist` installed; `launchctl list | grep nightly-tests` shows the label
-- [ ] Runs `pytest tests/unit/ -n auto` nightly at 03:00 local time
-- [ ] Telegram alert sent on first run (baseline message), regression (`delta > 0`), or collection error; clean runs are silent
-- [ ] Delta persisted to `data/nightly_tests_last_run.json` between runs
-- [ ] `scripts/install_nightly_tests.sh` installs cleanly and prints label, schedule, log path
-- [ ] CLAUDE.md quick reference table contains install and dry-run commands
-- [ ] `logs/nightly_tests.log` captures each run with timestamp, counts, and delta
+- [x] `~/Library/LaunchAgents/com.valor.nightly-tests.plist` installed; `launchctl list | grep nightly-tests` shows the label
+- [x] Runs `pytest tests/unit/ -n auto` nightly at 03:00 local time
+- [x] Telegram alert sent on first run (baseline message), regression (`delta > 0`), or collection error; clean runs are silent
+- [x] Delta persisted to `data/nightly_tests_last_run.json` between runs
+- [x] `scripts/install_nightly_tests.sh` installs cleanly and prints label, schedule, log path
+- [x] CLAUDE.md quick reference table contains install and dry-run commands
+- [x] `logs/nightly_tests.log` captures each run with timestamp, counts, and delta
 
 ## No-Gos
 
@@ -224,6 +224,6 @@ No MCP or bridge changes needed. Standalone Python process invoked by launchd. N
 
 ## Documentation
 
-- [ ] Add four rows to `## Quick Commands` table in `CLAUDE.md` (install, dry-run, tail logs, tail error log)
-- [ ] Create `docs/features/nightly-regression-tests.md` after shipping
-- [ ] Add entry to `docs/features/README.md` index after shipping
+- [x] Add four rows to `## Quick Commands` table in `CLAUDE.md` (install, dry-run, tail logs, tail error log)
+- [x] Create `docs/features/nightly-regression-tests.md` after shipping
+- [x] Add entry to `docs/features/README.md` index after shipping
