@@ -83,6 +83,14 @@ def main():
                 except Exception:
                     pass  # Non-fatal
             else:
+                # Only create AgentSession for worker-spawned sessions.
+                # Direct CLI invocations (no parent worker, no session type) produce no record —
+                # they add noise to the queue without providing value (issue #1001).
+                if not os.environ.get("VALOR_PARENT_SESSION_ID") and not os.environ.get(
+                    "SESSION_TYPE"
+                ):
+                    return
+
                 # First prompt in this session -- create AgentSession
                 from models.agent_session import AgentSession
 

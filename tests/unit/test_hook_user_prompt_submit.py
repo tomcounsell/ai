@@ -176,8 +176,8 @@ class TestMainCallChain:
             f"but got kwargs: {call_kwargs}"
         )
 
-    def test_main_omits_session_type_when_env_var_unset(self, monkeypatch):
-        """When SESSION_TYPE is not set, main() calls create_local without session_type kwarg."""
+    def test_main_skips_create_local_when_no_env_vars(self, monkeypatch):
+        """No env vars set -> skip create_local entirely (issue #1001)."""
         hook = _load_hook_module()
 
         fake_hook_input = {
@@ -190,6 +190,67 @@ class TestMainCallChain:
         fake_agent_session.agent_session_id = "mock-agent-id-456"
 
         monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.create_local", return_value=fake_agent_session
+            ) as mock_create,
+        ):
+            hook.main()
+
+        mock_create.assert_not_called()
+
+    def test_main_creates_session_when_session_type_set(self, monkeypatch):
+        """When SESSION_TYPE is set (worker-spawned), main() creates AgentSession."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Worker session",
+            "session_id": "test-session-st",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+        fake_agent_session = MagicMock()
+        fake_agent_session.agent_session_id = "mock-agent-id-st"
+
+        monkeypatch.setenv("SESSION_TYPE", "dev")
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.create_local", return_value=fake_agent_session
+            ) as mock_create,
+        ):
+            hook.main()
+
+        mock_create.assert_called_once()
+
+    def test_main_creates_session_when_parent_session_id_set(self, monkeypatch):
+        """VALOR_PARENT_SESSION_ID set -> create AgentSession."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Child session",
+            "session_id": "test-session-ps",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+        fake_agent_session = MagicMock()
+        fake_agent_session.agent_session_id = "mock-agent-id-ps"
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent123")
 
         with (
             patch.object(hook, "read_hook_input", return_value=fake_hook_input),
@@ -205,7 +266,37 @@ class TestMainCallChain:
 
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args.kwargs
-        assert "session_type" not in call_kwargs, (
-            f"Expected create_local to be called WITHOUT session_type kwarg, "
-            f"but got kwargs: {call_kwargs}"
-        )
+        assert call_kwargs.get("parent_agent_session_id") == "agt_parent123"
+
+    def test_main_creates_session_when_both_env_vars_set(self, monkeypatch):
+        """Both env vars set -> create AgentSession."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Both env vars",
+            "session_id": "test-session-both",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+        fake_agent_session = MagicMock()
+        fake_agent_session.agent_session_id = "mock-agent-id-both"
+
+        monkeypatch.setenv("SESSION_TYPE", "teammate")
+        monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent456")
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.create_local", return_value=fake_agent_session
+            ) as mock_create,
+        ):
+            hook.main()
+
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs.get("session_type") == "teammate"
+        assert call_kwargs.get("parent_agent_session_id") == "agt_parent456"
