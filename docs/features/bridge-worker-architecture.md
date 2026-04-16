@@ -407,6 +407,15 @@ python -m tools.valor_session kill --id <ID>                # Kill a session
 ./scripts/valor-service.sh worker-status   # Worker-specific status
 ```
 
+## Update Orchestrator: Worker Start Verification
+
+After installing the worker service during `/update`, the update orchestrator (`scripts/update/run.py`) verifies the worker actually starts:
+
+1. **30-second heartbeat poll**: Checks `is_worker_running()` and heartbeat file mtime every 2 seconds (15 iterations).
+2. **Kickstart fallback**: If no worker process is detected after 30 seconds, the orchestrator runs `launchctl kickstart -k gui/{uid}/com.valor.worker` to force-start the service. This bypasses launchd's `ThrottleInterval` and handles cases where `bootout`+`bootstrap` registered the service but didn't start it.
+3. **15-second re-poll**: After kickstart, polls for another 15 seconds (8 iterations) using the same heartbeat check.
+4. **Error exit on persistent failure**: If the worker is still not running after the full 45-second window (30s initial + 15s post-kickstart), the update exits with `result.success = False` and logs `ERROR: Worker not running after kickstart retry -- system degraded`. This ensures operators are alerted to degraded state rather than silently continuing with a dead worker.
+
 ## Worker Exit Code and launchd Restart Behavior
 
 The worker exits with **code 1** when shut down via SIGTERM (e.g., by `./scripts/valor-service.sh worker-restart`). This is intentional.
