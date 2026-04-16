@@ -127,10 +127,13 @@ class TestGlobalSemaphore:
         """
         max_sessions = 2
         original_semaphore = _queue._global_session_semaphore
+        original_dev_semaphore = _queue._dev_session_semaphore
 
         try:
             # Set up a semaphore with a low ceiling for testing
             _queue._global_session_semaphore = asyncio.Semaphore(max_sessions)
+            # High dev cap so the global semaphore is the binding constraint
+            _queue._dev_session_semaphore = asyncio.Semaphore(10)
 
             chat_id_a = "test-semaphore-chat-a"
             chat_id_b = "test-semaphore-chat-b"
@@ -169,6 +172,7 @@ class TestGlobalSemaphore:
             )
         finally:
             _queue._global_session_semaphore = original_semaphore
+            _queue._dev_session_semaphore = original_dev_semaphore
             # Clean up workers
             for task in list(_active_workers.values()):
                 task.cancel()
@@ -395,12 +399,21 @@ class TestDevWorktreeParallelism:
                 running_count[0] -= 1
 
         original_semaphore = _queue._global_session_semaphore
+        original_dev_semaphore = _queue._dev_session_semaphore
+        original_dev_semaphore_cap = _queue._dev_session_semaphore_cap
         try:
             _queue._global_session_semaphore = asyncio.Semaphore(5)
+            # Allow 2 concurrent dev sessions so both can run in parallel
+            _queue._dev_session_semaphore = asyncio.Semaphore(2)
+            _queue._dev_session_semaphore_cap = 2
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
-                # Each slugged dev session gets its own chat-keyed worker
+                # Each slugged dev session gets its own chat-keyed worker.
+                # Stagger starts so Worker A can pop its session before Worker B
+                # starts — avoids Popoto async_filter shared-connection race
+                # where concurrent reads can return empty results.
                 for cid in chat_ids:
                     _ensure_worker(cid, is_project_keyed=False)
+                    await asyncio.sleep(0.05)
                 await asyncio.sleep(0.5)
 
             assert peak_running[0] == 2, (
@@ -409,6 +422,8 @@ class TestDevWorktreeParallelism:
             )
         finally:
             _queue._global_session_semaphore = original_semaphore
+            _queue._dev_session_semaphore = original_dev_semaphore
+            _queue._dev_session_semaphore_cap = original_dev_semaphore_cap
             for cid in chat_ids:
                 task = _active_workers.pop(cid, None)
                 if task:

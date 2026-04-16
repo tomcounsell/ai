@@ -181,6 +181,16 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     _queue._global_session_semaphore = asyncio.Semaphore(_max_sessions)
     logger.info(f"Global session semaphore initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
 
+    # Initialize dev session concurrency semaphore. Controls how many slugged dev
+    # sessions run simultaneously. Default 1 preserves current sequential behavior.
+    # Clamp to minimum 1 to prevent deadlock if MAX_CONCURRENT_DEV_SESSIONS=0.
+    _max_dev_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_DEV_SESSIONS", "1")))
+    _queue._dev_session_semaphore = asyncio.Semaphore(_max_dev_sessions)
+    _queue._dev_session_semaphore_cap = _max_dev_sessions
+    logger.info(
+        f"Dev session semaphore initialized: MAX_CONCURRENT_DEV_SESSIONS={_max_dev_sessions}"
+    )
+
     handler = TelegramRelayOutputHandler(file_handler=FileOutputHandler())
     from bridge.email_bridge import EmailOutputHandler as _EmailOutputHandler
 
