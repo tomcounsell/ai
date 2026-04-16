@@ -20,7 +20,7 @@ import json
 import sys
 from datetime import UTC
 
-from tools.memory_search import forget, inspect, outcome_stats, save, search, status
+from tools.memory_search import forget, inspect, outcome_stats, save, search, status, timeline
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -282,6 +282,138 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_timeline(args: argparse.Namespace) -> int:
+    """Show memory timeline for a time range."""
+    from datetime import datetime, timedelta
+
+    # Parse time bounds
+    since = None
+    until = None
+
+    if hasattr(args, "since") and args.since:
+        since = _parse_time_arg(args.since)
+        if since is None:
+            print(f"Error: could not parse --since value: {args.since}", file=sys.stderr)
+            return 1
+
+    if hasattr(args, "until") and args.until:
+        until = _parse_time_arg(args.until)
+        if until is None:
+            print(f"Error: could not parse --until value: {args.until}", file=sys.stderr)
+            return 1
+
+    # Default: last 7 days if no time bounds specified
+    if since is None and until is None:
+        since = datetime.now(UTC) - timedelta(days=7)
+
+    result = timeline(
+        project_key=args.project,
+        since=since,
+        until=until,
+        category=getattr(args, "category", None),
+        group_by=getattr(args, "group_by", None),
+        limit=args.limit,
+    )
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    if result.get("error"):
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    results = result.get("results", [])
+    summary = result.get("summary", {})
+    groups = result.get("groups")
+
+    if not results:
+        time_desc = ""
+        if since:
+            time_desc = f" since {since.strftime('%Y-%m-%d')}"
+        print(f"No memories found{time_desc}")
+        return 0
+
+    print(f"Memory Timeline ({summary.get('total', 0)} records)")
+    print()
+
+    if groups:
+        for group_key in sorted(groups.keys(), reverse=True):
+            group_items = groups[group_key]
+            print(f"  [{group_key}] ({len(group_items)} records)")
+            for mem in group_items:
+                _print_timeline_entry(mem)
+            print()
+    else:
+        for mem in results:
+            _print_timeline_entry(mem)
+
+    # Summary footer
+    by_cat = summary.get("by_category", {})
+    if by_cat:
+        cat_parts = [f"{cat}: {count}" for cat, count in sorted(by_cat.items())]
+        print(f"  Categories: {', '.join(cat_parts)}")
+
+    return 0
+
+
+def _print_timeline_entry(mem: dict) -> None:
+    """Print a single timeline entry."""
+    content = mem.get("content", "")
+    if len(content) > 150:
+        content = content[:147] + "..."
+    source = mem.get("source", "unknown")
+    la = mem.get("last_accessed", "")
+    date_str = la[:16] if la else "unknown"
+    meta = mem.get("metadata", {})
+    category = meta.get("category", "")
+    cat_label = f"[{category}] " if category else ""
+    importance = mem.get("importance", 0.0)
+
+    print(f"    {date_str}  {cat_label}({source}, imp={importance:.1f}) {content}")
+
+
+def _parse_time_arg(value: str):
+    """Parse a time argument: ISO date, ISO datetime, or relative like '7 days ago'.
+
+    Returns a datetime with UTC timezone, or None if unparseable.
+    """
+    from datetime import datetime, timedelta
+
+    value = value.strip()
+
+    # Try ISO date (YYYY-MM-DD)
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%d")
+        return dt.replace(tzinfo=UTC)
+    except ValueError:
+        pass
+
+    # Try ISO datetime (YYYY-MM-DDTHH:MM:SS)
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+        return dt.replace(tzinfo=UTC)
+    except ValueError:
+        pass
+
+    # Try relative: "N days ago", "N hours ago", "N weeks ago"
+    import re
+
+    match = re.match(r"(\d+)\s+(day|days|hour|hours|week|weeks)\s+ago", value, re.IGNORECASE)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2).lower().rstrip("s")
+        now = datetime.now(UTC)
+        if unit == "day":
+            return now - timedelta(days=amount)
+        elif unit == "hour":
+            return now - timedelta(hours=amount)
+        elif unit == "week":
+            return now - timedelta(weeks=amount)
+
+    return None
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -365,6 +497,35 @@ def main() -> int:
         help="Run slow checks: orphan index count and per-category confidence",
     )
 
+    # timeline command
+    timeline_parser = subparsers.add_parser(
+        "timeline", help="Show memory timeline for a time range"
+    )
+    timeline_parser.add_argument(
+        "--since",
+        help="Start of time range (ISO date, or '7 days ago')",
+    )
+    timeline_parser.add_argument(
+        "--until",
+        help="End of time range (ISO date, or '1 day ago')",
+    )
+    timeline_parser.add_argument("--project", "-p", help="Project key (default: from env)")
+    timeline_parser.add_argument(
+        "--limit", "-n", type=int, default=50, help="Max results (default: 50)"
+    )
+    timeline_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    timeline_parser.add_argument(
+        "--category",
+        "-c",
+        choices=["correction", "decision", "pattern", "surprise"],
+        help="Filter by metadata category",
+    )
+    timeline_parser.add_argument(
+        "--group-by",
+        choices=["day", "category"],
+        help="Group results by day or category",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -378,6 +539,7 @@ def main() -> int:
         "stats": cmd_stats,
         "forget": cmd_forget,
         "status": cmd_status,
+        "timeline": cmd_timeline,
     }
 
     handler = handlers.get(args.command)

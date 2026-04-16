@@ -256,3 +256,106 @@ def retrieve_memories(
     except Exception as e:
         logger.warning(f"[memory_retrieval] retrieve_memories failed: {e}")
         return []
+
+
+def get_memories_in_time_range(
+    project_key: str,
+    since: float | None = None,
+    until: float | None = None,
+    limit: int = 100,
+) -> list[Any]:
+    """Retrieve Memory instances for a project within a time range.
+
+    Uses the DecayingSortedField sorted set to build a score lookup (scores
+    approximate creation timestamps), then hydrates records via
+    Memory.query.filter. Records are filtered by score range and sorted
+    by score descending (most recent first).
+
+    Records marked as superseded are excluded.
+
+    Args:
+        project_key: Project partition key.
+        since: Unix timestamp lower bound (inclusive). None = no lower bound.
+        until: Unix timestamp upper bound (inclusive). None = no upper bound.
+        limit: Maximum records to return.
+
+    Returns:
+        List of Memory instances with _timeline_score attribute, sorted by
+        score descending (most recent first). Empty list on any error.
+    """
+    try:
+        from models.memory import Memory
+
+        # Build a score lookup from the relevance sorted set
+        score_map: dict[str, float] = {}
+        try:
+            from popoto import DecayingSortedField
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            sorted_set_key = DecayingSortedField.get_sortedset_db_key(
+                Memory, "relevance", project_key
+            )
+            min_score = since if since is not None else "-inf"
+            max_score = until if until is not None else "+inf"
+
+            raw_results = POPOTO_REDIS_DB.zrangebyscore(
+                sorted_set_key.redis_key,
+                min_score,
+                max_score,
+                withscores=True,
+            )
+
+            if raw_results:
+                for redis_key, score in raw_results:
+                    str_key = redis_key.decode() if isinstance(redis_key, bytes) else str(redis_key)
+                    score_map[str_key] = float(score)
+        except Exception as e:
+            logger.debug(f"[memory_retrieval] sorted set lookup failed: {e}")
+
+        # If we have no score map and time filters are set, return empty
+        # (we cannot filter by time without scores)
+        if not score_map and (since is not None or until is not None):
+            return []
+
+        # Hydrate all records for this project
+        try:
+            all_records = list(Memory.query.filter(project_key=project_key))
+        except Exception as e:
+            logger.warning(f"[memory_retrieval] time range query failed: {e}")
+            return []
+
+        # Filter out superseded records
+        active = [r for r in all_records if not getattr(r, "superseded_by", "")]
+
+        # If time filters are set, only include records whose Redis key
+        # appeared in the score_map (already filtered by ZRANGEBYSCORE)
+        if score_map:
+            filtered = []
+            for record in active:
+                # Match record to score_map by checking if its memory_id is in a key
+                mid = getattr(record, "memory_id", "")
+                matched_score = None
+                for skey, sval in score_map.items():
+                    if mid and mid in skey:
+                        matched_score = sval
+                        break
+                if matched_score is not None:
+                    record._timeline_score = matched_score
+                    filtered.append(record)
+                elif since is None and until is None:
+                    # No time filter — include all
+                    record._timeline_score = 0.0
+                    filtered.append(record)
+            active = filtered
+        else:
+            # No score map — attach zero scores
+            for record in active:
+                record._timeline_score = 0.0
+
+        # Sort by score descending (most recent first)
+        active.sort(key=lambda r: getattr(r, "_timeline_score", 0.0), reverse=True)
+        return active[:limit]
+
+    except Exception as e:
+        logger.warning(f"[memory_retrieval] get_memories_in_time_range failed: {e}")
+        return []

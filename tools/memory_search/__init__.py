@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -470,6 +471,142 @@ def status(
     except Exception as e:
         logger.warning(f"[memory_search] status failed (non-fatal): {e}")
         return {"healthy": False, "error": str(e)}
+
+
+def timeline(
+    project_key: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    category: str | None = None,
+    group_by: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Query memories within a time range, optionally grouped by day or category.
+
+    Provides a time-sliced view of the memory system for answering questions
+    like "what did we learn this week?" without materialized artifacts.
+
+    Args:
+        project_key: Project partition key. Resolved from env if not provided.
+        since: Start of time range (inclusive). None = no lower bound.
+        until: End of time range (inclusive). None = no upper bound.
+        category: Filter by metadata category (correction, decision, pattern, surprise).
+        group_by: Group results by "day" or "category". None = flat list.
+        limit: Maximum number of results to return.
+
+    Returns:
+        Dict with "results" list, "summary" dict, "groups" dict (if group_by),
+        and "error" key (None if no error).
+    """
+    try:
+        project_key = _resolve_project_key(project_key)
+
+        # Convert datetime bounds to Unix timestamps for the retrieval helper
+        since_ts = since.timestamp() if since else None
+        until_ts = until.timestamp() if until else None
+
+        from agent.memory_retrieval import get_memories_in_time_range
+
+        records = get_memories_in_time_range(
+            project_key=project_key,
+            since=since_ts,
+            until=until_ts,
+            limit=limit * 2,  # over-fetch to account for post-filtering
+        )
+
+        # Post-filter by category if requested
+        if category:
+            records = [
+                r
+                for r in records
+                if (getattr(r, "metadata", None) or {}).get("category") == category
+            ]
+
+        # Limit results
+        records = records[:limit]
+
+        # Serialize results
+        results = []
+        for record in records:
+            meta = getattr(record, "metadata", None) or {}
+
+            # Use _timeline_score (relevance sorted set score) as the timestamp.
+            # This is set by get_memories_in_time_range() and approximates
+            # creation time. Falls back to last_accessed or relevance field.
+            ts_float = getattr(record, "_timeline_score", None)
+            if ts_float is None:
+                # Fallback: try relevance field directly
+                rel = getattr(record, "relevance", None)
+                if rel is not None:
+                    try:
+                        ts_float = float(rel)
+                    except (TypeError, ValueError):
+                        ts_float = None
+
+            timestamp_str = None
+            if ts_float is not None and ts_float > 0:
+                try:
+                    timestamp_str = datetime.fromtimestamp(ts_float, tz=UTC).isoformat()
+                except (OSError, OverflowError, ValueError):
+                    timestamp_str = None
+
+            results.append(
+                {
+                    "memory_id": getattr(record, "memory_id", ""),
+                    "content": getattr(record, "content", ""),
+                    "importance": getattr(record, "importance", 0.0),
+                    "source": getattr(record, "source", ""),
+                    "confidence": getattr(record, "confidence", 0.0),
+                    "timestamp": timestamp_str,
+                    "metadata": meta,
+                }
+            )
+
+        # Build summary
+        by_source: dict[str, int] = {}
+        by_category: dict[str, int] = {}
+        for r in results:
+            src = r.get("source", "unknown")
+            by_source[src] = by_source.get(src, 0) + 1
+            cat = r.get("metadata", {}).get("category", "other")
+            by_category[cat] = by_category.get(cat, 0) + 1
+
+        summary = {
+            "total": len(results),
+            "by_source": by_source,
+            "by_category": by_category,
+        }
+
+        response: dict[str, Any] = {
+            "results": results,
+            "summary": summary,
+            "error": None,
+        }
+
+        # Grouping
+        if group_by == "day":
+            groups: dict[str, list[dict]] = {}
+            for r in results:
+                ts = r.get("timestamp")
+                if ts:
+                    # Extract date portion from ISO string
+                    day_key = ts[:10] if len(ts) >= 10 else "unknown"
+                else:
+                    day_key = "unknown"
+                groups.setdefault(day_key, []).append(r)
+            response["groups"] = groups
+        elif group_by == "category":
+            groups = {}
+            for r in results:
+                cat = r.get("metadata", {}).get("category", "other")
+                groups.setdefault(cat, []).append(r)
+            response["groups"] = groups
+
+        return response
+
+    except Exception as e:
+        logger.warning(f"[memory_search] timeline failed (non-fatal): {type(e).__name__}: {e}")
+        return {"results": [], "summary": {"total": 0}, "error": None}
 
 
 def forget(memory_id: str) -> dict[str, Any]:
