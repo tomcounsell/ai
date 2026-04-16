@@ -26,7 +26,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -2239,9 +2239,37 @@ def register_callbacks(
 _RESTART_FLAG = Path(__file__).parent.parent / "data" / "restart-requested"
 
 
+_RESTART_FLAG_TTL = timedelta(hours=1)
+
+
 def _check_restart_flag() -> bool:
-    """Check if a restart has been requested and no sessions are running across all projects."""
+    """Check if a restart has been requested and no sessions are running across all projects.
+
+    Returns False (and deletes the flag) if the flag is older than 1 hour,
+    malformed, or empty — preventing stale flags from triggering self-destruct.
+    """
     if not _RESTART_FLAG.exists():
+        return False
+
+    flag_content = _RESTART_FLAG.read_text().strip()
+
+    # Validate flag freshness via embedded timestamp
+    try:
+        timestamp_str = flag_content.split()[0]
+        flag_time = datetime.fromisoformat(timestamp_str)
+        # Ensure timezone-aware comparison
+        if flag_time.tzinfo is None:
+            flag_time = flag_time.replace(tzinfo=UTC)
+        flag_age = datetime.now(UTC) - flag_time
+        if flag_age > _RESTART_FLAG_TTL:
+            logger.warning(f"Restart flag is stale (age={flag_age}) — ignoring and deleting")
+            _RESTART_FLAG.unlink(missing_ok=True)
+            return False
+    except (ValueError, IndexError):
+        logger.warning(
+            f"Restart flag has malformed content ({flag_content!r}) — ignoring and deleting"
+        )
+        _RESTART_FLAG.unlink(missing_ok=True)
         return False
 
     # Check all workers for running sessions
@@ -2250,7 +2278,6 @@ def _check_restart_flag() -> bool:
         logger.info(f"Restart requested but {len(running)} session(s) still running — deferring")
         return False
 
-    flag_content = _RESTART_FLAG.read_text().strip()
     logger.info(f"Restart flag found ({flag_content}), no running sessions — restarting bridge")
     return True
 

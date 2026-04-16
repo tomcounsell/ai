@@ -227,6 +227,8 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 3. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
 4. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
 
+**Restart flag TTL**: The flag file embeds an ISO 8601 timestamp. `_check_restart_flag()` ignores (and deletes) flags older than 1 hour. This prevents stale flags from a previous update session from triggering a self-destruct on worker-only machines where no bridge is running to consume the flag promptly. Malformed or empty flag content is also safely ignored and deleted.
+
 **Verify polling is active**:
 ```bash
 launchctl list | grep com.valor.update
@@ -326,6 +328,12 @@ This follows the proven cancellation pattern from the worker graceful shutdown (
 6. `main()` returns, `sys.exit(1)` terminates process
 7. launchd restarts bridge after ThrottleInterval
 
+### 16. Worker Status Heartbeat Check (`scripts/valor-service.sh`)
+
+**Problem**: After the worker shuts down or hangs, `worker-status` reports `RUNNING` because the old PID still exists in the process table (zombie/sleeping state). `worker-start` refuses to launch a new process, leaving the queue silently unattended.
+
+**Solution**: `status_worker()` now reads the `data/last_worker_connected` heartbeat file (written by `_write_worker_heartbeat()` on every health loop tick). If the heartbeat age exceeds 360 seconds (matching the dashboard threshold), the status is reported as `STALE` instead of `RUNNING`, with exit code 2. This distinguishes a healthy worker (exit 0), a stopped worker (exit 1), and a hung/zombie worker (exit 2).
+
 ## Recovery Lock
 
 During recovery, `data/recovery-in-progress` is created to prevent:
@@ -375,6 +383,7 @@ rm data/auto-revert-enabled
 | `data/bridge-auth-required` | Hibernation flag file (presence = auth required) |
 | `data/flood-backoff` | Flood-backoff expiry (JSON) |
 | `data/last_connected` | Last-connected timestamp (ISO 8601) |
+| `data/last_worker_connected` | Worker heartbeat file (mtime checked by `worker-status`) |
 | `logs/watchdog.log` | Watchdog output |
 | `logs/worker/{session_id}.log` | FileOutputHandler dual-write output (persisted even during bridge downtime) |
 
