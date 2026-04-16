@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-04-16
 tracking: https://github.com/tomcounsell/ai/issues/999
 last_comment_id:
+revision_applied: true
 ---
 
 # Worker Restart Verification + Resume Hydration Field Fix
@@ -104,7 +105,7 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **Kickstart fallback** (`scripts/update/run.py:804–812`): After the 30-second heartbeat window expires with `worker_pid == None`, run `subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.valor.worker"])` and poll for 15 more seconds using the same heartbeat check. If still not running, set `result.success = False` and log an error.
+- **Kickstart fallback** (`scripts/update/run.py:804–812`): After the 30-second heartbeat window expires with `worker_pid == None`, run `subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.valor.worker"])` wrapped in `try/except Exception` (matching existing error-handling pattern in this function) and poll for 15 more seconds using the same heartbeat check. If still not running, set `result.success = False` and log an error. Use the module-level `os` import (line 15) — no inline `import os as _os`.
 - **Field name fix** (`agent/agent_session_queue.py:669`): Change `update_fields=["message_text", "updated_at"]` → `update_fields=["initial_telegram_message", "updated_at"]`.
 - **Test assertion** (`tests/unit/test_resume_hydration.py`): Add assertion to `test_two_resume_files_triggers_hydration` that `async_save` was called with `update_fields=["initial_telegram_message", "updated_at"]`.
 
@@ -119,12 +120,19 @@ OR → **still no process** → error exit (non-zero)
 
 ```python
 # Kickstart fallback: force-start the service if launchd didn't auto-start
-import os as _os
-_uid = _os.getuid()
-subprocess.run(
-    ["launchctl", "kickstart", "-k", f"gui/{_uid}/com.valor.worker"],
-    capture_output=True,
-)
+# NOTE: os is already imported at module level (line 15) — no inline import needed.
+# The subprocess.run call is wrapped in try/except to match the existing error-handling
+# pattern in this function (see OSError catch at line ~796). If launchctl is missing or
+# fails with an OS error, we log and fall through to the re-poll — the worker may have
+# started another way.
+uid = os.getuid()
+try:
+    subprocess.run(
+        ["launchctl", "kickstart", "-k", f"gui/{uid}/com.valor.worker"],
+        capture_output=True,
+    )
+except Exception as e:
+    log(f"launchctl kickstart failed: {e}", v, always=True)
 # Re-poll for 15 more seconds
 for _ in range(8):
     _time.sleep(2)
@@ -161,7 +169,7 @@ session.async_save.assert_called_once_with(
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- The kickstart fallback in `run.py` wraps `subprocess.run` — failure to run `launchctl` should be caught and logged, not crash the orchestrator. Add a `try/except` around the kickstart call.
+- The kickstart fallback in `run.py` wraps `subprocess.run` in `try/except Exception` — failure to run `launchctl` (e.g., binary not found, permission denied) is caught, logged via `log(f"launchctl kickstart failed: {e}", v, always=True)`, and execution falls through to the re-poll loop. This matches the existing `OSError` catch pattern at ~line 796.
 - `_maybe_inject_resume_hydration` already has a top-level `except Exception` that logs and returns — confirmed at `agent_session_queue.py:673–677`.
 
 ### Empty/Invalid Input Handling
@@ -232,6 +240,7 @@ No agent integration required — both changes are in the update orchestrator an
 - [ ] `test_two_resume_files_triggers_hydration` asserts `update_fields=["initial_telegram_message", "updated_at"]` and passes
 - [ ] `pytest tests/unit/test_resume_hydration.py` passes
 - [ ] `pytest tests/ -x -q` passes
+- [ ] Resume hydration persistence: `async_save` with `update_fields=["initial_telegram_message", "updated_at"]` correctly persists the hydration block (verified by unit test mock assertions; full end-to-end persistence validation is out of scope for this Small fix but should be covered by a future integration test)
 - [ ] `python -m ruff check .` exits 0
 
 ## Team Orchestration
@@ -265,7 +274,7 @@ No agent integration required — both changes are in the update orchestrator an
 - **Assigned To**: fixes-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `scripts/update/run.py` (~line 809), after the `else:` branch that logs "WARN: Worker not running after install", add `launchctl kickstart -k` call and 15-second re-poll; set `result.success = False` if still dead
+- In `scripts/update/run.py` (~line 809), after the `else:` branch that logs "WARN: Worker not running after install", add `launchctl kickstart -k` call wrapped in `try/except Exception` (log error on failure, fall through to re-poll) and 15-second re-poll; set `result.success = False` if still dead. Use module-level `os` import, not inline `import os as _os`.
 - In `agent/agent_session_queue.py` line 669, change `update_fields=["message_text", "updated_at"]` to `update_fields=["initial_telegram_message", "updated_at"]`
 - In `tests/unit/test_resume_hydration.py`, update the three `async_save.assert_called_once()` calls to assert `update_fields=["initial_telegram_message", "updated_at"]`
 
@@ -281,22 +290,14 @@ No agent integration required — both changes are in the update orchestrator an
 - Confirm `update_fields=["message_text"` no longer appears in `agent_session_queue.py`
 - Confirm kickstart fallback exists in `scripts/update/run.py`
 
-### 3. Documentation
-- **Task ID**: document-fixes
+### 3. Documentation + Final Validation
+- **Task ID**: document-and-validate
 - **Depends On**: validate-fixes
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Update `docs/features/bridge-worker-architecture.md`: add note that update orchestrator retries worker start via `launchctl kickstart` if 30-second heartbeat window expires; note error exit on persistent failure
-
-### 4. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: document-fixes
-- **Assigned To**: fixes-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run full test suite, lint, format
-- Verify documentation updated
+- Verify documentation updated, then run full test suite (`pytest tests/ -x -q`) and lint (`python -m ruff check . && python -m ruff format --check .`) to confirm no regressions
 - Confirm all success criteria met
 
 ## Verification
@@ -314,6 +315,10 @@ No agent integration required — both changes are in the update orchestrator an
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Kickstart subprocess.run missing try/except | Task build-fixes | Wrapped in try/except Exception, matching existing OSError pattern in run.py; failure logs and falls through to re-poll |
+| NIT | Adversary | Inline `import os as _os` is unnecessary | Task build-fixes | Use module-level `os` import (line 15); removed inline alias |
+| NIT | Simplifier | Task 4 duplicates Task 2 | Plan revision | Merged Task 4 into Task 3 (document-and-validate) |
+| NIT | User | No end-to-end success criterion for resume hydration | Plan revision | Added success criterion for persistence verification; full e2e deferred to future integration test |
 
 ---
 
