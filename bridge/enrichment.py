@@ -86,7 +86,7 @@ async def enrich_message(
                     telegram_client, msg_obj
                 )
                 if media_description:
-                    if enriched_text and enriched_text != "Hello":
+                    if enriched_text and not enriched_text.startswith("--"):
                         enriched_text = f"{media_description}\n\n{enriched_text}"
                     else:
                         enriched_text = media_description

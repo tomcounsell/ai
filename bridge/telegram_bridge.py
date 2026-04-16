@@ -983,7 +983,7 @@ async def main():
         # Clean the message text (no media/YouTube/link enrichment here)
         clean_text = clean_message(text, project)
         if not clean_text:
-            clean_text = "Hello"
+            clean_text = "--file attachment only--" if message.media else "--empty message--"
 
         # Extract YouTube URLs (lightweight -- no transcription yet)
         youtube_urls = extract_youtube_urls(text)

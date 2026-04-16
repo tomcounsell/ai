@@ -1719,7 +1719,12 @@ async def _agent_session_health_check() -> None:
             worker_alive = worker is not None and not worker.done()
 
             if worker_alive:
-                # Worker exists and is processing — pending is normal queue behavior
+                # Worker exists — nudge its event in case it missed the original
+                # notify (e.g. startup-recovery race: session put to pending before
+                # the worker loop subscribed to its event).
+                event = _active_events.get(worker_key)
+                if event is not None:
+                    event.set()
                 continue
 
             # No live worker — check age threshold before starting one
@@ -2387,6 +2392,23 @@ async def _worker_loop(
                 if _semaphore_acquired:
                     semaphore.release()
                     _semaphore_acquired = False
+
+                # Guard against event.set()/event.clear() race: if a notify fired
+                # while we were in _pop_agent_session (e.g. startup health check),
+                # clearing the event here would lose it. Do a cheap sync check
+                # first; if there IS pending work, skip the wait entirely.
+                _has_pending = bool(
+                    AgentSession.query.filter(
+                        **(
+                            {"project_key": worker_key}
+                            if is_project_keyed
+                            else {"chat_id": worker_key}
+                        ),
+                        status="pending",
+                    )
+                )
+                if _has_pending:
+                    continue
 
                 # Event-based drain: wait for enqueue_agent_session() to signal new work,
                 # or fall back to sync query after timeout.
