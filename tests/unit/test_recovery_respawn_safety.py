@@ -329,9 +329,7 @@ class TestStartupRecoverySkipsTerminal:
         with (
             patch("agent.agent_session_queue.AgentSession") as mock_as,
             patch("agent.agent_session_queue.time") as mock_time,
-            patch(
-                "models.session_lifecycle.finalize_session"
-            ) as mock_finalize,
+            patch("models.session_lifecycle.finalize_session") as mock_finalize,
             patch("models.session_lifecycle.update_session") as mock_update,
         ):
             mock_time.time.return_value = time.time()
@@ -390,8 +388,10 @@ class TestStartupRecoveryLocalSessionGuard:
         # finalize_session must have been called with "abandoned"
         mock_finalize.assert_called_once()
         call_args = mock_finalize.call_args
-        assert call_args[0][1] == "abandoned" or call_args[1].get("status") == "abandoned" or (
-            len(call_args[0]) >= 2 and call_args[0][1] == "abandoned"
+        assert (
+            call_args[0][1] == "abandoned"
+            or call_args[1].get("status") == "abandoned"
+            or (len(call_args[0]) >= 2 and call_args[0][1] == "abandoned")
         )
 
     def test_startup_recovery_recovers_bridge_sessions(self):

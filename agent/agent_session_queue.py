@@ -770,9 +770,33 @@ async def _pop_agent_session(
                 return dt.replace(tzinfo=UTC)
             return dt
 
+        # Build a lookup of parent statuses for child-priority boost (issue #1004).
+        # Sessions whose parent is in waiting_for_children sort before peers at
+        # the same priority tier, breaking the deadlock where the parent holds a
+        # slot while the child can never start.
+        _parent_ids = {
+            getattr(j, "parent_agent_session_id", None)
+            for j in eligible
+            if getattr(j, "parent_agent_session_id", None)
+        }
+        _parent_waiting: set[str] = set()
+        if _parent_ids:
+            try:
+                from models.agent_session import AgentSession as _ParentAS
+
+                for pid in _parent_ids:
+                    _matches = list(_ParentAS.query.filter(id=pid))
+                    if _matches and getattr(_matches[0], "status", None) == "waiting_for_children":
+                        _parent_waiting.add(pid)
+            except Exception:
+                pass  # If lookup fails, no boost — safe fallback
+
         def sort_key(j):
             prio = PRIORITY_RANK.get(j.priority, 2)  # default to normal
-            return (prio, _ensure_tz(j.created_at))
+            # Boost children of waiting parents: 0 sorts before 1
+            _pid = getattr(j, "parent_agent_session_id", None)
+            child_boost = 0 if _pid and _pid in _parent_waiting else 1
+            return (prio, child_boost, _ensure_tz(j.created_at))
 
         eligible.sort(key=sort_key)
 
@@ -3367,6 +3391,28 @@ async def _handle_dev_session_completion(
                         )
                     else:
                         logger.info(f"[harness] Steered parent PM session {parent.session_id}")
+                        # Immediately re-enqueue parent so it picks up the
+                        # steering message without waiting for the periodic
+                        # hierarchy health check.  Issue #1004.
+                        if refreshed_status == "waiting_for_children":
+                            try:
+                                from models.session_lifecycle import (
+                                    transition_status as _ts,
+                                )
+
+                                _ts(
+                                    refreshed_parent,
+                                    "pending",
+                                    reason="child completed, steering injected",
+                                )
+                                logger.info(
+                                    f"[harness] Re-enqueued parent {parent.session_id} "
+                                    f"from waiting_for_children to pending"
+                                )
+                            except Exception as re_enqueue_err:
+                                logger.warning(
+                                    f"[harness] Failed to re-enqueue parent: {re_enqueue_err}"
+                                )
                 except Exception:
                     # If refresh fails, assume steer worked
                     logger.info(f"[harness] Steered parent PM session {parent.session_id}")
@@ -3605,6 +3651,26 @@ async def _execute_agent_session(session: AgentSession) -> None:
         from agent.sdk_client import get_stop_reason
 
         stop_reason = get_stop_reason(session.session_id) if session.session_id else None
+
+        # Re-read agent_session from Redis for fresh status.  The in-memory
+        # copy was loaded with status="running" at session start and is stale
+        # when the PM calls wait-for-children (which updates Redis directly).
+        # Without this re-read the waiting_for_children guard in output_router
+        # never fires.  Issue #1004.
+        if agent_session is not None:
+            try:
+                from models.agent_session import AgentSession as _FreshAS
+
+                _fresh = list(_FreshAS.query.filter(session_id=session.session_id))
+                if _fresh:
+                    agent_session = sorted(
+                        _fresh,
+                        key=lambda s: s.created_at or 0,
+                        reverse=True,
+                    )[0]
+            except Exception:
+                pass  # Fall back to stale in-memory copy
+
         session_status = agent_session.status if agent_session else None
         unhealthy_reason = is_session_unhealthy(session.session_id) if session.session_id else None
 
