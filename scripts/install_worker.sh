@@ -27,17 +27,25 @@ PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 mkdir -p "$PROJECT_DIR/logs"
 mkdir -p "$PROJECT_DIR/logs/worker"
 
-# Copy projects.json to config/ so launchd worker can read it without iCloud TCC.
-# macOS TCC blocks open()/stat() on ~/Desktop files from launchd agents, causing hangs.
-# This local copy is read when VALOR_LAUNCHD=1 (bridge/routing.py skips the iCloud path).
-PROJECTS_SRC="$HOME/Desktop/Valor/projects.json"
-PROJECTS_DST="$PROJECT_DIR/config/projects.json"
-if [ -f "$PROJECTS_SRC" ]; then
-    cp "$PROJECTS_SRC" "$PROJECTS_DST"
-    echo "Copied projects.json → config/projects.json"
-else
-    echo "WARNING: $PROJECTS_SRC not found — launchd worker will use existing config/projects.json"
-fi
+# Copy iCloud vault files to config/ so the launchd worker can read them without TCC hangs.
+# macOS TCC blocks open()/stat() on ~/Desktop files from launchd agents, causing indefinite
+# hangs that freeze the asyncio event loop. The worker reads these local copies when
+# VALOR_LAUNCHD=1 (bridge/routing.py and agent/reflection_scheduler.py skip the iCloud path).
+# We rm -f the destination first to avoid "identical (not copied)" errors when the destination
+# is a symlink pointing back to the source (set -euo pipefail would otherwise abort the script).
+_copy_config_file() {
+    local src="$1" dst="$2" label="$3"
+    if [ -f "$src" ]; then
+        rm -f "$dst"
+        cp "$src" "$dst"
+        echo "Copied $label → config/$(basename "$dst")"
+    else
+        echo "WARNING: $src not found — launchd worker will use existing config/$(basename "$dst")"
+    fi
+}
+
+_copy_config_file "$HOME/Desktop/Valor/projects.json"     "$PROJECT_DIR/config/projects.json"     "projects.json"
+_copy_config_file "$HOME/Desktop/Valor/reflections.yaml"  "$PROJECT_DIR/config/reflections.yaml"  "reflections.yaml"
 
 # Check source plist exists
 if [ ! -f "$PLIST_SRC" ]; then

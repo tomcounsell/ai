@@ -59,9 +59,14 @@ def _resolve_registry_path() -> Path:
             return p
         logger.warning("REFLECTIONS_YAML env var points to non-existent path: %s", env_path)
 
-    vault_path = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
-    if vault_path.exists():
-        return vault_path
+    # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced Desktop
+    # path entirely. macOS TCC blocks stat()/open() on ~/Desktop files from launchd
+    # agents — even exists() hangs indefinitely and blocks the asyncio event loop.
+    # install_worker.sh copies reflections.yaml → config/reflections.yaml at install time.
+    if not os.environ.get("VALOR_LAUNCHD"):
+        vault_path = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
+        if vault_path.exists():
+            return vault_path
 
     return Path(__file__).parent.parent / "config" / "reflections.yaml"
 
