@@ -852,7 +852,7 @@ async def _pop_agent_session(
                 prepend = "\n\n".join(extra_texts)
                 original = chosen.message_text or ""
                 chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
-                await chosen.async_save(update_fields=["message_text", "updated_at"])
+                await chosen.async_save(update_fields=["initial_telegram_message", "updated_at"])
                 logger.info(
                     f"[worker:{worker_key}] Drained {len(extra_texts)} steering message(s) "
                     f"into session {chosen.id} message_text"
@@ -983,7 +983,9 @@ async def _pop_agent_session_with_fallback(
                     prepend = "\n\n".join(extra_texts)
                     original = chosen.message_text or ""
                     chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
-                    await chosen.async_save(update_fields=["message_text", "updated_at"])
+                    await chosen.async_save(
+                        update_fields=["initial_telegram_message", "updated_at"]
+                    )
                     logger.info(
                         f"[worker:{worker_key}] Sync fallback: drained {len(extra_texts)} "
                         f"steering message(s) into session {chosen.id} message_text"
