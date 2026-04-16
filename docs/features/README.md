@@ -137,6 +137,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
 | [Teammate Conversational Humility](qa-conversational-humility.md) | Direct, honest Teammate responses: brevity, hedged language for uncertain claims, stop-hook review gate for delivery control | Shipped |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
+| [Telegram Message Edit Handling](telegram-message-edit-handling.md) | Handles Telegram MessageEdited events — steers running sessions with edited text or spawns a fresh session for completed ones | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
 | [Telegram PM Guide](telegram-pm-guide.md) | PM-facing guide for Telegram interaction patterns, session resumption, and pipeline signals | Shipped |
 | [Test Baseline Verification](test-baseline-verification.md) | Verified classification of test failures as regressions vs pre-existing by running failing tests against main | Shipped |
