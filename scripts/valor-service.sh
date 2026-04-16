@@ -638,15 +638,36 @@ status_worker() {
     local pid=$(get_worker_pid)
 
     if [ -n "$pid" ]; then
-        echo "Worker Status: RUNNING"
-        echo "PID: $pid"
-        echo "Uptime: $(ps -o etime= -p $pid 2>/dev/null | xargs)"
-        echo "Memory: $(ps -o rss= -p $pid 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')"
+        # Check heartbeat freshness to detect zombie/hung processes
+        local HEARTBEAT_FILE="$PROJECT_DIR/data/last_worker_connected"
+        local HEARTBEAT_AGE=9999
+        local HEARTBEAT_THRESHOLD=360
+        if [ -f "$HEARTBEAT_FILE" ]; then
+            HEARTBEAT_AGE=$(python3 -c "import os,time; print(int(time.time()-os.path.getmtime('$HEARTBEAT_FILE')))" 2>/dev/null || echo 9999)
+        fi
+
+        if [ "$HEARTBEAT_AGE" -gt "$HEARTBEAT_THRESHOLD" ]; then
+            echo "Worker Status: STALE"
+            echo "PID: $pid (process exists but heartbeat is stale — worker may be hung)"
+            echo "Uptime: $(ps -o etime= -p $pid 2>/dev/null | xargs)"
+            echo "Heartbeat: ${HEARTBEAT_AGE}s ago (threshold: ${HEARTBEAT_THRESHOLD}s)"
+            echo "Memory: $(ps -o rss= -p $pid 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')"
+        else
+            echo "Worker Status: RUNNING"
+            echo "PID: $pid"
+            echo "Uptime: $(ps -o etime= -p $pid 2>/dev/null | xargs)"
+            echo "Heartbeat: ${HEARTBEAT_AGE}s ago"
+            echo "Memory: $(ps -o rss= -p $pid 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')"
+        fi
 
         if launchctl list | grep -q "$WORKER_PLIST_NAME"; then
             echo "Launchd: INSTALLED (auto-start enabled)"
         else
             echo "Launchd: NOT INSTALLED (manual start only)"
+        fi
+
+        if [ "$HEARTBEAT_AGE" -gt "$HEARTBEAT_THRESHOLD" ]; then
+            return 2
         fi
         return 0
     else

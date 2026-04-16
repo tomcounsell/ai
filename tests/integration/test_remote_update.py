@@ -3,6 +3,7 @@
 import asyncio
 import os
 import subprocess
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -160,10 +161,17 @@ class TestRestartFlag:
 
         assert _check_restart_flag() is False
 
+    def _fresh_timestamp(self):
+        """Return a flag content string with a timestamp from 5 minutes ago."""
+        from datetime import datetime, timedelta
+
+        ts = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        return f"{ts} 3 commit(s)"
+
     def test_check_restart_flag_returns_true_when_flag_exists_and_no_jobs(self):
         from agent.agent_session_queue import _RESTART_FLAG, _check_restart_flag
 
-        _RESTART_FLAG.write_text("2026-02-02T10:00:00Z 3 commit(s)")
+        _RESTART_FLAG.write_text(self._fresh_timestamp())
 
         with patch("agent.agent_session_queue.AgentSession") as mock_session:
             mock_session.query.filter.return_value = []
@@ -176,7 +184,7 @@ class TestRestartFlag:
             _check_restart_flag,
         )
 
-        _RESTART_FLAG.write_text("2026-02-02T10:00:00Z 1 commit(s)")
+        _RESTART_FLAG.write_text(self._fresh_timestamp())
 
         # Simulate an active worker
         mock_task = MagicMock()
@@ -213,6 +221,38 @@ class TestRestartFlag:
 
         assert not _RESTART_FLAG.exists()
         mock_kill.assert_called_once_with(os.getpid(), 15)  # SIGTERM = 15
+
+    def test_check_restart_flag_ignores_stale_flag(self):
+        """A flag older than 1 hour should be ignored and deleted."""
+        from datetime import datetime, timedelta
+
+        from agent.agent_session_queue import _RESTART_FLAG, _check_restart_flag
+
+        stale_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        _RESTART_FLAG.write_text(f"{stale_ts} 5 commit(s)")
+
+        result = _check_restart_flag()
+        assert result is False
+        assert not _RESTART_FLAG.exists(), "Stale flag should be deleted"
+
+    def test_check_restart_flag_handles_malformed_flag_content(self):
+        """Malformed or empty flag content should not raise — returns False and deletes."""
+        from agent.agent_session_queue import _RESTART_FLAG, _check_restart_flag
+
+        # Empty content
+        _RESTART_FLAG.write_text("")
+        assert _check_restart_flag() is False
+        assert not _RESTART_FLAG.exists()
+
+        # Garbage content
+        _RESTART_FLAG.write_text("not-a-timestamp blah")
+        assert _check_restart_flag() is False
+        assert not _RESTART_FLAG.exists()
+
+        # Whitespace only
+        _RESTART_FLAG.write_text("   \n  ")
+        assert _check_restart_flag() is False
+        assert not _RESTART_FLAG.exists()
 
 
 # =============================================================================
