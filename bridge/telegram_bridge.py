@@ -586,11 +586,21 @@ RESPOND_TO_DMS = any(
 # DM whitelist - only respond to DMs from these Telegram user IDs
 # Loaded from projects.json dms.whitelist array
 # All DM users get uniform qa_only access (no per-user permission levels)
+# Entries may include "machine_exclude": ["Machine Name"] to skip on specific machines
 DM_WHITELIST: set[int] = set()
 DM_USER_TO_PROJECT: dict[int, dict] = {}
 _whitelist_entries = CONFIG.get("dms", {}).get("whitelist", [])
+try:
+    _current_machine = (
+        subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip().lower()
+    )
+except Exception:
+    _current_machine = ""
 for _entry in _whitelist_entries:
     if isinstance(_entry, dict) and "id" in _entry:
+        _excluded_machines = [m.lower() for m in _entry.get("machine_exclude", [])]
+        if _current_machine.lower() in _excluded_machines:
+            continue
         DM_WHITELIST.add(int(_entry["id"]))
         if "project" in _entry:
             _proj_key = _entry["project"]
