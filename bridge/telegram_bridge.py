@@ -1245,6 +1245,10 @@ async def main():
         # This is the FAST PATH for direct Telegram replies to running sessions.
         # The intake classifier (below) handles non-reply interjections.
         if is_reply_to_valor and message.reply_to_msg_id:
+            # Sentinel: set to True after the first dispatch_telegram_session call
+            # so the outer except handlers can bail early and prevent a second enqueue
+            # (#997: duplicate session on reply-chain timeout or unexpected exception).
+            _steering_session_enqueued = False
             try:
                 from models.agent_session import AgentSession
 
@@ -1464,6 +1468,7 @@ async def main():
                             project_config=project,
                             extra_context_overrides=_completed_extra_overrides,
                         )
+                        _steering_session_enqueued = True
                         logger.info(
                             f"[{project_name}] Resumed completed session "
                             f"{session_id} with prior context "
@@ -1477,6 +1482,10 @@ async def main():
                     f"falling through to queue: {e}",
                     exc_info=True,
                 )
+                # Guard: if session was already dispatched before the exception,
+                # do NOT fall through to the final enqueue (#997).
+                if _steering_session_enqueued:
+                    return
             except Exception as e:
                 # Unexpected errors -- log at ERROR with traceback for visibility
                 logger.error(
@@ -1484,6 +1493,10 @@ async def main():
                     f"falling through to queue: {e}",
                     exc_info=True,
                 )
+                # Guard: if session was already dispatched before the exception,
+                # do NOT fall through to the final enqueue (#997).
+                if _steering_session_enqueued:
+                    return
 
         # === IN-MEMORY COALESCING GUARD (#705) ===
         # Bridges the Redis visibility gap for rapid-fire messages (<200ms apart).

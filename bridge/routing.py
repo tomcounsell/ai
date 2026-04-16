@@ -971,18 +971,18 @@ async def should_respond_async(
     """
     message = event.message
 
-    # DMs: use sync logic
+    # DMs: use sync logic, but check reply_to_msg_id for session continuation (#996)
     if is_dm:
-        return (
-            should_respond_sync(
-                text,
-                is_dm,
-                project,
-                sender_id,
-                sender_username,
-            ),
-            False,
+        should = should_respond_sync(
+            text,
+            is_dm,
+            project,
+            sender_id,
+            sender_username,
         )
+        # Any reply in a DM thread should trigger session continuation, not a fresh session.
+        is_reply = bool(message.reply_to_msg_id)
+        return should, is_reply
 
     # Must be in a monitored group
     if not project:
@@ -990,8 +990,9 @@ async def should_respond_async(
 
     telegram_config = project.get("telegram", {})
 
-    # Reply to Valor's message → always detect (needed for session continuation)
-    # Must run before any early returns so is_reply_to_valor is set correctly
+    # Reply-to detection — needed for session continuation regardless of who sent the
+    # replied-to message (#996: replies to own messages should also steer the session).
+    # Must run before any early returns so is_reply_to_valor is set correctly.
     if message.reply_to_msg_id:
         try:
             replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
@@ -1020,6 +1021,12 @@ async def should_respond_async(
                         logger.debug(f"set_reaction failed (non-fatal): {react_err}")
                 logger.info(f"Reply to Valor: terminus={terminus}, not responding")
                 return False, True
+            elif replied_msg:
+                # Reply to a non-Valor message (e.g. user replying to their own message).
+                # Treat as session continuation so resolve_root_session_id can walk the
+                # reply chain to find the canonical session (#996).
+                logger.info("Reply to non-Valor thread message - treating as session continuation")
+                return True, True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
 

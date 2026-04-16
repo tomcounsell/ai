@@ -235,3 +235,167 @@ class TestClassifierBypass:
         """Groups with no config should NOT bypass -- classifier runs."""
         persona = resolve_persona(None, "Random Group", is_dm=False)
         assert persona is None  # None means classifier should run
+
+
+# =============================================================================
+# #996: Reply to any thread message should set is_reply_to_valor=True
+# =============================================================================
+
+
+class TestReplyToAnyThreadMessage:
+    """Reply to any message in a thread (not just Valor's) should trigger session continuation."""
+
+    def _project(self):
+        return {
+            "telegram": {
+                "respond_to_all": True,
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_reply_to_own_message_sets_is_reply_flag(self):
+        """Reply to a non-Valor (own) message should return is_reply=True (#996)."""
+        project = self._project()
+        event = _make_event("follow-up thought", reply_to_msg_id=555)
+        # replied_msg.out = False → message was NOT sent by Valor
+        client = _make_client(replied_msg_is_ours=False)
+
+        should, is_reply = await should_respond_async(
+            client,
+            event,
+            "follow-up thought",
+            is_dm=False,
+            chat_title="Dev: Project",
+            project=project,
+        )
+        assert should is True
+        assert is_reply is True, "Reply to own message must set is_reply_to_valor=True"
+
+    @pytest.mark.asyncio
+    async def test_dm_reply_sets_is_reply_flag(self):
+        """Reply in a DM thread should return is_reply=True (#996)."""
+        project = self._project()
+        event = _make_event("continued thought", reply_to_msg_id=777)
+        client = _make_client(replied_msg_is_ours=False)
+
+        should, is_reply = await should_respond_async(
+            client,
+            event,
+            "continued thought",
+            is_dm=True,
+            chat_title=None,
+            project=project,
+        )
+        # DM always responds; reply flag should now be True
+        assert is_reply is True, "DM reply must set is_reply_to_valor=True"
+
+    @pytest.mark.asyncio
+    async def test_dm_without_reply_does_not_set_flag(self):
+        """A fresh DM (no reply_to_msg_id) should return is_reply=False."""
+        project = self._project()
+        event = _make_event("brand new message", reply_to_msg_id=None)
+        client = _make_client(replied_msg_is_ours=False)
+
+        should, is_reply = await should_respond_async(
+            client,
+            event,
+            "brand new message",
+            is_dm=True,
+            chat_title=None,
+            project=project,
+        )
+        assert is_reply is False, "Fresh DM with no reply_to must not set is_reply_to_valor"
+
+    @pytest.mark.asyncio
+    async def test_reply_to_valor_still_works(self):
+        """Reply to Valor's own message continues to work as before (#996 non-regression)."""
+        project = self._project()
+        event = _make_event("can you elaborate?", reply_to_msg_id=888)
+        client = _make_client(replied_msg_is_ours=True)
+
+        # We need classify_conversation_terminus to return RESPOND — mock it
+        import bridge.routing as routing_mod
+
+        original = routing_mod.classify_conversation_terminus
+
+        async def _mock_terminus(**kwargs):
+            return "RESPOND"
+
+        routing_mod.classify_conversation_terminus = _mock_terminus
+        try:
+            should, is_reply = await should_respond_async(
+                client,
+                event,
+                "can you elaborate?",
+                is_dm=False,
+                chat_title="Dev: Project",
+                project=project,
+            )
+        finally:
+            routing_mod.classify_conversation_terminus = original
+
+        assert should is True
+        assert is_reply is True
+
+
+# =============================================================================
+# #997: Sentinel guard prevents double-dispatch on steering-check exception
+# =============================================================================
+
+
+class TestSteeringCheckSentinel:
+    """_steering_session_enqueued sentinel must be present in the steering check block."""
+
+    def test_sentinel_variable_initialized_in_steering_block(self):
+        """Verify the _steering_session_enqueued sentinel is present in telegram_bridge.py."""
+        import ast
+        from pathlib import Path
+
+        bridge_src = Path("bridge/telegram_bridge.py").read_text()
+        tree = ast.parse(bridge_src)
+
+        sentinel_found = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id == "_steering_session_enqueued":
+                        sentinel_found = True
+                        break
+
+        assert sentinel_found, (
+            "_steering_session_enqueued sentinel not found in bridge/telegram_bridge.py. "
+            "This guard prevents duplicate session enqueue (#997)."
+        )
+
+    def test_sentinel_set_to_true_after_dispatch(self):
+        """After dispatch_telegram_session, sentinel must be set True before return."""
+        from pathlib import Path
+
+        bridge_src = Path("bridge/telegram_bridge.py").read_text()
+        # _steering_session_enqueued = True must appear after dispatch_telegram_session
+        dispatch_pos = bridge_src.find(
+            "dispatch_telegram_session(", bridge_src.find("completed_sessions")
+        )
+        sentinel_pos = bridge_src.find("_steering_session_enqueued = True", dispatch_pos)
+        assert sentinel_pos != -1, (
+            "_steering_session_enqueued must be set to True after dispatch_telegram_session "
+            "in the completed-session resume branch (#997)."
+        )
+
+    def test_exception_handlers_guard_against_fallthrough(self):
+        """Both exception handlers must check _steering_session_enqueued before falling through."""
+        from pathlib import Path
+
+        bridge_src = Path("bridge/telegram_bridge.py").read_text()
+        # Find the two except blocks in the steering check and verify the guard
+        steering_block = bridge_src[
+            bridge_src.find("_steering_session_enqueued = False") : bridge_src.find(
+                "IN-MEMORY COALESCING GUARD"
+            )
+        ]
+        guard_count = steering_block.count("if _steering_session_enqueued:")
+        assert guard_count >= 2, (
+            f"Expected at least 2 '_steering_session_enqueued' guards in exception handlers "
+            f"(ConnectionError and Exception), found {guard_count} (#997)."
+        )
