@@ -667,7 +667,7 @@ async def _maybe_inject_resume_hydration(chosen, worker_key: str) -> None:
 
         original = chosen.message_text or ""
         chosen.message_text = f"{hydration_block}\n\n{original}" if original else hydration_block
-        await chosen.async_save(update_fields=["message_text", "updated_at"])
+        await chosen.async_save(update_fields=["initial_telegram_message", "updated_at"])
         logger.info(
             f"[worker:{worker_key}] Injected resume hydration into session {chosen.id} "
             f"({len(resume_files)} prior resume files found)"
