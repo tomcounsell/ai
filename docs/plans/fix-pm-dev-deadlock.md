@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -128,13 +128,15 @@ No prerequisites — this work has no external dependencies.
 
 ### Technical Approach
 
-1. **In `determine_delivery_action`** (`agent/output_router.py:66`): Add early return for `session_status == "waiting_for_children"` — return `"deliver"`. This goes BEFORE the PM+SDLC nudge check at line 110, ensuring the PM's output is delivered and the session exits cleanly.
+1. **Re-read session status in `send_to_chat`** (`agent/agent_session_queue.py:3580-3586`): The in-memory `agent_session.status` is loaded once at session start (filtered by `status="running"`), so it will be stale when the PM calls `wait-for-children` (which updates Redis directly). Add a Redis re-read of the agent session immediately before the routing decision. Replace the current `session_status = agent_session.status` with a fresh query pattern (already used at line 3744-3749 in the `deliver` branch).
 
-2. **In `_pop_agent_session`** (`agent/agent_session_queue.py:683`): Modify the sort key to boost sessions whose `parent_agent_session_id` is set (child sessions). Within the same priority tier, child sessions sort before parentless sessions. This is a tiebreaker only — it doesn't override the 4-tier priority system.
+2. **In `determine_delivery_action`** (`agent/output_router.py:66`): Add early return for `session_status == "waiting_for_children"` — return `"deliver"`. This goes BEFORE the PM+SDLC nudge check at line 110, ensuring the PM's output is delivered and the session exits cleanly.
 
-3. **In `_agent_session_hierarchy_health_check`** (`agent/agent_session_queue.py:1773`): Verify the existing "stuck parents: all children terminal → re-enqueue as pending" path at line 1836-1859 correctly handles this scenario. The PM must transition from `waiting_for_children` to `pending` with the steering message intact.
+3. **In `_pop_agent_session`** (`agent/agent_session_queue.py:683`): Modify the sort key to boost sessions whose `parent_agent_session_id` points to a parent in `waiting_for_children` status. This is scoped narrowly to avoid boosting continuation PM children or other parent-child relationships that don't have deadlock risk. Within the same priority tier, qualifying child sessions sort before parentless sessions. The Redis lookup per candidate adds minor cost but `_pop_agent_session` operates on small candidate lists (typically <10).
 
-4. **In `_handle_dev_session_completion`** (`agent/agent_session_queue.py:3198`): Verify that `steer_session()` correctly writes the steering message and `_ensure_worker()` wakes the relevant worker loop. If the PM is in `waiting_for_children`, the steering message sits in `queued_steering_messages` until the hierarchy health check re-enqueues the PM.
+4. **In `_handle_dev_session_completion`** (`agent/agent_session_queue.py:3198`): After `steer_session()` succeeds, add an explicit `transition_status(parent, "pending")` if the parent is in `waiting_for_children`. This re-enqueues the PM immediately rather than waiting for the periodic hierarchy health check. The health check remains as a safety net for edge cases (e.g., steering failure, continuation PM fallback).
+
+5. **In `_agent_session_hierarchy_health_check`** (`agent/agent_session_queue.py:1773`): Verify the existing "stuck parents: all children terminal → re-enqueue as pending" path at line 1836-1859 still works as a fallback. No code changes expected — verification only.
 
 ## Failure Path Test Strategy
 
@@ -151,7 +153,9 @@ No prerequisites — this work has no external dependencies.
 
 ## Test Impact
 
-No existing tests affected — the output router and `_pop_agent_session` sort logic are tested in isolation, and the new conditions are additive branches that don't change existing behavior for non-`waiting_for_children` sessions.
+- [ ] `tests/unit/test_nudge_loop.py` — UPDATE: audit for tests that pass `session_status` or test PM+SDLC routing paths; add `waiting_for_children` guard test cases
+- [ ] `tests/unit/test_duplicate_delivery.py` — UPDATE: audit for tests that exercise `determine_delivery_action` with PM+SDLC inputs; verify they still pass with the new early return
+- [ ] `tests/unit/test_output_router.py` — UPDATE: add test cases for `waiting_for_children` guard
 
 ## Rabbit Holes
 
@@ -229,39 +233,42 @@ No agent integration required — this is a worker-internal change to the output
 
 ## Step by Step Tasks
 
-### 1. Add waiting_for_children guard to output router
+### 1. Add session status re-read in send_to_chat and waiting_for_children guard to output router
 - **Task ID**: build-output-router
 - **Depends On**: none
-- **Validates**: tests/unit/test_output_router.py (update)
-- **Informed By**: spike-1 (confirmed: must stop nudge, not release semaphore internally)
+- **Validates**: tests/unit/test_output_router.py (update), tests/unit/test_nudge_loop.py (update), tests/unit/test_duplicate_delivery.py (audit)
+- **Informed By**: spike-1 (must stop nudge, not release semaphore internally), critique blocker (in-memory status is stale)
 - **Assigned To**: deadlock-fix-builder
 - **Agent Type**: builder
 - **Parallel**: true
+- In `agent/agent_session_queue.py` `send_to_chat()` (line 3580-3586): Add a Redis re-read of `agent_session` before the routing decision. Replace `session_status = agent_session.status if agent_session else None` with a fresh query: `fresh = list(AgentSession.query.filter(session_id=session.session_id)); agent_session = sorted(fresh, key=lambda s: s.created_at or 0, reverse=True)[0] if fresh else agent_session`. This pattern already exists at line 3744-3749.
 - In `agent/output_router.py`, add an early return in `determine_delivery_action`: if `session_status == "waiting_for_children"`, return `"deliver"`. Place this BEFORE the PM+SDLC check at line 110.
-- Add unit tests in `tests/unit/test_output_router.py` for the new branch: PM+SDLC+waiting_for_children → deliver, PM+SDLC+running → nudge_continue (unchanged)
+- Add unit tests for the new branch: PM+SDLC+waiting_for_children → deliver, PM+SDLC+running → nudge_continue (unchanged)
+- Audit `tests/unit/test_nudge_loop.py` and `tests/unit/test_duplicate_delivery.py` for tests that may be affected by the new early return
 
-### 2. Add child priority boost in _pop_agent_session
+### 2. Add child priority boost in _pop_agent_session (scoped to waiting parents)
 - **Task ID**: build-child-priority
 - **Depends On**: none
 - **Validates**: tests/unit/test_agent_session_queue.py (create)
-- **Informed By**: spike-2 (confirmed: child must be popped promptly for health check path to work)
+- **Informed By**: spike-2 (child must be popped promptly), critique concern (scope boost to waiting parents only)
 - **Assigned To**: deadlock-fix-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `agent/agent_session_queue.py`, modify the `sort_key` function inside `_pop_agent_session` (line 773-775): add a third element to the sort tuple — `0` if `parent_agent_session_id` is set, `1` otherwise. This makes child sessions sort before parentless sessions within the same priority tier.
-- Add a unit test verifying the sort order: given two pending sessions at normal priority (one with parent, one without), the child is popped first.
+- In `agent/agent_session_queue.py`, modify the `sort_key` function inside `_pop_agent_session` (line 773-775): add a third element to the sort tuple — `0` if `parent_agent_session_id` is set AND the parent session's status is `waiting_for_children`, `1` otherwise. This scopes the boost to only deadlock-risk children, not continuation PM children.
+- The parent status lookup requires a Redis read per candidate with a parent. Cache the parent status lookup for efficiency (collect all parent IDs, batch query, build a dict).
+- Add unit tests verifying: (a) child of waiting parent sorts before parentless session at same priority, (b) child of running parent does NOT get boosted, (c) existing priority ordering is preserved.
 
-### 3. Verify hierarchy health check re-enqueue path
-- **Task ID**: build-health-check-verify
+### 3. Add immediate PM re-enqueue in _handle_dev_session_completion
+- **Task ID**: build-immediate-reenqueue
 - **Depends On**: build-output-router
 - **Validates**: tests/unit/test_agent_session_queue.py (update or create)
-- **Informed By**: spike-2 (confirmed: PM transitions to pending via health check)
+- **Informed By**: spike-2 (PM transitions via health check is too slow), critique concern (health check may not fire promptly)
 - **Assigned To**: deadlock-fix-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Read `_agent_session_hierarchy_health_check` (line 1773-1864) and confirm the "all children terminal → re-enqueue parent as pending" path (line 1836-1859) handles the case where PM has a steering message in `queued_steering_messages`.
-- If the health check's re-enqueue path doesn't push the steering message through, add logic to ensure it does.
-- Add a test verifying: PM in `waiting_for_children` with one completed child → health check transitions PM to `pending` with steering message preserved.
+- In `_handle_dev_session_completion` (`agent/agent_session_queue.py:3198`): After `steer_session()` succeeds, add `transition_status(parent, "pending", reason="child completed, steering injected")` if parent is in `waiting_for_children`. This re-enqueues the PM immediately.
+- Verify `_agent_session_hierarchy_health_check` (line 1773-1864) still works as a fallback safety net — no changes needed there.
+- Add a test verifying: after dev child completes, parent PM in `waiting_for_children` transitions to `pending` with steering message preserved.
 
 ### 4. Validate full deadlock scenario
 - **Task ID**: validate-deadlock
@@ -308,10 +315,14 @@ No agent integration required — this is a worker-internal change to the output
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | [agent-type] | [The concern raised] | [How/whether addressed] | [Guard condition or gotcha] |
+| BLOCKER | Skeptic, Adversary | In-memory `agent_session.status` is stale ("running") when `send_to_chat` reads it — output router guard never fires | Task 1: Added Redis re-read of session status in `send_to_chat` before routing decision | Re-read pattern already exists at line 3744-3749; replicate it before line 3586 |
+| CONCERN | Operator, Skeptic | Health check re-enqueue may not fire promptly (interval depends on worker loop timing) | Task 3: Added explicit `transition_status(parent, "pending")` in `_handle_dev_session_completion` | Health check remains as safety net fallback |
+| CONCERN | Operator | Test Impact section missed existing test files that exercise `determine_delivery_action` | Updated Test Impact section to list `test_nudge_loop.py` and `test_duplicate_delivery.py` | Audit during Task 1 |
+| CONCERN | Adversary | Child priority boost applies to ALL parent-child relationships, not just deadlock-risk ones | Task 2: Scoped boost to children whose parent is in `waiting_for_children` status only | Requires parent status lookup per candidate — batch for efficiency |
+| NIT | Archaeologist | Spike-2 doesn't mention continuation PM fallback path in `_handle_dev_session_completion` | Acknowledged — continuation PM fallback is an alternative re-activation path | No plan change needed; health check and immediate re-enqueue cover both paths |
 
 ---
 
