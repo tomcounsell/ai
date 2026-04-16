@@ -1672,6 +1672,11 @@ async def _run_harness_subprocess(
     success, result_text is the parsed result and returncode is the process exit
     code (0 on success, non-zero on failure).
     """
+    # Default asyncio StreamReader limit is 64KB. The claude CLI outputs its
+    # full result as a single JSON line — long responses (e.g. multi-cycle
+    # analyses) can exceed that, raising LimitExceededError: "Separator is
+    # found, but chunk is longer than limit". Set limit to 16MB to cover any
+    # realistic Claude response.
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1679,6 +1684,7 @@ async def _run_harness_subprocess(
             stderr=asyncio.subprocess.PIPE,
             cwd=working_dir,
             env=proc_env,
+            limit=16 * 1024 * 1024,  # 16 MB — covers any realistic Claude response
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
