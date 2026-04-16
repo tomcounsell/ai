@@ -294,6 +294,48 @@ class PipelineProgress(BaseModel):
             return text
         return self.agent_session_id or "unknown"
 
+    @property
+    def message_user_text(self) -> str | None:
+        """The human message portion of message_text (after system prompt).
+
+        For system-prompt messages (starting with PROJECT: or [Prior session context),
+        extracts the MESSAGE: line and everything after it. Falls back to the FROM:
+        block if MESSAGE: is absent (e.g. truncated storage). For plain messages,
+        returns message_text unchanged.
+        """
+        if not self.message_text:
+            return None
+        if not any(self.message_text.startswith(p) for p in _SYSTEM_PROMPT_PREFIXES):
+            return self.message_text
+        # Prefer MESSAGE: marker — the actual user task text
+        msg_idx = self.message_text.find("\nMESSAGE:")
+        if msg_idx != -1:
+            return self.message_text[msg_idx + 1 :]  # strip leading newline
+        # Fallback: FROM: block (may still include metadata like SESSION_ID)
+        from_idx = self.message_text.find("\nFROM:")
+        if from_idx != -1:
+            return self.message_text[from_idx + 1 :]
+        return None
+
+    @property
+    def message_system_prompt(self) -> str | None:
+        """The system prompt portion of message_text (before MESSAGE:/FROM: block).
+
+        Returns None when message_text is not a system-prompt-style message.
+        """
+        if not self.message_text:
+            return None
+        if not any(self.message_text.startswith(p) for p in _SYSTEM_PROMPT_PREFIXES):
+            return None
+        # Split at MESSAGE: first, then FROM: as fallback
+        msg_idx = self.message_text.find("\nMESSAGE:")
+        if msg_idx != -1:
+            return self.message_text[:msg_idx].rstrip()
+        from_idx = self.message_text.find("\nFROM:")
+        if from_idx != -1:
+            return self.message_text[:from_idx].rstrip()
+        return self.message_text
+
 
 # === Project config helpers ===
 
