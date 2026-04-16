@@ -159,6 +159,18 @@ Or directly via `AgentSession.create(session_type="pm", ...)`.
 - `summary`, `result_text`, `stage_states`, `last_commit_sha` -- derived from `session_events`
 - `scheduling_depth` -- derived from parent chain walk (max depth 5)
 
+## Deadlock Prevention
+
+When a PM session dispatches a child dev session and enters `waiting_for_children` status, three mechanisms prevent the PM from starving the child of worker slots (issue #1004):
+
+1. **Output router guard**: `determine_delivery_action()` in `agent/output_router.py` checks `session_status == "waiting_for_children"` *before* the PM+SDLC nudge check. When the guard fires, the PM's output is delivered (not nudged), allowing the session to exit cleanly and release its global semaphore slot. Without this guard, the nudge loop would re-enqueue the PM as `pending`, consuming a slot on every cycle while the child sits in the queue.
+
+2. **Child priority boost**: `_pop_agent_session()` in `agent/agent_session_queue.py` boosts child sessions whose parent is in `waiting_for_children` status. Within the same priority tier, these children sort before parentless sessions (FIFO is preserved among equals). This ensures the child gets the next available slot rather than competing with unrelated sessions.
+
+3. **Immediate PM re-enqueue**: `_handle_dev_session_completion()` transitions the parent PM from `waiting_for_children` to `pending` immediately after steering succeeds, rather than waiting for the periodic hierarchy health check. The health check remains as a safety-net fallback.
+
+4. **Session status re-read**: `send_to_chat()` re-reads the agent session from Redis before the routing decision. The in-memory copy is loaded with `status="running"` at session start and becomes stale when the PM calls `wait-for-children` (which updates Redis directly). Without this re-read, the output router guard would never fire.
+
 ## Nudge Loop (Bridge Output Routing)
 
 The bridge uses a single nudge model for all output routing. No Observer, no SDLC stage awareness, no PipelineStateMachine in the bridge layer.

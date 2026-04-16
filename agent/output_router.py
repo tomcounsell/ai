@@ -103,6 +103,11 @@ def determine_delivery_action(
         return "deliver_fallback"
     if auto_continue_count >= max_nudge_count:
         return "deliver"
+    # PM in waiting_for_children must deliver (not nudge) so the session exits
+    # cleanly and releases its global semaphore slot.  The child dev session
+    # can then acquire the slot.  Issue #1004.
+    if session_status == "waiting_for_children":
+        return "deliver"
     # PM sessions running SDLC work should continue through pipeline stages
     # rather than delivering after the first skill completes.
     # The PM decides when to stop; the bridge just keeps it working.
