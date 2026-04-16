@@ -1,10 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Valor Engels
 created: 2026-04-16
 tracking: https://github.com/tomcounsell/ai/issues/972
+revision_applied: true
 ---
 
 # Nightly Regression Testing with Telegram Delta Reporting
@@ -45,14 +46,17 @@ A launchd job runs `pytest tests/unit/ -n auto` nightly at 03:00. It compares th
 2. **Run tests**: `subprocess.run(["python", "-m", "pytest", "tests/unit/", "-n", "auto", "--tb=no", "-q", "--json-report", "--json-report-file=/tmp/nightly_pytest.json"])` — captures structured output.
 3. **Parse results**: Read `/tmp/nightly_pytest.json`; extract `summary.passed`, `summary.failed`, `summary.error`.
 4. **Load previous run**: Read `data/nightly_tests_last_run.json`; extract prior `failed` count (defaults to 0 on first run).
-5. **Delta check**: `new_failures = current.failed - prev.failed`. If `new_failures > 0`, send Telegram alert.
-6. **Save state**: Write current run's counts + timestamp to `data/nightly_tests_last_run.json`.
-7. **Telegram alert**: `valor-telegram send --chat "Dev: Valor" "Nightly regression: +{N} new failures ({current.failed} total). Run: pytest tests/unit/ -n auto"`
+5. **Delta check**: `delta = current.failed - prev.failed`; `new_errors = current.error`. Alert condition: `if delta > 0 or new_errors > 0`. First-run (no prior state file): send a distinct baseline message instead of a regression alert.
+6. **Save state**: Write current run's counts + timestamp to `data/nightly_tests_last_run.json` (includes `passed`, `failed`, `error`, `total`, `run_at`).
+7. **Telegram alert**:
+   - Regression: `"Nightly regression: +{delta} new failures ({current.failed} total). Run: pytest tests/unit/ -n auto"`
+   - Collection error: `"Nightly tests: collection error ({new_errors} errors). Run: pytest tests/unit/ -n auto"`
+   - First run baseline: `"Nightly regression baseline established: {total} tests, {failed} failures."`
 8. **Logging**: All steps write to `logs/nightly_tests.log` via `log()` helper.
 
 ## Architectural Impact
 
-- **New dependencies**: `pytest-json-report` for structured JSON output.
+- **New dependencies**: `pytest-json-report>=1.5` added to `pyproject.toml` `[project.optional-dependencies].dev` for structured JSON output.
 - **Interface changes**: None — no bridge, agent, or Redis changes.
 - **Data ownership**: `data/nightly_tests_last_run.json` is gitignored (matches other `data/` runtime files).
 - **Reversibility**: Fully reversible — `launchctl bootout` + `rm` the plist removes it.
@@ -72,7 +76,7 @@ A launchd job runs `pytest tests/unit/ -n auto` nightly at 03:00. It compares th
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | pytest-xdist installed | `python -m pytest --co -q tests/unit/ -n auto 2>&1 \| head -3` | Parallel test execution |
-| pytest-json-report installed | `python -m pytest --json-report --help 2>&1 \| grep json-report` | Structured result output |
+| pytest-json-report installed | `python -m pytest --json-report --help 2>&1 \| grep json-report` | Structured result output (declared in `pyproject.toml` dev deps; install script enforces presence) |
 | valor-telegram on PATH | `which valor-telegram` | Telegram notifications |
 
 ## Solution
@@ -86,7 +90,7 @@ A launchd job runs `pytest tests/unit/ -n auto` nightly at 03:00. It compares th
 
 ### Flow
 
-`launchd 03:00` → `nightly_regression_tests.py` → `pytest tests/unit/ -n auto --json-report` → parse JSON → load `data/nightly_tests_last_run.json` → compute delta → if `new_failures > 0`: `valor-telegram send` → save state → log result → exit 0
+`launchd 03:00` → `nightly_regression_tests.py` → `pytest tests/unit/ -n auto --json-report` → parse JSON → load `data/nightly_tests_last_run.json` → compute delta+errors → if `first_run OR delta > 0 OR errors > 0`: `.venv/bin/valor-telegram send` → save state → log result → exit 0
 
 ### Technical Approach
 
@@ -98,21 +102,43 @@ DATA_DIR = PROJECT_DIR / "data"
 LAST_RUN_FILE = DATA_DIR / "nightly_tests_last_run.json"
 LOG_FILE = PROJECT_DIR / "logs" / "nightly_tests.log"
 TELEGRAM_CHAT = "Dev: Valor"
+TELEGRAM_BIN = PROJECT_DIR / ".venv/bin/valor-telegram"  # full path — launchd PATH omits .venv/bin
 PYTEST_JSON_TMP = "/tmp/nightly_pytest_report.json"
 ```
 
 Functions following `sdlc_reflection.py` conventions:
 - `log(msg)` — timestamp-prefixed, writes stdout + `LOG_FILE`
-- `load_last_run() -> dict` — reads `LAST_RUN_FILE`, returns `{"failed": 0}` on missing/corrupt
-- `save_last_run(state: dict)` — atomic write to `LAST_RUN_FILE`
+- `load_last_run() -> dict` — reads `LAST_RUN_FILE`, returns `{}` (empty dict) on missing/corrupt (empty = first run, not `{"failed": 0}`)
+- `save_last_run(state: dict)` — atomic write to `LAST_RUN_FILE` (includes `passed`, `failed`, `error`, `total`, `run_at`)
 - `run_tests() -> dict` — subprocess pytest with `--json-report`, returns summary dict
-- `send_telegram(msg: str)` — `subprocess.run(["valor-telegram", "send", "--chat", TELEGRAM_CHAT, msg])`
+- `send_telegram(msg: str)` — `subprocess.run([str(TELEGRAM_BIN), "send", "--chat", TELEGRAM_CHAT, msg])` with `if TELEGRAM_BIN.exists()` guard (best-effort)
 - `main() -> int` — orchestrates all steps, supports `--dry-run`
+
+**Alert logic in `main()`**:
+```python
+prev = load_last_run()
+is_first_run = not prev  # empty dict → first run
+delta = current["failed"] - prev.get("failed", 0)
+new_errors = current.get("error", 0)
+
+if is_first_run:
+    send_telegram(f"Nightly regression baseline established: {current['total']} tests, {current['failed']} failures.")
+elif delta > 0:
+    send_telegram(f"Nightly regression: +{delta} new failures ({current['failed']} total). Run: pytest tests/unit/ -n auto")
+elif new_errors > 0:
+    send_telegram(f"Nightly tests: collection error ({new_errors} errors). Run: pytest tests/unit/ -n auto")
+# else: clean run — silent
+```
 
 **2. `com.valor.nightly-tests.plist`**
 
 Use `StartCalendarInterval` (Hour=3, Minute=0) matching `com.valor.autoexperiment.plist`.
 Use the bash `-c "source .env; exec .venv/bin/python ..."` invocation from `com.valor.sdlc-reflection.plist`.
+
+Key plist entries that differ from the template pattern:
+- **`EnvironmentVariables.PATH`**: `__PROJECT_DIR__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin` — includes `.venv/bin` so venv-installed scripts are resolvable even if the Python code uses subprocess PATH-resolution fallback.
+- **`StandardOutPath`**: `__PROJECT_DIR__/logs/nightly_tests.log`
+- **`StandardErrorPath`**: `__PROJECT_DIR__/logs/nightly_tests_error.log` — captures startup crashes and unhandled exceptions before the `log()` helper fires.
 
 **3. `scripts/install_nightly_tests.sh`**
 
@@ -120,12 +146,21 @@ Mirror `install_sdlc_reflection.sh`:
 - `LABEL="${SERVICE_LABEL_PREFIX}.nightly-tests"`
 - `launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"` (modern API)
 - Echo label, schedule, log path, manual run and uninstall commands
+- **Prerequisite check** (run before plist installation):
+  ```bash
+  python -m pytest --json-report --help > /dev/null 2>&1 || {
+      echo "ERROR: pytest-json-report not installed. Run: uv pip install pytest-json-report"
+      exit 1
+  }
+  ```
+  `pytest-json-report>=1.5` is also declared in `pyproject.toml` `[project.optional-dependencies].dev` so `uv sync --extra dev` installs it automatically.
 
-**4. CLAUDE.md** — three rows in `## Quick Commands` table near the other install script rows:
+**4. CLAUDE.md** — four rows in `## Quick Commands` table near the other install script rows:
 ```
 | `./scripts/install_nightly_tests.sh` | Install nightly regression test launchd schedule |
 | `python scripts/nightly_regression_tests.py --dry-run` | Preview nightly test run without Telegram |
 | `tail -f logs/nightly_tests.log` | Stream nightly test logs |
+| `tail -f logs/nightly_tests_error.log` | Stream nightly test error log (startup crashes) |
 ```
 
 ## Failure Path Test Strategy
@@ -144,7 +179,7 @@ No existing tests affected — this is a standalone script. Unit tests for `load
 
 - [ ] `~/Library/LaunchAgents/com.valor.nightly-tests.plist` installed; `launchctl list | grep nightly-tests` shows the label
 - [ ] Runs `pytest tests/unit/ -n auto` nightly at 03:00 local time
-- [ ] Telegram alert sent only when `current.failed > prev.failed`; clean runs are silent
+- [ ] Telegram alert sent on first run (baseline message), regression (`delta > 0`), or collection error; clean runs are silent
 - [ ] Delta persisted to `data/nightly_tests_last_run.json` between runs
 - [ ] `scripts/install_nightly_tests.sh` installs cleanly and prints label, schedule, log path
 - [ ] CLAUDE.md quick reference table contains install and dry-run commands
@@ -169,11 +204,11 @@ No existing tests affected — this is a standalone script. Unit tests for `load
 
 ### Risk 1: pytest-json-report not installed
 **Impact:** Script crashes on flag parse.
-**Mitigation:** Install script checks for `python -m pytest --json-report --help` and prints install hint if missing.
+**Mitigation:** `pytest-json-report>=1.5` is declared in `pyproject.toml` dev dependencies — `uv sync --extra dev` installs it. Install script performs a hard preflight check and exits with a clear error message if missing.
 
-### Risk 2: False-positive alert on first run
-**Impact:** `prev.failed = 0`, any pre-existing failures trigger an alert.
-**Mitigation:** Intentional — first run gives a baseline snapshot. Document in install script output.
+### Risk 2: Confusing first-run alert
+**Impact:** First run has no prior state; the generic `"+N new failures"` message at 03:00 could cause unnecessary alarm.
+**Mitigation:** First run is detected by an empty (missing) `LAST_RUN_FILE`. A distinct baseline message is sent: `"Nightly regression baseline established: {total} tests, {failed} failures."` This clearly communicates intent and sets expectations.
 
 ### Risk 3: Machine sleep during scheduled window
 **Impact:** launchd fires at next wake, not at 03:00 exactly.
@@ -189,6 +224,6 @@ No MCP or bridge changes needed. Standalone Python process invoked by launchd. N
 
 ## Documentation
 
-- [ ] Add three rows to `## Quick Commands` table in `CLAUDE.md` (install, dry-run, tail logs)
+- [ ] Add four rows to `## Quick Commands` table in `CLAUDE.md` (install, dry-run, tail logs, tail error log)
 - [ ] Create `docs/features/nightly-regression-tests.md` after shipping
 - [ ] Add entry to `docs/features/README.md` index after shipping
