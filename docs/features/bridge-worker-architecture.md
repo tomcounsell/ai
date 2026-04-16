@@ -226,6 +226,32 @@ MAX_CONCURRENT_SESSIONS=3
 - Released after `_execute_agent_session()` completes (in the `finally` block, via all code paths including `CancelledError`)
 - When `None` (e.g., in tests that don't call `_run_worker()`), no ceiling applies
 
+### Dev Session Concurrency Cap (`MAX_CONCURRENT_DEV_SESSIONS`)
+
+A second asyncio semaphore limits how many **slugged dev sessions** can execute simultaneously, independent of the global cap:
+
+```bash
+# Allow 2 concurrent dev sessions (default: 1, sequential)
+MAX_CONCURRENT_DEV_SESSIONS=2 python -m worker
+
+# Or in .env
+MAX_CONCURRENT_DEV_SESSIONS=2
+```
+
+**When to use:** Set to 2 or 3 when multiple GitHub issues are queued and each has a separate worktree (created via `valor_session create --role dev --slug <slug>`). PM and teammate sessions are unaffected — they continue to serialize by project key as before.
+
+**Implementation details:**
+- `_dev_session_semaphore` and `_dev_session_semaphore_cap` are module-level variables in `agent/agent_session_queue.py`
+- Initialized by `_run_worker()` in `worker/__main__.py` alongside the global semaphore
+- Clamped to minimum 1 (`MAX_CONCURRENT_DEV_SESSIONS=0` → 1)
+- Acquired **only** for sessions where `session.session_type == "dev" and session.slug` — non-slugged dev sessions and all PM/teammate sessions are unaffected
+- **Starvation prevention**: when a slugged dev session waits for a dev slot, it first releases the global semaphore slot, then awaits the dev semaphore, then re-acquires the global slot. This ensures PM/teammate sessions can proceed while dev sessions wait, preventing global cap exhaustion.
+- Released in the `finally` block via `_dev_semaphore_acquired` flag, matching the pattern used for `_semaphore_acquired`
+- When `None` (e.g., in tests that don't call `_run_worker()`), no dev cap applies
+- `dev_sessions_running` and `dev_sessions_cap` are exposed in `dashboard.json` under `health`
+
+**Constraint:** `MAX_CONCURRENT_DEV_SESSIONS` should be ≤ `MAX_CONCURRENT_SESSIONS` for sensible semantics. If the dev cap exceeds the global cap, the global cap is the binding constraint — no deadlock, but the dev cap is effectively unused.
+
 ### Redis Pop Lock (TOCTOU Prevention)
 
 A short-lived Redis lock (`SETNX worker:pop_lock:{worker_key}`) wraps the query→transition block in both pop paths:
