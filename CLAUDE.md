@@ -174,6 +174,21 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `valor-youtube-search "query"` | Search YouTube for videos by query |
 | `valor-youtube-search --limit N "query"` | Search YouTube with limited results |
 
+## Manual Testing Hygiene
+
+When creating AgentSessions manually (debug scripts, one-off Python invocations) to test worker or queue behavior, **always clean up afterward**:
+
+```python
+# Clean up test sessions by project_key using Popoto only — never raw Redis
+from models.agent_session import AgentSession
+stale = [s for s in AgentSession.query.all() if s.project_key == "my-test-proj"]
+for s in stale: s.delete()
+```
+
+- Use a recognizable `project_key` prefix (e.g. `test-`, `dbg-`) so test sessions are easy to identify
+- Never use `redis.Redis().delete()`, `r.srem()`, or any raw Redis write — always go through `instance.delete()`
+- Check the dashboard after any manual test session run: `curl -s localhost:8500/dashboard.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['sessions']), 'sessions')"`
+
 ## Development Principles
 
 ### 1. NO LEGACY CODE TOLERANCE
