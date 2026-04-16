@@ -134,6 +134,10 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
+| `./scripts/install_nightly_tests.sh` | Install nightly regression test launchd schedule |
+| `python scripts/nightly_regression_tests.py --dry-run` | Preview nightly test run without Telegram |
+| `tail -f logs/nightly_tests.log` | Stream nightly test logs |
+| `tail -f logs/nightly_tests_error.log` | Stream nightly test error log (startup crashes) |
 | `python -m tools.analytics export --days 30` | Export analytics metrics as JSON |
 | `python -m tools.analytics summary` | Print human-readable analytics summary |
 | `python -m tools.analytics rollup` | Run analytics daily rollup manually |
