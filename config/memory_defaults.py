@@ -89,6 +89,7 @@ def apply_defaults() -> None:
     """Override popoto Defaults with memory-tuned values.
 
     Call this once before defining the Memory model. Safe to call multiple times.
+    Also configures the embedding provider for EmbeddingField if available.
     """
     Defaults.DECAY_RATE = MEMORY_DECAY_RATE
     Defaults.WF_MIN_THRESHOLD = MEMORY_WF_MIN_THRESHOLD
@@ -97,3 +98,11 @@ def apply_defaults() -> None:
     Defaults.ACTED_CONFIDENCE_SIGNAL = MEMORY_ACTED_SIGNAL
     Defaults.CONTRADICTED_CONFIDENCE_SIGNAL = MEMORY_CONTRADICTED_SIGNAL
     Defaults.DISMISSED_CYCLE_WEAKEN_FACTOR = MEMORY_DISMISSED_WEAKEN
+
+    # Configure embedding provider (non-blocking, graceful degradation)
+    try:
+        from agent.embedding_provider import configure_embedding_provider
+
+        configure_embedding_provider()
+    except Exception:
+        pass  # Embedding is optional; fail silently

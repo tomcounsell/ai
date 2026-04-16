@@ -312,11 +312,12 @@ class TestRetrieveMemories:
             with (
                 patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
                 patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+                patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
             ):
                 result = retrieve_memories("test query", "proj")
                 assert result == []
 
-    def test_fuses_three_signals(self):
+    def test_fuses_four_signals(self):
         from agent.memory_retrieval import retrieve_memories
 
         mock_record = MagicMock()
@@ -326,11 +327,13 @@ class TestRetrieveMemories:
         bm25_results = [("Memory:test-123:proj", 5.0)]
         relevance_results = [("Memory:test-123:proj", 1000.0)]
         confidence_results = [("Memory:test-123:proj", 0.8)]
+        embedding_results = [("Memory:test-123:proj", 0.95)]
 
         with (
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = bm25_results
@@ -355,11 +358,13 @@ class TestRetrieveMemories:
         bm25_results = [(key, 5.0)]
         relevance_results = [(key, 1000.0)]
         confidence_results = [(key, 0.8)]
+        embedding_results = [(key, 0.9)]
 
         with (
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = bm25_results
@@ -367,11 +372,11 @@ class TestRetrieveMemories:
 
             result = retrieve_memories("test query", "project", limit=10)
 
-        # Should be exactly 1 record, not 3
+        # Should be exactly 1 record, not 4
         assert len(result) == 1
 
     def test_bm25_failure_degrades_gracefully(self):
-        """When BM25 fails, retrieval still works with relevance + confidence."""
+        """When BM25 fails, retrieval still works with remaining signals."""
         from agent.memory_retrieval import retrieve_memories
 
         mock_record = MagicMock()
@@ -381,11 +386,13 @@ class TestRetrieveMemories:
         key = "Memory:test-456:proj"
         relevance_results = [(key, 1000.0)]
         confidence_results = [(key, 0.8)]
+        embedding_results = [(key, 0.85)]
 
         with (
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.side_effect = Exception("BM25 index missing")
@@ -393,7 +400,7 @@ class TestRetrieveMemories:
 
             result = retrieve_memories("test query", "project", limit=10)
 
-        # Should still return results from relevance + confidence
+        # Should still return results from relevance + confidence + embedding
         assert len(result) == 1
 
     def test_empty_query_returns_empty(self):
@@ -404,6 +411,7 @@ class TestRetrieveMemories:
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
         ):
             mock_bm25.search.return_value = []
             result = retrieve_memories("", "proj")
@@ -423,6 +431,7 @@ class TestRetrieveMemories:
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=[(key, 100.0)]),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = [(key, 5.0)]
@@ -443,6 +452,7 @@ class TestRetrieveMemories:
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = [("Memory:missing:proj", 5.0)]
@@ -471,6 +481,7 @@ class TestRetrieveMemories:
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = bm25_results
@@ -516,6 +527,7 @@ class TestRetrieveMemories:
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = bm25_results
@@ -563,6 +575,7 @@ class TestSupersededFilter:
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = bm25_results
@@ -589,6 +602,7 @@ class TestSupersededFilter:
             patch("popoto.BM25Field") as mock_bm25,
             patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
             patch("models.memory.Memory") as mock_memory_cls,
         ):
             mock_bm25.search.return_value = [(key, 0.9)]
@@ -599,3 +613,296 @@ class TestSupersededFilter:
         # None superseded_by is falsy -> treated as active, should be included
         result_ids = [r.memory_id for r in result]
         assert "none-superseded-id" in result_ids
+
+
+class TestGetEmbeddingRanked:
+    """Test the get_embedding_ranked() function."""
+
+    def test_returns_empty_when_no_provider(self):
+        from agent.memory_retrieval import get_embedding_ranked
+
+        with patch("popoto.fields.embedding_field.get_default_provider", return_value=None):
+            result = get_embedding_ranked("test query", "proj")
+        assert result == []
+
+    def test_returns_empty_when_no_embeddings_on_disk(self):
+
+        from agent.memory_retrieval import get_embedding_ranked
+
+        mock_provider = MagicMock()
+        mock_provider.embed.return_value = [[0.1] * 768]
+
+        with (
+            patch("popoto.fields.embedding_field.get_default_provider", return_value=mock_provider),
+            patch(
+                "popoto.fields.embedding_field.EmbeddingField.load_embeddings",
+                return_value=(None, []),
+            ),
+        ):
+            result = get_embedding_ranked("test query", "proj")
+        assert result == []
+
+    def test_returns_ranked_by_similarity(self):
+        import numpy as np
+
+        from agent.memory_retrieval import get_embedding_ranked
+
+        # Create mock provider that returns a query vector
+        query_vec = np.random.randn(768).astype(np.float32)
+        query_vec = query_vec / np.linalg.norm(query_vec)
+
+        mock_provider = MagicMock()
+        mock_provider.embed.return_value = [query_vec.tolist()]
+
+        # Create a matrix of stored embeddings: one similar, one dissimilar
+        similar_vec = query_vec + np.random.randn(768).astype(np.float32) * 0.1
+        similar_vec = similar_vec / np.linalg.norm(similar_vec)
+        dissimilar_vec = -query_vec  # opposite direction
+        dissimilar_vec = dissimilar_vec / np.linalg.norm(dissimilar_vec)
+
+        matrix = np.stack([similar_vec, dissimilar_vec])
+        keys = ["Memory:agent:proj:similar", "Memory:agent:proj:dissimilar"]
+
+        with (
+            patch("popoto.fields.embedding_field.get_default_provider", return_value=mock_provider),
+            patch(
+                "popoto.fields.embedding_field.EmbeddingField.load_embeddings",
+                return_value=(matrix, keys),
+            ),
+        ):
+            result = get_embedding_ranked("test query", "proj")
+
+        # Similar vector should rank first (positive similarity)
+        assert len(result) >= 1
+        assert result[0][0] == "Memory:agent:proj:similar"
+        assert result[0][1] > 0
+
+    def test_filters_by_project_key(self):
+        import numpy as np
+
+        from agent.memory_retrieval import get_embedding_ranked
+
+        query_vec = np.ones(768, dtype=np.float32)
+        query_vec = query_vec / np.linalg.norm(query_vec)
+
+        mock_provider = MagicMock()
+        mock_provider.embed.return_value = [query_vec.tolist()]
+
+        # Both vectors similar to query, but different projects
+        vec = query_vec.copy()
+        matrix = np.stack([vec, vec])
+        keys = ["Memory:agent:projA:key1", "Memory:agent:projB:key2"]
+
+        with (
+            patch("popoto.fields.embedding_field.get_default_provider", return_value=mock_provider),
+            patch(
+                "popoto.fields.embedding_field.EmbeddingField.load_embeddings",
+                return_value=(matrix, keys),
+            ),
+        ):
+            result = get_embedding_ranked("test query", "projA")
+
+        assert len(result) == 1
+        assert "projA" in result[0][0]
+
+    def test_graceful_on_provider_error(self):
+        from agent.memory_retrieval import get_embedding_ranked
+
+        mock_provider = MagicMock()
+        mock_provider.embed.side_effect = RuntimeError("Ollama unreachable")
+
+        with patch(
+            "popoto.fields.embedding_field.get_default_provider", return_value=mock_provider
+        ):
+            result = get_embedding_ranked("test query", "proj")
+        assert result == []
+
+    def test_embedding_failure_degrades_to_three_signals(self):
+        """When embedding search fails, retrieve_memories still works."""
+        from agent.memory_retrieval import retrieve_memories
+
+        mock_record = MagicMock()
+        mock_record.memory_id = "test-no-embed"
+        mock_record.superseded_by = ""
+
+        key = "Memory:test-no-embed:proj"
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[(key, 100.0)]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[(key, 0.8)]),
+            patch(
+                "agent.memory_retrieval.get_embedding_ranked",
+                side_effect=Exception("embedding crash"),
+            ),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = [(key, 5.0)]
+            mock_memory_cls.query.get.return_value = mock_record
+
+            result = retrieve_memories("test query", "proj", limit=10)
+
+        # Should still return results from BM25 + relevance + confidence
+        assert len(result) == 1
+
+
+class TestOllamaEmbeddingProvider:
+    """Test the OllamaEmbeddingProvider adapter."""
+
+    def test_embed_calls_ollama_api(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider
+
+        provider = OllamaEmbeddingProvider()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"embeddings": [[0.1] * 768]}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch(
+            "agent.embedding_provider.requests.post", return_value=mock_response
+        ) as mock_post:
+            result = provider.embed(["test text"])
+
+        assert len(result) == 1
+        assert len(result[0]) == 768
+        mock_post.assert_called_once()
+        call_args = mock_post.call_args
+        assert "/api/embed" in call_args[0][0]
+        assert call_args[1]["json"]["model"] == "nomic-embed-text"
+
+    def test_embed_empty_list_returns_empty(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider
+
+        provider = OllamaEmbeddingProvider()
+        result = provider.embed([])
+        assert result == []
+
+    def test_embed_raises_on_connection_error(self):
+        import pytest
+
+        from agent.embedding_provider import OllamaEmbeddingProvider
+
+        provider = OllamaEmbeddingProvider()
+
+        with patch(
+            "agent.embedding_provider.requests.post",
+            side_effect=__import__("requests").exceptions.ConnectionError("refused"),
+        ):
+            with pytest.raises(RuntimeError, match="Ollama unreachable"):
+                provider.embed(["test"])
+
+    def test_dimensions_property(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider
+
+        provider = OllamaEmbeddingProvider()
+        assert provider.dimensions == 768
+
+    def test_is_available_true(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider
+
+        provider = OllamaEmbeddingProvider()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"models": [{"name": "nomic-embed-text:latest"}]}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("agent.embedding_provider.requests.get", return_value=mock_response):
+            assert provider.is_available() is True
+
+    def test_is_available_false_no_model(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider
+
+        provider = OllamaEmbeddingProvider()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"models": [{"name": "llama3:latest"}]}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("agent.embedding_provider.requests.get", return_value=mock_response):
+            assert provider.is_available() is False
+
+    def test_is_available_false_on_connection_error(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider
+
+        provider = OllamaEmbeddingProvider()
+
+        with patch(
+            "agent.embedding_provider.requests.get",
+            side_effect=__import__("requests").exceptions.ConnectionError("refused"),
+        ):
+            assert provider.is_available() is False
+
+    def test_configure_sets_global_provider(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider, configure_embedding_provider
+
+        mock_provider = OllamaEmbeddingProvider()
+
+        with (
+            patch.object(mock_provider, "is_available", return_value=True),
+            patch(
+                "agent.embedding_provider.OllamaEmbeddingProvider",
+                return_value=mock_provider,
+            ),
+            patch("popoto.fields.embedding_field.set_default_provider") as mock_set,
+        ):
+            result = configure_embedding_provider()
+
+        mock_set.assert_called_once_with(mock_provider)
+        assert result is mock_provider
+
+    def test_configure_returns_none_when_unavailable(self):
+        from agent.embedding_provider import OllamaEmbeddingProvider, configure_embedding_provider
+
+        mock_provider = OllamaEmbeddingProvider()
+
+        with (
+            patch.object(mock_provider, "is_available", return_value=False),
+            patch(
+                "agent.embedding_provider.OllamaEmbeddingProvider",
+                return_value=mock_provider,
+            ),
+        ):
+            result = configure_embedding_provider()
+
+        assert result is None
+
+
+class TestParaphraseRecall:
+    """Acceptance test: semantic recall retrieves paraphrased content."""
+
+    def test_paraphrase_retrieval_via_embedding_signal(self):
+        """Saving 'user prefers terse replies' retrieves on 'keep answers short'.
+
+        This tests the full retrieve_memories pipeline with a mock embedding
+        provider that returns vectors with high cosine similarity for
+        semantically similar text. BM25 returns nothing (no keyword overlap),
+        but the embedding signal surfaces the match.
+        """
+
+        from agent.memory_retrieval import retrieve_memories
+
+        # The stored memory and the query have zero keyword overlap
+        stored_key = "Memory:agent:proj:terse-memory"
+
+        mock_record = MagicMock()
+        mock_record.memory_id = "terse-memory"
+        mock_record.superseded_by = ""
+
+        # Embedding signal: the provider returns similar vectors for both
+        # "user prefers terse replies" and "keep answers short"
+        embedding_results = [(stored_key, 0.92)]  # high similarity
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            # BM25 returns nothing -- no keyword overlap between
+            # "terse replies" and "keep answers short"
+            mock_bm25.search.return_value = []
+            mock_memory_cls.query.get.return_value = mock_record
+
+            result = retrieve_memories("keep answers short", "proj", limit=10)
+
+        # The embedding signal alone should surface the memory
+        assert len(result) == 1
+        assert result[0].memory_id == "terse-memory"

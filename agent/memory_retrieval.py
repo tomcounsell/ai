@@ -1,12 +1,16 @@
 """BM25 + RRF fusion retrieval for the subconscious memory system.
 
-Replaces ContextAssembler with a three-signal Reciprocal Rank Fusion:
+Four-signal Reciprocal Rank Fusion:
   1. BM25 keyword match quality (via BM25Field.search)
   2. Temporal relevance (via DecayingSortedField sorted set)
   3. Historical confidence (via ConfidenceField companion hash)
+  4. Semantic similarity (via EmbeddingField cosine similarity)
 
 Each signal produces a ranked list of (redis_key, score) tuples.
 RRF fuses them into a single ranking: score = sum(1 / (k + rank_i)).
+
+Signal 4 (embedding) gracefully degrades: if no embeddings exist or the
+provider is unavailable, RRF fuses the remaining three signals as before.
 
 All functions are fail-silent -- retrieval failures never crash the agent.
 """
@@ -162,17 +166,83 @@ def get_confidence_ranked(
         return []
 
 
+def get_embedding_ranked(
+    query_text: str,
+    project_key: str,
+    limit: int = 50,
+) -> list[tuple[str, float]]:
+    """Get embedding-similarity-ranked memory keys via cosine similarity.
+
+    Embeds the query text using the configured provider, loads all stored
+    Memory embeddings from disk, computes cosine similarity (dot product
+    on pre-normalized vectors), filters to the given project_key, and
+    returns (redis_key, similarity) tuples sorted descending.
+
+    Gracefully degrades: returns [] if no provider is configured, no
+    embeddings exist on disk, or any error occurs.
+
+    Args:
+        query_text: Search query to embed and compare against.
+        project_key: Project partition key to filter results.
+        limit: Maximum entries to return.
+
+    Returns:
+        List of (redis_key, similarity_score) tuples. Empty list on any error.
+    """
+    try:
+        import numpy as np
+        from popoto.fields.embedding_field import EmbeddingField, get_default_provider
+
+        from models.memory import Memory
+
+        provider = get_default_provider()
+        if provider is None:
+            return []
+
+        # Embed the query
+        query_vectors = provider.embed([query_text], input_type="query")
+        if not query_vectors or not query_vectors[0]:
+            return []
+
+        query_vec = np.array(query_vectors[0], dtype=np.float32)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm == 0:
+            return []
+        query_vec = query_vec / query_norm
+
+        # Load all stored embeddings (pre-normalized matrix)
+        matrix, keys = EmbeddingField.load_embeddings(Memory)
+        if matrix is None or len(keys) == 0:
+            return []
+
+        # Cosine similarity via dot product (matrix is pre-normalized)
+        similarities = matrix @ query_vec
+
+        # Build (key, score) tuples and sort by similarity descending
+        entries = list(zip(keys, similarities.tolist()))
+        entries = _filter_by_project(entries, project_key)
+        entries.sort(key=lambda x: x[1], reverse=True)
+
+        # Filter out negative similarities (irrelevant results)
+        entries = [(k, s) for k, s in entries if s > 0]
+
+        return entries[:limit]
+    except Exception as e:
+        logger.warning(f"[memory_retrieval] embedding ranked fetch failed: {e}")
+        return []
+
+
 def retrieve_memories(
     query_text: str,
     project_key: str,
     limit: int = 10,
     rrf_k: int | None = None,
 ) -> list[Any]:
-    """Retrieve memories using BM25 + RRF fusion of three signals.
+    """Retrieve memories using four-signal RRF fusion.
 
-    Combines BM25 keyword match, temporal relevance, and confidence
-    via Reciprocal Rank Fusion. Returns hydrated Memory instances
-    with a `score` attribute set to the RRF fusion score.
+    Combines BM25 keyword match, temporal relevance, confidence, and
+    semantic similarity via Reciprocal Rank Fusion. Returns hydrated
+    Memory instances with a `score` attribute set to the RRF fusion score.
 
     Args:
         query_text: Search query string.
@@ -207,11 +277,19 @@ def retrieve_memories(
         # Signal 3: Confidence (global hash, post-filtered to project)
         confidence_results = get_confidence_ranked(project_key, limit=50)
 
-        # Fuse the three signals
+        # Signal 4: Semantic similarity (embedding cosine, post-filtered to project)
+        try:
+            embedding_results = get_embedding_ranked(query_text, project_key, limit=50)
+        except Exception as e:
+            logger.warning(f"[memory_retrieval] embedding search failed: {e}")
+            embedding_results = []
+
+        # Fuse all signals (embedding gracefully degrades to empty list)
         fused = rrf_fuse(
             bm25_results,
             relevance_results,
             confidence_results,
+            embedding_results,
             k=rrf_k,
             limit=limit,
         )
@@ -332,7 +410,7 @@ def get_memories_in_time_range(
         if score_map:
             filtered = []
             for record in active:
-                # Match record to score_map by checking if its memory_id is in a key
+                # Match record to score_map by checking if its key contains the memory_id
                 mid = getattr(record, "memory_id", "")
                 matched_score = None
                 for skey, sval in score_map.items():
