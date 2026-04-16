@@ -18,10 +18,10 @@
 # Format: logfilename [owner:group] mode count size(KB) when flags
 # See newsyslog.conf(5) for details.
 #
-# logfilename                                  mode  count  size    when  flags
-__PROJECT_DIR__/logs/bridge.error.log          644   5      10240   *     NJ
-__PROJECT_DIR__/logs/watchdog.log              644   5      10240   *     NJ
-__PROJECT_DIR__/logs/reflections.log           644   5      10240   *     NJ
-__PROJECT_DIR__/logs/reflections_error.log     644   5      10240   *     NJ
-__PROJECT_DIR__/logs/worker.log                644   5      10240   *     NJ
-__PROJECT_DIR__/logs/worker_error.log          644   5      10240   *     NJ
+# logfilename                                  [owner:group]          mode  count  size    when  flags
+__PROJECT_DIR__/logs/bridge.error.log          [__USERNAME__:staff]   644   5      10240   *     NJ
+__PROJECT_DIR__/logs/watchdog.log              [__USERNAME__:staff]   644   5      10240   *     NJ
+__PROJECT_DIR__/logs/reflections.log           [__USERNAME__:staff]   644   5      10240   *     NJ
+__PROJECT_DIR__/logs/reflections_error.log     [__USERNAME__:staff]   644   5      10240   *     NJ
+__PROJECT_DIR__/logs/worker.log                [__USERNAME__:staff]   644   5      10240   *     NJ
+__PROJECT_DIR__/logs/worker_error.log          [__USERNAME__:staff]   644   5      10240   *     NJ

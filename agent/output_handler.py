@@ -248,11 +248,14 @@ class TelegramRelayOutputHandler:
         session_id = chat_id
         reply_to = int(msg_id) if msg_id else None
 
+        # Normalize EmojiResult to str for JSON serialization
+        emoji_str = str(emoji) if emoji is not None else None
+
         payload = {
             "type": "reaction",
             "chat_id": chat_id,
             "reply_to": reply_to,
-            "emoji": emoji,
+            "emoji": emoji_str,
             "session_id": session_id,
             "timestamp": time.time(),
         }

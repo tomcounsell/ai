@@ -41,7 +41,13 @@ def _render_template(project_dir: Path) -> str | None:
     template_path = project_dir / "config" / "newsyslog.conf.template"
     if not template_path.exists():
         return None
-    return template_path.read_text().replace("__PROJECT_DIR__", str(project_dir))
+    import os
+
+    return (
+        template_path.read_text()
+        .replace("__PROJECT_DIR__", str(project_dir))
+        .replace("__USERNAME__", os.environ.get("USER", os.getlogin()))
+    )
 
 
 def check_newsyslog(project_dir: Path) -> NewsyslogStatus:
