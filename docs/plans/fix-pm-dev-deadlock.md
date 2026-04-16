@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-16
 tracking: https://github.com/tomcounsell/ai/issues/1004
 last_comment_id:
+allow_unchecked: true
 ---
 
 # Fix PM Session Deadlock When Child Dev Session Can't Get a Worker Slot
