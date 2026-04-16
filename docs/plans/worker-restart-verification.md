@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -229,8 +229,8 @@ No agent integration required — both changes are in the update orchestrator an
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` to note that `/update` now retries worker start via `launchctl kickstart` if the 30-second heartbeat window expires.
-- [ ] No new feature doc needed — this is a bug fix to existing infrastructure.
+- [x] Update `docs/features/bridge-worker-architecture.md` to note that `/update` now retries worker start via `launchctl kickstart` if the 30-second heartbeat window expires.
+- [x] No new feature doc needed — this is a bug fix to existing infrastructure.
 
 ## Success Criteria
 
