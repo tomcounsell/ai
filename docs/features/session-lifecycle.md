@@ -174,13 +174,13 @@ Any `AgentSession` method that saves companion fields (non-status fields) **must
 | `push_steering_message()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
 | `pop_steering_messages()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
 | Heartbeat in `_heartbeat_loop` | `["updated_at"]` | `agent/agent_session_queue.py` |
-| Steering drain (async) | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
-| Steering drain (sync fallback) | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
+| Steering drain (async) | `["initial_telegram_message", "updated_at"]` | `agent/agent_session_queue.py` |
+| Steering drain (sync fallback) | `["initial_telegram_message", "updated_at"]` | `agent/agent_session_queue.py` |
 | `retain_for_resume` save | `["retain_for_resume", "updated_at"]` | `agent/agent_session_queue.py` |
 | Session metadata save | `["updated_at", "branch_name", "task_list_id"]` | `agent/agent_session_queue.py` |
 | `response_delivered_at` save | `["response_delivered_at", "updated_at"]` | `agent/agent_session_queue.py` |
 | Branch/commit checkpoint | `["branch_name", "session_events", "updated_at"]` | `agent/agent_session_queue.py` |
-| Resume hydration | `["message_text", "updated_at"]` | `agent/agent_session_queue.py` |
+| Resume hydration | `["initial_telegram_message", "updated_at"]` | `agent/agent_session_queue.py` |
 | Priority reorder | `["priority", "updated_at"]` | `agent/agent_session_queue.py` |
 | Continuation project_config | `["project_config", "updated_at"]` | `agent/agent_session_queue.py` |
 | Tool call tracking | `["updated_at", "tool_call_count"]` | `.claude/hooks/post_tool_use.py` |
