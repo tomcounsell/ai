@@ -1877,6 +1877,105 @@ async def main():
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
         )
 
+    @client.on(events.MessageEdited)
+    async def edit_handler(event):
+        """Handle edited messages.
+
+        When a user edits a message that has an active/pending session, inject
+        the new text as a steering message so the agent can course-correct.
+        When the session is already completed (Valor already replied), spawn a
+        fresh session using the edited text so the edit isn't silently dropped.
+        """
+        if event.out or SHUTTING_DOWN:
+            return
+
+        message = event.message
+        chat = await event.get_chat()
+        chat_title = getattr(chat, "title", None)
+        is_dm = event.is_private
+        sender = await event.get_sender()
+        sender_name = getattr(sender, "first_name", "Unknown")
+        sender_id = getattr(sender, "id", None)
+
+        # Find project for this chat
+        if is_dm and sender_id:
+            project = find_project_for_dm(sender_id) or find_project_for_chat(chat_title)
+        else:
+            project = find_project_for_chat(chat_title) if chat_title else None
+
+        if not project:
+            return
+
+        project_key = project.get("_key", "dm")
+        edited_text = (message.text or "").strip()
+        if not edited_text:
+            return
+
+        # The session ID this message originally created
+        session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
+
+        try:
+            from models.agent_session import AgentSession
+
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            session = sessions[0] if sessions else None
+        except Exception as e:
+            logger.debug(f"[edit] Session lookup failed (non-fatal): {e}")
+            session = None
+
+        if session is None:
+            # No session for this message — was never processed, ignore
+            logger.debug(f"[edit] No session found for msg {message.id}, ignoring edit")
+            return
+
+        if session.status in ("running", "active", "pending"):
+            # Agent is still working — steer with the updated text
+            from agent.steering import push_steering_message
+
+            push_steering_message(
+                session_id,
+                f"[Edit] {edited_text}",
+                sender_name,
+            )
+            logger.info(
+                f"[edit] Steered edit into {session.status} session {session_id} "
+                f"(msg {message.id}, {len(edited_text)} chars)"
+            )
+            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+
+        elif session.status == "completed":
+            # Valor already replied to the incomplete message — treat the edit as
+            # a fresh follow-up so it isn't silently dropped.
+            telegram_chat_id = str(event.chat_id)
+            working_dir_str = project.get("working_dir", "")
+            new_session_id = f"tg_{project_key}_{event.chat_id}_{message.id}_edit"
+
+            depth = await dispatch_telegram_session(
+                project_key=project_key,
+                session_id=new_session_id,
+                working_dir=working_dir_str,
+                message_text=edited_text,
+                sender_name=sender_name,
+                chat_id=telegram_chat_id,
+                telegram_message_id=message.id,
+                chat_title=chat_title,
+                priority="normal",
+                sender_id=sender_id,
+                session_type=None,
+                project_config=project,
+            )
+            logger.info(
+                f"[edit] Spawned fresh session {new_session_id} for completed-session edit "
+                f"(msg {message.id}, depth={depth})"
+            )
+            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+
+        else:
+            # killed/abandoned/failed — ignore
+            logger.debug(
+                f"[edit] Session {session_id} is terminal ({session.status}), ignoring edit"
+            )
+
     # Mutable ref for knowledge watcher (populated later, read by shutdown handler)
     _knowledge_watcher_ref: list = [None]
 
