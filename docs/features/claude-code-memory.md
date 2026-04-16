@@ -96,9 +96,11 @@ The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2
 
 ## AgentSession Lifecycle Tracking
 
-Local Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `agent_session_id`:
+Worker-spawned Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `agent_session_id`:
 
-1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create_local(session_type=..., ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The hook reads the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning subprocesses, so the record stores the actual persona (`teammate`, `pm`, or `dev`); if `SESSION_TYPE` is absent (standalone CLI use), it defaults to `dev`. The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
+> **Note:** Direct CLI sessions (developer running `claude` at the terminal) do **not** create AgentSession records. The UserPromptSubmit hook gates creation on the presence of `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` environment variables, which are only set by `sdk_client.py` for worker-spawned sessions (issue [#1001](https://github.com/tomcounsell/ai/issues/1001)). Memory extraction, transcript backup, and all other hook functionality continue to work normally for direct CLI sessions — they simply have no AgentSession record.
+
+1. **UserPromptSubmit hook**: On the first prompt of a worker-spawned session, creates an AgentSession via `AgentSession.create_local(session_type=..., ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The hook reads the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning subprocesses, so the record stores the actual persona (`teammate`, `pm`, or `dev`). The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
 2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
 3. **Stop hook**: Reads `agent_session_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
 
@@ -227,7 +229,7 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
 | Ingestion | `Memory.safe_save()` in bridge | `ingest()` called from UserPromptSubmit hook |
 | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
 | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |
-| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession created by UserPromptSubmit hook (`AgentSession.create_local(session_type=SESSION_TYPE env var or "dev", ...)`) |
+| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession created by UserPromptSubmit hook only for worker-spawned sessions (`AgentSession.create_local(session_type=SESSION_TYPE env var, ...)`); direct CLI sessions create no AgentSession (gated by `SESSION_TYPE`/`VALOR_PARENT_SESSION_ID` env vars) |
 | Category re-ranking | `_apply_category_weights()` in `check_and_inject()` | `_apply_category_weights()` imported from `agent.memory_hook` in `recall()` |
 | Shared code | `extract_topic_keywords()`, `_apply_category_weights()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
 
