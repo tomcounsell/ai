@@ -7,10 +7,12 @@ Email as a second transport alongside Telegram. Inbound emails are routed to age
 ```
 IMAP inbox (valor@yuda.me)
   → bridge/email_bridge.py (polls every 30s)
-    → find_project_for_email()   # bridge/routing.py
-    → enqueue_agent_session()    # transport="email"
+    → get_known_email_search_terms()  # bridge/routing.py — builds UNSEEN+FROM query
+    → _poll_imap(known_senders)       # fetches only matching messages; marks SEEN immediately
+    → find_project_for_email()        # bridge/routing.py
+    → enqueue_agent_session()         # transport="email"
       → Worker resolves EmailOutputHandler via (project_key, "email") callback
-        → EmailOutputHandler.send()  # bridge/email_bridge.py
+        → EmailOutputHandler.send()   # bridge/email_bridge.py
           → SMTP reply with In-Reply-To header
 ```
 
@@ -18,9 +20,9 @@ IMAP inbox (valor@yuda.me)
 
 | File | Role |
 |------|------|
-| `bridge/email_bridge.py` | IMAP polling loop, email parsing, `EmailOutputHandler` |
+| `bridge/email_bridge.py` | IMAP polling loop, email parsing, sender filtering, `EmailOutputHandler` |
 | `bridge/email_dead_letter.py` | Dead letter queue for failed SMTP sends |
-| `bridge/routing.py` | `find_project_for_email()`, `build_email_to_project_map()` |
+| `bridge/routing.py` | `find_project_for_email()`, `build_email_to_project_map()`, `get_known_email_search_terms()` |
 | `agent/agent_session_queue.py` | Transport-keyed callbacks via `register_callbacks(transport=...)` and `_resolve_callbacks()`; `extra_context_overrides` parameter |
 
 ### Session Identity
@@ -39,6 +41,17 @@ email_{project_key}_{normalized_sender}_{unix_timestamp}
 When an inbound email carries an `In-Reply-To` header, the bridge looks up `email:msgid:{message_id}` in Redis to find the existing `session_id`. Replies resume the original session rather than starting a new one.
 
 Each outbound SMTP send records the sent `Message-ID` in Redis so future replies can be correlated.
+
+### Sender Filtering
+
+The IMAP poller never fetches messages from unknown senders. Before each poll cycle, `get_known_email_search_terms()` (in `bridge/routing.py`) returns a list of search terms derived from all active projects' `email.contacts` and `email.domains`:
+
+- Exact addresses from `email.contacts` (e.g. `"tom@yuda.me"`)
+- Domain tokens from `email.domains` (e.g. `"@psyoptimal.com"`)
+
+`_build_imap_sender_query()` assembles these into an IMAP OR tree, and `_poll_imap()` issues a single `UNSEEN FROM ...` UID search. Messages from senders not in any project config are never fetched — they remain `UNSEEN` in the inbox so other machines polling the same shared inbox can still pick them up.
+
+Messages that do match are marked `SEEN` immediately on fetch (before parsing) to prevent duplicate processing on concurrent polls on the same machine.
 
 ### Transport-Keyed Callbacks
 
@@ -188,6 +201,8 @@ Or via the service script:
 **stdlib only.** `imaplib`, `smtplib`, and `email` from the Python standard library — no third-party dependencies. This keeps the email bridge installable anywhere Python runs.
 
 **Single inbox, sender-based routing.** All projects share one inbox (`valor@yuda.me`). The sender address determines which project the message is routed to — either by exact contact match or by domain wildcard. This avoids per-project mailboxes while keeping routing deterministic.
+
+**IMAP-level sender filtering.** The poller constructs an `UNSEEN FROM` query using only the configured senders for active projects (via `get_known_email_search_terms()`). Unknown senders are never fetched and remain `UNSEEN`, so other machines polling the same shared inbox are not blocked. This is preferable to fetching-then-discarding, which would mark unrecognised messages as read.
 
 **`telegram_message_id=0` sentinel.** The session queue requires a message ID for deduplication. Email sessions use `0` as a sentinel value since they have no Telegram message ID. This avoids a nullable field or a parallel code path in the queue.
 

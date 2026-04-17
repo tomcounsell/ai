@@ -5,7 +5,7 @@ The Telegram bridge (`bridge/telegram_bridge.py`) is organized into focused sub-
 | Module | Responsibility |
 |--------|---------------|
 | `bridge/media.py` | Media detection, download, transcription, image description |
-| `bridge/routing.py` | Message routing, project config, mention/response classification; `find_project_for_chat()` (group title), `find_project_for_dm()` (DM sender ID), `find_project_for_email()` (email address) |
+| `bridge/routing.py` | Message routing, project config, mention/response classification; `find_project_for_chat()` (group title), `find_project_for_dm()` (DM sender ID), `find_project_for_email()` (email address), `get_known_email_search_terms()` (IMAP sender filter terms) |
 | `bridge/context.py` | Context building, conversation history, reply chains, implicit-context heuristic (`references_prior_context`) |
 | `bridge/response.py` | Message formatting, reactions (re-exports from `agent/constants.py`), file extraction, sending |
 | `bridge/catchup.py` | Abandoned session revival and re-enqueueing |
