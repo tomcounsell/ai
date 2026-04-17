@@ -17,7 +17,7 @@ Four operational gaps degrade reliability and developer confidence in the sessio
 **Current behavior:**
 - `python -m tools.agent_session_scheduler kill --agent-session-id <ID>` returns "Session not found" for sessions in `dormant`, `paused`, `paused_circuit`, `superseded`, or `active` states — operators have no CLI path to terminate these without direct Redis surgery.
 - The 360-second worker-healthy threshold is a bare integer literal in `ui/app.py:188,207` and `tools/agent_session_scheduler.py:489`; only `tools/valor_session.py:63` names it `_WORKER_HEALTHY_THRESHOLD_S`.
-- `docs/features/session-lifecycle.md` header says "Session States (11 total)" but `models/session_lifecycle.py:64-73` defines 13 non-terminal states plus 5 terminal states; `paused` and `paused_circuit` are absent from all doc surfaces.
+- `docs/features/session-lifecycle.md` header says "Session States (11 total)" but `models/session_lifecycle.py:64-73` defines 8 non-terminal states plus 5 terminal states = 13 total; `paused` and `paused_circuit` are absent from all doc surfaces.
 - `docs/features/agent-session-queue.md` references `_reset_running_jobs()`, `_job_hierarchy_health_check()`, and `_finalize_parent()` (all removed/renamed), plus `stable_agent_session_id` and `depends_on` fields, and describes the delete-and-recreate pattern as still active for status transitions when it was superseded by in-place `IndexedField` mutation.
 
 **Desired outcome:**
@@ -74,15 +74,15 @@ No relevant external findings — this is purely an internal refactor with no ex
 
 **Heartbeat constant path (W4 fix):**
 
-1. `tools/valor_session.py:63` — `_WORKER_HEALTHY_THRESHOLD_S = 360` (named constant, correct location)
+1. `tools/valor_session.py:63` — `_WORKER_HEALTHY_THRESHOLD_S = 360` (private named constant, currently only in this file)
 2. `ui/app.py:188,207` — bare `360` (two sites needing import)
 3. `tools/agent_session_scheduler.py:489` — bare `360` (one site needing import)
-4. **Fix**: move the constant to `agent/constants.py` (the shared constants module) and add a comment explaining the 60s buffer above `AGENT_SESSION_HEALTH_CHECK_INTERVAL`; update the three consumer files to import from `agent/constants.py`
+4. **Fix**: move the constant to `agent/constants.py` as `HEARTBEAT_STALENESS_THRESHOLD_S` (renamed for accuracy — it governs both bridge and worker liveness checks, not just the worker); add a comment explaining the 60s buffer above `AGENT_SESSION_HEALTH_CHECK_INTERVAL`; update the three consumer files to import from `agent/constants.py`
 
 ## Architectural Impact
 
 - **New dependencies**: `agent/constants.py` becomes a dependency for `ui/app.py` and `tools/agent_session_scheduler.py` (both already import from `agent/` elsewhere)
-- **Interface changes**: `_WORKER_HEALTHY_THRESHOLD_S` moves from `tools/valor_session.py` to `agent/constants.py`; `tools/valor_session.py` will re-export or import from the new location
+- **Interface changes**: `_WORKER_HEALTHY_THRESHOLD_S` in `tools/valor_session.py` is replaced by `HEARTBEAT_STALENESS_THRESHOLD_S` in `agent/constants.py`; `tools/valor_session.py` imports from the new location
 - **Coupling**: Slight reduction — three files previously had divergent literal values, now share one constant
 - **Data ownership**: No change
 - **Reversibility**: Trivially reversible — no data or schema changes
@@ -106,8 +106,8 @@ No prerequisites — this work has no external dependencies.
 ### Key Elements
 
 - **Kill command fix**: `cmd_kill()` uses `NON_TERMINAL_STATUSES` from `models/session_lifecycle.py` for the state scan instead of a hardcoded tuple; the retry path also updated
-- **Heartbeat constant**: `WORKER_HEALTHY_THRESHOLD_S` (drop the leading underscore for a shared public constant) moved to `agent/constants.py` with a comment linking it to `AGENT_SESSION_HEALTH_CHECK_INTERVAL`; three consumer files updated
-- **State machine docs**: `docs/features/session-lifecycle.md`, `docs/features/agent-session-model.md`, `CLAUDE.md`, and `models/agent_session.py` docstring all updated to reflect all 13 states
+- **Heartbeat constant**: `HEARTBEAT_STALENESS_THRESHOLD_S` (renamed from `_WORKER_HEALTHY_THRESHOLD_S` for semantic accuracy — the constant governs both bridge and worker liveness checks in `ui/app.py`) moved to `agent/constants.py` with a comment linking it to `AGENT_SESSION_HEALTH_CHECK_INTERVAL`; three consumer files updated
+- **State machine docs**: `docs/features/session-lifecycle.md`, `docs/features/agent-session-model.md`, and `models/agent_session.py` docstring all updated to reflect all 13 states; `CLAUDE.md` Session Management table gets a "See also" pointer to `docs/features/session-lifecycle.md` (not expanded — see Rabbit Holes)
 - **Queue doc rewrite**: `docs/features/agent-session-queue.md` sections referencing removed functions (`_reset_running_jobs`, `_job_hierarchy_health_check`, `_finalize_parent`) and the stale delete-and-recreate narrative updated to reflect current code
 
 ### Technical Approach
@@ -121,26 +121,27 @@ No prerequisites — this work has no external dependencies.
 **W4 — Heartbeat constant:**
 - Add to `agent/constants.py`:
   ```python
-  # Worker heartbeat staleness threshold.
+  # Heartbeat staleness threshold — used by both worker and bridge health checks.
   # The worker writes its heartbeat every AGENT_SESSION_HEALTH_CHECK_INTERVAL seconds (300s).
   # A threshold of 360s gives one full check-cycle grace period before declaring unhealthy.
-  WORKER_HEALTHY_THRESHOLD_S: int = 360
+  HEARTBEAT_STALENESS_THRESHOLD_S: int = 360
   ```
-- `tools/valor_session.py`: replace `_WORKER_HEALTHY_THRESHOLD_S = 360` with `from agent.constants import WORKER_HEALTHY_THRESHOLD_S`; update the two usages in the same file
-- `ui/app.py`: import `WORKER_HEALTHY_THRESHOLD_S` from `agent.constants`; replace bare `360` literals at lines 188 and 207
-- `tools/agent_session_scheduler.py`: import `WORKER_HEALTHY_THRESHOLD_S` from `agent.constants`; replace bare `360` at line 489
+  The name `HEARTBEAT_STALENESS_THRESHOLD_S` is chosen over `WORKER_HEALTHY_THRESHOLD_S` because `ui/app.py` uses this value in both `_get_bridge_health()` and `_get_worker_health()` — it governs any heartbeat-based liveness check, not just the worker.
+- `tools/valor_session.py`: replace `_WORKER_HEALTHY_THRESHOLD_S = 360` with `from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S`; update usages in the same file
+- `ui/app.py`: import `HEARTBEAT_STALENESS_THRESHOLD_S` from `agent.constants`; replace bare `360` literals at lines 188 and 207
+- `tools/agent_session_scheduler.py`: import `HEARTBEAT_STALENESS_THRESHOLD_S` from `agent.constants`; replace bare `360` at line 489
 
 **W6+W8 — State machine docs:**
 - `docs/features/session-lifecycle.md`: change header to "Session States (13 total)"; add `paused` and `paused_circuit` rows to the non-terminal table with descriptions matching `models/session_lifecycle.py:72-73`
 - `docs/features/agent-session-model.md`: update lifecycle diagram/table to include all 13 states
-- `CLAUDE.md`: expand Session Management table from 4 rows to include all 13 operational states
-- `models/agent_session.py`: update docstring "Status values (11 total)" to "(13 total)" and add `paused` and `paused_circuit` entries
+- `CLAUDE.md`: add a "See also: `docs/features/session-lifecycle.md` for the full 13-state reference" note below the Session Management table — do NOT expand the table itself (see Rabbit Holes)
+- `models/agent_session.py`: update docstring "Status values (11 total)" to "(13 total)"; add `paused_circuit` and `paused` entries in the non-terminal section
 
 **W7 — Queue doc:**
 - Remove or clearly mark-historical the "Delete-and-Recreate Pattern" section (it describes the old approach; in-place `transition_status()` is now the standard path per `session_lifecycle.py:1602`)
 - Replace `_reset_running_jobs()` reference with `_recover_interrupted_agent_sessions_startup()` (the actual function)
 - Replace `_finalize_parent()` references with `_finalize_parent_sync()` (the actual function)
-- Remove `_job_hierarchy_health_check()` reference (function deleted); replace with accurate description of the health-check task in `_periodic_health_check()` / `_perform_health_checks()`
+- Remove `_job_hierarchy_health_check()` reference (function deleted); replace with accurate description of the health-check task performed by `_agent_session_hierarchy_health_check()` (line 1851) called from `_agent_session_health_loop()` (line 1971) in `agent/agent_session_queue.py`
 - Retain `stable_agent_session_id` documentation (field still exists); retain `~~depends_on~~` strikethrough (accurate as historical note)
 
 ## Failure Path Test Strategy
@@ -157,9 +158,10 @@ No prerequisites — this work has no external dependencies.
 ## Test Impact
 
 - [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: add test asserting that a session in `dormant` status is found and killed by `cmd_kill --agent-session-id`; add test for `paused` and `paused_circuit` states; verify "Session not found" is NOT returned for these states
+- [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: add test for `completed→killed` transition path introduced by including `"completed"` in the expanded scan tuple; verify `finalize_session` idempotency guard handles this without error
 - [ ] `tests/unit/test_agent_session_scheduler_kill.py::test_nonexistent_session_returns_error` (or equivalent) — UPDATE: verify the test still exercises a session in a truly missing state (not just an unscanned state)
 
-No other existing tests are affected — the heartbeat constant rename is a search-and-replace with no behavioral change, and the doc updates add no new code paths.
+No other existing tests are affected — the heartbeat constant rename (`HEARTBEAT_STALENESS_THRESHOLD_S`) is a search-and-replace with no behavioral change, and the doc updates add no new code paths.
 
 ## Rabbit Holes
 
@@ -201,13 +203,13 @@ No agent integration required — the kill command is a CLI tool for operators, 
 
 - [ ] Update `docs/features/session-lifecycle.md`: change "11 total" to "13 total" in the header; add `paused` and `paused_circuit` rows to the non-terminal table
 - [ ] Update `docs/features/agent-session-model.md`: add `paused` and `paused_circuit` to the lifecycle diagram/state table
-- [ ] Update `CLAUDE.md`: expand Session Management table to include all 13 states (or add a "See also: `docs/features/session-lifecycle.md` for full state reference" note)
+- [ ] Update `CLAUDE.md`: add a "See also: `docs/features/session-lifecycle.md` for the full 13-state reference" note below the Session Management table (do NOT expand the table itself — see Rabbit Holes)
 - [ ] Update `docs/features/agent-session-queue.md`: remove/historicize stale function references; fix `_finalize_parent` → `_finalize_parent_sync`; remove `_reset_running_jobs` and `_job_hierarchy_health_check` references
 
 ## Success Criteria
 
 - [ ] `python -m tools.agent_session_scheduler kill --agent-session-id <ID>` successfully kills sessions in all non-terminal states (`dormant`, `paused`, `paused_circuit`, `superseded`, `active`, plus existing states)
-- [ ] The 360s worker-healthy threshold is defined as `WORKER_HEALTHY_THRESHOLD_S` in `agent/constants.py`; `ui/app.py` and `tools/agent_session_scheduler.py` import and use it; `tools/valor_session.py` also imports from `agent/constants.py`
+- [ ] The 360s heartbeat staleness threshold is defined as `HEARTBEAT_STALENESS_THRESHOLD_S` in `agent/constants.py`; `ui/app.py` and `tools/agent_session_scheduler.py` import and use it; `tools/valor_session.py` also imports from `agent/constants.py`
 - [ ] `docs/features/session-lifecycle.md` header says "13 total" and includes `paused` and `paused_circuit` rows
 - [ ] `docs/features/agent-session-model.md` includes `paused` and `paused_circuit` in its state listing
 - [ ] `models/agent_session.py` docstring count says "13 total" and lists `paused` and `paused_circuit`
@@ -243,17 +245,18 @@ No agent integration required — the kill command is a CLI tool for operators, 
 - In `tools/agent_session_scheduler.py`, import `NON_TERMINAL_STATUSES` from `models.session_lifecycle`
 - Replace the hardcoded 5-state tuple at lines 874, 885, and 903 with `tuple(NON_TERMINAL_STATUSES | {"completed", "failed"})` (or an equivalent sorted tuple for determinism)
 - Add unit tests in `tests/unit/test_agent_session_scheduler_kill.py` for `dormant`, `paused`, and `paused_circuit` states being found and killed
+- Add unit test for `completed→killed` transition path (session in `completed` state found by expanded scan; verify `finalize_session` idempotency guard handles it without error)
 - Verify `skip_process_kill` logic remains correct (only `running` sessions get SIGTERM)
 
 ### 2. Extract heartbeat threshold constant (W4)
 - **Task ID**: build-heartbeat-constant
 - **Depends On**: none
-- **Validates**: `python -m ruff check . && python -c "from agent.constants import WORKER_HEALTHY_THRESHOLD_S; assert WORKER_HEALTHY_THRESHOLD_S == 360"`
+- **Validates**: `python -m ruff check . && python -c "from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S; assert HEARTBEAT_STALENESS_THRESHOLD_S == 360"`
 - **Assigned To**: lifecycle-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `WORKER_HEALTHY_THRESHOLD_S: int = 360` to `agent/constants.py` with the comment explaining the 60s buffer above `AGENT_SESSION_HEALTH_CHECK_INTERVAL`
-- Update `tools/valor_session.py` to import from `agent.constants` instead of defining locally
+- Add `HEARTBEAT_STALENESS_THRESHOLD_S: int = 360` to `agent/constants.py` with the comment explaining the 60s buffer above `AGENT_SESSION_HEALTH_CHECK_INTERVAL` and noting it applies to both worker and bridge liveness checks
+- Update `tools/valor_session.py` to import `HEARTBEAT_STALENESS_THRESHOLD_S` from `agent.constants` instead of defining `_WORKER_HEALTHY_THRESHOLD_S` locally; update all usages
 - Update `ui/app.py` lines 188 and 207 to use the imported constant
 - Update `tools/agent_session_scheduler.py` line 489 to use the imported constant
 
@@ -266,7 +269,7 @@ No agent integration required — the kill command is a CLI tool for operators, 
 - **Parallel**: true
 - `docs/features/session-lifecycle.md`: update header to "13 total"; add `paused` and `paused_circuit` rows with descriptions
 - `docs/features/agent-session-model.md`: add `paused` and `paused_circuit` to any state listing
-- `CLAUDE.md`: update Session Management table to add `paused`, `paused_circuit`, `pending`, `running`, `waiting_for_children`, `superseded`, `cancelled`, `failed`, `killed` — or add a pointer to `docs/features/session-lifecycle.md` for the full reference
+- `CLAUDE.md`: add a "See also: `docs/features/session-lifecycle.md` for the full 13-state reference" note below the Session Management table — do NOT expand the table to all 13 states (that would bloat it beyond operator utility; see Rabbit Holes)
 - `models/agent_session.py`: update docstring from "(11 total)" to "(13 total)"; add `paused_circuit` and `paused` entries in the non-terminal section
 
 ### 4. Correct agent-session-queue.md (W7)
@@ -279,7 +282,7 @@ No agent integration required — the kill command is a CLI tool for operators, 
 - Remove `_reset_running_jobs()` from the delete-and-recreate callers list; replace with `_recover_interrupted_agent_sessions_startup()` (the actual startup recovery function)
 - Add a callout that the "Delete-and-Recreate Pattern" section describes the historical design; note that status transitions now use in-place `IndexedField` mutation via `transition_status()` for KeyField-free paths
 - Replace `_finalize_parent()` references with `_finalize_parent_sync()`
-- Remove `_job_hierarchy_health_check()` reference; describe the health check logic as part of the periodic health monitor in `_perform_health_checks()` / `_periodic_health_check()`
+- Remove `_job_hierarchy_health_check()` reference (function does not exist); replace with accurate description naming `_agent_session_hierarchy_health_check()` (line 1851) called from `_agent_session_health_loop()` (line 1971)
 - Verify `stable_agent_session_id` reference is accurate (field still exists — retain)
 
 ### 5. Final validation
@@ -290,7 +293,7 @@ No agent integration required — the kill command is a CLI tool for operators, 
 - **Parallel**: false
 - Run `pytest tests/unit/test_agent_session_scheduler_kill.py -v` and verify all tests pass
 - Run `python -m ruff check . && python -m ruff format --check .`
-- Verify `grep "WORKER_HEALTHY_THRESHOLD_S" ui/app.py tools/agent_session_scheduler.py` shows imports, not literals
+- Verify `grep "HEARTBEAT_STALENESS_THRESHOLD_S" ui/app.py tools/agent_session_scheduler.py` shows imports, not literals
 - Verify `grep "13 total" docs/features/session-lifecycle.md models/agent_session.py` confirms both updated
 - Verify `grep "_reset_running_jobs\|_job_hierarchy_health_check" docs/features/agent-session-queue.md` returns no matches
 
@@ -302,7 +305,7 @@ No agent integration required — the kill command is a CLI tool for operators, 
 | Full unit suite | `pytest tests/unit/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Heartbeat constant importable | `python -c "from agent.constants import WORKER_HEALTHY_THRESHOLD_S; assert WORKER_HEALTHY_THRESHOLD_S == 360"` | exit code 0 |
+| Heartbeat constant importable | `python -c "from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S; assert HEARTBEAT_STALENESS_THRESHOLD_S == 360"` | exit code 0 |
 | No bare 360 in ui/app.py | `grep -n "< 360\|> 360\|== 360" ui/app.py` | exit code 1 |
 | No stale queue doc functions | `grep -c "_reset_running_jobs\|_job_hierarchy_health_check" docs/features/agent-session-queue.md` | output contains 0 |
 | State count updated | `grep "13 total" docs/features/session-lifecycle.md` | exit code 0 |
@@ -311,6 +314,11 @@ No agent integration required — the kill command is a CLI tool for operators, 
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Concern | Archaeologist | W7 doc references wrong replacement function names — plan said `_perform_health_checks()`/`_periodic_health_check()` but actual functions are `_agent_session_hierarchy_health_check()` (line 1851) and `_agent_session_health_loop()` (line 1971) | W7 Technical Approach + Task 4 + Verification | All references updated to correct function names |
+| Concern | Adversary | `WORKER_HEALTHY_THRESHOLD_S` name misleads — `ui/app.py` uses the value in both `_get_bridge_health()` and `_get_worker_health()`, making a "worker-only" name incorrect | W4 Technical Approach + Task 2 + all references | Renamed to `HEARTBEAT_STALENESS_THRESHOLD_S` throughout |
+| Concern | Skeptic | CLAUDE.md scope contradiction — Solution, Task 3, and Documentation all said "expand table to 13 states" while Rabbit Holes explicitly ruled this out as bloat | Solution + W6+W8 Technical Approach + Task 3 + Documentation | All sites now say "add 'See also' pointer, do NOT expand table" |
+| Nit | Skeptic | "13 non-terminal states" is wrong — there are 8 non-terminal + 5 terminal = 13 total | Problem section | Fixed to "8 non-terminal states plus 5 terminal states = 13 total" |
+| Nit | Adversary | No test coverage for `completed→killed` transition path introduced by expanded scan | Test Impact + Task 1 | Added explicit test item for `completed→killed` idempotency check |
 
 ---
 
