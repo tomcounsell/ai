@@ -362,6 +362,8 @@ install_service() {
         <string>${PROJECT_DIR}/.venv/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
         <key>HOME</key>
         <string>${HOME}</string>
+        <key>VALOR_LAUNCHD</key>
+        <string>1</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -378,6 +380,48 @@ install_service() {
 </dict>
 </plist>
 EOF
+
+    # Inject all env vars from .env into the plist so the bridge never needs to
+    # open the iCloud-symlinked .env at runtime. macOS TCC blocks launchd agents
+    # from accessing ~/Desktop files, causing load_dotenv() to hang indefinitely.
+    if [ -f "$PROJECT_DIR/.env" ]; then
+        echo "Injecting env vars from .env into plist..."
+        export PROJECT_DIR PLIST_PATH
+        "$PROJECT_DIR/.venv/bin/python" - <<'PYEOF'
+import os, sys, plistlib
+from pathlib import Path
+from dotenv import dotenv_values
+
+project_dir = Path(os.environ.get("PROJECT_DIR", "."))
+plist_path = Path(os.environ.get("PLIST_PATH", ""))
+env_file = project_dir / ".env"
+
+if not plist_path:
+    print("PLIST_PATH not set, skipping env injection", file=sys.stderr)
+    sys.exit(0)
+
+try:
+    env_vars = dotenv_values(env_file)
+except Exception as e:
+    print(f"Warning: could not parse .env: {e}", file=sys.stderr)
+    sys.exit(0)
+
+with open(plist_path, "rb") as f:
+    plist = plistlib.load(f)
+
+existing = plist.setdefault("EnvironmentVariables", {})
+injected = 0
+for key, value in env_vars.items():
+    if key not in existing and value is not None:
+        existing[key] = value
+        injected += 1
+
+with open(plist_path, "wb") as f:
+    plistlib.dump(plist, f)
+
+print(f"  Injected {injected} env vars into plist")
+PYEOF
+    fi
 
     # Stop any running instance first
     stop_bridge
