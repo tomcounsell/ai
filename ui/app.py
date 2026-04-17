@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S
 from bridge.utc import utc_now
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,7 @@ def create_app() -> FastAPI:
                 mtime = last_connected_file.stat().st_mtime
                 age_s = round(time.time() - mtime)
                 # Bridge writes last_connected every ~5min in heartbeat loop
-                if age_s < 360:
+                if age_s < HEARTBEAT_STALENESS_THRESHOLD_S:
                     return {"status": "ok", "age_s": age_s}
                 elif age_s < 600:
                     return {"status": "running", "age_s": age_s}
@@ -204,7 +205,7 @@ def create_app() -> FastAPI:
             if heartbeat_file.exists():
                 mtime = heartbeat_file.stat().st_mtime
                 age_s = round(time.time() - mtime)
-                if age_s < 360:
+                if age_s < HEARTBEAT_STALENESS_THRESHOLD_S:
                     return {"status": "ok", "age_s": age_s}
                 elif age_s < 600:
                     return {"status": "running", "age_s": age_s}

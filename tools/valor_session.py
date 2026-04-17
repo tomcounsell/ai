@@ -60,7 +60,8 @@ def _load_env() -> None:
 
 
 _WORKER_HEARTBEAT_FILE = _repo_root / "data" / "last_worker_connected"
-_WORKER_HEALTHY_THRESHOLD_S = 360  # seconds — matches ui/app.py _get_worker_health()
+
+from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S  # noqa: E402
 
 
 def _check_worker_health() -> tuple[bool, int | None]:
@@ -76,7 +77,7 @@ def _check_worker_health() -> tuple[bool, int | None]:
     try:
         mtime = _WORKER_HEARTBEAT_FILE.stat().st_mtime
         age_s = int(time.time() - mtime)
-        return (age_s < _WORKER_HEALTHY_THRESHOLD_S, age_s)
+        return (age_s < HEARTBEAT_STALENESS_THRESHOLD_S, age_s)
     except Exception:
         return (False, None)
 

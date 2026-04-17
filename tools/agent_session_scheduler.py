@@ -31,7 +31,9 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S
 from config.enums import SessionType
+from models.session_lifecycle import NON_TERMINAL_STATUSES
 
 
 def _to_ts(val):
@@ -486,7 +488,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         try:
             _hb = Path(__file__).parent.parent / "data" / "last_worker_connected"
             _age_s = int(time.time() - _hb.stat().st_mtime)
-            result["worker_healthy"] = _age_s < 360
+            result["worker_healthy"] = _age_s < HEARTBEAT_STALENESS_THRESHOLD_S
             result["worker_heartbeat_age_s"] = _age_s
         except Exception:
             result["worker_healthy"] = False
@@ -870,8 +872,9 @@ def cmd_kill(args: argparse.Namespace) -> int:
             if not args.agent_session_id.strip():
                 _output({"status": "error", "message": "--agent-session-id cannot be empty."})
                 return 1
-            # Search across all statuses
-            for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
+            # Search across all non-terminal + terminal statuses
+            _kill_scan_statuses = tuple(NON_TERMINAL_STATUSES | {"completed", "failed"})
+            for status in _kill_scan_statuses:
                 for entry in AgentSession.query.filter(status=status):
                     if entry.agent_session_id == args.agent_session_id:
                         targets.append(entry)
@@ -882,7 +885,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
             if not targets:
                 # Retry once after 1s (race condition during session transition)
                 time.sleep(1)
-                for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
+                for status in _kill_scan_statuses:
                     for entry in AgentSession.query.filter(status=status):
                         if entry.agent_session_id == args.agent_session_id:
                             targets.append(entry)
@@ -900,7 +903,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
             if not args.session_id.strip():
                 _output({"status": "error", "message": "--session-id cannot be empty."})
                 return 1
-            for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
+            for status in tuple(NON_TERMINAL_STATUSES | {"completed", "failed"}):
                 for entry in AgentSession.query.filter(status=status):
                     if entry.session_id == args.session_id:
                         targets.append(entry)

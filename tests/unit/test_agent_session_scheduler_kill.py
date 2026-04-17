@@ -9,12 +9,16 @@ Validates:
 6. _kill_agent_session sets status to "killed" via finalize_session() (in-place mutation)
 7. cmd_status includes killed_count and killed_sessions in output
 8. Recovery functions filter on status="running" (killed jobs excluded by query)
+9. cmd_kill finds sessions in all non-terminal states (dormant, paused, paused_circuit, etc.)
+10. cmd_kill handles completed->killed transition (idempotency guard in finalize_session)
 """
 
 import argparse
 import json
 import signal
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from tools.agent_session_scheduler import (
     _find_process_by_session_id,
@@ -435,6 +439,63 @@ class TestCmdKill:
         output = json.loads(capsys.readouterr().out)
         assert output["status"] == "error"
         assert "failed" in output["message"].lower()
+
+    @pytest.mark.parametrize("non_terminal_status", ["dormant", "paused", "paused_circuit"])
+    def test_kill_finds_session_in_non_terminal_states(self, non_terminal_status, capsys):
+        """cmd_kill locates and kills sessions stuck in non-terminal states.
+
+        Previously the kill command only scanned 5 hardcoded states; dormant, paused,
+        and paused_circuit were silently skipped, returning "Session not found".
+        After the fix the scan uses NON_TERMINAL_STATUSES so all non-terminal states
+        are covered.
+        """
+        target = _FakeSession(
+            agent_session_id="stuck-session",
+            session_id="s-stuck",
+            status=non_terminal_status,
+        )
+        # Only the target's status bucket contains the session
+        fake_query = _FakeQuery(sessions_by_status={non_terminal_status: [target]})
+
+        with (
+            patch("models.agent_session.AgentSession.query", fake_query),
+            patch("models.session_lifecycle.finalize_session"),
+            patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
+        ):
+            ret = cmd_kill(_make_args(agent_session_id="stuck-session"))
+
+        assert ret == 0, f"Expected exit 0 for status={non_terminal_status!r}, got {ret}"
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "killed", (
+            f"Expected killed, got {output['status']} for status={non_terminal_status!r}"
+        )
+        assert output["sessions"][0]["agent_session_id"] == "stuck-session"
+
+    def test_kill_session_in_completed_state_idempotent(self, capsys):
+        """Sessions in 'completed' state are found by the expanded scan.
+
+        finalize_session() is idempotent — calling it on an already-terminal session
+        logs and returns without re-executing side effects. The CLI should succeed (exit 0)
+        and report the session as killed.
+        """
+        target = _FakeSession(
+            agent_session_id="done-session",
+            session_id="s-done",
+            status="completed",
+        )
+        fake_query = _FakeQuery(sessions_by_status={"completed": [target]})
+
+        with (
+            patch("models.agent_session.AgentSession.query", fake_query),
+            patch("models.session_lifecycle.finalize_session"),
+            patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
+        ):
+            ret = cmd_kill(_make_args(agent_session_id="done-session"))
+
+        assert ret == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "killed"
+        assert output["count"] == 1
 
 
 # ---------------------------------------------------------------------------

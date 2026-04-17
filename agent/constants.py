@@ -32,6 +32,12 @@ _TERMINAL_EMOJI_CONFIG: dict[str, tuple[str, str]] = {
 }
 
 
+# Heartbeat staleness threshold — used by both worker and bridge health checks.
+# The worker writes its heartbeat every AGENT_SESSION_HEALTH_CHECK_INTERVAL seconds (300s).
+# A threshold of 360s gives one full check-cycle grace period before declaring unhealthy.
+HEARTBEAT_STALENESS_THRESHOLD_S: int = 360
+
+
 def _resolve_terminal_emoji(name: str, feeling: str, fallback_emoji: str) -> object:
     """Resolve a terminal reaction emoji, caching the result.
 

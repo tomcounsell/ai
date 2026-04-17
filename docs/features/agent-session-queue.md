@@ -6,9 +6,11 @@
 
 Popoto's `KeyField.on_save()` only adds the object key to the new status index set -- it never removes from the old one. This means in-place status mutations like `job.status = "running"; await job.async_save()` leave stale entries in the previous index set, causing ghost sessions and double-processing.
 
-### Delete-and-Recreate Pattern
+### Delete-and-Recreate Pattern (Historical)
 
-All status transitions now use delete-and-recreate instead of in-place mutation:
+> **Note**: This section describes the original design. Status transitions now use in-place `IndexedField` mutation via `transition_status()` in `models/session_lifecycle.py` for all non-KeyField status changes. Delete-and-recreate is only required when a KeyField (e.g., `parent_agent_session_id`) must change, since Popoto cannot mutate KeyFields in-place. See `models/session_lifecycle.py` and issue #783 for the migration history.
+
+The original delete-and-recreate pattern was:
 
 ```python
 fields = _extract_agent_session_fields(job)
@@ -17,13 +19,7 @@ fields["status"] = "running"
 new_job = await AgentSession.async_create(**fields)  # adds to new index via on_save
 ```
 
-This is applied in three functions (plus dependency-related operations):
-- `_pop_agent_session()` -- pending to running (also filters out dependency-blocked jobs)
-- `_recover_interrupted_sessions()` -- running to pending (sync, startup)
-- `_reset_running_jobs()` -- running to pending (async, shutdown)
-- `retry_agent_session()` -- failed/cancelled to pending (PM queue management)
-
-The `_extract_agent_session_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation. The `status` field is included for defense-in-depth: any delete-and-recreate path (e.g., health check orphan-fixing) preserves the original status instead of defaulting to `"pending"`. Callers that intentionally override status (retry, nudge fallback) set `fields["status"]` explicitly after extraction.
+The `_extract_agent_session_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation. The `status` field is included for defense-in-depth: any remaining delete-and-recreate path (e.g., health check orphan-fixing that reparents sessions) preserves the original status instead of defaulting to `"pending"`. Callers that intentionally override status (retry, nudge fallback) set `fields["status"]` explicitly after extraction.
 
 ## Worker Drain Guard (Event-Based)
 
@@ -136,13 +132,13 @@ Jobs support parent-child decomposition via the `parent_agent_session_id` field 
 
 ### Completion Propagation
 
-When a child session completes, `_complete_agent_session()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_agent_session()` delete the child.
+When a child session completes, `_complete_agent_session()` calls `_finalize_parent_sync()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent_sync()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_agent_session()` delete the child.
 
 Parent finalization mutates the parent's status in place via `transition_status()` (since `status` is an IndexedField, not a KeyField). `_pop_agent_session()` likewise uses in-place mutation -- delete-and-recreate is only required for callers that change a KeyField (e.g., `parent_agent_session_id` reparenting in retry/orphan-fix paths).
 
 ### Health Monitor Extensions
 
-The periodic health check (`_job_hierarchy_health_check()`) detects and self-heals:
+The periodic health check (`_agent_session_hierarchy_health_check()`, called from `_agent_session_health_loop()` every 5 minutes) detects and self-heals:
 
 - **Orphaned children**: `parent_agent_session_id` points to non-existent session -- cleared (status preserved via `_extract_agent_session_fields()` to prevent zombie loops)
 - **Stuck parents**: `waiting_for_children` with all children terminal -- auto-finalized

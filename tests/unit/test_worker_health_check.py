@@ -19,10 +19,11 @@ _repo_root = Path(__file__).parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from tools.valor_session import (  # noqa: E402
-    _WORKER_HEALTHY_THRESHOLD_S,
-    _check_worker_health,
-)
+from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S  # noqa: E402
+from tools.valor_session import _check_worker_health  # noqa: E402
+
+# Alias for backward-compat within this test module
+_WORKER_HEALTHY_THRESHOLD_S = HEARTBEAT_STALENESS_THRESHOLD_S
 
 # ---------------------------------------------------------------------------
 # _check_worker_health() unit tests

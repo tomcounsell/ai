@@ -114,7 +114,7 @@ class AgentSession(Model):
         create_dev(): Backward-compat wrapper for create_child(role="dev").
         create_local(): Create a local CLI session.
 
-    Status values (11 total):
+    Status values (13 total):
         Non-terminal (use transition_status()):
             pending              - Queued, waiting for worker
             running              - Worker picked up, agent executing
@@ -122,6 +122,10 @@ class AgentSession(Model):
             dormant              - Paused on open question, waiting for human reply
             waiting_for_children - Parent session waiting for child sessions to complete
             superseded           - Replaced by a newer session for the same session_id
+            paused_circuit       - Paused by api-health-gate when Anthropic circuit breaker is OPEN;
+                                   resumed by bridge-watchdog sustainability drip
+            paused               - Paused mid-execution due to auth/API failure;
+                                   resumed by bridge-watchdog session-resume-drip
 
         Terminal (use finalize_session()):
             completed  - Work finished successfully

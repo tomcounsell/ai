@@ -2,7 +2,7 @@
 
 How sessions transition between states via the consolidated lifecycle module (`models/session_lifecycle.py`).
 
-## Session States (11 total)
+## Session States (13 total)
 
 ### Non-terminal (use `transition_status()`)
 
@@ -14,6 +14,8 @@ How sessions transition between states via the consolidated lifecycle module (`m
 | `dormant` | Paused on open question, waiting for human reply |
 | `waiting_for_children` | Parent session waiting for child sessions to complete |
 | `superseded` | A newer session for the same session_id has taken over |
+| `paused_circuit` | Paused by api-health-gate when Anthropic circuit breaker is OPEN; resumed by bridge-watchdog sustainability drip |
+| `paused` | Paused mid-execution due to auth/API failure; resumed by bridge-watchdog session-resume-drip |
 
 ### Terminal (use `finalize_session()`)
 

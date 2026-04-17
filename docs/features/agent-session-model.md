@@ -6,7 +6,11 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 `pending` -> `running` -> `active` -> `dormant` -> `completed` | `failed` | `cancelled`
 
+Additional non-terminal states: `waiting_for_children`, `superseded`, `paused_circuit`, `paused`.
+
 The `cancelled` status is a terminal state set explicitly by the PM via `cancel_agent_session()`. Like `failed`, cancelled sessions block any sibling sessions that depend on them.
+
+See [Session Lifecycle](session-lifecycle.md) for the full 13-state reference (8 non-terminal + 5 terminal).
 
 ## Key Fields
 
