@@ -208,14 +208,14 @@ Sessions belonging to the same `worker_key` always execute **strictly one at a t
 
 ### Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)
 
-A global asyncio semaphore limits how many sessions can execute simultaneously across **all** worker keys:
+A single global asyncio semaphore limits how many sessions can execute simultaneously across **all** worker keys and **all** session types:
 
 ```bash
-# Set the ceiling (default: 3)
+# Set the ceiling (default: 8)
 MAX_CONCURRENT_SESSIONS=5 python -m worker
 
 # Or in .env
-MAX_CONCURRENT_SESSIONS=3
+MAX_CONCURRENT_SESSIONS=8
 ```
 
 **Implementation details:**
@@ -226,31 +226,7 @@ MAX_CONCURRENT_SESSIONS=3
 - Released after `_execute_agent_session()` completes (in the `finally` block, via all code paths including `CancelledError`)
 - When `None` (e.g., in tests that don't call `_run_worker()`), no ceiling applies
 
-### Dev Session Concurrency Cap (`MAX_CONCURRENT_DEV_SESSIONS`)
-
-A second asyncio semaphore limits how many **slugged dev sessions** can execute simultaneously, independent of the global cap:
-
-```bash
-# Allow 2 concurrent dev sessions (default: 1, sequential)
-MAX_CONCURRENT_DEV_SESSIONS=2 python -m worker
-
-# Or in .env
-MAX_CONCURRENT_DEV_SESSIONS=2
-```
-
-**When to use:** Set to 2 or 3 when multiple GitHub issues are queued and each has a separate worktree (created via `valor_session create --role dev --slug <slug>`). PM and teammate sessions are unaffected — they continue to serialize by project key as before.
-
-**Implementation details:**
-- `_dev_session_semaphore` and `_dev_session_semaphore_cap` are module-level variables in `agent/agent_session_queue.py`
-- Initialized by `_run_worker()` in `worker/__main__.py` alongside the global semaphore
-- Clamped to minimum 1 (`MAX_CONCURRENT_DEV_SESSIONS=0` → 1)
-- Acquired **only** for sessions where `session.session_type == "dev" and session.slug` — non-slugged dev sessions and all PM/teammate sessions are unaffected
-- **Starvation prevention**: when a slugged dev session waits for a dev slot, it first releases the global semaphore slot, then awaits the dev semaphore, then re-acquires the global slot. This ensures PM/teammate sessions can proceed while dev sessions wait, preventing global cap exhaustion.
-- Released in the `finally` block via `_dev_semaphore_acquired` flag, matching the pattern used for `_semaphore_acquired`
-- When `None` (e.g., in tests that don't call `_run_worker()`), no dev cap applies
-- `dev_sessions_running` and `dev_sessions_cap` are exposed in `dashboard.json` under `health`
-
-**Constraint:** `MAX_CONCURRENT_DEV_SESSIONS` should be ≤ `MAX_CONCURRENT_SESSIONS` for sensible semantics. If the dev cap exceeds the global cap, the global cap is the binding constraint — no deadlock, but the dev cap is effectively unused.
+**PM/dev deadlock prevention:** There is no session-type-specific cap. PM sessions that spawn child dev sessions transition to `waiting_for_children`, which triggers `output_router.route_session_output` to return `"deliver"` — the PM releases its global slot before the child needs it. Child dev sessions sort ahead of peers via the child-boost ordering in `sort_key`, so they acquire the freed slot next. See issues #1004 and #1021 for the history.
 
 ### Redis Pop Lock (TOCTOU Prevention)
 

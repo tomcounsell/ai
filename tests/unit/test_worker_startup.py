@@ -1,14 +1,9 @@
 """Unit tests for worker startup gate logic.
 
-Tests the _should_register_email_handler() helper and dev session semaphore
-initialization from worker.__main__. Imported directly — no worker startup,
-no Redis, no callback dicts touched.
+Tests the _should_register_email_handler() helper from worker.__main__.
+Imported directly — no worker startup, no Redis, no callback dicts touched.
 """
 
-import asyncio
-import os
-
-import agent.agent_session_queue as _queue
 from worker.__main__ import _should_register_email_handler
 
 
@@ -84,55 +79,3 @@ class TestShouldRegisterEmailHandler:
         """Non-empty contacts dict is truthy → registers handler."""
         project_cfg = {"email": {"contacts": {"user@example.com": {}}}}
         assert _should_register_email_handler(project_cfg) is True
-
-
-class TestDevSessionSemaphoreInit:
-    """MAX_CONCURRENT_DEV_SESSIONS env var initializes the dev semaphore correctly."""
-
-    def _simulate_init(self, monkeypatch, env_value: str | None) -> None:
-        """Simulate the semaphore init block from _run_worker without starting the worker."""
-
-        if env_value is None:
-            monkeypatch.delenv("MAX_CONCURRENT_DEV_SESSIONS", raising=False)
-        else:
-            monkeypatch.setenv("MAX_CONCURRENT_DEV_SESSIONS", env_value)
-
-        max_dev = max(1, int(os.environ.get("MAX_CONCURRENT_DEV_SESSIONS", "1")))
-        _queue._dev_session_semaphore = asyncio.Semaphore(max_dev)
-        _queue._dev_session_semaphore_cap = max_dev
-
-    def test_zero_clamped_to_one(self, monkeypatch):
-        """MAX_CONCURRENT_DEV_SESSIONS=0 must be clamped to minimum 1."""
-        original_sem = _queue._dev_session_semaphore
-        original_cap = _queue._dev_session_semaphore_cap
-        try:
-            self._simulate_init(monkeypatch, "0")
-            assert _queue._dev_session_semaphore_cap == 1
-            assert _queue._dev_session_semaphore._value == 1
-        finally:
-            _queue._dev_session_semaphore = original_sem
-            _queue._dev_session_semaphore_cap = original_cap
-
-    def test_three_initializes_with_cap_three(self, monkeypatch):
-        """MAX_CONCURRENT_DEV_SESSIONS=3 initializes semaphore with _value == 3."""
-        original_sem = _queue._dev_session_semaphore
-        original_cap = _queue._dev_session_semaphore_cap
-        try:
-            self._simulate_init(monkeypatch, "3")
-            assert _queue._dev_session_semaphore_cap == 3
-            assert _queue._dev_session_semaphore._value == 3
-        finally:
-            _queue._dev_session_semaphore = original_sem
-            _queue._dev_session_semaphore_cap = original_cap
-
-    def test_default_is_one_when_env_not_set(self, monkeypatch):
-        """When MAX_CONCURRENT_DEV_SESSIONS is unset, default cap is 1."""
-        original_sem = _queue._dev_session_semaphore
-        original_cap = _queue._dev_session_semaphore_cap
-        try:
-            self._simulate_init(monkeypatch, None)
-            assert _queue._dev_session_semaphore_cap == 1
-            assert _queue._dev_session_semaphore._value == 1
-        finally:
-            _queue._dev_session_semaphore = original_sem
-            _queue._dev_session_semaphore_cap = original_cap
