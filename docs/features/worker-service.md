@@ -108,7 +108,11 @@ python -m worker --dry-run
 ./scripts/install_worker.sh
 ```
 
-This installs `com.valor.worker` as a launchd service that auto-starts on boot.
+This installs two launchd services:
+- `com.valor.worker` — the worker itself (KeepAlive, auto-starts on boot)
+- `com.valor.worker-watchdog` — heartbeat monitor (`StartInterval: 120s`); kills a hung worker (event loop frozen, heartbeat stale >600s) so launchd restarts it
+
+See [Bridge Self-Healing §18](bridge-self-healing.md#18-worker-watchdog-monitoringworker_watchdogpy) for how the watchdog works.
 
 ### Commands
 
@@ -137,6 +141,7 @@ The worker is installed after reflections and before stale session cleanup in th
 | Worker log | `logs/worker.log` | Worker lifecycle events, startup, shutdown |
 | Worker errors | `logs/worker_error.log` | Unhandled exceptions |
 | Session output | `logs/worker/{session_id}.log` | Per-session agent output (timestamps, reactions) |
+| Watchdog log | `logs/worker_watchdog.log` | Heartbeat checks and kill events from `worker_watchdog.py` |
 
 ## Deployment Topology
 

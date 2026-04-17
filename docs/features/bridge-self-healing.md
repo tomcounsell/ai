@@ -328,11 +328,48 @@ This follows the proven cancellation pattern from the worker graceful shutdown (
 6. `main()` returns, `sys.exit(1)` terminates process
 7. launchd restarts bridge after ThrottleInterval
 
-### 16. Worker Status Heartbeat Check (`scripts/valor-service.sh`)
+### 16. Bridge Env Var Injection (`scripts/valor-service.sh` + `bridge/telegram_bridge.py`)
+
+**Problem**: The bridge launchd plist only provided `PATH` and `HOME` in `EnvironmentVariables`. At startup, `load_dotenv()` followed the repo `.env` symlink to `~/Desktop/Valor/.env` on iCloud Drive. macOS TCC blocks `open()` on iCloud Drive files from launchd agents, causing a silent indefinite hang before any bridge code could run.
+
+**Solution**: `scripts/valor-service.sh` (and `scripts/install_worker.sh`) now inject all `.env` variables directly into the installed plist at install time using Python's `dotenv_values()` parser. The bridge and worker detect `VALOR_LAUNCHD=1` in their environment and skip `load_dotenv()` entirely — env vars are already present in the process environment.
+
+```python
+# bridge/telegram_bridge.py
+if not os.environ.get("VALOR_LAUNCHD"):
+    load_dotenv(env_path)   # only runs outside launchd
+```
+
+This is a one-time injection at install time; updating `.env` secrets requires re-running the install script (or `/update`) to re-bake the plist.
+
+### 17. Worker Status Heartbeat Check (`scripts/valor-service.sh`)
 
 **Problem**: After the worker shuts down or hangs, `worker-status` reports `RUNNING` because the old PID still exists in the process table (zombie/sleeping state). `worker-start` refuses to launch a new process, leaving the queue silently unattended.
 
 **Solution**: `status_worker()` now reads the `data/last_worker_connected` heartbeat file (written by `_write_worker_heartbeat()` on every health loop tick). If the heartbeat age exceeds 360 seconds (matching the dashboard threshold), the status is reported as `STALE` instead of `RUNNING`, with exit code 2. This distinguishes a healthy worker (exit 0), a stopped worker (exit 1), and a hung/zombie worker (exit 2).
+
+### 18. Worker Watchdog (`monitoring/worker_watchdog.py`)
+
+**Problem**: A worker process can appear alive (PID exists, launchd does not restart it) but have a frozen asyncio event loop — for example, when a reflection callable calls `subprocess.run()` without `await`, blocking the loop indefinitely. The bridge watchdog only monitors the bridge; no equivalent existed for the worker.
+
+**Solution**: `monitoring/worker_watchdog.py` runs as a separate launchd service (`com.valor.worker-watchdog`, `StartInterval: 120`) alongside the worker. It checks the `data/last_worker_connected` heartbeat file on every tick:
+
+| Heartbeat age | Status | Action |
+|--------------|--------|--------|
+| < 600s | `ok` | Log debug, exit |
+| Missing (file absent) | `starting` | Skip — worker may be initializing |
+| Worker PID absent | `down` | Log info — launchd handles restart |
+| ≥ 600s (10 min) | `stale` | Kill worker (SIGTERM → SIGKILL if needed) so launchd restarts |
+
+The threshold (600s = 2× health-loop interval of 300s) gives a healthy worker plenty of slack while catching genuine hangs within two watchdog ticks (240s).
+
+**Check status**:
+```bash
+python monitoring/worker_watchdog.py --check   # print status, exit 0=ok, 1=stale/down
+tail -f logs/worker_watchdog.log
+```
+
+**Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 
 ## Recovery Lock
 
@@ -375,7 +412,8 @@ rm data/auto-revert-enabled
 | File | Purpose |
 |------|---------|
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
-| `monitoring/bridge_watchdog.py` | External health monitor |
+| `monitoring/bridge_watchdog.py` | External health monitor (bridge process) |
+| `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection) |
 | `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
@@ -383,8 +421,9 @@ rm data/auto-revert-enabled
 | `data/bridge-auth-required` | Hibernation flag file (presence = auth required) |
 | `data/flood-backoff` | Flood-backoff expiry (JSON) |
 | `data/last_connected` | Last-connected timestamp (ISO 8601) |
-| `data/last_worker_connected` | Worker heartbeat file (mtime checked by `worker-status`) |
-| `logs/watchdog.log` | Watchdog output |
+| `data/last_worker_connected` | Worker heartbeat file (mtime checked by `worker-status` and `worker_watchdog.py`) |
+| `logs/watchdog.log` | Bridge watchdog output |
+| `logs/worker_watchdog.log` | Worker watchdog output |
 | `logs/worker/{session_id}.log` | FileOutputHandler dual-write output (persisted even during bridge downtime) |
 
 ## Design Principles

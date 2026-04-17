@@ -69,7 +69,7 @@ each update run. This ensures the scheduler always reads the vault version.
 | `session-count-throttle` | 1 hour | normal | function | Count sessions in last hour; write throttle level |
 | `failure-loop-detector` | 1 hour | normal | function | Scan failed sessions; file one GitHub issue per novel error cluster |
 | `session-recovery-drip` | 30 sec | high | function | Drip one paused_circuit or paused session back to pending per tick (paused_circuit first) |
-| `system-health-digest` | daily | low | agent | Daily Telegram health summary |
+| `system-health-digest` | daily | low | agent | Daily Telegram health summary **(disabled — spawns agent)** |
 | `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation (dry-run default) |
 | `sentry-issue-triage` | daily | low | agent | Triage unresolved Sentry issues across projects (disabled) |
 
@@ -80,7 +80,7 @@ each update run. This ensures the scheduler always reads the vault version.
 | `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and deprecated typing imports |
 | `redis-ttl-cleanup` | `reflections.maintenance.run_redis_ttl_cleanup` | Prune expired records across all Redis models |
 | `redis-quality-audit` | `reflections.maintenance.run_redis_data_quality` | Audit data quality: unsummarized links, dead channels, error patterns |
-| `merged-branch-cleanup` | `reflections.maintenance.run_branch_plan_cleanup` | Delete merged branches; audit docs/plans/ for stale/orphaned plans |
+| `merged-branch-cleanup` | `reflections.maintenance.run_branch_plan_cleanup` | Delete merged branches; audit docs/plans/ for stale/orphaned plans **(disabled — calls gh CLI)** |
 | `disk-space-check` | `reflections.maintenance.run_disk_space_check` | Check free disk space; warn if below 10 GB |
 | `analytics-rollup` | `reflections.maintenance.run_analytics_rollup` | Aggregate daily analytics; purge old records |
 
@@ -93,22 +93,22 @@ each update run. This ensures the scheduler always reads the vault version.
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
 | `hooks-audit` | `reflections.auditing.run_hooks_audit` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
 | `feature-docs-audit` | `reflections.auditing.run_feature_docs_audit` | Audit docs/features/ for stale terms, stub docs, dead code refs |
-| `pr-review-audit` | `reflections.auditing.run_pr_review_audit` | Scan merged PRs for unaddressed review findings; file GitHub issues |
+| `pr-review-audit` | `reflections.auditing.run_pr_review_audit` | Scan merged PRs for unaddressed review findings; file GitHub issues **(disabled — calls gh CLI)** |
 
 **Task management:**
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `task-backlog-check` | `reflections.task_management.run_task_management` | Check open bug issues per project and local TODO files |
+| `task-backlog-check` | `reflections.task_management.run_task_management` | Check open bug issues per project and local TODO files **(disabled — calls gh CLI)** |
 | `principal-staleness` | `reflections.task_management.run_principal_staleness` | Check if config/PRINCIPAL.md is stale (>90 days) |
 
 **Pipelines:**
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing |
+| `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
 | `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
-| `daily-report-and-notify` | `reflections.daily_report.run` | Produce daily report → GitHub issues → Telegram notification (run last) |
+| `daily-report-and-notify` | `reflections.daily_report.run` | Produce daily report → GitHub issues → Telegram notification (run last) **(disabled — spawns agent)** |
 
 **Memory management:**
 
@@ -180,6 +180,8 @@ All daily maintenance work is implemented as standalone async callables in the `
 ```python
 {"status": "ok" | "error", "findings": [...], "summary": str}
 ```
+
+**Critical constraint**: Reflection callables are invoked from inside the asyncio event loop. Any `subprocess.run()` or other blocking I/O call must be wrapped with `await asyncio.to_thread(subprocess.run, ...)` or `loop.run_in_executor()`. A bare `subprocess.run()` inside an `async def` blocks the event loop, freezing the reflection scheduler and preventing worker heartbeat writes — which causes the worker watchdog to kill the process.
 
 The package modules:
 
@@ -472,6 +474,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | LLM reflection skipped | `ANTHROPIC_API_KEY` not set | Add to `.env` |
 | Telegram post failed | Missing `data/valor.session` | Run `python scripts/telegram_login.py` |
 | Reflection stuck/timing out | Subprocess hung | Check for timeout; review `logs/worker.log` |
+| Worker heartbeat stops / event loop frozen | Reflection called `subprocess.run()` from inside `async def` | All reflection callables must use `await asyncio.to_thread(subprocess.run, ...)` or `asyncio.run_in_executor()` — blocking subprocess calls in async functions freeze the event loop and prevent heartbeat writes |
 | Memory decay prune inactive | `MEMORY_DECAY_PRUNE_APPLY` not set | Set `MEMORY_DECAY_PRUNE_APPLY=true` in `.env` after reviewing dry-run logs |
 | High memory delta warning | Reflection consumed >100MB | Check `worker.log` for `HIGH MEMORY DELTA`; investigate flagged reflection |
 | Config not found | Vault not synced yet | Run `scripts/remote-update.sh` or set `REFLECTIONS_YAML` env var |
