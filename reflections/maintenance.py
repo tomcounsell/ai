@@ -29,7 +29,7 @@ from reflections.utils import PROJECT_ROOT, load_local_projects
 logger = logging.getLogger("reflections.maintenance")
 
 
-async def run_legacy_code_scan() -> dict:
+def run_legacy_code_scan() -> dict:
     """Scan for legacy code patterns: TODO comments, deprecated typing imports.
 
     Maps to monolith step: step_clean_legacy
@@ -257,25 +257,31 @@ async def run_branch_plan_cleanup() -> dict:
 
     # --- Stale branch cleanup ---
     try:
-        result = subprocess.run(
-            ["git", "branch", "--merged", "main"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        result = await asyncio.create_subprocess_exec(
+            "git",
+            "branch",
+            "--merged",
+            "main",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             cwd=str(PROJECT_ROOT),
         )
+        stdout, _ = await asyncio.wait_for(result.communicate(), timeout=15)
         if result.returncode == 0:
-            for line in result.stdout.splitlines():
+            for line in stdout.decode().splitlines():
                 branch = line.strip().lstrip("* ")
                 if branch and branch not in ("main", "master"):
-                    del_result = subprocess.run(
-                        ["git", "branch", "-d", branch],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
+                    del_proc = await asyncio.create_subprocess_exec(
+                        "git",
+                        "branch",
+                        "-d",
+                        branch,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
                         cwd=str(PROJECT_ROOT),
                     )
-                    if del_result.returncode == 0:
+                    await asyncio.wait_for(del_proc.communicate(), timeout=10)
+                    if del_proc.returncode == 0:
                         findings.append(f"Deleted merged branch: {branch}")
                         logger.info(f"Branch cleanup: deleted merged branch {branch}")
     except Exception as e:
@@ -395,14 +401,20 @@ async def run_branch_plan_cleanup() -> dict:
 
         if project_wd:
             try:
-                result = subprocess.run(
-                    ["gh", "issue", "list", "--state", "open", "--search", plan_name],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
+                gh_proc = await asyncio.create_subprocess_exec(
+                    "gh",
+                    "issue",
+                    "list",
+                    "--state",
+                    "open",
+                    "--search",
+                    plan_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                     cwd=project_wd,
                 )
-                if result.returncode == 0 and result.stdout.strip():
+                gh_stdout, _ = await asyncio.wait_for(gh_proc.communicate(), timeout=15)
+                if gh_proc.returncode == 0 and gh_stdout.strip():
                     stats["active"] += 1
                     continue
             except Exception as e:

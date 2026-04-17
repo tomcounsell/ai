@@ -287,7 +287,7 @@ async def run_documentation_audit() -> dict:
         return {"status": "error", "findings": [], "summary": f"Docs audit error: {e}"}
 
 
-async def run_skills_audit() -> dict:
+def run_skills_audit() -> dict:
     """Run skills audit to validate all SKILL.md files.
 
     Maps to monolith step: step_skills_audit
@@ -499,7 +499,7 @@ async def run_feature_docs_audit() -> dict:
     return {"status": "ok", "findings": findings, "summary": summary}
 
 
-async def run_pr_review_audit() -> dict:
+def run_pr_review_audit() -> dict:
     """Audit merged PRs for unaddressed review findings.
 
     Maps to monolith step: step_pr_review_audit

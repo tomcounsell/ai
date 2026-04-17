@@ -135,7 +135,7 @@ def _analyze_sessions_from_redis(target_date: str) -> dict:
     return result
 
 
-async def run() -> dict:
+def run() -> dict:
     """Run the full session intelligence pipeline.
 
     Pipeline: Session Analysis → LLM Reflection → Bug Issue Filing

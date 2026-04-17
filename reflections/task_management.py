@@ -20,7 +20,7 @@ from reflections.utils import PROJECT_ROOT, load_local_projects
 logger = logging.getLogger("reflections.task_management")
 
 
-async def run_task_management() -> dict:
+def run_task_management() -> dict:
     """Clean up task management: check open bugs per project, local TODOs.
 
     Maps to monolith step: step_clean_tasks
