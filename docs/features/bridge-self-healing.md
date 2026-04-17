@@ -223,9 +223,10 @@ The worker can also be installed separately via `./scripts/install_worker.sh`. S
 
 **Solution**: The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates frequently. Each invocation runs `scripts/remote-update.sh`, which:
 1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
-2. Runs `git fetch` + `git pull` via `scripts/update/run.py --cron`
-3. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
-4. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
+2. Runs `git pull --ff-only` directly in bash (before invoking Python), so the orchestrator and all update scripts are loaded fresh from disk
+3. Invokes `scripts/update/run.py --cron --no-pull` (the `--no-pull` flag skips the redundant internal pull since bash already pulled)
+4. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
+5. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
 
 **Restart flag TTL**: The flag file embeds an ISO 8601 timestamp. `_check_restart_flag()` ignores (and deletes) flags older than 1 hour. This prevents stale flags from a previous update session from triggering a self-destruct on worker-only machines where no bridge is running to consume the flag promptly. Malformed or empty flag content is also safely ignored and deleted.
 

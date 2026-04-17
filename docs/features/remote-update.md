@@ -33,7 +33,7 @@ We update Valor's codebase almost daily, but changes only take effect on the mac
 
 ### Key Elements
 
-- **`scripts/remote-update.sh`**: Single shell script that does the essential update — git pull, uv sync. Does NOT restart the bridge itself. Stripped-down version of the Claude Code `/update` skill (no calendar config, no MCP checks, no CLI tool audit — those are setup concerns, not update concerns).
+- **`scripts/remote-update.sh`**: Single shell script that does the essential update — git pull first (in bash, before Python loads), then delegates to the Python orchestrator. Does NOT restart the bridge itself. Stripped-down version of the Claude Code `/update` skill (no calendar config, no MCP checks, no CLI tool audit — those are setup concerns, not update concerns).
 - **Bridge command intercept**: Before any message processing, check if the raw text is `/update`. Run the script, reply with the result. If code changed, queue a restart (don't restart immediately).
 - **Queued restart**: Instead of killing the bridge mid-response, the update writes a restart flag file. The session queue worker checks for this flag between sessions and triggers a graceful restart only when idle.
 - **Launchd cron plist**: A second launchd job that runs `remote-update.sh` every 12 hours. If code changed, it writes the restart flag. Independent of the bridge — runs even if the bridge is down (in that case, launchd's `KeepAlive` will restart the bridge with the new code anyway).
@@ -64,102 +64,44 @@ This is a **new standalone shell script** — not a wrapper around the existing 
 
 ```bash
 #!/bin/bash
-# Remote update: pull latest code, sync deps if needed, restart bridge.
+# Remote update: pull latest code, sync deps if needed, write restart flag.
 # Designed to run unattended (from Telegram /update command or launchd cron).
-# NOT a replacement for the /update Claude Code skill — this handles only
-# the automatable subset (no Ollama, no calendar, no MCP, no CLI audit).
+#
+# This script uses the modular Python update system in scripts/update/.
+# For full updates with all checks, use: python scripts/update/run.py --full
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOCK_DIR="$PROJECT_DIR/data/update.lock"
-LOG_PREFIX="[remote-update]"
 
 cd "$PROJECT_DIR"
 
 # ── Lockfile (mkdir is atomic on POSIX) ──────────────────────────────
 cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "$LOG_PREFIX Another update is already running. Skipping."
+    echo "Another update is already running. Skipping."
     exit 0
 fi
 trap cleanup_lock EXIT
 
-# ── Pre-flight: check for dirty working tree ─────────────────────────
-if [ -n "$(git status --porcelain)" ]; then
-    echo "$LOG_PREFIX WARN: Dirty working tree detected."
-    echo "$LOG_PREFIX Files: $(git status --porcelain | head -5)"
-    echo "$LOG_PREFIX Attempting git stash before pull..."
-    STASHED=true
-    git stash push -m "remote-update auto-stash $(date +%Y%m%d-%H%M%S)" 2>&1
+# ── Git pull FIRST — before invoking any Python ──────────────────────
+# Pull here so the Python orchestrator (run.py) and all update scripts are
+# up to date before they execute. Without this, a Telegram /update or cron
+# run always executes the pre-pull version of the orchestrator; changes to
+# the update scripts only take effect on the next run.
+# run.py --cron is then called with --no-pull to skip the redundant pull.
+echo "[update] Pulling latest changes..."
+if git -C "$PROJECT_DIR" pull --ff-only 2>&1; then
+    echo "[update] Pull complete"
 else
-    STASHED=false
+    echo "[update] WARN: git pull failed or had conflicts — continuing with current code"
 fi
 
-# ── Git pull ─────────────────────────────────────────────────────────
-BEFORE=$(git rev-parse HEAD)
-if ! git pull --ff-only 2>&1; then
-    echo "$LOG_PREFIX FAIL: git pull --ff-only failed (branches diverged?)"
-    echo "$LOG_PREFIX Current HEAD: $(git rev-parse --short HEAD)"
-    echo "$LOG_PREFIX Remote HEAD: $(git rev-parse --short origin/main 2>/dev/null || echo 'unknown')"
-    if [ "$STASHED" = true ]; then
-        echo "$LOG_PREFIX Restoring stash..."
-        git stash pop 2>&1 || echo "$LOG_PREFIX WARN: stash pop failed, changes in git stash list"
-    fi
-    exit 1
-fi
-AFTER=$(git rev-parse HEAD)
-
-# ── Restore stash if we stashed ──────────────────────────────────────
-if [ "$STASHED" = true ]; then
-    echo "$LOG_PREFIX Restoring stashed changes..."
-    git stash pop 2>&1 || echo "$LOG_PREFIX WARN: stash pop conflict, changes remain in git stash list"
-fi
-
-# ── Check if anything changed ────────────────────────────────────────
-if [ "$BEFORE" = "$AFTER" ]; then
-    echo "$LOG_PREFIX Already up to date. ($(git rev-parse --short HEAD))"
-    exit 0
-fi
-
-# ── Report what changed ──────────────────────────────────────────────
-COMMIT_COUNT=$(git rev-list --count "$BEFORE..$AFTER")
-echo "$LOG_PREFIX Pulled $COMMIT_COUNT commit(s):"
-git log --oneline "$BEFORE..$AFTER" | while read -r line; do
-    echo "$LOG_PREFIX   $line"
-done
-echo ""
-
-# ── Sync dependencies (only if pyproject.toml or uv.lock changed) ───
-CHANGED_FILES=$(git diff --name-only "$BEFORE..$AFTER")
-if echo "$CHANGED_FILES" | grep -qE "^(pyproject\.toml|uv\.lock)$"; then
-    echo "$LOG_PREFIX pyproject.toml or uv.lock changed — syncing dependencies..."
-    if command -v uv &>/dev/null; then
-        uv sync --all-extras 2>&1
-        echo "$LOG_PREFIX Dependencies synced via uv."
-    elif [ -f "$PROJECT_DIR/.venv/bin/pip" ]; then
-        echo "$LOG_PREFIX uv not found, falling back to pip..."
-        "$PROJECT_DIR/.venv/bin/pip" install -e "$PROJECT_DIR" 2>&1
-        echo "$LOG_PREFIX Dependencies synced via pip."
-    else
-        echo "$LOG_PREFIX WARN: Neither uv nor pip found. Dependencies NOT synced."
-    fi
-else
-    echo "$LOG_PREFIX No dependency file changes — skipping dep sync."
-fi
-
-# ── Signal bridge to restart when idle ────────────────────────────────
-# Don't restart immediately — the bridge may be mid-response.
-# Write a flag file; the session queue worker checks this between sessions
-# and triggers a graceful restart only when no jobs are running.
-RESTART_FLAG="$PROJECT_DIR/data/restart-requested"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMIT_COUNT commit(s)" > "$RESTART_FLAG"
-echo "$LOG_PREFIX Restart queued (flag written to data/restart-requested)."
-echo "$LOG_PREFIX Bridge will restart after current work completes."
-
-echo ""
-echo "$LOG_PREFIX Update complete. $COMMIT_COUNT commit(s) pulled, restart queued."
-echo "$LOG_PREFIX HEAD: $(git rev-parse --short HEAD) — $(git log -1 --format='%s')"
+# ── Run update in cron mode ──────────────────────────────────────────
+# Output goes directly to Telegram - keep it clean for PM-style summary
+# --no-pull: git pull already done above; orchestrator skips its own pull step
+"$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/scripts/update/run.py" --cron --no-pull
 ```
 
 **Key design decisions:**
@@ -168,10 +110,9 @@ echo "$LOG_PREFIX HEAD: $(git rev-parse --short HEAD) — $(git log -1 --format=
 |----------|-----------|
 | `set -euo pipefail` | Strict mode — fail on any error, undefined var, or broken pipe |
 | `mkdir`-based lockfile | Atomic on POSIX, no `flock` dependency. `trap EXIT` ensures cleanup even on failure |
-| Dirty tree → auto-stash | The Claude Code `/update` skill says to stash first then pop after. We follow the same pattern. If stash pop conflicts, we warn but don't fail — the code is still updated |
+| Pull in bash before Python | `run.py` and all update scripts are loaded from disk after the pull, so fixes to the update system take effect immediately (not on the next run). `run.py` receives `--no-pull` to skip the redundant internal pull |
 | `--ff-only` | Prevents surprise merges. If branches diverged, fail loudly and let the operator handle it |
-| Check `pyproject.toml` AND `uv.lock` | Either file changing means deps need sync. Just checking `pyproject.toml` misses lockfile-only updates |
-| `uv` with `pip` fallback | New machines might not have `uv` yet. Check and fall back gracefully |
+| Delegate to `run.py --cron` | Dep sync, restart flag, and Telegram summary logic live in the Python orchestrator (`scripts/update/run.py`). The shell script stays thin — pull + invoke |
 | Exit 0 on "already up to date" | No restart flag, no dep sync, no noise. Cron is silent when nothing changed |
 | Restart flag instead of immediate restart | The bridge may be mid-response. Writing a flag lets the bridge finish current work and restart when idle. Flag file contains timestamp + commit count for debugging |
 | `$LOG_PREFIX` on every line | Makes output parseable when mixed into bridge logs or Telegram messages |
