@@ -1070,13 +1070,22 @@ class ValorAgent:
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
+        # Under launchd (VALOR_LAUNCHD=1), macOS TCC blocks open() on ~/Desktop
+        # files, causing indefinite hangs. Prefer the env var injected by
+        # install_worker.sh; only fall back to file read in terminal mode.
         if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
-            sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
-            if sentry_env.exists():
-                for line in sentry_env.read_text().splitlines():
-                    if line.startswith("SENTRY_PERSONAL_TOKEN="):
-                        env["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
-                        break
+            sentry_token = os.environ.get("SENTRY_PERSONAL_TOKEN") or os.environ.get(
+                "SENTRY_AUTH_TOKEN"
+            )
+            if sentry_token:
+                env["SENTRY_AUTH_TOKEN"] = sentry_token
+            elif not os.environ.get("VALOR_LAUNCHD"):
+                sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
+                if sentry_env.exists():
+                    for line in sentry_env.read_text().splitlines():
+                        if line.startswith("SENTRY_PERSONAL_TOKEN="):
+                            env["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
+                            break
 
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
