@@ -4765,13 +4765,14 @@ async def cleanup_stale_branches_all_projects() -> list[str]:
 def _cleanup_orphaned_claude_processes() -> int:
     """Kill orphaned Claude Code CLI subprocesses from prior worker/bridge runs.
 
-    On process restart, SDK subprocesses from the old process may still be alive
+    On process restart, CLI harness subprocesses from the old process may still be alive
     because Python only cancels asyncio tasks (not OS processes).
     These zombies block new workers via _ensure_worker's .done() check and
     consume resources.
 
-    Finds all 'claude' processes whose parent is PID 1 (orphaned), then
-    kills them with SIGTERM/SIGKILL.
+    Finds all 'claude' CLI processes by matching the stream-json output format flag
+    (a reliable marker of harness-spawned subprocesses), checks if they are orphaned
+    (PPID=1), then kills them with SIGTERM/SIGKILL.
 
     Returns the number of processes killed.
     """
@@ -4781,7 +4782,7 @@ def _cleanup_orphaned_claude_processes() -> int:
 
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "claude_agent_sdk/_bundled/claude"],
+            ["pgrep", "-f", "claude.*--output-format.*stream-json"],
             capture_output=True,
             text=True,
             timeout=10,
