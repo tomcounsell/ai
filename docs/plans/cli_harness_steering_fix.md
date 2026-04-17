@@ -1,5 +1,5 @@
 ---
-status: Review
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -194,11 +194,11 @@ No agent integration required — `steer_child.py` is called by the PM session a
 
 ## Documentation
 
-- [ ] Update `docs/features/pm-dev-session-architecture.md` line 386 to accurately describe CLI-harness turn-boundary delivery and SDK-harness mid-turn delivery as distinct mechanisms
-- [ ] Add scope declaration header to `docs/features/mid-session-steering.md` (Telegram bridge reply-thread path)
-- [ ] Add scope declaration header to `docs/features/session-steering.md` (turn-boundary inbox via `queued_steering_messages`)
-- [ ] Add scope declaration header to `docs/features/steering-queue.md` (Redis list, bridge coalescing, SDK mid-turn injection)
-- [ ] Update inline docstring for `_handle_steering()` to describe the fallback-to-model-field behavior
+- [x] Update `docs/features/pm-dev-session-architecture.md` line 386 to accurately describe CLI-harness turn-boundary delivery and SDK-harness mid-turn delivery as distinct mechanisms
+- [x] Add scope declaration header to `docs/features/mid-session-steering.md` (Telegram bridge reply-thread path)
+- [x] Add scope declaration header to `docs/features/session-steering.md` (turn-boundary inbox via `queued_steering_messages`)
+- [x] Add scope declaration header to `docs/features/steering-queue.md` (Redis list, bridge coalescing, SDK mid-turn injection)
+- [x] Update inline docstring for `_handle_steering()` to describe the fallback-to-model-field behavior
 
 ## Success Criteria
 

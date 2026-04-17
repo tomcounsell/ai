@@ -138,7 +138,7 @@ As the Claude Code harness improves at BUILD execution and models get smarter, e
 
 ### Mid-build course correction (no model swap)
 
-When PM observes a running BUILD going off-plan, the correction path is **steering**, not a model change. PM writes an Opus-reasoned steering message and pushes it to the BUILD's Redis queue via `scripts/steer_child.py`. The BUILD session stays on Sonnet but executes Opus-authored instructions. This avoids the complexity of mid-transcript model swaps and keeps the builder's context intact.
+When PM observes a running BUILD going off-plan, the correction path is **steering**, not a model change. PM writes an Opus-reasoned steering message and delivers it to the BUILD's turn-boundary inbox via `scripts/steer_child.py`. The BUILD session stays on Sonnet but executes Opus-authored instructions. This avoids the complexity of mid-transcript model swaps and keeps the builder's context intact.
 
 ### Hard PATCH via resume
 

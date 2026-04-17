@@ -56,7 +56,7 @@ Fresh is the default. PM escalates to resume only when the signal is clearly pre
 
 ### Mid-build course correction (not PATCH)
 
-For course corrections during a *running* BUILD — before the session has completed and before any test failures or review findings exist — PM does not dispatch PATCH at all. PM pushes an Opus-reasoned steering message into the BUILD's Redis queue via `scripts/steer_child.py`. The BUILD session executes the correction inline without returning to PM. This is faster and cheaper than a resume-patch cycle for corrections caught early.
+For course corrections during a *running* BUILD — before the session has completed and before any test failures or review findings exist — PM does not dispatch PATCH at all. PM delivers an Opus-reasoned steering message to the BUILD's turn-boundary inbox via `scripts/steer_child.py`. The BUILD session executes the correction inline without returning to PM. This is faster and cheaper than a resume-patch cycle for corrections caught early.
 
 The decision is:
 
