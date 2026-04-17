@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -242,17 +242,17 @@ No agent integration required — this is a worker-internal change. The agent's 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-worker-architecture.md` — delete the "Dev Session Concurrency Cap (`MAX_CONCURRENT_DEV_SESSIONS`)" subsection (lines 229-253). Update the "Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)" subsection: change default from `3` to `8` at line 218, update clamped-minimum examples that reference old default. Update any prose that references the dev cap as a separate concept.
-- [ ] Update `docs/features/README.md` line 26 — the index entry currently says "...global `MAX_CONCURRENT_SESSIONS` semaphore, `MAX_CONCURRENT_DEV_SESSIONS` dev cap for parallel slugged dev sessions, Redis pop lock..." — remove the `MAX_CONCURRENT_DEV_SESSIONS` clause.
-- [ ] No new feature doc needed — this is a simplification of an existing feature.
+- [x] Update `docs/features/bridge-worker-architecture.md` — delete the "Dev Session Concurrency Cap (`MAX_CONCURRENT_DEV_SESSIONS`)" subsection (lines 229-253). Update the "Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)" subsection: change default from `3` to `8` at line 218, update clamped-minimum examples that reference old default. Update any prose that references the dev cap as a separate concept.
+- [x] Update `docs/features/README.md` line 26 — the index entry currently says "...global `MAX_CONCURRENT_SESSIONS` semaphore, `MAX_CONCURRENT_DEV_SESSIONS` dev cap for parallel slugged dev sessions, Redis pop lock..." — remove the `MAX_CONCURRENT_DEV_SESSIONS` clause.
+- [x] No new feature doc needed — this is a simplification of an existing feature.
 
 ### External Documentation Site
 No external documentation site.
 
 ### Inline Documentation
-- [ ] At the deletion site in `agent/agent_session_queue.py` (where the swap trick was removed), add a one-line comment: `# Deadlock prevention lives in #1004's child-boost ordering (lines 773-799) and force-deliver on waiting_for_children (output_router.py:109). The swap trick was removed in #1021.`
-- [ ] Update docstring of `_run_worker` in `worker/__main__.py` if it mentions the dev semaphore (check).
-- [ ] No API docstrings change — all affected functions are private.
+- [x] At the deletion site in `agent/agent_session_queue.py` (where the swap trick was removed), add a one-line comment: `# Deadlock prevention lives in #1004's child-boost ordering (lines 773-799) and force-deliver on waiting_for_children (output_router.py:109). The swap trick was removed in #1021.`
+- [x] Update docstring of `_run_worker` in `worker/__main__.py` if it mentions the dev semaphore (check).
+- [x] No API docstrings change — all affected functions are private.
 
 ## Success Criteria
 
