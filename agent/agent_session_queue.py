@@ -2608,9 +2608,8 @@ async def _worker_loop(
             finalized_by_execute = False
 
             # Deadlock prevention lives in #1004's child-boost ordering
-            # (sort_key at the top of this file) and force-deliver on
-            # waiting_for_children (output_router.py). The swap trick was
-            # removed in #1021.
+            # (sort_key at line 794) and force-deliver on waiting_for_children
+            # (output_router.py). The swap trick was removed in #1021.
 
             try:
                 await _execute_agent_session(session)

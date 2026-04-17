@@ -208,7 +208,7 @@ Sessions belonging to the same `worker_key` always execute **strictly one at a t
 
 ### Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)
 
-A single global asyncio semaphore limits how many sessions can execute simultaneously across **all** worker keys and **all** session types (PM, teammate, dev):
+A single global asyncio semaphore limits how many sessions can execute simultaneously across **all** worker keys and **all** session types:
 
 ```bash
 # Set the ceiling (default: 8)
