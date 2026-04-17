@@ -106,8 +106,8 @@ def check_newsyslog(project_dir: Path) -> NewsyslogStatus:
 
     username = os.environ.get("USER", os.getlogin())
     install_cmd = (
-        f"sudo cp <(sed 's|__PROJECT_DIR__|{project_dir}|g;s|__USERNAME__|{username}|g'"
-        f" {template_path}) {NEWSYSLOG_DST}"
+        f"sed 's|__PROJECT_DIR__|{project_dir}|g;s|__USERNAME__|{username}|g'"
+        f" {template_path} | sudo tee {NEWSYSLOG_DST} > /dev/null"
     )
     reason = "missing" if current is None else "out-of-date"
     return NewsyslogStatus(
