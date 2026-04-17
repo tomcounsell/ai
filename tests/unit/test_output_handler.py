@@ -1,7 +1,7 @@
 """Tests for agent/output_handler.py.
 
-Tests the OutputHandler protocol, FileOutputHandler, LoggingOutputHandler,
-and TelegramRelayOutputHandler implementations.
+Tests the OutputHandler protocol, FileOutputHandler, and
+TelegramRelayOutputHandler implementations.
 """
 
 import asyncio
@@ -12,7 +12,6 @@ from unittest.mock import MagicMock
 
 from agent.output_handler import (
     FileOutputHandler,
-    LoggingOutputHandler,
     OutputHandler,
     TelegramRelayOutputHandler,
 )
@@ -24,11 +23,6 @@ class TestOutputHandlerProtocol:
     def test_file_output_handler_is_output_handler(self):
         """FileOutputHandler must satisfy the OutputHandler protocol."""
         handler = FileOutputHandler()
-        assert isinstance(handler, OutputHandler)
-
-    def test_logging_output_handler_is_output_handler(self):
-        """LoggingOutputHandler must satisfy the OutputHandler protocol."""
-        handler = LoggingOutputHandler()
         assert isinstance(handler, OutputHandler)
 
     def test_telegram_relay_handler_is_output_handler(self):
@@ -171,25 +165,6 @@ class TestFileOutputHandler:
             assert log_file.exists()
             content = log_file.read_text()
             assert "REACTION" in content
-
-
-class TestLoggingOutputHandler:
-    """Test LoggingOutputHandler logs via Python logging."""
-
-    def test_send_does_not_raise(self):
-        """send() should not raise exceptions."""
-        handler = LoggingOutputHandler()
-        asyncio.run(handler.send("chat-1", "test message", 1))
-
-    def test_send_empty_noop(self):
-        """send() with empty text should be a no-op."""
-        handler = LoggingOutputHandler()
-        asyncio.run(handler.send("chat-1", "", 1))
-
-    def test_react_does_not_raise(self):
-        """react() should not raise exceptions."""
-        handler = LoggingOutputHandler()
-        asyncio.run(handler.react("chat-1", 42, "\U0001f44d"))
 
 
 class TestTelegramRelayOutputHandler:

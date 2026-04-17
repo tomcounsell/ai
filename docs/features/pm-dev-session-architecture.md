@@ -446,7 +446,7 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `agent/agent_definitions.py` | Agent registry; `get_definition()` provides actionable error for stale dev-session callers |
 | `agent/agent_session_queue.py` | Queue with nudge loop and per-worker-key serialization; `_handle_dev_session_completion()` for post-harness SDLC lifecycle |
-| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery), `FileOutputHandler` (logs to `logs/worker/`), and `LoggingOutputHandler` implementations |
+| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery) and `FileOutputHandler` (logs to `logs/worker/`) implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
 | `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |
 | `agent/sdk_client.py` | SDK client; uses `project_key` identity checks for cross-repo detection |

@@ -44,7 +44,6 @@ class OutputHandler(Protocol):
 |---------|----------|---------|
 | `TelegramRelayOutputHandler` | `agent/output_handler.py` | Writes JSON to Redis outbox (`telegram:outbox:{session_id}`) for bridge relay delivery; wraps `FileOutputHandler` for dual-write |
 | `FileOutputHandler` | `agent/output_handler.py` | Writes output to `logs/worker/{session_id}.log` |
-| `LoggingOutputHandler` | `agent/output_handler.py` | Logs output via Python logging (stderr) |
 | Telegram callbacks | `bridge/telegram_bridge.py` | Sends output via Telegram (registered at bridge startup) |
 
 ### Registration

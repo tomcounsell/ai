@@ -4724,11 +4724,6 @@ def cleanup_corrupted_agent_sessions() -> int:
     return cleaned
 
 
-def recover_orphaned_agent_sessions_all_projects() -> int:
-    """Backward-compat alias for cleanup_corrupted_agent_sessions."""
-    return cleanup_corrupted_agent_sessions()
-
-
 async def cleanup_stale_branches_all_projects() -> list[str]:
     """Clean up stale session branches across all registered projects.
 
