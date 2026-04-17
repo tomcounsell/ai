@@ -1,1 +1,312 @@
-/Users/valorengels/Desktop/Valor/reflections.yaml
+# Reflections Registry
+#
+# All recurring non-issue work is declared here. The reflection scheduler
+# (agent/reflection_scheduler.py) reads this file and enqueues reflections
+# when they're due.
+#
+# Fields:
+#   name:           Unique identifier (used as Redis key)
+#   interval:       How often to run (seconds). Use constants below for readability.
+#   priority:       Job queue priority: urgent | high | normal | low
+#   execution_type: "function" (direct Python callable) or "agent" (full Claude session)
+#   callable:       Python dotted path to the function (for execution_type: function)
+#   command:        Natural-language prompt for PM session (for execution_type: agent)
+#   description:    Human-readable description
+#   enabled:        Whether this reflection is active (default: true)
+#
+# Interval reference:
+#   300    = 5 minutes
+#   1800   = 30 minutes
+#   3600   = 1 hour
+#   86400  = 24 hours
+#
+# NOTE: Bridge watchdog is intentionally NOT in this registry.
+# It must run as an external launchd service (com.valor.bridge-watchdog)
+# because it monitors the bridge process itself -- it cannot run inside
+# the process it monitors.
+
+reflections:
+  - name: session-liveness-check
+    description: "Check running sessions for liveness and timeout, recover stuck ones"
+    interval: 300  # 5 minutes
+    priority: high
+    execution_type: function
+    callable: "agent.agent_session_queue._agent_session_health_check"
+    enabled: true
+
+  - name: agent-session-cleanup
+    description: "Delete corrupted AgentSession records (invalid IDs, unsaveable) and rebuild indexes"
+    interval: 3600  # 1 hour
+    priority: normal
+    execution_type: function
+    callable: "agent.agent_session_queue.cleanup_corrupted_agent_sessions"
+    enabled: true
+
+  - name: stale-branch-cleanup
+    description: "Clean up session branches older than 72 hours"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "agent.agent_session_queue.cleanup_stale_branches_all_projects"
+    enabled: false
+
+  - name: redis-index-cleanup
+    description: "Rebuild Redis model indexes to clean orphaned entries from crashes/TTL expiry"
+    interval: 86400  # daily
+    priority: low
+    # execution_type/callable: dispatched by ReflectionScheduler (agent/reflection_scheduler.py)
+    # Also wired as step_popoto_index_cleanup in ReflectionRunner (scripts/reflections.py)
+    # See docs/features/popoto-index-hygiene.md
+    execution_type: function
+    callable: "scripts.popoto_index_cleanup.run_cleanup"
+    enabled: true
+
+  # === Sustainable Self-Healing (issues #773, #839 — merged) ===
+
+  - name: circuit-health-gate
+    description: "Check Anthropic circuit state; manage queue_paused and worker:hibernating flags atomically"
+    interval: 60  # 1 minute
+    priority: high
+    execution_type: function
+    callable: "agent.sustainability.circuit_health_gate"
+    enabled: true
+
+  - name: session-count-throttle
+    description: "Count sessions started in last hour; write throttle_level (none/moderate/suspended)"
+    interval: 3600  # 1 hour
+    priority: normal
+    execution_type: function
+    callable: "agent.sustainability.session_count_throttle"
+    enabled: true
+
+  - name: failure-loop-detector
+    description: "Scan failed sessions for repeated error fingerprints; file one GitHub issue per novel cluster"
+    interval: 3600  # 1 hour
+    priority: normal
+    execution_type: function
+    callable: "agent.sustainability.failure_loop_detector"
+    enabled: true
+
+  - name: session-recovery-drip
+    description: "Drip one paused session back to pending per tick (paused_circuit first, then paused; clears both recovery flags when both queues empty)"
+    interval: 30  # 30 seconds
+    priority: high
+    execution_type: function
+    callable: "agent.sustainability.session_recovery_drip"
+    enabled: true
+
+  - name: system-health-digest
+    description: "Daily Telegram health summary: circuit states, throttle level, session counts, failure clusters"
+    interval: 86400  # daily
+    priority: low
+    execution_type: agent
+    command: >
+      Generate and send the daily sustainability digest for the Valor AI system.
+      Required output fields: (1) circuit state per dependency (anthropic, telegram, redis),
+      (2) current throttle level from Redis, (3) queue paused status,
+      (4) session count in last 24 hours, (5) active failure cluster count from Redis set.
+      Format as a concise Telegram message (3-8 lines) and send to the 'Dev: Valor' chat.
+      Subject line: Daily System Health Digest.
+    enabled: false  # disabled: agent-type reflection spawns full Claude session
+
+  # === Memory Consolidation (issue #795) ===
+  # LLM-based semantic dedup: merges near-duplicate memories, flags contradictions.
+  # Default: dry_run=True — runs in observe-only mode for 14 days, logging proposed
+  # merges to logs/reflections.log. Enable apply mode by passing apply=True after
+  # reviewing dry-run logs and achieving >= 95% human agreement on proposed merges.
+  - name: memory-dedup
+    description: "LLM-based semantic consolidation: merge near-duplicate memories, flag contradictions"
+    interval: 86400  # daily
+    priority: normal
+    execution_type: function
+    callable: "scripts.memory_consolidation.run_consolidation"
+    enabled: true
+
+  - name: sentry-issue-triage
+    description: "Triage unresolved Sentry issues for all projects with SENTRY_DSN in their .env"
+    interval: 86400  # daily
+    priority: low
+    execution_type: agent
+    command: >
+      Triage unresolved Sentry issues across all local projects.
+      For each project returned by load_local_projects() that has SENTRY_DSN in its .env,
+      run: sentry issues list --status unresolved --json
+      Classify each issue using the A-E triage workflow from .claude/skills/sentry/SKILL.md.
+      For Class C or D issues, create a GitHub issue in that project's repo.
+      Send a summary to the 'Dev: Valor' Telegram chat.
+      Skip projects without SENTRY_DSN silently.
+    enabled: false
+
+  # === reflections/ package (issue #748) ===
+  # All entries below were extracted from the former scripts/reflections.py monolith
+  # into standalone callables in the reflections/ package. Monolith deleted in Phase C.
+
+  # --- Maintenance group ---
+
+  - name: tech-debt-scan
+    description: "Scan for TODO comments and deprecated typing imports"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_legacy_code_scan"
+    enabled: true
+
+  - name: redis-ttl-cleanup
+    description: "Run TTL cleanup on all Redis models: TelegramMessage, Link, Chat, AgentSession, BridgeEvent, ReflectionIgnore"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_redis_ttl_cleanup"
+    enabled: true
+
+  - name: redis-quality-audit
+    description: "Audit Redis data quality: unsummarized links, dead channels, session error patterns, message volumes"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_redis_data_quality"
+    enabled: true
+
+  - name: merged-branch-cleanup
+    description: "Delete merged git branches and audit docs/plans/ for complete/orphaned/stale plans"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_branch_plan_cleanup"
+    enabled: false  # disabled: calls gh issue list per plan file, slow on auth issues
+
+  - name: disk-space-check
+    description: "Check available disk space; warn if below 10 GB on project volume"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_disk_space_check"
+    enabled: true
+
+  - name: analytics-rollup
+    description: "Run daily analytics rollup: aggregate metrics and purge old data"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.maintenance.run_analytics_rollup"
+    enabled: true
+
+  # --- Auditing group ---
+
+  - name: daily-log-review
+    description: "Review previous day's logs per project: file sizes, error counts, regression markers"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_log_review"
+    enabled: true
+
+  - name: documentation-audit
+    description: "Audit documentation against codebase via DocsAuditor"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_documentation_audit"
+    enabled: true
+
+  - name: skills-audit
+    description: "Validate all SKILL.md files for required sections and quality"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_skills_audit"
+    enabled: true
+
+  - name: hooks-audit
+    description: "Audit Claude Code hooks: check hooks.log for errors, settings.json for configuration issues"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_hooks_audit"
+    enabled: true
+
+  - name: feature-docs-audit
+    description: "Audit docs/features/ for stale terms, stub docs, dead code refs, and README index mismatches"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_feature_docs_audit"
+    enabled: true
+
+  - name: pr-review-audit
+    description: "Audit merged PRs for unaddressed review findings; file GitHub issues for unaddressed items"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.auditing.run_pr_review_audit"
+    enabled: false  # disabled: calls gh CLI 5x per project (12 projects), slow and blocks on auth issues
+
+  # --- Task management group ---
+
+  - name: task-backlog-check
+    description: "Check open bug issues per project and local TODO files"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.task_management.run_task_management"
+    enabled: false  # disabled: calls gh issue list per project, slow on auth issues
+
+  - name: principal-staleness
+    description: "Check if config/PRINCIPAL.md is stale (>90 days since last modification)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.task_management.run_principal_staleness"
+    enabled: true
+
+  # --- Pipeline callables ---
+
+  - name: session-intelligence
+    description: "Pipeline: Session Analysis → LLM Reflection → Bug Issue Filing"
+    interval: 86400  # daily
+    priority: normal
+    execution_type: function
+    callable: "reflections.session_intelligence.run"
+    enabled: false  # disabled: calls gh issue create via subprocess
+
+  - name: behavioral-learning
+    description: "Pipeline: Episode Cycle-Close → Pattern Crystallization (skips if models.cyclic_episode unavailable)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.behavioral_learning.run"
+    enabled: true
+
+  - name: daily-report-and-notify
+    description: "Pipeline: Produce daily report → Create GitHub issues → Telegram notification (run last)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.daily_report.run"
+    enabled: false  # disabled: sends Telegram messages and creates GitHub issues autonomously
+
+  # --- Memory management group (new, no monolith equivalent) ---
+
+  - name: memory-decay-prune
+    description: "Delete below-threshold memories with zero access (dry_run default; set MEMORY_DECAY_PRUNE_APPLY=true to enable)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.memory_management.run_memory_decay_prune"
+    enabled: true
+
+  - name: memory-quality-audit
+    description: "Flag memories with quality issues: zero-access after 30 days, chronically low confidence"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.memory_management.run_memory_quality_audit"
+    enabled: true
+
+  - name: knowledge-reindex
+    description: "Re-index ~/src/work-vault/ docs into KnowledgeDocument records (stub if #728 not yet merged)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "reflections.memory_management.run_knowledge_reindex"
+    enabled: true
