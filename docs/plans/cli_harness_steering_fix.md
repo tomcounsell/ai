@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Review
 type: bug
 appetite: Small
 owner: Valor Engels
