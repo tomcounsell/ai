@@ -241,6 +241,21 @@ def find_project_for_dm(sender_id: int | None) -> dict | None:
     return DM_USER_TO_PROJECT.get(sender_id)
 
 
+def get_known_email_search_terms() -> list[str]:
+    """Return IMAP FROM search terms for all configured email senders.
+
+    Returns exact addresses from email.contacts (e.g. "tom@yuda.me") and
+    domain tokens from email.domains (e.g. "@psyoptimal.com"). These can be
+    used to build an IMAP UNSEEN+FROM query so the bridge never fetches
+    messages from unknown senders — leaving them UNSEEN for other machines.
+
+    Both maps are already filtered to ACTIVE_PROJECTS for this machine.
+    """
+    terms: list[str] = list(EMAIL_TO_PROJECT.keys())
+    terms += [f"@{domain}" for domain in EMAIL_DOMAIN_TO_PROJECT]
+    return terms
+
+
 def find_project_for_email(sender_email: str | None) -> dict | None:
     """Find which project an email sender belongs to.
 
