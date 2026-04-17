@@ -385,6 +385,8 @@ The PM session can push steering messages to its running child Dev sessions, ena
 
 The PM invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_session_id`) and pushes to the child's Redis steering queue. The child's watchdog hook picks up the message on the next tool call.
 
+> **Status (2026-04-17):** The mid-execution hook consumer is not yet implemented. Messages written via `steer_child.py` are only consumed at session pickup and completion — they are silently dropped if the child session is already running. See issue TBD for consolidation plans.
+
 ```bash
 # Steer a running child
 python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>

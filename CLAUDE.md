@@ -290,9 +290,7 @@ Standalone Worker (python -m worker) → Sole session execution engine
               (worker/__main__.py)         → Startup: index rebuild → recovery → orphan cleanup
                                            → Executes PM session (AgentSession role=pm, read-only)
                                                → PM creates Dev session via valor_session CLI
-                                                   → Worker routes Dev session by DEV_SESSION_HARNESS:
-                                                       sdk (default): Claude Agent SDK → Claude API
-                                                       claude-cli: claude -p subprocess → Claude API
+                                                   → Worker executes Dev session via CLI harness (claude -p → Claude API)
                                                    → _handle_dev_session_completion() → steers PM
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → TelegramRelayOutputHandler writes to Redis outbox
