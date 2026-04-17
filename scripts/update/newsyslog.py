@@ -102,8 +102,12 @@ def check_newsyslog(project_dir: Path) -> NewsyslogStatus:
         pass
 
     # sudo needs a password — surface an actionable one-liner.
+    import os
+
+    username = os.environ.get("USER", os.getlogin())
     install_cmd = (
-        f"sudo cp <(sed 's|__PROJECT_DIR__|{project_dir}|g' {template_path}) {NEWSYSLOG_DST}"
+        f"sudo cp <(sed 's|__PROJECT_DIR__|{project_dir}|g;s|__USERNAME__|{username}|g'"
+        f" {template_path}) {NEWSYSLOG_DST}"
     )
     reason = "missing" if current is None else "out-of-date"
     return NewsyslogStatus(
