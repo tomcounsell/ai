@@ -1,4 +1,6 @@
-"""Tests for PM persona hardening — completion guards, child session timeout, pipeline stage assertion.
+"""Tests for PM persona hardening.
+
+Covers completion guards, child session timeout, and pipeline stage assertion.
 
 Verifies that the PM persona file (config/personas/project-manager.md) contains the
 three self-monitoring guard sections required by issue #1007:

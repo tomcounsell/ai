@@ -329,7 +329,7 @@ class TestStartupRecoverySkipsTerminal:
         with (
             patch("agent.agent_session_queue.AgentSession") as mock_as,
             patch("agent.agent_session_queue.time") as mock_time,
-            patch("models.session_lifecycle.finalize_session") as mock_finalize,
+            patch("models.session_lifecycle.finalize_session"),
             patch("models.session_lifecycle.update_session") as mock_update,
         ):
             mock_time.time.return_value = time.time()
