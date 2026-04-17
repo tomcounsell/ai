@@ -149,24 +149,24 @@ Worker starts → reads `MAX_CONCURRENT_SESSIONS` (default 8) → creates single
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The removed swap trick includes a `try/except BaseException` (lines 2645-2652). After removal, no exception handler exists in the scope of this work. Its absence is not a failure path because the code it guarded is gone — the operation it guarded (re-acquiring the global slot after dev slot was acquired) no longer happens.
-- [ ] No `except Exception: pass` blocks introduced.
+- [x] The removed swap trick includes a `try/except BaseException` (lines 2645-2652). After removal, no exception handler exists in the scope of this work. Its absence is not a failure path because the code it guarded is gone — the operation it guarded (re-acquiring the global slot after dev slot was acquired) no longer happens.
+- [x] No `except Exception: pass` blocks introduced.
 
 ### Empty/Invalid Input Handling
-- [ ] `MAX_CONCURRENT_SESSIONS=0` continues to be clamped to minimum 1 via `max(1, ...)` at `worker/__main__.py:180`. Verified still present after this change.
-- [ ] `MAX_CONCURRENT_SESSIONS` missing from env continues to default (new default `8`).
-- [ ] No new input surfaces introduced.
+- [x] `MAX_CONCURRENT_SESSIONS=0` continues to be clamped to minimum 1 via `max(1, ...)` at `worker/__main__.py:180`. Verified still present after this change.
+- [x] `MAX_CONCURRENT_SESSIONS` missing from env continues to default (new default `8`).
+- [x] No new input surfaces introduced.
 
 ### Error State Rendering
-- [ ] Dashboard fields `dev_sessions_running` and `dev_sessions_cap` removed from `/dashboard.json`. Any external consumer reading these fields will get `KeyError` on access — **this is intended** since the fields no longer have meaning. The issue's acceptance criteria explicitly permits removal.
-- [ ] No user-visible output on the happy path is changed.
+- [x] Dashboard fields `dev_sessions_running` and `dev_sessions_cap` removed from `/dashboard.json`. Any external consumer reading these fields will get `KeyError` on access — **this is intended** since the fields no longer have meaning. The issue's acceptance criteria explicitly permits removal.
+- [x] No user-visible output on the happy path is changed.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_startup.py::TestDevSessionSemaphoreInit` (class, lines 89-138) — **DELETE**: the entire class tests initialization of a removed attribute. Includes three methods: `test_zero_clamped_to_one`, `test_three_initializes_with_cap_three`, `test_default_is_one_when_env_not_set`.
-- [ ] `tests/integration/test_worker_concurrency.py::test_semaphore_limits_concurrent_sessions` (lines 120-180) — **UPDATE**: remove the `original_dev_semaphore = _queue._dev_session_semaphore` save (line 130), the `_queue._dev_session_semaphore = asyncio.Semaphore(10)` assignment (line 136), and the restore at line 175. The test's actual assertion (global semaphore limits concurrent sessions) remains unchanged.
-- [ ] `tests/integration/test_worker_concurrency.py` (lines 390-431, method name `test_two_slugged_dev_sessions_execute_concurrently` or similar) — **UPDATE**: remove the `original_dev_semaphore` / `original_dev_semaphore_cap` saves (lines 402-403), the `_queue._dev_session_semaphore = asyncio.Semaphore(2)` / `_queue._dev_session_semaphore_cap = 2` assignments (lines 407-408), and the restore block (lines 425-426). The test's assertion that two slugged dev sessions run in parallel now relies purely on the global semaphore being set to 5 at line 405 — with `MAX_CONCURRENT_DEV_SESSIONS` gone, two dev sessions with a global cap of 5 will run in parallel automatically. Verify the assertion still passes (`peak_running == 2`).
-- [ ] No new tests required. The change is a removal; existing coverage of the global semaphore (`test_semaphore_limits_concurrent_sessions`) verifies the single-semaphore invariant. The deadlock prevention is covered by #1004's tests, which remain in place.
+- [x] `tests/unit/test_worker_startup.py::TestDevSessionSemaphoreInit` (class, lines 89-138) — **DELETE**: the entire class tests initialization of a removed attribute. Includes three methods: `test_zero_clamped_to_one`, `test_three_initializes_with_cap_three`, `test_default_is_one_when_env_not_set`.
+- [x] `tests/integration/test_worker_concurrency.py::test_semaphore_limits_concurrent_sessions` (lines 120-180) — **UPDATE**: remove the `original_dev_semaphore = _queue._dev_session_semaphore` save (line 130), the `_queue._dev_session_semaphore = asyncio.Semaphore(10)` assignment (line 136), and the restore at line 175. The test's actual assertion (global semaphore limits concurrent sessions) remains unchanged.
+- [x] `tests/integration/test_worker_concurrency.py` (lines 390-431, method name `test_two_slugged_dev_sessions_execute_concurrently` or similar) — **UPDATE**: remove the `original_dev_semaphore` / `original_dev_semaphore_cap` saves (lines 402-403), the `_queue._dev_session_semaphore = asyncio.Semaphore(2)` / `_queue._dev_session_semaphore_cap = 2` assignments (lines 407-408), and the restore block (lines 425-426). The test's assertion that two slugged dev sessions run in parallel now relies purely on the global semaphore being set to 5 at line 405 — with `MAX_CONCURRENT_DEV_SESSIONS` gone, two dev sessions with a global cap of 5 will run in parallel automatically. Verify the assertion still passes (`peak_running == 2`).
+- [x] No new tests required. The change is a removal; existing coverage of the global semaphore (`test_semaphore_limits_concurrent_sessions`) verifies the single-semaphore invariant. The deadlock prevention is covered by #1004's tests, which remain in place.
 
 ## Rabbit Holes
 
@@ -256,20 +256,20 @@ No external documentation site.
 
 ## Success Criteria
 
-- [ ] `MAX_CONCURRENT_DEV_SESSIONS` is gone: no env var read, no semaphore attribute, no swap code. Grep confirms zero matches across `worker/`, `agent/`, `ui/`, `tests/`, `.env.example`, `docs/features/`.
-- [ ] Default global cap is `8` in `worker/__main__.py:180`.
-- [ ] PM sessions still transition to `waiting_for_children` on child spawn (no regression in `agent/agent_session_queue.py` PM-side logic).
-- [ ] Child-boost ordering at `agent/agent_session_queue.py:773-799` is unchanged (verified by diff-review).
-- [ ] `output_router.py:109` force-deliver on `waiting_for_children` is unchanged.
-- [ ] `tests/unit/test_worker_startup.py` passes (with `TestDevSessionSemaphoreInit` deleted).
-- [ ] `tests/integration/test_worker_concurrency.py` passes (with dev-semaphore patches removed).
-- [ ] Dashboard `/dashboard.json` `health` object no longer contains `dev_sessions_running` or `dev_sessions_cap` fields.
-- [ ] `docs/features/bridge-worker-architecture.md` no longer documents `MAX_CONCURRENT_DEV_SESSIONS`.
-- [ ] `docs/features/README.md` index no longer mentions `MAX_CONCURRENT_DEV_SESSIONS`.
-- [ ] Tests pass (`pytest tests/unit/test_worker_startup.py tests/integration/test_worker_concurrency.py -x -q`).
-- [ ] Lint clean (`python -m ruff check .`).
-- [ ] Format clean (`python -m ruff format --check .`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] `MAX_CONCURRENT_DEV_SESSIONS` is gone: no env var read, no semaphore attribute, no swap code. Grep confirms zero matches across `worker/`, `agent/`, `ui/`, `tests/`, `.env.example`, `docs/features/`.
+- [x] Default global cap is `8` in `worker/__main__.py:180`.
+- [x] PM sessions still transition to `waiting_for_children` on child spawn (no regression in `agent/agent_session_queue.py` PM-side logic).
+- [x] Child-boost ordering at `agent/agent_session_queue.py:773-799` is unchanged (verified by diff-review).
+- [x] `output_router.py:109` force-deliver on `waiting_for_children` is unchanged.
+- [x] `tests/unit/test_worker_startup.py` passes (with `TestDevSessionSemaphoreInit` deleted).
+- [x] `tests/integration/test_worker_concurrency.py` passes (with dev-semaphore patches removed).
+- [x] Dashboard `/dashboard.json` `health` object no longer contains `dev_sessions_running` or `dev_sessions_cap` fields.
+- [x] `docs/features/bridge-worker-architecture.md` no longer documents `MAX_CONCURRENT_DEV_SESSIONS`.
+- [x] `docs/features/README.md` index no longer mentions `MAX_CONCURRENT_DEV_SESSIONS`.
+- [x] Tests pass (`pytest tests/unit/test_worker_startup.py tests/integration/test_worker_concurrency.py -x -q`).
+- [x] Lint clean (`python -m ruff check .`).
+- [x] Format clean (`python -m ruff format --check .`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
