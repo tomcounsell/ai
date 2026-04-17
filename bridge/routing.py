@@ -1008,6 +1008,7 @@ async def should_respond_async(
     # Reply-to detection — needed for session continuation regardless of who sent the
     # replied-to message (#996: replies to own messages should also steer the session).
     # Must run before any early returns so is_reply_to_valor is set correctly.
+    is_reply_to_non_valor_thread = False
     if message.reply_to_msg_id:
         try:
             replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
@@ -1037,11 +1038,10 @@ async def should_respond_async(
                 logger.info(f"Reply to Valor: terminus={terminus}, not responding")
                 return False, True
             elif replied_msg:
-                # Reply to a non-Valor message (e.g. user replying to their own message).
-                # Treat as session continuation so resolve_root_session_id can walk the
-                # reply chain to find the canonical session (#996).
-                logger.info("Reply to non-Valor thread message - treating as session continuation")
-                return True, True
+                # Reply to a non-Valor message. Remember for session continuation
+                # (#996) but don't short-circuit — team chats and Teammate-persona
+                # groups must still honor their mention-only policy.
+                is_reply_to_non_valor_thread = True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
 
@@ -1052,7 +1052,7 @@ async def should_respond_async(
         text_lower = text.lower()
         if any(mention.lower() in text_lower for mention in mentions):
             logger.debug("Teammate-persona group: @mention detected - responding")
-            return True, False
+            return True, is_reply_to_non_valor_thread
         # Completely silent -- no response, no reaction
         logger.debug(f"Teammate-persona group: silent storage for {chat_title!r}")
         return False, False
@@ -1062,8 +1062,14 @@ async def should_respond_async(
         mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
         text_lower = text.lower()
         if any(mention.lower() in text_lower for mention in mentions):
-            return True, False
+            return True, is_reply_to_non_valor_thread
         return False, False
+
+    # Dev:/PM: groups: reply-to-non-Valor triggers session continuation (#996).
+    # Must run AFTER team-chat/Teammate gates so mention-only policy wins there.
+    if is_reply_to_non_valor_thread:
+        logger.info("Reply to non-Valor thread message - treating as session continuation")
+        return True, True
 
     # respond_to_all means respond to everything
     if telegram_config.get("respond_to_all", True):

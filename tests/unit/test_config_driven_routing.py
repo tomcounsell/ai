@@ -307,6 +307,79 @@ class TestReplyToAnyThreadMessage:
         assert is_reply is False, "Fresh DM with no reply_to must not set is_reply_to_valor"
 
     @pytest.mark.asyncio
+    async def test_reply_to_non_valor_in_team_chat_is_silent(self):
+        """Reply to a non-Valor message in a team chat without mention must not respond.
+
+        Regression guard: the `elif replied_msg` branch used to short-circuit with
+        `return True, True`, bypassing the mention-only gate for team chats
+        (no Dev:/PM: prefix). That caused Valor to reply to unrelated threads.
+        """
+        project = self._project()
+        event = _make_event("replying to my own note", reply_to_msg_id=555)
+        client = _make_client(replied_msg_is_ours=False)
+
+        should, _is_reply = await should_respond_async(
+            client,
+            event,
+            "replying to my own note",
+            is_dm=False,
+            chat_title="Agent Builders Chat",  # no Dev:/PM: prefix → team chat
+            project=project,
+        )
+        assert should is False, (
+            "Reply to non-Valor message in a team chat must not trigger a response "
+            "without an @mention"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reply_to_non_valor_in_team_chat_with_mention_continues_session(self):
+        """@mention + reply-to-non-Valor in team chat should respond AND flag continuation."""
+        project = {
+            "telegram": {
+                "respond_to_all": True,
+                "mention_triggers": ["@valor", "valor"],
+            }
+        }
+        event = _make_event("hey valor what about this?", reply_to_msg_id=555)
+        client = _make_client(replied_msg_is_ours=False)
+
+        should, is_reply = await should_respond_async(
+            client,
+            event,
+            "hey valor what about this?",
+            is_dm=False,
+            chat_title="Agent Builders Chat",
+            project=project,
+        )
+        assert should is True
+        assert is_reply is True, (
+            "Mention-triggered response to a non-Valor reply must preserve session continuation"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reply_to_non_valor_in_teammate_group_is_silent(self):
+        """Reply-to-non-Valor in a Teammate-persona group without mention must be silent."""
+        project = {
+            "telegram": {
+                "groups": {"Team Chat": {"persona": "teammate"}},
+                "mention_triggers": ["@valor", "valor"],
+                "respond_to_all": True,
+            }
+        }
+        event = _make_event("replying to someone else", reply_to_msg_id=555)
+        client = _make_client(replied_msg_is_ours=False)
+
+        should, _is_reply = await should_respond_async(
+            client,
+            event,
+            "replying to someone else",
+            is_dm=False,
+            chat_title="Team Chat",
+            project=project,
+        )
+        assert should is False
+
+    @pytest.mark.asyncio
     async def test_reply_to_valor_still_works(self):
         """Reply to Valor's own message continues to work as before (#996 non-regression)."""
         project = self._project()
