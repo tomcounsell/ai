@@ -140,11 +140,51 @@ fi
 echo "Loading $LABEL..."
 launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
 
+# Install worker watchdog (checks heartbeat every 120s, kills hung worker so launchd restarts it)
+WATCHDOG_LABEL="${SERVICE_LABEL_PREFIX}.worker-watchdog"
+WATCHDOG_PLIST="$HOME/Library/LaunchAgents/${WATCHDOG_LABEL}.plist"
+
+cat > "$WATCHDOG_PLIST" << WATCHDOGEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${WATCHDOG_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PROJECT_DIR}/.venv/bin/python</string>
+        <string>${PROJECT_DIR}/monitoring/worker_watchdog.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${PROJECT_DIR}/.venv/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>StandardOutPath</key>
+    <string>${PROJECT_DIR}/logs/worker_watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>${PROJECT_DIR}/logs/worker_watchdog.log</string>
+</dict>
+</plist>
+WATCHDOGEOF
+
+launchctl bootout "gui/$(id -u)/$WATCHDOG_LABEL" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$WATCHDOG_PLIST"
+echo "Worker watchdog installed (checks heartbeat every 120s)"
+
 echo ""
 echo "Worker service installed successfully."
 echo "  Logs: $PROJECT_DIR/logs/worker.log"
 echo "  Errors: $PROJECT_DIR/logs/worker_error.log"
 echo "  Output: $PROJECT_DIR/logs/worker/ (per-session)"
+echo "  Watchdog: $PROJECT_DIR/logs/worker_watchdog.log"
 echo ""
 echo "To check status: launchctl list | grep worker"
 echo "To stop: launchctl bootout gui/$(id -u)/$LABEL"
