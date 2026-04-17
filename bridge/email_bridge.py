@@ -371,11 +371,16 @@ class EmailOutputHandler:
 # =============================================================================
 
 
-async def _process_inbound_email(parsed: dict, config: dict) -> None:
+async def _process_inbound_email(parsed: dict, config: dict) -> bool:
     """Process a single parsed inbound email.
 
     Resolves the sender to a project, checks for thread continuation via
     In-Reply-To header, and enqueues an AgentSession.
+
+    Returns True if the message was successfully routed to a project, False if
+    it was discarded (no matching project or project not active). Callers should
+    only mark a message as SEEN when this returns True, so unrouted messages
+    remain visible to other machines polling the same inbox.
 
     Args:
         parsed: Dict from parse_email_message() with keys:
@@ -396,12 +401,12 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
     project = find_project_for_email(from_addr)
     if project is None:
         logger.info(f"[email] No project found for sender {from_addr}, discarding")
-        return
+        return False
 
     project_key = project.get("_key") or project.get("name", "unknown")
     if project_key not in ACTIVE_PROJECTS:
         logger.info(f"[email] Project '{project_key}' not in ACTIVE_PROJECTS, discarding")
-        return
+        return False
 
     # Derive session type from email.persona (default: teammate for human-facing email)
     # customer-service maps to TEAMMATE so it never orchestrates dev sessions
@@ -464,15 +469,19 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
             },
         )
         logger.info(f"[email] Enqueued session {session_id} for {from_addr}")
+        return True
     except Exception as e:
         logger.error(f"[email] Failed to enqueue session for {from_addr}: {e}")
+        return False
 
 
-async def _poll_imap(imap_config: dict) -> list[bytes]:
+async def _poll_imap(imap_config: dict) -> list[tuple[bytes, bytes]]:
     """Connect to IMAP and fetch all unseen message bodies.
 
-    Marks fetched messages as SEEN atomically to prevent duplicate processing.
-    Returns a list of raw message bytes.
+    Returns a list of (uid, raw_bytes) pairs WITHOUT marking messages as seen.
+    UIDs are stable across reconnections, allowing the caller to selectively
+    mark only routed messages as seen (so unrouted messages stay visible to
+    other machines polling the same inbox).
     """
     host = imap_config["host"]
     port = imap_config["port"]
@@ -480,7 +489,7 @@ async def _poll_imap(imap_config: dict) -> list[bytes]:
     password = imap_config["password"]
     use_ssl = imap_config.get("ssl", True)
 
-    def _fetch_unseen() -> list[bytes]:
+    def _fetch_unseen() -> list[tuple[bytes, bytes]]:
         if use_ssl:
             conn = imaplib.IMAP4_SSL(host, port)
         else:
@@ -489,29 +498,27 @@ async def _poll_imap(imap_config: dict) -> list[bytes]:
             conn.login(user, password)
             conn.select("INBOX")
 
-            # Search for unseen messages
-            status, data = conn.search(None, "UNSEEN")
+            # Search for unseen messages using UIDs (stable across reconnections)
+            status, data = conn.uid("search", None, "UNSEEN")
             if status != "OK" or not data or not data[0]:
                 return []
 
-            msg_ids = data[0].split()
-            if not msg_ids:
+            uids = data[0].split()
+            if not uids:
                 return []
 
             # Cap per-poll batch to avoid hanging on inboxes with thousands of unseen messages.
-            # Take the most recent N (IMAP IDs are ascending, so slice from the end).
-            if len(msg_ids) > IMAP_MAX_BATCH:
-                msg_ids = msg_ids[-IMAP_MAX_BATCH:]
+            # Take the most recent N (UIDs are ascending, so slice from the end).
+            if len(uids) > IMAP_MAX_BATCH:
+                uids = uids[-IMAP_MAX_BATCH:]
 
             messages = []
-            for msg_id in msg_ids:
-                # Mark as SEEN before fetching to prevent re-processing on concurrent polls
-                conn.store(msg_id, "+FLAGS", "\\Seen")
-                status, msg_data = conn.fetch(msg_id, "(RFC822)")
+            for uid in uids:
+                status, msg_data = conn.uid("fetch", uid, "(RFC822)")
                 if status == "OK" and msg_data:
                     for response_part in msg_data:
                         if isinstance(response_part, tuple):
-                            messages.append(response_part[1])
+                            messages.append((uid, response_part[1]))
             return messages
         finally:
             try:
@@ -520,6 +527,36 @@ async def _poll_imap(imap_config: dict) -> list[bytes]:
                 pass
 
     return await asyncio.to_thread(_fetch_unseen)
+
+
+async def _mark_messages_seen(imap_config: dict, uids: list[bytes]) -> None:
+    """Mark a specific set of messages (by UID) as SEEN in the IMAP inbox."""
+    if not uids:
+        return
+
+    host = imap_config["host"]
+    port = imap_config["port"]
+    user = imap_config["user"]
+    password = imap_config["password"]
+    use_ssl = imap_config.get("ssl", True)
+
+    def _mark() -> None:
+        if use_ssl:
+            conn = imaplib.IMAP4_SSL(host, port)
+        else:
+            conn = imaplib.IMAP4(host, port)
+        try:
+            conn.login(user, password)
+            conn.select("INBOX")
+            uid_list = b",".join(uids)
+            conn.uid("store", uid_list, "+FLAGS", "\\Seen")
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
+    await asyncio.to_thread(_mark)
 
 
 async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
@@ -546,17 +583,27 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
 
             if messages:
                 logger.info(f"[email] Fetched {len(messages)} unseen message(s)")
-                for raw_bytes in messages:
+                routed_uids = []
+                for uid, raw_bytes in messages:
                     parsed = parse_email_message(raw_bytes)
                     if parsed is None:
                         continue
                     try:
-                        await _process_inbound_email(parsed, config)
+                        routed = await _process_inbound_email(parsed, config)
+                        if routed:
+                            routed_uids.append(uid)
                     except Exception as e:
                         logger.error(
                             f"[email] Error processing email from "
                             f"{parsed.get('from_addr', 'unknown')}: {e}"
                         )
+                # Only mark routed messages as seen; unrouted messages stay unseen
+                # so other machines polling the same inbox can still pick them up.
+                if routed_uids:
+                    try:
+                        await _mark_messages_seen(imap_config, routed_uids)
+                    except Exception as e:
+                        logger.warning(f"[email] Failed to mark messages as seen: {e}")
 
             # Reset backoff on success
             backoff = IMAP_POLL_INTERVAL
