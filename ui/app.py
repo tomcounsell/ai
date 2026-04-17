@@ -289,7 +289,6 @@ def create_app() -> FastAPI:
         """Full dashboard state as JSON for programmatic consumption."""
         from fastapi.responses import JSONResponse
 
-        import agent.agent_session_queue as _queue
         from ui.data.analytics import get_analytics_summary
         from ui.data.machine import get_machine_name, get_machine_projects
         from ui.data.reflections import get_all_reflections
@@ -302,16 +301,6 @@ def create_app() -> FastAPI:
         reflections = get_all_reflections()
         analytics = get_analytics_summary()
 
-        # Dev session semaphore metrics — null when worker hasn't initialized yet.
-        _dev_sem = _queue._dev_session_semaphore
-        _dev_sem_cap = _queue._dev_session_semaphore_cap
-        dev_sessions_cap = _dev_sem_cap if _dev_sem is not None else None
-        dev_sessions_running = (
-            (_dev_sem_cap - _dev_sem._value)
-            if _dev_sem is not None and _dev_sem_cap is not None
-            else None
-        )
-
         return JSONResponse(
             {
                 "health": {
@@ -322,8 +311,6 @@ def create_app() -> FastAPI:
                     "worker_last_seen_s": worker["age_s"],
                     "email": email["status"],
                     "email_last_seen_s": email["age_s"],
-                    "dev_sessions_running": dev_sessions_running,
-                    "dev_sessions_cap": dev_sessions_cap,
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,

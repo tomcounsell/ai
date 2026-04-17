@@ -2138,18 +2138,6 @@ _starting_workers: set[str] = set()
 # None sentinel means no ceiling (pre-initialization or testing).
 _global_session_semaphore: asyncio.Semaphore | None = None
 
-# Dev session concurrency ceiling: limits simultaneously executing slugged dev
-# sessions specifically. Initialized in _run_worker() from
-# MAX_CONCURRENT_DEV_SESSIONS env var (default 1). None sentinel means no
-# ceiling (pre-initialization or testing). Acquired only for slugged dev
-# sessions after the global semaphore, released in the finally block.
-_dev_session_semaphore: asyncio.Semaphore | None = None
-
-# Stores the initial value passed to asyncio.Semaphore(_dev_session_semaphore_cap)
-# so dashboard can compute dev_sessions_running = cap - semaphore._value.
-# asyncio.Semaphore does not expose its initial value after construction.
-_dev_session_semaphore_cap: int | None = None
-
 # Graceful shutdown coordination: when set, worker loops finish their current
 # session and exit instead of waiting for new work.
 _shutdown_requested: bool = False
@@ -2618,38 +2606,11 @@ async def _worker_loop(
             # that was already finalized inside _execute_agent_session. See #898.
             # On crash or CancelledError, this stays False so the finally block runs.
             finalized_by_execute = False
-            # _dev_semaphore_acquired: True only when a slugged dev session has acquired
-            # the dev session semaphore. Released in the finally block below.
-            _dev_semaphore_acquired = False
 
-            # For slugged dev sessions, swap from global slot to dev-specific slot.
-            # This prevents PM/teammate session starvation while a dev session waits
-            # for a dev slot: release global → acquire dev → re-acquire global.
-            _dev_semaphore = _dev_session_semaphore
-            if (
-                _dev_semaphore is not None
-                and session.session_type == SessionType.DEV
-                and session.slug
-            ):
-                # Release the global slot so PM/teammate sessions can proceed while
-                # this dev session waits for a dev semaphore slot.
-                if _semaphore_acquired:
-                    semaphore.release()
-                    _semaphore_acquired = False
-
-                # Acquire the dev semaphore (may wait if at cap).
-                await _dev_semaphore.acquire()
-                _dev_semaphore_acquired = True
-
-                # Re-acquire the global slot before execution begins.
-                if semaphore is not None:
-                    try:
-                        await semaphore.acquire()
-                        _semaphore_acquired = True
-                    except BaseException:
-                        _dev_semaphore.release()
-                        _dev_semaphore_acquired = False
-                        raise
+            # Deadlock prevention lives in #1004's child-boost ordering
+            # (sort_key at the top of this file) and force-deliver on
+            # waiting_for_children (output_router.py). The swap trick was
+            # removed in #1021.
 
             try:
                 await _execute_agent_session(session)
@@ -2810,10 +2771,6 @@ async def _worker_loop(
                             guard_err,
                         )
                         await _complete_agent_session(session, failed=session_failed)
-                # Release the dev concurrency slot after session is done
-                if _dev_semaphore_acquired and _dev_semaphore is not None:
-                    _dev_semaphore.release()
-                    _dev_semaphore_acquired = False
                 # Release the global concurrency slot after session is done
                 if _semaphore_acquired and semaphore is not None:
                     semaphore.release()
