@@ -1,5 +1,7 @@
 # Mid-Session Steering: Real-Time Course Correction for Running Agents
 
+**Scope:** Telegram bridge reply-thread steering via Redis list (`steering:{session_id}`). For PM→child steering, see `session-steering.md`.
+
 ## Overview
 
 Mid-session steering allows a user to send a reply-to message in Telegram that gets injected into a currently running agent session, enabling real-time course correction without waiting for the agent to finish. This is distinct from creating a new session or resuming a completed session.
