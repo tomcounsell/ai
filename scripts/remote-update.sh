@@ -61,6 +61,19 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 trap cleanup_lock EXIT
 
+# ── Git pull FIRST — before invoking any Python ──────────────────────
+# Pull here so the Python orchestrator (run.py) and all update scripts are
+# up to date before they execute. Without this, a Telegram /update or cron
+# run always executes the pre-pull version of the orchestrator; changes to
+# the update scripts only take effect on the next run.
+# run.py --cron is then called with --no-pull to skip the redundant pull.
+echo "[update] Pulling latest changes..."
+if git -C "$PROJECT_DIR" pull --ff-only 2>&1; then
+    echo "[update] Pull complete"
+else
+    echo "[update] WARN: git pull failed or had conflicts — continuing with current code"
+fi
+
 # ── Check for Python venv ────────────────────────────────────────────
 PYTHON="$PROJECT_DIR/.venv/bin/python"
 if [ ! -x "$PYTHON" ]; then
@@ -71,7 +84,8 @@ fi
 
 # ── Run update in cron mode ──────────────────────────────────────────
 # Output goes directly to Telegram - keep it clean for PM-style summary
-"$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron
+# --no-pull: git pull already done above; orchestrator skips its own pull step
+"$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron --no-pull
 
 # ── Unload legacy reflections launchd service (issue #748) ───────────
 # The com.valor.reflections launchd service has been deleted (scripts/reflections.py

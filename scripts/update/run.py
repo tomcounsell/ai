@@ -1107,6 +1107,11 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Output JSON")
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
     parser.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="Skip git pull (caller already pulled before invoking this script)",
+    )
+    parser.add_argument(
         "--project-dir",
         type=Path,
         default=PROJECT_ROOT,
@@ -1125,6 +1130,9 @@ def main() -> int:
         _log_buffer = []
     else:
         config = UpdateConfig.verify_only()
+
+    if args.no_pull:
+        config.do_git_pull = False
 
     if args.quiet:
         config.verbose = False
