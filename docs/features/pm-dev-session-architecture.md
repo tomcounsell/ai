@@ -383,7 +383,12 @@ The PM session can push steering messages to its running child Dev sessions, ena
 
 ### Mechanism
 
-The PM invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_session_id`) and pushes to the child's Redis steering queue. The child's watchdog hook picks up the message on the next tool call.
+The PM invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_session_id`) and writes to the child's turn-boundary inbox (`AgentSession.queued_steering_messages`). The worker delivers the message at the next turn boundary.
+
+**Delivery paths by harness type:**
+- **CLI-harness sessions** (default): `steer_child.py` calls `steer_session()` which writes to `queued_steering_messages`. The worker injects the message as user input at the next turn boundary. There is no mid-turn injection — the Dev session sees the message at most one turn late.
+- **Abort signals** (`--abort`): always use the Redis list (`steering:{session_id}`) regardless of harness type. The watchdog hook delivers these immediately via `additionalContext` injection.
+- **SDK-harness sessions** (legacy): both the turn-boundary inbox and the watchdog hook's mid-turn injection path are available, but all Dev sessions now default to CLI harness.
 
 ```bash
 # Steer a running child
@@ -396,7 +401,7 @@ python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-
 python scripts/steer_child.py --list --parent-id <parent_id>
 ```
 
-This reuses the same steering infrastructure (Redis queue, watchdog consumption) as Telegram reply-thread steering. See [Steering Queue](steering-queue.md) for the full steering architecture.
+See [Session Steering](session-steering.md) for the turn-boundary inbox architecture and [Steering Queue](steering-queue.md) for the Redis list / mid-turn injection path.
 
 ## Q&A Formatting (Prose vs Structured)
 

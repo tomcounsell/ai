@@ -8,6 +8,8 @@ tracking: https://github.com/tomcounsell/ai/issues/23
 
 # Steering Queue: Mid-Execution Course Correction via Reply Threads
 
+**Scope:** Redis list steering queue design and bridge coalescing. SDK-harness mid-turn injection (legacy/secondary path). For PM→child steering, see `session-steering.md`.
+
 ## Problem
 
 When Valor is executing a long task (10-30+ minutes), the supervisor cannot course-correct mid-execution. Messages sent during a running session either:

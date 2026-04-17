@@ -111,17 +111,35 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
         )
         return 1
 
-    # Push the steering message
-    push_steering_message(
-        session_id=session_id,
-        text=message,
-        sender="pm",
-        is_abort=abort,
-    )
-
     preview = message[:60] + "..." if len(message) > 60 else message
-    action = "Aborted" if abort else "Steered"
-    print(f"{action} {session_id}: {preview}")
+
+    if abort:
+        # Abort signals use the Redis list path — the watchdog hook delivers these
+        # immediately (even for CLI-harness) via additionalContext injection.
+        push_steering_message(
+            session_id=session_id,
+            text=message,
+            sender="pm",
+            is_abort=True,
+        )
+        print(f"Aborted {session_id} (via Redis abort queue): {preview}")
+    else:
+        # Non-abort messages use the turn-boundary inbox (queued_steering_messages).
+        # This works for both SDK-harness and CLI-harness Dev sessions.
+        # steer_session() looks up by session_id (the Popoto field), not agent_session_id.
+        from agent.agent_session_queue import steer_session
+
+        target_session_id = child.session_id or session_id
+        result = steer_session(session_id=target_session_id, message=message)
+        if not result.get("success"):
+            error = result.get("error", "unknown error")
+            print(
+                f"Error: failed to steer session '{session_id}': {error}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Steered {session_id} (via turn-boundary inbox): {preview}")
+
     return 0
 
 

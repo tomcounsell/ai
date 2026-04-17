@@ -411,6 +411,15 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
 
     Returns a hook result dict if steering action was taken, None otherwise.
     This runs on EVERY tool call (lightweight Redis LPOP).
+
+    Delivery paths:
+    - SDK-harness sessions: messages are injected mid-turn via client.interrupt()+query().
+    - CLI-harness sessions (no active SDK client): non-abort messages are written to
+      AgentSession.queued_steering_messages (turn-boundary inbox). The worker delivers
+      them at the next turn boundary. If the session cannot be found in the model,
+      falls back to re-pushing to the Redis list with a WARNING log.
+    - Abort signals: always delivered via hookSpecificOutput additionalContext regardless
+      of harness type.
     """
     from agent.steering import pop_all_steering_messages
 
@@ -462,11 +471,42 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
             )
             logger.info(f"[steering] Successfully injected into session {session_id}")
         else:
-            logger.warning(
-                f"[steering] No active client for session {session_id}, "
-                f"re-pushing messages for next session"
-            )
-            _repush_messages(session_id, messages)
+            # No active SDK client (CLI-harness session or SDK client not yet registered).
+            # For non-abort messages, write to the turn-boundary inbox instead of
+            # re-pushing to the Redis list (which would never be consumed).
+            non_abort = [m for m in messages if not m.get("is_abort")]
+            abort_msgs = [m for m in messages if m.get("is_abort")]
+
+            if non_abort:
+                try:
+                    from models.agent_session import AgentSession
+
+                    sessions = list(AgentSession.query.filter(session_id=session_id))
+                    if sessions:
+                        agent_session = sessions[0]
+                        logger.warning(
+                            f"[steering] No active client for {session_id} (CLI harness?); "
+                            f"writing to turn-boundary inbox instead"
+                        )
+                        for msg in non_abort:
+                            agent_session.push_steering_message(msg.get("text", ""))
+                    else:
+                        logger.warning(
+                            f"[steering] No active client and session {session_id} not found in "
+                            f"model — re-pushing {len(non_abort)} message(s) to Redis list"
+                        )
+                        _repush_messages(session_id, non_abort)
+                except Exception as e:
+                    logger.warning(
+                        f"[steering] No active client for {session_id}; model write failed "
+                        f"({e}) — re-pushing messages to Redis list"
+                    )
+                    _repush_messages(session_id, non_abort)
+
+            if abort_msgs:
+                # Abort messages stay in the Redis list — they are re-pushed so the
+                # watchdog can deliver them via additionalContext on the next tool call.
+                _repush_messages(session_id, abort_msgs)
     except Exception as e:
         logger.error(f"[steering] Failed to inject message: {e} — re-pushing to preserve")
         # Re-push so messages aren't lost on injection failure

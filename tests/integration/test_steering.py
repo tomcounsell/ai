@@ -596,11 +596,26 @@ class TestWatchdogSteering:
         assert "STEERING MESSAGE" in query_arg
 
     @pytest.mark.asyncio
-    async def test_watchdog_handles_missing_client(self):
-        """If no active client, messages should be re-pushed."""
-        from agent.health_check import _handle_steering
+    async def test_watchdog_handles_missing_client_session_found(self):
+        """If no active client but session exists in DB, message lands in queued_steering_messages.
 
-        session_id = "test_watchdog_noclient"
+        Turn-boundary inbox (not Redis re-push) when the model lookup succeeds.
+        """
+        from datetime import UTC, datetime
+
+        from agent.health_check import _handle_steering
+        from models.agent_session import AgentSession
+
+        session_id = "test_watchdog_noclient_found"
+        session = AgentSession(
+            session_id=session_id,
+            project_key="test-steer",
+            status="running",
+            message_text="test task",
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+
         push_steering_message(session_id, "focus on OAuth", "Tom")
 
         with patch("agent.sdk_client.get_active_client", return_value=None):
@@ -609,10 +624,79 @@ class TestWatchdogSteering:
         assert result is not None
         assert result["continue_"] is True
 
-        # Message should have been re-pushed
+        # Message should land in queued_steering_messages, NOT re-pushed to Redis list
+        msg = pop_steering_message(session_id)
+        assert msg is None, "Message should NOT have been re-pushed to Redis list"
+
+        # Verify it landed in the model's turn-boundary inbox
+        refreshed = list(AgentSession.query.filter(session_id=session_id))[0]
+        assert len(refreshed.queued_steering_messages) >= 1
+        assert "focus on OAuth" in refreshed.queued_steering_messages[0]
+
+    @pytest.mark.asyncio
+    async def test_watchdog_handles_missing_client_session_not_found(self):
+        """If no active client and session not in DB, message is re-pushed to Redis list."""
+        from agent.health_check import _handle_steering
+
+        session_id = "test_watchdog_noclient_notfound"
+        push_steering_message(session_id, "fallback message", "Tom")
+
+        with patch("agent.sdk_client.get_active_client", return_value=None):
+            result = await _handle_steering(session_id)
+
+        assert result is not None
+        assert result["continue_"] is True
+
+        # Session not in DB: message should be re-pushed to Redis list (existing fallback)
         msg = pop_steering_message(session_id)
         assert msg is not None
-        assert msg["text"] == "focus on OAuth"
+        assert msg["text"] == "fallback message"
+
+    @pytest.mark.asyncio
+    async def test_watchdog_fallback_to_repush_when_model_write_fails(self):
+        """If no active client and model write raises, messages are re-pushed to Redis list."""
+        from datetime import UTC, datetime
+
+        from agent.health_check import _handle_steering
+        from models.agent_session import AgentSession
+
+        session_id = "test_watchdog_model_write_fail"
+        session = AgentSession(
+            session_id=session_id,
+            project_key="test-steer",
+            status="running",
+            message_text="test task",
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+
+        push_steering_message(session_id, "update the tests", "Tom")
+
+        mock_session = session
+        original_push = mock_session.push_steering_message
+
+        def raise_on_push(msg):
+            raise RuntimeError("Redis write failed")
+
+        mock_session.push_steering_message = raise_on_push
+
+        with patch("agent.sdk_client.get_active_client", return_value=None):
+            with patch(
+                "models.agent_session.AgentSession.query",
+            ) as mock_query:
+                mock_query.filter.return_value = [mock_session]
+                result = await _handle_steering(session_id)
+
+        assert result is not None
+        assert result["continue_"] is True
+
+        # After model write failure, message should be re-pushed to Redis list
+        msg = pop_steering_message(session_id)
+        assert msg is not None
+        assert msg["text"] == "update the tests"
+
+        # Restore original method
+        mock_session.push_steering_message = original_push
 
     @pytest.mark.asyncio
     async def test_watchdog_repushes_on_injection_failure(self):
@@ -1122,3 +1206,153 @@ class TestResolveRootSessionId:
         assert "RESUME_REPLY_CHAIN_FAIL" in content, (
             "RESUME_REPLY_CHAIN_FAIL log tag missing — failure path invisible in logs"
         )
+
+
+class TestSteerChildDelivery:
+    """Integration tests for steer_child.py → CLI-harness delivery path.
+
+    These tests use real AgentSession objects (no mock of get_active_client or
+    push_steering_message) to verify the end-to-end steering delivery path.
+    """
+
+    def _create_dev_session(self, parent_agent_id: str, session_id: str, status: str = "running"):
+        """Create a Dev AgentSession with a parent-child relationship.
+
+        session_id: the Popoto session_id field (used by steer_session() for lookup).
+        Returns the saved session — use session.agent_session_id as the ID for _steer_child().
+        """
+        from datetime import UTC, datetime
+
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id=session_id,
+            project_key="test-steer-child",
+            status=status,
+            session_type="dev",
+            parent_agent_session_id=parent_agent_id,
+            message_text="dev task",
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+        return session
+
+    def _create_pm_session(self, session_id: str):
+        """Create a PM AgentSession. Returns the saved session."""
+        from datetime import UTC, datetime
+
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id=session_id,
+            project_key="test-steer-child",
+            status="running",
+            session_type="pm",
+            message_text="pm task",
+            created_at=datetime.now(tz=UTC),
+        )
+        session.save()
+        return session
+
+    def test_steer_child_cli_harness_delivery(self):
+        """_steer_child() writes message to turn-boundary inbox (queued_steering_messages)."""
+        from models.agent_session import AgentSession
+        from scripts.steer_child import _steer_child
+
+        parent = self._create_pm_session("tg_test_parent_p001")
+        child = self._create_dev_session(parent.agent_session_id, "tg_test_child_c001")
+
+        exit_code = _steer_child(
+            session_id=child.agent_session_id,
+            message="focus on error handling",
+            parent_id=parent.agent_session_id,
+            abort=False,
+        )
+
+        assert exit_code == 0
+
+        # Verify the message landed in queued_steering_messages
+        sessions = list(AgentSession.query.filter(id=child.agent_session_id))
+        assert sessions, "Child session not found after steering"
+        refreshed = sessions[0]
+        assert len(refreshed.queued_steering_messages) >= 1
+        assert "focus on error handling" in refreshed.queued_steering_messages[0]
+
+        # Verify the Redis list was NOT used (turn-boundary path only)
+        msg = pop_steering_message(child.session_id)
+        assert msg is None, "Message should NOT have gone to Redis steering list"
+
+    def test_steer_child_abort_uses_redis_list(self):
+        """_steer_child() with abort=True writes to Redis list, not turn-boundary inbox."""
+        from models.agent_session import AgentSession
+        from scripts.steer_child import _steer_child
+
+        parent = self._create_pm_session("tg_test_parent_p002")
+        child = self._create_dev_session(parent.agent_session_id, "tg_test_child_c002")
+
+        exit_code = _steer_child(
+            session_id=child.agent_session_id,
+            message="stop",
+            parent_id=parent.agent_session_id,
+            abort=True,
+        )
+
+        assert exit_code == 0
+
+        # Abort message should be on the Redis list with is_abort=True
+        # Abort path uses session_id (Redis key) from push_steering_message
+        msg = pop_steering_message(child.agent_session_id)
+        assert msg is not None, "Abort message should be in Redis steering list"
+        assert msg["is_abort"] is True
+        assert "stop" in msg["text"]
+
+        # queued_steering_messages should be empty (abort does NOT use turn-boundary inbox)
+        sessions = list(AgentSession.query.filter(id=child.agent_session_id))
+        refreshed = sessions[0]
+        inbox = refreshed.queued_steering_messages or []
+        assert len(inbox) == 0, "Abort messages must NOT appear in queued_steering_messages"
+
+    def test_steer_child_terminal_session_exits_nonzero(self):
+        """_steer_child() exits non-zero when session is in a terminal status."""
+        from scripts.steer_child import _steer_child
+
+        parent = self._create_pm_session("tg_test_parent_p003")
+        child = self._create_dev_session(
+            parent.agent_session_id, "tg_test_child_c003", status="completed"
+        )
+
+        exit_code = _steer_child(
+            session_id=child.agent_session_id,
+            message="too late",
+            parent_id=parent.agent_session_id,
+            abort=False,
+        )
+
+        assert exit_code == 1
+
+    def test_steer_child_steer_session_failure_exits_nonzero(self, capsys):
+        """_steer_child() exits non-zero and prints error when steer_session fails."""
+        from scripts.steer_child import _steer_child
+
+        parent = self._create_pm_session("tg_test_parent_p004")
+        child = self._create_dev_session(parent.agent_session_id, "tg_test_child_c004")
+
+        # Patch at the source module — _steer_child imports steer_session lazily
+        with patch(
+            "agent.agent_session_queue.steer_session",
+            return_value={
+                "success": False,
+                "session_id": child.session_id,
+                "error": "mock failure",
+            },
+        ):
+            exit_code = _steer_child(
+                session_id=child.agent_session_id,
+                message="will fail",
+                parent_id=parent.agent_session_id,
+                abort=False,
+            )
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "mock failure" in captured.err
