@@ -406,16 +406,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: Env symlink: {env_r.error}", v)
         result.warnings.append(f"Env symlink: {env_r.error}")
 
-    # Step 1.65: Verify config/projects.json symlink (worker fails to start without it)
-    log("Verifying config/projects.json symlink...", v)
+    # Step 1.65: Ensure config/projects.json is a real file copy (never a symlink —
+    # launchd TCC blocks open() on iCloud-synced ~/Desktop paths).
+    log("Verifying config/projects.json...", v)
     projects_r = env_sync.sync_projects_json(project_dir)
     if projects_r.created:
-        log("config/projects.json symlink created → ~/Desktop/Valor/projects.json", v, always=True)
-    elif projects_r.symlink_ok:
-        log("config/projects.json symlink OK", v)
+        log("config/projects.json copied from vault (was symlink or stale)", v, always=True)
+    elif projects_r.ok:
+        log("config/projects.json OK (real file copy)", v)
     if projects_r.error:
-        log(f"WARN: projects.json symlink: {projects_r.error}", v, always=True)
-        result.warnings.append(f"projects.json symlink: {projects_r.error}")
+        log(f"WARN: projects.json: {projects_r.error}", v, always=True)
+        result.warnings.append(f"projects.json: {projects_r.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)

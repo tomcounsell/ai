@@ -1,10 +1,13 @@
-"""Verify that the project .env and config/projects.json are symlinks pointing to the Valor vault.
+"""Verify that the project .env is a symlink and config/projects.json is a real file copy.
 
 The vault at ~/Desktop/Valor/ (iCloud-synced) is the single source of truth for
-secrets and project configuration. Both files must be symlinks — never regular files.
+secrets and project configuration.
 
-On a fresh machine or after accidental deletion, this module creates the symlinks
-automatically so the update process is self-healing.
+- .env: kept as a symlink (loaded only from terminal, never under launchd)
+- config/projects.json: kept as a real file copy (launchd TCC blocks open() on iCloud-synced
+  ~/Desktop files, so the launchd worker cannot follow a symlink here)
+
+On a fresh machine or after accidental deletion, this module restores both automatically.
 """
 
 from __future__ import annotations
@@ -69,21 +72,27 @@ def sync_env_from_vault(project_dir: Path) -> EnvSyncResult:
 
 @dataclass
 class ProjectsSyncResult:
-    """Result of config/projects.json symlink verification."""
+    """Result of config/projects.json file-copy verification."""
 
-    symlink_ok: bool = False
+    ok: bool = False
     created: bool = False
     error: str | None = None
 
 
 def sync_projects_json(project_dir: Path) -> ProjectsSyncResult:
-    """Verify config/projects.json is a symlink to the vault. Create it if missing.
+    """Ensure config/projects.json is a real file copy of the vault version.
+
+    config/projects.json must NEVER be a symlink — the launchd worker reads it
+    under VALOR_LAUNCHD=1, and macOS TCC blocks open()/stat() on iCloud-synced
+    ~/Desktop files from launchd agents, causing indefinite hangs.
 
     Returns ProjectsSyncResult with:
-      - symlink_ok=True  if the symlink exists and points to the vault
-      - created=True     if the symlink was just created (was missing)
-      - error            set if the vault is absent or symlink could not be created
+      - ok=True      if a current real-file copy exists
+      - created=True if the copy was just created or refreshed
+      - error        set if the vault is absent or copy could not be created
     """
+    import shutil
+
     result = ProjectsSyncResult()
     config_projects = project_dir / "config" / "projects.json"
 
@@ -95,22 +104,28 @@ def sync_projects_json(project_dir: Path) -> ProjectsSyncResult:
         logger.warning(result.error)
         return result
 
-    # Already a correct symlink — nothing to do.
-    if config_projects.is_symlink() and config_projects.resolve() == VAULT_PROJECTS_PATH.resolve():
-        result.symlink_ok = True
+    vault_mtime = VAULT_PROJECTS_PATH.stat().st_mtime
+
+    # Already a real file that is up-to-date — nothing to do.
+    if (
+        config_projects.exists()
+        and not config_projects.is_symlink()
+        and config_projects.stat().st_mtime >= vault_mtime
+    ):
+        result.ok = True
         return result
 
-    # Regular file or broken/wrong symlink — replace with symlink.
+    # Symlink, missing, or stale — replace with a real copy.
     try:
         if config_projects.exists() or config_projects.is_symlink():
             config_projects.unlink()
-        config_projects.symlink_to(VAULT_PROJECTS_PATH)
-        result.symlink_ok = True
+        shutil.copy2(str(VAULT_PROJECTS_PATH), str(config_projects))
+        result.ok = True
         result.created = True
-        logger.info("Created config/projects.json symlink → %s", VAULT_PROJECTS_PATH)
+        logger.info("Copied config/projects.json from vault (real file, not symlink)")
     except OSError as exc:
         result.error = str(exc)
-        logger.warning("Failed to create config/projects.json symlink: %s", exc)
+        logger.warning("Failed to copy config/projects.json: %s", exc)
 
     return result
 
