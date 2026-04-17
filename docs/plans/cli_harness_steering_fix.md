@@ -131,19 +131,19 @@ PM calls `steer_child.py` → validates session → calls `steer_session()` → 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_handle_steering()` `else` branch — new model write can fail (session not found, Redis down). Must log warning and fall back to re-push, never raise. Existing `except Exception as e` block covers this; add assertion in test that re-push fallback triggers when model write fails.
-- [ ] `steer_child.py` — `steer_session()` returns a dict with `success: bool`. If `success=False`, `steer_child.py` must exit non-zero with the error message. Add test for this path.
+- [x] `_handle_steering()` `else` branch — new model write can fail (session not found, Redis down). Must log warning and fall back to re-push, never raise. Existing `except Exception as e` block covers this; add assertion in test that re-push fallback triggers when model write fails.
+- [x] `steer_child.py` — `steer_session()` returns a dict with `success: bool`. If `success=False`, `steer_child.py` must exit non-zero with the error message. Add test for this path.
 
 ### Empty/Invalid Input Handling
-- [ ] `steer_session()` already rejects empty messages (returns `success: False`). `steer_child.py` already validates non-empty. No change needed; existing behavior preserved.
+- [x] `steer_session()` already rejects empty messages (returns `success: False`). `steer_child.py` already validates non-empty. No change needed; existing behavior preserved.
 
 ### Error State Rendering
-- [ ] If `steer_session()` returns `success: False`, `steer_child.py` must print the error to stderr and exit 1 — not print the success message. Verify this in the test.
+- [x] If `steer_session()` returns `success: False`, `steer_child.py` must print the error to stderr and exit 1 — not print the success message. Verify this in the test.
 
 ## Test Impact
 
-- [ ] `tests/integration/test_steering.py::TestWatchdogSteering::test_watchdog_handles_missing_client` — UPDATE: current test asserts message is re-pushed to Redis list; after fix, test must assert message is written to `AgentSession.queued_steering_messages` when model lookup succeeds, OR re-pushed when model lookup fails (session not in DB). Split into two test cases.
-- [ ] `tests/integration/test_steering.py::TestWatchdogSteering::test_watchdog_repushes_on_injection_failure` — UPDATE: re-push is now fallback, not primary path for missing-client case. Rename and narrow scope to "model write fails → re-push to Redis".
+- [x] `tests/integration/test_steering.py::TestWatchdogSteering::test_watchdog_handles_missing_client` — UPDATE: current test asserts message is re-pushed to Redis list; after fix, test must assert message is written to `AgentSession.queued_steering_messages` when model lookup succeeds, OR re-pushed when model lookup fails (session not in DB). Split into two test cases.
+- [x] `tests/integration/test_steering.py::TestWatchdogSteering::test_watchdog_repushes_on_injection_failure` — UPDATE: re-push is now fallback, not primary path for missing-client case. Rename and narrow scope to "model write fails → re-push to Redis".
 
 ## Rabbit Holes
 
@@ -202,16 +202,16 @@ No agent integration required — `steer_child.py` is called by the PM session a
 
 ## Success Criteria
 
-- [ ] `scripts/steer_child.py --session-id <cli-harness-child> --message "..."` results in the message appearing in `AgentSession.queued_steering_messages` of the target session
-- [ ] `scripts/steer_child.py` against a terminal-status session exits non-zero with a clear error message
-- [ ] `_handle_steering()` no-client branch writes to `AgentSession.queued_steering_messages` instead of re-pushing to Redis list (when session found in model)
-- [ ] `docs/features/pm-dev-session-architecture.md:386` accurately describes the turn-boundary delivery mechanism for CLI-harness
-- [ ] All three steering doc files have scope declarations at the top
-- [ ] At least one integration test in `tests/integration/test_steering.py` exercises `steer_child.py` with a real `AgentSession` (no mock of `get_active_client` or `push_steering_message`)
-- [ ] Abort path test: `steer_child.py --abort` still writes to Redis list with `is_abort=True`
-- [ ] `python -m ruff format .` clean
-- [ ] `python -m ruff check .` clean
-- [ ] Tests pass: `pytest tests/integration/test_steering.py -x -q`
+- [x] `scripts/steer_child.py --session-id <cli-harness-child> --message "..."` results in the message appearing in `AgentSession.queued_steering_messages` of the target session
+- [x] `scripts/steer_child.py` against a terminal-status session exits non-zero with a clear error message
+- [x] `_handle_steering()` no-client branch writes to `AgentSession.queued_steering_messages` instead of re-pushing to Redis list (when session found in model)
+- [x] `docs/features/pm-dev-session-architecture.md:386` accurately describes the turn-boundary delivery mechanism for CLI-harness
+- [x] All three steering doc files have scope declarations at the top
+- [x] At least one integration test in `tests/integration/test_steering.py` exercises `steer_child.py` with a real `AgentSession` (no mock of `get_active_client` or `push_steering_message`)
+- [x] Abort path test: `steer_child.py --abort` still writes to Redis list with `is_abort=True`
+- [x] `python -m ruff format .` clean
+- [x] `python -m ruff check .` clean
+- [x] Tests pass: `pytest tests/integration/test_steering.py -x -q`
 
 ## Team Orchestration
 
