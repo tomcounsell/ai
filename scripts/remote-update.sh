@@ -27,7 +27,10 @@ fi
 
 set -a
 # shellcheck disable=SC1091
-[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+# iCloud-synced .env can return EINTR mid-read; don't abort the script — defaults below cover it.
+if [ -f "$PROJECT_DIR/.env" ]; then
+    source "$PROJECT_DIR/.env" || echo "[update] WARN: .env source interrupted (EINTR from iCloud sync?), using defaults"
+fi
 set +a
 : "${SERVICE_LABEL_PREFIX:=com.valor}"
 
