@@ -141,8 +141,17 @@ HEARTBEAT_WRITE_INTERVAL = 60
 # age is strictly less than this window is considered fresh. 90s provides a
 # 30s grace margin over the 60s write cadence.
 HEARTBEAT_FRESHNESS_WINDOW = 90
-# Freshness window for the Tier 2 recent-stdout reprieve gate.
-STDOUT_FRESHNESS_WINDOW = 90
+# Freshness window (seconds) for the stdout-stale Tier 1 kill signal (#1046)
+# and the Tier 2 recent-stdout reprieve gate. A session whose last_stdout_at
+# age exceeds this window is flagged by Tier 1 even when both heartbeats are
+# fresh. 600s (10 min) accommodates long tool calls while bounding the
+# alive-but-silent failure mode. Env-tunable via STDOUT_FRESHNESS_WINDOW_SECS.
+STDOUT_FRESHNESS_WINDOW = int(os.environ.get("STDOUT_FRESHNESS_WINDOW_SECS", 600))
+# Deadline (seconds) after started_at before a session that has NEVER produced
+# stdout is also flagged by Tier 1. Preserves warmup tolerance (#1036) while
+# bounding the "silent from the start" case. Env-tunable via
+# FIRST_STDOUT_DEADLINE_SECS.
+FIRST_STDOUT_DEADLINE = int(os.environ.get("FIRST_STDOUT_DEADLINE_SECS", 300))
 # Max health-check kills before a session is finalized as `failed` instead
 # of being re-queued to `pending`. Ensures sessions always reach a terminal
 # status within ~10 minutes of going non-progressing, avoiding the
@@ -153,6 +162,13 @@ MAX_RECOVERY_ATTEMPTS = 2
 # health-check tick budget tight while still giving the cancellation a
 # moment to complete.
 TASK_CANCEL_TIMEOUT = 0.25
+
+# Module-level variable set by _has_progress() before returning False to
+# attribute the reason for flagging without changing the return type (#1046).
+# The health-check loop reads this immediately after _has_progress() returns
+# False to emit the tier1_flagged_stdout_stale counter. Reset to "" at the
+# top of _has_progress() on every call to avoid stale attribution.
+_last_progress_reason: str = ""
 
 
 # Fields to extract from AgentSession for delete-and-recreate pattern.
@@ -1576,6 +1592,30 @@ def _has_progress(entry: AgentSession) -> bool:
     (killing a working session). The kill trigger in the health check
     requires BOTH heartbeats to be stale before even evaluating Tier 2.
 
+    Tier 1 extension — stdout-stale kill signal (#1046):
+    Even when both heartbeats are fresh, a session whose ``last_stdout_at``
+    is stale beyond ``STDOUT_FRESHNESS_WINDOW`` (600s) is flagged by Tier 1.
+    This catches the alive-but-silent failure mode where a ``claude -p``
+    subprocess keeps emitting heartbeats but produces no stdout for 10+ min.
+
+    For sessions that have never produced stdout (``last_stdout_at is None``),
+    ``FIRST_STDOUT_DEADLINE`` (300s) applies: if ``started_at`` is older than
+    the deadline, Tier 1 flags the session. This preserves warmup tolerance
+    (#1036) while bounding the "silent from the start" case.
+
+    When a live-but-silent subprocess is flagged by Tier 1, Tier 2 gate (c)
+    "alive" will reprieve it — the subprocess is still running. The session
+    remains monitored and is only killed once the subprocess eventually goes
+    non-alive or the absolute timeout fires. This is intentional: an alive
+    subprocess should not be killed prematurely; the reprieve loop bounds kill
+    latency to ``STDOUT_FRESHNESS_WINDOW + one health-check tick`` after the
+    process goes non-alive.
+
+    The reason for the Tier 1 flag is stored in the module-level
+    ``_last_progress_reason`` variable (set before returning False) so the
+    health-check loop can emit a distinct counter without changing the return
+    type. The variable is reset to "" at the top of every call.
+
     Own-progress signals (original behavior, preserved):
     - ``claude_session_uuid`` — populated on SDK authentication.
     - ``log_path`` — written on the first log entry.
@@ -1592,17 +1632,42 @@ def _has_progress(entry: AgentSession) -> bool:
 
     Used by ``_agent_session_health_check`` to distinguish stuck slugless dev
     sessions (worker_alive via a co-running PM, but no progress) from healthy
-    long-warmup BUILD sessions. See issues #944, #963, and #1036.
+    long-warmup BUILD sessions. See issues #944, #963, #1036, and #1046.
     """
+    global _last_progress_reason
+    _last_progress_reason = ""
+
     # Tier 1: dual-heartbeat OR check (#1036). Fresh on either signal → progress.
     now_utc = datetime.now(tz=UTC)
+    any_heartbeat_fresh = False
     for hb_attr in ("last_heartbeat_at", "last_sdk_heartbeat_at"):
         hb = getattr(entry, hb_attr, None)
         if isinstance(hb, datetime):
             hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
             age_s = (now_utc - hb_aware).total_seconds()
             if age_s < HEARTBEAT_FRESHNESS_WINDOW:
-                return True
+                any_heartbeat_fresh = True
+                break
+
+    if any_heartbeat_fresh:
+        # Tier 1 extension: stdout-stale kill signal (#1046).
+        # Even with fresh heartbeats, flag if stdout is stale or overdue.
+        lso = getattr(entry, "last_stdout_at", None)
+        if isinstance(lso, datetime):
+            lso_aware = lso if lso.tzinfo else lso.replace(tzinfo=UTC)
+            if (now_utc - lso_aware).total_seconds() >= STDOUT_FRESHNESS_WINDOW:
+                _last_progress_reason = "stdout_stale"
+                return False  # stdout stale; Tier 1 flags despite fresh heartbeats
+        elif lso is None:
+            # No stdout yet — apply FIRST_STDOUT_DEADLINE relative to started_at.
+            started = getattr(entry, "started_at", None)
+            if started is not None:
+                started_aware = started if started.tzinfo else started.replace(tzinfo=UTC)
+                if (now_utc - started_aware).total_seconds() >= FIRST_STDOUT_DEADLINE:
+                    _last_progress_reason = "first_stdout_deadline"
+                    return False  # never produced stdout within deadline; flag
+        return True
+
     # Own-progress fields (original behavior, preserves #944 / #963 invariants).
     if (entry.turn_count or 0) > 0:
         return True
@@ -1871,6 +1936,22 @@ async def _agent_session_health_check() -> None:
                     except Exception as _m_err:
                         logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
 
+                    # Emit stdout-stale counter when the flag came from stdout,
+                    # not from heartbeat staleness (#1046). _last_progress_reason
+                    # is set by _has_progress() before returning False.
+                    if _last_progress_reason in ("stdout_stale", "first_stdout_deadline"):
+                        try:
+                            from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                            _MR.incr(
+                                f"{entry.project_key}:session-health:tier1_flagged_stdout_stale"
+                            )
+                        except Exception as _m_err:
+                            logger.debug(
+                                "[session-health] tier1_flagged_stdout_stale counter failed: %s",
+                                _m_err,
+                            )
+
                     reprieve = _tier2_reprieve_signal(handle, entry)
                     if reprieve is not None:
                         # Activity-positive: do NOT kill, do NOT increment recovery_attempts.
@@ -1889,7 +1970,10 @@ async def _agent_session_health_check() -> None:
                             entry.save(update_fields=["reprieve_count"])
                         except Exception as _rc_err:
                             logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
-                        logger.info(
+                        # Escalate log level after 3 reprieves to alert operators
+                        # that a session may be alive-but-silent indefinitely (#1046 C2).
+                        log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
+                        log_fn(
                             "[session-health] Tier 2 reprieve (%s) for session %s — "
                             "skipping kill (reprieve_count=%s)",
                             reprieve,
