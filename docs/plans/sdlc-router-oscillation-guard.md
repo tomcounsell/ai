@@ -1,9 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
 created: 2026-04-18
+revised: 2026-04-18
+revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1040
 last_comment_id:
 ---
@@ -292,22 +294,75 @@ forced dispatch if it fires:
 | G1: Critique loop | Latest critique verdict is `NEEDS REVISION` or `MAJOR REWORK` AND last dispatched skill was `/do-plan-critique` | `/do-plan` |
 | G2: Critique cycle cap | `critique_cycle_count >= MAX_CRITIQUE_CYCLES` (2) AND CRITIQUE is still failing | Escalate: emit `blocked` state with reason `critique cycle cap reached` |
 | G3: PR lock | Open PR exists for this issue AND proposed dispatch is `/do-plan` or `/do-plan-critique` | Redirect to `/do-pr-review` / `/do-patch` / `/do-merge` based on stage_states |
-| G4: Oscillation | `same_stage_dispatch_count >= 3` | Escalate: emit `blocked` state with reason `stage oscillation — {skill} dispatched {N} times without state change` |
-| G5: Unchanged artifact | Previous critique/review verdict for this stage matches the current artifact hash | Use cached verdict — do not re-dispatch the critique/review |
+| G4: Oscillation (universal) | `same_stage_dispatch_count >= 3` | Escalate: emit `blocked` state with reason `stage oscillation — {skill} dispatched {N} times without state change` |
+| G5: Unchanged critique artifact | Previous CRITIQUE verdict exists AND current plan file hash matches recorded hash | Use cached verdict — do not re-dispatch `/do-plan-critique` |
 
-G5 is the non-determinism mitigation. If the plan hash is unchanged and a
-verdict already exists, the router does NOT re-run the critique — it uses
-the cached verdict. This converts "same input, different output" into
-"same input, one consistent output."
+**G5 applies to CRITIQUE only, not REVIEW.** Plan files are pure text that only
+change when the plan file changes. Review verdicts on a PR can legitimately
+change without the diff changing — CI status flips green/red, new linked
+issues, new sibling PRs merging, human review comments arriving. Caching
+review verdicts on a diff hash would mask legitimate signal changes. The
+non-determinism of `/do-pr-review` is handled by G4 (oscillation cap) instead
+— after 3 same-skill dispatches without state change, the router escalates
+to `blocked` and surfaces the non-determinism for human judgment.
 
-**4. Same-stage dispatch counter.**
+G5 on CRITIQUE converts "same input, different output" into "same input, one
+consistent output." Cache invalidation: any edit to the plan file changes
+its sha256 hash; no TTL is needed because the hash IS the cache key. A plan
+whose hash matches a prior verdict cannot be re-critiqued until it is
+re-edited.
 
-After each `/sdlc` dispatch decision, the router writes
-`stage_states._sdlc_dispatches[-1] = {"skill": ..., "at": ISO8601,
-"stage_snapshot": {...}}`. If the next invocation dispatches the same skill
-and the `stage_snapshot` is identical (same statuses, same verdicts, same
-cycle counts), `same_stage_dispatch_count` increments. Otherwise it resets
-to 1. G4 uses this counter.
+**Coverage across all stages:** G1 targets CRITIQUE specifically, G2 caps
+critique cycles, G3 locks plan-stage dispatch once a PR exists, G5 caches
+CRITIQUE verdicts. G4 is **universal** — it applies to EVERY stage,
+including the less-scrutinized DOCS and MERGE stages. If the router
+dispatches `/do-docs` three times without stage_states changing, G4
+escalates. If `/do-merge` is dispatched repeatedly on a PR that keeps
+failing its merge gate, G4 escalates. No stage is exempt.
+
+**4. Same-stage dispatch counter (precise state machine).**
+
+The oscillation counter tracks how many times in a row `/sdlc` has picked the
+same sub-skill WITHOUT the pipeline state changing between picks.
+
+- **Storage:** `stage_states._sdlc_dispatches` is a **bounded list** (max 10
+  entries, FIFO-evicted) of `{skill: str, at: ISO8601, stage_snapshot: dict}`
+  records. Bounded list prevents unbounded growth over long-running sessions.
+- **When written:** At the END of `/sdlc` Step 4 — after the dispatch decision
+  is finalized and BEFORE the Skill tool is invoked. The router writes the
+  decision + current `stage_snapshot` BEFORE launching the sub-skill. This
+  ensures the record exists even if the sub-skill crashes mid-execution.
+- **When read:** At the START of `/sdlc` Step 3.5 (guard evaluation), for the
+  current invocation to decide whether to trip G4.
+- **`stage_snapshot` projection (explicit):** Only these fields:
+  - `stages` (the stage_state dict keyed by stage name → status)
+  - `_verdicts` (the most recent verdict per stage)
+  - `_patch_cycle_count` and `_critique_cycle_count`
+  - `pr_number` (if any)
+
+  **Excluded from snapshot** (to prevent spurious churn):
+  - Timestamps, ISO8601 strings, wall-clock ticks
+  - `recorded_at` inside verdict records
+  - PR check counts, CI status, human review comments
+  - The `_sdlc_dispatches` list itself (otherwise the counter would never match)
+
+- **Counter logic:** `same_stage_dispatch_count` is computed on read as "how
+  many of the most recent entries have the SAME skill AND IDENTICAL
+  stage_snapshot, counted backward from the last entry." A dict-equality
+  compare on the snapshot projection — cheap and deterministic.
+- **What resets the counter:** Any dispatch where the skill differs from the
+  prior dispatch, OR any dispatch where the `stage_snapshot` differs from the
+  prior snapshot. Human intervention (running `/do-patch` or `/do-test`
+  directly outside of `/sdlc`) changes `stage_states`, which changes the
+  snapshot, which implicitly resets the counter on the next `/sdlc` read —
+  no explicit hook needed (resolves former Open Question #2).
+- **Sub-skill crash handling:** If a sub-skill crashes before it updates
+  `stage_states`, the next `/sdlc` reads the same snapshot and the counter
+  increments. This is the intended behavior — repeated dispatches of a
+  crashing skill ARE oscillation. G4 catches it.
+
+G4 uses this counter. Threshold: `same_stage_dispatch_count >= 3` → escalate
+to `blocked`.
 
 **5. Regression test.**
 
@@ -323,8 +378,27 @@ testable, extract a Python-level reference implementation at
 `agent/sdlc_router.py` that encodes the dispatch table and guards as code.
 The SKILL.md continues to be the human-readable router runbook, but it
 cites `agent.sdlc_router.decide_next_dispatch()` as the canonical
-algorithm. A CI check will fail if the SKILL.md table drifts from the
-Python table (simple fixture-based comparison).
+algorithm.
+
+**Parity contract (SKILL.md markdown vs. Python table):**
+
+The SKILL.md dispatch table rows are parsed deterministically by the parity
+test via a fixed format:
+- Row format: `| <number> | <state string> | <skill string> | <reason> |`
+- State string and skill string MUST be extractable by a fixed regex
+- Each row has a stable row number (1, 2, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 9, 10, 10b)
+- The Python `DISPATCH_RULES` list has one entry per row number with fields
+  `{row_id: str, state_predicate: Callable, skill: str, reason: str}`
+
+The parity test asserts every markdown row number appears in `DISPATCH_RULES`
+with a matching `skill` string and a `state_predicate` whose natural-language
+`__doc__` matches the markdown state string (normalized whitespace, case
+insensitive). If the markdown evolves but the Python doesn't (or vice versa),
+the test fails with a precise diff of the mismatched row. This avoids brittle
+full-table comparison and localizes drift to single rows.
+
+The "Reason" column in the markdown is descriptive only and NOT checked by the
+parity test — it can evolve freely for human readability without breaking CI.
 
 ## Failure Path Test Strategy
 
@@ -366,8 +440,10 @@ Python table (simple fixture-based comparison).
       and verdicts). Existing flat-shape tests run under `--format legacy` and
       still pass.
 - [ ] `tests/unit/test_pipeline_state_machine.py` — UPDATE: add verdict
-      read/write tests on the `_verdicts` metadata subkey. Existing tests
-      unaffected.
+      read/write tests on the `_verdicts` metadata subkey. Add test that
+      `classify_outcome()` routes verdict writes through
+      `sdlc_verdict.record_verdict()` and produces the same `_verdicts`
+      shape as the CLI path. Existing tests unaffected.
 - [ ] `tests/unit/test_sdlc_mode.py` — UPDATE: if any test asserts the exact
       shape of the SDLC skill's dispatch output, update to assert on the new
       enriched shape.
@@ -381,6 +457,11 @@ Greenfield tests (new files, no existing tests to modify):
       regression test for #1036, plus synthetic cases for each of G1-G5.
 - [ ] `tests/unit/test_sdlc_router_decision.py` — NEW: pure-function tests
       for `agent.sdlc_router.decide_next_dispatch()`.
+- [ ] `tests/unit/test_sdlc_skill_md_parity.py` — NEW: markdown-to-Python
+      parity test that fails when SKILL.md dispatch rows diverge from
+      `agent.sdlc_router.DISPATCH_RULES`.
+- [ ] `tests/unit/test_stage_states_helpers.py` — NEW: optimistic-retry
+      helper tests — retry-on-conflict, retry exhaustion, success path.
 
 ## Rabbit Holes
 
@@ -400,12 +481,20 @@ Greenfield tests (new files, no existing tests to modify):
   (explicit strings in `/do-plan-critique`, `<!-- OUTCOME {...} -->` blocks
   in `/do-pr-review`). Parse these with plain string matching; do not
   introduce an LLM-based parser.
-- **Retrofitting the bridge's pipeline state machine**: `classify_outcome()`
-  in `agent/pipeline_state.py` already parses verdicts for bridge-initiated
-  sessions. Do NOT duplicate or entangle this with the new CLI — the CLI
-  is for explicit recording from skills. The two paths can coexist; the
-  CLI path writes the same `_verdicts` key that `classify_outcome()` could
-  also write (follow-up issue, not this plan).
+- **Rewriting `classify_outcome()` in `agent/pipeline_state.py`**: That function
+  parses verdicts from dev-session output tail for bridge-initiated sessions.
+  It stays as-is for its existing callers. This plan does NOT rewrite it.
+
+  **Deduplication: there is ONE source of truth.** To avoid two writers of the
+  `_verdicts` key, the new `sdlc_verdict` CLI is the SOLE writer. When
+  `classify_outcome()` parses a verdict from the output tail, it invokes
+  `sdlc_verdict record` (via subprocess or direct Python call — see task 3.5
+  below) instead of writing to `stage_states` itself. The existing
+  `_critique_cycle_count` increment in `classify_outcome()` remains unchanged —
+  that is a separate metadata field with a clear existing owner. Only verdict
+  RECORDING is unified. This is in scope for this plan, not a follow-up,
+  because leaving two writers risks exactly the dual-source drift that caused
+  the original bug.
 
 ## Risks
 
@@ -449,20 +538,34 @@ across benign churn.
 
 ## Race Conditions
 
-### Race 1: Concurrent `/sdlc` invocations on the same session
-**Location:** `agent/sdlc_router.py` read-modify-write on `stage_states`
-**Trigger:** Two PMs or a PM and a hook running `/sdlc` simultaneously.
-Both read the same `stage_states`, both decrement/increment
-`_sdlc_dispatches`, one save wins.
-**Data prerequisite:** `stage_states` reflects the last-completed
-dispatch.
-**State prerequisite:** Only one `/sdlc` is deciding the next dispatch
-at any given moment for a given issue/session.
-**Mitigation:** The single-PM-per-issue invariant is already enforced
-upstream (PM persona Rule 4 — wait-for-children). The router's
-read-modify-write is within one bash call, so the window is small.
-If a race is observed in practice, add a Redis lock keyed by session_id;
-not in scope for v1.
+### Race 1: Concurrent writes to `stage_states._verdicts` and `_sdlc_dispatches`
+**Location:** `tools/sdlc_verdict.py` and `agent/sdlc_router.py`
+read-modify-write on `AgentSession.stage_states` (a JSON field).
+**Trigger:** A skill finishes and invokes `sdlc_verdict record` at the same
+moment that `classify_outcome()` (bridge path) records its own verdict for a
+different stage, OR a PM and a hook both drive `/sdlc` for the same session.
+Both read the same `stage_states` dict, both modify different keys, one save
+wins and drops the other's change.
+**Data prerequisite:** `stage_states` reflects all completed writes.
+**State prerequisite:** Concurrent writers observe each other's writes.
+**Mitigation (v1, in-scope):** All writers use a **read-modify-write with
+optimistic retry** pattern, implemented as a small helper `update_stage_states`
+in `tools/stage_states_helpers.py`:
+1. Load session.
+2. Snapshot `stage_states` JSON.
+3. Apply the update function locally.
+4. Save; if Popoto raises a conflict or if the saved value differs from
+   the pre-save snapshot when re-read, retry up to 3 times.
+5. If all 3 retries fail, log a warning and continue (the write is a
+   metadata update, not a correctness-critical state change).
+
+This pattern eliminates the lost-write window without requiring a Redis lock.
+It is used by `sdlc_verdict record`, the oscillation-counter write in
+`sdlc_router`, and (for consistency) the verdict write that
+`classify_outcome()` now routes through `sdlc_verdict record` (see task 3.5).
+
+**Out of scope (v2, deferred):** True Redis WATCH/MULTI locking keyed by
+session_id. Defer until optimistic retry proves insufficient in production.
 
 ### Race 2: Verdict recorded after the next `/sdlc` already read
 **Location:** `tools/sdlc_verdict.py` write races with `/sdlc` read.
@@ -549,6 +652,13 @@ the SDLC skills.
       shape available via `--format legacy`.
 - [ ] `tools/sdlc_verdict record` and `get` round-trip a verdict with
       artifact hash.
+- [ ] `classify_outcome()` in `agent/pipeline_state.py` routes verdict
+      writes through `sdlc_verdict.record_verdict()`. There is ONE writer
+      for `_verdicts`. Covered by a new test in
+      `tests/unit/test_pipeline_state_machine.py`.
+- [ ] `update_stage_states` helper retries on write conflict and succeeds
+      on the second attempt. Covered by
+      `tests/unit/test_stage_states_helpers.py::test_retry_on_conflict`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`): feature doc created, README
       index updated.
@@ -624,23 +734,61 @@ the SDLC skills.
 
 ### 3. Create `sdlc_verdict` CLI
 - **Task ID**: build-verdict-recorder
-- **Depends On**: build-reference-algorithm
+- **Depends On**: build-reference-algorithm, build-stage-states-helpers
 - **Validates**: `tests/unit/test_sdlc_verdict.py` (create)
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- `record` subcommand: writes `stage_states._verdicts[stage] = {"verdict":
-  str, "recorded_at": ISO8601, "artifact_hash": sha256}`.
-- `get` subcommand: reads the latest verdict for a stage.
-- Artifact hash computation: plan file content for CRITIQUE, PR diff
-  head-hash for REVIEW (use `gh pr diff {N}` piped into sha256).
+- Expose `record_verdict(session, stage, verdict_str, blockers=None,
+  tech_debt=None)` and `get_verdict(session, stage)` as Python functions
+  (called from CLI AND from `classify_outcome()` — see task 3.5).
+- `record` subcommand writes `stage_states._verdicts[stage] = {"verdict":
+  str, "recorded_at": ISO8601, "artifact_hash": sha256}` via the
+  `update_stage_states` helper (optimistic retry).
+- `get` subcommand reads the latest verdict for a stage.
+- Artifact hash computation: plan file content for CRITIQUE only (REVIEW
+  does not cache by diff hash — see G5 rationale in Technical Approach).
+  Plan file path discovered by `grep -rl "#{issue_number}" docs/plans/`.
 - Graceful failure: returns `{}` on any error (same as sdlc_stage_marker).
 - Invoke from `/do-plan-critique` SKILL.md Step 5 and
   `/do-pr-review` SKILL.md after the OUTCOME block.
 
+### 3.5. Route `classify_outcome()` through the verdict recorder
+- **Task ID**: build-classify-outcome-unification
+- **Depends On**: build-verdict-recorder
+- **Validates**: `tests/unit/test_pipeline_state_machine.py` (update)
+- **Assigned To**: router-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- In `agent/pipeline_state.py::classify_outcome()`, when a critique or review
+  verdict is extracted from the dev-session output tail, invoke
+  `tools.sdlc_verdict.record_verdict(session, stage, verdict_str)` directly
+  (same process — not subprocess) instead of writing to `stage_states` inline.
+- Preserve existing `_critique_cycle_count` increment logic — unchanged.
+- The goal: ONE writer for `_verdicts`. Bridge-initiated sessions and
+  locally-initiated sessions both funnel through the same code path.
+- Add a regression test: `classify_outcome()` with a critique verdict
+  populates `_verdicts["CRITIQUE"]` with the same shape the CLI produces.
+
+### 3.6. Add optimistic-retry helper for stage_states writes
+- **Task ID**: build-stage-states-helpers
+- **Depends On**: none
+- **Validates**: `tests/unit/test_stage_states_helpers.py` (create)
+- **Assigned To**: router-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tools/stage_states_helpers.py` with `update_stage_states(session,
+  update_fn, max_retries=3) -> bool`.
+- Loads session, snapshots `stage_states` JSON, applies `update_fn(dict)`,
+  saves, verifies.
+- On conflict or mismatch, reloads and retries up to `max_retries`.
+- Returns `True` on success, `False` on exhaustion (logs a warning).
+- Used by `sdlc_verdict record`, oscillation-counter write in `sdlc_router`,
+  and the `classify_outcome()` write path.
+
 ### 4. Add Legal Dispatch Guards to the router
 - **Task ID**: build-guards
-- **Depends On**: build-enriched-query, build-verdict-recorder
+- **Depends On**: build-enriched-query, build-verdict-recorder, build-stage-states-helpers
 - **Validates**: `tests/unit/test_sdlc_router_oscillation.py` (create)
 - **Assigned To**: router-builder
 - **Agent Type**: builder
@@ -697,7 +845,8 @@ the SDLC skills.
 
 ### 8. Validate
 - **Task ID**: validate-all
-- **Depends On**: test-regression-suite, test-skill-md-parity, build-skill-integrations
+- **Depends On**: test-regression-suite, test-skill-md-parity,
+  build-skill-integrations, build-classify-outcome-unification
 - **Assigned To**: router-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -706,6 +855,13 @@ the SDLC skills.
 - Run `python -m ruff check . && python -m ruff format --check .`.
 - Smoke test: run `python -m tools.sdlc_stage_query --issue-number 1040`
   and verify the enriched payload shape.
+- Smoke test: run `python -m tools.sdlc_verdict record --stage CRITIQUE
+  --verdict "READY TO BUILD" --issue-number 1040 &&
+  python -m tools.sdlc_verdict get --stage CRITIQUE --issue-number 1040`
+  and verify round-trip.
+- Smoke test: invoke `classify_outcome()` with a simulated critique-verdict
+  output tail and verify `_verdicts["CRITIQUE"]` is populated identically
+  to the CLI path.
 
 ### 9. Documentation
 - **Task ID**: document-feature
@@ -734,26 +890,36 @@ the SDLC skills.
 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 
+## Revision Summary (2026-04-18)
+
+Revision pass addressed these concerns from the initial critique:
+
+| Concern | Resolution |
+|---------|------------|
+| G5 cache semantics ambiguous — does it apply to REVIEW? | **Scoped to CRITIQUE only.** REVIEW is covered by G4's universal oscillation cap. The rationale is explicit in Technical Approach. |
+| Dual writers to `_verdicts` (CLI + `classify_outcome()`) create drift risk | **Unified.** New task 3.5 routes `classify_outcome()` through `sdlc_verdict.record_verdict()`. ONE writer. |
+| SKILL.md vs. Python parity check was hand-wave | **Concrete contract** — row-number-keyed comparison, state-predicate `__doc__` matched to markdown state cell, Reason column intentionally excluded. Localized failure diffs. |
+| Race 1 dismissed with "single-PM invariant" despite new write paths | **Optimistic-retry helper** (task 3.6) wraps all `stage_states` writes. Retries on conflict up to 3 times, logs on exhaustion. |
+| G4 oscillation counter state machine underspecified | **Fully specified** — bounded list (max 10), written BEFORE skill launch, snapshot projection explicitly enumerated (excluded: timestamps, CI churn, the list itself), counter reset on any state-snapshot diff. |
+| DOCS/MERGE stage oscillation uncovered | G4 is **universal**, applies to every stage. Explicit coverage note added in Technical Approach. |
+| Open questions left unresolved | All three resolved in-plan (see Open Questions section). |
+
 ---
 
 ## Open Questions
 
-1. **Should G5 (artifact hash cache) apply to REVIEW as well as CRITIQUE,
-   or only CRITIQUE?** The issue lists non-determinism for both, but caching
-   review verdicts on an unchanged PR diff is aggressive — a new CI run or a
-   new linked discussion could legitimately change the verdict. My default is
-   to apply G5 to both stages with a short TTL (e.g., 10 minutes). Feedback
-   welcome.
+All prior open questions have been resolved during the revision pass:
 
-2. **Should the oscillation counter (G4) reset on user intervention?** If a
-   human manually runs `/do-patch` between `/sdlc` invocations, should the
-   counter reset? My default is yes — any non-`/sdlc` dispatch resets the
-   counter because it represents human intent. But this requires a hook in
-   the skill dispatch path that I haven't fully scoped.
+- **G5 applies to CRITIQUE only** (see Technical Approach, G5 row of the
+  guards table). Review verdicts are not cached on diff hash because CI
+  status and linked-issue state legitimately vary without the diff changing.
+  G4 (universal oscillation cap) handles REVIEW non-determinism instead.
+- **G4 counter resets implicitly on state change** (see "What resets the
+  counter" in Technical Approach step 4). Human intervention that modifies
+  `stage_states` changes the snapshot and resets the counter on the next
+  `/sdlc` read — no explicit hook needed.
+- **Dispatch table natural-language inference stays as the fallback after
+  guards.** Guards are preconditions, not a replacement for the table. A
+  future plan may propose full structural routing; this plan does not.
 
-3. **Do we need to deprecate the natural-language inference in the dispatch
-   table, or is it fine to keep as the fallback after guards?** The guards
-   cover the three known pathologies; the dispatch table still relies on LLM
-   judgment for nuanced cases (e.g., "docs NOT done but review is APPROVED").
-   My default is to keep the table as-is — guards are preconditions, not a
-   replacement. But a future plan could propose full structural routing.
+No remaining open questions — the plan is ready for build.
