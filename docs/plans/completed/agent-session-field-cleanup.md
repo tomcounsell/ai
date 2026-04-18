@@ -167,7 +167,7 @@ No agent integration required — AgentSession is not exposed through any MCP se
 
 - [ ] Update `docs/features/redis-models.md` — field name references throughout
 - [ ] Update `docs/features/session-isolation.md` — references `trigger_message_id`
-- [ ] Update `docs/features/steering-queue.md` — references `reply_to_msg_id`
+- [ ] Update `docs/features/steering-implementation-spec.md` — references `reply_to_msg_id`
 - [ ] Update inline comments on `models/agent_session.py` — field grouping comments
 
 ## Success Criteria
@@ -296,7 +296,7 @@ No agent integration required — AgentSession is not exposed through any MCP se
 - **Parallel**: false
 - Update `docs/features/redis-models.md` with new field names
 - Update `docs/features/session-isolation.md`
-- Update `docs/features/steering-queue.md`
+- Update `docs/features/steering-implementation-spec.md`
 - Update field comments in `models/agent_session.py`
 
 ### 7. Final Validation

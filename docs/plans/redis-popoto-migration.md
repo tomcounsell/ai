@@ -113,7 +113,7 @@ No existing tests affected for `bridge/dedup.py` -- it currently has zero test c
 ## Rabbit Holes
 
 - **Migrating the distributed lock to Popoto**: Popoto's `save()` cannot do atomic `SET NX EX`. The lock must stay as raw Redis. Do not attempt to wrap it in a model.
-- **Migrating `agent/steering.py`**: This is an intentional transient FIFO queue design (documented in `docs/features/steering-queue.md`). Explicitly out of scope.
+- **Migrating `agent/steering.py`**: This is an intentional transient FIFO queue design (documented in `docs/features/steering-implementation-spec.md`). Explicitly out of scope.
 - **Migrating `agent/job_queue.py`**: Contains ORM-repair code that intentionally uses raw Redis. Out of scope.
 - **Key migration/data continuity**: Do not build migration scripts for existing Redis keys. The data is ephemeral (TTLs of hours to days) and will naturally rotate.
 

@@ -402,7 +402,7 @@ python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-
 python scripts/steer_child.py --list --parent-id <parent_id>
 ```
 
-See [Session Steering](session-steering.md) for the turn-boundary inbox architecture and [Steering Queue](steering-queue.md) for the Redis list / mid-turn injection path.
+See [Session Steering](session-steering.md) for the turn-boundary inbox architecture and [Steering Queue: Historical Spec](steering-implementation-spec.md) for the Redis list / mid-turn injection path.
 
 ## Q&A Formatting (Prose vs Structured)
 

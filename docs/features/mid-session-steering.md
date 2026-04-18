@@ -2,6 +2,8 @@
 
 **Scope:** Telegram bridge reply-thread steering via Redis list (`steering:{session_id}`). For PM→child steering, see `session-steering.md`.
 
+**See also:** [Session Steering](session-steering.md) — canonical reference for the turn-boundary inbox model and parent-child steering
+
 ## Overview
 
 Mid-session steering allows a user to send a reply-to message in Telegram that gets injected into a currently running agent session, enabling real-time course correction without waiting for the agent to finish. This is distinct from creating a new session or resuming a completed session.
@@ -95,6 +97,6 @@ If a steering message arrives just as the agent finishes, `pop_all_steering_mess
 
 ## Related Documentation
 
-- [Steering Queue](steering-queue.md) -- Original implementation plan and design decisions
+- [Steering Queue: Historical Spec](steering-implementation-spec.md) -- Original implementation plan and design decisions
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Auto-continue and output classification that interacts with session status
 - [Agent Session Model](agent-session-model.md) -- Session lifecycle and status transitions

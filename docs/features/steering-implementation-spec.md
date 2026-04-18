@@ -6,7 +6,9 @@ created: 2026-02-02
 tracking: https://github.com/tomcounsell/ai/issues/23
 ---
 
-# Steering Queue: Mid-Execution Course Correction via Reply Threads
+# Steering Queue: Historical Design Specification
+
+> **Historical Design Specification** — This document records the original design decisions, Redis key structure, watchdog hook design, and SDK client registry rationale from the initial implementation of session steering. For the current operational reference, see [Session Steering](session-steering.md). For the end-to-end Telegram reply-thread flow, see [Mid-Session Steering](mid-session-steering.md).
 
 **Scope:** Redis list steering queue design and bridge coalescing. SDK-harness mid-turn injection (legacy/secondary path). For PM→child steering, see `session-steering.md`.
 
@@ -214,90 +216,6 @@ def clear_steering_queue(session_id: str) -> int:
 
 All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steering:{session_id}`. No TTL — messages persist until consumed or explicitly cleared by session completion.
 
-## Rabbit Holes & Risks
-
-### Risk 1: SDK interrupt + re-query behavior
-**Impact:** `client.interrupt()` sends an `SDKControlInterruptRequest` to the CLI subprocess. If the agent is mid-tool-execution (e.g., halfway through a git push), the interrupt could leave the working directory in a dirty state. Additionally, calling `client.query(steering_text)` after interrupt needs the CLI to be in a state where it accepts new user input — if the interrupt didn't fully cancel the pending tool, the query might fail or be ignored.
-**Mitigation:** Test this flow in isolation first with a simple long-running task. If interrupt + query doesn't work cleanly, fall back to injecting the steering text as a **tool result** via the hook return value (the hook already returns a dict to the SDK). Worst case: fall back to Option C (file-based signaling). The agent already reads files.
-
-### Risk 2: Race condition between watchdog and agent response
-**Impact:** The watchdog fires after a tool call. If the agent finishes between the steering push and the next tool call, the steering message is never consumed.
-**Mitigation:** When a session completes, check its steering queue. If messages remain, either auto-queue them as a new follow-up session or log them. Add `clear_steering_queue(session_id)` to `_execute_agent_session` completion path.
-
-### Risk 3: Watchdog hook doesn't have async access to Redis
-**Impact:** The hook is async but runs in the SDK's event loop. Redis calls via popoto are synchronous.
-**Mitigation:** Use `POPOTO_REDIS_DB.lpop()` directly — it's a sync Redis call but completes in <1ms (local Redis). Wrapping in `asyncio.to_thread()` is an option if needed but likely unnecessary for a single LPOP.
-
-### Risk 4: Multiple steering messages accumulate
-**Impact:** If the user sends several corrections in quick succession, they all queue up. The agent processes them one at a time (one per tool call), which could be confusing.
-**Mitigation:** Pop ALL messages from the queue in one check and concatenate them into a single injection. Use `LPOP` in a loop until empty, then combine.
-
-## Parent-Child Steering (PM session to Dev session)
-
-In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering** where a PM session (PM persona) pushes steering messages to its spawned Dev sessions.
-
-### How It Works
-
-The PM session invokes `scripts/steer_child.py` via bash to push steering messages to a running child Dev session. The script validates the parent-child relationship before pushing to the same Redis steering queue used by bridge steering.
-
-```
-PM session decides to steer
-    |
-    v
-python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>
-    |
-    v
-Script validates: child exists, is a Dev session, parent_chat_session_id matches, status is "running"
-    |
-    v
-push_steering_message(child_session_id, text, sender="PM session")
-    |
-    v
-Child's watchdog picks up on next tool call (existing _handle_steering in health_check.py)
-    |
-    v
-Dev session adjusts behavior
-```
-
-### CLI Usage
-
-```bash
-# Steer a child Dev session
-python scripts/steer_child.py --session-id <child_id> --message "skip docs, focus on tests" --parent-id <parent_id>
-
-# Send abort signal to a child
-python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-id <parent_id> --abort
-
-# List active child Dev sessions
-python scripts/steer_child.py --list --parent-id <parent_id>
-```
-
-The `--parent-id` can also be read from the `VALOR_SESSION_ID` environment variable, which is set by `sdk_client.py` for running sessions.
-
-### Validation
-
-The script enforces strict parent-child relationship validation:
-
-- Target must be an existing AgentSession
-- Target must be a Dev session (`is_dev` check)
-- Target's `parent_chat_session_id` must match the caller's ID
-- Target must be in `running` status
-
-All validation failures exit with non-zero code and print an error to stderr.
-
-### Relationship to Bridge Steering
-
-| Aspect | Bridge Steering | Parent-Child Steering |
-|--------|----------------|----------------------|
-| Caller | Telegram user (via reply thread) | PM session (via bash script) |
-| Entry point | `bridge/telegram_bridge.py` | `scripts/steer_child.py` |
-| Validation | Session ID match + running status | Parent-child relationship + running status |
-| Redis queue | Same (`steering:{session_id}`) | Same (`steering:{session_id}`) |
-| Consumption | Same (watchdog `_handle_steering`) | Same (watchdog `_handle_steering`) |
-| Sender field | User's name | "PM session" |
-
-Both paths converge on the same `push_steering_message()` function in `agent/steering.py` and the same consumption path in the watchdog hook.
-
 ## No-Gos (Out of Scope)
 
 - **Message classification AI** — Existing reply-to handling is sufficient for routing. No LLM-based classification of "steering vs new task" needed.
@@ -305,25 +223,3 @@ Both paths converge on the same `push_steering_message()` function in `agent/ste
 - **Multi-session steering** — Only one session runs per project at a time (enforced by session queue). No need to handle concurrent session steering.
 - **Non-reply steering** — Only reply-thread messages count as steering. A new mention always creates a new session.
 - **Automatic fan-out** — Parent-child steering is always explicit, per-child. No broadcasting to all children.
-
-## Success Criteria
-
-- [ ] Reply to a running session's message injects the reply into the active agent session
-- [ ] Agent acknowledges and acts on the steering message within its current execution
-- [ ] "stop" / "cancel" reply aborts the running session within one tool call
-- [ ] Non-reply messages during a running session queue normally with a position ack
-- [ ] Reply to a completed session resumes it (existing behavior preserved)
-- [ ] Steering queue cleans up after session completes (no orphaned Redis keys)
-- [ ] No production Redis pollution (steering keys cleaned up on session completion)
-- [ ] Tests cover: push/pop, abort signal, bridge routing, watchdog injection, cleanup
-
-## Files to Modify
-
-| File | Change |
-|------|--------|
-| `agent/steering.py` | **NEW** — Steering queue functions (push, pop, clear) |
-| `agent/health_check.py` | Add steering queue check to `watchdog_hook` |
-| `agent/sdk_client.py` | Store active client reference for interrupt access |
-| `bridge/telegram_bridge.py` | Route reply-to-active-session to steering queue |
-| `agent/agent_session_queue.py` | Clear steering queue on session completion; handle leftover messages |
-| `tests/test_steering.py` | **NEW** — Tests for steering queue, routing, and cleanup |
