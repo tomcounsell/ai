@@ -3,20 +3,27 @@ nudge/re-enqueue paths, and calendar heartbeat."""
 
 import asyncio
 import logging
-import os
+import os  # noqa: F401
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
+from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+from agent.output_router import NUDGE_MESSAGE, SendToChatResult
 from agent.session_completion import (
     _complete_agent_session,  # noqa: F401
+    _diagnose_missing_session,
     _handle_dev_session_completion,
 )
+from agent.session_health import HEARTBEAT_WRITE_INTERVAL
+from agent.session_logs import save_session_snapshot
+from agent.session_revival import _session_branch_name
 from agent.session_state import (
     SessionHandle,
     _active_sessions,
 )
+from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from config.enums import PersonaType, SessionType  # noqa: F401
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -88,8 +95,8 @@ async def _handle_harness_not_found(raw: str, agent_session) -> tuple[str, bool]
 def _call_ensure_worker(worker_key, *, is_project_keyed=False):
     """Deferred call to _ensure_worker to avoid circular import."""
     from agent.agent_session_queue import _ensure_worker  # noqa: PLC0415
-    _ensure_worker(worker_key, is_project_keyed=is_project_keyed)
 
+    _ensure_worker(worker_key, is_project_keyed=is_project_keyed)
 
 
 def _find_valor_calendar() -> str:
@@ -137,7 +144,6 @@ async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
 
 # Interval between calendar heartbeats during long-running sessions
 CALENDAR_HEARTBEAT_INTERVAL = 25 * 60  # 25 minutes (fits within 30-min segments)
-
 
 
 async def _enqueue_nudge(
@@ -216,6 +222,7 @@ async def _enqueue_nudge(
         # This prevents loss of context_summary, expectations, issue_url,
         # pr_url, history, correlation_id, and other session-phase fields.
         from agent.agent_session_queue import _extract_agent_session_fields as _eaf  # noqa: PLC0415
+
         fields = _eaf(session)
         # Override fields that change for continuation
         fields["status"] = "pending"
@@ -278,7 +285,6 @@ async def _enqueue_nudge(
 # ---------------------------------------------------------------------------
 # Public steering API
 # ---------------------------------------------------------------------------
-
 
 
 async def re_enqueue_session(
@@ -431,6 +437,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         # Restore branch state from checkpoint if this is a resumed session
         try:
+            from agent.agent_session_queue import restore_branch_state  # noqa: PLC0415
+
             restore_branch_state(session)
         except Exception as e:
             logger.debug(f"[restore] Non-fatal restore error at session start: {e}")
@@ -451,6 +459,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"[{session.project_key}] current_stage lookup failed for "
                     f"{session.session_id} (non-fatal): {e}"
                 )
+            from agent.agent_session_queue import resolve_branch_for_stage  # noqa: PLC0415
+
             resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
             branch_name = resolved_branch
             # If branch resolution says we need a worktree and working_dir isn't one
@@ -574,6 +584,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
         if agent_session:
             _extra = getattr(agent_session, "extra_context", None) or {}
             _transport = _extra.get("transport")
+
+        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
 
         send_cb, react_cb = _resolve_callbacks(session.project_key, _transport)
 
@@ -1384,4 +1396,3 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # into _active_sessions across sessions on the same worker.
         if _session_id_for_registry:
             _active_sessions.pop(_session_id_for_registry, None)
-

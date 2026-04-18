@@ -27,47 +27,44 @@ import subprocess
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-from agent.branch_manager import (
-    get_branch_state,
-    get_plan_context,
-    sanitize_branch_name,
-)
-from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+# Shared mutable session-tracking state — re-exported here for backward compatibility.
+import agent.session_state as _session_state  # noqa: F401 (also used for mutation sites)
 from agent.output_handler import OutputHandler
 
 # Output routing — decision logic lives in output_router; re-exported here
 # for backward compatibility with callers that import from agent_session_queue.
 from agent.output_router import (
     MAX_NUDGE_COUNT,  # noqa: F401
-    NUDGE_MESSAGE,
-    SendToChatResult,
+    NUDGE_MESSAGE,  # noqa: F401
+    SendToChatResult,  # noqa: F401
     determine_delivery_action,  # noqa: F401
 )
-from agent.session_logs import save_session_snapshot
 
-# Shared mutable session-tracking state — re-exported here for backward compatibility.
-import agent.session_state as _session_state  # noqa: F401 (also used for mutation sites)
-from agent.session_state import (  # noqa: F401
-    ReactionCallback,
-    ResponseCallback,
-    SendCallback,
-    SessionHandle,
-    _active_events,
-    _active_sessions,
-    _active_workers,
-    _global_session_semaphore,
-    _reaction_callbacks,
-    _response_callbacks,
-    _send_callbacks,
-    _shutdown_requested,
-    _starting_workers,
+# Session completion (post-execution lifecycle) — re-exported here for backward compatibility.
+from agent.session_completion import (  # noqa: F401
+    _CONTINUATION_PM_MAX_DEPTH,
+    _complete_agent_session,
+    _create_continuation_pm,
+    _diagnose_missing_session,
+    _extract_issue_number,
+    _handle_dev_session_completion,
+    _transition_parent,
 )
-from agent.worktree_manager import WORKTREES_DIR, validate_workspace
-from config.enums import ClassificationType, PersonaType, SessionType
-from models.agent_session import AgentSession
-from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
+
+# Session executor (CLI harness, nudge/re-enqueue, steer) — re-exported for backward compatibility.
+from agent.session_executor import (  # noqa: F401
+    _HARNESS_EXHAUSTION_MSG,
+    _HARNESS_NOT_FOUND_MAX_RETRIES,
+    _HARNESS_NOT_FOUND_PREFIX,
+    _calendar_heartbeat,
+    _enqueue_nudge,
+    _execute_agent_session,
+    _find_valor_calendar,
+    _handle_harness_not_found,
+    re_enqueue_session,
+    steer_session,
+)
 
 # Health monitoring — re-exported here for backward compatibility.
 from agent.session_health import (  # noqa: F401
@@ -88,6 +85,7 @@ from agent.session_health import (  # noqa: F401
     format_duration,
     recover_orphaned_agent_sessions_all_projects,
 )
+from agent.session_logs import save_session_snapshot
 
 # Session pickup (pop locking, startup steering drain, dependency checks) — re-exported here.
 from agent.session_pickup import (  # noqa: F401
@@ -103,8 +101,8 @@ from agent.session_pickup import (  # noqa: F401
 
 # Revival detection — re-exported here for backward compatibility.
 from agent.session_revival import (  # noqa: F401
-    REVIVAL_COOLDOWN_SECONDS,
     _COOLDOWN_FILE,
+    REVIVAL_COOLDOWN_SECONDS,
     _load_cooldowns,
     _save_cooldowns,
     _session_branch_name,
@@ -115,31 +113,23 @@ from agent.session_revival import (  # noqa: F401
     queue_revival_agent_session,
     record_revival_cooldown,
 )
-
-# Session completion (post-execution lifecycle) — re-exported here for backward compatibility.
-from agent.session_completion import (  # noqa: F401
-    _CONTINUATION_PM_MAX_DEPTH,
-    _complete_agent_session,
-    _create_continuation_pm,
-    _diagnose_missing_session,
-    _extract_issue_number,
-    _handle_dev_session_completion,
-    _transition_parent,
+from agent.session_state import (  # noqa: F401
+    ReactionCallback,
+    ResponseCallback,
+    SendCallback,
+    SessionHandle,
+    _active_events,
+    _active_sessions,
+    _active_workers,
+    _global_session_semaphore,
+    _reaction_callbacks,
+    _response_callbacks,
+    _send_callbacks,
+    _shutdown_requested,
+    _starting_workers,
 )
-
-# Session executor (CLI harness, nudge/re-enqueue, steer) — re-exported here for backward compatibility.
-from agent.session_executor import (  # noqa: F401
-    _HARNESS_EXHAUSTION_MSG,
-    _HARNESS_NOT_FOUND_MAX_RETRIES,
-    _HARNESS_NOT_FOUND_PREFIX,
-    _calendar_heartbeat,
-    _enqueue_nudge,
-    _execute_agent_session,
-    _find_valor_calendar,
-    _handle_harness_not_found,
-    re_enqueue_session,
-    steer_session,
-)
+from config.enums import ClassificationType, SessionType
+from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
 
@@ -564,8 +554,6 @@ def restore_branch_state(session: AgentSession) -> bool:
 
 # Session pickup functions extracted to agent/session_pickup.py.
 # All symbols re-exported at the top of this module for backward compatibility.
-
-
 
 
 async def _pending_depth(chat_id: str) -> int:

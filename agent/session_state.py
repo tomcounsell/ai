@@ -1,10 +1,12 @@
-"""Shared mutable session-tracking state for the worker — prevents circular imports between executor and health modules."""
+"""Shared mutable session-tracking state for the worker.
+
+Prevents circular imports between executor and health modules.
+"""
 
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
-
 
 # Callbacks registered by the bridge for sending messages and reactions
 SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text, reply_to, session)

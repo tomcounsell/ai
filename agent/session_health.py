@@ -9,7 +9,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent.session_state import SessionHandle, _active_sessions, _active_workers
+from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -76,6 +76,7 @@ TASK_CANCEL_TIMEOUT = 0.25
 # False to emit the tier1_flagged_stdout_stale counter. Reset to "" at the
 # top of _has_progress() on every call to avoid stale attribution.
 _last_progress_reason: str = ""
+
 
 def _recover_interrupted_agent_sessions_startup() -> int:
     """Reset stale running sessions to pending at startup.
@@ -792,6 +793,7 @@ async def _agent_session_health_check() -> None:
                             entry.recovery_attempts,
                         )
                         from agent.agent_session_queue import _ensure_worker  # noqa: PLC0415
+
                         _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
                         # Wake up an already-running idle worker — _ensure_worker returns
                         # early if the worker exists, so the event is never set and the
@@ -910,6 +912,10 @@ async def _agent_session_hierarchy_health_check() -> None:
                     )
                     # Delete-and-recreate required: parent_agent_session_id is a KeyField,
                     # so mutating it directly would corrupt the index.
+                    from agent.agent_session_queue import (
+                        _extract_agent_session_fields,  # noqa: PLC0415
+                    )
+
                     fields = _extract_agent_session_fields(child)
                     child.delete()
                     fields["parent_agent_session_id"] = None
@@ -936,6 +942,8 @@ async def _agent_session_hierarchy_health_check() -> None:
                     "[session-health] Stuck parent %s has no children — auto-completing",
                     parent.agent_session_id,
                 )
+                from agent.session_completion import _transition_parent  # noqa: PLC0415
+
                 _transition_parent(parent, "completed")
                 stuck_fixed += 1
                 continue
@@ -980,6 +988,8 @@ async def _agent_session_hierarchy_health_check() -> None:
                     )
                 else:
                     # Failed parent: finalize immediately (no point composing a summary)
+                    from agent.session_completion import _transition_parent  # noqa: PLC0415
+
                     _transition_parent(parent, new_status)
                 stuck_fixed += 1
     except Exception as e:
@@ -1027,7 +1037,6 @@ async def _agent_session_health_loop() -> None:
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
 
 
-
 def format_duration(seconds) -> str:
     """Format seconds into human-readable duration."""
     if seconds is None:
@@ -1038,6 +1047,7 @@ def format_duration(seconds) -> str:
     hours = minutes // 60
     remaining_mins = minutes % 60
     return f"{hours}h{remaining_mins}m"
+
 
 def cleanup_corrupted_agent_sessions() -> int:
     """Delete AgentSession records with corrupted data that prevent .save().
@@ -1219,5 +1229,3 @@ def _cleanup_orphaned_claude_processes() -> int:
         logger.debug("[cleanup] Error scanning for orphaned processes: %s", e)
 
     return killed
-
-

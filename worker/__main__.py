@@ -160,7 +160,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     7. Starts health monitor
     8. Waits for shutdown signal
     """
-    import agent.agent_session_queue as _queue
     from agent.agent_session_queue import (
         _active_workers,
         _agent_session_health_loop,

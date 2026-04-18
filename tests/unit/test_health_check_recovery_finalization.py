@@ -389,7 +389,7 @@ class TestStdoutStaleTier1:
         assert _has_progress(entry) is True
 
     def test_fresh_heartbeats_no_stdout_old_started_at_returns_false(self):
-        """Fresh heartbeats + no stdout + old started_at (> 300s) → FIRST_STDOUT_DEADLINE → False."""
+        """Fresh heartbeats + no stdout + old started_at (>300s) → FIRST_STDOUT_DEADLINE → False."""
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
