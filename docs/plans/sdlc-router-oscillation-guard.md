@@ -432,35 +432,37 @@ passing when the parser crashes.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/sdlc_verdict.py` catches all exceptions and writes `{}` on
+- [x] `tools/sdlc_verdict.py` catches all exceptions and writes `{}` on
       failure (same pattern as `sdlc_stage_marker`). Test: corrupt the session's
       `stage_states` JSON and call `sdlc_verdict record` — must not crash.
-- [ ] `tools/sdlc_stage_query.py` enriched output gracefully handles missing
+      Covered by `test_corrupt_stage_states_does_not_crash`.
+- [x] `tools/sdlc_stage_query.py` enriched output gracefully handles missing
       `_verdicts` / missing cycle counters — returns sane defaults. Test: session
       with no metadata returns `{"stages": {...}, "_meta": {"patch_cycle_count":
-      0, ...}}`.
-- [ ] No exception handlers added in `agent/sdlc_router.py` — the dispatch
+      0, ...}}`. Covered by `test_defaults_when_session_missing`.
+- [x] No exception handlers added in `agent/sdlc_router.py` — the dispatch
       function is pure and deterministic given a state dict. Failure modes are
       caller's responsibility.
 
 ### Empty/Invalid Input Handling
-- [ ] `sdlc_verdict record` with an unknown stage returns `{}` and does not
-      write to session. Test: `--stage BOGUS` returns `{}`.
-- [ ] Enriched query with empty `stage_states` returns
+- [x] `sdlc_verdict record` with an unknown stage returns `{}` and does not
+      write to session. Test: `--stage BOGUS` returns `{}`. Covered by
+      `test_rejects_unknown_stage`.
+- [x] Enriched query with empty `stage_states` returns
       `{"stages": {}, "_meta": {...defaults}}`. Test: new session with no prior
-      dispatches.
-- [ ] Router guards fail closed: if the enriched query returns `{}`, Guard G3
+      dispatches. Covered by `test_defaults_when_session_missing`.
+- [x] Router guards fail closed: if the enriched query returns `{}`, Guard G3
       (PR lock) cannot fire (no pr_number available) — router falls through to
       natural-language dispatch (current behavior preserved for edge cases).
 
 ### Error State Rendering
-- [ ] Guard G2 (critique cycle cap) escalation produces a human-readable
+- [x] Guard G2 (critique cycle cap) escalation produces a human-readable
       `blocked` message in the router output. The orchestrator LLM surfaces this
       to the user rather than silently looping. Test: seed a session with
       `critique_cycle_count=2` and verify the router emits `blocked` with
-      the cycle-cap reason.
-- [ ] Guard G4 (oscillation) emits a structured `blocked` state that the PM
-      persona can read and report.
+      the cycle-cap reason. Covered by `test_g2_critique_cycle_cap`.
+- [x] Guard G4 (oscillation) emits a structured `blocked` state that the PM
+      persona can read and report. Covered by `test_g4_oscillation_cap`.
 
 ## Test Impact
 
@@ -660,18 +662,18 @@ The new `tools/sdlc_verdict.py` is invoked by `/do-plan-critique` and
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/sdlc-router-oscillation-guard.md` describing
+- [x] Create `docs/features/sdlc-router-oscillation-guard.md` describing
       the guards (G1-G5), the enriched stage query, and the verdict recorder.
       Include the G1-G5 table and the regression-test reference.
-- [ ] Add entry to `docs/features/README.md` index table pointing at the
+- [x] Add entry to `docs/features/README.md` index table pointing at the
       new feature doc.
 
 ### Inline Documentation
-- [ ] Docstring on `agent/sdlc_router.decide_next_dispatch()` describing
+- [x] Docstring on `agent/sdlc_router.decide_next_dispatch()` describing
       the algorithm and guard order.
-- [ ] Docstring on `tools/sdlc_verdict.record_verdict()` and
+- [x] Docstring on `tools/sdlc_verdict.record_verdict()` and
       `read_verdict()` describing the `_verdicts` key shape.
-- [ ] Comments in `.claude/skills/sdlc/SKILL.md` new Legal Dispatch
+- [x] Comments in `.claude/skills/sdlc/SKILL.md` new Legal Dispatch
       Guards section pointing at `agent.sdlc_router.decide_next_dispatch`
       as the canonical algorithm.
 
