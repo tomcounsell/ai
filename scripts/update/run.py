@@ -535,11 +535,47 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         ["git", "commit", "-m", msg],
                         cwd=project_dir,
                     )
-                    deps.run_cmd(
-                        ["git", "push"],
-                        cwd=project_dir,
-                    )
-                    log(f"Committed and pushed: {msg}", v, always=True)
+                    try:
+                        deps.run_cmd(
+                            ["git", "push"],
+                            cwd=project_dir,
+                        )
+                        log(f"Committed and pushed: {msg}", v, always=True)
+                    except Exception:
+                        # Push rejected — another machine may have pushed the same bump.
+                        # Pull rebase and re-push; if our changes are already present,
+                        # reset to origin/main (no warning needed).
+                        try:
+                            deps.run_cmd(
+                                ["git", "pull", "--rebase", "origin", "main"],
+                                cwd=project_dir,
+                            )
+                            # Check if our commit is still ahead of origin
+                            ahead = deps.run_cmd(
+                                ["git", "rev-list", "--count", "origin/main..HEAD"],
+                                cwd=project_dir,
+                                check=False,
+                            ).stdout.strip()
+                            if ahead and int(ahead) > 0:
+                                deps.run_cmd(
+                                    ["git", "push"],
+                                    cwd=project_dir,
+                                )
+                                log(f"Committed and pushed (after rebase): {msg}", v, always=True)
+                            else:
+                                # Remote already has the same bump — reset local commit
+                                deps.run_cmd(
+                                    ["git", "reset", "--hard", "origin/main"],
+                                    cwd=project_dir,
+                                )
+                                log(
+                                    f"Dep bump already on remote, skipping push: {msg}",
+                                    v,
+                                    always=True,
+                                )
+                        except Exception as e2:
+                            log(f"WARN: Failed to push dep bump: {e2}", v)
+                            result.warnings.append("Dep bump succeeded but commit/push failed")
                 except Exception as e:
                     log(f"WARN: Failed to commit bump: {e}", v)
                     result.warnings.append("Dep bump succeeded but commit/push failed")
