@@ -244,13 +244,13 @@ class TestCLIOutput:
 
     def test_no_args_returns_empty_json(self):
         # Strip session env vars: the tool falls back to VALOR_SESSION_ID /
-        # AGENT_SESSION_ID (tools/sdlc_stage_query.py:159) when no args are
-        # given, so inheriting the parent env would cause a real Redis query
-        # and a non-empty result when this test runs inside an SDLC session.
+        # AGENT_SESSION_ID when no args are given, so inheriting the parent
+        # env would cause a real Redis query and a non-empty result when
+        # this test runs inside an SDLC session.
         strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
         clean_env = {k: v for k, v in os.environ.items() if k not in strip}
         result = subprocess.run(
-            [sys.executable, "-m", "tools.sdlc_stage_query"],
+            [sys.executable, "-m", "tools.sdlc_stage_query", "--format", "legacy"],
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
@@ -269,3 +269,92 @@ class TestCLIOutput:
         assert result.returncode == 0
         assert "--session-id" in result.stdout
         assert "--issue-number" in result.stdout
+
+
+class TestEnrichedPayload:
+    """Tests for the enriched ``query_enriched`` output."""
+
+    def test_returns_stages_and_meta_keys(self):
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "_patch_cycle_count": 1,
+                "_critique_cycle_count": 2,
+                "_verdicts": {
+                    "CRITIQUE": {"verdict": "NEEDS REVISION"},
+                    "REVIEW": {"verdict": "APPROVED"},
+                },
+            }
+        )
+        mock_session.pr_number = 42
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert "stages" in result
+        assert "_meta" in result
+        assert result["stages"]["ISSUE"] == "completed"
+        assert result["_meta"]["patch_cycle_count"] == 1
+        assert result["_meta"]["critique_cycle_count"] == 2
+        assert result["_meta"]["latest_critique_verdict"] == "NEEDS REVISION"
+        assert result["_meta"]["latest_review_verdict"] == "APPROVED"
+        assert result["_meta"]["pr_number"] == 42
+
+    def test_defaults_when_session_missing(self):
+        from tools.sdlc_stage_query import query_enriched
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=None):
+            with patch("tools.sdlc_stage_query._find_session_by_issue", return_value=None):
+                result = query_enriched(session_id="missing")
+
+        assert result["stages"] == {}
+        assert result["_meta"]["patch_cycle_count"] == 0
+        assert result["_meta"]["critique_cycle_count"] == 0
+        assert result["_meta"]["latest_critique_verdict"] is None
+        assert result["_meta"]["revision_applied"] is False
+        assert result["_meta"]["pr_number"] is None
+        assert result["_meta"]["same_stage_dispatch_count"] == 0
+        assert result["_meta"]["last_dispatched_skill"] is None
+
+    def test_legacy_flat_shape_preserved(self):
+        """--format legacy returns the old flat shape."""
+        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
+        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.sdlc_stage_query",
+                "--format",
+                "legacy",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=clean_env,
+        )
+        assert result.returncode == 0
+        parsed = json.loads(result.stdout.strip())
+        assert parsed == {}  # no session → empty flat dict
+
+    def test_default_json_shape_includes_stages_and_meta(self):
+        """Default (no --format flag) returns the enriched shape."""
+        strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
+        clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        result = subprocess.run(
+            [sys.executable, "-m", "tools.sdlc_stage_query"],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=clean_env,
+        )
+        assert result.returncode == 0
+        parsed = json.loads(result.stdout.strip())
+        assert "stages" in parsed
+        assert "_meta" in parsed

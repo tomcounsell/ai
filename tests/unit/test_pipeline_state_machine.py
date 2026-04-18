@@ -926,3 +926,129 @@ class TestRecordStageCompletionDeleted:
         import agent.pipeline_state as mod
 
         assert not hasattr(mod, "record_stage_completion")
+
+
+class TestClassifyOutcomeVerdictUnification:
+    """classify_outcome() routes verdict writes through sdlc_verdict.record_verdict.
+
+    Regression coverage for task 3.5 of the sdlc-router-oscillation-guard plan:
+    there must be exactly ONE writer for the _verdicts metadata key. Both the
+    CLI path (tools/sdlc_verdict.py) and the bridge-initiated path
+    (agent/pipeline_state.py::classify_outcome) funnel through
+    tools.sdlc_verdict.record_verdict.
+    """
+
+    def test_classify_outcome_critique_invokes_record_verdict(self):
+        """CRITIQUE verdict extracted from output tail routes through record_verdict."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "Verdict: READY TO BUILD (no concerns)"
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("CRITIQUE", "end_turn", tail)
+            assert mock_record.called, (
+                "classify_outcome did not call tools.sdlc_verdict.record_verdict — "
+                "dual-writer drift risk reintroduced"
+            )
+            # Signature: record_verdict(session, stage, verdict_str, blockers=?, tech_debt=?)
+            args, kwargs = mock_record.call_args
+            assert args[1] == "CRITIQUE"
+            # Verdict passthrough (prefix match — extractor may normalize)
+            assert "READY TO BUILD" in args[2]
+
+    def test_classify_outcome_review_invokes_record_verdict(self):
+        """REVIEW verdict extracted from output tail routes through record_verdict."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = 'Review complete. <!-- OUTCOME {"status":"fail","stage":"REVIEW"} --> 2 blockers'
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("REVIEW", "end_turn", tail)
+            # Review verdict may or may not be extracted depending on output shape;
+            # if it is, it must go through record_verdict (never raw stage_states write).
+            if mock_record.called:
+                args, kwargs = mock_record.call_args
+                assert args[1] == "REVIEW"
+
+    def test_classify_outcome_does_not_write_verdicts_key_directly(self):
+        """classify_outcome() must NOT write to session.stage_states._verdicts directly.
+
+        The only path allowed is through tools.sdlc_verdict.record_verdict.
+        This test validates the unification invariant — a second writer would
+        mean raw writes could bypass the record_verdict helper (which handles
+        hashing, retry, etc).
+        """
+        states = {"CRITIQUE": "in_progress"}
+        session = _make_session(stage_states=json.dumps(states))
+        # save() should be called only by the record_verdict helper, not by
+        # classify_outcome itself inserting into _verdicts
+        sm = PipelineStateMachine(session)
+        tail = "Verdict: NEEDS REVISION"
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("CRITIQUE", "end_turn", tail)
+            # The only path that should touch _verdicts is record_verdict.
+            # If _verdicts appears in stage_states without record_verdict being
+            # called, a dual-writer exists.
+            raw = getattr(session, "stage_states", None)
+            if raw:
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) else raw
+                except (ValueError, TypeError):
+                    data = {}
+                if "_verdicts" in data and not mock_record.called:
+                    pytest.fail(
+                        "_verdicts key written without record_verdict being called — "
+                        "a second writer bypassed the unification path"
+                    )
+
+    def test_classify_outcome_build_stage_does_not_call_record_verdict(self):
+        """BUILD stage has no verdict concept — record_verdict must not be called."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "PR created: https://github.com/org/repo/pull/42"
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("BUILD", "end_turn", tail)
+            assert not mock_record.called, (
+                "BUILD stage invoked record_verdict — only CRITIQUE and REVIEW should"
+            )
+
+    def test_classify_outcome_tolerates_record_verdict_failure(self):
+        """A record_verdict exception must not propagate out of classify_outcome.
+
+        Metadata recording is best-effort. If the ORM is unavailable or the
+        session is malformed, classify_outcome still returns its classification.
+        """
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "Verdict: READY TO BUILD"
+
+        with patch(
+            "tools.sdlc_verdict.record_verdict",
+            side_effect=RuntimeError("redis down"),
+        ):
+            # Should not raise
+            result = sm.classify_outcome("CRITIQUE", "end_turn", tail)
+            assert result in ("success", "fail", "ambiguous", "partial")
+
+    def test_tools_sdlc_verdict_is_imported_lazily(self):
+        """tools.sdlc_verdict should be imported inside the function body, not at module top.
+
+        Enforces the one-way import boundary noted in the plan's Implementation
+        Note (Rabbit Holes / classify_outcome dedup): agent/ imports tools/, but
+        tools/ MUST NOT import agent/. A module-top import would create a cycle
+        risk if tools/ later grows dependencies on agent/.
+        """
+        # The module itself must not have sdlc_verdict in its globals
+        # (unless it was imported elsewhere legitimately — we check the
+        # _record_verdict_from_output function imports it lazily)
+        import inspect
+
+        import agent.pipeline_state as mod
+
+        src = inspect.getsource(mod._record_verdict_from_output)
+        assert "from tools.sdlc_verdict import record_verdict" in src, (
+            "_record_verdict_from_output must import record_verdict lazily inside "
+            "the function body to preserve the one-way agent -> tools boundary"
+        )

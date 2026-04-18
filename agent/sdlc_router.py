@@ -36,9 +36,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
 
@@ -158,9 +159,7 @@ def build_stage_snapshot(stage_states: dict, meta: dict) -> dict:
             stripped_verdicts[stage] = record
 
     return {
-        "stages": {
-            k: v for k, v in stage_states.items() if not k.startswith("_")
-        },
+        "stages": {k: v for k, v in stage_states.items() if not k.startswith("_")},
         "_verdicts": stripped_verdicts,
         "_patch_cycle_count": stage_states.get("_patch_cycle_count", 0),
         "_critique_cycle_count": stage_states.get("_critique_cycle_count", 0),
@@ -269,9 +268,7 @@ def _stages_completed(stage_states: dict, stages: list[str]) -> bool:
     return all(stage_states.get(s) == STATUS_COMPLETED for s in stages)
 
 
-def guard_g3_pr_lock(
-    stage_states: dict, meta: dict, context: dict
-) -> Dispatch | Blocked | None:
+def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch | Blocked | None:
     """G3: once a PR exists, /do-plan and /do-plan-critique are not legal.
 
     If an open PR exists for this issue AND the most recent dispatch was
@@ -336,10 +333,7 @@ def guard_g4_oscillation(
 
     skill = meta.get("last_dispatched_skill") or "<unknown>"
     return Blocked(
-        reason=(
-            f"G4: stage oscillation — {skill} dispatched {count} times "
-            f"without state change"
-        ),
+        reason=(f"G4: stage oscillation — {skill} dispatched {count} times without state change"),
         guard_id="G4",
     )
 
@@ -418,6 +412,9 @@ def evaluate_guards(
 
 def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
     """No plan exists."""
+    # If an open PR exists, a plan must exist too — defer to PR-stage rows.
+    if meta.get("pr_number"):
+        return False
     plan_status = stage_states.get("PLAN")
     # "No plan exists" is the absence of a plan file OR a pending PLAN stage.
     return plan_status in (None, "pending")
@@ -427,23 +424,16 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
     """Plan exists, not yet critiqued."""
     plan_status = stage_states.get("PLAN")
     critique_status = stage_states.get("CRITIQUE")
-    return (
-        plan_status in (STATUS_COMPLETED, "ready")
-        and critique_status in (None, "pending")
-    )
+    return plan_status in (STATUS_COMPLETED, "ready") and critique_status in (None, "pending")
 
 
-def _rule_critique_needs_revision(
-    stage_states: dict, meta: dict, context: dict
-) -> bool:
+def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict) -> bool:
     """Plan critiqued (NEEDS REVISION)."""
     verdict = _latest_critique_verdict(stage_states, meta).upper()
     return CRITIQUE_NEEDS_REVISION in verdict
 
 
-def _rule_critique_ready_no_concerns(
-    stage_states: dict, meta: dict, context: dict
-) -> bool:
+def _rule_critique_ready_no_concerns(stage_states: dict, meta: dict, context: dict) -> bool:
     """Plan critiqued (READY TO BUILD, zero concerns), no branch/PR."""
     verdict = _latest_critique_verdict(stage_states, meta).upper()
     if CRITIQUE_READY_TO_BUILD not in verdict:
@@ -526,9 +516,7 @@ def _rule_review_has_findings(stage_states: dict, meta: dict, context: dict) -> 
     return False
 
 
-def _rule_patch_applied_after_review(
-    stage_states: dict, meta: dict, context: dict
-) -> bool:
+def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: dict) -> bool:
     """Patch applied after review findings — re-review is required."""
     if not meta.get("pr_number"):
         return False
@@ -539,9 +527,7 @@ def _rule_patch_applied_after_review(
     return last == SKILL_DO_PATCH
 
 
-def _rule_review_approved_docs_not_done(
-    stage_states: dict, meta: dict, context: dict
-) -> bool:
+def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context: dict) -> bool:
     """Review APPROVED, zero findings, docs NOT done."""
     if not meta.get("pr_number"):
         return False
@@ -559,9 +545,7 @@ def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     return _stages_completed(stage_states, needed)
 
 
-def _rule_stage_states_unavailable_pr_open(
-    stage_states: dict, meta: dict, context: dict
-) -> bool:
+def _rule_stage_states_unavailable_pr_open(stage_states: dict, meta: dict, context: dict) -> bool:
     """stage_states unavailable AND an open PR exists for this issue."""
     if meta.get("pr_number") and not stage_states:
         return True
@@ -581,15 +565,12 @@ _rule_critique_ready_with_concerns_no_revision.__doc__ = (
     "revision_applied not set in plan frontmatter"
 )
 _rule_critique_ready_with_concerns_revision_applied.__doc__ = (
-    "Plan critiqued (READY TO BUILD, concerns present), "
-    "revision_applied: true in plan frontmatter"
+    "Plan critiqued (READY TO BUILD, concerns present), revision_applied: true in plan frontmatter"
 )
 _rule_branch_exists_no_pr.__doc__ = "Branch exists, no PR"
 _rule_tests_failing.__doc__ = "Tests failing"
 _rule_pr_exists_no_review.__doc__ = "PR exists, no review"
-_rule_review_has_findings.__doc__ = (
-    "PR review has findings (blockers, nits, OR tech debt)"
-)
+_rule_review_has_findings.__doc__ = "PR review has findings (blockers, nits, OR tech debt)"
 _rule_patch_applied_after_review.__doc__ = "Patch applied after review findings"
 _rule_review_approved_docs_not_done.__doc__ = (
     "Review APPROVED with zero findings, docs NOT done (see Step 3)"
@@ -780,7 +761,7 @@ def record_dispatch(
     Returns:
         The mutated stage_states dict.
     """
-    timestamp = (now or datetime.now(timezone.utc)).isoformat()
+    timestamp = (now or datetime.now(UTC)).isoformat()
     # Build a snapshot from a stage_states view that EXCLUDES the history
     # list itself, otherwise the counter would never match across invocations.
     view = {k: v for k, v in stage_states.items() if k != "_sdlc_dispatches"}
