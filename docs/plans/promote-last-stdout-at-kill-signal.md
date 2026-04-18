@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1046
 last_comment_id:
+revision_applied: true
 ---
 
 # Promote last_stdout_at to Tier-1 Kill Signal
@@ -279,7 +280,8 @@ No agent integration required — this is an internal worker health-check change
 - Add `FIRST_STDOUT_DEADLINE = 300` constant (env-tunable via `int(os.environ.get("FIRST_STDOUT_DEADLINE_SECS", 300))`)
 - Add stdout-stale branch to `_has_progress()` after the dual-heartbeat OR check (before own-progress fields): check `last_stdout_at` stale, then `FIRST_STDOUT_DEADLINE` for `last_stdout_at is None` sessions
 - Update `_has_progress()` docstring to document the new tier-1 stdout-stale signal and `FIRST_STDOUT_DEADLINE`
-- Add `tier1_flagged_stdout_stale` counter emit in health-check loop after tier-1 flags; detect stdout-stale by re-checking `last_stdout_at` after `_has_progress()` returns False
+- Add `tier1_flagged_stdout_stale` counter emit in health-check loop after tier-1 flags: use a module-level `_last_progress_reason: str = ""` variable that `_has_progress()` sets before returning False (`"stdout_stale"` or `"first_stdout_deadline"`). The health-check loop reads it immediately after `not _has_progress(entry)`. Variable reset to `""` at top of `_has_progress()`. Avoids the re-check race window and does not change `_has_progress()` return type. (C1 implementation note)
+- In the reprieve log block (at the existing `logger.info("[session-health] Tier 2 reprieve...")` call), add log-level escalation: `log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info`. Use `log_fn` for the Tier 2 reprieve message. `reprieve_count` is already saved to Redis before this log call — no new fields or constants needed. (C2 implementation note)
 - Update `tests/unit/test_health_check_recovery_finalization.py` tier-2 test `test_no_reprieve_on_stale_stdout`: change `_ago(200)` to `_ago(700)` to match new 600s threshold
 - Add 4 new unit tests in `TestDualHeartbeatOrSemantics` (or a new `TestStdoutStaleTier1` class): fresh heartbeats + stale stdout → False, fresh heartbeats + fresh stdout → True, fresh heartbeats + no stdout + young started_at → True, fresh heartbeats + no stdout + old started_at → False
 
@@ -330,9 +332,11 @@ No agent integration required — this is an internal worker health-check change
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Adversary, Simplifier | C1: `tier1_flagged_stdout_stale` attribution re-check has a race window. The plan proposed re-reading `last_stdout_at` after `_has_progress()` returns False, but a concurrent `on_stdout_event` write could update the field between the call and the re-check, causing the counter to fail to emit. | Task 1 (added bullet) | Use a module-level `_last_progress_reason: str = ""` variable set inside `_has_progress()` before returning False. The health-check loop reads it immediately after `not _has_progress(entry)`. Variable reset to `""` at top of `_has_progress()`. Avoids the re-check timing window without changing the return type. |
+| CONCERN | Operator, Skeptic | C2: No escalation path for the infinite alive-but-silent reprieve loop. A session receiving infinite tier-2 "alive" reprieves produces no operator signal until the 45-minute timeout fires, leaving the queue blocked with no warning. | Task 1 (added bullet) | In the reprieve log block, escalate log level after 3 reprieves: `log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info`. Use `log_fn` for the Tier 2 reprieve message. `reprieve_count` is already saved before the log call — no new fields needed. |
+| NIT | Operator | N1: `FIRST_STDOUT_DEADLINE_SECS` env var name inconsistency — the constant is env-tunable via `FIRST_STDOUT_DEADLINE_SECS` but the Verification table does not document this. Minor documentation inconsistency. | No plan text change required | Standardize env var name as `FIRST_STDOUT_DEADLINE_SECS` (consistent with `_SECS` suffix convention). Builder to add one line to Verification table confirming env-tunability. |
 
 ---
 
