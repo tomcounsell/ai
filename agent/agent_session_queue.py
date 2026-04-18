@@ -3803,9 +3803,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
     Two-tier no-progress detector integration (#1036):
       * A ``SessionHandle`` is registered in ``_active_sessions`` BEFORE any
         raise site so the health check always has a cancellable reference.
-      * Cleanup is tied to the asyncio task completion via
-        ``add_done_callback`` so the registry entry is always popped — even
-        on exception, CancelledError, or any early return.
+      * Cleanup happens in an explicit ``finally`` block wrapping the entire
+        session body — ``_active_sessions.pop()`` runs on every exit path
+        (return, raise, ``CancelledError``).
       * A T+0 ``last_heartbeat_at`` write ensures the first health-check tick
         after session start sees a fresh heartbeat.
       * Three messenger callbacks (``on_sdk_started``, ``on_heartbeat_tick``,
@@ -3825,11 +3825,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
     # health check would kill the entire worker (plan spike-1 explicitly
     # forbids this; #1039 review).
     #
-    # Cleanup is performed via an ``add_done_callback`` attached to the
-    # BackgroundTask's session-scoped task below, plus a defensive
-    # ``finally`` via ``_session_registry_cleanup`` for the pre-BackgroundTask
-    # window. This gives the "pop in a finally block, always" contract from
-    # the SessionHandle docstring without requiring a 900-line re-indent.
+    # Cleanup is guaranteed by the ``finally`` block wrapping the entire
+    # session body below: ``_active_sessions.pop()`` runs on every exit path
+    # (return, raise, ``CancelledError``), satisfying the "pop in a finally
+    # block, always" contract from the SessionHandle docstring.
     _session_id_for_registry = session.agent_session_id
     if _session_id_for_registry:
         _active_sessions[_session_id_for_registry] = SessionHandle(task=None)
