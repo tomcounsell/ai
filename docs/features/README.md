@@ -12,7 +12,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Agent Session Health Monitor](agent-session-health-monitor.md) | Detects and recovers stuck running sessions in the queue | Shipped |
 | [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) | Parent-child session decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model with DatetimeFields, SessionEvent log, consolidated DictFields | Shipped |
-| [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, corrupted session cleanup | Shipped |
+| [Agent Session Queue](agent-session-queue.md) | Module structure (6 extracted modules: session_state, session_revival, session_pickup, session_health, session_completion, session_executor), KeyField index fixes, Event-based drain guard, corrupted session cleanup | Shipped |
 | [Agent Session Scheduling](agent-session-scheduling.md) | Agent-initiated queue operations: schedule SDLC sessions, deferred execution, 4-tier priority, queue manipulation | Shipped |
 | [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) | Delivery-choice protocol (SEND/EDIT/REACT/SILENT/CONTINUE) with defense-in-depth filtering to prevent control signal text leaking to users | Shipped |
 | [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
