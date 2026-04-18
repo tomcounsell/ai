@@ -11,6 +11,7 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
+
 async def _complete_agent_session(session: AgentSession, *, failed: bool = False) -> None:
     """Mark a running session as completed (or failed) and persist to Redis.
 
@@ -151,7 +152,6 @@ def _diagnose_missing_session(session_id: str) -> dict:
         return result
     except Exception as e:
         return {"error": str(e)}
-
 
 
 def _extract_issue_number(session: Any, agent_session: Any) -> int | None:
@@ -450,6 +450,7 @@ async def _handle_dev_session_completion(
                 f"You MUST invoke /sdlc to dispatch /do-merge before emitting [PIPELINE_COMPLETE]."
             )
             from agent.session_executor import steer_session as _steer_session  # noqa: PLC0415
+
             steer_result = _steer_session(parent.session_id, steering_msg)
             if steer_result.get("success"):
                 # CONCERN 1 guard: steer was accepted, but parent may finalize
@@ -532,5 +533,3 @@ async def _handle_dev_session_completion(
 
     except Exception as e:
         logger.warning(f"[harness] _handle_dev_session_completion failed (non-fatal): {e}")
-
-

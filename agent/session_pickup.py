@@ -1,10 +1,8 @@
 """Session selection, pop locking, startup steering drain, and dependency readiness checks."""
 
-import asyncio
 import logging
 import os
 from datetime import UTC, datetime
-from pathlib import Path
 
 import agent.steering as _steering
 from models.agent_session import AgentSession
@@ -150,8 +148,7 @@ async def _drain_startup_steering(session: AgentSession, *, worker_key: str = ""
         # Drain failure must not crash session start
         label = f"[worker:{worker_key}]" if worker_key else "[worker]"
         logger.warning(
-            f"{label} Failed to drain steering messages for session "
-            f"{session.id} (non-fatal): {e}"
+            f"{label} Failed to drain steering messages for session {session.id} (non-fatal): {e}"
         )
 
 
