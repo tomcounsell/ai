@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1024
 last_comment_id:
+revision_applied: true
 ---
 
 # Delete Orphan SubagentStop Hook
@@ -143,7 +144,7 @@ Deterministic deletion in this order:
 
 1. **Pre-deletion grep sweep (blocker gate):** Run this exact command and verify output:
    ```
-   grep -rn "subagent_stop_hook\|SubagentStop\|agent\.hooks\.subagent_stop" agent/ bridge/ worker/ tests/ scripts/ tools/ docs/ --include="*.py" --include="*.md"
+   grep -rn "subagent_stop_hook\|SubagentStop\|agent\.hooks\.subagent_stop" agent/ bridge/ worker/ tests/ scripts/ tools/ reflections/ docs/ --include="*.py" --include="*.md"
    ```
    Expected inventory (everything else must be absent):
    - `agent/hooks/__init__.py:17` (import)
@@ -153,8 +154,21 @@ Deterministic deletion in this order:
    - `tools/sdlc_stage_marker.py:7` (docstring comment)
    - `agent/hooks/pre_tool_use.py:314` (docstring comment)
    - `tests/integration/test_stage_comment.py:77` (sample filename in fixture)
-   - Occurrences under `docs/` — triage: update active docs, leave historical plan docs untouched.
+   - `reflections/auditing.py:377` — **LEAVE UNCHANGED**. This check iterates `.claude/settings.json` hooks (the live CLI-harness `.claude/hooks/subagent_stop.py`), NOT the SDK hook being deleted. Touching it would break the `|| true` audit rule for the live harness hook. Pre-declared as a KEEP so it does not trip the surprise-match gate.
+   - Occurrences under `docs/` — triage: update active docs (enumerated in the Documentation section), leave historical plan docs untouched.
    If any other reference surfaces, **stop and triage**. A surprise reference means either a new caller landed after plan time (check `git log` on that file) or the recon missed something — either way, do not delete until it's understood.
+
+   **Caller-count gate (Risk 1 mitigation):** In addition to the inventory grep, run:
+   ```
+   grep -rn "get_agent_response_sdk\|build_hooks_config\|ValorAgent(" agent/ bridge/ worker/
+   ```
+   Expected matches (anything else = STOP and escalate, do not proceed with deletion):
+   - `agent/sdk_client.py:1120` — `hooks=build_hooks_config()` inside `ValorAgent._create_options()`
+   - `agent/sdk_client.py:1885` — docstring reference to `get_agent_response_sdk`
+   - `agent/sdk_client.py:1953` — `def get_agent_response_sdk(...)` definition
+   - `agent/sdk_client.py` — `class ValorAgent` and its internal `ValorAgent()` instantiation inside `get_agent_response_sdk()`
+   - `agent/__init__.py` — re-export of `get_agent_response_sdk`
+   Any match outside this inventory means a new SDK-path caller has landed; escalate rather than silently dropping their logging.
 
 2. **Delete `agent/hooks/subagent_stop.py`** via `git rm`.
 
@@ -194,8 +208,8 @@ Deterministic deletion in this order:
 ## Test Impact
 
 - [ ] `tests/unit/test_subagent_stop_hook.py` — **DELETE**: tests a hook that is being removed. Every test in the file imports `subagent_stop_hook` or `_extract_outcome_summary` from the deleted module; there is no partial keep.
-- [ ] `tests/integration/test_stage_comment.py::TestStageCommentFormat::test_format_stage_comment_is_valid_markdown` — **UPDATE**: line 77 passes the string `"agent/hooks/subagent_stop.py"` as a sample file path into `format_stage_comment()`. Change to any existing file path (e.g., `"agent/hooks/pre_tool_use.py"`). The assertion body is path-agnostic (it only checks that the formatter emits the `### Files Modified` section), so the update is trivial.
-- [ ] Any tests that currently mock `agent.hooks.subagent_stop.*` — audit via `grep -rn "agent\.hooks\.subagent_stop\|subagent_stop_hook" tests/`. Expected zero matches outside `tests/unit/test_subagent_stop_hook.py` itself. If matches exist, each one is either a DELETE (covers the removed hook exclusively) or UPDATE (the test has a broader scope and mocked the hook incidentally — remove the patch).
+- [ ] `tests/integration/test_stage_comment.py::TestStageCommentFormat::test_format_stage_comment_is_valid_markdown` — **UPDATE (HYGIENE, not correctness)**: line 77 passes the string `"agent/hooks/subagent_stop.py"` as a sample file path into `format_stage_comment()`. The assertion only checks `"### Files Modified" in body` — `format_stage_comment()` formats markdown only and never touches the filesystem, so the test passes today regardless of whether the file exists. Update is a dangling-reference cleanup for future readers, not a correctness fix. Replace with `"agent/hooks/pre_tool_use.py"` if the edit is cheap; skip if a conflict arises.
+- [x] **Mock audit complete**: `grep -rn "agent\.hooks\.subagent_stop\|subagent_stop_hook" tests/` at critique time returned zero matches outside `tests/unit/test_subagent_stop_hook.py` itself. No other test mocks or imports the hook — no incidental UPDATE work required.
 
 ## Rabbit Holes
 
@@ -208,8 +222,8 @@ Deterministic deletion in this order:
 ## Risks
 
 ### Risk 1: A caller for `get_agent_response_sdk()` lands on main between plan time and build time
-**Impact:** If a new caller appears, `ValorAgent._create_options()` runs again, `build_hooks_config()` returns a dict missing the `SubagentStop` key, and the SDK passes that dict to `ClaudeAgentOptions`. The SDK is permissive about missing hook keys (it simply doesn't register a matcher), so there is no crash — the hook just doesn't fire. Net behavior: identical to what happens today, since the hook already doesn't do anything meaningful beyond logging.
-**Mitigation:** The pre-deletion grep sweep at build time is the gate. If a caller appears, the sweep will reveal it and the builder can triage (most likely outcome: confirm the caller doesn't depend on SubagentStop behavior, proceed; worst case: pause and scope-expand).
+**Impact:** A new SDK-path caller would silently lose the SubagentStop logging that was previously emitted. No crash — the SDK is permissive about missing hook keys — but a regression in observability that a downstream reader may rely on. The caller wouldn't know the logging is gone until they look for it and can't find it.
+**Mitigation:** Explicit caller-count gate at build time. Run `grep -rn "get_agent_response_sdk\|build_hooks_config\|ValorAgent(" agent/ bridge/ worker/` and compare against the known inventory baked into Technical Approach step 1 (the 5 expected matches under `agent/sdk_client.py` and `agent/__init__.py`). **If the result set differs in any way — new file, new line, new matching symbol — stop and escalate; do not proceed with deletion.** The builder pauses, surfaces the new caller to the human, and the PM decides whether to (a) abort and close the issue as superseded, or (b) expand scope to preserve the logging behavior under the new caller. No silent proceed-anyway path.
 
 ### Risk 2: A doc reference to `subagent_stop` is missed, and a reader later assumes the hook is still live
 **Impact:** Confusion and wasted time during later audits or debugging. Not a runtime risk.
@@ -244,9 +258,19 @@ No agent integration required. This is a bridge-internal change — actually, an
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/harness-abstraction.md` if needed: the Phase 5 section at line 155 states `subagent_stop.py` was "stripped to logging only". After this PR, that note is still accurate as historical context but should be followed by a note like "Subsequently deleted entirely in issue #1024 once the broader SDK path was confirmed fully unreachable." Add this as a sentence in the Phase 5 section, not a new section. If on re-read the existing sentence is already historical enough, leave it.
-- [ ] Grep `docs/features/` for any other active doc that describes `subagent_stop` as live. If found, update each to reflect deletion. Audit targets include `docs/features/hooks-best-practices.md`, `docs/features/pipeline-state-machine.md`, `docs/features/sdlc-stage-handoff.md`, `docs/features/sdlc-pipeline-integrity.md` — all surfaced by the Phase 2 grep.
+All 7 active docs below were found by `grep -rln "subagent_stop" docs/features/` at plan time (13 total references). Each has a definite disposition — no contingent "if found" language.
+
+- [ ] `docs/features/harness-abstraction.md` — **AMEND**: the Phase 5 section (~line 155) states `subagent_stop.py` was "stripped to logging only". Append: "Subsequently deleted entirely in issue #1024 once the broader SDK path was confirmed fully unreachable." Preserve the timeline; do not rewrite earlier phases.
+- [ ] `docs/features/sdlc-pipeline-integrity.md` — **REWRITE §D**: currently contains §D "SubagentStop Stage State Injection" (~lines 67-80) describing the hook as an active SDLC feedback mechanism. Convert to a "Removed" historical note: "§D — Removed. SubagentStop-based stage injection was stripped in the Phase 5 harness migration and the hook file was deleted in #1024. SDLC stage transitions now live in `_handle_dev_session_completion()` in `agent/agent_session_queue.py`." Total refs in this file: 4.
+- [ ] `docs/features/sdk-modernization.md` — **UPDATE**: 3 references. Rewrite each to past-tense / removed; if any reference lists SubagentStop as a current SDK hook, drop it from the list.
+- [ ] `docs/features/sdlc-stage-handoff.md` — **UPDATE**: 4 references. Replace any live-tense description of the SDK SubagentStop hook with the current mechanism (`_handle_dev_session_completion()`). Historical mentions may stay if they are already phrased as historical.
+- [ ] `docs/features/pipeline-state-machine.md` — **UPDATE**: 2 references. Same treatment as above — drop SubagentStop from any active-mechanism description.
+- [ ] `docs/features/pm-dev-session-architecture.md` — **UPDATE**: 1 reference (a hook registry row). Remove the row if the registry is meant to enumerate live SDK hooks only; otherwise annotate as "Removed (#1024)".
+- [ ] `docs/features/hooks-best-practices.md` — **PARTIAL UPDATE**: 2 references. **Keep the `|| true` rule** — it governs the live `.claude/hooks/subagent_stop.py` (separate CLI-harness hook, not being deleted). **Drop the SDK-registry mention** that lists SubagentStop among the hooks registered via `HookMatcher`.
+- [ ] `docs/features/session-watchdog-reliability.md` — **UPDATE**: 1 cross-reference. Update any pointer to the SDK SubagentStop hook; either redirect to the settings.json hook (if that was the intent) or remove the xref entirely.
 - [ ] No entry needed in `docs/features/README.md` index — this deletion doesn't add or rename any feature.
+
+**Audit gate:** After all 8 edits above, re-run `grep -rln "subagent_stop" docs/features/` and confirm the result set shrinks to: (a) historical-tense references only, and (b) `hooks-best-practices.md` where it describes the settings.json hook (`.claude/hooks/subagent_stop.py`), not the deleted SDK hook. No active-tense live-mechanism claims about the SDK hook should remain.
 
 ### External Documentation Site
 
@@ -261,7 +285,7 @@ No external documentation site (Sphinx/RTD/MkDocs) is used in this repo. Skip.
 ## Success Criteria
 
 - [ ] `agent/hooks/subagent_stop.py` does not exist on the feature branch
-- [ ] `grep -rn "subagent_stop_hook" agent/ bridge/ worker/ tests/` returns zero matches (empty output, exit code 1)
+- [ ] `grep -rn "subagent_stop_hook" agent/ bridge/ worker/ tests/ scripts/ tools/ reflections/` returns zero matches (empty output, exit code 1). Scope matches the Technical Approach step 1 sweep exactly — no asymmetry between sweep and verify.
 - [ ] `grep -rn "from agent.hooks.subagent_stop" .` returns zero matches in production code (worktree files under `.claude/worktrees/` and `.worktrees/` are ignored — those are isolated session workspaces)
 - [ ] `agent/hooks/__init__.py` has 4 keys in the dict returned by `build_hooks_config()` (PreToolUse, PostToolUse, Stop, PreCompact) — verify with a one-liner: `python -c "from agent.hooks import build_hooks_config; cfg = build_hooks_config(); assert set(cfg.keys()) == {'PreToolUse', 'PostToolUse', 'Stop', 'PreCompact'}, cfg.keys()"`
 - [ ] `tests/unit/test_subagent_stop_hook.py` does not exist
@@ -295,25 +319,27 @@ See template. Only `builder` and `validator` are needed here.
 
 ## Step by Step Tasks
 
-### 1. Pre-deletion grep sweep and deletion
+### 1. Grep sweep, caller-count gate, deletion, and doc updates (single commit)
 - **Task ID**: build-deletion
 - **Depends On**: none
-- **Validates**: `tests/unit/` (all must pass after deletion), `tests/integration/test_stage_comment.py`
-- **Informed By**: Phase 2 grep in plan (inventory of 7 references + 2 file-scale deletions)
+- **Validates**: `tests/unit/` (all must pass after deletion), `tests/integration/test_stage_comment.py`, active `docs/features/` grep
+- **Informed By**: Technical Approach step 1 (inventory of 7 references + 2 file-scale deletions + `reflections/auditing.py:377` KEEP); Documentation section (8 enumerated doc edits)
 - **Assigned To**: `hook-deletion-builder`
 - **Agent Type**: `builder`
 - **Parallel**: false
-- Run the inventory grep: `grep -rn "subagent_stop_hook\|SubagentStop\|agent\.hooks\.subagent_stop" agent/ bridge/ worker/ tests/ scripts/ tools/ docs/ --include="*.py" --include="*.md"`. Confirm each match is in the expected inventory (Technical Approach step 1). If any surprise match surfaces, stop and raise as a blocker — do not proceed with deletion.
+- Run the inventory grep: `grep -rn "subagent_stop_hook\|SubagentStop\|agent\.hooks\.subagent_stop" agent/ bridge/ worker/ tests/ scripts/ tools/ reflections/ docs/ --include="*.py" --include="*.md"`. Confirm each match is in the expected inventory (Technical Approach step 1). The `reflections/auditing.py:377` match is pre-declared and must be LEFT UNCHANGED — do not treat it as a surprise. If any OTHER surprise match surfaces, stop and raise as a blocker — do not proceed with deletion.
+- Run the caller-count gate: `grep -rn "get_agent_response_sdk\|build_hooks_config\|ValorAgent(" agent/ bridge/ worker/`. Confirm matches are limited to `agent/sdk_client.py` (lines 1120, 1885, 1953, plus the ValorAgent class/instantiation) and `agent/__init__.py` (re-export). Any other match = STOP, escalate to human.
 - `git rm agent/hooks/subagent_stop.py`
 - `git rm tests/unit/test_subagent_stop_hook.py`
 - Edit `agent/hooks/__init__.py`: remove line 17 import (`from agent.hooks.subagent_stop import subagent_stop_hook`), remove the `"SubagentStop"` dict entry in `build_hooks_config()`, update the docstring bullet at line 30 to drop the `SubagentStop` reference.
 - Edit `tools/sdlc_stage_marker.py:7`: update the docstring comment to remove `subagent_stop` from the hook path list.
 - Edit `agent/hooks/pre_tool_use.py:314`: update the docstring comment to reference `_handle_dev_session_completion` instead of `subagent_stop`.
-- Edit `tests/integration/test_stage_comment.py:77`: replace `"agent/hooks/subagent_stop.py"` with `"agent/hooks/pre_tool_use.py"`.
-- Grep active docs: `grep -rln "subagent_stop_hook\|agent/hooks/subagent_stop" docs/features/`. For each match, update the doc to reflect that the hook is deleted (past tense or removed mention entirely). Leave `docs/plans/` untouched.
+- **Hygiene edit (optional but preferred)**: Edit `tests/integration/test_stage_comment.py:77` to replace `"agent/hooks/subagent_stop.py"` with `"agent/hooks/pre_tool_use.py"`. The current string is harmless — `format_stage_comment()` never touches the filesystem — so this is hygiene, not a correctness gate. Skip if any conflict surfaces; the test will still pass.
+- Apply all 8 doc edits enumerated in the Documentation section (`harness-abstraction.md` AMEND, `sdlc-pipeline-integrity.md` §D REWRITE, `sdk-modernization.md` UPDATE, `sdlc-stage-handoff.md` UPDATE, `pipeline-state-machine.md` UPDATE, `pm-dev-session-architecture.md` UPDATE, `hooks-best-practices.md` PARTIAL UPDATE, `session-watchdog-reliability.md` UPDATE).
+- Re-run `grep -rln "subagent_stop" docs/features/` and confirm the audit gate: only historical-tense references + the `hooks-best-practices.md` settings.json hook mention remain.
 - Run `pytest tests/unit/ tests/integration/test_stage_comment.py -x -q`. All must pass.
 - Run `python -m ruff check .` and `python -m ruff format --check .`. Both must exit 0.
-- Commit with message `chore(#1024): delete orphan SubagentStop hook`.
+- Commit with message `chore(#1024): delete orphan SubagentStop hook`. Single commit — the doc audit is part of the deletion, not a follow-up.
 
 ### 2. Validation
 - **Task ID**: validate-deletion
@@ -321,31 +347,13 @@ See template. Only `builder` and `validator` are needed here.
 - **Assigned To**: `hook-deletion-validator`
 - **Agent Type**: `validator`
 - **Parallel**: false
-- Re-run the grep sweep command and confirm the inventory shrunk to match the success criteria (zero `subagent_stop_hook` matches in `agent/ bridge/ worker/ tests/`).
+- Re-run the grep sweep and confirm the inventory shrunk per Success Criteria (zero `subagent_stop_hook` matches across `agent/ bridge/ worker/ tests/ scripts/ tools/ reflections/`).
+- Re-run the caller-count gate and confirm no new SDK-path callers landed during the build.
 - Run `python -c "from agent.hooks import build_hooks_config; cfg = build_hooks_config(); assert set(cfg.keys()) == {'PreToolUse', 'PostToolUse', 'Stop', 'PreCompact'}, cfg.keys()"`. Must exit 0.
 - Run `pytest tests/ -x -q`. Must exit 0.
 - Run `python -m ruff check .` and `python -m ruff format --check .`. Both must exit 0.
-- Report pass/fail status. If fail, hand back to builder with the specific failing check.
-
-### 3. Documentation
-- **Task ID**: document-deletion
-- **Depends On**: validate-deletion
-- **Assigned To**: `hook-deletion-builder` (no documentarian specialist needed — the doc work is small and inline)
-- **Agent Type**: `builder`
-- **Parallel**: false
-- Inside `docs/features/harness-abstraction.md`, in the Phase 5 section (around line 150), append a sentence noting that the `subagent_stop.py` file was subsequently deleted in issue #1024 once the broader SDK path was confirmed fully unreachable. Do not rewrite earlier phases.
-- Re-grep `docs/features/` to confirm no active doc still describes `subagent_stop` as a live registered hook. Historical references are fine as long as they are phrased as historical.
-- Commit doc update with message `docs(#1024): note deletion of orphan SubagentStop hook`.
-
-### 4. Final validation
-- **Task ID**: validate-all
-- **Depends On**: document-deletion
-- **Assigned To**: `hook-deletion-validator`
-- **Agent Type**: `validator`
-- **Parallel**: false
-- Run all commands in the Verification table below. All must pass.
 - Verify every Success Criteria checkbox can be ticked.
-- Generate final report. Ready for PR.
+- Report pass/fail status. If fail, hand back to builder with the specific failing check. Ready for PR.
 
 ## Verification
 
@@ -356,19 +364,29 @@ See template. Only `builder` and `validator` are needed here.
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Hook file deleted | `test ! -f agent/hooks/subagent_stop.py && echo ok` | output contains ok |
 | Test file deleted | `test ! -f tests/unit/test_subagent_stop_hook.py && echo ok` | output contains ok |
-| No stale hook refs in prod code | `grep -rn "subagent_stop_hook" agent/ bridge/ worker/ tests/` | exit code 1 |
+| No stale hook refs in prod code | `grep -rn "subagent_stop_hook" agent/ bridge/ worker/ tests/ scripts/ tools/ reflections/` | exit code 1 |
+| Caller-count gate | `grep -rn "get_agent_response_sdk\|build_hooks_config\|ValorAgent(" agent/ bridge/ worker/` | only matches in `agent/sdk_client.py` and `agent/__init__.py` — no new SDK callers |
 | 4-key hooks config | `python -c "from agent.hooks import build_hooks_config; assert set(build_hooks_config().keys()) == {'PreToolUse', 'PostToolUse', 'Stop', 'PreCompact'}"` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic, Archaeologist | Plan inventory misses 7 active `docs/features/` files (13 references) with live prose treating the hook as wired. | `/do-plan` revision pass. Expand the Documentation section to enumerate each target file + disposition. | Files: `sdlc-pipeline-integrity.md` (4 refs incl. full §D "SubagentStop Stage State Injection"), `sdk-modernization.md` (3), `sdlc-stage-handoff.md` (4), `pipeline-state-machine.md` (2), `pm-dev-session-architecture.md` (1 registry row), `hooks-best-practices.md` (2 — SDK-hook list vs settings.json hook), `session-watchdog-reliability.md` (1 xref). For `hooks-best-practices.md`: keep the `\|\| true` rule (it governs the live `.claude/hooks/subagent_stop.py`); only drop the SDK-registry mention. For `sdlc-pipeline-integrity.md` §D: convert to a "Removed" historical note with pointer to `harness-abstraction.md` Phase 5 + issue #1024. |
+| CONCERN | Adversary | Unlisted active-code reference: `reflections/auditing.py:377` checks `event_type in ("Stop", "SubagentStop")`. | Add to the inventory in Technical Approach step 1 and explicitly mark "LEAVE UNCHANGED — audits settings.json hooks, not SDK hooks." | The `auditing.py:377` check iterates `.claude/settings.json` hooks, which still registers a live `.claude/hooks/subagent_stop.py`. Deleting this check would break the `|| true` audit rule for the live CLI-harness hook. The pre-deletion grep sweep will surface this file — builder must not treat the match as a surprise-blocker and must not edit it. |
+| CONCERN | Simplifier | Task 3 (Documentation) depends on Task 2 (validate-deletion), but Task 2 runs `pytest tests/ -x -q` *before* feature-doc updates happen — yet none of the validation is affected by doc prose. Meanwhile Task 1's inline `grep docs/features/` step duplicates Task 3's grep. | Merge Task 3's doc-audit into Task 1, or move the doc-audit ahead of Task 2. Either collapses a phase and removes the duplicated grep. | Current flow: Task 1 does partial doc audit → Task 2 validates (no doc gate) → Task 3 does the "real" doc audit → Task 4 re-validates. Simpler: Task 1 (grep + delete + edit + doc audit in one commit) → Task 2 (validate everything, incl. `grep -rln subagent_stop docs/features/` returns zero live-tense matches) → done. Saves the `docs(#1024):` commit and one agent hop. |
+| CONCERN | Operator | Success Criterion "grep `subagent_stop_hook` returns zero matches in `agent/ bridge/ worker/ tests/`" omits `reflections/` and `scripts/` and `tools/`, but the inventory grep in Technical Approach *does* check `tools/` and `scripts/`. Criteria and build-time sweep disagree. | Make the two grep commands identical. Either widen the success-criterion grep to the full sweep, or tighten the sweep to match the criterion. | Recommended: use the full sweep in both places — `grep -rn "subagent_stop_hook" agent/ bridge/ worker/ tests/ scripts/ tools/ reflections/` — and expect zero. The `reflections/auditing.py` match is on the string `"SubagentStop"` not `subagent_stop_hook`, so it will not surface under this criterion (verified). |
+| CONCERN | Skeptic | Risk 1 ("new caller lands on main between plan and build time") understates impact. Plan says "no crash — the hook just doesn't fire," but the net effect is that a new SDK-path caller would silently lose logging that was previously there. | Add a mitigation: if the pre-deletion grep surfaces a new caller for `get_agent_response_sdk` or anything that reaches `build_hooks_config()` beyond the existing single call site, pause and escalate; do not proceed with deletion. | Build-time check: `grep -rn "get_agent_response_sdk\|build_hooks_config\|ValorAgent(" agent/ bridge/ worker/` must return exactly the known inventory (`agent/sdk_client.py:1120`, `agent/sdk_client.py:1953`, `agent/sdk_client.py:1885`, plus `agent/__init__.py` export). Anything else = stop. |
+| CONCERN | User | `tests/integration/test_stage_comment.py:77` is a fixture *string* inside `format_stage_comment(files=[...])` — the assertion only checks `"### Files Modified" in body`. The plan treats changing this as mandatory, but the current string is harmless (the formatter never touches the filesystem for that list). | Clarify the rationale: update is a hygiene change (removes a dangling reference for future readers), not a correctness fix. Flagging it as "UPDATE" in Test Impact is correct; flagging it as essential to deletion is not. | The test passes today with or without the file existing — `format_stage_comment()` formats markdown only. Mark the test-update as NIT-level unless the builder finds a second test that actually imports from the deleted path. Current Test Impact grep confirmed: zero `agent.hooks.subagent_stop` imports outside `tests/unit/test_subagent_stop_hook.py`. |
+| NIT | Simplifier | Open Question #2 ("downstream forks or private branches") is explicitly scoped out in No-Gos line 233. The Open Question is noise. | Delete Open Question #2. | — |
+| NIT | Skeptic | Freshness Check notes PR #912 is a citation error in the issue body but leaves the error in place. | Either fix the issue body during build or add a line to the PR body noting the correction. | — |
+| NIT | User | Documentation section item 2 reads "If found, update each to reflect deletion" with target doc examples — but those docs *are* found (grep confirms 7 files). Phrasing implies uncertainty when the work is known. | Rewrite as a definite TODO list with specific dispositions per file (see Skeptic CONCERN above). | — |
 
 ---
 
 ## Open Questions
 
-1. Should the Phase 5 note in `docs/features/harness-abstraction.md` be amended with a forward reference to this issue (#1024), or left as the authoritative "stripped to logging only" snapshot? Recommendation: add the amendment — it gives future readers a pointer to the final deletion and preserves the timeline.
-2. Are there any downstream forks or private branches that depend on `subagent_stop_hook` that we should coordinate with before deletion? Scope assumption: no. The issue body indicates this is internal orphan code with no external consumers. Confirming with the owner before merge is cheap insurance.
+1. Should the Phase 5 note in `docs/features/harness-abstraction.md` be amended with a forward reference to this issue (#1024), or left as the authoritative "stripped to logging only" snapshot? **Resolved during revision**: the Documentation section now mandates the AMEND. No longer an open question.
+
+**Note for builder on PR body:** include a correction line noting that issue #1024's body cites PR #912 as the Dev-session migration PR, but that PR doesn't exist — the actual migration landed in PRs #868 and #902 (documented in `docs/features/harness-abstraction.md`). The underlying fact (migration happened, hook orphaned) is correct; this is a citation-error footnote for future readers.
