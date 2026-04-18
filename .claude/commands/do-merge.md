@@ -229,7 +229,7 @@ After the Lockfile Sync Check, run a full test suite gate to ensure the PR branc
 
 ```bash
 # Run the full suite fail-fast on the PR branch (already checked out)
-pytest tests/ -x -q --tb=no 2>&1 | tee /tmp/pytest_output.txt
+pytest tests/ -q --tb=no 2>&1 | tee /tmp/pytest_output.txt
 PYTEST_EXIT=$?
 
 # Parse failure test IDs from output
@@ -281,7 +281,7 @@ fi
 
 **After a clean merge:** Update `data/main_test_baseline.json` to `{"failing_tests": []}` so future PRs are held to a fully green standard.
 
-**Note:** The `-x` fail-fast flag minimizes wall-clock time. If main is already green, the suite exits quickly on success.
+**Note:** The full suite collects all failures before comparing against the baseline — this is required for the `comm -23` regression check to work correctly. Using `-x` (fail-fast) would stop after the first pre-existing failure and hide new regressions.
 
 Also verify the PR is mergeable:
 

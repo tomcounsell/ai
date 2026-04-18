@@ -544,25 +544,35 @@ Before emitting the OUTCOME, run a mandatory Exception Swallow Gate on the diff.
 ```bash
 # Get the diff of new/changed Python lines that add except Exception blocks
 DIFF_BASE=$(git rev-parse --abbrev-ref HEAD | grep -q "^main$" && echo "HEAD~1" || echo "main")
-NEW_EXCEPT_LINES=$(git diff "$DIFF_BASE"...HEAD -- '*.py' | grep '^+' | grep -v '^+++' | grep 'except.*Exception')
+DIFF_CONTENT=$(git diff "$DIFF_BASE"...HEAD -- '*.py' | grep '^+' | grep -v '^+++')
 
-if [ -z "$NEW_EXCEPT_LINES" ]; then
+# Find line numbers (within the diff output) of new except Exception clauses
+EXCEPT_LINE_NUMS=$(echo "$DIFF_CONTENT" | grep -n 'except.*Exception' | cut -d: -f1)
+
+if [ -z "$EXCEPT_LINE_NUMS" ]; then
     echo "EXCEPTION_SWALLOW_GATE: PASS (no new except Exception blocks)"
 else
-    # For each new except Exception line, check if it is guarded
+    # For each new except Exception line, check the clause line AND the next 3 handler-body lines
     FAILURES=""
-    while IFS= read -r line; do
-        # Pass if the line contains logger, log., warning, error, or raise
-        if echo "$line" | grep -qE "logger|log\.|warning|error|raise"; then
+    TOTAL_LINES=$(echo "$DIFF_CONTENT" | wc -l)
+    while IFS= read -r lineno; do
+        # Extract the except clause line itself
+        clause_line=$(echo "$DIFF_CONTENT" | sed -n "${lineno}p")
+        # Extract up to 3 handler-body lines following the except clause
+        end_line=$((lineno + 3))
+        [ $end_line -gt $TOTAL_LINES ] && end_line=$TOTAL_LINES
+        body_lines=$(echo "$DIFF_CONTENT" | sed -n "$((lineno+1)),${end_line}p")
+        # Pass if the except clause has a valid swallow-ok comment (reason must be 10+ non-whitespace chars)
+        if echo "$clause_line" | grep -qE "# swallow-ok: .{10,}"; then
             continue
         fi
-        # Pass if the line has a valid swallow-ok comment (reason must be 10+ non-whitespace chars)
-        if echo "$line" | grep -qE "# swallow-ok: .{10,}"; then
+        # Pass if the handler body contains logger, log., warning, error, or raise
+        if echo "$body_lines" | grep -qE "logger|log\.|warning|error|raise"; then
             continue
         fi
         FAILURES="$FAILURES
-$line"
-    done <<< "$NEW_EXCEPT_LINES"
+$clause_line"
+    done <<< "$EXCEPT_LINE_NUMS"
 
     if [ -z "$FAILURES" ]; then
         echo "EXCEPTION_SWALLOW_GATE: PASS"
@@ -571,8 +581,8 @@ $line"
         echo -e "$FAILURES"
         echo ""
         echo "Each new except Exception block must either:"
-        echo "  1. Contain logger, log., warning, error, or raise in the handler body"
-        echo "  2. Have an inline comment: # swallow-ok: {reason with 10+ chars}"
+        echo "  1. Contain logger, log., warning, error, or raise in the handler body (next 3 lines)"
+        echo "  2. Have an inline comment on the except line: # swallow-ok: {reason with 10+ chars}"
         echo "     Example: # swallow-ok: safe during shutdown, task already cancelled"
         echo "     Invalid: # swallow-ok: x   (reason too short)"
         echo "     Invalid: # swallow-ok:      (empty reason)"
