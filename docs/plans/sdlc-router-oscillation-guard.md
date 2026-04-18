@@ -4,7 +4,7 @@ type: bug
 appetite: Medium
 owner: Valor
 created: 2026-04-18
-revised: 2026-04-18
+revised: 2026-04-18 (second pass)
 revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1040
 last_comment_id:
@@ -306,6 +306,15 @@ non-determinism of `/do-pr-review` is handled by G4 (oscillation cap) instead
 — after 3 same-skill dispatches without state change, the router escalates
 to `blocked` and surfaces the non-determinism for human judgment.
 
+**Implementation Note (G5 hash stability):** The `artifact_hash` for CRITIQUE
+MUST be computed over the full UTF-8-encoded plan file bytes including
+frontmatter, after normalizing line endings to `\n`. Do NOT strip the YAML
+frontmatter before hashing — frontmatter edits (e.g. `revision_applied: true`)
+are meaningful plan changes that SHOULD bust the cache. Do NOT normalize
+whitespace within prose — a reviewer who reflows a paragraph is editing the
+plan and the critique should re-run. Only line-ending normalization is
+required (cross-platform safety for collaborators on Windows checkouts).
+
 G5 on CRITIQUE converts "same input, different output" into "same input, one
 consistent output." Cache invalidation: any edit to the plan file changes
 its sha256 hash; no TTL is needed because the hash IS the cache key. A plan
@@ -361,6 +370,16 @@ same sub-skill WITHOUT the pipeline state changing between picks.
   increments. This is the intended behavior — repeated dispatches of a
   crashing skill ARE oscillation. G4 catches it.
 
+**Implementation Note (snapshot determinism):** When computing the
+`stage_snapshot` for equality comparison, the dict MUST be serialized with
+`json.dumps(snapshot, sort_keys=True, separators=(",", ":"))` before
+comparing. Python dict equality is insertion-order-insensitive, but mixing
+raw-dict compares with JSON-roundtripped dicts (which can happen when a
+snapshot is loaded from Redis) creates subtle bugs where equal-looking
+snapshots compare unequal. Canonicalize through `json.dumps(..., sort_keys=True)`
+once, compare string equality. Document this in the `sdlc_router.py`
+snapshot helper.
+
 G4 uses this counter. Threshold: `same_stage_dispatch_count >= 3` → escalate
 to `blocked`.
 
@@ -399,6 +418,16 @@ full-table comparison and localizes drift to single rows.
 
 The "Reason" column in the markdown is descriptive only and NOT checked by the
 parity test — it can evolve freely for human readability without breaking CI.
+
+**Implementation Note (parity parser robustness):** The markdown row parser
+MUST tolerate trailing whitespace, escaped pipe characters inside cells
+(`\|`), and multi-line cells that use `<br>` for line breaks. Use a tested
+markdown-table parser (e.g. `mistune` if already a dependency, otherwise a
+small local regex parser with explicit test coverage) rather than naive
+string splitting on `|`. Add a negative test that mutates a row in SKILL.md
+and asserts the parity test fails with a readable diff pointing at the
+specific row number — this proves the test catches drift rather than silently
+passing when the parser crashes.
 
 ## Failure Path Test Strategy
 
@@ -496,6 +525,16 @@ Greenfield tests (new files, no existing tests to modify):
   because leaving two writers risks exactly the dual-source drift that caused
   the original bug.
 
+  **Implementation Note (import direction):** The `classify_outcome()` caller
+  lives in `agent/pipeline_state.py`; the verdict recorder lives in
+  `tools/sdlc_verdict.py`. Today `tools/` does not import `agent/`, so the
+  new call direction (`agent/pipeline_state.py` importing
+  `tools.sdlc_verdict.record_verdict`) is acceptable. Do NOT introduce a
+  reverse import (tools importing agent) — that would create a cycle with
+  `agent/sdlc_router.py` which imports helpers from `tools/`. A regression
+  test in `test_architectural_constraints.py` (or similar) should assert
+  this one-way boundary.
+
 ## Risks
 
 ### Risk 1: Guard logic false-positives block legitimate flows
@@ -566,6 +605,16 @@ It is used by `sdlc_verdict record`, the oscillation-counter write in
 
 **Out of scope (v2, deferred):** True Redis WATCH/MULTI locking keyed by
 session_id. Defer until optimistic retry proves insufficient in production.
+
+**Implementation Note (retry exhaustion observability):** When the optimistic
+retry in `update_stage_states` exhausts its 3 attempts, the helper MUST emit
+a WARNING log with `session_id`, `stage`, and `update_fn.__name__` so the
+failure is traceable. Silently returning `False` without a log makes missed
+writes invisible during bridge-path debugging. Also increment a Prometheus
+counter `sdlc_stage_states_retry_exhausted_total` (or log a structured JSON
+record if Prometheus is not wired yet) so the rate of lost writes is
+observable in the dashboard. This is metadata lost, not correctness lost —
+but sustained exhaustion indicates real contention worth escalating to v2.
 
 ### Race 2: Verdict recorded after the next `/sdlc` already read
 **Location:** `tools/sdlc_verdict.py` write races with `/sdlc` read.
@@ -903,6 +952,28 @@ Revision pass addressed these concerns from the initial critique:
 | G4 oscillation counter state machine underspecified | **Fully specified** — bounded list (max 10), written BEFORE skill launch, snapshot projection explicitly enumerated (excluded: timestamps, CI churn, the list itself), counter reset on any state-snapshot diff. |
 | DOCS/MERGE stage oscillation uncovered | G4 is **universal**, applies to every stage. Explicit coverage note added in Technical Approach. |
 | Open questions left unresolved | All three resolved in-plan (see Open Questions section). |
+
+## Revision Summary (2026-04-18, second pass)
+
+Second revision pass embeds Implementation Notes for concerns that the prior
+revision addressed in prose but did not flag as actionable for the builder.
+These are NOT new blockers — the concerns were already acknowledged. They are
+surfaced now as explicit Implementation Note callouts inside the relevant
+sections so the build agent cannot miss them during execution.
+
+| Concern | Implementation Note Location |
+|---------|-------------------------------|
+| G5 artifact-hash stability across platforms and whitespace edits | **Technical Approach — G5 table footnote.** Hash full UTF-8 bytes including frontmatter; normalize line endings only; do NOT strip frontmatter or normalize internal whitespace. |
+| Snapshot-equality false negatives from dict ordering / JSON roundtrip mismatch | **Technical Approach — Step 4 (same-stage counter).** Canonicalize snapshots via `json.dumps(..., sort_keys=True)` before comparison. |
+| Silent write loss when `update_stage_states` retries exhaust | **Race Conditions — Mitigation (v1).** WARNING log with session_id + stage + update_fn.__name__, plus a counter metric to surface sustained contention. |
+| Markdown parity parser fragility on escaped pipes / multi-line cells | **Technical Approach — Step 5 (parity contract).** Use a tested markdown-table parser; add a negative mutation test asserting parity failure produces a readable row-level diff. |
+| Import-direction cycle risk when `classify_outcome()` calls `sdlc_verdict` | **Rabbit Holes — `classify_outcome()` dedup.** Agent imports tools; tools MUST NOT import agent. Boundary enforced by a regression test. |
+
+Frontmatter changes: `revised: 2026-04-18 (second pass)`; `revision_applied`
+remains `true`. No task list additions — every Implementation Note is a
+surgical instruction the builder applies inside the task it is nested under.
+No new Success Criteria are introduced; the notes sharpen existing criteria
+rather than adding work.
 
 ---
 
