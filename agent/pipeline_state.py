@@ -326,6 +326,19 @@ class PipelineStateMachine:
         Validates stage_states via the StageStates Pydantic model before
         serializing. Validation errors log a warning but do not crash --
         the data is still saved to avoid losing progress.
+
+        Metadata preservation invariant (regression #1040 blocker 1):
+        ``_save()`` is a write path that only knows about ``self.states``
+        plus the two cycle counters (``_patch_cycle_count`` and
+        ``_critique_cycle_count`` — explicitly re-added below). Any OTHER
+        underscore-prefixed metadata key (``_verdicts``, ``_sdlc_dispatches``,
+        or any future ``_*`` key) would be silently dropped if we serialized
+        ``self.states`` alone. To protect cross-writer invariants — especially
+        the verdict recorder in ``tools.sdlc_verdict`` and the dispatch
+        recorder in ``agent.sdlc_router.record_dispatch`` — we reload the
+        latest raw ``stage_states`` from the session BEFORE writing and merge
+        every ``_*`` key we did not manage ourselves. This makes ``_save()``
+        a safe participant in the cross-process stage_states write protocol.
         """
         # Validate states before saving
         try:
@@ -341,9 +354,24 @@ class PipelineStateMachine:
                 f"{getattr(self.session, 'session_id', '?')}: {e}. Saving anyway."
             )
 
+        # Load any concurrent metadata writes from the live session so we can
+        # preserve underscore-prefixed keys we don't own (see invariant in
+        # docstring above). This avoids clobbering ``_verdicts`` /
+        # ``_sdlc_dispatches`` that the verdict/dispatch recorders wrote
+        # between __init__ and this save.
+        preserved_metadata = self._load_preserved_metadata()
+
         data = dict(self.states)
+        # Owned metadata keys — re-applied explicitly each save.
         data["_patch_cycle_count"] = self.patch_cycle_count
         data["_critique_cycle_count"] = self.critique_cycle_count
+        # Unowned underscore metadata keys — merged back in without
+        # overwriting the owned keys above.
+        for key, value in preserved_metadata.items():
+            if key in ("_patch_cycle_count", "_critique_cycle_count"):
+                continue
+            data[key] = value
+
         self.session.stage_states = json.dumps(data)
         try:
             self.session.save()
@@ -352,6 +380,39 @@ class PipelineStateMachine:
                 f"Failed to save stage_states for session "
                 f"{getattr(self.session, 'session_id', '?')}: {e}"
             )
+
+    def _load_preserved_metadata(self) -> dict:
+        """Return underscore-prefixed metadata keys from the live session.
+
+        ``_save()`` calls this to pick up writes other writers (e.g.
+        ``tools.sdlc_verdict.record_verdict``, ``agent.sdlc_router.record_dispatch``)
+        may have made between when this state machine was constructed and
+        the current save. Returns only ``_*`` keys other than the two cycle
+        counters owned by the state machine itself. Never raises.
+        """
+        try:
+            raw = getattr(self.session, "stage_states", None)
+            if not raw:
+                return {}
+            if isinstance(raw, str):
+                data = json.loads(raw)
+            elif isinstance(raw, dict):
+                data = raw
+            else:
+                return {}
+            if not isinstance(data, dict):
+                return {}
+            return {
+                k: v
+                for k, v in data.items()
+                if k.startswith("_") and k not in ("_patch_cycle_count", "_critique_cycle_count")
+            }
+        except Exception as e:
+            logger.debug(
+                f"_load_preserved_metadata: failed on session "
+                f"{getattr(self.session, 'session_id', '?')}: {e}"
+            )
+            return {}
 
     def _get_predecessors(self, stage: str) -> list[str]:
         """Get stages that must be completed before this stage can start.

@@ -740,6 +740,7 @@ def record_dispatch(
     stage_states: dict,
     skill: str,
     now: datetime | None = None,
+    pr_number: int | None = None,
 ) -> dict:
     """Append a dispatch record to ``stage_states._sdlc_dispatches``.
 
@@ -757,6 +758,14 @@ def record_dispatch(
         stage_states: The dict to mutate.
         skill: The skill string being dispatched.
         now: Optional timestamp for testability. Defaults to current UTC.
+        pr_number: Optional PR number from the caller's ``_meta`` dict. Passed
+            into ``build_stage_snapshot`` so the snapshot's ``pr_number`` field
+            reflects the live PR state. If omitted, the snapshot falls back
+            to ``stage_states.get("_pr_number")`` for callers that mirror the
+            PR number into ``stage_states`` directly; otherwise it is ``None``.
+            Explicit pass-through is preferred because ``sdlc_stage_query``
+            puts the PR number into ``_meta.pr_number`` rather than
+            mirroring it into ``stage_states``.
 
     Returns:
         The mutated stage_states dict.
@@ -765,7 +774,11 @@ def record_dispatch(
     # Build a snapshot from a stage_states view that EXCLUDES the history
     # list itself, otherwise the counter would never match across invocations.
     view = {k: v for k, v in stage_states.items() if k != "_sdlc_dispatches"}
-    snapshot = build_stage_snapshot(view, meta={"pr_number": stage_states.get("_pr_number")})
+    # Resolve the pr_number: explicit argument wins, else fall back to any
+    # mirrored value in stage_states (opt-in convention for callers that
+    # prefer to keep PR context alongside stage_states).
+    resolved_pr_number = pr_number if pr_number is not None else stage_states.get("_pr_number")
+    snapshot = build_stage_snapshot(view, meta={"pr_number": resolved_pr_number})
 
     history = stage_states.setdefault("_sdlc_dispatches", [])
     if not isinstance(history, list):
