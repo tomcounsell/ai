@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1027
 last_comment_id:
+revision_applied: true
 ---
 
 # Consolidate Three Overlapping Steering Docs
@@ -104,6 +105,7 @@ Files referenced as cross-links to `steering-queue.md` (must be updated to `stee
 - `docs/features/telegram-message-edit-handling.md` (two refs)
 - `docs/features/bridge-workflow-gaps.md` (line 105)
 - `docs/features/pm-dev-session-architecture.md` (line 405)
+- `docs/features/reaction-semantics.md` (line 105) — link `[Steering Queue](steering-queue.md)` → `[Steering Queue: Historical Spec](steering-implementation-spec.md)`
 - `docs/plans/parent-child-steering.md` (multiple refs — completed plan, update is cosmetic)
 - `docs/plans/redis-popoto-migration.md` (one ref)
 
@@ -175,7 +177,7 @@ This plan IS the documentation task — the deliverables are all doc files.
 - [ ] `session-steering.md` has "See also" links to `mid-session-steering.md` and `steering-implementation-spec.md` at the top
 - [ ] `mid-session-steering.md` has "See also: session-steering.md" at the top
 - [ ] `steering-queue.md` is renamed to `steering-implementation-spec.md` and marked as historical
-- [ ] Abort keyword / status transition / race condition content exists in exactly one location (not duplicated across primary and spec)
+- [ ] Abort keyword, status transition table, and race condition content exist in exactly one location: `mid-session-steering.md` (Telegram-user-facing flow) — not duplicated in `session-steering.md` or `steering-implementation-spec.md`
 - [ ] `docs/features/README.md` reflects the final hierarchy with updated file name
 - [ ] `grep -r "steering-queue" docs/ .claude/` returns zero results (no broken links)
 - [ ] `grep -r "steering-implementation-spec" docs/features/README.md` confirms new entry exists
@@ -211,7 +213,7 @@ This plan IS the documentation task — the deliverables are all doc files.
 - Add "See also: session-steering.md" link at top of `mid-session-steering.md`
 - Strip the parent-child section from `steering-queue.md`; remove content duplicated in `mid-session-steering.md` (abort keywords, status transition table, race conditions); add prominent "Historical Design Specification" header
 - Rename `steering-queue.md` → `steering-implementation-spec.md` via `git mv`
-- Update all cross-references: `README.md`, `telegram-message-edit-handling.md`, `bridge-workflow-gaps.md`, `pm-dev-session-architecture.md`, and both completed plan docs
+- Update all cross-references: `README.md`, `telegram-message-edit-handling.md`, `bridge-workflow-gaps.md`, `pm-dev-session-architecture.md`, `reaction-semantics.md` (line 105: `[Steering Queue](steering-queue.md)` → `[Steering Queue: Historical Spec](steering-implementation-spec.md)`), and both completed plan docs
 - Commit all changes in a single commit
 
 #### 2. Validate — verify no broken links
@@ -223,7 +225,8 @@ This plan IS the documentation task — the deliverables are all doc files.
 - Run `grep -r "steering-queue" docs/ .claude/ CLAUDE.md` — expect zero results
 - Run `grep -r "steering-implementation-spec" docs/features/README.md` — expect match
 - Verify `session-steering.md` contains the parent-child section
-- Verify "See also" blocks present in `session-steering.md` and `mid-session-steering.md`
+- Verify "See also" block in `session-steering.md` references both `mid-session-steering.md` and `steering-implementation-spec.md`: `grep "steering-implementation-spec\|mid-session-steering" docs/features/session-steering.md`
+- Verify "See also" block present in `mid-session-steering.md`: `grep "session-steering" docs/features/mid-session-steering.md`
 - Verify `steering-implementation-spec.md` has historical header and no parent-child section
 - Report pass/fail
 
@@ -237,6 +240,7 @@ This plan IS the documentation task — the deliverables are all doc files.
 | README updated | `grep "steering-implementation-spec" docs/features/README.md` | exit code 0 |
 | Parent-child in primary | `grep "Parent-Child Steering" docs/features/session-steering.md` | exit code 0 |
 | See-also in mid-session | `grep "session-steering" docs/features/mid-session-steering.md` | exit code 0 |
+| See-also in primary | `grep "steering-implementation-spec\|mid-session-steering" docs/features/session-steering.md` | exit code 0 |
 
 ## Critique Results
 
