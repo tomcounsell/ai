@@ -11,7 +11,7 @@ Two complementary paths write stage markers:
 ### 1. Bridge hooks (primary path — bridge-initiated sessions)
 
 - `pre_tool_use.py` detects dev-session Agent tool use, extracts the stage name from the prompt, and calls `PipelineStateMachine.start_stage()` on the parent PM session.
-- `subagent_stop.py` fires on dev-session completion, calls `classify_outcome()` then `complete_stage()` or `fail_stage()`.
+- The worker post-completion handler `_handle_dev_session_completion()` in `agent/agent_session_queue.py` fires on dev-session completion, calls `classify_outcome()` then `complete_stage()` or `fail_stage()`. (Prior to the Phase 5 harness migration this logic lived in the SDK `SubagentStop` hook at `agent/hooks/subagent_stop.py`, which was stripped to logging-only and then deleted in issue #1024.)
 
 This path fires automatically for all sessions initiated through the Telegram bridge.
 

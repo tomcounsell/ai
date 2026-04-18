@@ -167,7 +167,6 @@ The PM persona includes Rule 5 ("MERGE is Mandatory Before Pipeline Complete") w
 - **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` for the Skill path (`_handle_skill_tool_start()` with `_SKILL_TO_STAGE` mapping), marking the stage as `in_progress`
 - **PostToolUse hook** (`agent/hooks/post_tool_use.py`): Calls `complete_stage()` when a mapped SDLC Skill tool finishes (Skill path)
 - **Worker post-completion handler** (`agent/agent_session_queue.py:_handle_dev_session_completion()`): Calls `classify_outcome()` and routes to `complete_stage()` or `fail_stage()` after dev session harness returns (dev-session path)
-- **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Logs completion only; SDLC tracking moved to worker
 - **PM session**: Uses state machine for stage queries and outcome classification
 - **Job Queue** (`agent/agent_session_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
 - **AgentSession** (`models/agent_session.py`): `get_stage_progress()` convenience wrapper around `get_display_progress()`
@@ -194,7 +193,6 @@ The PM persona includes Rule 5 ("MERGE is Mandatory Before Pipeline Complete") w
 | `agent/agent_session_queue.py` | `_handle_dev_session_completion()` — `complete_stage()`/`fail_stage()` wiring for dev-session path |
 | `agent/hooks/pre_tool_use.py` | `start_stage()` wiring — Skill path via `_handle_skill_tool_start()` + `_SKILL_TO_STAGE` |
 | `agent/hooks/post_tool_use.py` | `complete_stage()` wiring for Skill path via `_complete_pipeline_stage()` |
-| `agent/hooks/subagent_stop.py` | Logs completion only (SDLC tracking moved to worker) |
 | `tests/unit/test_pipeline_state_machine.py` | State machine unit tests |
 | `tests/unit/test_sdlc_stage_query.py` | Stage query CLI tool unit tests |
 | `tests/unit/test_pre_tool_use_start_stage.py` | Stage extraction and start_stage wiring tests |

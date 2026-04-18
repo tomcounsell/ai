@@ -64,20 +64,20 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 
 MERGE is the terminal stage, gated by human authorization.
 
-### D. SubagentStop Stage State Injection
+### D. Stage State Injection (via worker post-completion handler)
 
-**File**: `agent/hooks/subagent_stop.py`
+**File**: `agent/agent_session_queue.py` (`_handle_dev_session_completion()`)
 
-When a dev-session subagent completes, the SubagentStop hook now injects the current SDLC pipeline state back into the PM (PM session) context. This prevents the PM from fabricating stage completion claims (e.g., claiming "review passed" without running `/do-pr-review`).
+When a Dev session completes, the worker's post-completion handler reads the current SDLC pipeline state from the Dev session's AgentSession and steers the parent PM session with a pipeline-state summary. This prevents the PM from fabricating stage completion claims (e.g., claiming "review passed" without running `/do-pr-review`).
 
-The hook:
-1. Detects `agent_type == "dev-session"` completions
-2. Reads `stage_states` from the AgentSession in Redis (the legacy `sdlc_stages` field was removed in PR #490)
-3. Returns `{"reason": "Pipeline state: {dict}"}` so the PM sees which stages are actually complete vs still pending
+The handler:
+1. Runs after every Dev session finishes (unconditional — the CLI harness is the only execution path)
+2. Reads `stage_states` from the Dev session's AgentSession in Redis (the earlier `sdlc_stages` field was retired in PR #490)
+3. Injects a pipeline-state steering message into the parent PM so the PM sees which stages are actually complete vs still pending
 
-This creates a feedback loop: the PM dispatches a dev-session to run a stage, the dev-session updates `stage_states` during execution, and the SubagentStop hook feeds the updated state back to the PM before it decides the next action.
+This creates a feedback loop: the PM dispatches a Dev session to run a stage, the Dev session updates `stage_states` during execution, and the worker post-completion handler feeds the updated state back to the PM before it decides the next action.
 
-**Related commit**: `c7e5a55d` (simplified from initial `9829690d`)
+**History**: originally implemented via the SDK `SubagentStop` hook (`agent/hooks/subagent_stop.py`, related commit `c7e5a55d`). The logic was moved to `_handle_dev_session_completion()` in the Phase 5 harness migration (see [Harness Abstraction](harness-abstraction.md)), and the hook file itself was deleted in issue #1024 once the broader SDK path was confirmed fully unreachable.
 
 ## Known Tech Debt
 
