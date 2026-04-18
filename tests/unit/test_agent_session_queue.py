@@ -310,13 +310,13 @@ class TestPopAgentSessionThrottleGuard:
         mock_r = self._make_mock_redis("suspended")
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
-            with patch("agent.agent_session_queue.AgentSession") as mock_cls:
+            with patch("agent.session_pickup.AgentSession") as mock_cls:
                 mock_query = MagicMock()
                 mock_cls.query = mock_query
                 mock_query.async_filter = AsyncMock(return_value=[normal_session])
 
-                with patch("agent.agent_session_queue._acquire_pop_lock", return_value=True):
-                    with patch("agent.agent_session_queue._release_pop_lock"):
+                with patch("agent.session_pickup._acquire_pop_lock", return_value=True):
+                    with patch("agent.session_pickup._release_pop_lock"):
                         result = await _pop_agent_session(
                             worker_key="test-suspended-normal", is_project_keyed=False
                         )
@@ -334,13 +334,13 @@ class TestPopAgentSessionThrottleGuard:
         mock_r = self._make_mock_redis("suspended")
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
-            with patch("agent.agent_session_queue.AgentSession") as mock_cls:
+            with patch("agent.session_pickup.AgentSession") as mock_cls:
                 mock_query = MagicMock()
                 mock_cls.query = mock_query
                 mock_query.async_filter = AsyncMock(return_value=[low_session])
 
-                with patch("agent.agent_session_queue._acquire_pop_lock", return_value=True):
-                    with patch("agent.agent_session_queue._release_pop_lock"):
+                with patch("agent.session_pickup._acquire_pop_lock", return_value=True):
+                    with patch("agent.session_pickup._release_pop_lock"):
                         result = await _pop_agent_session(
                             worker_key="test-suspended-low", is_project_keyed=False
                         )
@@ -358,13 +358,13 @@ class TestPopAgentSessionThrottleGuard:
         mock_r = self._make_mock_redis("moderate")
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
-            with patch("agent.agent_session_queue.AgentSession") as mock_cls:
+            with patch("agent.session_pickup.AgentSession") as mock_cls:
                 mock_query = MagicMock()
                 mock_cls.query = mock_query
                 mock_query.async_filter = AsyncMock(return_value=[low_session])
 
-                with patch("agent.agent_session_queue._acquire_pop_lock", return_value=True):
-                    with patch("agent.agent_session_queue._release_pop_lock"):
+                with patch("agent.session_pickup._acquire_pop_lock", return_value=True):
+                    with patch("agent.session_pickup._release_pop_lock"):
                         result = await _pop_agent_session(
                             worker_key="test-moderate-low", is_project_keyed=False
                         )
@@ -836,9 +836,9 @@ class TestHealthCheckNoProgressRecovery:
             return []
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
-            patch("agent.agent_session_queue._acquire_pop_lock", return_value=True),
-            patch("agent.agent_session_queue._release_pop_lock"),
+            patch("agent.session_pickup.AgentSession") as mock_cls,
+            patch("agent.session_pickup._acquire_pop_lock", return_value=True),
+            patch("agent.session_pickup._release_pop_lock"),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
         ):
             # Redis sustainability guards return falsy → proceed normally.
