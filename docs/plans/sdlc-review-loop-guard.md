@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1043
 last_comment_id:
+revision_applied: true
 ---
 
 # SDLC Review Loop Guard
@@ -156,8 +157,8 @@ These are read-only lookups. On any `gh` CLI failure, default both to `None` (gu
 **2. Implement G6 in `agent/sdlc_router.py`.**
 
 ```python
-def _guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict) -> GuardResult | None:
-    """G6: PR is mergeable, CI green, and review verdict APPROVED — fast-path to /do-merge."""
+def _guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict) -> Dispatch | None:
+    """G6: PR is mergeable, CI green, DOCS done, and review verdict APPROVED — fast-path to /do-merge."""
     pr_number = meta.get("pr_number")
     if not pr_number:
         return None
@@ -165,11 +166,14 @@ def _guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict
         return None
     if meta.get("ci_all_passing") is not True:
         return None
+    # DOCS must be completed before dispatching merge
+    if stage_states.get("DOCS") not in (STATUS_COMPLETED,):
+        return None
     verdicts = stage_states.get("_verdicts") or {}
     review_verdict = _verdict_text(verdicts.get("REVIEW"))
     if "APPROVED" not in review_verdict.upper():
         return None
-    return GuardTripped(skill=SKILL_DO_MERGE, reason="PR is mergeable, CI green, review APPROVED — fast-path to merge")
+    return Dispatch(skill=SKILL_DO_MERGE, reason="PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to merge", row_id="G6")
 ```
 
 Add G6 to the guard evaluation order: **G6 is evaluated LAST** (after G1-G5). G2 and G4 (escalation guards) take priority — a pipeline that's oscillating should escalate to `blocked` before the merge guard fires. G3 (PR lock) redirects `/do-plan` dispatches but does not prevent G6 from firing. Order: G1 → G2 → G3 → G4 → G5 → G6.
@@ -197,11 +201,22 @@ Add G6 row:
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
-| G6: Terminal merge ready | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `_verdicts["REVIEW"]` contains `APPROVED` | `/do-merge {pr_number}` |
+| G6: Terminal merge ready | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `DOCS == "completed"` AND `_verdicts["REVIEW"]` contains `APPROVED` | `/do-merge {pr_number}` |
 
-**5. Update parity test to include G6.**
+**5. Add guard parity infrastructure and G6 coverage to the parity test.**
 
-`tests/unit/test_sdlc_skill_md_parity.py` (added by PR #1044) must be updated to include the G6 row in its expected guard table. The parity test checks that every guard in SKILL.md has a corresponding Python function in `agent/sdlc_router.py`.
+`tests/unit/test_sdlc_skill_md_parity.py` (added by PR #1044) currently only covers `DISPATCH_RULES` (rows 1–10b); it has no `parse_guard_rows()` function and no guard-table validation. This step has two parts:
+
+**Part A — Add `parse_guard_rows(md: str) -> list[dict]` to the parity test module.** The function must:
+- Find the "## Step 3:" heading (or whichever step contains the guard table in SKILL.md after this plan's SKILL.md updates land).
+- Parse consecutive `|`-delimited rows, extracting `guard_id` (first cell, e.g. `"G1"`, `"G6"`), `condition` (second cell), and `forced_dispatch` (third cell).
+- Return only rows whose first cell matches the pattern `G\d+`.
+
+**Part B — Add guard parity tests using the new parser.** Specifically:
+- `test_guard_row_ids_in_python()`: asserts that every `guard_id` found by `parse_guard_rows()` has a corresponding function name `_guard_g{N}_*` exported by `agent/sdlc_router.py`.
+- `test_g6_guard_row_present_in_skill_md()`: asserts that a row with `guard_id == "G6"` exists in the parsed guard table after this plan's SKILL.md edits.
+
+The parity test module imports `DISPATCH_RULES` from `agent.sdlc_router`; extend it to also import `GUARDS` (a new list of guard callables exported by `agent/sdlc_router.py` alongside `DISPATCH_RULES`) so the tests can enumerate guard names programmatically.
 
 **6. Add regression test.**
 
@@ -210,14 +225,53 @@ In `tests/unit/test_sdlc_router_oscillation.py` (added by PR #1044), add:
 ```python
 def test_1043_pr264_8step_terminates():
     """Replay the PR #264 8-step incident: router must dispatch /do-merge at step 3."""
-    # Seed: stages all completed through REVIEW, _verdicts["REVIEW"] = "APPROVED",
+    # Seed: ALL stages completed (ISSUE through DOCS inclusive), REVIEW verdict APPROVED,
     # pr_number=264, pr_merge_state="CLEAN", ci_all_passing=True
-    # Step 1: /do-pr-review dispatched (before verdict recorded)
-    # Step 2: /do-pr-review again (first approved verdict recorded)  
-    # Step 3: must dispatch /do-merge (G6 fires) — NOT /do-pr-review
-    ...
-    assert result.skill == "/do-merge"
-    assert "Steps 3-8 avoided" in result.reason or isinstance(result, GuardTripped)
+    states = {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "CRITIQUE": "completed",
+        "BUILD": "completed",
+        "TEST": "completed",
+        "REVIEW": "completed",
+        "DOCS": "completed",   # DOCS must be seeded as completed for G6 to fire
+        "_verdicts": {"REVIEW": {"verdict": "APPROVED"}},
+    }
+    meta = {
+        "pr_number": 264,
+        "pr_merge_state": "CLEAN",
+        "ci_all_passing": True,
+        "latest_review_verdict": "APPROVED",
+    }
+    # Step 3 (after two prior /do-pr-review dispatches with same SHA): G6 fires
+    result = decide_next_dispatch(states, meta)
+    assert isinstance(result, Dispatch)
+    assert result.skill == SKILL_DO_MERGE
+    assert result.row_id == "G6"
+
+
+def test_g6_does_not_fire_when_docs_not_done():
+    """G6 must not dispatch /do-merge if DOCS stage is not completed."""
+    states = {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "CRITIQUE": "completed",
+        "BUILD": "completed",
+        "TEST": "completed",
+        "REVIEW": "completed",
+        # DOCS intentionally absent / not completed
+        "_verdicts": {"REVIEW": {"verdict": "APPROVED"}},
+    }
+    meta = {
+        "pr_number": 264,
+        "pr_merge_state": "CLEAN",
+        "ci_all_passing": True,
+        "latest_review_verdict": "APPROVED",
+    }
+    result = decide_next_dispatch(states, meta)
+    # G6 must NOT fire — should route to /do-docs (Row 9) instead
+    assert isinstance(result, Dispatch)
+    assert result.skill != SKILL_DO_MERGE
 ```
 
 ## Failure Path Test Strategy
@@ -240,16 +294,16 @@ def test_1043_pr264_8step_terminates():
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_router_oscillation.py` — UPDATE: add `test_1043_pr264_8step_terminates` and `test_g6_terminal_merge_ready` (positive + 4 negative cases: no pr_number, pr not CLEAN, CI not passing, no APPROVED verdict).
+- [ ] `tests/unit/test_sdlc_router_oscillation.py` — UPDATE: add `test_1043_pr264_8step_terminates` (positive G6 case with explicit `"DOCS": "completed"` seeding) and `test_g6_does_not_fire_when_docs_not_done` (negative case), plus 4 more negative cases: no pr_number, pr not CLEAN, CI not passing, no APPROVED verdict. All assertions use `Dispatch` and `Blocked` types — no `GuardTripped`.
 - [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: add cases for new `_meta` fields `pr_merge_state` and `ci_all_passing` (success path, gh failure path, empty statusCheckRollup → True).
-- [ ] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE: add G6 to expected guard list.
+- [ ] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE (two-part): (A) add `parse_guard_rows()` function that parses the guard table from SKILL.md; (B) add `test_guard_row_ids_in_python()` and `test_g6_guard_row_present_in_skill_md()` using the new parser. Also add `GUARDS` list export to `agent/sdlc_router.py` for programmatic enumeration.
 
 No existing tests are broken by this change — all additions are additive.
 
 ## Rabbit Holes
 
 - **Caching `pr_merge_state` to avoid extra `gh` calls**: Do not add a caching layer. The `gh` call is a single lightweight API hit per `/sdlc` invocation. Caching would introduce staleness bugs (PR could become un-CLEAN between calls).
-- **G6 firing on a PR that still needs docs**: G6 must NOT fire if DOCS is not completed. The existing `_rule_ready_to_merge` already enforces this by checking all stages. G6 is a *fast path to dispatch `/do-merge`*, not a replacement for the DOCS gate. G6 should only fire after `REVIEW` is confirmed — the `/do-merge` skill itself enforces all stage completion before actually merging. So dispatching `/do-merge` early is safe: it will fail its own gate if DOCS is incomplete.
+- **G6 firing on a PR that still needs docs**: G6 explicitly checks `stage_states.get("DOCS") == "completed"` before firing (added in response to critique). If DOCS is not completed, G6 returns `None` and the normal dispatch table routes to Row 9 (`/do-docs`). The `/do-merge` skill's own gate is a belt-and-suspenders backstop, but G6 must not bypass the DOCS check.
 - **Formal GitHub review approval for self-authored PRs**: Do not attempt to work around GitHub's restriction on self-approvals (e.g., using a bot account or Admin bypass). The recorded verdict in `_verdicts` is the correct signal for self-authored flows.
 - **Replacing G4 with G6**: G4 remains as the universal oscillation safety net. G6 is an optimization (fast path). Both are needed.
 
@@ -297,16 +351,17 @@ No agent integration required — this is a skills-internal change. The new fiel
 
 ## Success Criteria
 
-- [ ] G6 fires correctly: given `pr_merge_state=CLEAN`, `ci_all_passing=True`, `_verdicts["REVIEW"]="APPROVED"`, `sdlc_router.decide_next_dispatch()` returns dispatch to `/do-merge`. Covered by `test_g6_terminal_merge_ready`.
+- [ ] G6 fires correctly: given `pr_merge_state=CLEAN`, `ci_all_passing=True`, `stage_states["DOCS"]="completed"`, `_verdicts["REVIEW"]="APPROVED"`, `sdlc_router.decide_next_dispatch()` returns a `Dispatch` (not `GuardTripped` — that type does not exist) with `skill=SKILL_DO_MERGE` and `row_id="G6"`. Covered by `test_g6_terminal_merge_ready`.
 - [ ] G6 does NOT fire when `pr_merge_state != "CLEAN"`. Covered by `test_g6_terminal_merge_ready` negative cases.
 - [ ] G6 does NOT fire when `ci_all_passing=False`. Covered by negative test.
+- [ ] G6 does NOT fire when `stage_states["DOCS"]` is not `"completed"`. Covered by `test_g6_does_not_fire_when_docs_not_done`.
 - [ ] G6 does NOT fire when `_verdicts["REVIEW"]` is missing or contains `"CHANGES REQUESTED"`. Covered by negative tests.
 - [ ] `sdlc_stage_query` enriched output includes `pr_merge_state` and `ci_all_passing`. Covered by `test_sdlc_stage_query.py` updates.
 - [ ] `sdlc_stage_query` returns `pr_merge_state=None` on `gh` failure — G6 does not fire. Covered by failure test.
-- [ ] PR #264 8-step incident replay: the router dispatches `/do-merge` at step 3, not `/do-pr-review`. Covered by `test_1043_pr264_8step_terminates`.
+- [ ] PR #264 8-step incident replay: the router dispatches `/do-merge` at step 3 (all stages through DOCS seeded as completed, APPROVED verdict, CLEAN state). Covered by `test_1043_pr264_8step_terminates`.
 - [ ] SKILL.md Step 2e comment updated to document `reviewDecision=""` ambiguity for self-authored PRs.
-- [ ] SKILL.md Step 3.5 guard table includes G6 row.
-- [ ] `test_sdlc_skill_md_parity.py` passes with G6 included.
+- [ ] SKILL.md Step 3.5 guard table includes G6 row with DOCS condition.
+- [ ] `test_sdlc_skill_md_parity.py` has `parse_guard_rows()`, `test_guard_row_ids_in_python()`, and `test_g6_guard_row_present_in_skill_md()`. `GUARDS` list exported from `agent/sdlc_router.py`.
 - [ ] Unit tests pass (`pytest tests/unit/test_sdlc_router_oscillation.py tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_skill_md_parity.py -x -q`).
 - [ ] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`).
 - [ ] `docs/features/sdlc-router-oscillation-guard.md` updated to include G6.
@@ -359,10 +414,11 @@ No agent integration required — this is a skills-internal change. The new fiel
 - **Assigned To**: g6-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_guard_g6_terminal_merge_ready()` to the guard list in `_evaluate_guards()`.
+- Add `_guard_g6_terminal_merge_ready()` to the guard list in `_evaluate_guards()`. Return type is `Dispatch | None` (not `GuardResult` — that type does not exist in `agent/sdlc_router.py`).
 - Order: G6 is evaluated AFTER G1-G5 (escalation guards take priority).
-- G6 fires: `pr_merge_state="CLEAN"` AND `ci_all_passing=True` AND `_verdicts["REVIEW"]` contains "APPROVED".
-- Returns `GuardTripped(skill=SKILL_DO_MERGE, reason="PR is mergeable, CI green, review APPROVED — fast-path to merge")`.
+- G6 fires: `pr_merge_state="CLEAN"` AND `ci_all_passing=True` AND `stage_states.get("DOCS") == STATUS_COMPLETED` AND `_verdicts["REVIEW"]` contains "APPROVED".
+- Returns `Dispatch(skill=SKILL_DO_MERGE, reason="PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to merge", row_id="G6")`.
+- Export a `GUARDS` list (alongside `DISPATCH_RULES`) containing all guard callables in evaluation order. This enables the parity test to enumerate guard names programmatically.
 
 ### 3. Update SKILL.md Step 2e and Step 3.5
 - **Task ID**: build-skill-md-updates
@@ -380,10 +436,11 @@ No agent integration required — this is a skills-internal change. The new fiel
 - **Assigned To**: g6-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add `test_g6_terminal_merge_ready` (positive case) and 4 negative cases (no pr_number, pr not CLEAN, CI not passing, no APPROVED verdict).
-- Add `test_1043_pr264_8step_terminates`: seed state with all stages completed through REVIEW, APPROVED verdict, CLEAN merge state. Assert dispatch at step 3 is `/do-merge`.
+- Add `test_g6_terminal_merge_ready` (positive case with explicit `"DOCS": "completed"` seeding) and 5 negative cases: no pr_number, pr not CLEAN, CI not passing, no APPROVED verdict, **DOCS not completed** (new — tests Concern 1 fix). All assertions use `Dispatch` and `Blocked` types only — do NOT reference `GuardTripped` (type does not exist).
+- Add `test_1043_pr264_8step_terminates`: seed state with ALL stages completed (ISSUE through DOCS inclusive), APPROVED verdict, CLEAN merge state, `ci_all_passing=True`. Assert `isinstance(result, Dispatch)` and `result.skill == SKILL_DO_MERGE` and `result.row_id == "G6"`.
+- Add `test_g6_does_not_fire_when_docs_not_done`: seed same as above but omit `"DOCS": "completed"`. Assert result is not `/do-merge`.
 - Update `test_sdlc_stage_query.py` for new fields (success path, failure path, empty CI list).
-- Update `test_sdlc_skill_md_parity.py` to include G6 in expected guard list.
+- In `test_sdlc_skill_md_parity.py`: (A) implement `parse_guard_rows(md: str) -> list[dict]` parsing the guard table from SKILL.md; (B) add `test_guard_row_ids_in_python()` asserting each guard row ID has a matching callable in `GUARDS`; (C) add `test_g6_guard_row_present_in_skill_md()` asserting G6 row exists in the parsed table.
 
 ### 5. Validate
 - **Task ID**: validate-all
@@ -417,7 +474,21 @@ No agent integration required — this is a skills-internal change. The new fiel
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict: READY TO BUILD** (concerns addressed in revision)
+
+**Blockers resolved:**
+
+1. **Wrong return types in G6 code snippets** — The original plan used `GuardResult` and `GuardTripped` which do not exist in `agent/sdlc_router.py` (PR #1044). Corrected to `Dispatch | None` return type and `Dispatch(skill=..., row_id="G6")` return value throughout the plan.
+
+2. **Parity test update under-specified** — The original plan said "add G6 to expected guard list" but `test_sdlc_skill_md_parity.py` has no guard-table parsing infrastructure (only `DISPATCH_RULES` coverage). Expanded to: (A) add `parse_guard_rows()` function, (B) add guard parity tests `test_guard_row_ids_in_python()` and `test_g6_guard_row_present_in_skill_md()`, (C) add `GUARDS` list export to `agent/sdlc_router.py`.
+
+**Concerns addressed:**
+
+1. **G6 DOCS bypass** — G6 now explicitly checks `stage_states.get("DOCS") == STATUS_COMPLETED` before firing. The guard returns `None` if DOCS is not done, routing to Row 9 (`/do-docs`) instead. Guard table entry, code snippet, Rabbit Holes, and Success Criteria all updated.
+
+2. **Regression test type errors and ambiguous DOCS seeding** — `test_1043_pr264_8step_terminates` now seeds all stages through DOCS as `"completed"` explicitly, uses `Dispatch` type assertions only, and asserts `result.row_id == "G6"`. Added companion `test_g6_does_not_fire_when_docs_not_done` for the negative DOCS case.
+
+**Revision applied:** `revision_applied: true`
 
 ## Open Questions
 
