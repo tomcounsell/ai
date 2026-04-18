@@ -464,32 +464,32 @@ passing when the parser crashes.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: add cases for the
+- [x] `tests/unit/test_sdlc_stage_query.py` — UPDATE: add cases for the
       enriched `--format json` output (new `_meta` section with cycle counters
       and verdicts). Existing flat-shape tests run under `--format legacy` and
       still pass.
-- [ ] `tests/unit/test_pipeline_state_machine.py` — UPDATE: add verdict
+- [x] `tests/unit/test_pipeline_state_machine.py` — UPDATE: add verdict
       read/write tests on the `_verdicts` metadata subkey. Add test that
       `classify_outcome()` routes verdict writes through
       `sdlc_verdict.record_verdict()` and produces the same `_verdicts`
       shape as the CLI path. Existing tests unaffected.
-- [ ] `tests/unit/test_sdlc_mode.py` — UPDATE: if any test asserts the exact
+- [x] `tests/unit/test_sdlc_mode.py` — UPDATE: if any test asserts the exact
       shape of the SDLC skill's dispatch output, update to assert on the new
       enriched shape.
-- [ ] `tests/unit/test_sdlc_stubs.py` — UPDATE: stubs for `sdlc_verdict` may
+- [x] `tests/unit/test_sdlc_stubs.py` — UPDATE: stubs for `sdlc_verdict` may
       need to be added (if the test file stubs SDLC tools for isolation).
 
 Greenfield tests (new files, no existing tests to modify):
-- [ ] `tests/unit/test_sdlc_verdict.py` — NEW: round-trip recording and
+- [x] `tests/unit/test_sdlc_verdict.py` — NEW: round-trip recording and
       retrieval, artifact-hash stability, graceful failure on bad inputs.
-- [ ] `tests/unit/test_sdlc_router_oscillation.py` — NEW: 12-step replay
+- [x] `tests/unit/test_sdlc_router_oscillation.py` — NEW: 12-step replay
       regression test for #1036, plus synthetic cases for each of G1-G5.
-- [ ] `tests/unit/test_sdlc_router_decision.py` — NEW: pure-function tests
+- [x] `tests/unit/test_sdlc_router_decision.py` — NEW: pure-function tests
       for `agent.sdlc_router.decide_next_dispatch()`.
-- [ ] `tests/unit/test_sdlc_skill_md_parity.py` — NEW: markdown-to-Python
+- [x] `tests/unit/test_sdlc_skill_md_parity.py` — NEW: markdown-to-Python
       parity test that fails when SKILL.md dispatch rows diverge from
       `agent.sdlc_router.DISPATCH_RULES`.
-- [ ] `tests/unit/test_stage_states_helpers.py` — NEW: optimistic-retry
+- [x] `tests/unit/test_stage_states_helpers.py` — NEW: optimistic-retry
       helper tests — retry-on-conflict, retry exhaustion, success path.
 
 ## Rabbit Holes
@@ -681,38 +681,46 @@ the SDLC skills.
 
 ## Success Criteria
 
-- [ ] `/sdlc` on a session with latest CRITIQUE verdict `NEEDS REVISION`
+- [x] `/sdlc` on a session with latest CRITIQUE verdict `NEEDS REVISION`
       and last_dispatched_skill `/do-plan-critique` dispatches `/do-plan`
       (not `/do-plan-critique`). Covered by
       `tests/unit/test_sdlc_router_oscillation.py::test_g1_critique_loop_blocked`.
-- [ ] `/sdlc` with `critique_cycle_count >= 2` and CRITIQUE still failing
+- [x] `/sdlc` with `critique_cycle_count >= 2` and CRITIQUE still failing
       emits `blocked`. Covered by `test_g2_critique_cycle_cap`.
-- [ ] `/sdlc` with an open PR for the current issue never dispatches
+- [x] `/sdlc` with an open PR for the current issue never dispatches
       `/do-plan` or `/do-plan-critique`. Covered by `test_g3_pr_lock`.
-- [ ] `/sdlc` that has dispatched the same skill 3 times with unchanged
+- [x] `/sdlc` that has dispatched the same skill 3 times with unchanged
       state emits `blocked`. Covered by `test_g4_oscillation_cap`.
-- [ ] `/sdlc` re-invoked on an unchanged plan hash uses the cached
+- [x] `/sdlc` re-invoked on an unchanged plan hash uses the cached
       critique verdict rather than re-dispatching `/do-plan-critique`.
       Covered by `test_g5_artifact_hash_cache`.
-- [ ] The 12-step #1036 dispatch sequence replay terminates in `merged`
+- [x] The 12-step #1036 dispatch sequence replay terminates in `merged`
       or a legitimate `blocked` state, never in a loop. Covered by
       `test_1036_replay_terminates`.
-- [ ] `tools/sdlc_stage_query` returns the enriched payload; legacy
+- [x] `tools/sdlc_stage_query` returns the enriched payload; legacy
       shape available via `--format legacy`.
-- [ ] `tools/sdlc_verdict record` and `get` round-trip a verdict with
+- [x] `tools/sdlc_verdict record` and `get` round-trip a verdict with
       artifact hash.
-- [ ] `classify_outcome()` in `agent/pipeline_state.py` routes verdict
+- [x] `classify_outcome()` in `agent/pipeline_state.py` routes verdict
       writes through `sdlc_verdict.record_verdict()`. There is ONE writer
       for `_verdicts`. Covered by a new test in
       `tests/unit/test_pipeline_state_machine.py`.
-- [ ] `update_stage_states` helper retries on write conflict and succeeds
+- [x] `update_stage_states` helper retries on write conflict and succeeds
       on the second attempt. Covered by
       `tests/unit/test_stage_states_helpers.py::test_retry_on_conflict`.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`): feature doc created, README
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`): feature doc created, README
       index updated.
-- [ ] Lint and format clean (`python -m ruff check . && python -m ruff
+- [x] Lint and format clean (`python -m ruff check . && python -m ruff
       format --check .`).
+
+## PR Review Blocker Fixes (Post-Review)
+
+The following blockers were identified in the PR #1044 review and resolved:
+
+- [x] **Blocker 1**: `agent/pipeline_state.py _save()` clobbers `_verdicts` and `_sdlc_dispatches` — fixed by `_load_preserved_metadata()` which reloads all `_*` keys before writing. Regression tests added in `TestSaveMetadataPreservation` in `tests/unit/test_pipeline_state_machine.py` (4 new tests).
+- [x] **Blocker 2**: `agent/sdlc_router.record_dispatch()` was only callable via Python API, not at runtime — added `tools/sdlc_dispatch.py` CLI module (`python -m tools.sdlc_dispatch record`) and updated SKILL.md with concrete bash examples.
+
 
 ## Team Orchestration
 

@@ -900,6 +900,128 @@ class TestArtifactInferenceDeleted:
         assert len(calls) == 0, "get_display_progress() made subprocess calls — inference removed"
 
 
+class TestSaveMetadataPreservation:
+    """Regression tests for _save() not clobbering underscore-prefixed metadata.
+
+    Blocker 1 from PR #1044 review: _save() was overwriting _verdicts and
+    _sdlc_dispatches because it only serialized self.states plus the two owned
+    cycle counters. Any _* key written by a concurrent writer (sdlc_verdict,
+    sdlc_dispatch) between __init__ and _save() would be silently lost.
+
+    Fix: _save() now calls _load_preserved_metadata() to reload all other _*
+    keys from the live session before building the final JSON blob.
+    """
+
+    def test_save_preserves_verdicts_written_concurrently(self):
+        """_save() must not drop _verdicts written after __init__.
+
+        Simulates a concurrent verdict write: after constructing the state
+        machine, update session.stage_states to include _verdicts, then call
+        _save(). The saved blob must contain the _verdicts key.
+        """
+        initial = json.dumps({"ISSUE": "completed", "PLAN": "in_progress"})
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+
+        # Simulate a concurrent verdict write that happens between __init__ and _save.
+        with_verdicts = {
+            "ISSUE": "completed",
+            "PLAN": "in_progress",
+            "_verdicts": {"CRITIQUE": {"verdict": "NEEDS REVISION", "recorded_at": "2026-01-01"}},
+        }
+        session.stage_states = json.dumps(with_verdicts)
+
+        # Now _save() should preserve the _verdicts key rather than dropping it.
+        sm.complete_stage("PLAN")
+
+        saved = json.loads(session.stage_states)
+        assert "_verdicts" in saved, (
+            "_save() dropped _verdicts — metadata-preservation regression reintroduced"
+        )
+        assert saved["_verdicts"]["CRITIQUE"]["verdict"] == "NEEDS REVISION"
+
+    def test_save_preserves_sdlc_dispatches_written_concurrently(self):
+        """_save() must not drop _sdlc_dispatches written after __init__.
+
+        Simulates a concurrent dispatch write: after constructing the state
+        machine, update session.stage_states to include _sdlc_dispatches,
+        then call _save(). The saved blob must contain the history.
+        """
+        initial = json.dumps({"ISSUE": "completed", "PLAN": "in_progress"})
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+
+        dispatch_entry = {"skill": "/do-plan-critique", "at": "2026-01-01T00:00:00+00:00"}
+        with_dispatches = {
+            "ISSUE": "completed",
+            "PLAN": "in_progress",
+            "_sdlc_dispatches": [dispatch_entry],
+        }
+        session.stage_states = json.dumps(with_dispatches)
+
+        sm.complete_stage("PLAN")
+
+        saved = json.loads(session.stage_states)
+        assert "_sdlc_dispatches" in saved, (
+            "_save() dropped _sdlc_dispatches — metadata-preservation regression reintroduced"
+        )
+        assert len(saved["_sdlc_dispatches"]) == 1
+        assert saved["_sdlc_dispatches"][0]["skill"] == "/do-plan-critique"
+
+    def test_save_does_not_clobber_unknown_future_metadata_keys(self):
+        """_save() preserves any _* key, not just known ones.
+
+        This guards against future metadata writers being silently dropped
+        by a _save() that only knows about existing keys.
+        """
+        initial = json.dumps(
+            {"ISSUE": "completed", "PLAN": "in_progress", "_future_key": {"data": 42}}
+        )
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+        sm.complete_stage("PLAN")
+
+        saved = json.loads(session.stage_states)
+        assert "_future_key" in saved, (
+            "_save() dropped unknown _future_key — metadata-preservation invariant violated"
+        )
+        assert saved["_future_key"]["data"] == 42
+
+    def test_save_owned_cycle_counters_take_precedence_over_stale_concurrent_values(self):
+        """Owned _patch_cycle_count and _critique_cycle_count are always from self.
+
+        A concurrent writer must NOT be able to overwrite the owned counters
+        that PipelineStateMachine manages exclusively. _save() should prefer
+        self.patch_cycle_count / self.critique_cycle_count over any stale
+        value found in the live session's _* keys.
+        """
+        initial = json.dumps({"ISSUE": "completed", "PLAN": "completed"})
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+
+        # Simulate a stale/wrong counter in the live session.
+        stale_state = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "_patch_cycle_count": 99,  # stale
+            "_critique_cycle_count": 88,  # stale
+        }
+        session.stage_states = json.dumps(stale_state)
+
+        # The state machine's own counts should win.
+        sm.patch_cycle_count = 2
+        sm.critique_cycle_count = 1
+        sm._save()
+
+        saved = json.loads(session.stage_states)
+        assert saved["_patch_cycle_count"] == 2, (
+            "_save() allowed stale _patch_cycle_count to overwrite the owned counter"
+        )
+        assert saved["_critique_cycle_count"] == 1, (
+            "_save() allowed stale _critique_cycle_count to overwrite the owned counter"
+        )
+
+
 class TestSaveWarningOnFailure:
     """Test that _save() logs warning when session.save() raises."""
 

@@ -152,7 +152,20 @@ The canonical Python implementation is `agent.sdlc_router.decide_next_dispatch()
 
 **G5 applies to CRITIQUE only**, not REVIEW. Review verdicts legitimately change on unchanged diffs (CI flips, new comments, linked issues). G4 handles REVIEW non-determinism instead.
 
-After evaluating guards, record the dispatch decision via `agent.sdlc_router.record_dispatch()` wrapped in `tools.stage_states_helpers.update_stage_states()` BEFORE invoking the sub-skill. This preserves the G4 signal even if the sub-skill crashes mid-execution.
+After evaluating guards, record the dispatch decision via `python -m tools.sdlc_dispatch record` BEFORE invoking the sub-skill. This preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
+
+```bash
+# Record a dispatch event (call BEFORE invoking the sub-skill)
+python -m tools.sdlc_dispatch record --skill /do-build --issue-number {issue_number}
+
+# Record with PR context (for review/patch/merge stages)
+python -m tools.sdlc_dispatch record --skill /do-pr-review --issue-number {issue_number} --pr-number {pr_number}
+
+# Inspect the dispatch history (debug G4 state)
+python -m tools.sdlc_dispatch get --issue-number {issue_number}
+```
+
+The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_helpers.update_stage_states()` — it is the correct runtime entry point. Never call `record_dispatch()` directly from a shell or skill script; always use `python -m tools.sdlc_dispatch record`.
 
 ## Step 4: Dispatch ONE Sub-Skill
 
