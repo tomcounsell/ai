@@ -134,6 +134,39 @@ For the DOCS stage completion check, re-read the `python -m tools.sdlc_stage_que
 - If docs tasks are all checked AND `docs/` changes exist in PR → docs done
 - When in doubt, dispatch `/do-docs` — it is idempotent and will no-op if nothing needs updating
 
+## Step 3.5: Legal Dispatch Guards
+
+Before consulting the dispatch table in Step 4, evaluate the following guards against the enriched `sdlc_stage_query` output (`stages` + `_meta`). If any guard fires, it forces a specific dispatch or escalates to `blocked`, and Step 4 is SKIPPED.
+
+The canonical Python implementation is `agent.sdlc_router.decide_next_dispatch()`. The parity test in `tests/unit/test_sdlc_skill_md_parity.py` asserts this markdown stays in sync with the Python rules.
+
+| Guard | Condition | Forced Dispatch |
+|-------|-----------|-----------------|
+| G1: Critique loop | Latest critique verdict contains `NEEDS REVISION` or `MAJOR REWORK` AND `last_dispatched_skill == /do-plan-critique` | `/do-plan` |
+| G2: Critique cycle cap | `critique_cycle_count >= MAX_CRITIQUE_CYCLES` (2) AND CRITIQUE is not completed | Escalate: `blocked` with reason `critique cycle cap reached` |
+| G3: PR lock | `pr_number` is set AND (`last_dispatched_skill` OR proposed dispatch) is `/do-plan` or `/do-plan-critique` | `/do-merge` (if REVIEW and DOCS complete), `/do-patch` (if review requested changes), else `/do-pr-review` |
+| G4: Oscillation (universal) | `same_stage_dispatch_count >= 3` | Escalate: `blocked` with reason `stage oscillation — {skill} dispatched {N} times without state change` |
+| G5: Unchanged critique artifact | `_verdicts["CRITIQUE"]` has `artifact_hash` AND current plan file hash matches | Use cached verdict: `/do-plan` (NEEDS REVISION) or `/do-build` (READY TO BUILD). Never re-dispatch `/do-plan-critique` on an unchanged plan. |
+
+**G4 is universal** — it applies to EVERY stage, including DOCS and MERGE. Repeated dispatches of `/do-docs` or `/do-merge` without state change WILL trip the guard.
+
+**G5 applies to CRITIQUE only**, not REVIEW. Review verdicts legitimately change on unchanged diffs (CI flips, new comments, linked issues). G4 handles REVIEW non-determinism instead.
+
+After evaluating guards, record the dispatch decision via `python -m tools.sdlc_dispatch record` BEFORE invoking the sub-skill. This preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
+
+```bash
+# Record a dispatch event (call BEFORE invoking the sub-skill)
+python -m tools.sdlc_dispatch record --skill /do-build --issue-number {issue_number}
+
+# Record with PR context (for review/patch/merge stages)
+python -m tools.sdlc_dispatch record --skill /do-pr-review --issue-number {issue_number} --pr-number {pr_number}
+
+# Inspect the dispatch history (debug G4 state)
+python -m tools.sdlc_dispatch get --issue-number {issue_number}
+```
+
+The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_helpers.update_stage_states()` — it is the correct runtime entry point. Never call `record_dispatch()` directly from a shell or skill script; always use `python -m tools.sdlc_dispatch record`.
+
 ## Step 4: Dispatch ONE Sub-Skill
 
 Based on the assessment, invoke exactly ONE sub-skill and return.

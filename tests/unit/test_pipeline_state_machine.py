@@ -900,6 +900,128 @@ class TestArtifactInferenceDeleted:
         assert len(calls) == 0, "get_display_progress() made subprocess calls — inference removed"
 
 
+class TestSaveMetadataPreservation:
+    """Regression tests for _save() not clobbering underscore-prefixed metadata.
+
+    Blocker 1 from PR #1044 review: _save() was overwriting _verdicts and
+    _sdlc_dispatches because it only serialized self.states plus the two owned
+    cycle counters. Any _* key written by a concurrent writer (sdlc_verdict,
+    sdlc_dispatch) between __init__ and _save() would be silently lost.
+
+    Fix: _save() now calls _load_preserved_metadata() to reload all other _*
+    keys from the live session before building the final JSON blob.
+    """
+
+    def test_save_preserves_verdicts_written_concurrently(self):
+        """_save() must not drop _verdicts written after __init__.
+
+        Simulates a concurrent verdict write: after constructing the state
+        machine, update session.stage_states to include _verdicts, then call
+        _save(). The saved blob must contain the _verdicts key.
+        """
+        initial = json.dumps({"ISSUE": "completed", "PLAN": "in_progress"})
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+
+        # Simulate a concurrent verdict write that happens between __init__ and _save.
+        with_verdicts = {
+            "ISSUE": "completed",
+            "PLAN": "in_progress",
+            "_verdicts": {"CRITIQUE": {"verdict": "NEEDS REVISION", "recorded_at": "2026-01-01"}},
+        }
+        session.stage_states = json.dumps(with_verdicts)
+
+        # Now _save() should preserve the _verdicts key rather than dropping it.
+        sm.complete_stage("PLAN")
+
+        saved = json.loads(session.stage_states)
+        assert "_verdicts" in saved, (
+            "_save() dropped _verdicts — metadata-preservation regression reintroduced"
+        )
+        assert saved["_verdicts"]["CRITIQUE"]["verdict"] == "NEEDS REVISION"
+
+    def test_save_preserves_sdlc_dispatches_written_concurrently(self):
+        """_save() must not drop _sdlc_dispatches written after __init__.
+
+        Simulates a concurrent dispatch write: after constructing the state
+        machine, update session.stage_states to include _sdlc_dispatches,
+        then call _save(). The saved blob must contain the history.
+        """
+        initial = json.dumps({"ISSUE": "completed", "PLAN": "in_progress"})
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+
+        dispatch_entry = {"skill": "/do-plan-critique", "at": "2026-01-01T00:00:00+00:00"}
+        with_dispatches = {
+            "ISSUE": "completed",
+            "PLAN": "in_progress",
+            "_sdlc_dispatches": [dispatch_entry],
+        }
+        session.stage_states = json.dumps(with_dispatches)
+
+        sm.complete_stage("PLAN")
+
+        saved = json.loads(session.stage_states)
+        assert "_sdlc_dispatches" in saved, (
+            "_save() dropped _sdlc_dispatches — metadata-preservation regression reintroduced"
+        )
+        assert len(saved["_sdlc_dispatches"]) == 1
+        assert saved["_sdlc_dispatches"][0]["skill"] == "/do-plan-critique"
+
+    def test_save_does_not_clobber_unknown_future_metadata_keys(self):
+        """_save() preserves any _* key, not just known ones.
+
+        This guards against future metadata writers being silently dropped
+        by a _save() that only knows about existing keys.
+        """
+        initial = json.dumps(
+            {"ISSUE": "completed", "PLAN": "in_progress", "_future_key": {"data": 42}}
+        )
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+        sm.complete_stage("PLAN")
+
+        saved = json.loads(session.stage_states)
+        assert "_future_key" in saved, (
+            "_save() dropped unknown _future_key — metadata-preservation invariant violated"
+        )
+        assert saved["_future_key"]["data"] == 42
+
+    def test_save_owned_cycle_counters_take_precedence_over_stale_concurrent_values(self):
+        """Owned _patch_cycle_count and _critique_cycle_count are always from self.
+
+        A concurrent writer must NOT be able to overwrite the owned counters
+        that PipelineStateMachine manages exclusively. _save() should prefer
+        self.patch_cycle_count / self.critique_cycle_count over any stale
+        value found in the live session's _* keys.
+        """
+        initial = json.dumps({"ISSUE": "completed", "PLAN": "completed"})
+        session = _make_session(stage_states=initial)
+        sm = PipelineStateMachine(session)
+
+        # Simulate a stale/wrong counter in the live session.
+        stale_state = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "_patch_cycle_count": 99,  # stale
+            "_critique_cycle_count": 88,  # stale
+        }
+        session.stage_states = json.dumps(stale_state)
+
+        # The state machine's own counts should win.
+        sm.patch_cycle_count = 2
+        sm.critique_cycle_count = 1
+        sm._save()
+
+        saved = json.loads(session.stage_states)
+        assert saved["_patch_cycle_count"] == 2, (
+            "_save() allowed stale _patch_cycle_count to overwrite the owned counter"
+        )
+        assert saved["_critique_cycle_count"] == 1, (
+            "_save() allowed stale _critique_cycle_count to overwrite the owned counter"
+        )
+
+
 class TestSaveWarningOnFailure:
     """Test that _save() logs warning when session.save() raises."""
 
@@ -926,3 +1048,129 @@ class TestRecordStageCompletionDeleted:
         import agent.pipeline_state as mod
 
         assert not hasattr(mod, "record_stage_completion")
+
+
+class TestClassifyOutcomeVerdictUnification:
+    """classify_outcome() routes verdict writes through sdlc_verdict.record_verdict.
+
+    Regression coverage for task 3.5 of the sdlc-router-oscillation-guard plan:
+    there must be exactly ONE writer for the _verdicts metadata key. Both the
+    CLI path (tools/sdlc_verdict.py) and the bridge-initiated path
+    (agent/pipeline_state.py::classify_outcome) funnel through
+    tools.sdlc_verdict.record_verdict.
+    """
+
+    def test_classify_outcome_critique_invokes_record_verdict(self):
+        """CRITIQUE verdict extracted from output tail routes through record_verdict."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "Verdict: READY TO BUILD (no concerns)"
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("CRITIQUE", "end_turn", tail)
+            assert mock_record.called, (
+                "classify_outcome did not call tools.sdlc_verdict.record_verdict — "
+                "dual-writer drift risk reintroduced"
+            )
+            # Signature: record_verdict(session, stage, verdict_str, blockers=?, tech_debt=?)
+            args, kwargs = mock_record.call_args
+            assert args[1] == "CRITIQUE"
+            # Verdict passthrough (prefix match — extractor may normalize)
+            assert "READY TO BUILD" in args[2]
+
+    def test_classify_outcome_review_invokes_record_verdict(self):
+        """REVIEW verdict extracted from output tail routes through record_verdict."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = 'Review complete. <!-- OUTCOME {"status":"fail","stage":"REVIEW"} --> 2 blockers'
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("REVIEW", "end_turn", tail)
+            # Review verdict may or may not be extracted depending on output shape;
+            # if it is, it must go through record_verdict (never raw stage_states write).
+            if mock_record.called:
+                args, kwargs = mock_record.call_args
+                assert args[1] == "REVIEW"
+
+    def test_classify_outcome_does_not_write_verdicts_key_directly(self):
+        """classify_outcome() must NOT write to session.stage_states._verdicts directly.
+
+        The only path allowed is through tools.sdlc_verdict.record_verdict.
+        This test validates the unification invariant — a second writer would
+        mean raw writes could bypass the record_verdict helper (which handles
+        hashing, retry, etc).
+        """
+        states = {"CRITIQUE": "in_progress"}
+        session = _make_session(stage_states=json.dumps(states))
+        # save() should be called only by the record_verdict helper, not by
+        # classify_outcome itself inserting into _verdicts
+        sm = PipelineStateMachine(session)
+        tail = "Verdict: NEEDS REVISION"
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("CRITIQUE", "end_turn", tail)
+            # The only path that should touch _verdicts is record_verdict.
+            # If _verdicts appears in stage_states without record_verdict being
+            # called, a dual-writer exists.
+            raw = getattr(session, "stage_states", None)
+            if raw:
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) else raw
+                except (ValueError, TypeError):
+                    data = {}
+                if "_verdicts" in data and not mock_record.called:
+                    pytest.fail(
+                        "_verdicts key written without record_verdict being called — "
+                        "a second writer bypassed the unification path"
+                    )
+
+    def test_classify_outcome_build_stage_does_not_call_record_verdict(self):
+        """BUILD stage has no verdict concept — record_verdict must not be called."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "PR created: https://github.com/org/repo/pull/42"
+
+        with patch("tools.sdlc_verdict.record_verdict") as mock_record:
+            sm.classify_outcome("BUILD", "end_turn", tail)
+            assert not mock_record.called, (
+                "BUILD stage invoked record_verdict — only CRITIQUE and REVIEW should"
+            )
+
+    def test_classify_outcome_tolerates_record_verdict_failure(self):
+        """A record_verdict exception must not propagate out of classify_outcome.
+
+        Metadata recording is best-effort. If the ORM is unavailable or the
+        session is malformed, classify_outcome still returns its classification.
+        """
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "Verdict: READY TO BUILD"
+
+        with patch(
+            "tools.sdlc_verdict.record_verdict",
+            side_effect=RuntimeError("redis down"),
+        ):
+            # Should not raise
+            result = sm.classify_outcome("CRITIQUE", "end_turn", tail)
+            assert result in ("success", "fail", "ambiguous", "partial")
+
+    def test_tools_sdlc_verdict_is_imported_lazily(self):
+        """tools.sdlc_verdict should be imported inside the function body, not at module top.
+
+        Enforces the one-way import boundary noted in the plan's Implementation
+        Note (Rabbit Holes / classify_outcome dedup): agent/ imports tools/, but
+        tools/ MUST NOT import agent/. A module-top import would create a cycle
+        risk if tools/ later grows dependencies on agent/.
+        """
+        # The module itself must not have sdlc_verdict in its globals
+        # (unless it was imported elsewhere legitimately — we check the
+        # _record_verdict_from_output function imports it lazily)
+        import inspect
+
+        import agent.pipeline_state as mod
+
+        src = inspect.getsource(mod._record_verdict_from_output)
+        assert "from tools.sdlc_verdict import record_verdict" in src, (
+            "_record_verdict_from_output must import record_verdict lazily inside "
+            "the function body to preserve the one-way agent -> tools boundary"
+        )

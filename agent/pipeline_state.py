@@ -147,6 +147,122 @@ def _record_stage_metric(metric_name: str, stage: str) -> None:
         pass
 
 
+# Canonical critique verdict strings, matched case-insensitively against the
+# dev-session output tail. Order matters: the longer "ready to build (with
+# concerns)" must be tested before the generic "ready to build" prefix so we
+# always capture the richer form.
+_CRITIQUE_VERDICT_PATTERNS = [
+    ("READY TO BUILD (with concerns)", "ready to build (with concerns)"),
+    ("READY TO BUILD (no concerns)", "ready to build (no concerns)"),
+    ("MAJOR REWORK", "major rework"),
+    ("NEEDS REVISION", "needs revision"),
+    ("READY TO BUILD", "ready to build"),
+]
+
+# Canonical review verdicts.
+_REVIEW_VERDICT_PATTERNS = [
+    ("CHANGES REQUESTED", "changes requested"),
+    ("APPROVED", "approved"),
+    ("REVIEW PASSED", "review passed"),
+    ("REVIEW FAILED", "review failed"),
+]
+
+
+def _extract_critique_verdict(output_tail: str) -> str | None:
+    """Extract the canonical critique verdict string from the output tail."""
+    if not output_tail:
+        return None
+    lower = output_tail.lower()
+    for canonical, needle in _CRITIQUE_VERDICT_PATTERNS:
+        if needle in lower:
+            return canonical
+    return None
+
+
+def _extract_review_verdict(output_tail: str) -> str | None:
+    """Extract the canonical review verdict string from the output tail.
+
+    Prefers values carried by an ``<!-- OUTCOME {...} -->`` block when
+    available, since the review skill emits structured outcome contracts
+    (``status=success|partial|fail``). Falls back to literal string matching.
+    """
+    if not output_tail:
+        return None
+    contract = _parse_outcome_contract(output_tail)
+    if contract and contract.get("stage") == "REVIEW":
+        status = contract.get("status", "")
+        artifacts = contract.get("artifacts") or {}
+        blockers = artifacts.get("blockers", 0) or 0
+        tech_debt = artifacts.get("tech_debt", 0) or 0
+        if status == "success" and not blockers and not tech_debt:
+            return "APPROVED"
+        if status in ("partial", "fail") or blockers or tech_debt:
+            return "CHANGES REQUESTED"
+    lower = output_tail.lower()
+    for canonical, needle in _REVIEW_VERDICT_PATTERNS:
+        if needle in lower:
+            return canonical
+    return None
+
+
+def _review_counts(output_tail: str) -> tuple[int | None, int | None]:
+    """Extract blocker / tech-debt counts from the OUTCOME contract if present."""
+    contract = _parse_outcome_contract(output_tail)
+    if not contract or contract.get("stage") != "REVIEW":
+        return (None, None)
+    artifacts = contract.get("artifacts") or {}
+    blockers = artifacts.get("blockers")
+    tech_debt = artifacts.get("tech_debt")
+    try:
+        blockers_i = int(blockers) if blockers is not None else None
+    except (TypeError, ValueError):
+        blockers_i = None
+    try:
+        tech_debt_i = int(tech_debt) if tech_debt is not None else None
+    except (TypeError, ValueError):
+        tech_debt_i = None
+    return (blockers_i, tech_debt_i)
+
+
+def _record_verdict_from_output(session, stage: str, output_tail: str) -> None:
+    """Best-effort: write the extracted verdict via tools.sdlc_verdict.
+
+    This is the unification path called from ``classify_outcome()``. It is the
+    ONLY indirect writer to ``_verdicts`` — the CLI path and this path both
+    funnel through ``tools.sdlc_verdict.record_verdict``, which in turn uses
+    the optimistic-retry helper. If the verdict cannot be extracted or
+    recording fails, this function silently returns. It never raises.
+    """
+    if stage not in ("CRITIQUE", "REVIEW"):
+        return
+    if session is None:
+        return
+    try:
+        if stage == "CRITIQUE":
+            verdict = _extract_critique_verdict(output_tail)
+            if not verdict:
+                return
+            from tools.sdlc_verdict import record_verdict
+
+            record_verdict(session, "CRITIQUE", verdict)
+        else:
+            verdict = _extract_review_verdict(output_tail)
+            if not verdict:
+                return
+            blockers, tech_debt = _review_counts(output_tail)
+            from tools.sdlc_verdict import record_verdict
+
+            record_verdict(
+                session,
+                "REVIEW",
+                verdict,
+                blockers=blockers,
+                tech_debt=tech_debt,
+            )
+    except Exception as e:
+        logger.debug(f"_record_verdict_from_output({stage}) failed: {e}")
+
+
 class PipelineStateMachine:
     """Manages SDLC pipeline stage transitions with ordering enforcement.
 
@@ -210,6 +326,19 @@ class PipelineStateMachine:
         Validates stage_states via the StageStates Pydantic model before
         serializing. Validation errors log a warning but do not crash --
         the data is still saved to avoid losing progress.
+
+        Metadata preservation invariant (regression #1040 blocker 1):
+        ``_save()`` is a write path that only knows about ``self.states``
+        plus the two cycle counters (``_patch_cycle_count`` and
+        ``_critique_cycle_count`` — explicitly re-added below). Any OTHER
+        underscore-prefixed metadata key (``_verdicts``, ``_sdlc_dispatches``,
+        or any future ``_*`` key) would be silently dropped if we serialized
+        ``self.states`` alone. To protect cross-writer invariants — especially
+        the verdict recorder in ``tools.sdlc_verdict`` and the dispatch
+        recorder in ``agent.sdlc_router.record_dispatch`` — we reload the
+        latest raw ``stage_states`` from the session BEFORE writing and merge
+        every ``_*`` key we did not manage ourselves. This makes ``_save()``
+        a safe participant in the cross-process stage_states write protocol.
         """
         # Validate states before saving
         try:
@@ -225,9 +354,24 @@ class PipelineStateMachine:
                 f"{getattr(self.session, 'session_id', '?')}: {e}. Saving anyway."
             )
 
+        # Load any concurrent metadata writes from the live session so we can
+        # preserve underscore-prefixed keys we don't own (see invariant in
+        # docstring above). This avoids clobbering ``_verdicts`` /
+        # ``_sdlc_dispatches`` that the verdict/dispatch recorders wrote
+        # between __init__ and this save.
+        preserved_metadata = self._load_preserved_metadata()
+
         data = dict(self.states)
+        # Owned metadata keys — re-applied explicitly each save.
         data["_patch_cycle_count"] = self.patch_cycle_count
         data["_critique_cycle_count"] = self.critique_cycle_count
+        # Unowned underscore metadata keys — merged back in without
+        # overwriting the owned keys above.
+        for key, value in preserved_metadata.items():
+            if key in ("_patch_cycle_count", "_critique_cycle_count"):
+                continue
+            data[key] = value
+
         self.session.stage_states = json.dumps(data)
         try:
             self.session.save()
@@ -236,6 +380,39 @@ class PipelineStateMachine:
                 f"Failed to save stage_states for session "
                 f"{getattr(self.session, 'session_id', '?')}: {e}"
             )
+
+    def _load_preserved_metadata(self) -> dict:
+        """Return underscore-prefixed metadata keys from the live session.
+
+        ``_save()`` calls this to pick up writes other writers (e.g.
+        ``tools.sdlc_verdict.record_verdict``, ``agent.sdlc_router.record_dispatch``)
+        may have made between when this state machine was constructed and
+        the current save. Returns only ``_*`` keys other than the two cycle
+        counters owned by the state machine itself. Never raises.
+        """
+        try:
+            raw = getattr(self.session, "stage_states", None)
+            if not raw:
+                return {}
+            if isinstance(raw, str):
+                data = json.loads(raw)
+            elif isinstance(raw, dict):
+                data = raw
+            else:
+                return {}
+            if not isinstance(data, dict):
+                return {}
+            return {
+                k: v
+                for k, v in data.items()
+                if k.startswith("_") and k not in ("_patch_cycle_count", "_critique_cycle_count")
+            }
+        except Exception as e:
+            logger.debug(
+                f"_load_preserved_metadata: failed on session "
+                f"{getattr(self.session, 'session_id', '?')}: {e}"
+            )
+            return {}
 
     def _get_predecessors(self, stage: str) -> list[str]:
         """Get stages that must be completed before this stage can start.
@@ -523,6 +700,9 @@ class PipelineStateMachine:
                     f"(expected {stage}, got {contract_stage}) — falling through to Tier 1/2"
                 )
             elif status in ("success", "fail", "partial"):
+                # Record the verdict for CRITIQUE/REVIEW before returning so
+                # structured OUTCOME blocks also populate _verdicts.
+                _record_verdict_from_output(self.session, stage, output_tail)
                 logger.info(f"classify_outcome({stage}): OUTCOME contract -> {status}")
                 return status
             else:
@@ -543,6 +723,11 @@ class PipelineStateMachine:
             if "issues/" in tail or "issue created" in tail or "issue #" in tail:
                 return "success"
         elif stage == "CRITIQUE":
+            # Record the verdict before returning so the SDLC router can
+            # consume it via `_verdicts["CRITIQUE"]`. This is the unification
+            # point: bridge-initiated sessions funnel through the same
+            # `tools.sdlc_verdict.record_verdict` writer as the CLI path.
+            _record_verdict_from_output(self.session, "CRITIQUE", output_tail)
             if "ready to build" in tail:
                 return "success"
             if "needs revision" in tail:
@@ -569,6 +754,9 @@ class PipelineStateMachine:
             if "commit" in tail or "pushed" in tail:
                 return "success"
         elif stage == "REVIEW":
+            # Record the verdict before returning (see CRITIQUE above for
+            # rationale — unifies bridge and CLI write paths).
+            _record_verdict_from_output(self.session, "REVIEW", output_tail)
             if "approved" in tail or "review passed" in tail:
                 return "success"
             if "changes requested" in tail or "review failed" in tail:
