@@ -45,7 +45,7 @@ def _render_template(project_dir: Path) -> str | None:
 
     return (
         template_path.read_text()
-        .replace("__PROJECT_DIR__", str(project_dir))
+        .replace("__PROJECT_DIR__", str(project_dir.resolve()))
         .replace("__USERNAME__", os.environ.get("USER", os.getlogin()))
     )
 

@@ -138,14 +138,22 @@ WORKER_PLIST="$PROJECT_DIR/com.valor.worker.plist"
 WORKER_LABEL="${SERVICE_LABEL_PREFIX}.worker"
 WORKER_DST="$HOME/Library/LaunchAgents/${WORKER_LABEL}.plist"
 if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
-    if launchctl list | grep -q "$WORKER_LABEL"; then
-        if ! launchctl bootout "gui/$(id -u)/$WORKER_LABEL"; then
-            echo "ERROR: Failed to bootout $WORKER_LABEL"
-        fi
-    fi
     sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$WORKER_LABEL|g" "$WORKER_PLIST" > "$WORKER_DST"
-    if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
-        echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+    if launchctl list | grep -q "$WORKER_LABEL"; then
+        # Service is loaded — use kickstart -k to atomically kill+restart without
+        # the bootout/bootstrap race condition (bootstrap error 5: label still registered).
+        if ! launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
+            # kickstart failed; fall back to bootout + bootstrap with a brief wait
+            launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
+            sleep 2
+            if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+                echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+            fi
+        fi
+    else
+        if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+            echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+        fi
     fi
 fi
 
