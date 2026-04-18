@@ -43,6 +43,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools._sdlc_utils import find_plan_path as _find_plan_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,36 +166,6 @@ def _lookup_pr_number(issue_number: int | None) -> int | None:
 _FRONTMATTER_REVISION_RE = re.compile(
     r"^revision_applied:\s*(true|false)\s*$", re.IGNORECASE | re.MULTILINE
 )
-
-
-def _find_plan_path(issue_number: int) -> Path | None:
-    """Locate the plan file tracking this issue (same logic as sdlc_verdict)."""
-    if not issue_number:
-        return None
-
-    repo_root_env = os.environ.get("SDLC_TARGET_REPO")
-    if repo_root_env:
-        plans_dir = Path(repo_root_env) / "docs" / "plans"
-    else:
-        plans_dir = Path(__file__).resolve().parent.parent / "docs" / "plans"
-
-    if not plans_dir.is_dir():
-        return None
-
-    needle = f"#{issue_number}"
-    try:
-        for entry in plans_dir.iterdir():
-            if not entry.is_file() or entry.suffix != ".md":
-                continue
-            try:
-                text = entry.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            if needle in text:
-                return entry
-    except Exception as e:
-        logger.debug(f"_find_plan_path failed: {e}")
-    return None
 
 
 def _parse_revision_applied(plan_path: Path | None) -> bool:

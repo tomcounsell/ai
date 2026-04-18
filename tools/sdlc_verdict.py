@@ -54,83 +54,17 @@ import argparse
 import hashlib
 import json
 import logging
-import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+from tools._sdlc_utils import find_plan_path as _find_plan_path
+from tools._sdlc_utils import find_session as _find_session
 
 logger = logging.getLogger(__name__)
 
 # Valid stages this module will write verdicts for.
 _VERDICT_STAGES = frozenset(["CRITIQUE", "REVIEW"])
-
-
-def _find_session(session_id: str | None = None, issue_number: int | None = None):
-    """Resolve the PM session. Mirrors sdlc_stage_marker._find_session logic."""
-    resolved_id = (
-        session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
-    )
-    if resolved_id:
-        try:
-            from models.agent_session import AgentSession
-
-            sessions = list(AgentSession.query.filter(session_id=resolved_id))
-            if sessions:
-                for s in sessions:
-                    if getattr(s, "session_type", None) == "pm":
-                        return s
-                return sessions[0]
-        except Exception as e:
-            logger.debug(f"sdlc_verdict: _find_session by id failed: {e}")
-
-    if issue_number is not None:
-        try:
-            from tools._sdlc_utils import find_session_by_issue
-
-            return find_session_by_issue(issue_number)
-        except Exception as e:
-            logger.debug(f"sdlc_verdict: find_session_by_issue failed: {e}")
-
-    return None
-
-
-def _find_plan_path(issue_number: int) -> Path | None:
-    """Locate the plan file tracking this issue.
-
-    Uses ``grep -rl "#{N}" docs/plans/`` semantics — walks ``docs/plans/`` and
-    returns the first file containing a reference to the issue number.
-    Returns None if no plan is found or the directory doesn't exist.
-    """
-    if not issue_number:
-        return None
-
-    # Determine the repo root. Prefer SDLC_TARGET_REPO for cross-repo work,
-    # otherwise walk up from this file.
-    repo_root_env = os.environ.get("SDLC_TARGET_REPO")
-    if repo_root_env:
-        plans_dir = Path(repo_root_env) / "docs" / "plans"
-    else:
-        here = Path(__file__).resolve()
-        plans_dir = here.parent.parent / "docs" / "plans"
-
-    if not plans_dir.is_dir():
-        return None
-
-    needle = f"#{issue_number}"
-    try:
-        for entry in plans_dir.iterdir():
-            if not entry.is_file() or entry.suffix != ".md":
-                continue
-            try:
-                text = entry.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            if needle in text:
-                return entry
-    except Exception as e:
-        logger.debug(f"sdlc_verdict: _find_plan_path walk failed: {e}")
-        return None
-    return None
 
 
 def compute_plan_hash(plan_path: Path | str) -> str | None:

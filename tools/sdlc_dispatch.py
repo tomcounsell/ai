@@ -34,40 +34,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 from datetime import UTC, datetime
 
+from tools._sdlc_utils import find_session as _find_session
+
 logger = logging.getLogger(__name__)
-
-
-def _find_session(session_id: str | None = None, issue_number: int | None = None):
-    """Resolve the PM session. Mirrors sdlc_verdict._find_session logic."""
-    resolved_id = (
-        session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
-    )
-    if resolved_id:
-        try:
-            from models.agent_session import AgentSession
-
-            sessions = list(AgentSession.query.filter(session_id=resolved_id))
-            if sessions:
-                for s in sessions:
-                    if getattr(s, "session_type", None) == "pm":
-                        return s
-                return sessions[0]
-        except Exception as e:
-            logger.debug(f"sdlc_dispatch: _find_session by id failed: {e}")
-
-    if issue_number is not None:
-        try:
-            from tools._sdlc_utils import find_session_by_issue
-
-            return find_session_by_issue(issue_number)
-        except Exception as e:
-            logger.debug(f"sdlc_dispatch: find_session_by_issue failed: {e}")
-
-    return None
 
 
 def record_dispatch_for_session(
