@@ -10,7 +10,7 @@ tracking: https://github.com/tomcounsell/ai/issues/23
 
 > **Historical Design Specification** — This document records the original design decisions, Redis key structure, watchdog hook design, and SDK client registry rationale from the initial implementation of session steering. For the current operational reference, see [Session Steering](session-steering.md). For the end-to-end Telegram reply-thread flow, see [Mid-Session Steering](mid-session-steering.md).
 
-**Scope:** Redis list steering queue design and bridge coalescing. SDK-harness mid-turn injection (legacy/secondary path). For PM→child steering, see `session-steering.md`.
+**Scope:** Redis list steering queue design and bridge coalescing. SDK-harness mid-turn injection (secondary path; the current canonical path is the turn-boundary inbox in `session-steering.md`). For PM→child steering, see `session-steering.md`.
 
 ## Problem
 
