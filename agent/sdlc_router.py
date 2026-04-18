@@ -21,7 +21,7 @@ The algorithm:
     decide_next_dispatch(stage_states, meta, context)
         -> Dispatch | Blocked
 
-    1. Evaluate guards (G1–G5). If any guard trips, return its decision.
+    1. Evaluate guards (G1–G6). If any guard trips, return its decision.
     2. Otherwise, walk the ``DISPATCH_RULES`` list in row order and return
        the first rule whose ``state_predicate`` accepts ``(stage_states, meta,
        context)``.

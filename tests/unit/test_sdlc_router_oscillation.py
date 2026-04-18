@@ -302,7 +302,7 @@ class TestSnapshotAndCounter:
 
 
 class TestGuardOrdering:
-    """Guards fire in G1..G5 order; first match wins."""
+    """Guards fire in G1..G6 order; first match wins."""
 
     def test_g1_precedence_over_g3(self):
         # Both G1 (critique loop) and G3 (PR lock) would fire; G1 wins.
