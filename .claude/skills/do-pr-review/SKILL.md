@@ -437,6 +437,23 @@ After posting the review and verifying it was posted (Steps 6-6.5), emit a typed
 
 **Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`.
 
+### Record the verdict (mandatory)
+
+After emitting the OUTCOME block, record the review verdict on the PM session so the SDLC router's Legal Dispatch Guards (G3, G4) can consume it:
+
+```bash
+# For APPROVED reviews (OUTCOME status=success):
+python -m tools.sdlc_verdict record --stage REVIEW \
+  --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number $ISSUE_NUMBER
+
+# For reviews with findings (OUTCOME status=partial or fail):
+python -m tools.sdlc_verdict record --stage REVIEW \
+  --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
+  --issue-number $ISSUE_NUMBER
+```
+
+The recorder prints `{}` on failure and never raises — it MUST NOT block the review from finishing. If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag and the recorder will resolve via `VALOR_SESSION_ID` / `AGENT_SESSION_ID`.
+
 ## Hard Rules
 
 1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Use `gh pr review` to post, or `gh pr comment` for self-authored PRs. Step 6.5 verifies posting succeeded. The SDLC dispatcher checks for both reviews and comments before advancing.

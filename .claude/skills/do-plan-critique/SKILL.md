@@ -236,6 +236,19 @@ Output the final report in this format:
 - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
 ```
 
+### Step 5.5: Record the verdict (mandatory)
+
+After printing the verdict, record it on the PM session so the SDLC router's Legal Dispatch Guards (G1, G5) can consume it:
+
+```bash
+python -m tools.sdlc_verdict record --stage CRITIQUE \
+  --verdict "$VERDICT_STRING" --issue-number $ISSUE_NUMBER
+```
+
+Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag — the recorder falls back to `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env vars and the artifact_hash will be None.
+
+The recorder prints `{}` on failure and never raises — it MUST NOT block the critique from finishing.
+
 ## Outcome Contract
 
 The skill returns a structured verdict that the SDLC pipeline can use:
