@@ -47,6 +47,7 @@ Validator hooks exist to block invalid operations. Adding `|| true` defeats the 
 **Validators in this project:**
 - `validate_commit_message.py` — blocks commits with bad messages
 - `validate_merge_guard.py` — blocks unauthorized merges
+- `validate_no_raw_redis_delete.py` — blocks raw Redis reads/writes on Popoto-managed keys
 - `validate_documentation_section.py` — blocks plans without docs section
 - `validate_test_impact_section.py` — blocks plans without test impact
 - `validate_file_contains.py` — blocks plans missing required sections
