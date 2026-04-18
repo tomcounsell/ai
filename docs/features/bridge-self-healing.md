@@ -409,6 +409,17 @@ Any **one** passing gate reprieves the kill. The reprieve signal is logged and
 `reprieve_count` on the AgentSession is incremented for post-hoc analysis.
 `recovery_attempts` is NOT incremented on reprieve.
 
+**Scope:** Tier 2 reprieve applies **only** to `no_progress` recoveries.
+`worker_dead` and `timeout` recoveries skip Tier 2 entirely and proceed
+directly to the kill path. The rationale:
+
+* `worker_dead` — there is no live worker to deliver any future progress
+  signal, so an "active children" reprieve would only prolong a hung session.
+* `timeout` — the configured session timeout is an absolute cap. Allowing an
+  activity-positive gate to defeat the timeout would make the cap
+  unenforceable; a runaway session that keeps spawning child processes would
+  never be killed.
+
 The pid is populated via the `on_sdk_started` callback that the messenger
 invokes once the SDK subprocess spawns; see "Messenger callbacks" below.
 

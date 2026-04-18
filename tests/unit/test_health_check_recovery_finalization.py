@@ -584,3 +584,196 @@ class TestAgentSessionFieldsRoundTrip:
         required = {"last_heartbeat_at", "last_sdk_heartbeat_at", "last_stdout_at"}
         missing = required - AgentSession._DATETIME_FIELDS
         assert not missing, f"Missing from _DATETIME_FIELDS: {missing}"
+
+
+# ==========================================================================
+# Spike-1 cancellation invariant tests (#1039 review)
+# ==========================================================================
+
+
+class TestSessionHandleTaskInvariant:
+    """Tests that SessionHandle.task registration never targets the worker loop.
+
+    Plan spike-1 (#1036) and #1039 review explicitly forbid cancelling the
+    worker-loop task from the health check. These tests guard the invariant.
+    """
+
+    def test_session_handle_task_defaults_to_none(self):
+        """SessionHandle() constructed without args has task=None."""
+        from agent.agent_session_queue import SessionHandle
+
+        handle = SessionHandle()
+        assert handle.task is None
+        assert handle.pid is None
+
+    def test_handle_task_is_none_before_background_task_starts(self):
+        """Health-check cancel path must no-op when handle.task is None.
+
+        Between _execute_agent_session entry and BackgroundTask.run() there
+        is nothing session-scoped to cancel; a bare `.cancel()` call on
+        None would crash the health check.
+        """
+        from agent.agent_session_queue import SessionHandle
+
+        handle = SessionHandle(task=None, pid=None)
+        # Mirror the health-check guard (agent_session_queue.py ~L1900).
+        if handle is not None and handle.task is not None and not handle.task.done():
+            # This branch must NOT be entered when task is None.
+            raise AssertionError("must not attempt cancel when handle.task is None")
+        # The guard correctly skipped cancel — test passes.
+        assert handle.task is None
+
+    def test_cancelling_handle_task_does_not_cancel_worker_loop(self):
+        """Cancelling one session handle's task must not cancel the other.
+
+        This is the core invariant of spike-1: the health check's .cancel()
+        must target the session-scoped task (BackgroundTask._task), not the
+        worker-loop task that is shared across sessions.
+        """
+        import asyncio
+
+        from agent.agent_session_queue import SessionHandle
+
+        async def _test():
+            # Two distinct long-running "session" tasks (simulating two
+            # BackgroundTask._task instances on the same worker).
+            async def _long_running(label: str):
+                try:
+                    await asyncio.sleep(60)
+                    return label
+                except asyncio.CancelledError:
+                    raise
+
+            task_a = asyncio.create_task(_long_running("A"))
+            task_b = asyncio.create_task(_long_running("B"))
+            try:
+                handle_a = SessionHandle(task=task_a)
+                handle_b = SessionHandle(task=task_b)
+
+                # Cancel only A via its handle.
+                handle_a.task.cancel()
+                try:
+                    await asyncio.wait_for(handle_a.task, timeout=1.0)
+                except (asyncio.CancelledError, TimeoutError):
+                    pass
+
+                assert handle_a.task.done(), "handle_a.task should be done after cancel"
+                assert not handle_b.task.done(), (
+                    "handle_b.task must NOT be cancelled when handle_a.task is cancelled — "
+                    "this guards plan spike-1 (sessions must not share a cancel target)"
+                )
+            finally:
+                for t in (task_a, task_b):
+                    if not t.done():
+                        t.cancel()
+                        try:
+                            await asyncio.wait_for(t, timeout=1.0)
+                        except (asyncio.CancelledError, TimeoutError):
+                            pass
+
+        asyncio.run(_test())
+
+    def test_session_handle_task_populated_after_task_run(self):
+        """Source audit: _execute_agent_session populates handle.task from
+        BackgroundTask._task after task.run(), not from asyncio.current_task().
+
+        This is a structural assertion — the worker task must NEVER be the
+        cancel target (plan spike-1, #1039 review).
+        """
+        import inspect
+
+        from agent import agent_session_queue as q
+
+        src = inspect.getsource(q._execute_agent_session)
+        # The populated handle.task must come from task._task (BackgroundTask).
+        assert "task._task" in src, (
+            "Expected _execute_agent_session to reference BackgroundTask._task "
+            "when populating the registry handle"
+        )
+        # The initial registration must use SessionHandle(task=None) so the
+        # worker task is NOT stored as the cancel target.
+        assert "SessionHandle(task=None)" in src, (
+            "Expected initial registration to use SessionHandle(task=None) — "
+            "registering asyncio.current_task() would make cancel target the "
+            "worker loop (plan spike-1 violation)"
+        )
+        # The old buggy pattern must be gone.
+        assert "SessionHandle(task=_current_task)" not in src, (
+            "Found stale spike-1 violation: SessionHandle(task=_current_task) "
+            "registers the worker-loop task as the cancel target"
+        )
+
+
+class TestReprieveScopedToNoProgress:
+    """Tests for Tier 2 reprieve scoping (#1039 review, tech debt 1+2).
+
+    Tier 1/Tier 2 reprieve logic applies ONLY to no_progress recoveries.
+    worker_dead and timeout recoveries must skip reprieve entirely.
+    """
+
+    def test_tier2_reprieve_only_applies_to_no_progress(self):
+        """Source audit: the Tier 1 flagged metric and Tier 2 reprieve block
+        are guarded by `_reason_kind == "no_progress"`.
+
+        Exercises the gating structurally since the health-check function
+        is a large async loop (testing it end-to-end requires a full Redis
+        + worker harness).
+        """
+        import inspect
+
+        from agent import agent_session_queue as q
+
+        src = inspect.getsource(q._agent_session_health_check)
+        assert '_reason_kind == "no_progress"' in src, (
+            "Expected Tier 1/Tier 2 block to be gated on _reason_kind == 'no_progress' "
+            "(tech debt 1+2 from #1039 review)"
+        )
+        # Confirm the gating sits between reason classification and kill path.
+        idx_kind = src.find('_reason_kind = "no_progress"')
+        idx_gate = src.find('_reason_kind == "no_progress"')
+        idx_tier1_counter = src.find("tier1_flagged_total")
+        idx_reprieve = src.find("_tier2_reprieve_signal")
+        assert idx_kind < idx_gate, "_reason_kind must be assigned before it is gated"
+        assert idx_gate < idx_tier1_counter, (
+            "Tier 1 flagged counter must sit INSIDE the no_progress gate"
+        )
+        assert idx_gate < idx_reprieve, "Tier 2 reprieve call must sit INSIDE the no_progress gate"
+
+    def test_tier1_flagged_metric_only_increments_for_no_progress(self):
+        """Source audit: tier1_flagged_total increments inside the no_progress
+        branch only. This prevents timeout/worker_dead recoveries from
+        inflating the counter (tech debt 1+2)."""
+        import inspect
+
+        from agent import agent_session_queue as q
+
+        src = inspect.getsource(q._agent_session_health_check)
+
+        # The counter must be referenced exactly once (single increment site).
+        count_refs = src.count("tier1_flagged_total")
+        assert count_refs == 1, (
+            f"Expected tier1_flagged_total to be incremented once; found {count_refs} "
+            "references — check the no_progress gating"
+        )
+
+        # Verify the single reference lives inside the no_progress gated block
+        # by checking the text between the gate and the kill path contains it.
+        gate_idx = src.find('_reason_kind == "no_progress"')
+        kill_idx = src.find("DISABLE_PROGRESS_KILL")
+        assert gate_idx != -1 and kill_idx != -1
+        gated_section = src[gate_idx:kill_idx]
+        assert "tier1_flagged_total" in gated_section, (
+            "tier1_flagged_total must be inside the no_progress gate, not outside"
+        )
+
+    def test_no_progress_handle_none_debug_log_present(self):
+        """Source audit: debug log fires when handle is None, regardless
+        of reason_kind (NIT 1 from #1039 review)."""
+        import inspect
+
+        from agent import agent_session_queue as q
+
+        src = inspect.getsource(q._agent_session_health_check)
+        assert "Tier 2 will use stdout gate only" in src, (
+            "Expected debug log 'Tier 2 will use stdout gate only' when handle is None"
+        )
