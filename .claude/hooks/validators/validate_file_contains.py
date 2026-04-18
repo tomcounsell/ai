@@ -259,11 +259,27 @@ def main():
     )
     args = parser.parse_args()
 
-    # Consume stdin if provided
+    # Read stdin — PostToolUse hooks receive tool context as JSON.
+    # If this fires on a Write that didn't target <directory>/*<extension>,
+    # pass through silently: the caller isn't writing a plan doc.
     try:
-        json.load(sys.stdin)
+        payload = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
-        pass
+        payload = None
+
+    if isinstance(payload, dict) and payload.get("hook_event_name") == "PostToolUse":
+        tool_input = payload.get("tool_input") or {}
+        target = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if target:
+            ext = args.extension if args.extension.startswith(".") else f".{args.extension}"
+            directory_norm = args.directory.rstrip("/") + "/"
+            # Normalize to relative path against cwd when absolute
+            rel_target = target
+            cwd = payload.get("cwd") or ""
+            if cwd and target.startswith(cwd + "/"):
+                rel_target = target[len(cwd) + 1 :]
+            if not (rel_target.startswith(directory_norm) and rel_target.endswith(ext)):
+                sys.exit(0)
 
     success, message = validate(args.directory, args.extension, args.max_age, args.required_strings)
 
