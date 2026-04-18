@@ -311,7 +311,7 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
 
     Loads the parent AgentSession from Redis, creates a PipelineStateMachine,
     and calls start_stage(). This marks the stage as in_progress so that
-    subagent_stop can later find and complete it.
+    _handle_dev_session_completion can later find and complete it.
 
     Failures are logged but never raised -- this must not block the Agent tool.
     """

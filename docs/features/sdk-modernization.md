@@ -20,13 +20,13 @@ Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent defini
 ## Expanded Hooks
 
 - New `agent/hooks/` package with `build_hooks_config()`
-- 5 hook types registered: PreToolUse, PostToolUse, Stop, SubagentStop, PreCompact
+- 4 hook types registered: PreToolUse, PostToolUse, Stop, PreCompact
 - **PreToolUse**: blocks writes to sensitive files (.env, credentials)
 - **PostToolUse**: existing watchdog (health check + steering)
 - **Stop**: logs session completion
-- **SubagentStop**: logs subagent completion
 - **PreCompact**: logs context compaction events
 - All hooks use proper SDK type annotations
+- A `SubagentStop` hook was originally registered here as well; it was stripped to logging-only in the Phase 5 harness migration and then deleted entirely in issue #1024 once the SDK execution path was confirmed unreachable.
 
 ## Agent-Addressable Steering
 
@@ -41,7 +41,6 @@ Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent defini
 - `agent/hooks/pre_tool_use.py` (new)
 - `agent/hooks/post_tool_use.py` (new)
 - `agent/hooks/stop.py` (new)
-- `agent/hooks/subagent_stop.py` (new)
 - `agent/hooks/pre_compact.py` (new)
 - `agent/sdk_client.py` (modified)
 - `agent/health_check.py` (modified)

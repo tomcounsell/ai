@@ -58,7 +58,7 @@ When a Dev session completes (via SDK or CLI harness), the worker calls `_handle
 6. Steers the parent PM session via `steer_session()` with stage name and outcome summary
 7. All operations are wrapped in try/except -- failures never crash the worker
 
-The `subagent_stop_hook` in `agent/hooks/subagent_stop.py` now only logs completion (SDLC tracking logic removed in Phase 5 cleanup).
+SDLC stage tracking on Dev-session completion lives entirely in `_handle_dev_session_completion()`. The original SDK `subagent_stop_hook` (`agent/hooks/subagent_stop.py`) was stripped to logging-only in the Phase 5 harness migration and then deleted in issue #1024.
 
 ### On Stage Start (PM session Prompt Enrichment)
 
@@ -84,7 +84,7 @@ Each stage comment follows a standardized markdown template:
 
 ### Files Modified
 - `utils/issue_comments.py`
-- `agent/hooks/subagent_stop.py`
+- `agent/hooks/pre_tool_use.py`
 
 ### Notes for Next Stage
 Focus testing on error handling paths -- the happy path is straightforward.
@@ -132,7 +132,7 @@ This enables automatic PATCH cycles: a REVIEW that finds issues routes to PATCH,
 
 - `classify_outcome()` errors default to `complete_stage()` (never crashes)
 - "ambiguous" classification defaults to success (avoids false PATCH triggers)
-- `SubagentStopHookInput` lacks a `stop_reason` field, so `stop_reason=None` is passed by default -- classification relies primarily on output tail pattern matching
+- The worker post-completion handler does not receive an explicit `stop_reason` from the CLI harness, so `stop_reason=None` is passed to `classify_outcome()` by default -- classification relies primarily on output tail pattern matching
 
 ## Key Components
 
@@ -154,9 +154,9 @@ Extended with these functions for worker post-completion SDLC handling:
 - `_extract_issue_number(session, agent_session)` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or `issues/NNN` pattern in session message text. Returns int or None.
 - `_handle_dev_session_completion(session, agent_session, result)` -- Called after `complete_transcript()` runs (which runs `_finalize_parent_sync()` synchronously). Classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers parent PM session. Re-checks parent status after steer — if terminal at re-check, creates a continuation PM (ordering invariant fix, issue #987). Path B: if `agent_session=None`, falls back to `session.parent_agent_session_id` instead of returning silently. All operations non-fatal.
 
-### `agent/hooks/subagent_stop.py`
+### `agent/hooks/subagent_stop.py` (removed)
 
-Now only logs session completion. All SDLC stage tracking logic (`_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion`) was moved to the worker post-completion handler in Phase 5 cleanup.
+Previously the SDK `SubagentStop` hook. All SDLC stage tracking logic (`_register_dev_session_completion`, `_record_stage_on_parent`, `_post_stage_comment_on_completion`) was moved to the worker post-completion handler in Phase 5 cleanup. The file itself was deleted in issue #1024 once the broader SDK execution path was confirmed unreachable.
 
 ### `agent/sdk_client.py`
 

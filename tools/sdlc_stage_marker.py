@@ -3,9 +3,9 @@
 Invoked by SDLC skills (do-issue, do-plan, do-plan-critique, do-pr-review, do-docs)
 to record stage start/completion without depending on the bridge hooks.
 
-Skills use this as a belt-and-suspenders backup — the bridge hooks
-(pre_tool_use/subagent_stop) remain the primary marker path for bridge-initiated
-sessions. This tool handles local Claude Code sessions where hooks don't fire.
+Skills use this as a belt-and-suspenders backup — the bridge pre_tool_use hook
+remains the primary marker path for bridge-initiated sessions. This tool handles
+local Claude Code sessions where hooks don't fire.
 
 Usage:
     python -m tools.sdlc_stage_marker --stage DOCS --status in_progress

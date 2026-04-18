@@ -45,7 +45,7 @@ For terminal transitions. Executes all completion side effects in order:
 
 **Lazy-load safety**: Before saving, `finalize_session()` backfills `session._saved_field_values["status"]` with the current status. Popoto's `_create_lazy_model()` only seeds `_saved_field_values` with KeyFields, so lazy-loaded sessions have no `"status"` entry. Without this backfill, `IndexedFieldMixin.on_save()` skips `srem()` and the session accumulates in both the old and new status index sets simultaneously (ghost sessions).
 
-**Skip flags**: The hooks subprocess paths (`stop.py`, `subagent_stop.py`) use `skip_auto_tag=True, skip_checkpoint=True` to avoid importing heavy dependencies that may not be available in the subprocess context.
+**Skip flags**: The Claude Code hook subprocess path (`.claude/hooks/stop.py`) uses `skip_auto_tag=True, skip_checkpoint=True` to avoid importing heavy dependencies that may not be available in the subprocess context.
 
 ### `transition_status(session, new_status, reason, *, reject_from_terminal=True)`
 
@@ -74,7 +74,6 @@ When a session finishes execution, all paths converge on `finalize_session()`:
 | Worker completion | `_complete_agent_session()` in `agent_session_queue.py` | None (all side effects run) |
 | Transcript completion | `complete_transcript()` in `session_transcript.py` | None (all side effects run) |
 | Claude Code hook stop | `.claude/hooks/stop.py` | `skip_auto_tag=True, skip_checkpoint=True` |
-| Subagent stop | `agent/hooks/subagent_stop.py` | `skip_parent=True` |
 | Bridge acknowledgment | `telegram_bridge.py` dormant->completed | None |
 | PM cancel | `agent_session_queue.py` | None |
 | Watchdog abandon/fail | `session_watchdog.py` | None |

@@ -360,7 +360,6 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 | `_extract_issue_number()` | `agent/agent_session_queue.py` | Resolves tracking issue from env vars or session message_text |
 | `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Starts pipeline stage on Skill tool calls (PM Skill path) |
 | `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path |
-| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Logs Dev session completion (SDLC tracking moved to worker) |
 | `PipelineStateMachine` | `agent/pipeline_state.py` | Manages stage_states on the parent AgentSession (moved from `bridge/` in Phase 3) |
 | `classify_outcome()` | `agent/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
 | `get_definition()` | `agent/agent_definitions.py` | Returns actionable error for stale callers requesting `"dev-session"` Agent tool dispatch |

@@ -74,7 +74,7 @@ class TestStageCommentIntegration:
             stage="BUILD",
             outcome="PR #123 opened",
             findings=["Fixed auth middleware", "Added retry logic"],
-            files=["agent/hooks/subagent_stop.py", "utils/issue_comments.py"],
+            files=["agent/hooks/pre_tool_use.py", "utils/issue_comments.py"],
             notes="Review should check error handling paths.",
         )
 
