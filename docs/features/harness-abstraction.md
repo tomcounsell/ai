@@ -4,7 +4,7 @@
 
 ## Overview
 
-All session types (PM, Teammate, Dev) now execute via the CLI harness (`claude -p --output-format stream-json`). The original `DEV_SESSION_HARNESS` environment variable is preserved for legacy reference, but all session types are unconditionally routed to `get_response_via_harness()` — the SDK path (`get_agent_response_sdk()`) is no longer used.
+All session types (PM, Teammate, Dev) now execute via the CLI harness (`claude -p --output-format stream-json`). The original `DEV_SESSION_HARNESS` environment variable is preserved for historical compatibility, but all session types are unconditionally routed to `get_response_via_harness()` — the SDK path (`get_agent_response_sdk()`) is not exercised.
 
 **Phase 6 (end-to-end validation)** is complete — all session types run through the CLI harness in production.
 

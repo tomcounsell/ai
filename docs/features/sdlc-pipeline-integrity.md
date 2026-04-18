@@ -72,7 +72,7 @@ When a Dev session completes, the worker's post-completion handler reads the cur
 
 The handler:
 1. Runs after every Dev session finishes (unconditional — the CLI harness is the only execution path)
-2. Reads `stage_states` from the Dev session's AgentSession in Redis (the legacy `sdlc_stages` field was removed in PR #490)
+2. Reads `stage_states` from the Dev session's AgentSession in Redis (the earlier `sdlc_stages` field was retired in PR #490)
 3. Injects a pipeline-state steering message into the parent PM so the PM sees which stages are actually complete vs still pending
 
 This creates a feedback loop: the PM dispatches a Dev session to run a stage, the Dev session updates `stage_states` during execution, and the worker post-completion handler feeds the updated state back to the PM before it decides the next action.

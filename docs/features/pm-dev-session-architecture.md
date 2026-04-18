@@ -387,7 +387,7 @@ The PM invokes `scripts/steer_child.py` via bash with the child's session ID and
 **Delivery paths by harness type:**
 - **CLI-harness sessions** (default): `steer_child.py` calls `steer_session()` which writes to `queued_steering_messages`. The worker injects the message as user input at the next turn boundary. There is no mid-turn injection — the Dev session sees the message at most one turn late.
 - **Abort signals** (`--abort`): always use the Redis list (`steering:{session_id}`) regardless of harness type. The watchdog hook delivers these immediately via `additionalContext` injection.
-- **SDK-harness sessions** (legacy): both the turn-boundary inbox and the watchdog hook's mid-turn injection path are available, but all Dev sessions now default to CLI harness.
+- **SDK-harness sessions** (historical): both the turn-boundary inbox and the watchdog hook's mid-turn injection path are available, but all Dev sessions now default to CLI harness.
 
 > **Status (2026-04-17):** The mid-execution hook consumer is not yet implemented. Messages written via `steer_child.py` are only consumed at session pickup and completion — they are silently dropped if the child session is already running. See issue TBD for consolidation plans.
 
