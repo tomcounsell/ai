@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import psutil
@@ -1562,6 +1563,8 @@ async def get_response_via_harness(
     prior_uuid: str | None = None,
     session_id: str | None = None,
     full_context_message: str | None = None,
+    on_sdk_started: Callable[[int], None] | None = None,
+    on_stdout_event: Callable[[], None] | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
 
@@ -1629,7 +1632,11 @@ async def get_response_via_harness(
         cmd = harness_cmd + [message]
 
     result_text, session_id_from_harness, returncode = await _run_harness_subprocess(
-        cmd, working_dir, proc_env
+        cmd,
+        working_dir,
+        proc_env,
+        on_sdk_started=on_sdk_started,
+        on_stdout_event=on_stdout_event,
     )
 
     # Mandatory stale-UUID fallback: when prior_uuid was set and the subprocess
@@ -1651,7 +1658,11 @@ async def get_response_via_harness(
                 )
             fallback_cmd = harness_cmd + [fallback_msg]
             result_text, session_id_from_harness, _ = await _run_harness_subprocess(
-                fallback_cmd, working_dir, proc_env
+                fallback_cmd,
+                working_dir,
+                proc_env,
+                on_sdk_started=on_sdk_started,
+                on_stdout_event=on_stdout_event,
             )
         else:
             logger.error(
@@ -1673,6 +1684,9 @@ async def _run_harness_subprocess(
     cmd: list[str],
     working_dir: str,
     proc_env: dict[str, str],
+    *,
+    on_sdk_started: Callable[[int], None] | None = None,
+    on_stdout_event: Callable[[], None] | None = None,
 ) -> tuple[str | None, str | None, int | None]:
     """Execute a harness subprocess and parse stream-json output.
 
@@ -1680,6 +1694,12 @@ async def _run_harness_subprocess(
     returncode is None and result_text carries the error message. On stream-parse
     success, result_text is the parsed result and returncode is the process exit
     code (0 on success, non-zero on failure).
+
+    Optional callbacks (issue #1036):
+        on_sdk_started(pid): fires once, immediately after the subprocess is
+            spawned with a valid pid. Callback exceptions are caught + logged.
+        on_stdout_event(): fires on each non-empty stdout line from the SDK.
+            Callback exceptions are caught + logged.
     """
     # Default asyncio StreamReader limit is 64KB. The claude CLI outputs its
     # full result as a single JSON line — long responses (e.g. multi-cycle
@@ -1699,6 +1719,13 @@ async def _run_harness_subprocess(
         logger.error(f"Harness binary not found: {e}")
         return (f"Error: CLI harness not found — {e}", None, None)
 
+    # Fire SDK-started callback once the pid is known (#1036).
+    if on_sdk_started is not None and proc.pid is not None:
+        try:
+            on_sdk_started(proc.pid)
+        except Exception as _cb_err:
+            logger.warning("on_sdk_started callback raised: %s", _cb_err)
+
     full_text = ""
     result_text = None
     session_id_from_harness = None
@@ -1707,6 +1734,14 @@ async def _run_harness_subprocess(
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
             continue
+
+        # Fire stdout-event callback for liveness tracking (#1036). Do NOT
+        # block the harness loop if the callback raises.
+        if on_stdout_event is not None:
+            try:
+                on_stdout_event()
+            except Exception as _cb_err:
+                logger.warning("on_stdout_event callback raised: %s", _cb_err)
 
         try:
             data = json.loads(line)

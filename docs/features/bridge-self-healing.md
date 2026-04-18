@@ -372,6 +372,105 @@ tail -f logs/worker_watchdog.log
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 
+## Two-tier no-progress detector
+
+The periodic `_agent_session_health_check` (every 5 minutes) decides whether a
+long-running session is making progress. To minimize **false-negatives**
+(killing a working session) while still reaping genuinely wedged sessions, the
+detector uses two independent tiers. (Issue #1036.)
+
+### Tier 1 — dual heartbeat
+
+Two independent 60-second writers update separate AgentSession fields:
+
+| Field | Writer | When |
+|-------|--------|------|
+| `last_heartbeat_at` | Queue-layer `_heartbeat_loop` inside `_execute_agent_session` | Every `HEARTBEAT_WRITE_INTERVAL` (60s) |
+| `last_sdk_heartbeat_at` | Messenger-layer `BackgroundTask._watchdog` via `on_heartbeat_tick` callback | Every 60s while SDK subprocess runs |
+
+`_has_progress()` returns `True` if **either** heartbeat is within
+`HEARTBEAT_FRESHNESS_WINDOW` (90s). Tier 1 flags a session as potentially stuck
+only when **both** heartbeats are stale — this tolerates single-writer failures
+(e.g. event loop starved such that the queue heartbeat loop skips a beat, while
+the messenger watchdog keeps ticking, or vice versa).
+
+### Tier 2 — activity-positive reprieve gates
+
+When Tier 1 flags a session, the health check calls `_tier2_reprieve_signal()`
+which evaluates three OS-level liveness checks via `psutil`:
+
+| Gate | Check | Return |
+|------|-------|--------|
+| (c) alive    | `psutil.Process(pid).status()` not in `{zombie, dead, stopped}` | `"alive"` |
+| (d) children | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred) |
+| (e) stdout   | `last_stdout_at` within `STDOUT_FRESHNESS_WINDOW` (90s) | `"stdout"` |
+
+Any **one** passing gate reprieves the kill. The reprieve signal is logged and
+`reprieve_count` on the AgentSession is incremented for post-hoc analysis.
+`recovery_attempts` is NOT incremented on reprieve.
+
+The pid is populated via the `on_sdk_started` callback that the messenger
+invokes once the SDK subprocess spawns; see "Messenger callbacks" below.
+
+### Kill path
+
+If Tier 1 flags stuck AND all Tier 2 gates fail:
+
+1. Look up `handle = _active_sessions.get(agent_session_id)` — the per-session
+   `SessionHandle(task, pid)` registered at the top of `_execute_agent_session`.
+2. Cancel `handle.task` and wait up to `TASK_CANCEL_TIMEOUT` (0.25s) for
+   propagation. `CancelledError` flows through `BackgroundTask._task` →
+   `asyncio.create_subprocess_exec`, terminating the SDK subprocess cleanly.
+3. Increment `entry.recovery_attempts`.
+4. If `recovery_attempts >= MAX_RECOVERY_ATTEMPTS` (2) → `finalize_session(entry, "failed", ...)`
+   so the session reaches a terminal status with full audit history. Otherwise
+   transition to `pending` and re-ensure a worker.
+5. `StatusConflictError` from the transition is caught and logged at WARNING
+   (race with the worker's own `CancelledError` handler is tolerated).
+
+### Kill-switch
+
+Set `DISABLE_PROGRESS_KILL=1` in the worker environment to suppress the kill
+transition while **keeping** Tier 1 flagging and Tier 2 evaluation active. The
+detector still logs a WARNING `[session-health] Would kill session ...`
+for each would-be kill. This lets operators collect real data on detector
+behavior before enabling kills during rollout.
+
+### Metrics
+
+Redis counters keyed by `<project_key>:session-health:`:
+
+* `tier1_flagged_total` — every time both heartbeats were stale.
+* `tier2_reprieve_total:{alive|children|stdout}` — reprieve by signal.
+* `kill_total` — actual kills (after Tier 2 failed and kill-switch off).
+
+### Per-session fields
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `last_heartbeat_at` | DatetimeField | Queue-layer heartbeat |
+| `last_sdk_heartbeat_at` | DatetimeField | Messenger watchdog heartbeat |
+| `last_stdout_at` | DatetimeField | Last SDK stdout event |
+| `recovery_attempts` | IntField | Kills only; finalizes at `MAX_RECOVERY_ATTEMPTS` |
+| `reprieve_count` | IntField | Tier 2 saves — diagnostic only |
+
+All five fields are included in `_AGENT_SESSION_FIELDS` so they round-trip
+through delete-and-recreate paths (retry, orphan-fix, continuation fallback).
+
+### Messenger callbacks (ORM-free)
+
+`BossMessenger` exposes three optional callbacks (`on_sdk_started`,
+`on_heartbeat_tick`, `on_stdout_event`) with `notify_*` wrappers that catch
+callback exceptions and log at WARNING. The messenger imports nothing from
+`models/`; the queue layer (`_execute_agent_session`) defines closures that
+bump ORM fields and passes them into the `BossMessenger` constructor.
+
+`_active_sessions: dict[str, SessionHandle]` is the per-session registry the
+health check uses to look up cancellable tasks and subprocess pids. It is
+registered at the very top of `_execute_agent_session` (before any raise
+site) and cleaned up via `task.add_done_callback` so the entry is always
+popped — regardless of exception, `CancelledError`, or early return.
+
 ## Recovery Lock
 
 During recovery, `data/recovery-in-progress` is created to prevent:

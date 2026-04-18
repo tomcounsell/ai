@@ -26,6 +26,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,28 @@ AGENT_SESSION_HEALTH_MIN_RUNNING = (
     300  # Don't recover sessions running less than 5 min (race condition guard)
 )
 
+# === Two-tier no-progress detector constants (issue #1036) ===
+# Heartbeat write interval inside `_heartbeat_loop` for the queue-layer
+# heartbeat field `last_heartbeat_at`. 60s matches the messenger watchdog
+# tick so both Tier 1 heartbeats nominally refresh on the same cadence.
+HEARTBEAT_WRITE_INTERVAL = 60
+# Freshness window (seconds) for Tier 1 heartbeat fields. A heartbeat whose
+# age is strictly less than this window is considered fresh. 90s provides a
+# 30s grace margin over the 60s write cadence.
+HEARTBEAT_FRESHNESS_WINDOW = 90
+# Freshness window for the Tier 2 recent-stdout reprieve gate.
+STDOUT_FRESHNESS_WINDOW = 90
+# Max health-check kills before a session is finalized as `failed` instead
+# of being re-queued to `pending`. Ensures sessions always reach a terminal
+# status within ~10 minutes of going non-progressing, avoiding the
+# Meta.ttl=30d silent-delete backstop described in spike-2 of issue #1036.
+MAX_RECOVERY_ATTEMPTS = 2
+# Timeout for awaiting task cancellation during recovery. SDK client cleanup
+# propagates near-instantly once CancelledError is raised; 0.25s keeps the
+# health-check tick budget tight while still giving the cancellation a
+# moment to complete.
+TASK_CANCEL_TIMEOUT = 0.25
+
 
 # Fields to extract from AgentSession for delete-and-recreate pattern.
 # Used by callers that legitimately need a fresh AutoKeyField-generated ID:
@@ -202,6 +225,14 @@ _AGENT_SESSION_FIELDS = [
     "slug",
     # === PM self-messaging fields ===
     "pm_sent_message_ids",
+    # === Two-tier no-progress detector fields (issue #1036) ===
+    # Round-trip these across delete-and-recreate so recovery_attempts counter
+    # and heartbeat timestamps are preserved. B2 from plan critique.
+    "last_heartbeat_at",
+    "last_sdk_heartbeat_at",
+    "last_stdout_at",
+    "recovery_attempts",
+    "reprieve_count",
 ]
 
 
@@ -1532,13 +1563,23 @@ def _get_agent_session_timeout(session) -> int:
 def _has_progress(entry: AgentSession) -> bool:
     """Return True iff the session shows any signal that real work has begun.
 
-    Three own-progress fields cover the SDK subprocess warmup arc from auth
-    to first turn:
-    - ``claude_session_uuid`` is populated when the SDK subprocess authenticates
-      with the Claude API (seconds after launch, long before the first turn).
-    - ``log_path`` is written once the session emits its first log entry
-      (typically on the first tool call).
-    - ``turn_count`` increments on each full agent turn completion.
+    Tier 1 signals (dual heartbeat, issue #1036) — checked first:
+    - ``last_heartbeat_at``: queue-layer heartbeat, written every 60s by
+      ``_heartbeat_loop`` inside ``_execute_agent_session``.
+    - ``last_sdk_heartbeat_at``: messenger-sourced heartbeat, written by
+      ``BackgroundTask._watchdog`` via the ``on_heartbeat_tick`` callback.
+
+    Semantics: **OR** — if EITHER heartbeat is fresher than
+    ``HEARTBEAT_FRESHNESS_WINDOW`` (90s), the session has progress. This
+    tolerates single-writer failures (e.g. queue heartbeat loop wedged while
+    the messenger watchdog keeps ticking), minimizing false-positives
+    (killing a working session). The kill trigger in the health check
+    requires BOTH heartbeats to be stale before even evaluating Tier 2.
+
+    Own-progress signals (original behavior, preserved):
+    - ``claude_session_uuid`` — populated on SDK authentication.
+    - ``log_path`` — written on the first log entry.
+    - ``turn_count`` — incremented per turn completion.
 
     Any one of the three is sufficient evidence that the session is in flight.
 
@@ -1551,8 +1592,18 @@ def _has_progress(entry: AgentSession) -> bool:
 
     Used by ``_agent_session_health_check`` to distinguish stuck slugless dev
     sessions (worker_alive via a co-running PM, but no progress) from healthy
-    long-warmup BUILD sessions. See issues #944 and #963.
+    long-warmup BUILD sessions. See issues #944, #963, and #1036.
     """
+    # Tier 1: dual-heartbeat OR check (#1036). Fresh on either signal → progress.
+    now_utc = datetime.now(tz=UTC)
+    for hb_attr in ("last_heartbeat_at", "last_sdk_heartbeat_at"):
+        hb = getattr(entry, hb_attr, None)
+        if isinstance(hb, datetime):
+            hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
+            age_s = (now_utc - hb_aware).total_seconds()
+            if age_s < HEARTBEAT_FRESHNESS_WINDOW:
+                return True
+    # Own-progress fields (original behavior, preserves #944 / #963 invariants).
     if (entry.turn_count or 0) > 0:
         return True
     if bool((entry.log_path or "").strip()):
@@ -1566,6 +1617,71 @@ def _has_progress(entry: AgentSession) -> bool:
     if any(c.status not in _TERMINAL_STATUSES for c in children):
         return True
     return False
+
+
+def _tier2_reprieve_signal(
+    handle: "SessionHandle | None",
+    entry: AgentSession,
+) -> str | None:
+    """Evaluate Tier 2 activity-positive reprieve gates (issue #1036).
+
+    Called by the health check after Tier 1 has flagged a session as "both
+    heartbeats stale". Any single positive signal reprieves the kill.
+
+    Gates (order matters for telemetry — the first passing gate is returned):
+      (c) "alive"    — ``psutil.Process(pid).status()`` is not one of
+                       {zombie, dead, stopped}. Proves the SDK subprocess
+                       still exists and is not a zombie.
+      (d) "children" — ``psutil.Process(pid).children()`` is non-empty.
+                       Stronger signal than (c): tool-subprocess execution is
+                       actively happening right now. Returned in preference
+                       to "alive" so metrics highlight this case.
+      (e) "stdout"   — ``entry.last_stdout_at`` is within
+                       ``STDOUT_FRESHNESS_WINDOW``. Proves the SDK recently
+                       emitted stdout (stream-json event).
+
+    Returns the name of the first passing gate ("children", "alive", or
+    "stdout"), or ``None`` if every gate fails.
+
+    Failure handling:
+      * ``handle is None`` → (c)(d) skipped; fall through to (e).
+      * ``handle.pid is None`` → (c)(d) skipped; fall through to (e).
+      * ``psutil.NoSuchProcess`` / ``psutil.AccessDenied`` / ``ImportError``
+        → (c)(d) skipped silently; fall through to (e).
+
+    This helper NEVER raises. A genuinely dead session where every gate
+    fails is preferable to crashing the health-check loop.
+    """
+    pid = handle.pid if handle is not None else None
+    if pid is not None:
+        try:
+            import psutil
+
+            proc = psutil.Process(pid)
+            status = proc.status()
+            if status not in (
+                psutil.STATUS_ZOMBIE,
+                psutil.STATUS_DEAD,
+                psutil.STATUS_STOPPED,
+            ):
+                # Prefer "children" when present — stronger signal.
+                if proc.children():
+                    return "children"
+                return "alive"
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ImportError):
+            pass
+        except Exception as e:
+            # Defensive: never crash the health check from a psutil edge case.
+            logger.debug("[session-health] psutil probe failed for pid=%s: %s", pid, e)
+
+    # (e) recent stdout — works even when pid is unknown.
+    lso = getattr(entry, "last_stdout_at", None)
+    if isinstance(lso, datetime):
+        lso_aware = lso if lso.tzinfo else lso.replace(tzinfo=UTC)
+        age = (datetime.now(tz=UTC) - lso_aware).total_seconds()
+        if age < STDOUT_FRESHNESS_WINDOW:
+            return "stdout"
+    return None
 
 
 async def _agent_session_health_check() -> None:
@@ -1725,6 +1841,51 @@ async def _agent_session_health_check() -> None:
                         )
                     continue
 
+                # === Two-tier no-progress detector (#1036) ===
+                # Tier 1 already flagged stuck via `_has_progress()` returning False.
+                # Before any kill, consult Tier 2 activity-positive reprieve gates.
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                    _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
+                except Exception as _m_err:
+                    logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
+
+                handle = _active_sessions.get(entry.agent_session_id)
+                reprieve = _tier2_reprieve_signal(handle, entry)
+                if reprieve is not None:
+                    # Activity-positive: do NOT kill, do NOT increment recovery_attempts.
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                        _MR.incr(
+                            f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}"
+                        )
+                    except Exception as _m_err:
+                        logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
+                    try:
+                        entry.reprieve_count = (entry.reprieve_count or 0) + 1
+                        entry.save(update_fields=["reprieve_count"])
+                    except Exception as _rc_err:
+                        logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
+                    logger.info(
+                        "[session-health] Tier 2 reprieve (%s) for session %s — "
+                        "skipping kill (reprieve_count=%s)",
+                        reprieve,
+                        entry.agent_session_id,
+                        entry.reprieve_count,
+                    )
+                    continue
+
+                # All Tier 2 gates failed. Respect kill-switch.
+                if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
+                    logger.warning(
+                        "[session-health] Would kill session %s (DISABLE_PROGRESS_KILL=1): %s",
+                        entry.agent_session_id,
+                        reason,
+                    )
+                    continue
+
                 is_local = worker_key.startswith("local")
                 logger.warning(
                     "[session-health] Recovering stuck session %s "
@@ -1735,46 +1896,122 @@ async def _agent_session_health_check() -> None:
                     is_local,
                     reason,
                 )
-                from models.session_lifecycle import finalize_session, transition_status
 
-                if is_local:
-                    # Local CLI sessions have no bridge worker to resume them --
-                    # mark abandoned instead of resetting to pending
-                    finalize_session(
-                        entry,
-                        "abandoned",
-                        reason=f"health check: local session stuck (chat={worker_key})",
-                        skip_auto_tag=True,
-                    )
+                # Cancel the in-flight session task if we have a handle. This
+                # terminates the SDK subprocess via CancelledError propagation
+                # through BackgroundTask._task, preventing orphan heartbeats.
+                if handle is not None and not handle.task.done():
+                    handle.task.cancel()
+                    try:
+                        await asyncio.wait_for(handle.task, timeout=TASK_CANCEL_TIMEOUT)
+                    except (TimeoutError, asyncio.CancelledError):
+                        pass
+                    except Exception as _c_err:
+                        logger.debug(
+                            "[session-health] task cancel await raised %s for session %s",
+                            _c_err,
+                            entry.agent_session_id,
+                        )
                     logger.info(
-                        "[session-health] Marked local session %s as abandoned (chat=%s)",
+                        "[session-health] Cancelled orphan task for session %s",
                         entry.agent_session_id,
-                        worker_key,
                     )
-                else:
-                    # Apply companion fields directly to the already-loaded entry,
-                    # then transition via transition_status() which has its own CAS
-                    # re-read. This avoids the redundant Redis re-read that
-                    # update_session() would do.
-                    entry.priority = "high"
-                    entry.started_at = None
-                    transition_status(
-                        entry,
-                        "pending",
-                        reason=f"health check: recovered stuck session (chat={worker_key})",
-                    )
-                    logger.info(
-                        "[session-health] Recovered session %s (chat=%s)",
+
+                from models.session_lifecycle import (
+                    StatusConflictError,
+                    finalize_session,
+                    transition_status,
+                )
+
+                # Bump recovery_attempts counter only on actual kill (#1036).
+                entry.recovery_attempts = (entry.recovery_attempts or 0) + 1
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                    _MR.incr(f"{entry.project_key}:session-health:kill_total")
+                except Exception as _m_err:
+                    logger.debug("[session-health] kill counter failed: %s", _m_err)
+
+                try:
+                    if is_local:
+                        # Local CLI sessions have no bridge worker to resume them --
+                        # mark abandoned. Tier 2 reprieves already had a chance above,
+                        # so if we reach here the local session is genuinely wedged.
+                        finalize_session(
+                            entry,
+                            "abandoned",
+                            reason=(
+                                f"health check: local session stuck "
+                                f"(chat={worker_key}, attempts={entry.recovery_attempts})"
+                            ),
+                            skip_auto_tag=True,
+                        )
+                        logger.info(
+                            "[session-health] Marked local session %s as abandoned "
+                            "(chat=%s, attempts=%s)",
+                            entry.agent_session_id,
+                            worker_key,
+                            entry.recovery_attempts,
+                        )
+                    elif entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
+                        # Exhausted retries: finalize as `failed` so the session
+                        # reaches a terminal status and is auditable via
+                        # valor-session status. Prevents the Meta.ttl silent-delete
+                        # backstop from eating non-terminal records (spike-2).
+                        finalize_session(
+                            entry,
+                            "failed",
+                            reason=(
+                                f"health check: {entry.recovery_attempts} recovery "
+                                f"attempts, never progressed"
+                            ),
+                        )
+                        logger.warning(
+                            "[session-health] Finalized session %s as failed after "
+                            "%s recovery attempts",
+                            entry.agent_session_id,
+                            entry.recovery_attempts,
+                        )
+                    else:
+                        # Apply companion fields directly to the already-loaded entry,
+                        # then transition via transition_status() which has its own CAS
+                        # re-read. Save recovery_attempts along the way.
+                        entry.priority = "high"
+                        entry.started_at = None
+                        try:
+                            entry.save(update_fields=["recovery_attempts"])
+                        except Exception as _ra_err:
+                            logger.debug(
+                                "[session-health] recovery_attempts save failed: %s",
+                                _ra_err,
+                            )
+                        transition_status(
+                            entry,
+                            "pending",
+                            reason=(
+                                f"health check: recovered stuck session "
+                                f"(chat={worker_key}, attempt {entry.recovery_attempts})"
+                            ),
+                        )
+                        logger.info(
+                            "[session-health] Recovered session %s (chat=%s, attempt %s)",
+                            entry.agent_session_id,
+                            worker_key,
+                            entry.recovery_attempts,
+                        )
+                        _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
+                        # Wake up an already-running idle worker — _ensure_worker returns
+                        # early if the worker exists, so the event is never set and the
+                        # recovered pending session would stall until a new notify arrives.
+                        event = _active_events.get(worker_key)
+                        if event is not None:
+                            event.set()
+                except StatusConflictError as _sc_err:
+                    logger.warning(
+                        "[session-health] StatusConflictError during recovery of %s: %s",
                         entry.agent_session_id,
-                        worker_key,
+                        _sc_err,
                     )
-                    _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
-                    # Wake up an already-running idle worker — _ensure_worker returns
-                    # early if the worker exists, so the event is never set and the
-                    # recovered pending session would stall until a new notify arrives.
-                    event = _active_events.get(worker_key)
-                    if event is not None:
-                        event.set()
                 recovered += 1
         except Exception:
             logger.exception(
@@ -2123,6 +2360,39 @@ DRAIN_TIMEOUT = 1.5  # seconds
 
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
+
+
+@dataclass
+class SessionHandle:
+    """Per-session lookup handle for the two-tier no-progress detector (#1036).
+
+    Populated at the top of ``_execute_agent_session`` and removed in its
+    ``finally`` block. The ``task`` field is the ``asyncio.Task`` currently
+    running the session so the health check can cancel it when both Tier 1
+    heartbeats go stale AND all Tier 2 reprieve gates fail. The ``pid`` field
+    is populated by the messenger's ``on_sdk_started`` callback once the SDK
+    subprocess is spawned; it is used by the Tier 2 process-alive / has-children
+    gates via psutil.
+
+    Lifecycle contract:
+      * Single writer: ``_execute_agent_session`` for its own session id.
+      * Multi reader: ``_agent_session_health_check`` and
+        ``_tier2_reprieve_signal`` (both look up by id, tolerate missing).
+      * ``_active_sessions.pop()`` happens in ``_execute_agent_session``'s
+        ``finally`` block, always.
+    """
+
+    task: asyncio.Task
+    pid: int | None = None
+
+
+# Registry of in-flight session executions, keyed by agent_session_id.
+#
+# Written only by ``_execute_agent_session`` (register at entry before any
+# raise site; pop in ``finally``). Read by the health check (to look up the
+# cancellable task on kill) and by ``_tier2_reprieve_signal`` (to read the
+# pid for Tier 2 gates).
+_active_sessions: dict[str, SessionHandle] = {}
 
 # Tracks worker_keys for which asyncio.create_task() has been called but the task
 # has not yet registered itself in _active_workers (i.e., the spawn is in-flight).
@@ -3495,8 +3765,49 @@ async def _execute_agent_session(session: AgentSession) -> None:
     2. Run agent work via BackgroundTask + BossMessenger (in project working dir)
     3. Periodic calendar heartbeats during long-running work
     4. Set reaction based on result
+
+    Two-tier no-progress detector integration (#1036):
+      * A ``SessionHandle`` is registered in ``_active_sessions`` BEFORE any
+        raise site so the health check always has a cancellable reference.
+      * Cleanup is tied to the asyncio task completion via
+        ``add_done_callback`` so the registry entry is always popped — even
+        on exception, CancelledError, or any early return.
+      * A T+0 ``last_heartbeat_at`` write ensures the first health-check tick
+        after session start sees a fresh heartbeat.
+      * Three messenger callbacks (``on_sdk_started``, ``on_heartbeat_tick``,
+        ``on_stdout_event``) bump per-session ORM fields; the messenger
+        itself imports nothing from ``models/``.
     """
     from agent import BackgroundTask, BossMessenger
+
+    # === Two-tier no-progress detector registration (#1036) ===
+    # Register BEFORE any raise site so the health check has a handle on
+    # early failures. Cleanup is scheduled via add_done_callback so the pop
+    # always runs when the current asyncio task completes — regardless of
+    # how _execute_agent_session exits (return, raise, CancelledError).
+    _current_task = asyncio.current_task()
+    _session_id_for_registry = session.agent_session_id
+    if _current_task is not None and _session_id_for_registry:
+        _active_sessions[_session_id_for_registry] = SessionHandle(task=_current_task)
+
+        def _cleanup_registry(_t: "asyncio.Task", _sid: str = _session_id_for_registry) -> None:
+            _active_sessions.pop(_sid, None)
+
+        _current_task.add_done_callback(_cleanup_registry)
+
+    # T+0 heartbeat write: guarantee the very first health-check tick after
+    # session start sees a fresh heartbeat. Uses the pre-loaded `session`
+    # (the enqueue record) directly with a partial save scoped to a single
+    # field so it cannot clobber status or any other field.
+    try:
+        session.last_heartbeat_at = datetime.now(tz=UTC)
+        session.save(update_fields=["last_heartbeat_at"])
+    except Exception as _hb_err:
+        logger.warning(
+            "[%s] T+0 last_heartbeat_at save failed (non-fatal): %s",
+            session.session_id,
+            _hb_err,
+        )
 
     working_dir = Path(session.working_dir)
     allowed_root = Path.home() / "src"
@@ -3894,10 +4205,56 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"Failed to stamp response_delivered_at for {session.session_id}: {e}"
                 )
 
+    # === Two-tier no-progress detector callbacks (#1036) ===
+    # These closures bump per-session ORM fields on each signal. They are
+    # passed to BossMessenger so the messenger itself imports nothing from
+    # models/ — it just blindly invokes callbacks (notify_* wrappers catch
+    # exceptions). Each save is scoped to a single field so it cannot
+    # clobber status or any other field.
+    def _on_sdk_started(pid: int) -> None:
+        handle = _active_sessions.get(session.agent_session_id)
+        if handle is not None:
+            handle.pid = pid
+        try:
+            session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
+            session.save(update_fields=["last_sdk_heartbeat_at"])
+        except Exception as e:
+            logger.warning(
+                "[%s] on_sdk_started save failed (pid=%s): %s",
+                session.session_id,
+                pid,
+                e,
+            )
+
+    def _on_heartbeat_tick() -> None:
+        try:
+            session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
+            session.save(update_fields=["last_sdk_heartbeat_at"])
+        except Exception as e:
+            logger.warning(
+                "[%s] on_heartbeat_tick save failed: %s",
+                session.session_id,
+                e,
+            )
+
+    def _on_stdout_event() -> None:
+        try:
+            session.last_stdout_at = datetime.now(tz=UTC)
+            session.save(update_fields=["last_stdout_at"])
+        except Exception as e:
+            logger.warning(
+                "[%s] on_stdout_event save failed: %s",
+                session.session_id,
+                e,
+            )
+
     messenger = BossMessenger(
         _send_callback=send_to_chat,
         chat_id=session.chat_id,
         session_id=session.session_id,
+        on_sdk_started=_on_sdk_started,
+        on_heartbeat_tick=_on_heartbeat_tick,
+        on_stdout_event=_on_stdout_event,
     )
 
     # Deferred enrichment: process media, YouTube, links, reply chain.
@@ -4108,6 +4465,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
             prior_uuid=_prior_uuid,
             session_id=session.session_id,
             full_context_message=_harness_input,
+            # Two-tier no-progress detector callbacks (#1036). These route
+            # through messenger.notify_* wrappers so exceptions are caught
+            # and the queue-layer closures bump ORM fields on AgentSession.
+            on_sdk_started=messenger.notify_sdk_started,
+            on_stdout_event=messenger.notify_stdout_event,
         )
         if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
             result, requeued = await _handle_harness_not_found(raw, agent_session)
@@ -4119,17 +4481,37 @@ async def _execute_agent_session(session: AgentSession) -> None:
     task = BackgroundTask(messenger=messenger)
     await task.run(do_work(), send_result=True)
 
-    # Wait for the background task to complete, with periodic calendar heartbeats
-    # and updated_at writes to keep the session alive during long Claude API calls.
+    # Wait for the background task to complete, with periodic heartbeats.
+    # The loop now ticks at HEARTBEAT_WRITE_INTERVAL (60s) for the two-tier
+    # no-progress detector's queue-layer heartbeat (#1036). Every N ticks
+    # (where N*interval == CALENDAR_HEARTBEAT_INTERVAL, i.e. every 25 min)
+    # it also fires the calendar heartbeat and updated_at save to keep the
+    # prior behavior intact.
     async def _heartbeat_loop():
+        elapsed = 0
         while not task._task.done():
-            await asyncio.sleep(CALENDAR_HEARTBEAT_INTERVAL)
-            if not task._task.done():
+            await asyncio.sleep(HEARTBEAT_WRITE_INTERVAL)
+            elapsed += HEARTBEAT_WRITE_INTERVAL
+            if task._task.done():
+                break
+
+            # Tier 1 queue-layer heartbeat (#1036): write every tick.
+            try:
+                session.last_heartbeat_at = datetime.now(tz=UTC)
+                session.save(update_fields=["last_heartbeat_at"])
+            except Exception as hb_err:
+                logger.warning(
+                    "[%s] last_heartbeat_at save failed: %s",
+                    session.session_id,
+                    hb_err,
+                )
+
+            # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
+            if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:
+                elapsed = 0
                 asyncio.create_task(
                     _calendar_heartbeat(session.project_key, project=session.project_key)
                 )
-                # Write updated_at heartbeat so stale cleanup doesn't kill this session
-                # Use partial save to avoid clobbering status on stale references (#950)
                 if agent_session:
                     try:
                         agent_session.updated_at = datetime.now(tz=UTC)

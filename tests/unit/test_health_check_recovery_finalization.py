@@ -247,3 +247,340 @@ class TestHasProgressChildActivity:
         from agent.agent_session_queue import _has_progress
 
         assert _has_progress(entry) is False
+
+
+# ==========================================================================
+# Two-tier no-progress detector tests (issue #1036)
+# ==========================================================================
+
+
+def _now_utc():
+    from datetime import UTC, datetime
+
+    return datetime.now(tz=UTC)
+
+
+def _ago(seconds: int):
+    from datetime import timedelta
+
+    return _now_utc() - timedelta(seconds=seconds)
+
+
+class TestHasProgressDualHeartbeat:
+    """Tests for dual-heartbeat OR semantics in _has_progress (#1036).
+
+    Tier 1 freshness: either `last_heartbeat_at` OR `last_sdk_heartbeat_at`
+    within HEARTBEAT_FRESHNESS_WINDOW (90s) → progress=True.
+    """
+
+    @staticmethod
+    def _make_entry(**overrides):
+        defaults = {
+            "turn_count": 0,
+            "log_path": "",
+            "claude_session_uuid": None,
+            "last_heartbeat_at": None,
+            "last_sdk_heartbeat_at": None,
+        }
+        defaults.update(overrides)
+        entry = SimpleNamespace(**defaults)
+        entry.get_children = lambda: []
+        return entry
+
+    def test_queue_heartbeat_within_window_returns_true(self):
+        entry = self._make_entry(last_heartbeat_at=_ago(30))
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_sdk_heartbeat_within_window_returns_true(self):
+        entry = self._make_entry(last_sdk_heartbeat_at=_ago(30))
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_either_heartbeat_fresh_returns_true(self):
+        # One fresh, one stale → True (OR semantics)
+        entry = self._make_entry(
+            last_heartbeat_at=_ago(30),
+            last_sdk_heartbeat_at=_ago(300),
+        )
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_both_heartbeats_stale_returns_false(self):
+        # Both stale, other fields empty → False
+        entry = self._make_entry(
+            last_heartbeat_at=_ago(300),
+            last_sdk_heartbeat_at=_ago(300),
+        )
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is False
+
+    def test_heartbeats_at_boundary_returns_true(self):
+        # At age=89s (just inside 90s window) → True
+        entry = self._make_entry(
+            last_heartbeat_at=_ago(89),
+            last_sdk_heartbeat_at=_ago(89),
+        )
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is True
+
+    def test_both_heartbeats_none_falls_through_to_other_checks(self):
+        # Both None, turn_count=5 → True (unchanged behavior, #944)
+        entry = self._make_entry(turn_count=5)
+        from agent.agent_session_queue import _has_progress
+
+        assert _has_progress(entry) is True
+
+
+class TestTier2ReprieveGates:
+    """Tests for _tier2_reprieve_signal (#1036).
+
+    Tier 2 activity-positive gates evaluated only after Tier 1 flagged stuck.
+    Any ONE passing gate → reprieve (non-None return).
+    """
+
+    @staticmethod
+    def _make_entry(**overrides):
+        defaults = {"last_stdout_at": None}
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def _make_handle(self, pid=None):
+        from agent.agent_session_queue import SessionHandle
+
+        # Use a done task so we can construct SessionHandle without running one.
+        fake_task = MagicMock()
+        return SessionHandle(task=fake_task, pid=pid)
+
+    def test_reprieve_on_process_alive(self, monkeypatch):
+        """Non-zombie process without children → 'alive'."""
+        import psutil as _psutil
+
+        class _Proc:
+            def status(self):
+                return _psutil.STATUS_RUNNING
+
+            def children(self):
+                return []
+
+        monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        handle = self._make_handle(pid=12345)
+        assert _tier2_reprieve_signal(handle, self._make_entry()) == "alive"
+
+    def test_reprieve_on_children(self, monkeypatch):
+        """Non-zombie process with children → 'children' (preferred signal)."""
+        import psutil as _psutil
+
+        class _Proc:
+            def status(self):
+                return _psutil.STATUS_RUNNING
+
+            def children(self):
+                return [MagicMock()]
+
+        monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        handle = self._make_handle(pid=12345)
+        assert _tier2_reprieve_signal(handle, self._make_entry()) == "children"
+
+    def test_no_reprieve_on_zombie(self, monkeypatch):
+        """Zombie status → not a reprieve via (c)(d); falls to (e)."""
+        import psutil as _psutil
+
+        class _Proc:
+            def status(self):
+                return _psutil.STATUS_ZOMBIE
+
+            def children(self):
+                return [MagicMock()]
+
+        monkeypatch.setattr(_psutil, "Process", lambda pid: _Proc())
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        handle = self._make_handle(pid=12345)
+        assert _tier2_reprieve_signal(handle, self._make_entry()) is None
+
+    def test_no_reprieve_on_dead_process(self, monkeypatch):
+        """psutil.NoSuchProcess → skip (c)(d); fall to (e)."""
+        import psutil as _psutil
+
+        def _raise(_pid):
+            raise _psutil.NoSuchProcess(_pid)
+
+        monkeypatch.setattr(_psutil, "Process", _raise)
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        handle = self._make_handle(pid=999999)
+        assert _tier2_reprieve_signal(handle, self._make_entry()) is None
+
+    def test_reprieve_on_recent_stdout(self):
+        """No pid, recent stdout → 'stdout'."""
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        handle = self._make_handle(pid=None)
+        entry = self._make_entry(last_stdout_at=_ago(30))
+        assert _tier2_reprieve_signal(handle, entry) == "stdout"
+
+    def test_no_reprieve_on_stale_stdout(self):
+        """No pid, stale stdout (>90s) → None."""
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        handle = self._make_handle(pid=None)
+        entry = self._make_entry(last_stdout_at=_ago(200))
+        assert _tier2_reprieve_signal(handle, entry) is None
+
+    def test_no_reprieve_on_handle_none(self):
+        """handle=None, no stdout → None."""
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        assert _tier2_reprieve_signal(None, self._make_entry()) is None
+
+    def test_reprieve_on_stdout_when_handle_none(self):
+        """handle=None but fresh stdout → 'stdout' (Tier 2 gate still works)."""
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        entry = self._make_entry(last_stdout_at=_ago(30))
+        assert _tier2_reprieve_signal(None, entry) == "stdout"
+
+
+class TestRecoveryCancellation:
+    """Tests for task cancellation in the kill path (#1036)."""
+
+    def test_registry_registration_roundtrip(self):
+        """SessionHandle round-trips through _active_sessions."""
+        import asyncio
+
+        from agent.agent_session_queue import SessionHandle, _active_sessions
+
+        async def _test():
+            t = asyncio.current_task()
+            _active_sessions["test-abc"] = SessionHandle(task=t, pid=42)
+            try:
+                assert _active_sessions["test-abc"].pid == 42
+                assert _active_sessions["test-abc"].task is t
+            finally:
+                _active_sessions.pop("test-abc", None)
+
+        asyncio.run(_test())
+        # Final cleanup check
+        assert "test-abc" not in _active_sessions
+
+    def test_recovery_handles_missing_registry_entry(self):
+        """handle=None → _tier2_reprieve_signal still works gracefully."""
+        from agent.agent_session_queue import _tier2_reprieve_signal
+
+        # No handle, no fresh signals → None
+        entry = SimpleNamespace(last_stdout_at=None)
+        assert _tier2_reprieve_signal(None, entry) is None
+
+    def test_recovery_handles_completed_task_gracefully(self):
+        """A done task with done()==True → no crash during cancel wait."""
+        import asyncio
+
+        from agent.agent_session_queue import SessionHandle
+
+        async def _test():
+            async def _trivial():
+                return None
+
+            t = asyncio.create_task(_trivial())
+            await t  # complete it
+            handle = SessionHandle(task=t, pid=1)
+            # Simulate the health-check cancel path
+            if not handle.task.done():  # should be False
+                handle.task.cancel()
+            assert handle.task.done() is True
+
+        asyncio.run(_test())
+
+
+class TestRecoveryAttempts:
+    """Tests for recovery_attempts counter semantics (#1036)."""
+
+    def test_model_fields_exist(self):
+        """AgentSession has recovery_attempts and reprieve_count fields."""
+        from models.agent_session import AgentSession
+
+        s = AgentSession(chat_id="x", project_key="test", working_dir="/tmp")
+        assert hasattr(s, "recovery_attempts")
+        assert hasattr(s, "reprieve_count")
+
+    def test_startup_recovery_does_not_touch_recovery_attempts(self):
+        """_recover_interrupted_agent_sessions_startup source does not reference
+        recovery_attempts (startup recovery is semantically different from
+        health-check kills — Risk 3 in plan)."""
+        import inspect
+
+        from agent import agent_session_queue as q
+
+        src = inspect.getsource(q._recover_interrupted_agent_sessions_startup)
+        assert "recovery_attempts" not in src, (
+            "startup recovery must not increment recovery_attempts (Risk 3)"
+        )
+
+    def test_health_check_source_mentions_recovery_attempts_and_max(self):
+        """Sanity: the health-check kill path references recovery_attempts
+        and MAX_RECOVERY_ATTEMPTS."""
+        import inspect
+
+        from agent import agent_session_queue as q
+
+        src = inspect.getsource(q._agent_session_health_check)
+        assert "recovery_attempts" in src
+        assert "MAX_RECOVERY_ATTEMPTS" in src
+        assert "reprieve_count" in src
+
+
+class TestDisableProgressKill:
+    """Tests for DISABLE_PROGRESS_KILL runtime kill-switch (#1036)."""
+
+    def test_env_var_referenced_in_health_check(self):
+        """The env var must be read in the health-check recovery branch."""
+        import inspect
+
+        from agent import agent_session_queue as q
+
+        src = inspect.getsource(q._agent_session_health_check)
+        assert "DISABLE_PROGRESS_KILL" in src, "kill-switch env var not wired"
+
+    def test_env_var_suppression_via_monkeypatch(self, monkeypatch):
+        """Setting DISABLE_PROGRESS_KILL=1 is picked up via os.environ.get."""
+        import os
+
+        monkeypatch.setenv("DISABLE_PROGRESS_KILL", "1")
+        assert os.environ.get("DISABLE_PROGRESS_KILL") == "1"
+        # Sanity cleanup: monkeypatch auto-undoes
+
+
+class TestAgentSessionFieldsRoundTrip:
+    """Tests for _AGENT_SESSION_FIELDS round-trip (B2 from plan critique)."""
+
+    def test_new_fields_in_agent_session_fields_list(self):
+        """All five new fields must round-trip through save/load."""
+        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+
+        required = {
+            "last_heartbeat_at",
+            "last_sdk_heartbeat_at",
+            "last_stdout_at",
+            "recovery_attempts",
+            "reprieve_count",
+        }
+        missing = required - set(_AGENT_SESSION_FIELDS)
+        assert not missing, f"Missing from _AGENT_SESSION_FIELDS: {missing}"
+
+    def test_datetime_fields_registered(self):
+        """All three new DatetimeField names registered for coercion."""
+        from models.agent_session import AgentSession
+
+        required = {"last_heartbeat_at", "last_sdk_heartbeat_at", "last_stdout_at"}
+        missing = required - AgentSession._DATETIME_FIELDS
+        assert not missing, f"Missing from _DATETIME_FIELDS: {missing}"

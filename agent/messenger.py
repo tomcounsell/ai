@@ -37,6 +37,17 @@ class BossMessenger:
 
     The agent uses this to send results when work is complete.
     The bridge provides the actual send implementation.
+
+    Liveness-observer callbacks (optional, issue #1036):
+        on_sdk_started:    one-shot, fires when the SDK subprocess is spawned
+                           (pid is provided by the caller once known).
+        on_heartbeat_tick: fires on each `_watchdog` tick (default 60s) while
+                           the SDK subprocess is running.
+        on_stdout_event:   fires on each stdout event the SDK emits.
+
+    All three callbacks default to None; when set, exceptions they raise are
+    caught and logged at WARNING. The messenger imports nothing from `models/`
+    — the queue layer provides implementations that bump ORM fields.
     """
 
     # Callback to actually send the message (provided by bridge)
@@ -48,6 +59,55 @@ class BossMessenger:
 
     # Track sent messages
     messages_sent: list[MessageRecord] = field(default_factory=list)
+
+    # === Liveness callbacks (issue #1036) ===
+    # These are optional and ORM-free; the messenger invokes them blindly.
+    on_sdk_started: Callable[[int], None] | None = None
+    on_heartbeat_tick: Callable[[], None] | None = None
+    on_stdout_event: Callable[[], None] | None = None
+
+    def notify_sdk_started(self, pid: int) -> None:
+        """Invoke on_sdk_started(pid) if provided. Exceptions are logged WARNING."""
+        cb = self.on_sdk_started
+        if cb is None:
+            return
+        try:
+            cb(pid)
+        except Exception as e:
+            logger.warning(
+                "[%s] on_sdk_started callback raised (pid=%s): %s",
+                self.session_id,
+                pid,
+                e,
+            )
+
+    def notify_heartbeat_tick(self) -> None:
+        """Invoke on_heartbeat_tick() if provided. Exceptions are logged WARNING."""
+        cb = self.on_heartbeat_tick
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            logger.warning(
+                "[%s] on_heartbeat_tick callback raised: %s",
+                self.session_id,
+                e,
+            )
+
+    def notify_stdout_event(self) -> None:
+        """Invoke on_stdout_event() if provided. Exceptions are logged WARNING."""
+        cb = self.on_stdout_event
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            logger.warning(
+                "[%s] on_stdout_event callback raised: %s",
+                self.session_id,
+                e,
+            )
 
     async def send(self, message: str, message_type: str = "result") -> bool:
         """
@@ -198,6 +258,11 @@ class BackgroundTask:
         Emits a heartbeat log every 60s while the SDK subprocess is running.
         This provides continuous liveness visibility instead of a single
         check at acknowledgment_timeout. Does not send any message to chat.
+
+        After each heartbeat log, invokes `messenger.notify_heartbeat_tick()`
+        so the queue layer can update `last_sdk_heartbeat_at` for the
+        two-tier no-progress detector (issue #1036). Callback exceptions are
+        caught inside `notify_heartbeat_tick` and do not crash the watchdog.
         """
         heartbeat_interval = 60  # seconds
         elapsed = 0
@@ -213,6 +278,8 @@ class BackgroundTask:
                         elapsed,
                         communicated,
                     )
+                    # Two-tier no-progress detector callback (#1036).
+                    self.messenger.notify_heartbeat_tick()
         except asyncio.CancelledError:
             # Normal cancellation when task completes
             pass
