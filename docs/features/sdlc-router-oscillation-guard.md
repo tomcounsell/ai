@@ -24,9 +24,11 @@ runs against an unchanged PR.
 | `agent/pipeline_state.py::classify_outcome` | Routes verdict writes through `sdlc_verdict.record_verdict()` — ONE writer to `_verdicts`. |
 | `.claude/skills/sdlc/SKILL.md` | Dispatch table rows cite the Python implementation; a parity test fails CI if markdown and Python drift. |
 
-## The Five Guards
+## The Six Guards
 
-Guards run **before** the dispatch table. The first tripped guard wins.
+Guards run **before** the dispatch table. The first tripped guard wins. G1-G5
+are escalation/safety guards; G6 is the terminal-state fast-path and is
+evaluated last.
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
@@ -35,6 +37,20 @@ Guards run **before** the dispatch table. The first tripped guard wins.
 | **G3: PR lock** | Open PR exists for the issue AND proposed dispatch is `/do-plan` or `/do-plan-critique` | Redirect to `/do-pr-review` / `/do-patch` / `/do-merge` based on `stage_states` |
 | **G4: Oscillation (universal)** | `same_stage_dispatch_count >= 3` | `blocked` — escalate with reason `stage oscillation — {skill} dispatched {N} times without state change` |
 | **G5: Unchanged critique artifact** | Previous CRITIQUE verdict exists AND current plan file hash matches recorded hash | Use cached verdict — do not re-dispatch `/do-plan-critique`. **Applies to CRITIQUE only.** REVIEW non-determinism is handled by G4 instead. |
+| **G6: Terminal merge ready** | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `DOCS == "completed"` AND `_verdicts["REVIEW"]` contains `APPROVED` | `/do-merge {pr_number}` — fast-path bypasses re-reviewing an already-approved PR |
+
+### Why G6 is Evaluated Last
+
+G6 is an optimization (fast-path), not a safety guard. Escalation guards (G2:
+cycle cap, G4: oscillation) take priority — a stuck pipeline should escalate to
+the human before merging. G6 only fires when everything is definitively done,
+making the `/do-pr-review` re-dispatch loop impossible in the happy path.
+
+Context: issue #1043 / PR #1044. Before G6, the router would dispatch
+`/do-pr-review` on every `/sdlc` invocation for a self-authored PR because
+`reviewDecision=""` permanently (GitHub rejects self-approvals). G6 bypasses
+the `reviewDecision` GitHub field entirely, reading from the stored
+`_verdicts["REVIEW"]` verdict instead.
 
 ### Why G5 is CRITIQUE-only
 
@@ -98,11 +114,26 @@ Redis) creates subtle bugs where equal-looking snapshots compare unequal.
     "latest_review_verdict": null,
     "revision_applied": false,
     "pr_number": null,
+    "pr_merge_state": null,
+    "ci_all_passing": null,
     "same_stage_dispatch_count": 2,
     "last_dispatched_skill": "/do-plan-critique"
   }
 }
 ```
+
+**New fields added by issue #1043:**
+
+- `pr_merge_state` — live value of `mergeStateStatus` from `gh pr view` (e.g.
+  `"CLEAN"`, `"BLOCKED"`, `"DIRTY"`). `null` when no PR exists or `gh` CLI
+  fails. Used by G6 to verify the PR is actually mergeable.
+- `ci_all_passing` — `True` when all `statusCheckRollup` conclusions are
+  `"SUCCESS"` (empty rollup also returns `True` — a repo with no required
+  checks has no failing checks). `null` on `gh` failure. Used by G6.
+
+Both fields default to `null` when the `gh` CLI fails (network error, unknown
+PR, timeout). G6 will not fire if either field is `null`, safely falling back
+to the normal dispatch table.
 
 Pass `--format legacy` to get the old flat `{"ISSUE": "completed", ...}`
 shape for older callers.
@@ -134,12 +165,15 @@ deferred until optimistic retry proves insufficient in production.
 
 - `tests/unit/test_sdlc_router_decision.py` — pure-function tests for every
   dispatch rule row (1 through 10b).
-- `tests/unit/test_sdlc_router_oscillation.py` — one test per guard (G1-G5),
-  snapshot/counter helpers, guard ordering, and the 12-step #1036 replay
-  (`test_1036_replay_terminates`).
-- `tests/unit/test_sdlc_skill_md_parity.py` — markdown-to-Python parity with
-  positive (table matches) and negative (mutation detection) cases,
-  tolerating escaped pipes in cells.
+- `tests/unit/test_sdlc_router_oscillation.py` — one test per guard (G1-G6),
+  snapshot/counter helpers, guard ordering, the 12-step #1036 replay
+  (`test_1036_replay_terminates`), and the 8-step #1043 PR #264 replay
+  (`test_1043_pr264_8step_terminates`).
+- `tests/unit/test_sdlc_skill_md_parity.py` — markdown-to-Python parity for
+  both dispatch rows and guard rows (G1-G6), with positive (table matches)
+  and negative (mutation detection) cases, tolerating escaped pipes in cells.
+  Includes `parse_guard_rows()`, `test_guard_row_ids_in_python()`, and
+  `test_g6_guard_row_present_in_skill_md()` added by issue #1043.
 - `tests/unit/test_sdlc_verdict.py` — record/get round-trip, hash stability
   across line endings and frontmatter edits, graceful failure on bad inputs.
 - `tests/unit/test_stage_states_helpers.py` — success path, retry-on-conflict,
@@ -158,5 +192,6 @@ deferred until optimistic retry proves insufficient in production.
 - [SDLC Stage Tracking](sdlc-stage-tracking.md) — stored-state-only stage
   completion (no artifact inference).
 - Related issues: #704 (stage_states as source of truth), #729 (anti-skip),
-  #941 (local session tracking), #1005 (PM-level pipeline completion
-  guards), #1036 (the regression this plan fixes).
+  #941 (local session tracking), #1005 (PM-level pipeline completion guards),
+  #1036 (the regression G1-G5 fix), #1043 (G6 terminal-state fast-path and
+  self-authored PR review loop fix).
