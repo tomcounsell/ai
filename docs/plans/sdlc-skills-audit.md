@@ -209,7 +209,7 @@ No agent integration required — skill docs are read by Claude Code sessions di
 - [x] Pattern 5: `do-pr-review/sub-skills/code-review.md` includes a Pre-Verdict Checklist (≥10 items) that must be evaluated before the verdict is written.
 - [x] #1040 and #1041 remain open as independent tracking issues (not subsumed by this plan).
 - [x] `docs/features/sdlc-skills-audit.md` exists and records the five patterns with their fix dispositions.
-- [ ] Tests pass (`/do-test`)
+- [x] Tests pass (`/do-test`) — 667 unit tests pass; 1 pre-existing failure (`test_qa_answer_classified_as_completion`) unrelated to this PR (heuristic classifier with no API key)
 
 ## Team Orchestration
 
