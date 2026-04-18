@@ -75,7 +75,7 @@ Added a **Failure Path Test Strategy** section to the plan template (`.claude/sk
 ### Test Skill (do-test)
 
 Added a **Quality Checks (Post-Test)** section to the test skill (`.claude/skills/do-test/SKILL.md`) with three automated scans:
-- **Exception Swallow Scan** -- grep for bare exception handlers without logging
+- **Exception Swallow Scan** -- grep for bare exception handlers without logging. **Updated in #1042:** this scan was promoted from advisory to a mandatory blocking gate that runs before OUTCOME emission. New `except Exception` blocks without `logger`/`raise`/`# swallow-ok:` fail the TEST stage.
 - **Empty Input Check** -- verify empty input edge cases are tested
 - **Closure Coverage Flag** -- detect untested inner functions/closures
 

@@ -20,7 +20,7 @@ When a plan completes, the Observer routes to CRITIQUE instead of BUILD. The `/d
 
 2. **Structural checks** (Step 2): Automated validation of required sections, task integrity, dependency chains, file path existence, and cross-reference consistency.
 
-3. **War room critics** (Step 3): Six parallel critics (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User) analyze the plan from different perspectives, each returning 0-3 severity-rated findings.
+3. **War room critics** (Step 3): Seven parallel critics (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor) analyze the plan from different perspectives, each returning 0-3 severity-rated findings. The Consistency Auditor (added in #1042) specifically checks for contradictions between sections — spike findings vs. task steps, No-Gos vs. Solution, success criteria vs. Technical Approach.
 
 4. **Aggregation** (Steps 4-5): Findings are deduplicated, sorted by severity, and a verdict is issued.
 
@@ -88,7 +88,7 @@ The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are w
 | `models/agent_session.py` | CRITIQUE in SDLC_STAGES |
 | `agent/build_pipeline.py` | "critique" in STAGES list |
 | `.claude/skills/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check |
-| `.claude/skills/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template |
+| `.claude/skills/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template; seven critic personas including Consistency Auditor (#1042) and serialization-boundary item in Skeptic |
 | `.claude/skills/sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
 | `.claude/skills/do-plan/SKILL.md` | Phase 2.6 Propagation Check |
 | `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Critique Results table with Implementation Note column |
