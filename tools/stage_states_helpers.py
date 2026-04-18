@@ -40,7 +40,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from models.agent_session import AgentSession
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RETRIES = 3
 
 
-def _load_states(session: "AgentSession") -> dict:
+def _load_states(session: AgentSession) -> dict:
     """Load ``stage_states`` from a session as a plain dict.
 
     Returns an empty dict if the field is missing or malformed.
@@ -78,7 +79,7 @@ def _load_states(session: "AgentSession") -> dict:
     return {}
 
 
-def _reload_session(session: "AgentSession"):
+def _reload_session(session: AgentSession):
     """Reload a session from Redis to get the latest stage_states.
 
     Returns the refreshed session (which may be the same object or a new one).
@@ -118,7 +119,7 @@ def _record_exhaustion_metric(session_id: str, update_fn_name: str) -> None:
 
 
 def update_stage_states(
-    session: "AgentSession",
+    session: AgentSession,
     update_fn: Callable[[dict], dict],
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> bool:

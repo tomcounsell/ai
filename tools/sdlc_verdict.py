@@ -56,7 +56,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -215,7 +215,7 @@ def record_verdict(
     if session is None:
         return {}
 
-    recorded_at = (now or datetime.now(timezone.utc)).isoformat()
+    recorded_at = (now or datetime.now(UTC)).isoformat()
     artifact_hash = _compute_artifact_hash(stage, issue_number)
 
     record: dict = {
