@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from agent.sdlc_router import DISPATCH_RULES
+from agent.sdlc_router import DISPATCH_RULES, GUARDS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SKILL_MD = REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md"
@@ -228,3 +228,93 @@ def test_escaped_pipe_in_cell_is_preserved():
     """Escaped pipe ``\\|`` must not split a cell."""
     cells = _split_cells(r"| row | cell with \| escaped pipe | skill |")
     assert cells == ["row", "cell with | escaped pipe", "skill"]
+
+
+# ---------------------------------------------------------------------------
+# Guard table parity (Step 3.5 in SKILL.md)
+# ---------------------------------------------------------------------------
+
+
+_GUARD_ROW_RE = re.compile(r"^G\d+")
+
+
+def parse_guard_rows(md: str) -> list[dict]:
+    """Parse the Step 3.5 guard table from SKILL.md.
+
+    Finds the "## Step 3.5: Legal Dispatch Guards" heading and reads the
+    consecutive markdown table rows. Returns a list of dicts with keys
+    ``guard_id``, ``condition``, and ``forced_dispatch``. Only rows whose
+    first cell matches the pattern ``G\\d+`` (e.g. "G1", "G6") are returned.
+    """
+    lines = md.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if "Step 3.5" in line and "Guard" in line:
+            start = i
+            break
+    if start is None:
+        raise AssertionError("Could not locate 'Step 3.5' guards section in SKILL.md")
+
+    rows: list[dict] = []
+    in_table = False
+    for line in lines[start:]:
+        if not line.startswith("|"):
+            if in_table:
+                break
+            continue
+        in_table = True
+        cells = _split_cells(line)
+        if len(cells) < 3:
+            continue
+        if _is_separator_row(cells):
+            continue
+        guard_id_cell = cells[0]
+        # Extract guard ID like "G1", "G6" from "G1: Critique loop"
+        match = _GUARD_ROW_RE.match(guard_id_cell.strip())
+        if not match:
+            continue  # header row or non-guard row
+        guard_id = match.group(0)
+        rows.append(
+            {
+                "guard_id": guard_id,
+                "condition": cells[1].replace("<br>", " "),
+                "forced_dispatch": cells[2],
+            }
+        )
+    return rows
+
+
+def test_guard_row_ids_in_python():
+    """Every guard_id found by parse_guard_rows has a matching callable in GUARDS.
+
+    For each row with guard_id="GN", there must be a function named ``guard_gN_*``
+    in the GUARDS list exported by agent/sdlc_router.py.
+    """
+    md = SKILL_MD.read_text(encoding="utf-8")
+    guard_rows = parse_guard_rows(md)
+    assert guard_rows, "No guard rows found — parse_guard_rows returned empty list"
+
+    # Build a set of guard function names from the GUARDS list
+    guard_names = {g.__name__.lower() for g in GUARDS}
+
+    missing = []
+    for row in guard_rows:
+        guard_id = row["guard_id"].lower()  # e.g. "g6"
+        # Match functions like guard_g6_terminal_merge_ready
+        if not any(name.startswith(f"guard_{guard_id}_") for name in guard_names):
+            missing.append(row["guard_id"])
+
+    assert not missing, (
+        f"Guard IDs in SKILL.md without matching callables in GUARDS: {missing}\n"
+        f"Available GUARDS: {sorted(guard_names)}"
+    )
+
+
+def test_g6_guard_row_present_in_skill_md():
+    """SKILL.md Step 3.5 guard table must contain a G6 row."""
+    md = SKILL_MD.read_text(encoding="utf-8")
+    guard_rows = parse_guard_rows(md)
+    guard_ids = [r["guard_id"] for r in guard_rows]
+    assert "G6" in guard_ids, (
+        f"G6 guard row not found in SKILL.md guard table. Found guard IDs: {guard_ids}"
+    )
