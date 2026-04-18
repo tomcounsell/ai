@@ -278,25 +278,25 @@ def test_g6_does_not_fire_when_docs_not_done():
 
 ### Exception Handling Coverage
 
-- [ ] `tools/sdlc_stage_query.py`: The `gh pr view` call for `pr_merge_state`/`ci_all_passing` is wrapped in a try/except. On any failure (network error, unknown PR, jq parse error), both fields default to `None` and G6 does not fire. Test: mock a `gh` CLI failure and verify `_meta["pr_merge_state"]` is `None` and the dispatch falls through to the normal table.
-- [ ] `agent/sdlc_router.py` `_guard_g6`: All guard functions already catch exceptions internally (see existing guards in PR #1044). G6 follows the same pattern.
+- [x] `tools/sdlc_stage_query.py`: The `gh pr view` call for `pr_merge_state`/`ci_all_passing` is wrapped in a try/except. On any failure (network error, unknown PR, jq parse error), both fields default to `None` and G6 does not fire. Test: mock a `gh` CLI failure and verify `_meta["pr_merge_state"]` is `None` and the dispatch falls through to the normal table.
+- [x] `agent/sdlc_router.py` `_guard_g6`: All guard functions already catch exceptions internally (see existing guards in PR #1044). G6 follows the same pattern.
 
 ### Empty/Invalid Input Handling
 
-- [ ] `pr_merge_state=None`: G6 returns `None` (does not fire). Test: session with no `pr_number` or failed `gh` lookup.
-- [ ] `ci_all_passing=False`: G6 does not fire even if verdict is APPROVED. Test: seeded state with CI failure.
-- [ ] `_verdicts["REVIEW"]` missing or `{}`: G6 returns `None`. Test: session with no recorded verdict.
-- [ ] `pr_merge_state="BLOCKED"`: G6 returns `None`. Test: branch protection blocks merge.
+- [x] `pr_merge_state=None`: G6 returns `None` (does not fire). Test: session with no `pr_number` or failed `gh` lookup.
+- [x] `ci_all_passing=False`: G6 does not fire even if verdict is APPROVED. Test: seeded state with CI failure.
+- [x] `_verdicts["REVIEW"]` missing or `{}`: G6 returns `None`. Test: session with no recorded verdict.
+- [x] `pr_merge_state="BLOCKED"`: G6 returns `None`. Test: branch protection blocks merge.
 
 ### Error State Rendering
 
-- [ ] G6 fires but `/do-merge` subsequently fails its own gate check: this is `/do-merge`'s responsibility, not the router's. G6 only dispatches; it does not guarantee the merge will succeed.
+- [x] G6 fires but `/do-merge` subsequently fails its own gate check: this is `/do-merge`'s responsibility, not the router's. G6 only dispatches; it does not guarantee the merge will succeed.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_router_oscillation.py` — UPDATE: add `test_1043_pr264_8step_terminates` (positive G6 case with explicit `"DOCS": "completed"` seeding) and `test_g6_does_not_fire_when_docs_not_done` (negative case), plus 4 more negative cases: no pr_number, pr not CLEAN, CI not passing, no APPROVED verdict. All assertions use `Dispatch` and `Blocked` types — no `GuardTripped`.
-- [ ] `tests/unit/test_sdlc_stage_query.py` — UPDATE: add cases for new `_meta` fields `pr_merge_state` and `ci_all_passing` (success path, gh failure path, empty statusCheckRollup → True).
-- [ ] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE (two-part): (A) add `parse_guard_rows()` function that parses the guard table from SKILL.md; (B) add `test_guard_row_ids_in_python()` and `test_g6_guard_row_present_in_skill_md()` using the new parser. Also add `GUARDS` list export to `agent/sdlc_router.py` for programmatic enumeration.
+- [x] `tests/unit/test_sdlc_router_oscillation.py` — UPDATE: add `test_1043_pr264_8step_terminates` (positive G6 case with explicit `"DOCS": "completed"` seeding) and `test_g6_does_not_fire_when_docs_not_done` (negative case), plus 4 more negative cases: no pr_number, pr not CLEAN, CI not passing, no APPROVED verdict. All assertions use `Dispatch` and `Blocked` types — no `GuardTripped`.
+- [x] `tests/unit/test_sdlc_stage_query.py` — UPDATE: add cases for new `_meta` fields `pr_merge_state` and `ci_all_passing` (success path, gh failure path, empty statusCheckRollup → True).
+- [x] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE (two-part): (A) add `parse_guard_rows()` function that parses the guard table from SKILL.md; (B) add `test_guard_row_ids_in_python()` and `test_g6_guard_row_present_in_skill_md()` using the new parser. Also add `GUARDS` list export to `agent/sdlc_router.py` for programmatic enumeration.
 
 No existing tests are broken by this change — all additions are additive.
 
@@ -342,29 +342,29 @@ No agent integration required — this is a skills-internal change. The new fiel
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/sdlc-router-oscillation-guard.md` (created by PR #1044) to include G6 — add a row to the guards table and describe the `pr_merge_state` + `ci_all_passing` fields in the enriched query schema section.
-- [ ] No new feature doc needed — G6 is part of the same oscillation guard feature.
+- [x] Update `docs/features/sdlc-router-oscillation-guard.md` (created by PR #1044) to include G6 — add a row to the guards table and describe the `pr_merge_state` + `ci_all_passing` fields in the enriched query schema section.
+- [x] No new feature doc needed — G6 is part of the same oscillation guard feature.
 
 ### Inline Documentation
-- [ ] Docstring on `_guard_g6_terminal_merge_ready()` explaining the fast-path rationale and the guard ordering (evaluated last).
-- [ ] Comment in SKILL.md Step 2e explaining the `reviewDecision=""` ambiguity for self-authored PRs.
+- [x] Docstring on `_guard_g6_terminal_merge_ready()` explaining the fast-path rationale and the guard ordering (evaluated last).
+- [x] Comment in SKILL.md Step 2e explaining the `reviewDecision=""` ambiguity for self-authored PRs.
 
 ## Success Criteria
 
-- [ ] G6 fires correctly: given `pr_merge_state=CLEAN`, `ci_all_passing=True`, `stage_states["DOCS"]="completed"`, `_verdicts["REVIEW"]="APPROVED"`, `sdlc_router.decide_next_dispatch()` returns a `Dispatch` (not `GuardTripped` — that type does not exist) with `skill=SKILL_DO_MERGE` and `row_id="G6"`. Covered by `test_g6_terminal_merge_ready`.
-- [ ] G6 does NOT fire when `pr_merge_state != "CLEAN"`. Covered by `test_g6_terminal_merge_ready` negative cases.
-- [ ] G6 does NOT fire when `ci_all_passing=False`. Covered by negative test.
-- [ ] G6 does NOT fire when `stage_states["DOCS"]` is not `"completed"`. Covered by `test_g6_does_not_fire_when_docs_not_done`.
-- [ ] G6 does NOT fire when `_verdicts["REVIEW"]` is missing or contains `"CHANGES REQUESTED"`. Covered by negative tests.
-- [ ] `sdlc_stage_query` enriched output includes `pr_merge_state` and `ci_all_passing`. Covered by `test_sdlc_stage_query.py` updates.
-- [ ] `sdlc_stage_query` returns `pr_merge_state=None` on `gh` failure — G6 does not fire. Covered by failure test.
-- [ ] PR #264 8-step incident replay: the router dispatches `/do-merge` at step 3 (all stages through DOCS seeded as completed, APPROVED verdict, CLEAN state). Covered by `test_1043_pr264_8step_terminates`.
-- [ ] SKILL.md Step 2e comment updated to document `reviewDecision=""` ambiguity for self-authored PRs.
-- [ ] SKILL.md Step 3.5 guard table includes G6 row with DOCS condition.
-- [ ] `test_sdlc_skill_md_parity.py` has `parse_guard_rows()`, `test_guard_row_ids_in_python()`, and `test_g6_guard_row_present_in_skill_md()`. `GUARDS` list exported from `agent/sdlc_router.py`.
-- [ ] Unit tests pass (`pytest tests/unit/test_sdlc_router_oscillation.py tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_skill_md_parity.py -x -q`).
-- [ ] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`).
-- [ ] `docs/features/sdlc-router-oscillation-guard.md` updated to include G6.
+- [x] G6 fires correctly: given `pr_merge_state=CLEAN`, `ci_all_passing=True`, `stage_states["DOCS"]="completed"`, `_verdicts["REVIEW"]="APPROVED"`, `sdlc_router.decide_next_dispatch()` returns a `Dispatch` (not `GuardTripped` — that type does not exist) with `skill=SKILL_DO_MERGE` and `row_id="G6"`. Covered by `test_g6_terminal_merge_ready`.
+- [x] G6 does NOT fire when `pr_merge_state != "CLEAN"`. Covered by `test_g6_terminal_merge_ready` negative cases.
+- [x] G6 does NOT fire when `ci_all_passing=False`. Covered by negative test.
+- [x] G6 does NOT fire when `stage_states["DOCS"]` is not `"completed"`. Covered by `test_g6_does_not_fire_when_docs_not_done`.
+- [x] G6 does NOT fire when `_verdicts["REVIEW"]` is missing or contains `"CHANGES REQUESTED"`. Covered by negative tests.
+- [x] `sdlc_stage_query` enriched output includes `pr_merge_state` and `ci_all_passing`. Covered by `test_sdlc_stage_query.py` updates.
+- [x] `sdlc_stage_query` returns `pr_merge_state=None` on `gh` failure — G6 does not fire. Covered by failure test.
+- [x] PR #264 8-step incident replay: the router dispatches `/do-merge` at step 3 (all stages through DOCS seeded as completed, APPROVED verdict, CLEAN state). Covered by `test_1043_pr264_8step_terminates`.
+- [x] SKILL.md Step 2e comment updated to document `reviewDecision=""` ambiguity for self-authored PRs.
+- [x] SKILL.md Step 3.5 guard table includes G6 row with DOCS condition.
+- [x] `test_sdlc_skill_md_parity.py` has `parse_guard_rows()`, `test_guard_row_ids_in_python()`, and `test_g6_guard_row_present_in_skill_md()`. `GUARDS` list exported from `agent/sdlc_router.py`.
+- [x] Unit tests pass (`pytest tests/unit/test_sdlc_router_oscillation.py tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_skill_md_parity.py -x -q`).
+- [x] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`).
+- [x] `docs/features/sdlc-router-oscillation-guard.md` updated to include G6.
 
 ## Team Orchestration
 
