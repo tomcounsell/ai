@@ -27,9 +27,16 @@ fi
 
 set -a
 # shellcheck disable=SC1091
-# iCloud-synced .env can return EINTR mid-read; don't abort the script — defaults below cover it.
+# iCloud-synced .env causes bash-level EINTR that aborts the shell before || can catch it.
+# Fix: cp to a temp file first (cp handles EINTR at the C level), then source the local copy.
 if [ -f "$PROJECT_DIR/.env" ]; then
-    source "$PROJECT_DIR/.env" || echo "[update] WARN: .env source interrupted (EINTR from iCloud sync?), using defaults"
+    _env_tmp=$(mktemp /tmp/valor-env-XXXXXX)
+    if cp "$PROJECT_DIR/.env" "$_env_tmp" 2>/dev/null; then
+        source "$_env_tmp" 2>/dev/null || echo "[update] WARN: .env source failed, using defaults"
+    else
+        echo "[update] WARN: .env copy interrupted (iCloud sync?), using defaults"
+    fi
+    rm -f "$_env_tmp"
 fi
 set +a
 : "${SERVICE_LABEL_PREFIX:=com.valor}"
