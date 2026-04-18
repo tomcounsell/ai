@@ -222,6 +222,67 @@ fi
 If this check prints GATES_FAILED, report it as a blocker and do NOT proceed
 with the merge. Fix: `uv lock && git add uv.lock && git commit -m "Sync uv.lock"`.
 
+
+### Full Suite Gate
+
+After the Lockfile Sync Check, run a full test suite gate to ensure the PR branch does not introduce new regressions.
+
+```bash
+# Run the full suite fail-fast on the PR branch (already checked out)
+pytest tests/ -q --tb=no 2>&1 | tee /tmp/pytest_output.txt
+PYTEST_EXIT=$?
+
+# Parse failure test IDs from output
+FAILING_TESTS=$(grep " FAILED" /tmp/pytest_output.txt | awk '{print $1}' | sort)
+FAILURE_COUNT=$(echo "$FAILING_TESTS" | grep -c "." 2>/dev/null || echo 0)
+
+# Load baseline (written by a previous clean merge)
+BASELINE_FILE="data/main_test_baseline.json"
+if [ -f "$BASELINE_FILE" ]; then
+    BASELINE_TESTS=$(python3 -c "import json; d=json.load(open('$BASELINE_FILE')); print('\n'.join(d.get('failing_tests', [])))" | sort)
+    NEW_REGRESSIONS=$(comm -23 <(echo "$FAILING_TESTS") <(echo "$BASELINE_TESTS") | grep -v '^$' || true)
+    REGRESSION_COUNT=$(echo "$NEW_REGRESSIONS" | grep -c "." 2>/dev/null || echo 0)
+else
+    # No baseline — bootstrap: all failures treated as pre-existing, write new baseline
+    NEW_REGRESSIONS=""
+    REGRESSION_COUNT=0
+    if [ $PYTEST_EXIT -ne 0 ]; then
+        echo "FULL_SUITE: BOOTSTRAP — no baseline exists; $FAILURE_COUNT failures logged as pre-existing baseline"
+        mkdir -p data
+        python3 -c "
+import json, sys
+lines = open('/tmp/pytest_output.txt').readlines()
+failures = [l.strip().split()[0] for l in lines if ' FAILED' in l]
+json.dump({'failing_tests': sorted(failures)}, open('data/main_test_baseline.json', 'w'))
+print(f'Baseline written with {len(failures)} pre-existing failures.')
+"
+    fi
+fi
+
+if [ $PYTEST_EXIT -eq 0 ]; then
+    echo "FULL_SUITE: PASS"
+    mkdir -p data
+    echo '{"failing_tests": []}' > data/main_test_baseline.json
+elif [ "${REGRESSION_COUNT:-0}" -eq 0 ]; then
+    PREEXISTING_COUNT=$(echo "$FAILING_TESTS" | grep -c "." 2>/dev/null || echo 0)
+    echo "FULL_SUITE: PASS (pre-existing $PREEXISTING_COUNT failure(s) noted — in baseline, non-blocking)"
+    echo "Pre-existing failures (first 20):"
+    echo "$FAILING_TESTS" | head -20
+else
+    FIRST_REGRESSION=$(echo "$NEW_REGRESSIONS" | head -1)
+    echo "FULL_SUITE: FAIL — ${REGRESSION_COUNT} new regression(s) not in baseline:"
+    echo "$NEW_REGRESSIONS" | head -20
+    echo "First regression: $FIRST_REGRESSION"
+    echo "GATES_FAILED"
+fi
+```
+
+**Red-main recovery path:** If `data/main_test_baseline.json` does not exist and tests fail, write the current failure list as the new baseline (bootstrap mode). This allows the first merge after a red-main period to proceed, establishing the baseline for future comparisons. Log all pre-existing failures in the PR comment.
+
+**After a clean merge:** Update `data/main_test_baseline.json` to `{"failing_tests": []}` so future PRs are held to a fully green standard.
+
+**Note:** The full suite collects all failures before comparing against the baseline — this is required for the `comm -23` regression check to work correctly. Using `-x` (fail-fast) would stop after the first pre-existing failure and hide new regressions.
+
 Also verify the PR is mergeable:
 
 ```bash

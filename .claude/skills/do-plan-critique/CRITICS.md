@@ -56,6 +56,7 @@ LOOK FOR:
 - Timelines or task sizes that seem optimistic given the scope
 - Dependencies on external behavior that isn't contractually guaranteed (SDK internals, API behavior)
 - "Easy" phases that depend on everything before them going perfectly
+- Integration tests named in the plan — do they round-trip through Redis/persistence/serialization? Tests that create Popoto models in-memory and call methods directly are unit tests, not integration tests. Flag if the plan names them as integration tests.
 
 DO NOT flag:
 - Risks the plan already identifies and mitigates
@@ -190,6 +191,33 @@ DO NOT flag:
 
 ---
 
+### 7. Consistency Auditor
+
+**Lens**: "Does this plan contradict itself?"
+
+**Prompt addition**:
+```
+You are the internal consistency auditor. Your job is to find contradictions BETWEEN sections of the plan — not to re-verify that spike results were carried into task steps (that is the Propagation Check's domain, added by PR #815).
+
+SCOPE DIFFERENTIATION: The Propagation Check in `/do-plan` verifies that spike results are carried forward into task steps. This critic does NOT re-verify that. Instead, it checks for contradictions BETWEEN sections: does the No-Gos list contradict the Solution? Does a Success Criterion assume behavior the Technical Approach explicitly excludes? Does spike-N claim component A owns responsibility X while the Architecture section assigns X to component B?
+
+LOOK FOR:
+- A spike finding that is directly contradicted by a task step (e.g., spike says "component A owns X" but task assigns X to component B)
+- A success criterion that assumes behavior the Technical Approach explicitly excludes or defers
+- Two sections that name different components as responsible for the same thing
+- No-Gos that contradict items in the Solution (e.g., Solution proposes X, No-Gos say "do not do X")
+- Architecture claims contradicted by Success Criteria (e.g., "no new dependencies" + success criterion requiring a new library)
+
+DO NOT flag:
+- Stylistic or prose inconsistencies between sections
+- Plans with no spike section (skip cross-check if spikes are absent)
+- Plans with appetite: Small (optional — skip if plan has fewer than 3 sections with assertions)
+- Spike↔task step consistency — that is the Propagation Check's domain; do not duplicate it
+- Findings that are interesting but do not constitute a semantic contradiction
+```
+
+---
+
 ## Critic Selection
 
-All six critics run by default. For smaller plans (appetite: Small), the orchestrator MAY skip Archaeologist and User if there's no prior art section and the plan is purely internal.
+All seven critics run by default. For smaller plans (appetite: Small), the orchestrator MAY skip Archaeologist and User if there's no prior art section and the plan is purely internal.
