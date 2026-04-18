@@ -169,18 +169,22 @@ class TestFallbackExistsInSource:
     """Structural test: verify the fallback finalization code is present in the source."""
 
     def test_fallback_finalization_present_in_agent_session_queue(self):
-        """The else branch with fallback finalization must exist in the source."""
+        """The else branch with fallback finalization must exist in the source.
+
+        After the session_executor.py extraction, the fallback code lives in
+        agent/session_executor.py. We check that module's source instead.
+        """
         import inspect
 
-        import agent.agent_session_queue as mod
+        import agent.session_executor as mod
 
         source = inspect.getsource(mod)
         assert "Fallback finalization" in source, (
-            "Expected 'Fallback finalization' comment in agent_session_queue.py — "
+            "Expected 'Fallback finalization' comment in agent/session_executor.py — "
             "the else branch from issue #917 is missing"
         )
         assert "agent_session was None" in source, (
-            "Expected 'agent_session was None' log message in agent_session_queue.py"
+            "Expected 'agent_session was None' log message in agent/session_executor.py"
         )
 
 
@@ -392,24 +396,33 @@ class TestStdoutStaleTier1:
         assert _has_progress(entry) is False
 
     def test_last_progress_reason_set_on_stdout_stale(self):
-        """_last_progress_reason is 'stdout_stale' when stdout-stale flag fires."""
-        import agent.agent_session_queue as q
+        """_last_progress_reason is 'stdout_stale' when stdout-stale flag fires.
+
+        _last_progress_reason lives in agent.session_health after extraction.
+        """
+        import agent.session_health as q
 
         entry = self._make_entry(last_stdout_at=_ago(700))
         q._has_progress(entry)
         assert q._last_progress_reason == "stdout_stale"
 
     def test_last_progress_reason_set_on_first_stdout_deadline(self):
-        """_last_progress_reason is 'first_stdout_deadline' when deadline flag fires."""
-        import agent.agent_session_queue as q
+        """_last_progress_reason is 'first_stdout_deadline' when deadline flag fires.
+
+        _last_progress_reason lives in agent.session_health after extraction.
+        """
+        import agent.session_health as q
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
         q._has_progress(entry)
         assert q._last_progress_reason == "first_stdout_deadline"
 
     def test_last_progress_reason_reset_on_true_return(self):
-        """_last_progress_reason is reset to '' when _has_progress() returns True."""
-        import agent.agent_session_queue as q
+        """_last_progress_reason is reset to '' when _has_progress() returns True.
+
+        _last_progress_reason lives in agent.session_health after extraction.
+        """
+        import agent.session_health as q
 
         q._last_progress_reason = "leftover"
         entry = self._make_entry(last_stdout_at=_ago(60))

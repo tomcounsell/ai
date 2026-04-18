@@ -218,7 +218,8 @@ class TestCompleteAgentSessionRequeryNoStatusFilter:
         """
         session = _make_session(status="completed")
 
-        with patch("agent.agent_session_queue.AgentSession") as mock_agent_session_cls:
+        # _complete_agent_session now lives in agent.session_completion — patch there.
+        with patch("agent.session_completion.AgentSession") as mock_agent_session_cls:
             mock_query = MagicMock()
             mock_agent_session_cls.query = mock_query
             mock_filter = MagicMock()
@@ -250,7 +251,8 @@ class TestCompleteAgentSessionRequeryNoStatusFilter:
         fresh_session = _make_session(status="completed")
         fresh_session.session_id = stale_session.session_id
 
-        with patch("agent.agent_session_queue.AgentSession") as mock_agent_session_cls:
+        # _complete_agent_session now lives in agent.session_completion — patch there.
+        with patch("agent.session_completion.AgentSession") as mock_agent_session_cls:
             mock_query = MagicMock()
             mock_agent_session_cls.query = mock_query
             mock_filter = MagicMock()
@@ -399,31 +401,30 @@ class TestHealthCheckDeliveryGuard:
 
         mock_finalize = MagicMock()
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.session_health.AgentSession") as mock_cls,
             patch(
-                "agent.agent_session_queue._active_workers",
+                "agent.session_health._active_workers",
                 {"chat-123": MagicMock(done=MagicMock(return_value=True))},
             ),
         ):
             mock_cls.query.filter.return_value = [delivered_session]
-            # The health check does a local import of finalize_session
-            with patch("agent.agent_session_queue.finalize_session", mock_finalize, create=True):
-                # Patch at the import target inside the function
-                import models.session_lifecycle as lifecycle_mod
+            # The health check does a local import of finalize_session from models
+            import models.session_lifecycle as lifecycle_mod
 
-                original_finalize = lifecycle_mod.finalize_session
-                original_transition = lifecycle_mod.transition_status
-                lifecycle_mod.finalize_session = mock_finalize
-                mock_transition = MagicMock()
-                lifecycle_mod.transition_status = mock_transition
-                try:
-                    from agent.agent_session_queue import _agent_session_health_check
+            original_finalize = lifecycle_mod.finalize_session
+            original_transition = lifecycle_mod.transition_status
+            lifecycle_mod.finalize_session = mock_finalize
+            mock_transition = MagicMock()
+            lifecycle_mod.transition_status = mock_transition
+            try:
+                from agent.agent_session_queue import _agent_session_health_check
 
-                    await _agent_session_health_check()
-                finally:
-                    lifecycle_mod.finalize_session = original_finalize
-                    lifecycle_mod.transition_status = original_transition
+                await _agent_session_health_check()
+            finally:
+                lifecycle_mod.finalize_session = original_finalize
+                lifecycle_mod.transition_status = original_transition
 
             # Should finalize as completed, NOT transition to pending
             mock_finalize.assert_called_once()
@@ -448,13 +449,13 @@ class TestHealthCheckDeliveryGuard:
         mock_transition = MagicMock()
         mock_finalize = MagicMock()
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.session_health.AgentSession") as mock_cls,
             patch(
-                "agent.agent_session_queue._active_workers",
+                "agent.session_health._active_workers",
                 {"chat-456": MagicMock(done=MagicMock(return_value=True))},
             ),
-            patch("agent.agent_session_queue._ensure_worker"),
         ):
             mock_cls.query.filter.return_value = [undelivered_session]
             import models.session_lifecycle as lifecycle_mod
@@ -674,10 +675,10 @@ class TestHealthCheckNoProgressRecovery:
         mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
         live_worker = MagicMock(done=MagicMock(return_value=False))
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
-            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
-            patch("agent.agent_session_queue._ensure_worker"),
+            patch("agent.session_health.AgentSession") as mock_cls,
+            patch("agent.session_health._active_workers", {"valor": live_worker}),
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
@@ -702,9 +703,10 @@ class TestHealthCheckNoProgressRecovery:
         mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
         live_worker = MagicMock(done=MagicMock(return_value=False))
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
-            patch("agent.agent_session_queue._active_workers", {"local-valor": live_worker}),
+            patch("agent.session_health.AgentSession") as mock_cls,
+            patch("agent.session_health._active_workers", {"local-valor": live_worker}),
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
@@ -744,10 +746,10 @@ class TestHealthCheckNoProgressRecovery:
         mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
         live_worker = MagicMock(done=MagicMock(return_value=False))
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
-            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
-            patch("agent.agent_session_queue._ensure_worker"),
+            patch("agent.session_health.AgentSession") as mock_cls,
+            patch("agent.session_health._active_workers", {"valor": live_worker}),
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
@@ -771,10 +773,10 @@ class TestHealthCheckNoProgressRecovery:
         mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
         live_worker = MagicMock(done=MagicMock(return_value=False))
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
-            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
-            patch("agent.agent_session_queue._ensure_worker"),
+            patch("agent.session_health.AgentSession") as mock_cls,
+            patch("agent.session_health._active_workers", {"valor": live_worker}),
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
@@ -798,10 +800,10 @@ class TestHealthCheckNoProgressRecovery:
         mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
         live_worker = MagicMock(done=MagicMock(return_value=False))
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
-            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
-            patch("agent.agent_session_queue._ensure_worker"),
+            patch("agent.session_health.AgentSession") as mock_cls,
+            patch("agent.session_health._active_workers", {"valor": live_worker}),
             lifecycle_ctx,
         ):
             mock_cls.query.filter.return_value = [session]
@@ -893,10 +895,10 @@ class TestHealthCheckNoProgressRecovery:
 
         live_worker = MagicMock(done=MagicMock(return_value=False))
 
+        # _agent_session_health_check now lives in agent.session_health — patch there.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
-            patch("agent.agent_session_queue._active_workers", {"valor": live_worker}),
-            patch("agent.agent_session_queue._ensure_worker"),
+            patch("agent.session_health.AgentSession") as mock_cls,
+            patch("agent.session_health._active_workers", {"valor": live_worker}),
             _ctx(),
         ):
             mock_cls.query.filter.return_value = [session]
