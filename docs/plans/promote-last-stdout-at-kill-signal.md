@@ -173,9 +173,9 @@ This is an internal health-check change with no user-visible output. The Redis c
 
 ## Test Impact
 
-- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestDualHeartbeatOrSemantics` — UPDATE: add test cases for `last_stdout_at` stale with fresh heartbeats (tier-1 should flag), and `last_stdout_at is None` with old `started_at` (FIRST_STDOUT_DEADLINE case)
-- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestTier2ReprieveGates::test_no_reprieve_on_stale_stdout` — UPDATE: the assertion `_tier2_reprieve_signal(handle, entry)` where `last_stdout_at=_ago(200)` returns `None` is based on `STDOUT_FRESHNESS_WINDOW=90`. After raising to 600, `_ago(200)` returns `"stdout"` (fresh within 600s). Update test to use `_ago(700)` for stale case.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py::TestTier2ReprieveGates::test_reprieve_on_recent_stdout` — UPDATE: still valid after constant change (`_ago(30)` remains fresh), but verify.
+- [x] `tests/unit/test_health_check_recovery_finalization.py::TestDualHeartbeatOrSemantics` — UPDATE: add test cases for `last_stdout_at` stale with fresh heartbeats (tier-1 should flag), and `last_stdout_at is None` with old `started_at` (FIRST_STDOUT_DEADLINE case)
+- [x] `tests/unit/test_health_check_recovery_finalization.py::TestTier2ReprieveGates::test_no_reprieve_on_stale_stdout` — UPDATE: the assertion `_tier2_reprieve_signal(handle, entry)` where `last_stdout_at=_ago(200)` returns `None` is based on `STDOUT_FRESHNESS_WINDOW=90`. After raising to 600, `_ago(200)` returns `"stdout"` (fresh within 600s). Update test to use `_ago(700)` for stale case.
+- [x] `tests/unit/test_health_check_recovery_finalization.py::TestTier2ReprieveGates::test_reprieve_on_recent_stdout` — UPDATE: still valid after constant change (`_ago(30)` remains fresh), but verify.
 
 ## Rabbit Holes
 
@@ -226,24 +226,24 @@ No agent integration required — this is an internal worker health-check change
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-self-healing.md` — "Two-tier no-progress detector" section: add description of the stdout-stale tier-1 signal, document `STDOUT_FRESHNESS_WINDOW` change from 90s → 600s, document `FIRST_STDOUT_DEADLINE` constant (default 300s, env-tunable via `FIRST_STDOUT_DEADLINE_SECS`), and explain the alive-but-silent failure mode this addresses.
-- [ ] Update `docs/features/bridge-self-healing.md` — add `session-health:tier1_flagged_stdout_stale:{project_key}` to the Redis counter reference table so operators know how to distinguish heartbeat-stale vs. stdout-stale kills in dashboards.
-- [ ] Update inline docstring for `_has_progress()` in `agent/agent_session_queue.py` to document the new tier-1 stdout-stale branch and `FIRST_STDOUT_DEADLINE` fallback behavior.
+- [x] Update `docs/features/bridge-self-healing.md` — "Two-tier no-progress detector" section: add description of the stdout-stale tier-1 signal, document `STDOUT_FRESHNESS_WINDOW` change from 90s → 600s, document `FIRST_STDOUT_DEADLINE` constant (default 300s, env-tunable via `FIRST_STDOUT_DEADLINE_SECS`), and explain the alive-but-silent failure mode this addresses.
+- [x] Update `docs/features/bridge-self-healing.md` — add `session-health:tier1_flagged_stdout_stale:{project_key}` to the Redis counter reference table so operators know how to distinguish heartbeat-stale vs. stdout-stale kills in dashboards.
+- [x] Update inline docstring for `_has_progress()` in `agent/agent_session_queue.py` to document the new tier-1 stdout-stale branch and `FIRST_STDOUT_DEADLINE` fallback behavior.
 
 ## Success Criteria
 
-- [ ] A session whose `last_stdout_at` is stale for `STDOUT_FRESHNESS_WINDOW` (600s) is flagged by tier-1 even when both heartbeats are fresh.
-- [ ] A session with `last_stdout_at is None` and young `started_at` (< `FIRST_STDOUT_DEADLINE`) is NOT flagged — heartbeat-only semantics preserved (warmup tolerance, #1036 case).
-- [ ] A session with `last_stdout_at is None` and old `started_at` (> `FIRST_STDOUT_DEADLINE`) IS flagged by tier-1.
-- [ ] `session-health:tier1_flagged_stdout_stale:{project_key}` Redis counter increments on stdout-triggered tier-1 flags.
-- [ ] `DISABLE_PROGRESS_KILL=1` continues to suppress kills while emitting the new metric.
-- [ ] After two silent-hang recoveries, session transitions to terminal `failed` (existing PR #1039 path, no code change needed).
-- [ ] Unit test: fresh heartbeats + stale `last_stdout_at` (> 600s) → `_has_progress()` returns `False`.
-- [ ] Unit test: fresh heartbeats + fresh `last_stdout_at` (< 600s) → `_has_progress()` returns `True`.
-- [ ] Unit test: fresh heartbeats + `last_stdout_at is None` + young `started_at` → `_has_progress()` returns `True`.
-- [ ] Unit test: fresh heartbeats + `last_stdout_at is None` + old `started_at` → `_has_progress()` returns `False`.
-- [ ] Existing tier-2 test `test_no_reprieve_on_stale_stdout` updated for new 600s threshold — passes.
-- [ ] Tests pass (`pytest tests/unit/test_health_check_recovery_finalization.py -v`)
+- [x] A session whose `last_stdout_at` is stale for `STDOUT_FRESHNESS_WINDOW` (600s) is flagged by tier-1 even when both heartbeats are fresh.
+- [x] A session with `last_stdout_at is None` and young `started_at` (< `FIRST_STDOUT_DEADLINE`) is NOT flagged — heartbeat-only semantics preserved (warmup tolerance, #1036 case).
+- [x] A session with `last_stdout_at is None` and old `started_at` (> `FIRST_STDOUT_DEADLINE`) IS flagged by tier-1.
+- [x] `session-health:tier1_flagged_stdout_stale:{project_key}` Redis counter increments on stdout-triggered tier-1 flags.
+- [x] `DISABLE_PROGRESS_KILL=1` continues to suppress kills while emitting the new metric.
+- [x] After two silent-hang recoveries, session transitions to terminal `failed` (existing PR #1039 path, no code change needed).
+- [x] Unit test: fresh heartbeats + stale `last_stdout_at` (> 600s) → `_has_progress()` returns `False`.
+- [x] Unit test: fresh heartbeats + fresh `last_stdout_at` (< 600s) → `_has_progress()` returns `True`.
+- [x] Unit test: fresh heartbeats + `last_stdout_at is None` + young `started_at` → `_has_progress()` returns `True`.
+- [x] Unit test: fresh heartbeats + `last_stdout_at is None` + old `started_at` → `_has_progress()` returns `False`.
+- [x] Existing tier-2 test `test_no_reprieve_on_stale_stdout` updated for new 600s threshold — passes.
+- [x] Tests pass (`pytest tests/unit/test_health_check_recovery_finalization.py -v`)
 
 ## Team Orchestration
 
