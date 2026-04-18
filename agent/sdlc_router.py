@@ -387,7 +387,7 @@ def guard_g5_artifact_hash_cache(
 def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict) -> Dispatch | None:
     """G6: PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to /do-merge.
 
-    Fires when all four conditions are met:
+    Fires when all five conditions are met:
     - ``pr_number`` is set (a PR exists for this issue)
     - ``pr_merge_state == "CLEAN"`` (GitHub mergeStateStatus)
     - ``ci_all_passing is True`` (all statusCheckRollup conclusions are SUCCESS)
