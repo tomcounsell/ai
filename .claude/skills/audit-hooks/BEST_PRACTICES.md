@@ -26,13 +26,7 @@ A failing Stop hook blocks session exit entirely. The user's session hangs with 
 
 ---
 
-### 2. SubagentStop hooks MUST have `|| true`
-
-Same reasoning as Stop hooks — a failing SubagentStop hook blocks subagent completion.
-
----
-
-### 3. Advisory hooks MUST have `|| true`
+### 2. Advisory hooks MUST have `|| true`
 
 Advisory hooks observe but do not enforce. They include: memory recall/extraction, calendar logging, SDLC reminders, pre-tool-use logging.
 
@@ -40,7 +34,7 @@ Advisory hooks observe but do not enforce. They include: memory recall/extractio
 
 ---
 
-### 4. Validator hooks MUST NOT have `|| true`
+### 3. Validator hooks MUST NOT have `|| true`
 
 Validator hooks exist to block invalid operations. Adding `|| true` defeats the purpose.
 
@@ -55,7 +49,7 @@ Validator hooks exist to block invalid operations. Adding `|| true` defeats the 
 
 ---
 
-### 5. All `|| true` hooks MUST call `log_hook_error()` on failure
+### 3. All `|| true` hooks MUST call `log_hook_error()` on failure
 
 Silent failure is invisible failure. Every advisory hook must log errors to `logs/hooks.log`.
 
@@ -78,7 +72,7 @@ if __name__ == "__main__":
 
 ---
 
-### 6. Bash hooks MUST use `set +e`
+### 3. Bash hooks MUST use `set +e`
 
 `set -e` causes the entire hook to exit on any subcommand failure, even benign ones (like `grep` finding no matches). In a hook context, this leads to silent exits.
 
@@ -98,7 +92,7 @@ set -e
 
 ---
 
-### 7. Bash hooks MUST NOT use bare `exec`
+### 3. Bash hooks MUST NOT use bare `exec`
 
 `exec` replaces the shell process, preventing any error recovery or logging after the exec'd command.
 
@@ -119,7 +113,7 @@ exec python my_tool "$@"
 
 ---
 
-### 8. Shell hooks MUST prefer venv binaries
+### 3. Shell hooks MUST prefer venv binaries
 
 Hook scripts run as subprocesses with the system PATH. Project-specific tools installed in `.venv/` are not on PATH unless explicitly referenced.
 
@@ -139,7 +133,7 @@ valor-calendar "$@"  # may not be on PATH
 
 ---
 
-### 9. Python hooks MUST minimize imports
+### 3. Python hooks MUST minimize imports
 
 Hooks run on every tool invocation. Heavy imports (anthropic, openai, pandas, numpy, requests) add latency to every operation.
 
@@ -164,7 +158,7 @@ def main():
 
 ---
 
-### 10. Hook timeouts MUST match expected workload
+### 3. Hook timeouts MUST match expected workload
 
 | Workload | Recommended timeout |
 |----------|-------------------|

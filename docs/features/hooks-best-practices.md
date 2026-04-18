@@ -5,7 +5,7 @@ status: Shipped
 
 # Hooks Best Practices & Audit
 
-Claude Code hooks fire at lifecycle events (UserPromptSubmit, PreToolUse, PostToolUse, Stop, SubagentStop). This project has hooks for validation, memory, calendar logging, and SDLC tracking. The `/audit-hooks` skill and accompanying best practices document ensure all hooks follow consistent safety patterns.
+Claude Code hooks fire at lifecycle events (UserPromptSubmit, PreToolUse, PostToolUse, Stop). This project has hooks for validation, memory, calendar logging, and SDLC tracking. The `/audit-hooks` skill and accompanying best practices document ensure all hooks follow consistent safety patterns.
 
 ## Quick Reference
 
@@ -17,7 +17,7 @@ Claude Code hooks fire at lifecycle events (UserPromptSubmit, PreToolUse, PostTo
 
 ## Key Rules
 
-1. **Stop/SubagentStop hooks** must have `|| true` (prevents session hangs)
+1. **Stop hooks** must have `|| true` (prevents session hangs)
 2. **Advisory hooks** must have `|| true` (logging, memory, calendar never block)
 3. **Validator hooks** must NOT have `|| true` (they exist to enforce rules)
 4. **All `|| true` hooks** must call `log_hook_error()` on failure (no silent swallowing)

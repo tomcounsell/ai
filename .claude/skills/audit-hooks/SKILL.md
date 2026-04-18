@@ -25,7 +25,7 @@ Audits all Claude Code hooks registered in `.claude/settings.json` against the b
 ### Step 1: Parse settings.json
 
 Read `.claude/settings.json` and extract every hook entry. For each hook, record:
-- Event type (UserPromptSubmit, PreToolUse, PostToolUse, Stop, SubagentStop)
+- Event type (UserPromptSubmit, PreToolUse, PostToolUse, Stop)
 - Matcher (empty string = all, or specific tool name)
 - Command string
 - Timeout value
@@ -37,7 +37,7 @@ Read `.claude/settings.json` and extract every hook entry. For each hook, record
 |---------------|----------|-------------------|
 | **Validator** | PreToolUse/PostToolUse + matcher + named `validate_*.py` | NO — must NOT have `|| true` |
 | **Advisory** | Any hook whose purpose is logging/tracking/enrichment | YES — must have `|| true` |
-| **Stop/SubagentStop** | Any hook on Stop or SubagentStop events | YES — must have `|| true` |
+| **Stop** | Any hook on Stop events | YES — must have `|| true` |
 
 ### Step 3: Check each hook against rules
 
@@ -45,7 +45,7 @@ For EACH hook command, check:
 
 **Settings-level checks:**
 - [ ] `|| true` correctness (Rules 1-4 from BEST_PRACTICES.md)
-- [ ] Timeout appropriateness (Rule 10: 5s simple, 10s git, 15s API)
+- [ ] Timeout appropriateness (Rule 9: 5s simple, 10s git, 15s API)
 - [ ] Matcher specificity (empty matcher on PreToolUse fires on every tool call — WARN if timeout > 5s)
 
 **Python script checks** (for hooks targeting `.py` files):
