@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1023
 last_comment_id:
+revision_applied: true
 ---
 
 # Refactor: Split agent_session_queue.py by Responsibility
@@ -29,7 +30,8 @@ concerns; a properly factored module would have localized those changes to a sin
 - Contributors cannot locate their concern without full-text search.
 
 **Desired outcome:**
-- `agent/agent_session_queue.py` shrinks to the queue dispatch surface only (~1500 LOC target).
+- `agent/agent_session_queue.py` shrinks to the queue dispatch surface only (~2000 LOC target;
+  see Solution section for why ~1500 was aspirational).
 - Each extracted module has a one-sentence purpose statement at the top of its docstring.
 - The duplicate Redis drain paths collapse to one shared helper.
 - Zero behavior change — all integration tests pass unchanged.
@@ -114,14 +116,17 @@ ecosystem patterns involved.
   behavioral difference.
 - **Method**: code-read
 - **Finding**: Both paths call `pop_all_steering_messages(chosen.session_id)` and prepend the
-  result to `chosen.message_text` with the same logic. The only difference is that the
-  fallback path calls `await chosen.async_save(update_fields=["initial_telegram_message",
-  "updated_at"])` after prepending. The hot path does not save separately (it relies on the
-  downstream startup save). This difference is load-bearing and must be preserved. A shared
-  helper with a `save_after: bool` parameter safely collapses both paths.
-- **Confidence**: high
-- **Impact on plan**: The shared helper takes `(session, save_after: bool = False)` parameter.
-  Hot path calls with `save_after=False`, fallback path calls with `save_after=True`.
+  result to `chosen.message_text` with the same logic. **Contrary to an earlier draft of this
+  plan, both paths call `await chosen.async_save(update_fields=["initial_telegram_message",
+  "updated_at"])` when steering messages are present** (confirmed at L929 for the hot path and
+  L1063 for the fallback path — both calls are identical). The two paths are therefore
+  fully equivalent and collapse to a single helper with no conditional save parameter.
+- **Confidence**: high (re-verified against current source)
+- **Impact on plan**: `_drain_startup_steering(session)` in `agent/session_pickup.py` takes no
+  `save_after` parameter. The function body mirrors the current hot path exactly: pop → prepend
+  → `async_save` (always, when `extra_texts` is non-empty). Both callers invoke it identically.
+  Verify after extraction: `grep -n "async_save" agent/session_pickup.py` must show exactly
+  one call site inside `_drain_startup_steering`.
 
 ### spike-3: Test import surface
 - **Assumption**: All existing tests that import from `agent.agent_session_queue` will continue
@@ -156,10 +161,11 @@ Post-refactor: same flow, different files. All public symbols re-exported from
 
 ## Architectural Impact
 
-- **New modules**: 5 new files in `agent/` (see Solution section)
+- **New modules**: 6 new files in `agent/` (5 responsibility modules + 1 thin state module)
 - **Interface changes**: None — all public symbols re-exported from `agent_session_queue.py`
 - **Coupling**: Decreases coupling between unrelated concerns; health check module no longer
-  needs to be imported to test the executor
+  needs to be imported to test the executor; `session_state.py` provides a clean shared-state
+  boundary that prevents circular imports
 - **Data ownership**: Unchanged — AgentSession remains the authoritative model
 - **Reversibility**: Fully reversible — re-exports make the split transparent to all callers;
   can be undone by inlining the modules back
@@ -189,44 +195,112 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/refactor-agent
 
 ### Key Elements
 
+Seven modules after the refactor (six new + residual):
+
+- **`agent/session_state.py`** *(new thin state module)*: All mutable session-tracking globals
+  and the `SessionHandle` dataclass that extracted modules share. No imports from any other
+  `agent/` module (only stdlib + models). Prevents circular imports between `session_executor`
+  and `session_health` which both need these globals.
+  Owns: `SessionHandle`, `_active_sessions`, `_active_workers`, `_active_events`,
+  `_starting_workers`, `_global_session_semaphore`, `_shutdown_requested`,
+  `_send_callbacks`, `_reaction_callbacks`, `_response_callbacks`.
+
 - **`agent/session_executor.py`**: The core `_execute_agent_session()` loop plus turn-boundary
-  steering consumption. Owns the subprocess harness lifecycle.
-- **`agent/session_completion.py`**: `_complete_agent_session()`, `_transition_parent()`,
-  `_handle_dev_session_completion()`, `_create_continuation_pm()`. Owns the post-run lifecycle.
-- **`agent/session_health.py`**: `_agent_session_health_check()`, `_agent_session_hierarchy_health_check()`,
-  `_dependency_health_check()`, `_agent_session_health_loop()`, `_has_progress()`,
-  `_tier2_reprieve_signal()`, `_get_agent_session_timeout()`, `SessionHandle`,
-  `_recover_interrupted_agent_sessions_startup()`. Owns health monitoring and recovery.
-- **`agent/session_revival.py`**: `check_revival()`, `record_revival_cooldown()`,
-  `maybe_send_revival_prompt()`, `queue_revival_agent_session()`, `cleanup_stale_branches()`,
-  `cleanup_stale_branches_all_projects()`, `_session_branch_name()`, `_load_cooldowns()`,
-  `_save_cooldowns()`. Owns revival detection and branch cleanup.
-- **`agent/session_pickup.py`**: `_pop_agent_session()`, `_pop_agent_session_with_fallback()`,
-  `_acquire_pop_lock()`, `_release_pop_lock()`, `_maybe_inject_resume_hydration()`,
-  `_drain_startup_steering()` (new shared helper collapsing the duplicate drain paths),
-  `dependency_status()`. Owns session selection and startup preparation.
-- **`agent_session_queue.py` (residual)**: Queue dispatch surface: `enqueue_agent_session()`,
-  `_push_agent_session()`, `_worker_loop()`, `register_callbacks()`, `_resolve_callbacks()`,
-  `_ensure_worker()`, `_session_notify_listener()`, `request_shutdown()`, `_check_restart_flag()`,
-  `_trigger_restart()`, `clear_restart_flag()`, CLI tools (`_cli_*`), plus all re-exports for
-  backward compatibility.
+  steering consumption, nudge/re-enqueue paths, and calendar heartbeat helpers that are called
+  exclusively from within the executor. Owns the subprocess harness lifecycle.
+  Owns: `_execute_agent_session`, `_handle_harness_not_found`, `_enqueue_nudge`,
+  `re_enqueue_session`, `steer_session`, `_calendar_heartbeat`, `_find_valor_calendar`,
+  `_HARNESS_NOT_FOUND_PREFIX`, `_HARNESS_NOT_FOUND_MAX_RETRIES`, `_HARNESS_EXHAUSTION_MSG`.
+
+- **`agent/session_completion.py`**: Post-execution lifecycle: session finalization, parent
+  transitions, dev completion handling, and continuation-PM creation.
+  Owns: `_complete_agent_session`, `_transition_parent`, `_handle_dev_session_completion`,
+  `_create_continuation_pm`, `_extract_issue_number`, `_diagnose_missing_session`,
+  `_CONTINUATION_PM_MAX_DEPTH`.
+
+- **`agent/session_health.py`**: Periodic health monitoring, no-progress detection, orphan
+  cleanup, and startup recovery.
+  Owns: `_agent_session_health_check`, `_agent_session_hierarchy_health_check`,
+  `_dependency_health_check`, `_agent_session_health_loop`, `_has_progress`,
+  `_tier2_reprieve_signal`, `_get_agent_session_timeout`,
+  `_recover_interrupted_agent_sessions_startup`, `_write_worker_heartbeat`,
+  `cleanup_corrupted_agent_sessions`, `recover_orphaned_agent_sessions_all_projects`,
+  `_cleanup_orphaned_claude_processes`, `format_duration`,
+  `AGENT_SESSION_HEALTH_MIN_RUNNING`, `AGENT_SESSION_TIMEOUT_BUILD`,
+  `HEARTBEAT_WRITE_INTERVAL`.
+  **Do NOT move `DRAIN_TIMEOUT`** — its only caller is `_worker_loop` in the residual.
+
+- **`agent/session_revival.py`**: Revival detection, cooldown tracking, and stale branch cleanup.
+  Owns: `check_revival`, `record_revival_cooldown`, `maybe_send_revival_prompt`,
+  `queue_revival_agent_session`, `cleanup_stale_branches`, `cleanup_stale_branches_all_projects`,
+  `_session_branch_name`, `_load_cooldowns`, `_save_cooldowns`, `REVIVAL_COOLDOWN_SECONDS`,
+  `_COOLDOWN_FILE`.
+
+- **`agent/session_pickup.py`**: Session selection, pop locking, startup steering drain, and
+  dependency readiness checks.
+  Owns: `_pop_agent_session`, `_pop_agent_session_with_fallback`, `_acquire_pop_lock`,
+  `_release_pop_lock`, `_maybe_inject_resume_hydration`,
+  `_drain_startup_steering` (new shared helper — no `save_after` param; always saves when messages present),
+  `dependency_status`, `_POP_LOCK_TTL_SECONDS`.
+
+- **`agent_session_queue.py` (residual)**: Queue dispatch surface — the entry points that
+  bridge and worker import.
+  Owns: `enqueue_agent_session`, `_push_agent_session`, `_worker_loop`, `register_callbacks`,
+  `_resolve_callbacks`, `_ensure_worker`, `_session_notify_listener`, `request_shutdown`,
+  `_check_restart_flag`, `_trigger_restart`, `clear_restart_flag`, `DRAIN_TIMEOUT`,
+  `_extract_agent_session_fields`, `_pending_depth`, `_remove_by_session`,
+  `reorder_agent_session`, `cancel_agent_session`, `retry_agent_session`,
+  `get_queue_status`, `get_active_session_for_chat`, `_get_pending_agent_sessions_sync`,
+  `_ts`, `PRIORITY_RANK`, `MAX_CONCURRENT_SESSIONS`, `_RESTART_FLAG`, `_RESTART_FLAG_TTL`,
+  CLI tools (`_cli_*`), plus all re-exports for backward compatibility.
+
+**LOC target revision**: With the above assignment, the residual is estimated at ~2000–2200 LOC
+(not ~1500). The ~1500 LOC figure assumed the queue management helpers (`reorder_agent_session`,
+`cancel_agent_session`, `retry_agent_session`, `get_queue_status`, etc.) would also be extracted.
+Those are left in the residual for this pass. The success criterion is updated accordingly
+(see Success Criteria). A follow-up issue can extract them to `tools/agent_session_scheduler.py`.
 
 ### Technical Approach
 
-1. **Extract in dependency order** (bottom-up): revival → pickup → health → completion →
-   executor → residual queue. Each step is independently testable.
-2. **Module-level globals**: Each extracted module must copy any globals it references
-   (`PRIORITY_RANK`, `_RESTART_FLAG`, etc.) or import them from the residual queue module.
-   Prefer copying constants; import mutable globals from one canonical home.
-3. **Re-export pattern**: After each extraction, add to `agent_session_queue.py`:
+1. **Extract `agent/session_state.py` first** — this thin module holds only mutable globals
+   and `SessionHandle`. No other `agent/` imports. All subsequent extracted modules import
+   shared state from here, not from the residual `agent_session_queue.py`. This prevents
+   circular imports between `session_executor` (needs `_active_sessions`) and `session_health`
+   (also needs `_active_sessions`). The residual also imports from `session_state`.
+
+2. **Extract in dependency order** (bottom-up after session_state): revival → pickup → health →
+   completion → executor → residual cleanup. Each step is independently testable.
+
+3. **Module-level constants vs. mutable globals**:
+   - *Constants* (`PRIORITY_RANK`, `AGENT_SESSION_TIMEOUT_BUILD`, etc.) — copy into the module
+     that owns them. Constants are immutable; duplication is safe and avoids import chains.
+   - *Mutable globals* (`_active_sessions`, `_active_workers`, `_active_events`, etc.) — live
+     exclusively in `agent/session_state.py`. Every module that needs them imports from there.
+   - `DRAIN_TIMEOUT` stays in the residual `agent_session_queue.py`; its only caller is
+     `_worker_loop`. Do not move it to `session_health.py`.
+
+4. **Re-export pattern**: After each extraction, add to `agent_session_queue.py`:
    `from agent.session_executor import _execute_agent_session  # noqa: F401`
    This ensures zero breakage for existing callers.
-4. **Deferred bridge imports**: Any extracted module referencing `bridge.telegram_bridge`
+
+5. **Deferred bridge imports**: Any extracted module referencing `bridge.telegram_bridge`
    must use inline `from bridge.telegram_bridge import X` (not top-level). Match existing pattern.
-5. **Shared drain helper**: `_drain_startup_steering(session, save_after: bool = False)` in
-   `agent/session_pickup.py`. Both `_pop_agent_session` and `_pop_agent_session_with_fallback`
-   call it; `save_after=True` only on the fallback path.
-6. **Verification**: After each module extraction, run `pytest tests/unit/ -n auto` and confirm
+
+6. **Shared drain helper**: `_drain_startup_steering(session)` in `agent/session_pickup.py`.
+   No `save_after` parameter — both drain paths save when steering messages are present.
+   The helper body: pop → prepend → `async_save(update_fields=["initial_telegram_message", "updated_at"])`
+   (only when `extra_texts` is non-empty). Both `_pop_agent_session` and `_pop_agent_session_with_fallback`
+   call it identically.
+
+7. **Globals inventory sign-off** (Task 1 gate): Before Task 2 begins, the extractor must
+   confirm the following 13 mutable globals and 2 path constants are all accounted for in
+   the module assignment above: `_active_sessions`, `_active_workers`, `_active_events`,
+   `_starting_workers`, `_global_session_semaphore`, `_shutdown_requested`,
+   `_send_callbacks`, `_reaction_callbacks`, `_response_callbacks`, `_RESTART_FLAG`,
+   `_CONTINUATION_PM_MAX_DEPTH`, `_COOLDOWN_FILE`, `_POP_LOCK_TTL_SECONDS`,
+   `DRAIN_TIMEOUT` (residual), `_RESTART_FLAG_TTL` (residual).
+
+8. **Verification**: After each module extraction, run `pytest tests/unit/ -n auto` and confirm
    green before proceeding. Full integration run at end.
 
 ## Failure Path Test Strategy
@@ -239,7 +313,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/refactor-agent
   logging; verify no new silent swallows are introduced
 
 ### Empty/Invalid Input Handling
-- [ ] `_drain_startup_steering(session, save_after)` must handle `session.session_id = None`
+- [ ] `_drain_startup_steering(session)` must handle `session.session_id = None`
   gracefully — `pop_all_steering_messages` already handles this; builder must not break it
 - [ ] `_create_continuation_pm()` with `session.parent_agent_session_id = None` — existing
   guard; verify it survives the move
@@ -259,7 +333,7 @@ transparent to the test suite.
 - [ ] `tests/unit/test_health_check_recovery_finalization.py` — no change needed (re-exported
   `_has_progress`, `_tier2_reprieve_signal`, `SessionHandle`)
 - [ ] `tests/unit/test_agent_session_queue.py` — no change needed (all symbols re-exported)
-- [ ] `tests/unit/test_agent_session_queue_async.py` — no change needed
+- [ ] `tests/unit/test_agent_session_queue_async.py` — no change needed (`get_active_session_for_chat` re-exported)
 - [ ] `tests/unit/test_steering_mechanism.py` — no change needed (MAX_NUDGE_COUNT etc. re-exported)
 - [ ] `tests/unit/test_agent_session_hierarchy.py` — no change needed (`_transition_parent` re-exported)
 
@@ -282,13 +356,17 @@ After extraction, run full unit suite to confirm zero regressions before integra
 
 ## Risks
 
-### Risk 1: Module-level global references
-**Impact:** Extracted functions that reference globals defined in `agent_session_queue.py`
-(e.g., `_active_sessions`, `_worker_futures`, `_RESTART_FLAG`) will break at runtime if the
-globals are not reachable in the extracted module.
-**Mitigation:** Inventory every module-level global referenced by each candidate function
-before extraction. Globals shared across modules must live in one canonical module and be
-imported everywhere else. Use `grep -n "^[A-Z_]" agent/agent_session_queue.py` to enumerate.
+### Risk 1: Module-level global references and circular imports
+**Impact:** Extracted functions that reference mutable globals (`_active_sessions`,
+`_active_workers`, `_active_events`, etc.) will break at runtime if those globals are not
+reachable. Worse, if `session_executor.py` and `session_health.py` both import from
+`agent_session_queue.py` to get these globals, and the residual re-exports from those modules,
+the import graph becomes circular.
+**Mitigation:** All mutable globals live exclusively in `agent/session_state.py`. Every
+extracted module that needs them — including the residual — imports from `session_state`.
+`session_state.py` itself has no imports from any other `agent/` module. The globals inventory
+in Task 1 must explicitly confirm each of the 13 mutable globals is assigned to `session_state`
+or the residual before any extraction begins.
 
 ### Risk 2: Async context propagation
 **Impact:** `_execute_agent_session` and health check functions use `asyncio.create_task()`,
@@ -351,13 +429,15 @@ as before (those functions stay in the residual module).
 
 ## Success Criteria
 
-- [ ] `agent/agent_session_queue.py` is under ~1500 LOC (`wc -l agent/agent_session_queue.py`)
-- [ ] Each extracted module (`session_executor.py`, `session_completion.py`, `session_health.py`,
-  `session_revival.py`, `session_pickup.py`) has a one-sentence purpose statement in its top docstring
+- [ ] `agent/agent_session_queue.py` is under ~2000 LOC (`wc -l agent/agent_session_queue.py`)
+- [ ] Each extracted module (`session_state.py`, `session_executor.py`, `session_completion.py`,
+  `session_health.py`, `session_revival.py`, `session_pickup.py`) has a one-sentence purpose
+  statement in its top docstring
 - [ ] No behavior change — `pytest tests/unit/ -n auto` passes unchanged
 - [ ] No behavior change — `pytest tests/integration/ -x` passes unchanged (or existing failures
   are pre-existing and documented)
-- [ ] Duplicate Redis drain paths collapsed into `_drain_startup_steering()` helper
+- [ ] Duplicate Redis drain paths collapsed into `_drain_startup_steering(session)` helper
+  (no `save_after` param — always saves when messages present)
 - [ ] `python -m ruff format .` clean
 - [ ] `python -m ruff check .` clean
 - [ ] All existing callers still import successfully (`python -c "from agent.agent_session_queue
@@ -369,7 +449,7 @@ as before (those functions stay in the residual module).
 
 - **Builder (extraction)**
   - Name: extractor
-  - Role: Extract the five modules from agent_session_queue.py in dependency order
+  - Role: Extract the six modules from agent_session_queue.py in dependency order
   - Agent Type: builder
   - Resume: true
 
@@ -393,16 +473,36 @@ as before (those functions stay in the residual module).
 - **Assigned To**: extractor
 - **Agent Type**: builder
 - **Parallel**: false
-- List every module-level global, constant, and `asyncio.Event`/`asyncio.Lock` in
-  `agent/agent_session_queue.py` with a note on which candidate functions reference them
-- Produce a mapping: `{global_name: [functions that reference it]}` as a comment block
-  at the top of the plan's Technical Approach (inline in the PR description is fine)
-- This inventory drives all subsequent extraction steps
+- Confirm the following 13 mutable globals and 2 path constants from `agent/agent_session_queue.py`
+  are accounted for in the module assignment in the Solution section (all go to `session_state.py`
+  or the residual as documented):
+  `_active_sessions`, `_active_workers`, `_active_events`, `_starting_workers`,
+  `_global_session_semaphore`, `_shutdown_requested`, `_send_callbacks`, `_reaction_callbacks`,
+  `_response_callbacks`, `_RESTART_FLAG`, `_CONTINUATION_PM_MAX_DEPTH`, `_COOLDOWN_FILE`,
+  `_POP_LOCK_TTL_SECONDS`, `DRAIN_TIMEOUT` (residual), `_RESTART_FLAG_TTL` (residual)
+- Validate with: `python -c "import re; src=open('agent/agent_session_queue.py').read(); [print(m) for m in re.findall(r'^(_[a-z][a-z_]+|DRAIN_TIMEOUT|_RESTART_FLAG_TTL)\s*[:=]', src, re.MULTILINE)]"`
+- Sign off that all 15 items match the module assignments above before proceeding to Task 2
 
-### 2. Extract agent/session_revival.py
-- **Task ID**: build-revival
+### 2. Extract agent/session_state.py
+- **Task ID**: build-session-state
 - **Depends On**: build-globals-inventory
-- **Assigns To**: extractor
+- **Assigned To**: extractor
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `agent/session_state.py` with one-sentence docstring:
+  "Shared mutable session-tracking state for the worker — prevents circular imports between executor and health modules."
+- Move: `SessionHandle` dataclass, `_active_sessions`, `_active_workers`, `_active_events`,
+  `_starting_workers`, `_global_session_semaphore`, `_shutdown_requested`,
+  `_send_callbacks`, `_reaction_callbacks`, `_response_callbacks`
+- `session_state.py` must import ONLY from stdlib and `models/` — no other `agent/` imports
+- Re-export all moved symbols from `agent_session_queue.py`
+- Verify: `python -c "import agent.session_state"` must not raise ImportError
+- Run `pytest tests/unit/ -n auto` — must be green before proceeding
+
+### 3. Extract agent/session_revival.py
+- **Task ID**: build-revival
+- **Depends On**: build-session-state
+- **Assigned To**: extractor
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `agent/session_revival.py` with one-sentence docstring:
@@ -414,7 +514,7 @@ as before (those functions stay in the residual module).
 - Re-export all moved symbols from `agent_session_queue.py`
 - Run `pytest tests/unit/ -n auto` — must be green before proceeding
 
-### 3. Extract agent/session_pickup.py
+### 4. Extract agent/session_pickup.py
 - **Task ID**: build-pickup
 - **Depends On**: build-revival
 - **Assigned To**: extractor
@@ -423,14 +523,16 @@ as before (those functions stay in the residual module).
 - Create `agent/session_pickup.py` with one-sentence docstring:
   "Session selection, pop locking, startup steering drain, and dependency readiness checks."
 - Move: `_pop_agent_session`, `_pop_agent_session_with_fallback`, `_acquire_pop_lock`,
-  `_release_pop_lock`, `_maybe_inject_resume_hydration`, `dependency_status`
-- **Add** `_drain_startup_steering(session, save_after: bool = False)` helper that
-  consolidates the duplicate drain logic from both `_pop_agent_session` and
-  `_pop_agent_session_with_fallback`. Update both functions to call the helper.
+  `_release_pop_lock`, `_maybe_inject_resume_hydration`, `dependency_status`, `_POP_LOCK_TTL_SECONDS`
+- **Add** `_drain_startup_steering(session)` helper (no `save_after` param) that consolidates
+  the duplicate drain logic from both `_pop_agent_session` and `_pop_agent_session_with_fallback`.
+  Function body: pop → prepend → `async_save(update_fields=["initial_telegram_message", "updated_at"])`
+  when `extra_texts` is non-empty. Update both callers to use the helper.
+- Verify deduplication: `grep -c "pop_all_steering_messages" agent/session_pickup.py` must output `1`
 - Re-export all moved symbols from `agent_session_queue.py`
 - Run `pytest tests/unit/ -n auto` — must be green before proceeding
 
-### 4. Extract agent/session_health.py
+### 5. Extract agent/session_health.py
 - **Task ID**: build-health
 - **Depends On**: build-pickup
 - **Assigned To**: extractor
@@ -440,13 +542,17 @@ as before (those functions stay in the residual module).
   "Periodic health monitoring, no-progress detection, orphan cleanup, and startup recovery."
 - Move: `_agent_session_health_check`, `_agent_session_hierarchy_health_check`,
   `_dependency_health_check`, `_agent_session_health_loop`, `_has_progress`,
-  `_tier2_reprieve_signal`, `_get_agent_session_timeout`, `SessionHandle`,
+  `_tier2_reprieve_signal`, `_get_agent_session_timeout`,
   `_recover_interrupted_agent_sessions_startup`, `_write_worker_heartbeat`,
-  `AGENT_SESSION_HEALTH_MIN_RUNNING`, `DRAIN_TIMEOUT` (if defined here)
+  `cleanup_corrupted_agent_sessions`, `recover_orphaned_agent_sessions_all_projects`,
+  `_cleanup_orphaned_claude_processes`, `format_duration`,
+  `AGENT_SESSION_HEALTH_MIN_RUNNING`, `AGENT_SESSION_TIMEOUT_BUILD`, `HEARTBEAT_WRITE_INTERVAL`
+- Import `SessionHandle` and shared state from `agent.session_state` (not from residual)
+- **Do NOT move `DRAIN_TIMEOUT`** — it stays in the residual (`_worker_loop` is its only caller)
 - Re-export all moved symbols from `agent_session_queue.py`
 - Run `pytest tests/unit/ -n auto` — must be green before proceeding
 
-### 5. Extract agent/session_completion.py
+### 6. Extract agent/session_completion.py
 - **Task ID**: build-completion
 - **Depends On**: build-health
 - **Assigned To**: extractor
@@ -456,39 +562,45 @@ as before (those functions stay in the residual module).
   "Post-execution lifecycle: session finalization, parent transitions, dev completion
   handling, and continuation-PM creation."
 - Move: `_complete_agent_session`, `_transition_parent`, `_handle_dev_session_completion`,
-  `_create_continuation_pm`, `_extract_issue_number`, `_diagnose_missing_session`
+  `_create_continuation_pm`, `_extract_issue_number`, `_diagnose_missing_session`,
+  `_CONTINUATION_PM_MAX_DEPTH`
 - Re-export all moved symbols from `agent_session_queue.py`
 - Run `pytest tests/unit/ -n auto` — must be green before proceeding
 
-### 6. Extract agent/session_executor.py
+### 7. Extract agent/session_executor.py
 - **Task ID**: build-executor
 - **Depends On**: build-completion
 - **Assigned To**: extractor
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `agent/session_executor.py` with one-sentence docstring:
-  "Core session execution: CLI harness subprocess lifecycle and turn-boundary steering."
-- Move: `_execute_agent_session`, `_handle_harness_not_found`,
+  "Core session execution: CLI harness subprocess lifecycle, turn-boundary steering,
+  nudge/re-enqueue paths, and calendar heartbeat."
+- Move: `_execute_agent_session`, `_handle_harness_not_found`, `_enqueue_nudge`,
+  `re_enqueue_session`, `steer_session`, `_calendar_heartbeat`, `_find_valor_calendar`,
   `_HARNESS_NOT_FOUND_PREFIX`, `_HARNESS_NOT_FOUND_MAX_RETRIES`, `_HARNESS_EXHAUSTION_MSG`
 - Re-export all moved symbols from `agent_session_queue.py`
 - Run `pytest tests/unit/ -n auto` — must be green before proceeding
 
-### 7. Validate residual queue
+### 8. Validate residual queue
 - **Task ID**: validate-residual
 - **Depends On**: build-executor
 - **Assigned To**: regressor
 - **Agent Type**: validator
 - **Parallel**: false
-- Confirm `wc -l agent/agent_session_queue.py` is under 1500 LOC
-- Confirm all five new modules exist with one-sentence docstrings
+- Confirm `wc -l agent/agent_session_queue.py` is under 2000 LOC
+- Confirm all six new modules exist (`session_state.py`, `session_executor.py`,
+  `session_completion.py`, `session_health.py`, `session_revival.py`, `session_pickup.py`)
+  each with a one-sentence docstring
 - Run `python -c "from agent.agent_session_queue import enqueue_agent_session,
   register_callbacks, _execute_agent_session, _create_continuation_pm, _has_progress,
   check_revival"` — must not raise ImportError
+- Run `python -c "import agent.session_state; import agent.session_executor; import agent.session_health"` — must not raise ImportError (circular import check)
 - Run `python -m ruff format --check .` and `python -m ruff check .`
 - Run `pytest tests/unit/ -n auto`
 - Report pass/fail for each criterion
 
-### 8. Integration regression
+### 9. Integration regression
 - **Task ID**: validate-integration
 - **Depends On**: validate-residual
 - **Assigned To**: regressor
@@ -497,55 +609,63 @@ as before (those functions stay in the residual module).
 - Run `pytest tests/integration/ -x -q` — document any pre-existing failures (do not
   introduce new ones)
 - Run `pytest tests/ -x -q --ignore=tests/integration` as a broader sweep
-- Confirm `_drain_startup_steering` helper is used in both `_pop_agent_session` and
-  `_pop_agent_session_with_fallback` (grep for the duplicate `pop_all_steering_messages`
-  call — should appear only once in `session_pickup.py`)
+- Confirm `_drain_startup_steering` helper deduplication:
+  `grep -c "pop_all_steering_messages" agent/session_pickup.py` must output `1`
 
-### 9. Documentation
+### 10. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-integration
 - **Assigned To**: extractor
-- **Agent Type**: documentarian
+- **Agent Type**: builder
 - **Parallel**: false
-- Update `docs/features/agent-session-queue.md` to list the five extracted modules with
+- Update `docs/features/agent-session-queue.md` to list all six extracted modules with
   their one-sentence purpose statements and the symbols each owns
-- Add or update the module diagram showing the five new files and their relationships
+- Add or update the module diagram showing the six new files and their relationships
 - Add entry to `docs/features/README.md` if not already present for agent-session-queue
+- Validate: `grep -c "session_executor\|session_health\|session_pickup\|session_completion\|session_revival\|session_state" docs/features/agent-session-queue.md | awk '$1 >= 6 {exit 0} {exit 1}'`
 
-### 10. Final validation
+### 11. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: regressor
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify all success criteria are met
-- Confirm `docs/features/agent-session-queue.md` is updated
+- Confirm `docs/features/agent-session-queue.md` is updated with all six modules
 - Generate final report confirming zero regressions
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Residual LOC under target | `wc -l agent/agent_session_queue.py` | output < 1500 |
+| Residual LOC under target | `wc -l agent/agent_session_queue.py` | output < 2000 |
 | Unit tests pass | `pytest tests/unit/ -n auto -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Re-exports intact | `python -c "from agent.agent_session_queue import enqueue_agent_session, _execute_agent_session, _create_continuation_pm, _has_progress, check_revival"` | exit code 0 |
-| Drain deduplication | `grep -c "pop_all_steering_messages" agent/agent_session_queue.py agent/session_pickup.py` | output contains "session_pickup.py:1" |
+| No circular imports | `python -c "import agent.session_state; import agent.session_executor; import agent.session_health"` | exit code 0 |
+| Drain deduplication | `grep -c "pop_all_steering_messages" agent/session_pickup.py` | output is `1` |
+| Docs updated | `grep -c "session_executor\|session_health\|session_pickup\|session_completion\|session_revival\|session_state" docs/features/agent-session-queue.md` | output >= 6 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| — | — | (populated by /do-plan-critique) | — | — |
+| BLOCKER | Skeptic, Consistency Auditor | Spike-2 save_after claim incorrect — hot path at L929 does save after prepend; both paths are identical | Revised spike-2, removed `save_after` param | `_drain_startup_steering(session)` always saves when messages present; confirmed by re-reading L929 and L1063 |
+| CONCERN | Skeptic, Adversary | Mutable globals straddle modules causing circular import risk | Added `agent/session_state.py` as thin shared-state module | `session_state.py` imports only stdlib + models; executor and health both import from it |
+| CONCERN | Skeptic, Simplifier | 21 functions unassigned leaving LOC target unachievable | Explicitly assigned all functions; revised residual LOC target to ~2000 | `_enqueue_nudge`, `steer_session`, calendar helpers → executor; cleanup/orphan/format → health |
+| CONCERN | Consistency Auditor, Skeptic | DRAIN_TIMEOUT misassigned to session_health.py | Kept DRAIN_TIMEOUT in residual; added explicit "Do NOT move" note | Only caller is `_worker_loop` in residual; Task 5 explicitly prohibits moving it |
+| CONCERN | Operator | Task 1 output not machine-verifiable | Added explicit validation command and sign-off checklist | `python -c "import re; ..."` command added; sign-off on 15 named globals required |
+| NIT | — | Task 2 "Assigns To" typo | Fixed to "Assigned To" | Task 3 (now 3) corrected |
+| NIT | — | Task 9 agent type "documentarian" not in available types | Changed to "builder" | Task 10 (now 10) updated |
+| NIT | — | Task 9 has no validation command | Added `grep -c` validation command | Task 10 (now 10) updated |
 
 ---
 
 ## Open Questions
 
-1. **LOC target**: The ~1500 LOC target for the residual `agent_session_queue.py` assumes
-   the CLI tools (~180 LOC), worker loop (~913 LOC), and dispatch surface (~400 LOC)
-   stay together. If the worker loop is also extracted, the residual could reach ~600 LOC.
-   Should the worker loop (`_worker_loop`, `enqueue_agent_session`, `_push_agent_session`)
-   be extracted to `agent/worker_dispatch.py`, or is the ~1500 LOC residual acceptable?
-   *(Recommendation: leave worker loop in residual for now; a follow-up can extract it.)*
+No unresolved questions — the critique revision pass addressed all concerns raised. The
+LOC target is revised to ~2000 LOC (from ~1500) to account for the 21 previously unassigned
+functions that stay in the residual. A follow-up issue can extract the queue management helpers
+(`reorder_agent_session`, `cancel_agent_session`, `retry_agent_session`, etc.) to
+`tools/agent_session_scheduler.py` if further shrinkage is desired.
