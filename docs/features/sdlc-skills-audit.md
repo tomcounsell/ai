@@ -48,7 +48,7 @@ PR #1039 exposed five recurring patterns where each layer of the SDLC pipeline's
 
 **Observed impact:** 71 failures on `main` existed without automated detection at merge time. The merge gate checked TEST/REVIEW/DOCS stage markers but did not validate the full suite on the target branch.
 
-**Fix applied:** Added a Full Suite Gate to `do-merge.md` after the Lockfile Sync Check. The gate runs `pytest tests/ -x -q --tb=no` on the PR branch and compares results against `data/main_test_baseline.json`. Failures in the baseline are pre-existing (non-blocking); failures NOT in the baseline are new regressions (blocking).
+**Fix applied:** Added a Full Suite Gate to `do-merge.md` after the Lockfile Sync Check. The gate runs `pytest tests/ -q --tb=no` on the PR branch and compares results against `data/main_test_baseline.json`. Failures in the baseline are pre-existing (non-blocking); failures NOT in the baseline are new regressions (blocking).
 
 **Red-main recovery path:** If the baseline file does not exist, all failures are written as the new baseline (bootstrap mode) — the gate does not block clean PRs because of pre-existing red-main failures.
 
