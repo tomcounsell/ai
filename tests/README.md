@@ -129,6 +129,7 @@ tests/
 | unit | `test_worker_entry.py` | 24 | Worker entry point startup, config loading, argument parsing |
 | integration | `test_agent_session_lifecycle.py` | 58 | Session lifecycle, history, summarizer |
 | integration | `test_lifecycle_transition.py` | 16 | Session state transitions |
+| integration | `test_session_heartbeat_progress.py` | 12 | Two-tier no-progress detector: dual heartbeat freshness, Tier 2 reprieve gates, recovery_attempts/reprieve_count fields, DISABLE_PROGRESS_KILL kill-switch |
 | e2e | `test_session_continuity.py` | 11 | Session creation, resume, transcript |
 
 ### `summarizer` — Response processing
