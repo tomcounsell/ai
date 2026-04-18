@@ -1,7 +1,6 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("pm", "teammate", or "dev")
-and an optional role field for flexible specialization within each session type.
+Single Popoto model with session_type discriminator ("pm", "teammate", or "dev").
 
 Popoto does not support model inheritance, so PM and Dev sessions are
 distinguished by the session_type field with factory methods and derived
@@ -15,14 +14,11 @@ Session types (permission model):
   Dev session (session_type="dev"): Full-permission Agent SDK session, Dev persona.
     Does the actual coding work, runs SDLC pipeline stages.
 
-Roles (specialization within a session type):
-  "pm"  - Project manager role (default for PM sessions)
-  "dev" - Developer role (default for dev sessions)
-  None  - Unspecialized (legacy or generic sessions)
-
 Parent-child relationship:
-  parent_agent_session_id is the canonical parent link (role-neutral).
-  Use create_child(role=...) to spawn child sessions.
+  parent_agent_session_id is the canonical parent link.
+  parent_session_id and parent_chat_session_id are deprecated aliases that
+  delegate to parent_agent_session_id via property.
+  Use create_child() to spawn child sessions.
 
 Status lifecycle (see models/session_lifecycle.py for canonical mutation functions):
   Non-terminal: pending -> running -> active -> dormant | waiting_for_children | superseded
@@ -79,7 +75,7 @@ class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
     Single Popoto model with a session_type discriminator ("pm", "teammate",
-    or "dev") and an optional role field for flexible specialization.
+    or "dev").
 
     Session types (permission model):
         PM session (session_type="pm"):
@@ -92,20 +88,15 @@ class AgentSession(Model):
             Full-permission Agent SDK session, Dev persona. Does the actual
             coding work, runs SDLC pipeline stages.
 
-    Roles (specialization):
-        "pm"  - Project manager (default for PM sessions)
-        "dev" - Developer (default for dev sessions)
-        None  - Unspecialized (legacy or generic sessions)
-
     Parent-child hierarchy:
-        parent_agent_session_id: Canonical parent link (role-neutral). Set
+        parent_agent_session_id: Canonical parent link. Set
             by all session creators (create_child, create_dev, enqueue_session).
 
     Factory methods:
         create_pm(): Create a PM session (PM persona, read-only).
         create_teammate(): Create a Teammate session (read-only).
-        create_child(role=...): Create a child session with the given role.
-        create_dev(): Backward-compat wrapper for create_child(role="dev").
+        create_child(): Create a child Dev session.
+        create_dev(): Backward-compat wrapper for create_child().
         create_local(): Create a local CLI session.
 
     Status values (13 total):
@@ -193,7 +184,7 @@ class AgentSession(Model):
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
-    # === Session mode ===
+    # === Session mode (deprecated — use session_type. Kept as no-op for 30-day Redis TTL safety.) ===
     session_mode = Field(null=True)
 
     # === Semantic routing fields ===
@@ -222,9 +213,6 @@ class AgentSession(Model):
 
     # === Dev session fields (null when session_type="pm" or "teammate") ===
     slug = Field(null=True)  # Derives branch, plan path, worktree
-
-    # === Role field (flexible specialization beyond session_type) ===
-    role = Field(null=True)  # "pm", "dev", or None for unspecialized sessions
 
     # === Session hierarchy fields ===
     parent_agent_session_id = KeyField(null=True)
@@ -312,22 +300,10 @@ class AgentSession(Model):
         "last_stdout_at",
     }
 
-    # Known roles for validation
-    _KNOWN_ROLES = {"pm", "dev"}
-
     def __init__(self, **kwargs):
         """Initialize AgentSession with backward-compatible field name support."""
         kwargs = self.__class__._normalize_kwargs(kwargs)
         super().__init__(**kwargs)
-
-    def save(self, *args, **kwargs):
-        """Save with soft validation: warn if role is None."""
-        if getattr(self, "role", None) is None and getattr(self, "session_type", None):
-            logger.debug(
-                f"AgentSession {getattr(self, 'session_id', '?')} saved with role=None "
-                f"(session_type={self.session_type})"
-            )
-        return super().save(*args, **kwargs)
 
     def __setattr__(self, name, value):
         """Auto-convert timestamps to datetime for DatetimeField fields.
@@ -1071,7 +1047,6 @@ class AgentSession(Model):
     def create_child(
         cls,
         *,
-        role: str | None = None,
         session_id: str,
         project_key: str,
         working_dir: str,
@@ -1081,10 +1056,9 @@ class AgentSession(Model):
         stage_states: dict | None = None,
         **kwargs,
     ) -> "AgentSession":
-        """Create a child AgentSession with the given role.
+        """Create a child Dev AgentSession.
 
         Args:
-            role: Session role (e.g., "dev", "pm"). Defaults to None.
             session_id: Unique session identifier.
             project_key: Project this session belongs to.
             working_dir: Working directory for the session.
@@ -1110,7 +1084,6 @@ class AgentSession(Model):
             parent_agent_session_id=parent_agent_session_id,
             initial_telegram_message=itm,
             slug=slug,
-            role=role,
             session_events=initial_events,
             created_at=datetime.now(tz=UTC),
             **kwargs,
@@ -1131,12 +1104,11 @@ class AgentSession(Model):
         stage_states: dict | None = None,
         **kwargs,
     ) -> "AgentSession":
-        """Create a Dev session (backward-compat wrapper for create_child(role='dev')).
+        """Create a Dev session (backward-compat wrapper for create_child()).
 
-        Deprecated: Use create_child(role="dev", ...) instead.
+        Deprecated: Use create_child(...) instead.
         """
         return cls.create_child(
-            role="dev",
             session_id=session_id,
             project_key=project_key,
             working_dir=working_dir,

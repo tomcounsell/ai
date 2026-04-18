@@ -244,7 +244,6 @@ def send_hibernation_notification(event: str, project_key: str | None = None) ->
             return
 
         notification_session = AgentSession(
-            role="teammate",
             session_type="teammate",
             project_key=pk,
             command=command,

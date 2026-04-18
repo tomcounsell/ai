@@ -18,7 +18,7 @@ import time
 from pydantic import BaseModel
 
 from agent.pipeline_graph import DISPLAY_STAGES
-from config.enums import PersonaType
+from config.enums import PersonaType, SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -464,34 +464,22 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
 
 
 def _resolve_persona_display(session) -> str | None:
-    """Map session_mode and session_type into a dashboard display persona.
+    """Map session_type into a dashboard display persona.
 
-    session_mode takes priority when set:
-      session_mode="teammate"         → "Teammate"
-      session_mode="project-manager"  → "Project Manager"
-      session_mode="developer"        → "Developer"
-
-    Fallback from session_type:
-      session_type="dev"              → "Developer"
-      session_type="chat"             → "Project Manager"
+    session_type is the sole discriminator:
+      session_type="teammate"  → "Teammate"
+      session_type="pm"        → "Project Manager"
+      session_type="dev"       → "Developer"
     """
-    mode = getattr(session, "session_mode", None)
-    if mode == PersonaType.TEAMMATE:
-        return "Teammate"
-    if mode == PersonaType.PROJECT_MANAGER:
-        return "Project Manager"
-    if mode == PersonaType.DEVELOPER:
-        return "Developer"
-
     raw = getattr(session, "session_type", None)
     if raw is None:
         return None
-    if raw == "dev":
-        return "Developer"
-    if raw == "pm":
-        return "Project Manager"
-    if raw == "teammate":
+    if raw == SessionType.TEAMMATE:
         return "Teammate"
+    if raw == SessionType.PM:
+        return "Project Manager"
+    if raw == SessionType.DEV:
+        return "Developer"
     if raw == "chat":
         return "Project Manager"  # Legacy fallback for pre-migration sessions
     return _safe_str(raw)
