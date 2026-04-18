@@ -40,6 +40,11 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_merge_guard.py",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_raw_redis_delete.py",
+            "timeout": 5
           }
         ]
       }

@@ -190,7 +190,7 @@ for s in stale: s.delete()
 ```
 
 - Use a recognizable `project_key` prefix (e.g. `test-`, `dbg-`) so test sessions are easy to identify
-- Never use `redis.Redis().delete()`, `r.srem()`, or any raw Redis write — always go through `instance.delete()`
+- Never use raw Redis on Popoto-managed keys — all reads (`r.hgetall`, `r.hget`, `r.scan_iter`) and writes (`r.delete`, `r.srem`, `r.sadd`, `r.zrem`) must go through the ORM (`Model.query.filter()`, `instance.save()`, `instance.delete()`). Enforced by `.claude/hooks/validators/validate_no_raw_redis_delete.py`.
 - Check the dashboard after any manual test session run: `curl -s localhost:8500/dashboard.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['sessions']), 'sessions')"`
 
 ## Development Principles
