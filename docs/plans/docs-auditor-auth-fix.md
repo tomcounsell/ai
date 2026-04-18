@@ -6,9 +6,10 @@ owner: Valor
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1034
 last_comment_id:
+revision_applied: true
 ---
 
-# docs_auditor auth fix: circuit-break on missing API key, prevent worker heartbeat stale
+# docs_auditor auth fix: circuit-break on missing/invalid API key, prevent worker heartbeat stale
 
 ## Problem
 
@@ -30,10 +31,10 @@ heartbeat within 7-8 minutes of restart.
 - Worker health appears degraded to downstream monitoring and users.
 
 **Desired outcome:**
-- Docs auditor detects missing/invalid API key at startup (before iterating docs), logs ONE
-  warning, and exits cleanly.
+- Docs auditor detects missing OR invalid API key at startup (before iterating any docs), logs
+  ONE warning, and exits cleanly.
 - Worker heartbeat stays healthy regardless of auditor state.
-- If auth is available, auditor continues to work correctly.
+- If auth is available and valid, auditor continues to work correctly.
 - `docs/features/reflections.md` documents the auth requirement for the docs auditor.
 
 ## Freshness Check
@@ -76,7 +77,8 @@ heartbeat within 7-8 minutes of restart.
   different code path.
 - **Issue #495 / PR #502** — "Bridge resilience: circuit breaker, unified recovery, degraded mode"
   — established `CircuitBreaker` in `bridge/resilience.py`. The infrastructure exists; docs
-  auditor simply never hooks into it.
+  auditor simply never hooks into it. Integrating into the circuit breaker is explicitly deferred
+  to Rabbit Holes — this fix is narrower (auth probe + cascade cap).
 
 ## Research
 
@@ -121,104 +123,191 @@ The fix must work correctly whether or not the key is set.
 
 ### Key Elements
 
-- **Auth probe in `DocsAuditor.__init__` or `run()`**: Check `ANTHROPIC_API_KEY` (or test-construct the
-  client and probe auth) at the START of each run — before iterating any docs. If auth is unavailable,
-  set `AuditSummary.skipped=True` with `skip_reason="no API key"` and return immediately.
-- **Single warning log on auth failure**: One `logger.warning(...)` at the point of early exit — not
-  per-doc, not per-model.
-- **Prevent Sonnet escalation on auth errors**: When a Haiku call fails with an `AuthenticationError`
-  (or any auth-related exception), do NOT escalate to Sonnet. Auth failures are deterministic — Sonnet
-  will fail identically. Short-circuit immediately.
-- **Heartbeat protection**: Early exit from `run()` before iterating docs means the `asyncio.to_thread`
-  call completes quickly, keeping the thread pool free and the event loop responsive.
+- **Auth probe in `DocsAuditor.run()`**: A single `_check_auth()` method handles BOTH missing and
+  invalid keys. It checks env var presence first (fast path, no network), then makes a minimal API
+  test call (`client.models.list()`) to confirm the key is actually valid. If auth is unavailable
+  OR the key is invalid, log ONE `logger.warning(...)` and return
+  `AuditSummary(skipped=True, skip_reason="...", skip_type="auth")` immediately.
+- **Consolidated approach — no per-call auth handling**: Fix 2 from the previous plan revision
+  (re-raising auth exceptions inside `_call_llm_for_verdict` + catching in `analyze_doc`) is
+  removed. The probe at `run()` start exits before any doc is processed, so Fix 2 is unreachable
+  in the missing-key case. The invalid-key case is also caught at the probe stage. Per-call
+  auth handling adds complexity without adding safety (re-raised exceptions from `_call_llm_for_verdict`
+  are swallowed by `run()`'s outer `except Exception` at line 560-563 anyway).
+- **Consecutive error circuit break**: A `consecutive_errors` counter in `run()`'s doc loop
+  breaks early at ≥3 consecutive failures. This caps cascade for non-auth API failures (rate
+  limits, transient network errors) that the auth probe cannot catch at startup.
+- **Observability distinction**: `AuditSummary.skip_type` field ("auth" vs "schedule") lets
+  `run_documentation_audit()` return `{"status": "disabled", ...}` for auth-skip vs `{"status": "ok", ...}`
+  for schedule-skip. Dashboards and monitoring can distinguish permanently-disabled from
+  temporarily-skipped.
+- **Heartbeat protection**: Auth probe short-circuits before any doc iteration, so the
+  `asyncio.to_thread` call completes in milliseconds. Thread pool stays free; event loop
+  stays responsive; heartbeat written on schedule.
 
 ### Flow
 
 Worker starts → ReflectionScheduler fires `documentation-audit` → `run_documentation_audit()` →
-`asyncio.to_thread(auditor.run)` → `DocsAuditor.run()` probes auth → no api_key → log ONE warning →
-return `AuditSummary(skipped=True, skip_reason="ANTHROPIC_API_KEY not set")` → thread completes →
-event loop free → heartbeat written on schedule
+`asyncio.to_thread(auditor.run)` → `DocsAuditor.run()` calls `_check_auth()`:
+
+- Key absent or sentinel ("None", "null", etc.) → log WARNING → return `AuditSummary(skipped=True, skip_type="auth", skip_reason="ANTHROPIC_API_KEY not set")`
+- Key present, `client.models.list()` raises AuthenticationError → log WARNING → return `AuditSummary(skipped=True, skip_type="auth", skip_reason="ANTHROPIC_API_KEY invalid or expired")`
+- Key present, probe passes → proceed to doc loop
+  - Per-doc: if `consecutive_errors >= 3` → break loop early
+- Thread completes → event loop free → heartbeat written on schedule
 
 ### Technical Approach
 
-**Fix 1 — Auth probe at `DocsAuditor.run()` start (primary fix):**
+**Fix 1 — Consolidated auth probe at `DocsAuditor.run()` start (primary fix, covers missing AND invalid keys):**
 
-Add an `_check_auth()` private method that:
-1. Returns `True` if `os.environ.get("ANTHROPIC_API_KEY")` is non-empty (fast path, no network call)
-2. Returns `False` otherwise
-
-In `run()`, before the doc enumeration loop, call `_check_auth()`. If it returns `False`:
-- Log `logger.warning("Docs auditor skipping: ANTHROPIC_API_KEY not set — set key to enable LLM-based audit")`
-- Return `AuditSummary(skipped=True, skip_reason="ANTHROPIC_API_KEY not set")`
-
-This is the minimal correct fix: no network call, deterministic, fast.
-
-**Fix 2 — Short-circuit Sonnet escalation on auth errors:**
-
-In `_call_llm_for_verdict()`, detect auth-type exceptions specifically:
+Add an `_check_auth()` private method:
 
 ```python
-except Exception as e:
-    err_str = str(e).lower()
-    if "authentication" in err_str or "api_key" in err_str or "auth_token" in err_str:
-        # Re-raise so analyze_doc can detect auth failures and skip escalation
-        raise
-    logger.error("LLM call failed (%s): %s", model, e)
-    return Verdict(action="KEEP", rationale=f"LLM error: {e}", low_confidence=True)
+def _check_auth(self) -> tuple[bool, str]:
+    """Check ANTHROPIC_API_KEY presence and validity.
+
+    Returns (ok: bool, reason: str). Performs a minimal API probe to catch
+    rotated/expired keys at startup rather than per-doc.
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key or key.lower() in ("none", "null", "false", "0"):
+        return False, "ANTHROPIC_API_KEY not set"
+    try:
+        client = _anthropic_module.Anthropic(api_key=key)
+        client.models.list()  # minimal probe — no tokens consumed
+        return True, ""
+    except Exception as e:
+        err_str = str(e).lower()
+        if "authentication" in err_str or "api_key" in err_str or "auth_token" in err_str:
+            return False, f"ANTHROPIC_API_KEY invalid or expired: {e}"
+        # Non-auth error during probe (network, etc.) — treat as transient; allow run to proceed
+        logger.warning("Auth probe encountered non-auth error: %s — proceeding", e)
+        return True, ""
 ```
 
-Then in `analyze_doc()`, catch auth errors separately to skip escalation:
+In `run()`, before the frequency gate, call `_check_auth()`:
 
 ```python
-try:
-    verdict = self._call_llm_for_verdict(report, MODEL_HAIKU)
-except Exception as e:
-    if "authentication" in str(e).lower():
-        logger.error("Auth error in docs auditor — check ANTHROPIC_API_KEY")
-        return Verdict(action="KEEP", rationale=f"Auth error: {e}", low_confidence=False)
-    raise
-if verdict.low_confidence:
-    verdict = self._call_llm_for_verdict(report, MODEL_SONNET)
+auth_ok, auth_reason = self._check_auth()
+if not auth_ok:
+    logger.warning("Docs auditor skipping: %s", auth_reason)
+    return AuditSummary(skipped=True, skip_type="auth", skip_reason=auth_reason)
 ```
 
-NOTE: Fix 1 (auth probe at `run()` start) makes Fix 2 largely redundant — if the probe works, auth
-errors never reach `_call_llm_for_verdict`. Fix 2 is a defense-in-depth measure for cases where the
-key IS set but invalid (rotated/expired). Both fixes together are correct and non-redundant.
+**Fix 2 — Add `skip_type` to `AuditSummary` and `Verdict.auth_failure`:**
 
-**Fix 3 — Document the auth requirement in `docs/features/reflections.md`:**
+Extend the `AuditSummary` dataclass:
+```python
+@dataclass
+class AuditSummary:
+    skipped: bool = False
+    skip_reason: str = ""
+    skip_type: str = ""  # "auth" | "schedule" | "" (normal run)
+    ...
+```
+
+Extend the `Verdict` dataclass:
+```python
+@dataclass
+class Verdict:
+    action: str
+    rationale: str
+    corrections: list[str] = field(default_factory=list)
+    low_confidence: bool = False
+    auth_failure: bool = False  # True when no LLM was consulted due to auth error
+```
+
+`auth_failure` is reserved for future use (e.g., if a per-call auth fallback is ever added).
+It is not set by this fix — the consolidated probe eliminates the need for per-call auth
+tracking. Including the field now avoids a breaking dataclass change later.
+
+**Fix 3 — Consecutive error circuit break in `run()` doc loop:**
+
+Add a `consecutive_errors` counter to `run()`'s doc loop:
+
+```python
+consecutive_errors = 0
+MAX_CONSECUTIVE_ERRORS = 3
+
+for path in docs:
+    if self._api_call_count >= self.max_api_calls:
+        ...break...
+
+    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+        logger.warning(
+            "Stopping audit after %d consecutive errors to prevent cascade",
+            consecutive_errors,
+        )
+        break
+
+    try:
+        verdict = self.analyze_doc(path)
+        consecutive_errors = 0  # reset on success
+        ...
+    except Exception as e:
+        consecutive_errors += 1
+        msg = f"Error auditing {path}: {e}"
+        logger.error(msg)
+        summary.errors.append(msg)
+        summary.kept.append(str(path))
+```
+
+**Fix 4 — Observability in `run_documentation_audit()` (`reflections/auditing.py`):**
+
+Update `run_documentation_audit()` to use `skip_type` for distinct status:
+
+```python
+if summary_obj.skipped:
+    if summary_obj.skip_type == "auth":
+        return {"status": "disabled", "findings": [f"Docs audit disabled: {summary_obj.skip_reason}"], "summary": "..."}
+    else:
+        return {"status": "ok", "findings": [f"Docs audit skipped: {summary_obj.skip_reason}"], "summary": "..."}
+```
+
+NOTE: `run_documentation_audit()` at `reflections/auditing.py:263` already creates a fresh
+`DocsAuditor` instance per call (`auditor = DocsAuditor(...)`), which keeps `_api_call_count`
+isolated across reflection runs. This per-call isolation is correct and must be preserved
+if the function is ever refactored.
+
+**Fix 5 — Document the auth requirement in `docs/features/reflections.md`:**
 
 Add a section explaining:
 - The docs auditor uses the Anthropic Python SDK directly (not OAuth subprocess)
 - It requires `ANTHROPIC_API_KEY` in the worker environment
-- If absent, the auditor silently skips with a single warning (correct behavior after this fix)
+- If absent or invalid, the auditor silently skips with a single warning (correct behavior after this fix)
 - Contrast with AgentSessions which use `CLAUDE_CODE_OAUTH_TOKEN`
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_call_llm_for_verdict` has `except Exception` at line 651 — test that auth exceptions are
-  re-raised (not swallowed) when the new auth-detection logic fires
-- [ ] `analyze_doc` catches the re-raised auth exception and returns `Verdict(low_confidence=False)` —
-  verify Sonnet escalation does NOT happen
+- [ ] `_check_auth()` with key missing: returns `(False, "ANTHROPIC_API_KEY not set")`
+- [ ] `_check_auth()` with key="": returns `(False, ...)`
+- [ ] `_check_auth()` with key="None": returns `(False, ...)` (sentinel guard)
+- [ ] `_check_auth()` with key=valid: `client.models.list()` succeeds; returns `(True, "")`
+- [ ] `_check_auth()` with key=invalid: `client.models.list()` raises AuthenticationError; returns `(False, "ANTHROPIC_API_KEY invalid...")`
+- [ ] `_check_auth()` non-auth error during probe (network error): returns `(True, "")` and logs WARNING
+- [ ] `run()` returns `AuditSummary(skipped=True, skip_type="auth")` when `_check_auth()` returns False
+- [ ] `run()` proceeds normally when `_check_auth()` returns True
+- [ ] Consecutive errors break at ≥3: `run()` stops doc loop early and logs WARNING
 
 ### Empty/Invalid Input Handling
-- [ ] `_check_auth()` handles empty string `ANTHROPIC_API_KEY=""` (falsy → skip)
-- [ ] `_check_auth()` handles whitespace-only key (strip → empty → skip)
+- [ ] `_check_auth()` handles `ANTHROPIC_API_KEY=""` (empty string)
+- [ ] `_check_auth()` handles `ANTHROPIC_API_KEY=" "` (whitespace-only, strips to empty)
+- [ ] `_check_auth()` handles `ANTHROPIC_API_KEY=None` (string "None", lowercased sentinel check)
 
 ### Error State Rendering
-- [ ] `run_documentation_audit()` in `reflections/auditing.py` receives `AuditSummary(skipped=True)`
-  and reports it as `"Docs audit skipped: ANTHROPIC_API_KEY not set"` — verify this propagates
-  correctly through the reflection scheduler's status tracking
+- [ ] `run_documentation_audit()` returns `{"status": "disabled", ...}` when `skip_type == "auth"`
+- [ ] `run_documentation_audit()` returns `{"status": "ok", ...}` when `skip_type == "schedule"`
 
 ## Test Impact
 
-- [ ] `tests/unit/test_docs_auditor.py` — UPDATE: add tests for `_check_auth()` (env set / not set /
-  empty string), add test that `run()` returns skipped summary when auth missing, add test that
-  auth exceptions in `_call_llm_for_verdict` are re-raised rather than swallowed, add test that
-  `analyze_doc` does NOT call Sonnet when Haiku raises auth error
+- [ ] `tests/unit/test_docs_auditor.py` — UPDATE: add tests for `_check_auth()` (all cases above),
+  add test that `run()` returns `skipped=True, skip_type="auth"` when auth missing, add timing
+  assertion (run() completes within 1 second when key absent), add test that consecutive errors
+  trigger early loop break, add test that `AuditSummary.skip_type` propagates correctly
 - [ ] `tests/unit/test_reflections_package.py::test_run_documentation_audit_*` — UPDATE: mock
-  `DocsAuditor.run` to return `AuditSummary(skipped=True, skip_reason="ANTHROPIC_API_KEY not set")`
-  and assert the wrapper formats it correctly
+  `DocsAuditor.run` to return `AuditSummary(skipped=True, skip_type="auth", skip_reason="ANTHROPIC_API_KEY not set")`
+  and assert the wrapper returns `{"status": "disabled", ...}` (not "ok")
 
 ## Rabbit Holes
 
@@ -229,31 +318,45 @@ Add a section explaining:
 - **Propagating `ANTHROPIC_API_KEY` to the worker launchd plist** — Tempting, but this changes
   deployment configuration rather than making the code resilient. The fix must work whether or
   not the key is present.
-- **Caching auth probe result across runs** — Unnecessary; the probe is O(1) env lookup.
+- **Caching auth probe result across runs** — Unnecessary; the probe is O(1) env lookup + one
+  `models.list()` call per audit run (not per doc).
 - **Integrating with `bridge.resilience.CircuitBreaker`** — The existing circuit breaker tracks
-  AgentSession API failures at the queue level. Wiring the docs auditor into it adds coupling
-  between a low-priority reflection and the session queue circuit state. Overkill for a simple
-  auth guard.
+  AgentSession API failures at the queue level (PR #502/#842). Wiring the docs auditor into it
+  adds coupling between a low-priority reflection and the session queue circuit state. Overkill
+  for a simple auth guard. The consecutive error counter in Fix 3 provides equivalent protection
+  without that coupling.
+- **Dashboard status entry for docs_auditor** — The `{"status": "disabled"}` return from
+  `run_documentation_audit()` is readable by the dashboard's reflection status display. Wiring a
+  dedicated docs_auditor tile into the dashboard is a separate dashboard feature.
 
 ## Risks
 
-### Risk 1: Key set but invalid (rotated/expired)
-**Impact:** Auth probe passes (key is non-empty), but `messages.create()` fails. Without Fix 2,
-Sonnet escalation still happens on every doc.
-**Mitigation:** Fix 2 (auth-exception re-raise + `analyze_doc` short-circuit) handles this case.
-Additionally, the `_api_call_count` cap limits max errors to 50 regardless.
+### Risk 1: `client.models.list()` probe adds startup latency
+**Impact:** The probe makes a real API call on each audit run start. If the Anthropic API is
+slow (rare), this adds latency before the frequency gate check.
+**Mitigation:** The probe is only made when a key IS present; missing-key path skips it immediately.
+The audit is a once-daily background job — a sub-second probe delay is acceptable.
 
 ### Risk 2: `reflections-modular` plan (#1028) modifies `reflections/auditing.py`
 **Impact:** The `run_documentation_audit()` function or `DocsAuditor` integration may be refactored
 before or after this PR lands. Merge conflict likely.
 **Mitigation:** This fix is confined to `scripts/docs_auditor.py` (the `DocsAuditor` class itself)
-and a comment update in `reflections/auditing.py`. The modularization plan should carry forward
+and a targeted change in `reflections/auditing.py`. The modularization plan should carry forward
 the auth guard if it moves the invocation.
+
+### Risk 3: Non-auth API failures (rate-limits, timeouts) still produce errors per-doc
+**Impact:** If the API is temporarily unavailable (rate limit, outage) after the probe passes,
+the auth probe succeeds but individual `messages.create()` calls fail. These are caught by the
+existing `except Exception` in `_call_llm_for_verdict` and log ERRORs per doc.
+**Mitigation:** Fix 3 (consecutive error counter) caps cascade at 3 consecutive failures. After
+3 failures, `run()` breaks the loop and returns partial results. This is a best-effort guard,
+not a full circuit breaker — non-auth cascades are an acknowledged residual risk.
 
 ## Race Conditions
 
-No race conditions — the auth probe is a synchronous env lookup at the start of `run()`. The fix
-does not introduce any shared mutable state.
+No race conditions — the auth probe is a synchronous operation at the start of `run()`. The fix
+does not introduce any shared mutable state. `_api_call_count` and the new `consecutive_errors`
+counter are instance-local and reset per `DocsAuditor` instance.
 
 ## No-Gos (Out of Scope)
 
@@ -261,7 +364,7 @@ does not introduce any shared mutable state.
 - Making the docs auditor use OAuth subprocess harness (separate architectural decision)
 - Fixing other reflections that may have similar auth issues (separate issues if they exist)
 - Changing the worker heartbeat interval or stale threshold (different problem)
-- Implementing a full circuit breaker in the docs auditor (overkill for this scope)
+- Implementing a full circuit breaker integration with `bridge.resilience.CircuitBreaker` (overkill)
 
 ## Update System
 
@@ -277,8 +380,8 @@ worker, not via any MCP tool or bridge invocation. No `.mcp.json` changes needed
 ## Documentation
 
 - [ ] Update `docs/features/reflections.md` to document the auth requirement for the docs auditor:
-  explain that it uses `ANTHROPIC_API_KEY` (direct SDK), not OAuth, and that absence of the key
-  causes clean skip with one warning log.
+  explain that it uses `ANTHROPIC_API_KEY` (direct SDK), not OAuth, and that absence/invalidity
+  of the key causes clean skip with one warning log.
 - [ ] Verify `docs/features/README.md` index entry for `reflections.md` is current (no new entry
   needed — existing entry covers the reflections feature; confirm it links correctly after the
   auth section is added).
@@ -287,11 +390,17 @@ worker, not via any MCP tool or bridge invocation. No `.mcp.json` changes needed
 
 - [ ] After `worker-restart`, zero `Could not resolve authentication method` errors in
   `logs/worker.log` within 5 minutes (regardless of `ANTHROPIC_API_KEY` presence)
-- [ ] `DocsAuditor.run()` returns `AuditSummary(skipped=True)` when `ANTHROPIC_API_KEY` is unset,
-  with one `WARNING` log line and zero `ERROR` log lines
-- [ ] When `ANTHROPIC_API_KEY` IS set, `DocsAuditor.run()` proceeds normally and produces real
-  verdicts (at least one `KEEP` / `UPDATE` / `DELETE`)
-- [ ] When api_key is set but invalid, Sonnet escalation is NOT triggered after a Haiku auth error
+- [ ] `DocsAuditor.run()` returns `AuditSummary(skipped=True, skip_type="auth")` when
+  `ANTHROPIC_API_KEY` is unset, with one `WARNING` log line and zero `ERROR` log lines
+- [ ] `DocsAuditor.run()` returns `AuditSummary(skipped=True, skip_type="auth")` when
+  `ANTHROPIC_API_KEY` is present but invalid (rotated/expired), with one `WARNING` and zero `ERROR`
+- [ ] When `ANTHROPIC_API_KEY` IS set and valid, `DocsAuditor.run()` proceeds normally and produces
+  real verdicts (at least one `KEEP` / `UPDATE` / `DELETE`)
+- [ ] `run_documentation_audit()` returns `{"status": "disabled", ...}` when skip_type is "auth"
+  (distinct from `{"status": "ok", ...}` for schedule-skip)
+- [ ] `DocsAuditor.run()` completes within 1 second when `ANTHROPIC_API_KEY` is absent (timing
+  assertion in unit test)
+- [ ] After 3 consecutive doc-audit errors, `run()` breaks the loop early with a WARNING log
 - [ ] Worker heartbeat stays under 360s threshold across 30 minutes of operation after fix
 - [ ] `tests/unit/test_docs_auditor.py` — all new auth tests pass
 - [ ] `docs/features/reflections.md` documents the auth requirement
@@ -302,7 +411,7 @@ worker, not via any MCP tool or bridge invocation. No `.mcp.json` changes needed
 
 - **Builder (auth-fix)**
   - Name: auth-fix-builder
-  - Role: Implement auth probe, exception short-circuit, and doc update
+  - Role: Implement auth probe, consecutive error guard, observability changes, and doc update
   - Agent Type: builder
   - Resume: true
 
@@ -314,47 +423,97 @@ worker, not via any MCP tool or bridge invocation. No `.mcp.json` changes needed
 
 ## Step by Step Tasks
 
-### 1. Implement auth probe and exception short-circuit in `scripts/docs_auditor.py`
-- **Task ID**: build-auth-fix
+### 1. Extend `Verdict` and `AuditSummary` dataclasses in `scripts/docs_auditor.py`
+- **Task ID**: extend-dataclasses
 - **Depends On**: none
 - **Validates**: tests/unit/test_docs_auditor.py
-- **Informed By**: Technical Approach (Fixes 1 and 2)
+- **Informed By**: Technical Approach (Fix 2)
 - **Assigned To**: auth-fix-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_check_auth()` method to `DocsAuditor` that checks `os.environ.get("ANTHROPIC_API_KEY")`
-  (strip whitespace; return False if empty/absent)
-- In `DocsAuditor.run()`, call `_check_auth()` before the frequency gate check; if False, log one
-  WARNING and return `AuditSummary(skipped=True, skip_reason="ANTHROPIC_API_KEY not set")`
-- In `_call_llm_for_verdict()`, detect authentication-type exceptions (check `"authentication"`,
-  `"api_key"`, `"auth_token"` in lowercased error string) and re-raise them instead of returning
-  `low_confidence=True`
-- In `analyze_doc()`, wrap the Haiku `_call_llm_for_verdict` call to catch re-raised auth
-  exceptions and return `Verdict(action="KEEP", low_confidence=False)` without escalating to Sonnet
-- Add tests to `tests/unit/test_docs_auditor.py`:
-  - `test_run_skips_when_api_key_missing` — mock env without key; assert `run()` returns skipped
-  - `test_run_skips_when_api_key_empty` — mock `ANTHROPIC_API_KEY=""`; assert skipped
-  - `test_check_auth_returns_true_when_key_set` — mock key present; assert `_check_auth()` True
-  - `test_auth_error_not_escalated_to_sonnet` — mock `messages.create` raising auth error; assert
-    `analyze_doc` does NOT call Sonnet (mock call count == 1)
-  - `test_call_llm_reraises_auth_exceptions` — verify re-raise behavior
+- Add `auth_failure: bool = False` field to `Verdict` dataclass (reserved for future use;
+  not set by this fix — documents the field so downstream code can key off it cleanly)
+- Add `skip_type: str = ""` field to `AuditSummary` dataclass (values: `"auth"`, `"schedule"`, `""`)
 
-### 2. Update `docs/features/reflections.md`
+### 2. Implement consolidated auth probe in `scripts/docs_auditor.py`
+- **Task ID**: build-auth-probe
+- **Depends On**: extend-dataclasses
+- **Validates**: tests/unit/test_docs_auditor.py
+- **Informed By**: Technical Approach (Fix 1)
+- **Assigned To**: auth-fix-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `_check_auth()` method to `DocsAuditor` that:
+  - Reads `os.environ.get("ANTHROPIC_API_KEY", "").strip()`
+  - Returns `(False, "ANTHROPIC_API_KEY not set")` if empty or sentinel string ("none", "null", "false", "0")
+  - Constructs `_anthropic_module.Anthropic(api_key=key)` and calls `client.models.list()`
+  - On `AuthenticationError` (check error string for "authentication", "api_key", "auth_token"):
+    returns `(False, "ANTHROPIC_API_KEY invalid or expired: {e}")`
+  - On non-auth exception: logs WARNING "Auth probe non-auth error: {e} — proceeding"; returns `(True, "")`
+  - On success: returns `(True, "")`
+- In `DocsAuditor.run()`, call `_check_auth()` BEFORE the frequency gate check:
+  - If `(False, reason)`: log `logger.warning("Docs auditor skipping: %s", reason)`;
+    return `AuditSummary(skipped=True, skip_type="auth", skip_reason=reason)`
+- Add tests to `tests/unit/test_docs_auditor.py`:
+  - `test_check_auth_key_missing` — no env var; assert returns `(False, "ANTHROPIC_API_KEY not set")`
+  - `test_check_auth_key_empty` — `ANTHROPIC_API_KEY=""`; assert `(False, ...)`
+  - `test_check_auth_key_sentinel_none` — `ANTHROPIC_API_KEY="None"`; assert `(False, ...)`
+  - `test_check_auth_key_sentinel_null` — `ANTHROPIC_API_KEY="null"`; assert `(False, ...)`
+  - `test_check_auth_key_valid` — mock `client.models.list()` success; assert `(True, "")`
+  - `test_check_auth_key_invalid` — mock `client.models.list()` raising `AuthenticationError`; assert `(False, "...invalid...")`
+  - `test_check_auth_non_auth_error` — mock `client.models.list()` raising `ConnectionError`; assert `(True, "")` and WARNING logged
+  - `test_run_skips_when_api_key_missing` — mock env without key; assert `run()` returns `AuditSummary(skipped=True, skip_type="auth")`
+  - `test_run_skips_when_api_key_invalid` — mock `_check_auth` returning `(False, "invalid")`; assert skipped with `skip_type="auth"`
+  - `test_run_completes_fast_when_key_absent` — assert `run()` completes within 1 second when `ANTHROPIC_API_KEY` absent (timing assertion using `time.time()`)
+  - `test_run_proceeds_when_auth_ok` — mock `_check_auth` returning `(True, "")`; assert `run()` does NOT return skipped summary
+
+### 3. Add consecutive error circuit break in `scripts/docs_auditor.py`
+- **Task ID**: build-error-cap
+- **Depends On**: extend-dataclasses
+- **Validates**: tests/unit/test_docs_auditor.py
+- **Informed By**: Technical Approach (Fix 3)
+- **Assigned To**: auth-fix-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `consecutive_errors = 0` and `MAX_CONSECUTIVE_ERRORS = 3` (module-level constant) to `run()`
+- In the doc loop `except Exception as e:` handler: increment `consecutive_errors`
+- At the start of each loop iteration (after the API cap check): if `consecutive_errors >= MAX_CONSECUTIVE_ERRORS`:
+  log `logger.warning("Stopping audit after %d consecutive errors...", consecutive_errors)` and `break`
+- On successful `analyze_doc()` result: reset `consecutive_errors = 0`
+- Add test `test_run_breaks_on_consecutive_errors` — mock `analyze_doc` to raise 3 consecutive
+  exceptions; assert `run()` breaks after 3 failures and logs WARNING
+
+### 4. Update `reflections/auditing.py` for `skip_type` observability
+- **Task ID**: build-observability
+- **Depends On**: extend-dataclasses
+- **Validates**: tests/unit/test_reflections_package.py
+- **Informed By**: Technical Approach (Fix 4)
+- **Assigned To**: auth-fix-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- In `run_documentation_audit()`, branch on `summary_obj.skip_type`:
+  - `skip_type == "auth"`: return `{"status": "disabled", "findings": [f"Docs audit disabled: {summary_obj.skip_reason}"], "summary": "..."}`
+  - Other skip types (schedule, etc.): return `{"status": "ok", "findings": [f"Docs audit skipped: {summary_obj.skip_reason}"], "summary": "..."}`
+- Add comment: `# NOTE: A fresh DocsAuditor instance must be created per call to isolate _api_call_count`
+- Update test `test_run_documentation_audit_*` in `tests/unit/test_reflections_package.py`:
+  assert mock returning `skip_type="auth"` produces `status="disabled"`
+
+### 5. Update `docs/features/reflections.md`
 - **Task ID**: document-auth-req
-- **Depends On**: build-auth-fix
+- **Depends On**: build-auth-probe
 - **Assigned To**: auth-fix-builder
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Add section "Docs Auditor Authentication" to `docs/features/reflections.md` explaining:
   - Docs auditor uses `Anthropic()` SDK directly (not OAuth subprocess)
   - Requires `ANTHROPIC_API_KEY` in worker environment
-  - If absent, auditor skips with one WARNING (correct behavior)
+  - If absent or invalid, auditor skips with one WARNING (correct behavior)
   - Contrast with AgentSessions using `CLAUDE_CODE_OAUTH_TOKEN`
   - Note: to enable docs auditing, add `ANTHROPIC_API_KEY` to the worker's launchd env or `.env`
 
-### 3. Final Validation
+### 6. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: build-auth-fix, document-auth-req
+- **Depends On**: build-auth-probe, build-error-cap, build-observability, document-auth-req
 - **Assigned To**: auth-fix-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -362,7 +521,7 @@ worker, not via any MCP tool or bridge invocation. No `.mcp.json` changes needed
 - Run `pytest tests/unit/test_reflections_package.py -v` — no regression
 - Verify `docs/features/reflections.md` has the new auth section
 - Confirm no `except Exception: pass` (bare swallow) was introduced
-- Run `python -m black scripts/docs_auditor.py` and verify no format issues
+- Run `python -m black scripts/docs_auditor.py reflections/auditing.py` and verify no format issues
 
 ## Verification
 
@@ -370,17 +529,27 @@ worker, not via any MCP tool or bridge invocation. No `.mcp.json` changes needed
 |-------|---------|----------|
 | Unit tests pass | `pytest tests/unit/test_docs_auditor.py -v -q` | exit code 0 |
 | Reflections tests pass | `pytest tests/unit/test_reflections_package.py -v -q` | exit code 0 |
-| No auth error logged when key absent | `python -c "import os; os.environ.pop('ANTHROPIC_API_KEY', None); from pathlib import Path; from scripts.docs_auditor import DocsAuditor; s = DocsAuditor(Path('.')).run(); print(s.skipped, s.skip_reason)"` | output contains `True` |
-| Format clean | `python -m black --check scripts/docs_auditor.py` | exit code 0 |
+| No auth error logged when key absent | `python -c "import os; os.environ.pop('ANTHROPIC_API_KEY', None); from pathlib import Path; from scripts.docs_auditor import DocsAuditor; s = DocsAuditor(Path('.')).run(); print(s.skipped, s.skip_type, s.skip_reason)"` | `True auth ANTHROPIC_API_KEY not set` |
+| Disabled status when key absent | Check `run_documentation_audit()` return when key absent | `{"status": "disabled", ...}` |
+| Format clean | `python -m black --check scripts/docs_auditor.py reflections/auditing.py` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Consistency Auditor, Skeptic | B1: `Verdict(low_confidence=False)` on auth error corrupts verdict semantics | extend-dataclasses (Fix 2) | Added `Verdict.auth_failure` field; removed per-call auth catch from `analyze_doc` entirely — probe at `run()` start replaces it |
+| BLOCKER | Skeptic, Simplifier, Consistency Auditor | B2: Fix 2 redundant AND leaves gap for invalid keys | build-auth-probe (Fix 1) | Consolidated into `_check_auth()` with `client.models.list()` probe; covers missing AND invalid keys at startup; removed per-call re-raise/catch entirely |
+| CONCERN | Adversary | C1: Auth probe passes on `"None"` string value | build-auth-probe (Fix 1) | Added `key.lower() in ("none", "null", "false", "0")` sentinel guard |
+| CONCERN | Operator | C2: No observability distinction between auth-skip and schedule-skip | build-observability (Fix 4) + extend-dataclasses | Added `AuditSummary.skip_type`; `run_documentation_audit()` returns `status="disabled"` for auth-skip |
+| CONCERN | Operator, User | C3: Worker heartbeat validation absent from test plan | build-auth-probe task | Added `test_run_completes_fast_when_key_absent` timing assertion (1 second limit) |
+| CONCERN | Archaeologist | C4: No Prior Art section | Prior Art section | Added PR #502/#842 references; deferred CircuitBreaker integration documented in Rabbit Holes |
+| CONCERN | Archaeologist | C5: Non-auth API failures still cascade | build-error-cap (Fix 3) | Added `consecutive_errors` counter; breaks loop at ≥3 failures |
+| CONCERN | Consistency Auditor, Skeptic | C6: Desired outcome overstates Fix 1 scope | build-auth-probe (Fix 1) | Extended `_check_auth()` to make a probe API call — desired outcome now correctly says "missing OR invalid" |
+| NIT | Adversary | N2: `_api_call_count` isolation undocumented | build-observability | Added inline comment to `run_documentation_audit()` noting fresh-instance requirement |
+| NIT | User | N3: No dashboard signal for disabled auditor | build-observability | `status="disabled"` propagates to reflection status tracking; full dashboard tile deferred to Rabbit Holes |
 
 ---
 
 ## Open Questions
 
-None — root cause is confirmed, fix is scoped, no human input needed before building.
+None — root cause is confirmed, fix is scoped, all critique blockers addressed.
