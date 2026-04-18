@@ -1,4 +1,4 @@
-"""Tests for the Legal Dispatch Guards (G1-G5) and the #1036 replay."""
+"""Tests for the Legal Dispatch Guards (G1-G6) and the #1036/#1043 replays."""
 
 from __future__ import annotations
 
@@ -504,6 +504,140 @@ def test_1036_replay_terminates():
             SKILL_DO_PLAN,
             SKILL_DO_PLAN_CRITIQUE,
         )
+
+
+# ---------------------------------------------------------------------------
+# G6 tests — terminal merge-ready fast-path (issue #1043)
+# ---------------------------------------------------------------------------
+
+
+def _g6_happy_states() -> dict:
+    """Seed state for G6 positive tests: all stages through DOCS completed."""
+    return {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "CRITIQUE": "completed",
+        "BUILD": "completed",
+        "TEST": "completed",
+        "REVIEW": "completed",
+        "DOCS": "completed",
+        "_verdicts": {"REVIEW": {"verdict": "APPROVED"}},
+    }
+
+
+def _g6_happy_meta() -> dict:
+    """Seed meta for G6 positive tests: CLEAN merge state, CI green."""
+    return {
+        "pr_number": 264,
+        "pr_merge_state": "CLEAN",
+        "ci_all_passing": True,
+        "latest_review_verdict": "APPROVED",
+    }
+
+
+def test_g6_terminal_merge_ready_fires():
+    """G6: CLEAN + CI green + DOCS done + APPROVED verdict → /do-merge with row_id G6."""
+    result = decide_next_dispatch(_g6_happy_states(), _g6_happy_meta())
+    assert isinstance(result, Dispatch)
+    assert result.skill == SKILL_DO_MERGE
+    assert result.row_id == "G6"
+
+
+def test_1043_pr264_8step_terminates():
+    """Replay the PR #264 8-step incident: router must dispatch /do-merge, not /do-pr-review.
+
+    Issue #1043 showed /sdlc dispatching /do-pr-review eight times on a
+    merge-ready PR. With G6 in place the router must immediately route to
+    /do-merge when all stages are done, CI is green, and the review is APPROVED.
+    """
+    result = decide_next_dispatch(_g6_happy_states(), _g6_happy_meta())
+    assert isinstance(result, Dispatch)
+    assert result.skill == SKILL_DO_MERGE
+    assert result.row_id == "G6"
+
+
+def test_g6_does_not_fire_when_docs_not_done():
+    """G6 must not dispatch /do-merge if DOCS stage is not completed."""
+    states = {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "CRITIQUE": "completed",
+        "BUILD": "completed",
+        "TEST": "completed",
+        "REVIEW": "completed",
+        # DOCS intentionally absent — not completed
+        "_verdicts": {"REVIEW": {"verdict": "APPROVED"}},
+    }
+    result = decide_next_dispatch(states, _g6_happy_meta())
+    # G6 must NOT fire — should route to /do-docs (Row 9) instead
+    assert isinstance(result, Dispatch)
+    assert result.skill != SKILL_DO_MERGE
+    assert result.row_id != "G6"
+
+
+def test_g6_does_not_fire_without_pr_number():
+    """G6 is silent when no PR exists."""
+    meta = {k: v for k, v in _g6_happy_meta().items() if k != "pr_number"}
+    result = decide_next_dispatch(_g6_happy_states(), meta)
+    # G6 must not fire — result may be Dispatch (row 10/10b) or Blocked
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G6"
+    # Blocked is also acceptable (no pr_number + all stages done = ambiguous state)
+
+
+def test_g6_does_not_fire_when_pr_not_clean():
+    """G6 is silent when mergeStateStatus is not CLEAN."""
+    meta = {**_g6_happy_meta(), "pr_merge_state": "BLOCKED"}
+    result = decide_next_dispatch(_g6_happy_states(), meta)
+    # Should not route to /do-merge via G6
+    assert isinstance(result, (Dispatch, Blocked))
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G6"
+
+
+def test_g6_does_not_fire_when_ci_not_passing():
+    """G6 is silent when CI is not fully passing."""
+    meta = {**_g6_happy_meta(), "ci_all_passing": False}
+    result = decide_next_dispatch(_g6_happy_states(), meta)
+    assert isinstance(result, (Dispatch, Blocked))
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G6"
+
+
+def test_g6_does_not_fire_when_review_verdict_missing():
+    """G6 is silent when _verdicts['REVIEW'] is absent."""
+    states = {k: v for k, v in _g6_happy_states().items() if k != "_verdicts"}
+    result = decide_next_dispatch(states, _g6_happy_meta())
+    assert isinstance(result, (Dispatch, Blocked))
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G6"
+
+
+def test_g6_does_not_fire_when_review_verdict_is_changes_requested():
+    """G6 is silent when review verdict is CHANGES REQUESTED."""
+    states = {**_g6_happy_states(), "_verdicts": {"REVIEW": {"verdict": "CHANGES REQUESTED"}}}
+    result = decide_next_dispatch(states, _g6_happy_meta())
+    assert isinstance(result, (Dispatch, Blocked))
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G6"
+
+
+def test_g6_does_not_fire_when_ci_all_passing_is_none():
+    """G6 is silent when ci_all_passing is None (gh CLI failure)."""
+    meta = {**_g6_happy_meta(), "ci_all_passing": None}
+    result = decide_next_dispatch(_g6_happy_states(), meta)
+    assert isinstance(result, (Dispatch, Blocked))
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G6"
+
+
+def test_g6_does_not_fire_when_pr_merge_state_is_none():
+    """G6 is silent when pr_merge_state is None (gh CLI failure)."""
+    meta = {**_g6_happy_meta(), "pr_merge_state": None}
+    result = decide_next_dispatch(_g6_happy_states(), meta)
+    assert isinstance(result, (Dispatch, Blocked))
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G6"
 
 
 def _states_with_plan() -> dict:

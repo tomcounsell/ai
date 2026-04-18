@@ -100,9 +100,12 @@ If a PR exists, fetch its full state for assessment:
 gh pr view {pr_number} --json number,headRefName,reviewDecision,statusCheckRollup,body
 
 # 2e. Check review status — look for APPROVED, CHANGES_REQUESTED, or no review
-# reviewDecision: "APPROVED" means review is clean
-# reviewDecision: "CHANGES_REQUESTED" means blockers exist
-# reviewDecision: "" (empty) means no review yet
+# reviewDecision: "APPROVED" means formal GitHub review approved (non-self-authored PRs)
+# reviewDecision: "CHANGES_REQUESTED" means formal GitHub review requested changes
+# reviewDecision: "" (empty) — AMBIGUOUS for self-authored PRs:
+#   - For non-self-authored PRs: no review posted yet
+#   - For self-authored PRs: expected even after review — check _verdicts["REVIEW"] from sdlc_stage_query
+# Always cross-check _meta.latest_review_verdict before concluding no review exists.
 ```
 
 ## Step 3: Check Documentation Status
@@ -147,6 +150,7 @@ The canonical Python implementation is `agent.sdlc_router.decide_next_dispatch()
 | G3: PR lock | `pr_number` is set AND (`last_dispatched_skill` OR proposed dispatch) is `/do-plan` or `/do-plan-critique` | `/do-merge` (if REVIEW and DOCS complete), `/do-patch` (if review requested changes), else `/do-pr-review` |
 | G4: Oscillation (universal) | `same_stage_dispatch_count >= 3` | Escalate: `blocked` with reason `stage oscillation — {skill} dispatched {N} times without state change` |
 | G5: Unchanged critique artifact | `_verdicts["CRITIQUE"]` has `artifact_hash` AND current plan file hash matches | Use cached verdict: `/do-plan` (NEEDS REVISION) or `/do-build` (READY TO BUILD). Never re-dispatch `/do-plan-critique` on an unchanged plan. |
+| G6: Terminal merge ready | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `DOCS == "completed"` AND `_verdicts["REVIEW"]` contains `APPROVED` | `/do-merge {pr_number}` |
 
 **G4 is universal** — it applies to EVERY stage, including DOCS and MERGE. Repeated dispatches of `/do-docs` or `/do-merge` without state change WILL trip the guard.
 

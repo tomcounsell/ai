@@ -384,12 +384,51 @@ def guard_g5_artifact_hash_cache(
     return None
 
 
+def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict) -> Dispatch | None:
+    """G6: PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to /do-merge.
+
+    Fires when all four conditions are met:
+    - ``pr_number`` is set (a PR exists for this issue)
+    - ``pr_merge_state == "CLEAN"`` (GitHub mergeStateStatus)
+    - ``ci_all_passing is True`` (all statusCheckRollup conclusions are SUCCESS)
+    - ``stage_states["DOCS"] == "completed"`` (docs gate has passed)
+    - ``_verdicts["REVIEW"]`` contains "APPROVED"
+
+    G6 is evaluated LAST (after G1-G5). Escalation guards (G2, G4) take priority
+    over the merge fast-path — a stuck pipeline should escalate before merging.
+    G3 (PR lock) redirects plan-stage dispatches but does not prevent G6.
+
+    Returns ``None`` if any condition is not met, allowing the normal dispatch
+    table to handle routing (e.g., to Row 9 ``/do-docs`` if docs aren't done).
+    """
+    pr_number = meta.get("pr_number")
+    if not pr_number:
+        return None
+    if meta.get("pr_merge_state") != "CLEAN":
+        return None
+    if meta.get("ci_all_passing") is not True:
+        return None
+    # DOCS must be completed before dispatching merge — G6 must not bypass the docs gate.
+    if stage_states.get("DOCS") != STATUS_COMPLETED:
+        return None
+    verdicts = stage_states.get("_verdicts") or {}
+    review_verdict = _verdict_text(verdicts.get("REVIEW"))
+    if "APPROVED" not in review_verdict.upper():
+        return None
+    return Dispatch(
+        skill=SKILL_DO_MERGE,
+        reason="G6: PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to merge",
+        row_id="G6",
+    )
+
+
 GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
     guard_g1_critique_loop,
     guard_g2_critique_cycle_cap,
     guard_g3_pr_lock,
     guard_g4_oscillation,
     guard_g5_artifact_hash_cache,
+    guard_g6_terminal_merge_ready,
 ]
 
 

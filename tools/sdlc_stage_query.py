@@ -8,6 +8,8 @@ used by the router's Legal Dispatch Guards::
         "stages": {"ISSUE": "completed", "PLAN": "completed", ...},
         "_meta": {
             "patch_cycle_count": 0,
+            "pr_merge_state": "CLEAN",
+            "ci_all_passing": true,
             "critique_cycle_count": 1,
             "latest_critique_verdict": "NEEDS REVISION",
             "latest_review_verdict": null,
@@ -123,6 +125,58 @@ def _get_stage_states(session) -> dict[str, str]:
         return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
+def _fetch_pr_merge_state(pr_number: int | None) -> tuple[str | None, bool | None]:
+    """Fetch live PR merge state and CI status from GitHub.
+
+    Returns a tuple of (pr_merge_state, ci_all_passing):
+    - ``pr_merge_state``: value of ``mergeStateStatus`` (e.g. "CLEAN", "BLOCKED",
+      "DIRTY") or ``None`` on any failure.
+    - ``ci_all_passing``: ``True`` if all ``statusCheckRollup`` conclusions are
+      ``"SUCCESS"`` (empty list also returns ``True`` — a repo with no required
+      checks has no failing checks), ``None`` on failure.
+
+    On any ``gh`` CLI failure (network error, unknown PR, timeout), both fields
+    default to ``None``. Guard G6 will not fire if either is ``None``.
+    """
+    if not pr_number:
+        return None, None
+
+    try:
+        proc = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "mergeStateStatus,statusCheckRollup",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            logger.debug(f"_fetch_pr_merge_state: gh returned {proc.returncode}")
+            return None, None
+        data = json.loads(proc.stdout or "{}")
+        merge_state = data.get("mergeStateStatus")
+        if not isinstance(merge_state, str):
+            merge_state = None
+        rollup = data.get("statusCheckRollup")
+        if not isinstance(rollup, list):
+            ci_all_passing = None
+        else:
+            # Empty statusCheckRollup: no required checks → no failing checks.
+            # all() on empty sequence returns True in Python, which is correct here.
+            ci_all_passing = all(
+                isinstance(check, dict) and check.get("conclusion") == "SUCCESS" for check in rollup
+            )
+        return merge_state, ci_all_passing
+    except Exception as e:
+        logger.debug(f"_fetch_pr_merge_state failed: {e}")
+        return None, None
+
+
 def _lookup_pr_number(issue_number: int | None) -> int | None:
     """Attempt to find the open PR number for this issue via ``gh``.
 
@@ -220,6 +274,9 @@ def _compute_meta(
     else:
         pr_number = _lookup_pr_number(issue_number)
 
+    # Fetch live PR merge state and CI status for G6 guard
+    pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number)
+
     # Compute dispatch-history derived fields
     same_stage_count = 0
     last_skill: str | None = None
@@ -242,6 +299,8 @@ def _compute_meta(
         "latest_review_verdict": latest_review,
         "revision_applied": revision_applied,
         "pr_number": pr_number,
+        "pr_merge_state": pr_merge_state,
+        "ci_all_passing": ci_all_passing,
         "same_stage_dispatch_count": int(same_stage_count),
         "last_dispatched_skill": last_skill,
     }
@@ -256,6 +315,8 @@ def _default_meta() -> dict:
         "latest_review_verdict": None,
         "revision_applied": False,
         "pr_number": None,
+        "pr_merge_state": None,
+        "ci_all_passing": None,
         "same_stage_dispatch_count": 0,
         "last_dispatched_skill": None,
     }

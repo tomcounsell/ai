@@ -358,3 +358,141 @@ class TestEnrichedPayload:
         parsed = json.loads(result.stdout.strip())
         assert "stages" in parsed
         assert "_meta" in parsed
+
+    def test_enriched_meta_includes_pr_merge_state_and_ci_all_passing(self):
+        """_meta includes pr_merge_state and ci_all_passing fields."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "completed"})
+        mock_session.pr_number = 42
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch(
+                "tools.sdlc_stage_query._fetch_pr_merge_state",
+                return_value=("CLEAN", True),
+            ):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert "pr_merge_state" in result["_meta"]
+        assert "ci_all_passing" in result["_meta"]
+        assert result["_meta"]["pr_merge_state"] == "CLEAN"
+        assert result["_meta"]["ci_all_passing"] is True
+
+    def test_enriched_meta_defaults_pr_merge_state_to_none_on_gh_failure(self):
+        """When gh CLI fails, pr_merge_state and ci_all_passing default to None."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "completed"})
+        mock_session.pr_number = 42
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch(
+                "tools.sdlc_stage_query._fetch_pr_merge_state",
+                return_value=(None, None),
+            ):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["pr_merge_state"] is None
+        assert result["_meta"]["ci_all_passing"] is None
+
+    def test_default_meta_includes_pr_merge_state_and_ci_all_passing(self):
+        """_default_meta always includes pr_merge_state and ci_all_passing keys."""
+        from tools.sdlc_stage_query import _default_meta
+
+        meta = _default_meta()
+        assert "pr_merge_state" in meta
+        assert "ci_all_passing" in meta
+        assert meta["pr_merge_state"] is None
+        assert meta["ci_all_passing"] is None
+
+
+class TestFetchPrMergeState:
+    """Tests for the _fetch_pr_merge_state helper."""
+
+    def test_returns_none_tuple_when_no_pr_number(self):
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        result = _fetch_pr_merge_state(None)
+        assert result == (None, None)
+
+    def test_returns_none_tuple_on_gh_failure(self):
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+            result = _fetch_pr_merge_state(264)
+
+        assert result == (None, None)
+
+    def test_parses_clean_merge_state_and_passing_ci(self):
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        gh_output = _json.dumps(
+            {
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [
+                    {"conclusion": "SUCCESS"},
+                    {"conclusion": "SUCCESS"},
+                ],
+            }
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
+            merge_state, ci_passing = _fetch_pr_merge_state(264)
+
+        assert merge_state == "CLEAN"
+        assert ci_passing is True
+
+    def test_ci_all_passing_false_when_any_check_fails(self):
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        gh_output = _json.dumps(
+            {
+                "mergeStateStatus": "BLOCKED",
+                "statusCheckRollup": [
+                    {"conclusion": "SUCCESS"},
+                    {"conclusion": "FAILURE"},
+                ],
+            }
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
+            merge_state, ci_passing = _fetch_pr_merge_state(264)
+
+        assert merge_state == "BLOCKED"
+        assert ci_passing is False
+
+    def test_empty_status_check_rollup_means_ci_passing(self):
+        """Empty statusCheckRollup (no required checks) -> ci_all_passing=True."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        gh_output = _json.dumps(
+            {
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [],
+            }
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
+            merge_state, ci_passing = _fetch_pr_merge_state(264)
+
+        assert merge_state == "CLEAN"
+        assert ci_passing is True
+
+    def test_returns_none_tuple_on_exception(self):
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        with patch("tools.sdlc_stage_query.subprocess.run", side_effect=OSError("not found")):
+            result = _fetch_pr_merge_state(264)
+
+        assert result == (None, None)
