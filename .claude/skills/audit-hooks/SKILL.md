@@ -44,20 +44,20 @@ Read `.claude/settings.json` and extract every hook entry. For each hook, record
 For EACH hook command, check:
 
 **Settings-level checks:**
-- [ ] `|| true` correctness (Rules 1-4 from BEST_PRACTICES.md)
+- [ ] `|| true` correctness (Rules 1-3 from BEST_PRACTICES.md)
 - [ ] Timeout appropriateness (Rule 9: 5s simple, 10s git, 15s API)
 - [ ] Matcher specificity (empty matcher on PreToolUse fires on every tool call — WARN if timeout > 5s)
 
 **Python script checks** (for hooks targeting `.py` files):
-- [ ] Has `try/except` + `log_hook_error()` at `__main__` level (Rule 5)
+- [ ] Has `try/except` + `log_hook_error()` at `__main__` level (Rule 4)
 - [ ] No bare `sys.exit(1)` in advisory hooks
-- [ ] No top-level imports of known-heavy modules: `anthropic`, `openai`, `pandas`, `numpy`, `httpx`, `pydantic` (Rule 9)
+- [ ] No top-level imports of known-heavy modules: `anthropic`, `openai`, `pandas`, `numpy`, `httpx`, `pydantic` (Rule 8)
 - [ ] File exists and is syntactically valid Python
 
 **Bash script checks** (for hooks targeting `.sh` files):
-- [ ] Uses `set +e`, not `set -e` (Rule 6)
-- [ ] No bare `exec` without error handling (Rule 7)
-- [ ] Prefers venv binaries over system PATH (Rule 8)
+- [ ] Uses `set +e`, not `set -e` (Rule 5)
+- [ ] No bare `exec` without error handling (Rule 6)
+- [ ] Prefers venv binaries over system PATH (Rule 7)
 - [ ] Has error logging to `logs/hooks.log`
 - [ ] File exists and is executable
 

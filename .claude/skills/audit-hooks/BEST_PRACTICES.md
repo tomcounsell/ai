@@ -49,7 +49,7 @@ Validator hooks exist to block invalid operations. Adding `|| true` defeats the 
 
 ---
 
-### 3. All `|| true` hooks MUST call `log_hook_error()` on failure
+### 4. All `|| true` hooks MUST call `log_hook_error()` on failure
 
 Silent failure is invisible failure. Every advisory hook must log errors to `logs/hooks.log`.
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
 ---
 
-### 3. Bash hooks MUST use `set +e`
+### 5. Bash hooks MUST use `set +e`
 
 `set -e` causes the entire hook to exit on any subcommand failure, even benign ones (like `grep` finding no matches). In a hook context, this leads to silent exits.
 
@@ -92,7 +92,7 @@ set -e
 
 ---
 
-### 3. Bash hooks MUST NOT use bare `exec`
+### 6. Bash hooks MUST NOT use bare `exec`
 
 `exec` replaces the shell process, preventing any error recovery or logging after the exec'd command.
 
@@ -113,7 +113,7 @@ exec python my_tool "$@"
 
 ---
 
-### 3. Shell hooks MUST prefer venv binaries
+### 7. Shell hooks MUST prefer venv binaries
 
 Hook scripts run as subprocesses with the system PATH. Project-specific tools installed in `.venv/` are not on PATH unless explicitly referenced.
 
@@ -133,7 +133,7 @@ valor-calendar "$@"  # may not be on PATH
 
 ---
 
-### 3. Python hooks MUST minimize imports
+### 8. Python hooks MUST minimize imports
 
 Hooks run on every tool invocation. Heavy imports (anthropic, openai, pandas, numpy, requests) add latency to every operation.
 
@@ -158,7 +158,7 @@ def main():
 
 ---
 
-### 3. Hook timeouts MUST match expected workload
+### 9. Hook timeouts MUST match expected workload
 
 | Workload | Recommended timeout |
 |----------|-------------------|
