@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 appetite: Large
 owner: Valor Engels
@@ -421,11 +421,11 @@ as before (those functions stay in the residual module).
 
 ## Documentation
 
-- [ ] Update `docs/features/agent-session-queue.md` to list the new module structure and
+- [x] Update `docs/features/agent-session-queue.md` to list the new module structure and
   the purpose of each extracted file
-- [ ] Add inline docstrings to each new module file with a one-sentence purpose statement
+- [x] Add inline docstrings to each new module file with a one-sentence purpose statement
   (this is also an acceptance criterion)
-- [ ] Add entry to `docs/features/README.md` if the feature doc is new
+- [x] Add entry to `docs/features/README.md` if the feature doc is new
 
 ## Success Criteria
 

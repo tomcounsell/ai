@@ -333,7 +333,7 @@ Dev session executes assigned work
     |-- Commits code, runs tests, streams output
     |
     v
-_handle_dev_session_completion() (agent/agent_session_queue.py)
+_handle_dev_session_completion() (agent/session_completion.py)
     |-- Looks up parent PM session via parent_agent_session_id
     |-- PipelineStateMachine(parent).classify_outcome(stage, result)
     |       |
@@ -355,9 +355,9 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 
 | Component | File | Role |
 |-----------|------|------|
-| `_handle_dev_session_completion()` | `agent/agent_session_queue.py` | Worker post-completion: classifies outcome, posts GitHub comment, steers parent PM; creates continuation PM on steer failure |
-| `_create_continuation_pm()` | `agent/agent_session_queue.py` | Creates a continuation PM session when the parent PM is terminal — includes SETNX dedup, depth cap, and structured logging |
-| `_extract_issue_number()` | `agent/agent_session_queue.py` | Resolves tracking issue from env vars or session message_text |
+| `_handle_dev_session_completion()` | `agent/session_completion.py` | Worker post-completion: classifies outcome, posts GitHub comment, steers parent PM; creates continuation PM on steer failure |
+| `_create_continuation_pm()` | `agent/session_completion.py` | Creates a continuation PM session when the parent PM is terminal — includes SETNX dedup, depth cap, and structured logging |
+| `_extract_issue_number()` | `agent/session_completion.py` | Resolves tracking issue from env vars or session message_text |
 | `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Starts pipeline stage on Skill tool calls (PM Skill path) |
 | `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path |
 | `PipelineStateMachine` | `agent/pipeline_state.py` | Manages stage_states on the parent AgentSession (moved from `bridge/` in Phase 3) |
@@ -446,7 +446,12 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `agent/agent_definitions.py` | Agent registry; `get_definition()` provides actionable error for stale dev-session callers |
-| `agent/agent_session_queue.py` | Queue with nudge loop and per-worker-key serialization; `_handle_dev_session_completion()` for post-harness SDLC lifecycle |
+| `agent/agent_session_queue.py` | Queue dispatch surface — entry points (`enqueue_agent_session`, `register_callbacks`, worker loops); re-exports symbols from split modules |
+| `agent/session_completion.py` | Post-execution lifecycle: `_handle_dev_session_completion()`, `_create_continuation_pm()`, finalization |
+| `agent/session_executor.py` | Core execute loop: `_execute_agent_session()`, turn-boundary steering, nudge/re-enqueue |
+| `agent/session_health.py` | Health monitor, startup recovery, orphan cleanup |
+| `agent/session_pickup.py` | Pop locking, steering drain, session selection |
+| `agent/session_state.py` | Shared globals: `_active_sessions`, `_global_session_semaphore`, `SessionHandle` |
 | `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery), `FileOutputHandler` (logs to `logs/worker/`), and `LoggingOutputHandler` implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
 | `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |

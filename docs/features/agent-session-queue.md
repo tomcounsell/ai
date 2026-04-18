@@ -55,7 +55,7 @@ At startup, two cleanup passes run before session processing begins. These are c
 
 2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets stale running sessions to pending with high priority. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may have been picked up by a worker in the current process before startup recovery fired. Sessions with `started_at=None` (missing or corrupt) are always recovered. Uses the same timing guard as the periodic health check to prevent orphaning SDK subprocesses (issue #727).
 
-3. **Orphaned process cleanup** (`_cleanup_orphaned_claude_processes()`): Kills Claude Agent SDK subprocesses from prior worker runs whose PPID is 1 (orphaned by parent death). Called from `worker/__main__.py` at startup after session recovery. Defined in `agent/agent_session_queue.py` so it is available to the worker without importing from the bridge.
+3. **Orphaned process cleanup** (`_cleanup_orphaned_claude_processes()`): Kills Claude Agent SDK subprocesses from prior worker runs whose PPID is 1 (orphaned by parent death). Called from `worker/__main__.py` at startup after session recovery. Defined in `agent/session_health.py` (re-exported from `agent_session_queue.py` for backward compatibility).
 
 ### Caller: Worker Only
 

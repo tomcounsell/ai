@@ -51,7 +51,7 @@ When a stuck session is found:
 The health check loop starts automatically with the **worker process** (`python -m worker`), alongside the session notify listener and session watchdog. Both the health loop and notify listener run as background asyncio tasks in the worker:
 
 - **Session notify listener** (`_session_notify_listener()` in `agent/agent_session_queue.py`): Subscribes to the `valor:sessions:new` Redis pub/sub channel. Extracts `worker_key` from the payload and calls `_ensure_worker(worker_key, is_project_keyed)` immediately — ~1s pickup latency. This is the fast path for normal operation. Uses a **dedicated** `redis.Redis` connection with `socket_timeout=None` so `pubsub.listen()` blocks indefinitely between messages, instead of inheriting the global `POPOTO_REDIS_DB` pool's `socket_timeout=5` (which would cause a reconnect cycle and a guaranteed message-loss window — issue #824).
-- **Agent session health monitor** (`_agent_session_health_loop()` in `agent/agent_session_queue.py`): Runs every 5 minutes. Recovers sessions missed by pub/sub (Redis restart, worker not running at publish time, bypass paths). This is the safety net. The task is named `session-health-monitor` and registers a `done_callback` (`_health_task_done`) that logs ERROR if the loop exits unexpectedly with an exception (cancellation during shutdown is ignored). This mirrors the `_notify_task_done` pattern on `notify_task` and prevents silent loss of health monitoring.
+- **Agent session health monitor** (`_agent_session_health_loop()` in `agent/session_health.py`, re-exported from `agent_session_queue.py`): Runs every 5 minutes. Recovers sessions missed by pub/sub (Redis restart, worker not running at publish time, bypass paths). This is the safety net. The task is named `session-health-monitor` and registers a `done_callback` (`_health_task_done`) that logs ERROR if the loop exits unexpectedly with an exception (cancellation during shutdown is ignored). This mirrors the `_notify_task_done` pattern on `notify_task` and prevents silent loss of health monitoring.
 - **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level (separate from queue-level monitoring)
 
 ### Done Callback — `_health_task_done`
@@ -97,7 +97,7 @@ Total: 2 jobs (1 pending, 1 running)
 
 ## Configuration
 
-Constants in `agent/agent_session_queue.py`:
+Constants in `agent/session_health.py` (re-exported from `agent_session_queue.py`):
 
 | Constant | Default | Description |
 |----------|---------|-------------|
@@ -117,7 +117,8 @@ Constants in `agent/agent_session_queue.py`:
 - [session-watchdog.md](session-watchdog.md) -- Session-level health monitoring (complementary layer)
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
 - [agent-session-model.md](agent-session-model.md) -- AgentSession model fields and lifecycle
-- `agent/agent_session_queue.py` -- Implementation source
+- `agent/session_health.py` -- Health monitor and startup recovery implementation
+- `agent/agent_session_queue.py` -- Queue entry points (re-exports from session_health and other modules)
 - Issue #127 -- Original tracking issue
 - Issue #944 -- No-progress recovery for sessions stuck behind a shared-worker-key PM
 - Issue #1036 -- Two-tier no-progress detector (dual heartbeat + Tier 2 reprieve gates)

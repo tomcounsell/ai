@@ -219,7 +219,7 @@ MAX_CONCURRENT_SESSIONS=8
 ```
 
 **Implementation details:**
-- `_global_session_semaphore` is a module-level `asyncio.Semaphore | None` in `agent/agent_session_queue.py`
+- `_global_session_semaphore` is a module-level `asyncio.Semaphore | None` in `agent/session_state.py` (re-exported from `agent_session_queue.py`)
 - Initialized by `_run_worker()` in `worker/__main__.py` **before** any worker loop is created
 - Clamped to minimum 1 to prevent deadlock (`MAX_CONCURRENT_SESSIONS=0` → 1 with a warning log)
 - The semaphore is acquired **before** `_pop_agent_session()` is called, so `transition_status("running")` never occurs without a slot — the dashboard count stays accurate
@@ -320,7 +320,7 @@ In `agent/sdk_client.py`, `session_type` is resolved from Redis **before** `buil
 
 ## Per-session registry (`_active_sessions`)
 
-`agent/agent_session_queue.py` maintains `_active_sessions: dict[str, SessionHandle]`,
+`agent/session_state.py` (re-exported from `agent_session_queue.py`) maintains `_active_sessions: dict[str, SessionHandle]`,
 a per-session registry keyed by `agent_session_id`. Each `SessionHandle` holds:
 
 * `task` — the `asyncio.Task` currently running `_execute_agent_session`. The

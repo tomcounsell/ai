@@ -48,7 +48,7 @@ All errors are swallowed with `logger.warning` — hooks never crash the PM sess
 
 ### On Stage Completion (Worker Post-Completion Handler — Dev-Session Path)
 
-When a Dev session completes (via SDK or CLI harness), the worker calls `_handle_dev_session_completion()` in `agent/agent_session_queue.py`:
+When a Dev session completes (via SDK or CLI harness), the worker calls `_handle_dev_session_completion()` in `agent/session_completion.py`:
 
 1. Looks up the parent PM session via `parent_agent_session_id`
 2. Resolves the tracking issue number from `SDLC_TRACKING_ISSUE` env var, `SDLC_ISSUE_NUMBER` env var, or `issues/NNN` pattern in the session message text
@@ -147,9 +147,9 @@ Utility module with four functions:
 
 All GitHub interactions use the `gh` CLI via subprocess with a 10-second timeout. No new Python dependencies.
 
-### `agent/agent_session_queue.py`
+### `agent/session_completion.py`
 
-Extended with these functions for worker post-completion SDLC handling:
+Contains the worker post-completion SDLC handling functions (re-exported from `agent_session_queue.py`):
 
 - `_extract_issue_number(session, agent_session)` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or `issues/NNN` pattern in session message text. Returns int or None.
 - `_handle_dev_session_completion(session, agent_session, result)` -- Called after `complete_transcript()` runs (which runs `_finalize_parent_sync()` synchronously). Classifies outcome, updates PipelineStateMachine, posts GitHub stage comment, and steers parent PM session. Re-checks parent status after steer — if terminal at re-check, creates a continuation PM (ordering invariant fix, issue #987). Path B: if `agent_session=None`, falls back to `session.parent_agent_session_id` instead of returning silently. All operations non-fatal.

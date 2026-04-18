@@ -14,7 +14,7 @@ The session system has 9 mechanisms that can revive, recover, or re-enqueue sess
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/agent_session_queue.py` |
+| Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
 | Trigger | Worker process startup (`worker/__main__.py`) |
 | What it does | Resets stale `running` bridge sessions to `pending` (orphaned from previous process); abandons stale local CLI sessions |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
@@ -26,7 +26,7 @@ The session system has 9 mechanisms that can revive, recover, or re-enqueue sess
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/agent_session_queue.py` |
+| Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
 | Trigger | Periodic timer (every 5 min, `AGENT_SESSION_HEALTH_CHECK_INTERVAL`) |
 | What it does | Recovers stuck `running` sessions on three signals: (1) dead/missing worker, (2) worker alive but no progress after the 300s startup guard (issue #944), (3) exceeded session timeout. Starts workers for stalled `pending` sessions. |
 | Progress signal | `_has_progress(entry)` uses a **two-tier** detector (issue #1036). Tier 1: either `last_heartbeat_at` (queue-layer) or `last_sdk_heartbeat_at` (messenger-layer) fresh within 90s counts as progress; both must be stale to flag stuck. The three original own-progress signals (`turn_count > 0`, `log_path`, `claude_session_uuid`) and the #963 child-activity check are preserved. Tier 2 (`no_progress` only): `_tier2_reprieve_signal()` checks process-alive / has-children / recent-stdout; any one passing gate reprieves the kill for this cycle. See [Bridge Self-Healing §Two-tier no-progress detector](bridge-self-healing.md#two-tier-no-progress-detector) for the full design. |
@@ -45,7 +45,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/agent_session_queue.py` |
+| Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
 | Trigger | Periodic timer |
 | What it does | Fixes orphaned children (parent deleted) and stuck parents (all children terminal) |
 | Terminal safety | **Safe** -- orphan fix preserves original status via `_extract_agent_session_fields`; stuck parent fix only finalizes (terminal transition), never revives |
@@ -55,7 +55,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/agent_session_queue.py` |
+| Location | `agent/session_executor.py` (re-exported from `agent/agent_session_queue.py`) |
 | Trigger | Agent output during execution (auto-continue) |
 | What it does | Re-enqueues session with nudge message for continued execution |
 | Terminal safety | **Guarded** -- three-layer defense |
@@ -65,7 +65,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/agent_session_queue.py` |
+| Location | `agent/output_router.py` |
 | Trigger | Every agent output (decides deliver vs nudge) |
 | What it does | Returns `deliver_already_completed` for terminal sessions, preventing nudge paths |
 | Terminal safety | **Guarded** -- checks `session_status in TERMINAL_STATUSES` (all 5 statuses) |
@@ -107,7 +107,7 @@ When the health check recovers a session (`running → pending → running`), th
 
 | Property | Value |
 |----------|-------|
-| Location | `agent/agent_session_queue.py` |
+| Location | `agent/session_executor.py` (re-exported from `agent/agent_session_queue.py`) |
 | Trigger | `get_response_via_harness()` returns a string starting with `"Error: CLI harness not found"` (i.e., `FileNotFoundError` on `claude` binary) |
 | What it does | Silently re-queues the session up to 3 times using `transition_status()` in-place. After 3 failures, delivers one persona-aligned message instead of a raw Python exception string. |
 | Terminal safety | **Guarded** -- `transition_status()` default `reject_from_terminal=True` prevents re-queuing a terminal session. B1 guard returns raw early when `agent_session is None`. |
