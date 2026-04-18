@@ -533,6 +533,63 @@ For each stale xfail detected (either form):
 
 **Skip if:** No xfail markers found in the test suite.
 
+## Exception Swallow Gate
+
+Before emitting the OUTCOME, run a mandatory Exception Swallow Gate on the diff. This gate blocks the TEST stage if new unguarded `except Exception` blocks are introduced.
+
+**When to run:** Always — after tests pass, before OUTCOME emission. Scan the diff (not the full codebase) for new `except Exception` blocks only.
+
+**Gate logic:**
+
+```bash
+# Get the diff of new/changed Python lines that add except Exception blocks
+DIFF_BASE=$(git rev-parse --abbrev-ref HEAD | grep -q "^main$" && echo "HEAD~1" || echo "main")
+NEW_EXCEPT_LINES=$(git diff "$DIFF_BASE"...HEAD -- '*.py' | grep '^+' | grep -v '^+++' | grep 'except.*Exception')
+
+if [ -z "$NEW_EXCEPT_LINES" ]; then
+    echo "EXCEPTION_SWALLOW_GATE: PASS (no new except Exception blocks)"
+else
+    # For each new except Exception line, check if it is guarded
+    FAILURES=""
+    while IFS= read -r line; do
+        # Pass if the line contains logger, log., warning, error, or raise
+        if echo "$line" | grep -qE "logger|log\.|warning|error|raise"; then
+            continue
+        fi
+        # Pass if the line has a valid swallow-ok comment (reason must be 10+ non-whitespace chars)
+        if echo "$line" | grep -qE "# swallow-ok: .{10,}"; then
+            continue
+        fi
+        FAILURES="$FAILURES
+$line"
+    done <<< "$NEW_EXCEPT_LINES"
+
+    if [ -z "$FAILURES" ]; then
+        echo "EXCEPTION_SWALLOW_GATE: PASS"
+    else
+        echo "EXCEPTION_SWALLOW_GATE: FAIL — new unguarded except Exception block(s):"
+        echo -e "$FAILURES"
+        echo ""
+        echo "Each new except Exception block must either:"
+        echo "  1. Contain logger, log., warning, error, or raise in the handler body"
+        echo "  2. Have an inline comment: # swallow-ok: {reason with 10+ chars}"
+        echo "     Example: # swallow-ok: safe during shutdown, task already cancelled"
+        echo "     Invalid: # swallow-ok: x   (reason too short)"
+        echo "     Invalid: # swallow-ok:      (empty reason)"
+        echo "GATE_FAILED"
+    fi
+fi
+```
+
+**If gate fails:** Emit `<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"swallow_gate":"failed","new_swallows":[...]}} -->` and stop. Do NOT emit a success OUTCOME.
+
+**Carve-out convention:** To exempt a legitimate exception swallow, add an inline comment on the same line as the `except` clause:
+```python
+except Exception:  # swallow-ok: safe during shutdown, task already cancelled
+    pass
+```
+The reason must be at least 10 non-whitespace characters. Bare `# swallow-ok:` or whitespace-only reasons do NOT pass.
+
 ## OUTCOME Contract Emission
 
 As the very last line of your final response, emit an OUTCOME contract so the pipeline can classify the test result programmatically:

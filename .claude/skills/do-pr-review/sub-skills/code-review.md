@@ -107,6 +107,33 @@ else:
 "
 ```
 
+### Pre-Verdict Checklist
+
+Before writing the verdict, evaluate each of the following items. Every item must receive a `PASS`, `FAIL`, or `N/A` verdict. No blank entries are allowed. Items marked `FAIL` automatically become findings.
+
+Emit the completed checklist as a markdown table in the review comment:
+
+```markdown
+## Pre-Verdict Checklist
+
+| # | Item | Verdict | Notes |
+|---|------|---------|-------|
+| 1 | All plan acceptance criteria checked against diff | PASS/FAIL/N/A | |
+| 2 | No-Gos from plan — none violated | PASS/FAIL/N/A | |
+| 3 | New `except Exception` blocks — each has logger/raise/swallow-ok | PASS/FAIL/N/A | |
+| 4 | New integration tests — exercise serialization boundary (not in-memory only) | PASS/FAIL/N/A | |
+| 5 | Plan internal consistency — spike findings match task steps | PASS/FAIL/N/A | |
+| 6 | No hardcoded secrets or debug artifacts | PASS/FAIL/N/A | |
+| 7 | New public APIs — docstrings present | PASS/FAIL/N/A | |
+| 8 | Breaking changes — migration path documented | PASS/FAIL/N/A | |
+| 9 | Tests added for new behavior | PASS/FAIL/N/A | |
+| 10 | Tests cover the failure path (not just happy path) | PASS/FAIL/N/A | |
+| 11 | UI changes (if any) — screenshot captured | PASS/FAIL/N/A | |
+| 12 | Docs updated for user-facing changes | PASS/FAIL/N/A | |
+```
+
+An "Approved" verdict requires all 12 items evaluated (no blanks). Items that do not apply to this PR should be marked `N/A` with a note. An "Approved" verdict with one or more `FAIL` items is not valid — `FAIL` items must be promoted to findings.
+
 ### 6. Classify Findings
 
 **Severity Guidelines:**
