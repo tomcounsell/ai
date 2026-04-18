@@ -328,12 +328,17 @@ def check_sdk_auth(project_dir: Path) -> dict[str, bool]:
     except Exception:
         pass
 
-    # Check .env for API key and billing preference
+    # Check .env for API key and billing preference. The .env symlinks to
+    # ~/Desktop/Valor/.env (iCloud + TCC-protected); read can raise PermissionError
+    # (TCC revoked) or OSError (iCloud eviction). Neither should crash the orchestrator.
     env_file = project_dir / ".env"
     if env_file.exists():
-        content = env_file.read_text()
-        result["api_key_configured"] = "ANTHROPIC_API_KEY=sk-ant-" in content
-        result["use_api_billing"] = "USE_API_BILLING=true" in content
+        try:
+            content = env_file.read_text()
+            result["api_key_configured"] = "ANTHROPIC_API_KEY=sk-ant-" in content
+            result["use_api_billing"] = "USE_API_BILLING=true" in content
+        except OSError as exc:
+            result["env_read_error"] = str(exc)
 
     return result
 

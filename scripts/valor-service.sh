@@ -11,9 +11,19 @@ VENV="$PROJECT_DIR/.venv"
 
 # Source .env so SERVICE_LABEL_PREFIX (and other env vars) are available.
 # Failures are non-fatal — we fall back to defaults below.
+# Note: .env symlinks to ~/Desktop/Valor/.env (iCloud + TCC-protected). Direct source
+# can hit EINTR (iCloud eviction) or EPERM (TCC revoked) and abort bash under set -e
+# before `||` can catch it. Copy to a local temp first — cp handles EINTR at the C
+# level, and source on the local temp is stable.
 set -a
 # shellcheck disable=SC1091
-[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+if [ -f "$PROJECT_DIR/.env" ]; then
+    _env_tmp=$(mktemp /tmp/valor-env-XXXXXX)
+    if cp "$PROJECT_DIR/.env" "$_env_tmp" 2>/dev/null; then
+        source "$_env_tmp" 2>/dev/null || true
+    fi
+    rm -f "$_env_tmp"
+fi
 set +a
 : "${SERVICE_LABEL_PREFIX:=com.valor}"
 
