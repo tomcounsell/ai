@@ -306,20 +306,20 @@ Those are left in the residual for this pass. The success criterion is updated a
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_execute_agent_session` has broad `except Exception` catch around subprocess handling —
+- [x] `_execute_agent_session` has broad `except Exception` catch around subprocess handling —
   builder must verify the existing tests for this path cover observable behavior (log + status
   transition), not just happy path
-- [ ] Extracted modules that call `await session.async_save()` inherit the existing save-failure
+- [x] Extracted modules that call `await session.async_save()` inherit the existing save-failure
   logging; verify no new silent swallows are introduced
 
 ### Empty/Invalid Input Handling
-- [ ] `_drain_startup_steering(session)` must handle `session.session_id = None`
+- [x] `_drain_startup_steering(session)` must handle `session.session_id = None`
   gracefully — `pop_all_steering_messages` already handles this; builder must not break it
-- [ ] `_create_continuation_pm()` with `session.parent_agent_session_id = None` — existing
+- [x] `_create_continuation_pm()` with `session.parent_agent_session_id = None` — existing
   guard; verify it survives the move
 
 ### Error State Rendering
-- [ ] No user-visible output changes — this is pure restructuring; all output paths remain in
+- [x] No user-visible output changes — this is pure restructuring; all output paths remain in
   the same functions, just in new files
 
 ## Test Impact
@@ -328,14 +328,14 @@ All test files that import from `agent.agent_session_queue` will continue to wor
 re-exports. No test file needs modification. The re-export strategy makes this refactor
 transparent to the test suite.
 
-- [ ] `tests/unit/test_harness_retry.py` — no change needed (re-exported `_handle_harness_not_found`)
-- [ ] `tests/unit/test_continuation_pm.py` — no change needed (re-exported `_create_continuation_pm`)
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — no change needed (re-exported
+- [x] `tests/unit/test_harness_retry.py` — no change needed (re-exported `_handle_harness_not_found`)
+- [x] `tests/unit/test_continuation_pm.py` — no change needed (re-exported `_create_continuation_pm`)
+- [x] `tests/unit/test_health_check_recovery_finalization.py` — no change needed (re-exported
   `_has_progress`, `_tier2_reprieve_signal`, `SessionHandle`)
-- [ ] `tests/unit/test_agent_session_queue.py` — no change needed (all symbols re-exported)
-- [ ] `tests/unit/test_agent_session_queue_async.py` — no change needed (`get_active_session_for_chat` re-exported)
-- [ ] `tests/unit/test_steering_mechanism.py` — no change needed (MAX_NUDGE_COUNT etc. re-exported)
-- [ ] `tests/unit/test_agent_session_hierarchy.py` — no change needed (`_transition_parent` re-exported)
+- [x] `tests/unit/test_agent_session_queue.py` — no change needed (all symbols re-exported)
+- [x] `tests/unit/test_agent_session_queue_async.py` — no change needed (`get_active_session_for_chat` re-exported)
+- [x] `tests/unit/test_steering_mechanism.py` — no change needed (MAX_NUDGE_COUNT etc. re-exported)
+- [x] `tests/unit/test_agent_session_hierarchy.py` — no change needed (`_transition_parent` re-exported)
 
 After extraction, run full unit suite to confirm zero regressions before integration run.
 
@@ -429,18 +429,18 @@ as before (those functions stay in the residual module).
 
 ## Success Criteria
 
-- [ ] `agent/agent_session_queue.py` is under ~2000 LOC (`wc -l agent/agent_session_queue.py`)
-- [ ] Each extracted module (`session_state.py`, `session_executor.py`, `session_completion.py`,
+- [x] `agent/agent_session_queue.py` is under ~2000 LOC (`wc -l agent/agent_session_queue.py`)
+- [x] Each extracted module (`session_state.py`, `session_executor.py`, `session_completion.py`,
   `session_health.py`, `session_revival.py`, `session_pickup.py`) has a one-sentence purpose
   statement in its top docstring
-- [ ] No behavior change — `pytest tests/unit/ -n auto` passes unchanged
-- [ ] No behavior change — `pytest tests/integration/ -x` passes unchanged (or existing failures
+- [x] No behavior change — `pytest tests/unit/ -n auto` passes unchanged
+- [x] No behavior change — `pytest tests/integration/ -x` passes unchanged (or existing failures
   are pre-existing and documented)
-- [ ] Duplicate Redis drain paths collapsed into `_drain_startup_steering(session)` helper
+- [x] Duplicate Redis drain paths collapsed into `_drain_startup_steering(session)` helper
   (no `save_after` param — always saves when messages present)
-- [ ] `python -m ruff format .` clean
-- [ ] `python -m ruff check .` clean
-- [ ] All existing callers still import successfully (`python -c "from agent.agent_session_queue
+- [x] `python -m ruff format .` clean
+- [x] `python -m ruff check .` clean
+- [x] All existing callers still import successfully (`python -c "from agent.agent_session_queue
   import enqueue_agent_session, register_callbacks, _execute_agent_session"`)
 
 ## Team Orchestration
