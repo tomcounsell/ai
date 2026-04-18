@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1042
 last_comment_id:
+revision_applied: true
 ---
 
 # SDLC Skills Audit: Close the Five Blind Spots
@@ -118,10 +119,10 @@ No prerequisites — all changes are to skill documentation files and one Python
 
 All five changes are additive edits to skill markdown files:
 
-1. **`do-test/SKILL.md`** — Add an "Exception Swallow Gate" step immediately before the OUTCOME emission. The gate scans the diff (not the full codebase) for new `except Exception` blocks. Any new block that passes the `grep -v "logger|log\.|warning|error|raise"` filter is a gate failure. Emit `status: fail` if gate fails. Add a carve-out for shutdown/cleanup patterns via an inline `# swallow-ok: {reason}` comment convention.
+1. **`do-test/SKILL.md`** — Add an "Exception Swallow Gate" step immediately before the OUTCOME emission. The gate scans the diff (not the full codebase) for new `except Exception` blocks. Any new block that passes the `grep -Ev "logger|log\.|warning|error|raise"` filter (note: `-E` flag required for alternation) is a gate failure. Emit `status: fail` if gate fails. Add a carve-out for shutdown/cleanup patterns via an inline `# swallow-ok: {reason}` comment convention — the reason string must be at least 10 characters (use `grep -E "# swallow-ok: .{10,}"` to detect valid carve-outs; whitespace-only or single-character reasons do NOT pass).
 2. **`do-plan-critique/CRITICS.md`** — Add the Consistency Auditor as critic #7. Charter: cross-check every spike finding against every task step; cross-check every architecture claim against every success criterion; flag any pair of statements that contradict each other.
 3. **`do-plan-critique/CRITICS.md`** — Extend the Skeptic's "LOOK FOR" list with a serialization-boundary item: "Integration tests named in the plan — do they round-trip through Redis/persistence? Or do they create objects in-memory and call methods directly? In-memory-only is a unit test, not an integration test."
-4. **`do-merge.md`** — After the Lockfile Sync Check, add a Full Suite Gate: run `pytest tests/ -x -q --tb=no` on `main` (after merging but before pushing, or as a check on the target branch). If `main` is already red, fork to a red-main recovery path: log the pre-existing failures, allow the green PR to merge, file a follow-up task to fix the red failures.
+4. **`do-merge.md`** — After the Lockfile Sync Check, add a Full Suite Gate: run `pytest tests/ -x -q --tb=no` on the PR branch (already checked out). Compare failures against the stored baseline in `data/main_test_baseline.json`. If the baseline file exists, failures appearing in the baseline are pre-existing (non-blocking); failures NOT in the baseline are new regressions (blocking). If the baseline file does not exist, treat all failures as regressions. After a clean merge, write the current failure list back to `data/main_test_baseline.json` (post-merge write step). If `main` is already red, fork to a red-main recovery path: log the pre-existing failures, allow the green PR to merge (do not block clean PRs because of pre-existing red baseline), document them in the PR comment.
 5. **`do-pr-review/sub-skills/code-review.md`** — Add a mandatory Pre-Verdict Checklist section (12 fixed items) that the reviewer must evaluate for every PR. The checklist is emitted as a structured markdown table in the review comment, alongside the prose verdict. "Approved" requires the checklist to be complete — not just "LLM says approved."
 
 ## Failure Path Test Strategy
@@ -129,6 +130,7 @@ All five changes are additive edits to skill markdown files:
 ### Exception Handling Coverage
 - [ ] Pattern 1 change is itself about exception handling — the new gate must not be bypassable by an empty diff (no new files touched)
 - [ ] The `# swallow-ok:` carve-out must require a non-empty reason string; bare `# swallow-ok:` should not pass the gate
+- [ ] A `# swallow-ok:` with fewer than 10 characters (e.g. `# swallow-ok: x` or whitespace-only) does not pass the gate — only reasons of 10+ characters qualify
 
 ### Empty/Invalid Input Handling
 - [ ] The Exception Swallow Gate grep must handle files with no `except` blocks without error (zero matches = pass)
@@ -248,9 +250,10 @@ No agent integration required — skill docs are read by Claude Code sessions di
 - **Parallel**: true
 - Read `.claude/skills/do-plan-critique/CRITICS.md` in full
 - Add critic #7: **Consistency Auditor** after critic #6 (User)
+- Open the critic definition with a scope differentiation paragraph: "SCOPE DIFFERENTIATION: The Propagation Check in `/do-plan` (PR #815) verifies that spike results are carried forward into task steps. This critic does NOT re-verify that. Instead, it checks for contradictions BETWEEN sections: does the No-Gos list contradict the Solution? Does a Success Criterion assume behavior the Technical Approach explicitly excludes? Does spike-N claim component A owns responsibility X while the Architecture section assigns X to component B?"
 - Charter: detect contradictions between spike findings↔task steps, architecture claims↔success criteria, and any two sections that make incompatible assertions about the same component
-- "LOOK FOR" list: spike finding contradicted by a task step; success criterion that assumes behavior the Technical Approach doesn't implement; two sections that name different components for the same responsibility
-- "DO NOT flag" list: stylistic differences, prose inconsistencies, plans with no spike section (skip cross-check), plans under Small appetite (optional)
+- "LOOK FOR" list: spike finding contradicted by a task step; success criterion that assumes behavior the Technical Approach doesn't implement; two sections that name different components for the same responsibility; No-Gos that contradict items in the Solution
+- "DO NOT flag" list: stylistic differences, prose inconsistencies, plans with no spike section (skip cross-check), plans under Small appetite (optional), spike↔task consistency (that is the Propagation Check's domain — do not duplicate it)
 - Update critic selection note: "All seven critics run by default"
 
 ### 2. Extend Skeptic with serialization-boundary item
@@ -271,9 +274,9 @@ No agent integration required — skill docs are read by Claude Code sessions di
 - **Parallel**: true
 - Read `.claude/skills/do-test/SKILL.md` in full
 - Move the Exception Swallow Scan from "Quality Checks (Post-Test)" into a new "Exception Swallow Gate" step that runs *before* the OUTCOME emission
-- Gate logic: scan the diff (not the full codebase) for new `except Exception` blocks. For each new block: pass if it contains `logger`, `log.`, `warning`, `error`, or `raise`; pass if it has an inline `# swallow-ok: {reason}` comment with a non-empty reason; fail otherwise
+- Gate logic: scan the diff (not the full codebase) for new `except Exception` blocks. For each new block: pass if it contains `logger`, `log.`, `warning`, `error`, or `raise`; pass if it has an inline `# swallow-ok: {reason}` comment where the reason is at least 10 non-whitespace characters (use `grep -E "# swallow-ok: .{10,}"` to detect valid carve-outs — bare `# swallow-ok:`, whitespace-only, or single-character reasons do NOT pass); fail otherwise. Use `grep -Ev "logger|log\.|warning|error|raise"` (the `-E` flag is required for alternation — without it `|` is treated as a literal character)
 - If gate fails: emit `<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"swallow_gate":"failed","new_swallows":[...]}} -->`
-- Document the `# swallow-ok: {reason}` convention in the gate section with example
+- Document the `# swallow-ok: {reason}` convention in the gate section with example (e.g. `# swallow-ok: safe during shutdown, task already cancelled`)
 - Keep the existing post-test advisory scan in "Quality Checks" for the full-codebase sweep (unchanged)
 
 ### 4. Add Full Suite Gate to do-merge
@@ -286,10 +289,12 @@ No agent integration required — skill docs are read by Claude Code sessions di
 - Read `.claude/commands/do-merge.md` in full
 - After the Lockfile Sync Check section, add a new "Full Suite Gate" section:
   - Run `pytest tests/ -x -q --tb=no` on the PR branch (already checked out)
-  - If all tests pass: emit `FULL_SUITE: PASS`
-  - If tests fail AND the failures are pre-existing on `main` (compare against a baseline run): emit `FULL_SUITE: PASS (pre-existing N failures noted)` and log the failure names
-  - If tests fail AND new regressions exist: emit `FULL_SUITE: FAIL — N new regression(s): [list]` and set GATES_FAILED
-  - Red-main recovery: if `main` already has failures at the time of merge, document them in the PR comment and allow merge (do not block clean PRs because of pre-existing red baseline)
+  - Load `data/main_test_baseline.json` if it exists. This file contains a `failing_tests` list written by the previous clean merge. Failures in the baseline are pre-existing (non-blocking). Failures NOT in the baseline are new regressions (blocking). If the baseline file does not exist, treat all failures as regressions.
+  - If all tests pass: emit `FULL_SUITE: PASS` and update `data/main_test_baseline.json` to `{"failing_tests": []}` after merge
+  - If tests fail AND all failures are pre-existing (in baseline): emit `FULL_SUITE: PASS (pre-existing N failures noted)` and log the failure names; proceed with merge
+  - If tests fail AND new regressions exist (NOT in baseline): emit `FULL_SUITE: FAIL — N new regression(s): [list]` and set GATES_FAILED
+  - Red-main recovery: if the baseline file does not exist and tests fail, document all failures in the PR comment, allow merge, and write the failure list to `data/main_test_baseline.json` as the new baseline (bootstrapping). Do not block clean PRs because of pre-existing red baseline.
+  - After each clean merge: write current failure list (empty or baseline) back to `data/main_test_baseline.json`
 - Note: this gate adds wall-clock time; the fail-fast `-x` flag minimizes it
 
 ### 5. Add Pre-Verdict Checklist to code-review.md
@@ -371,9 +376,14 @@ No agent integration required — skill docs are read by Claude Code sessions di
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Adversary | `grep -v "..."` uses basic regex — `\|` not interpreted as alternation without `-E` flag, causing 100% false positives | Technical Approach item 1, Task 3 | Changed `grep -v` to `grep -Ev` in all gate filter references |
+| CONCERN | Skeptic, Operator | Baseline comparison method for Full Suite Gate unspecified | Technical Approach item 4, Task 4 | Added `data/main_test_baseline.json` artifact approach with read-side and write-side steps |
+| CONCERN | Adversary | `# swallow-ok:` minimum length not enforced — single-char or whitespace reasons bypass gate | Technical Approach item 1, Task 3, Failure Path | Added 10-char minimum requirement; gate uses `grep -E "# swallow-ok: .{10,}"` |
+| CONCERN | Archaeologist | Consistency Auditor scope overlaps with Propagation Check (PR #815) | Task 1 (build-critic-7) | Added scope differentiation paragraph to critic definition; explicitly excludes spike↔task domain |
+| NIT | — | Tasks 6, 7, 8 missing `Validates` field | Tasks 6, 7, 8 | Noted; not addressed in this revision pass (structural formatting only) |
+| NIT | — | Retrospective doc belongs in `docs/sdlc/` not `docs/features/` | Documentation section, Task 7 | Noted; left as-is — decision deferred to build stage |
 
 ---
 
