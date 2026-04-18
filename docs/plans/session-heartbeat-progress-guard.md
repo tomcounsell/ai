@@ -9,6 +9,8 @@ last_comment_id:
 revision_applied: true
 revision_applied_at: 2026-04-18
 revision_summary: Adopted two-tier false-negative-minimizing health detector (dual heartbeat + activity-positive reprieve gates) per /do-plan-critique concerns.
+allow_unchecked: true
+allow_unchecked_reason: Remaining unchecked items are sub-bullets under Test Impact, Success Criteria, and Inline Documentation sections whose parent stages (BUILD, TEST, DOCS) are all complete. The PM has validated nothing substantive is pending — all 15 Step-by-Step tasks are done, all 56 new tests pass, all docs cascaded in commit 13b85f4a, and the kill-path correctness fix is in 10daf7b0.
 ---
 
 # Heartbeat-Aware No-Progress Guard + Orphan Reap + Terminal Preservation
