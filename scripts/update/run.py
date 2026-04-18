@@ -741,7 +741,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             "Check 'machine' field in ~/Desktop/Valor/projects.json"
         )
 
-    # Step 4.5: Telegram auth check (critical — bridge is useless without it)
+    # Step 4.5: Telegram auth check (warn only — bridge is optional, worker runs without it)
     if config.do_service_restart:
         log("Checking Telegram session...", v)
         telegram_check = verify.check_telegram_session(project_dir)
@@ -749,11 +749,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"  Telegram: {telegram_check.version or 'OK'}", v)
         else:
             log(
-                f"ERROR: Telegram session not authorized: {telegram_check.error}",
+                f"WARN: Telegram session not authorized: {telegram_check.error}",
                 v,
                 always=True,
             )
-            result.errors.append(f"Telegram auth: {telegram_check.error}")
+            result.warnings.append(f"Telegram auth: {telegram_check.error}")
 
     # Step 5: Service management
     if config.do_service_restart:
@@ -790,15 +790,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if result.service_status.running:
             log(f"Bridge running (PID: {result.service_status.pid})", v)
         else:
-            log("ERROR: Bridge not running after restart", v, always=True)
-            result.errors.append("Bridge not running after restart")
+            log(
+                "WARN: Bridge not running after restart (worker and web UI unaffected)",
+                v,
+                always=True,
+            )
+            result.warnings.append("Bridge not running after restart")
 
         # Always restart web UI to pick up code/dep changes
         if service.restart_webui(project_dir):
             log("Web UI restarted (port 8500)", v)
         else:
-            log("ERROR: Web UI failed to start", v, always=True)
-            result.errors.append("Web UI failed to start")
+            log("WARN: Web UI failed to start", v, always=True)
+            result.warnings.append("Web UI failed to start")
 
         # Check update cron
         if service.is_update_cron_installed():
