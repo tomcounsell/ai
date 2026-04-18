@@ -337,6 +337,87 @@ class TestHasProgressDualHeartbeat:
         assert _has_progress(entry) is True
 
 
+class TestStdoutStaleTier1:
+    """Tests for the stdout-stale Tier 1 kill signal (#1046).
+
+    Even with fresh heartbeats, _has_progress() returns False when:
+    - last_stdout_at is stale beyond STDOUT_FRESHNESS_WINDOW (600s), or
+    - last_stdout_at is None and started_at is older than FIRST_STDOUT_DEADLINE (300s).
+
+    Sessions with fresh stdout or young started_at are NOT flagged.
+    """
+
+    @staticmethod
+    def _make_entry(**overrides):
+        defaults = {
+            "turn_count": 0,
+            "log_path": "",
+            "claude_session_uuid": None,
+            "last_heartbeat_at": _ago(30),  # fresh heartbeat — Tier 1 would normally pass
+            "last_sdk_heartbeat_at": None,
+            "last_stdout_at": None,
+            "started_at": None,
+        }
+        defaults.update(overrides)
+        entry = SimpleNamespace(**defaults)
+        entry.get_children = lambda: []
+        return entry
+
+    def test_fresh_heartbeats_stale_stdout_returns_false(self):
+        """Fresh heartbeats + stale stdout (> 600s) → Tier 1 flags → False."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(last_stdout_at=_ago(700))
+        assert _has_progress(entry) is False
+
+    def test_fresh_heartbeats_fresh_stdout_returns_true(self):
+        """Fresh heartbeats + fresh stdout (< 600s) → no flag → True."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(last_stdout_at=_ago(60))
+        assert _has_progress(entry) is True
+
+    def test_fresh_heartbeats_no_stdout_young_started_at_returns_true(self):
+        """Fresh heartbeats + no stdout + young started_at (< 300s) → warmup tolerance → True."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(last_stdout_at=None, started_at=_ago(120))
+        assert _has_progress(entry) is True
+
+    def test_fresh_heartbeats_no_stdout_old_started_at_returns_false(self):
+        """Fresh heartbeats + no stdout + old started_at (> 300s) → FIRST_STDOUT_DEADLINE → False."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
+        assert _has_progress(entry) is False
+
+    def test_last_progress_reason_set_on_stdout_stale(self):
+        """_last_progress_reason is 'stdout_stale' when stdout-stale flag fires."""
+        import agent.agent_session_queue as q
+
+        entry = self._make_entry(last_stdout_at=_ago(700))
+        q._has_progress(entry)
+        assert q._last_progress_reason == "stdout_stale"
+
+    def test_last_progress_reason_set_on_first_stdout_deadline(self):
+        """_last_progress_reason is 'first_stdout_deadline' when deadline flag fires."""
+        import agent.agent_session_queue as q
+
+        entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
+        q._has_progress(entry)
+        assert q._last_progress_reason == "first_stdout_deadline"
+
+    def test_last_progress_reason_reset_on_true_return(self):
+        """_last_progress_reason is reset to '' when _has_progress() returns True."""
+        import agent.agent_session_queue as q
+
+        q._last_progress_reason = "leftover"
+        entry = self._make_entry(last_stdout_at=_ago(60))
+        result = q._has_progress(entry)
+        assert result is True
+        assert q._last_progress_reason == ""
+
+
 class TestTier2ReprieveGates:
     """Tests for _tier2_reprieve_signal (#1036).
 
@@ -430,11 +511,11 @@ class TestTier2ReprieveGates:
         assert _tier2_reprieve_signal(handle, entry) == "stdout"
 
     def test_no_reprieve_on_stale_stdout(self):
-        """No pid, stale stdout (>90s) → None."""
+        """No pid, stale stdout (>600s) → None (STDOUT_FRESHNESS_WINDOW raised to 600s, #1046)."""
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         handle = self._make_handle(pid=None)
-        entry = self._make_entry(last_stdout_at=_ago(200))
+        entry = self._make_entry(last_stdout_at=_ago(700))
         assert _tier2_reprieve_signal(handle, entry) is None
 
     def test_no_reprieve_on_handle_none(self):
