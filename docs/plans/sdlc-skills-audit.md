@@ -128,23 +128,23 @@ All five changes are additive edits to skill markdown files:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Pattern 1 change is itself about exception handling — the new gate must not be bypassable by an empty diff (no new files touched)
-- [ ] The `# swallow-ok:` carve-out must require a non-empty reason string; bare `# swallow-ok:` should not pass the gate
-- [ ] A `# swallow-ok:` with fewer than 10 characters (e.g. `# swallow-ok: x` or whitespace-only) does not pass the gate — only reasons of 10+ characters qualify
+- [x] Pattern 1 change is itself about exception handling — the new gate must not be bypassable by an empty diff (no new files touched)
+- [x] The `# swallow-ok:` carve-out must require a non-empty reason string; bare `# swallow-ok:` should not pass the gate
+- [x] A `# swallow-ok:` with fewer than 10 characters (e.g. `# swallow-ok: x` or whitespace-only) does not pass the gate — only reasons of 10+ characters qualify
 
 ### Empty/Invalid Input Handling
-- [ ] The Exception Swallow Gate grep must handle files with no `except` blocks without error (zero matches = pass)
-- [ ] The Consistency Auditor must handle plans with no spike sections gracefully (skip cross-check if section missing)
+- [x] The Exception Swallow Gate grep must handle files with no `except` blocks without error (zero matches = pass)
+- [x] The Consistency Auditor must handle plans with no spike sections gracefully (skip cross-check if section missing)
 
 ### Error State Rendering
-- [ ] If the full-suite gate fails in do-merge, the blocking message must include the number of failures and the first failure name — not just "tests failed"
+- [x] If the full-suite gate fails in do-merge, the blocking message must include the number of failures and the first failure name — not just "tests failed"
 
 ## Test Impact
 
 These changes are all to skill markdown files and one Python validator hook. No existing Python tests are directly affected. However:
 
-- [ ] `tests/unit/test_skill_docs.py` (if it exists) — CHECK: verify no test asserts on the old CRITICS count or do-test OUTCOME format. Run `grep -rn "CRITICS\|Exception Swallow\|do-merge" tests/` to find any.
-- [ ] `.claude/hooks/validators/` — the new `validate_exception_swallow_gate.py` hook is new code; it needs a unit test in `tests/unit/test_hooks.py` or equivalent.
+- [x] `tests/unit/test_skill_docs.py` (if it exists) — CHECK: verify no test asserts on the old CRITICS count or do-test OUTCOME format. Run `grep -rn "CRITICS\|Exception Swallow\|do-merge" tests/` to find any. Checked: no assertions on CRITICS count or Exception Swallow format found.
+- [x] `.claude/hooks/validators/` — the new `validate_exception_swallow_gate.py` hook is new code; it needs a unit test in `tests/unit/test_hooks.py` or equivalent. N/A: gate implemented as skill doc prose, not a Python hook — no new hook created.
 
 No existing integration or e2e tests are affected — skill docs are not exercised by the test suite directly.
 
@@ -193,22 +193,22 @@ No agent integration required — skill docs are read by Claude Code sessions di
 
 ## Documentation
 
-- [ ] Update `.claude/skills/do-plan-critique/CRITICS.md` with the Consistency Auditor persona (this IS the deliverable — no separate feature doc needed)
-- [ ] Update `.claude/skills/do-test/SKILL.md` with the Exception Swallow Gate (inline)
-- [ ] Update `.claude/commands/do-merge.md` with the Full Suite Gate section
-- [ ] Update `.claude/skills/do-pr-review/sub-skills/code-review.md` with the Pre-Verdict Checklist
-- [ ] Create `docs/features/sdlc-skills-audit.md` summarizing the five patterns and the fixes applied (post-merge retrospective doc)
-- [ ] Add entry to `docs/features/README.md` index table for the new retrospective doc
+- [x] Update `.claude/skills/do-plan-critique/CRITICS.md` with the Consistency Auditor persona (this IS the deliverable — no separate feature doc needed)
+- [x] Update `.claude/skills/do-test/SKILL.md` with the Exception Swallow Gate (inline)
+- [x] Update `.claude/commands/do-merge.md` with the Full Suite Gate section
+- [x] Update `.claude/skills/do-pr-review/sub-skills/code-review.md` with the Pre-Verdict Checklist
+- [x] Create `docs/features/sdlc-skills-audit.md` summarizing the five patterns and the fixes applied (post-merge retrospective doc)
+- [x] Add entry to `docs/features/README.md` index table for the new retrospective doc
 
 ## Success Criteria
 
-- [ ] Pattern 1: Exception Swallow Scan in `do-test/SKILL.md` is a blocking gate (not advisory). New `except Exception` blocks without `# swallow-ok:` fail the TEST stage OUTCOME.
-- [ ] Pattern 2: Skeptic critic in `CRITICS.md` includes a serialization-boundary item in its "LOOK FOR" checklist.
-- [ ] Pattern 3: A seventh "Consistency Auditor" critic persona exists in `CRITICS.md` with an explicit cross-section consistency charter.
-- [ ] Pattern 4: `do-merge.md` includes a Full Suite Gate check that runs `pytest tests/ -x -q` on the target branch before merge. Red-main recovery path is documented.
-- [ ] Pattern 5: `do-pr-review/sub-skills/code-review.md` includes a Pre-Verdict Checklist (≥10 items) that must be evaluated before the verdict is written.
-- [ ] #1040 and #1041 remain open as independent tracking issues (not subsumed by this plan).
-- [ ] `docs/features/sdlc-skills-audit.md` exists and records the five patterns with their fix dispositions.
+- [x] Pattern 1: Exception Swallow Scan in `do-test/SKILL.md` is a blocking gate (not advisory). New `except Exception` blocks without `# swallow-ok:` fail the TEST stage OUTCOME.
+- [x] Pattern 2: Skeptic critic in `CRITICS.md` includes a serialization-boundary item in its "LOOK FOR" checklist.
+- [x] Pattern 3: A seventh "Consistency Auditor" critic persona exists in `CRITICS.md` with an explicit cross-section consistency charter.
+- [x] Pattern 4: `do-merge.md` includes a Full Suite Gate check that runs `pytest tests/ -x -q` on the target branch before merge. Red-main recovery path is documented.
+- [x] Pattern 5: `do-pr-review/sub-skills/code-review.md` includes a Pre-Verdict Checklist (≥10 items) that must be evaluated before the verdict is written.
+- [x] #1040 and #1041 remain open as independent tracking issues (not subsumed by this plan).
+- [x] `docs/features/sdlc-skills-audit.md` exists and records the five patterns with their fix dispositions.
 - [ ] Tests pass (`/do-test`)
 
 ## Team Orchestration
