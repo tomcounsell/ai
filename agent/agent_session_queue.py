@@ -2125,24 +2125,36 @@ async def _agent_session_hierarchy_health_check() -> None:
     # Check for orphaned children
     try:
         all_sessions = list(AgentSession.query.all())
-        children_with_parent = [s for s in all_sessions if s.parent_agent_session_id]
-        parent_ids = {s.agent_session_id for s in all_sessions}
+        # Guard against corrupt/phantom records whose fields are still Popoto Field
+        # descriptors rather than hydrated values — those would crash set-building
+        # and recreate.
+        hydrated = [s for s in all_sessions if isinstance(s.agent_session_id, str)]
+        children_with_parent = [s for s in hydrated if isinstance(s.parent_agent_session_id, str)]
+        parent_ids = {s.agent_session_id for s in hydrated}
 
         for child in children_with_parent:
             if child.parent_agent_session_id not in parent_ids:
-                logger.warning(
-                    "[session-health] Orphaned child %s: parent %s no longer exists — "
-                    "clearing parent_agent_session_id",
-                    child.agent_session_id,
-                    child.parent_agent_session_id,
-                )
-                # Delete-and-recreate required: parent_agent_session_id is a KeyField,
-                # so mutating it directly would corrupt the index.
-                fields = _extract_agent_session_fields(child)
-                child.delete()
-                fields["parent_agent_session_id"] = None
-                AgentSession.create(**fields)
-                orphans_fixed += 1
+                try:
+                    logger.warning(
+                        "[session-health] Orphaned child %s: parent %s no longer exists — "
+                        "clearing parent_agent_session_id",
+                        child.agent_session_id,
+                        child.parent_agent_session_id,
+                    )
+                    # Delete-and-recreate required: parent_agent_session_id is a KeyField,
+                    # so mutating it directly would corrupt the index.
+                    fields = _extract_agent_session_fields(child)
+                    child.delete()
+                    fields["parent_agent_session_id"] = None
+                    AgentSession.create(**fields)
+                    orphans_fixed += 1
+                except Exception as inner:
+                    logger.error(
+                        "[session-health] Orphan repair failed for %s: %s",
+                        getattr(child, "agent_session_id", "?"),
+                        inner,
+                        exc_info=True,
+                    )
     except Exception as e:
         logger.error("[session-health] Orphan detection failed: %s", e, exc_info=True)
 
