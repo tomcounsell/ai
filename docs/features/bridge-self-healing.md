@@ -377,9 +377,9 @@ tail -f logs/worker_watchdog.log
 The periodic `_agent_session_health_check` (every 5 minutes) decides whether a
 long-running session is making progress. To minimize **false-negatives**
 (killing a working session) while still reaping genuinely wedged sessions, the
-detector uses two independent tiers. (Issue #1036.)
+detector uses two independent tiers. (Issues #1036 and #1046.)
 
-### Tier 1 — dual heartbeat
+### Tier 1 — dual heartbeat + stdout-stale kill signal
 
 Two independent 60-second writers update separate AgentSession fields:
 
@@ -389,10 +389,45 @@ Two independent 60-second writers update separate AgentSession fields:
 | `last_sdk_heartbeat_at` | Messenger-layer `BackgroundTask._watchdog` via `on_heartbeat_tick` callback | Every 60s while SDK subprocess runs |
 
 `_has_progress()` returns `True` if **either** heartbeat is within
-`HEARTBEAT_FRESHNESS_WINDOW` (90s). Tier 1 flags a session as potentially stuck
-only when **both** heartbeats are stale — this tolerates single-writer failures
-(e.g. event loop starved such that the queue heartbeat loop skips a beat, while
-the messenger watchdog keeps ticking, or vice versa).
+`HEARTBEAT_FRESHNESS_WINDOW` (90s) **and** stdout is fresh. Tier 1 flags a
+session as potentially stuck when **both** heartbeats are stale, OR when both
+heartbeats are fresh but stdout has been absent for too long (see below).
+
+**Stdout-stale kill signal (#1046):** The `_has_progress()` function includes a
+Tier 1 extension to catch the **alive-but-silent failure mode**: a `claude -p`
+subprocess can emit heartbeats every 60s (appearing healthy) yet produce zero
+stdout for hours — e.g. when the Claude API hangs or an MCP tool blocks. Even
+with both heartbeats fresh, `_has_progress()` returns `False` when:
+
+1. **`last_stdout_at` is set and stale** — `(now - last_stdout_at) >=
+   STDOUT_FRESHNESS_WINDOW` (600s = 10 min). The session is flagged even with
+   fresh heartbeats; Tier 2 gate (c) "alive" will typically reprieve it while
+   the subprocess is still running. Once the process goes non-alive, all Tier 2
+   gates fail and the kill path executes.
+
+2. **`last_stdout_at` is None** (session never produced stdout) **and `started_at`
+   is older than `FIRST_STDOUT_DEADLINE`** (300s = 5 min) — the session has not
+   emitted any stdout for 5+ minutes of runtime. This preserves warmup tolerance
+   from #1036 (young sessions with no stdout are fine) while bounding the
+   "silent from the start" failure case.
+
+**Constants** (both env-tunable):
+
+| Constant | Default | Env var | Purpose |
+|----------|---------|---------|---------|
+| `STDOUT_FRESHNESS_WINDOW` | 600s | `STDOUT_FRESHNESS_WINDOW_SECS` | Tier 1 stdout-stale threshold; also Tier 2 gate (e) reprieve window |
+| `FIRST_STDOUT_DEADLINE` | 300s | `FIRST_STDOUT_DEADLINE_SECS` | Tier 1 deadline for sessions that have never produced stdout |
+
+**Reprieve behavior for alive-but-silent sessions:** When Tier 1 stdout-stale
+fires, `_tier2_reprieve_signal()` is called. Gate (c) "alive" will reprieve the
+session as long as the subprocess is running — this is intentional; a running
+process should not be killed prematurely. The actual kill latency for a hung-
+but-alive process is bounded to `STDOUT_FRESHNESS_WINDOW + one health-check tick`
+after the process eventually goes non-alive or the absolute session timeout fires.
+
+**Operator alert:** After 3 Tier 2 reprieves, the reprieve log message is
+escalated from `INFO` to `WARNING`, signaling that the session may be in an
+indefinite alive-but-silent reprieve loop.
 
 ### Tier 2 — activity-positive reprieve gates
 
@@ -403,7 +438,7 @@ which evaluates three OS-level liveness checks via `psutil`:
 |------|-------|--------|
 | (c) alive    | `psutil.Process(pid).status()` not in `{zombie, dead, stopped}` | `"alive"` |
 | (d) children | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred) |
-| (e) stdout   | `last_stdout_at` within `STDOUT_FRESHNESS_WINDOW` (90s) | `"stdout"` |
+| (e) stdout   | `last_stdout_at` within `STDOUT_FRESHNESS_WINDOW` (600s) | `"stdout"` |
 
 Any **one** passing gate reprieves the kill. The reprieve signal is logged and
 `reprieve_count` on the AgentSession is incremented for post-hoc analysis.
@@ -451,9 +486,15 @@ behavior before enabling kills during rollout.
 
 Redis counters keyed by `<project_key>:session-health:`:
 
-* `tier1_flagged_total` — every time both heartbeats were stale.
+* `tier1_flagged_total` — every time both heartbeats were stale (heartbeat-stale path).
+* `tier1_flagged_stdout_stale` — every time Tier 1 fired due to stale stdout or missed `FIRST_STDOUT_DEADLINE` (stdout-stale path, #1046). Use this counter to distinguish the alive-but-silent failure mode from dead-heartbeat kills in dashboards.
 * `tier2_reprieve_total:{alive|children|stdout}` — reprieve by signal.
 * `kill_total` — actual kills (after Tier 2 failed and kill-switch off).
+
+**Distinguishing kill causes in dashboards:**
+- `tier1_flagged_total` high, `tier1_flagged_stdout_stale` low → heartbeat writers are dying (clock/event-loop issue)
+- `tier1_flagged_stdout_stale` high → sessions hang silently (API/MCP tool issue)
+- `tier2_reprieve_total:alive` high → processes alive but silent; monitor `reprieve_count` for operator warnings
 
 ### Per-session fields
 
@@ -461,11 +502,12 @@ Redis counters keyed by `<project_key>:session-health:`:
 |-------|------|---------|
 | `last_heartbeat_at` | DatetimeField | Queue-layer heartbeat |
 | `last_sdk_heartbeat_at` | DatetimeField | Messenger watchdog heartbeat |
-| `last_stdout_at` | DatetimeField | Last SDK stdout event |
+| `last_stdout_at` | DatetimeField | Last SDK stdout event; Tier 1 stdout-stale input (#1046) |
+| `started_at` | DatetimeField | Session start time; `FIRST_STDOUT_DEADLINE` anchor (#1046) |
 | `recovery_attempts` | IntField | Kills only; finalizes at `MAX_RECOVERY_ATTEMPTS` |
-| `reprieve_count` | IntField | Tier 2 saves — diagnostic only |
+| `reprieve_count` | IntField | Tier 2 saves — diagnostic only; triggers WARNING log after 3 |
 
-All five fields are included in `_AGENT_SESSION_FIELDS` so they round-trip
+All fields are included in `_AGENT_SESSION_FIELDS` so they round-trip
 through delete-and-recreate paths (retry, orphan-fix, continuation fallback).
 
 ### Messenger callbacks (ORM-free)
