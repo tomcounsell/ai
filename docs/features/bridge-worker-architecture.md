@@ -318,6 +318,47 @@ The bridge also reads `AgentSession.status` to determine if a session is already
 
 In `agent/sdk_client.py`, `session_type` is resolved from Redis **before** `build_context_prefix()` is called, so the restriction decision is always based on the session's actual role, not on whether the message arrived via a DM channel.
 
+## Per-session registry (`_active_sessions`)
+
+`agent/agent_session_queue.py` maintains `_active_sessions: dict[str, SessionHandle]`,
+a per-session registry keyed by `agent_session_id`. Each `SessionHandle` holds:
+
+* `task` — the `asyncio.Task` currently running `_execute_agent_session`. The
+  health check uses this to cancel wedged sessions in the kill path.
+* `pid` — the SDK subprocess pid, populated by the messenger's
+  `on_sdk_started` callback. Used by the two-tier detector's Tier 2
+  process-alive / has-children gates.
+
+**Lifecycle contract**:
+* Single writer: `_execute_agent_session` for its own session id.
+* Multi reader: `_agent_session_health_check`, `_tier2_reprieve_signal`.
+* Registration happens at the very top of `_execute_agent_session`, **before**
+  any raise site.
+* Cleanup uses `asyncio.current_task().add_done_callback(...)` so the entry
+  is popped even on exception, `CancelledError`, or early return.
+
+See `docs/features/bridge-self-healing.md#two-tier-no-progress-detector`
+for the full two-tier detector design.
+
+## Messenger callbacks (ORM-free)
+
+`agent/messenger.py::BossMessenger` exposes three optional liveness callbacks:
+
+| Kwarg | Called from | Purpose |
+|-------|-------------|---------|
+| `on_sdk_started(pid)` | `_run_harness_subprocess` once the subprocess is spawned | Populate `SessionHandle.pid`; bump `last_sdk_heartbeat_at` |
+| `on_heartbeat_tick()` | `BackgroundTask._watchdog` every 60s | Bump `last_sdk_heartbeat_at` |
+| `on_stdout_event()` | `_run_harness_subprocess` on each stdout line | Bump `last_stdout_at` |
+
+All three are plumbed through `notify_*` wrappers that catch callback
+exceptions and log at WARNING — the messenger is resilient to ORM failures.
+The messenger module imports nothing from `models/`; the queue layer
+(`_execute_agent_session`) provides closures that do the ORM writes.
+
+This keeps `agent/messenger.py` purely transport-layer while still surfacing
+its existing liveness signals (the `SDK heartbeat: running Ns, communicated=...`
+line) to the two-tier no-progress detector.
+
 ## Import Boundary
 
 The bridge imports from `agent.agent_session_queue` are allowlisted to these functions only:

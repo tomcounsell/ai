@@ -19,7 +19,10 @@ When a stuck running session is detected, it is automatically recovered by delet
 ### Detection
 
 - **Dead worker detection**: Checks `_active_workers[worker_key]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the session is considered orphaned.
-- **No-progress detection (issue #944)**: Even when the worker is alive, a running session past the 300s startup guard is recovered if it shows no progress signal. `_has_progress(entry)` returns True iff ANY of `turn_count > 0`, non-empty `log_path`, or non-empty `claude_session_uuid` is set — together these cover the SDK subprocess warmup arc from auth to first turn. This catches slugless dev sessions stuck behind a co-running PM session (both share `worker_key == project_key`).
+- **No-progress detection (issue #944, extended by #1036)**: Even when the worker is alive, a running session past the 300s startup guard is recovered if it shows no progress. `_has_progress(entry)` now uses a **two-tier** detector — see [Bridge Self-Healing §Two-tier no-progress detector](bridge-self-healing.md#two-tier-no-progress-detector) for the full design. In brief:
+  - **Tier 1 (dual heartbeat):** either `last_heartbeat_at` (queue-layer) or `last_sdk_heartbeat_at` (messenger-layer) fresh within 90s counts as progress. Both must be stale for the session to be flagged. The original three own-progress signals (`turn_count > 0`, non-empty `log_path`, non-empty `claude_session_uuid`) and the #963 child-activity check are preserved.
+  - **Tier 2 (reprieve gates, `no_progress` only):** if Tier 1 flags a session, `_tier2_reprieve_signal()` checks process-alive / has-children / recent-stdout via `psutil`. Any one passing gate reprieves the kill, increments `reprieve_count`, and emits a `tier2_reprieve_total:{alive|children|stdout}` counter. `worker_dead` and `timeout` recoveries skip Tier 2 entirely.
+  - **Kill path:** cancels `handle.task` from `_active_sessions` registry; increments `recovery_attempts`; finalizes as `failed` at `MAX_RECOVERY_ATTEMPTS=2` (history preserved); otherwise transitions `running → pending`. `DISABLE_PROGRESS_KILL=1` suppresses kills while keeping flagging active.
 - **Timeout detection**: Compares `started_at` timestamp against the configured max duration for the session type.
 - **Race condition guard**: Jobs must be running for at least 5 minutes (`AGENT_SESSION_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
 
@@ -38,9 +41,10 @@ When a stuck session is found:
 
 1. Log a warning with the session ID, project key, and reason (dead worker, no progress signal, or timeout)
 2. Increment the project-scoped Redis counter `{project_key}:session-health:recoveries:{worker_dead|no_progress|timeout}` for observability (non-fatal on failure)
-3. Delete the orphaned AgentSession from Redis
-4. Re-create it as `pending` with all original data preserved (local sessions finalize as `abandoned` instead)
-5. Call `_ensure_worker()` to restart the processing loop for that project
+3. For `no_progress` recoveries: run Tier 2 reprieve gates — if any gate passes, skip recovery this cycle (reprieve)
+4. Cancel the session task via `_active_sessions` registry and wait up to `TASK_CANCEL_TIMEOUT` (0.25s)
+5. Increment `recovery_attempts`; if `recovery_attempts >= MAX_RECOVERY_ATTEMPTS` (2), finalize as `failed` (history preserved); otherwise transition to `pending` (local sessions finalize as `abandoned`)
+6. Call `_ensure_worker()` to restart the processing loop for that project
 
 ### Startup Integration
 
@@ -101,6 +105,11 @@ Constants in `agent/agent_session_queue.py`:
 | `AGENT_SESSION_TIMEOUT_DEFAULT` | 2700 (45 min) | Max runtime for standard sessions |
 | `AGENT_SESSION_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build sessions |
 | `AGENT_SESSION_HEALTH_MIN_RUNNING` | 300 (5 min) | Min runtime before recovery eligible |
+| `HEARTBEAT_FRESHNESS_WINDOW` | 90s | Either heartbeat within this window = progress |
+| `STDOUT_FRESHNESS_WINDOW` | 90s | `last_stdout_at` within this window = Tier 2 reprieve |
+| `HEARTBEAT_WRITE_INTERVAL` | 60s | How often `_heartbeat_loop` writes `last_heartbeat_at` |
+| `MAX_RECOVERY_ATTEMPTS` | 2 | Kills before session is finalized as `failed` |
+| `TASK_CANCEL_TIMEOUT` | 0.25s | Grace period after `handle.task.cancel()` |
 
 ## Related
 
@@ -111,3 +120,4 @@ Constants in `agent/agent_session_queue.py`:
 - `agent/agent_session_queue.py` -- Implementation source
 - Issue #127 -- Original tracking issue
 - Issue #944 -- No-progress recovery for sessions stuck behind a shared-worker-key PM
+- Issue #1036 -- Two-tier no-progress detector (dual heartbeat + Tier 2 reprieve gates)

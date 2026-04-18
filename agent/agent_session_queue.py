@@ -26,6 +26,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,28 @@ AGENT_SESSION_HEALTH_MIN_RUNNING = (
     300  # Don't recover sessions running less than 5 min (race condition guard)
 )
 
+# === Two-tier no-progress detector constants (issue #1036) ===
+# Heartbeat write interval inside `_heartbeat_loop` for the queue-layer
+# heartbeat field `last_heartbeat_at`. 60s matches the messenger watchdog
+# tick so both Tier 1 heartbeats nominally refresh on the same cadence.
+HEARTBEAT_WRITE_INTERVAL = 60
+# Freshness window (seconds) for Tier 1 heartbeat fields. A heartbeat whose
+# age is strictly less than this window is considered fresh. 90s provides a
+# 30s grace margin over the 60s write cadence.
+HEARTBEAT_FRESHNESS_WINDOW = 90
+# Freshness window for the Tier 2 recent-stdout reprieve gate.
+STDOUT_FRESHNESS_WINDOW = 90
+# Max health-check kills before a session is finalized as `failed` instead
+# of being re-queued to `pending`. Ensures sessions always reach a terminal
+# status within ~10 minutes of going non-progressing, avoiding the
+# Meta.ttl=30d silent-delete backstop described in spike-2 of issue #1036.
+MAX_RECOVERY_ATTEMPTS = 2
+# Timeout for awaiting task cancellation during recovery. SDK client cleanup
+# propagates near-instantly once CancelledError is raised; 0.25s keeps the
+# health-check tick budget tight while still giving the cancellation a
+# moment to complete.
+TASK_CANCEL_TIMEOUT = 0.25
+
 
 # Fields to extract from AgentSession for delete-and-recreate pattern.
 # Used by callers that legitimately need a fresh AutoKeyField-generated ID:
@@ -202,6 +225,14 @@ _AGENT_SESSION_FIELDS = [
     "slug",
     # === PM self-messaging fields ===
     "pm_sent_message_ids",
+    # === Two-tier no-progress detector fields (issue #1036) ===
+    # Round-trip these across delete-and-recreate so recovery_attempts counter
+    # and heartbeat timestamps are preserved. B2 from plan critique.
+    "last_heartbeat_at",
+    "last_sdk_heartbeat_at",
+    "last_stdout_at",
+    "recovery_attempts",
+    "reprieve_count",
 ]
 
 
@@ -1532,13 +1563,23 @@ def _get_agent_session_timeout(session) -> int:
 def _has_progress(entry: AgentSession) -> bool:
     """Return True iff the session shows any signal that real work has begun.
 
-    Three own-progress fields cover the SDK subprocess warmup arc from auth
-    to first turn:
-    - ``claude_session_uuid`` is populated when the SDK subprocess authenticates
-      with the Claude API (seconds after launch, long before the first turn).
-    - ``log_path`` is written once the session emits its first log entry
-      (typically on the first tool call).
-    - ``turn_count`` increments on each full agent turn completion.
+    Tier 1 signals (dual heartbeat, issue #1036) — checked first:
+    - ``last_heartbeat_at``: queue-layer heartbeat, written every 60s by
+      ``_heartbeat_loop`` inside ``_execute_agent_session``.
+    - ``last_sdk_heartbeat_at``: messenger-sourced heartbeat, written by
+      ``BackgroundTask._watchdog`` via the ``on_heartbeat_tick`` callback.
+
+    Semantics: **OR** — if EITHER heartbeat is fresher than
+    ``HEARTBEAT_FRESHNESS_WINDOW`` (90s), the session has progress. This
+    tolerates single-writer failures (e.g. queue heartbeat loop wedged while
+    the messenger watchdog keeps ticking), minimizing false-positives
+    (killing a working session). The kill trigger in the health check
+    requires BOTH heartbeats to be stale before even evaluating Tier 2.
+
+    Own-progress signals (original behavior, preserved):
+    - ``claude_session_uuid`` — populated on SDK authentication.
+    - ``log_path`` — written on the first log entry.
+    - ``turn_count`` — incremented per turn completion.
 
     Any one of the three is sufficient evidence that the session is in flight.
 
@@ -1551,8 +1592,18 @@ def _has_progress(entry: AgentSession) -> bool:
 
     Used by ``_agent_session_health_check`` to distinguish stuck slugless dev
     sessions (worker_alive via a co-running PM, but no progress) from healthy
-    long-warmup BUILD sessions. See issues #944 and #963.
+    long-warmup BUILD sessions. See issues #944, #963, and #1036.
     """
+    # Tier 1: dual-heartbeat OR check (#1036). Fresh on either signal → progress.
+    now_utc = datetime.now(tz=UTC)
+    for hb_attr in ("last_heartbeat_at", "last_sdk_heartbeat_at"):
+        hb = getattr(entry, hb_attr, None)
+        if isinstance(hb, datetime):
+            hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
+            age_s = (now_utc - hb_aware).total_seconds()
+            if age_s < HEARTBEAT_FRESHNESS_WINDOW:
+                return True
+    # Own-progress fields (original behavior, preserves #944 / #963 invariants).
     if (entry.turn_count or 0) > 0:
         return True
     if bool((entry.log_path or "").strip()):
@@ -1566,6 +1617,71 @@ def _has_progress(entry: AgentSession) -> bool:
     if any(c.status not in _TERMINAL_STATUSES for c in children):
         return True
     return False
+
+
+def _tier2_reprieve_signal(
+    handle: "SessionHandle | None",
+    entry: AgentSession,
+) -> str | None:
+    """Evaluate Tier 2 activity-positive reprieve gates (issue #1036).
+
+    Called by the health check after Tier 1 has flagged a session as "both
+    heartbeats stale". Any single positive signal reprieves the kill.
+
+    Gates (order matters for telemetry — the first passing gate is returned):
+      (c) "alive"    — ``psutil.Process(pid).status()`` is not one of
+                       {zombie, dead, stopped}. Proves the SDK subprocess
+                       still exists and is not a zombie.
+      (d) "children" — ``psutil.Process(pid).children()`` is non-empty.
+                       Stronger signal than (c): tool-subprocess execution is
+                       actively happening right now. Returned in preference
+                       to "alive" so metrics highlight this case.
+      (e) "stdout"   — ``entry.last_stdout_at`` is within
+                       ``STDOUT_FRESHNESS_WINDOW``. Proves the SDK recently
+                       emitted stdout (stream-json event).
+
+    Returns the name of the first passing gate ("children", "alive", or
+    "stdout"), or ``None`` if every gate fails.
+
+    Failure handling:
+      * ``handle is None`` → (c)(d) skipped; fall through to (e).
+      * ``handle.pid is None`` → (c)(d) skipped; fall through to (e).
+      * ``psutil.NoSuchProcess`` / ``psutil.AccessDenied`` / ``ImportError``
+        → (c)(d) skipped silently; fall through to (e).
+
+    This helper NEVER raises. A genuinely dead session where every gate
+    fails is preferable to crashing the health-check loop.
+    """
+    pid = handle.pid if handle is not None else None
+    if pid is not None:
+        try:
+            import psutil
+
+            proc = psutil.Process(pid)
+            status = proc.status()
+            if status not in (
+                psutil.STATUS_ZOMBIE,
+                psutil.STATUS_DEAD,
+                psutil.STATUS_STOPPED,
+            ):
+                # Prefer "children" when present — stronger signal.
+                if proc.children():
+                    return "children"
+                return "alive"
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ImportError):
+            pass
+        except Exception as e:
+            # Defensive: never crash the health check from a psutil edge case.
+            logger.debug("[session-health] psutil probe failed for pid=%s: %s", pid, e)
+
+    # (e) recent stdout — works even when pid is unknown.
+    lso = getattr(entry, "last_stdout_at", None)
+    if isinstance(lso, datetime):
+        lso_aware = lso if lso.tzinfo else lso.replace(tzinfo=UTC)
+        age = (datetime.now(tz=UTC) - lso_aware).total_seconds()
+        if age < STDOUT_FRESHNESS_WINDOW:
+            return "stdout"
+    return None
 
 
 async def _agent_session_health_check() -> None:
@@ -1680,16 +1796,23 @@ async def _agent_session_health_check() -> None:
                     reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
 
             if should_recover:
-                # O1: observability counter — classify the recovery reason and
-                # increment a project-scoped Redis counter for dashboards.
-                # Failure to write the counter must never block recovery.
+                # Classify the recovery reason up front — referenced below to
+                # gate Tier 1/Tier 2 reprieve logic to no_progress recoveries
+                # only (#1039 review). worker_dead and timeout kinds must
+                # NOT pass through Tier 2: a dead worker cannot be reprieved
+                # by an "active children" signal, and a timed-out session
+                # with active children should still be killed — otherwise
+                # the timeout cap becomes unenforceable.
+                if "no progress signal" in reason:
+                    _reason_kind = "no_progress"
+                elif "exceeded timeout" in reason:
+                    _reason_kind = "timeout"
+                else:
+                    _reason_kind = "worker_dead"
+
+                # O1: observability counter — increment a project-scoped Redis
+                # counter for dashboards. Failure must never block recovery.
                 try:
-                    if "no progress signal" in reason:
-                        _reason_kind = "no_progress"
-                    elif "exceeded timeout" in reason:
-                        _reason_kind = "timeout"
-                    else:
-                        _reason_kind = "worker_dead"
                     from popoto.redis_db import POPOTO_REDIS_DB as _R
 
                     _R.incr(f"{entry.project_key}:session-health:recoveries:{_reason_kind}")
@@ -1725,6 +1848,65 @@ async def _agent_session_health_check() -> None:
                         )
                     continue
 
+                # === Two-tier no-progress detector (#1036) ===
+                # Tier 1/Tier 2 reprieve logic applies ONLY to no_progress
+                # recoveries. worker_dead and timeout recoveries skip reprieve
+                # and fall through to the kill path below (#1039 review):
+                #   * worker_dead: no worker to deliver future progress.
+                #   * timeout: Tier 2 activity signals must NOT defeat the
+                #     absolute timeout cap; an actively-running session that
+                #     exceeds its configured timeout should still be killed.
+                handle = _active_sessions.get(entry.agent_session_id)
+                if handle is None:
+                    logger.debug(
+                        "[session-health] No registry handle for %s; "
+                        "Tier 2 will use stdout gate only",
+                        entry.agent_session_id,
+                    )
+                if _reason_kind == "no_progress":
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                        _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
+                    except Exception as _m_err:
+                        logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
+
+                    reprieve = _tier2_reprieve_signal(handle, entry)
+                    if reprieve is not None:
+                        # Activity-positive: do NOT kill, do NOT increment recovery_attempts.
+                        try:
+                            from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                            _MR.incr(
+                                f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}"
+                            )
+                        except Exception as _m_err:
+                            logger.debug(
+                                "[session-health] tier2_reprieve counter failed: %s", _m_err
+                            )
+                        try:
+                            entry.reprieve_count = (entry.reprieve_count or 0) + 1
+                            entry.save(update_fields=["reprieve_count"])
+                        except Exception as _rc_err:
+                            logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
+                        logger.info(
+                            "[session-health] Tier 2 reprieve (%s) for session %s — "
+                            "skipping kill (reprieve_count=%s)",
+                            reprieve,
+                            entry.agent_session_id,
+                            entry.reprieve_count,
+                        )
+                        continue
+
+                # All Tier 2 gates failed. Respect kill-switch.
+                if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
+                    logger.warning(
+                        "[session-health] Would kill session %s (DISABLE_PROGRESS_KILL=1): %s",
+                        entry.agent_session_id,
+                        reason,
+                    )
+                    continue
+
                 is_local = worker_key.startswith("local")
                 logger.warning(
                     "[session-health] Recovering stuck session %s "
@@ -1735,46 +1917,127 @@ async def _agent_session_health_check() -> None:
                     is_local,
                     reason,
                 )
-                from models.session_lifecycle import finalize_session, transition_status
 
-                if is_local:
-                    # Local CLI sessions have no bridge worker to resume them --
-                    # mark abandoned instead of resetting to pending
-                    finalize_session(
-                        entry,
-                        "abandoned",
-                        reason=f"health check: local session stuck (chat={worker_key})",
-                        skip_auto_tag=True,
-                    )
+                # Cancel the in-flight session task if we have a handle and
+                # the task reference has been populated. `handle.task` is None
+                # between `_execute_agent_session` entry and
+                # `BackgroundTask.run()` completion — during that setup window
+                # there is nothing session-scoped to cancel (the worker-loop
+                # task is off limits; plan spike-1, #1039 review). Cancelling
+                # the populated `task._task` terminates the SDK subprocess via
+                # CancelledError propagation, preventing orphan heartbeats.
+                if handle is not None and handle.task is not None and not handle.task.done():
+                    handle.task.cancel()
+                    try:
+                        await asyncio.wait_for(handle.task, timeout=TASK_CANCEL_TIMEOUT)
+                    except (TimeoutError, asyncio.CancelledError):
+                        pass
+                    except Exception as _c_err:
+                        logger.debug(
+                            "[session-health] task cancel await raised %s for session %s",
+                            _c_err,
+                            entry.agent_session_id,
+                        )
                     logger.info(
-                        "[session-health] Marked local session %s as abandoned (chat=%s)",
+                        "[session-health] Cancelled orphan task for session %s",
                         entry.agent_session_id,
-                        worker_key,
                     )
-                else:
-                    # Apply companion fields directly to the already-loaded entry,
-                    # then transition via transition_status() which has its own CAS
-                    # re-read. This avoids the redundant Redis re-read that
-                    # update_session() would do.
-                    entry.priority = "high"
-                    entry.started_at = None
-                    transition_status(
-                        entry,
-                        "pending",
-                        reason=f"health check: recovered stuck session (chat={worker_key})",
-                    )
-                    logger.info(
-                        "[session-health] Recovered session %s (chat=%s)",
+
+                from models.session_lifecycle import (
+                    StatusConflictError,
+                    finalize_session,
+                    transition_status,
+                )
+
+                # Bump recovery_attempts counter only on actual kill (#1036).
+                entry.recovery_attempts = (entry.recovery_attempts or 0) + 1
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                    _MR.incr(f"{entry.project_key}:session-health:kill_total")
+                except Exception as _m_err:
+                    logger.debug("[session-health] kill counter failed: %s", _m_err)
+
+                try:
+                    if is_local:
+                        # Local CLI sessions have no bridge worker to resume them --
+                        # mark abandoned. Tier 2 reprieves already had a chance above,
+                        # so if we reach here the local session is genuinely wedged.
+                        finalize_session(
+                            entry,
+                            "abandoned",
+                            reason=(
+                                f"health check: local session stuck "
+                                f"(chat={worker_key}, attempts={entry.recovery_attempts})"
+                            ),
+                            skip_auto_tag=True,
+                        )
+                        logger.info(
+                            "[session-health] Marked local session %s as abandoned "
+                            "(chat=%s, attempts=%s)",
+                            entry.agent_session_id,
+                            worker_key,
+                            entry.recovery_attempts,
+                        )
+                    elif entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
+                        # Exhausted retries: finalize as `failed` so the session
+                        # reaches a terminal status and is auditable via
+                        # valor-session status. Prevents the Meta.ttl silent-delete
+                        # backstop from eating non-terminal records (spike-2).
+                        finalize_session(
+                            entry,
+                            "failed",
+                            reason=(
+                                f"health check: {entry.recovery_attempts} recovery "
+                                f"attempts, never progressed"
+                            ),
+                        )
+                        logger.warning(
+                            "[session-health] Finalized session %s as failed after "
+                            "%s recovery attempts",
+                            entry.agent_session_id,
+                            entry.recovery_attempts,
+                        )
+                    else:
+                        # Apply companion fields directly to the already-loaded entry,
+                        # then transition via transition_status() which has its own CAS
+                        # re-read. Save recovery_attempts along the way.
+                        entry.priority = "high"
+                        entry.started_at = None
+                        try:
+                            entry.save(update_fields=["recovery_attempts"])
+                        except Exception as _ra_err:
+                            logger.debug(
+                                "[session-health] recovery_attempts save failed: %s",
+                                _ra_err,
+                            )
+                        transition_status(
+                            entry,
+                            "pending",
+                            reason=(
+                                f"health check: recovered stuck session "
+                                f"(chat={worker_key}, attempt {entry.recovery_attempts})"
+                            ),
+                        )
+                        logger.info(
+                            "[session-health] Recovered session %s (chat=%s, attempt %s)",
+                            entry.agent_session_id,
+                            worker_key,
+                            entry.recovery_attempts,
+                        )
+                        _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
+                        # Wake up an already-running idle worker — _ensure_worker returns
+                        # early if the worker exists, so the event is never set and the
+                        # recovered pending session would stall until a new notify arrives.
+                        event = _active_events.get(worker_key)
+                        if event is not None:
+                            event.set()
+                except StatusConflictError as _sc_err:
+                    logger.warning(
+                        "[session-health] StatusConflictError during recovery of %s: %s",
                         entry.agent_session_id,
-                        worker_key,
+                        _sc_err,
                     )
-                    _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
-                    # Wake up an already-running idle worker — _ensure_worker returns
-                    # early if the worker exists, so the event is never set and the
-                    # recovered pending session would stall until a new notify arrives.
-                    event = _active_events.get(worker_key)
-                    if event is not None:
-                        event.set()
                 recovered += 1
         except Exception:
             logger.exception(
@@ -2123,6 +2386,47 @@ DRAIN_TIMEOUT = 1.5  # seconds
 
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
+
+
+@dataclass
+class SessionHandle:
+    """Per-session lookup handle for the two-tier no-progress detector (#1036).
+
+    Populated at the top of ``_execute_agent_session`` and removed in its
+    ``finally`` block. The ``task`` field is the ``asyncio.Task`` running the
+    session-scoped SDK work so the health check can cancel it when both Tier 1
+    heartbeats go stale AND all Tier 2 reprieve gates fail.
+
+    ``task`` is ``None`` until ``BackgroundTask.run()`` creates the
+    session-scoped task at ``agent/messenger.py:198``. Early setup code runs on
+    the worker-loop task itself; cancelling that would tear down the entire
+    worker (plan spike-1, #1039 review). Between registration and
+    ``BackgroundTask.run()`` there is nothing session-scoped to cancel — the
+    health check must check ``task is not None`` before calling ``.cancel()``.
+
+    The ``pid`` field is populated by the messenger's ``on_sdk_started``
+    callback once the SDK subprocess is spawned; it is used by the Tier 2
+    process-alive / has-children gates via psutil.
+
+    Lifecycle contract:
+      * Single writer: ``_execute_agent_session`` for its own session id.
+      * Multi reader: ``_agent_session_health_check`` and
+        ``_tier2_reprieve_signal`` (both look up by id, tolerate missing).
+      * ``_active_sessions.pop()`` happens in ``_execute_agent_session``'s
+        ``finally`` block, always.
+    """
+
+    task: asyncio.Task | None = None
+    pid: int | None = None
+
+
+# Registry of in-flight session executions, keyed by agent_session_id.
+#
+# Written only by ``_execute_agent_session`` (register at entry before any
+# raise site; pop in ``finally``). Read by the health check (to look up the
+# cancellable task on kill) and by ``_tier2_reprieve_signal`` (to read the
+# pid for Tier 2 gates).
+_active_sessions: dict[str, SessionHandle] = {}
 
 # Tracks worker_keys for which asyncio.create_task() has been called but the task
 # has not yet registered itself in _active_workers (i.e., the spawn is in-flight).
@@ -3495,576 +3799,676 @@ async def _execute_agent_session(session: AgentSession) -> None:
     2. Run agent work via BackgroundTask + BossMessenger (in project working dir)
     3. Periodic calendar heartbeats during long-running work
     4. Set reaction based on result
+
+    Two-tier no-progress detector integration (#1036):
+      * A ``SessionHandle`` is registered in ``_active_sessions`` BEFORE any
+        raise site so the health check always has a cancellable reference.
+      * Cleanup happens in an explicit ``finally`` block wrapping the entire
+        session body — ``_active_sessions.pop()`` runs on every exit path
+        (return, raise, ``CancelledError``).
+      * A T+0 ``last_heartbeat_at`` write ensures the first health-check tick
+        after session start sees a fresh heartbeat.
+      * Three messenger callbacks (``on_sdk_started``, ``on_heartbeat_tick``,
+        ``on_stdout_event``) bump per-session ORM fields; the messenger
+        itself imports nothing from ``models/``.
     """
     from agent import BackgroundTask, BossMessenger
 
-    working_dir = Path(session.working_dir)
-    allowed_root = Path.home() / "src"
-    is_wt = WORKTREES_DIR in str(working_dir)
-    working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
-
-    # Restore branch state from checkpoint if this is a resumed session
+    # === Two-tier no-progress detector registration (#1036) ===
+    # Register an empty handle BEFORE any raise site so observability is
+    # consistent even if setup/enrichment/hydration fails.
+    #
+    # The cancellable task reference (``handle.task``) is populated AFTER
+    # ``BackgroundTask.run()`` creates the session-scoped task at
+    # ``messenger.py:198``. Between registration and that point the session
+    # runs on the worker-loop task — cancelling the current task from the
+    # health check would kill the entire worker (plan spike-1 explicitly
+    # forbids this; #1039 review).
+    #
+    # Cleanup is guaranteed by the ``finally`` block wrapping the entire
+    # session body below: ``_active_sessions.pop()`` runs on every exit path
+    # (return, raise, ``CancelledError``), satisfying the "pop in a finally
+    # block, always" contract from the SessionHandle docstring.
+    _session_id_for_registry = session.agent_session_id
+    if _session_id_for_registry:
+        _active_sessions[_session_id_for_registry] = SessionHandle(task=None)
     try:
-        restore_branch_state(session)
-    except Exception as e:
-        logger.debug(f"[restore] Non-fatal restore error at session start: {e}")
-
-    # Resolve branch: use slug + stage mapping if available, else session-based
-    slug = session.slug
-    stage = None
-    if slug:
-        # Try to read current stage from the AgentSession
+        # T+0 heartbeat write: guarantee the very first health-check tick after
+        # session start sees a fresh heartbeat. Uses the pre-loaded `session`
+        # (the enqueue record) directly with a partial save scoped to a single
+        # field so it cannot clobber status or any other field.
         try:
-            from models.session_lifecycle import get_authoritative_session as _get_auth
+            session.last_heartbeat_at = datetime.now(tz=UTC)
+            session.save(update_fields=["last_heartbeat_at"])
+        except Exception as _hb_err:
+            logger.warning(
+                "[%s] T+0 last_heartbeat_at save failed (non-fatal): %s",
+                session.session_id,
+                _hb_err,
+            )
 
-            _auth = _get_auth(session.session_id)
-            if _auth:
-                stage = _auth.current_stage
+        working_dir = Path(session.working_dir)
+        allowed_root = Path.home() / "src"
+        is_wt = WORKTREES_DIR in str(working_dir)
+        working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
+
+        # Restore branch state from checkpoint if this is a resumed session
+        try:
+            restore_branch_state(session)
         except Exception as e:
-            logger.debug(
-                f"[{session.project_key}] current_stage lookup failed for "
-                f"{session.session_id} (non-fatal): {e}"
-            )
-        resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
-        branch_name = resolved_branch
-        # If branch resolution says we need a worktree and working_dir isn't one
-        if needs_wt and WORKTREES_DIR not in str(working_dir):
-            try:
-                from agent.worktree_manager import get_or_create_worktree
+            logger.debug(f"[restore] Non-fatal restore error at session start: {e}")
 
-                wt_path = get_or_create_worktree(working_dir, slug)
-                working_dir = Path(wt_path)
-                logger.info(
-                    f"[branch-mapping] Resolved worktree for slug={slug} "
-                    f"stage={stage}: {working_dir}"
+        # Resolve branch: use slug + stage mapping if available, else session-based
+        slug = session.slug
+        stage = None
+        if slug:
+            # Try to read current stage from the AgentSession
+            try:
+                from models.session_lifecycle import get_authoritative_session as _get_auth
+
+                _auth = _get_auth(session.session_id)
+                if _auth:
+                    stage = _auth.current_stage
+            except Exception as e:
+                logger.debug(
+                    f"[{session.project_key}] current_stage lookup failed for "
+                    f"{session.session_id} (non-fatal): {e}"
                 )
-            except Exception as e:
-                _stype = getattr(session, "session_type", None)
-                if _stype == "dev":
-                    # Dev sessions with a slug MUST have worktree isolation.
-                    # Falling back to the main checkout would contaminate it.
-                    # See issue #887: session-isolation-bypass incident (2026-04-10).
-                    logger.critical(
-                        f"[branch-mapping] FATAL: Failed to create worktree for "
-                        f"dev session slug={slug}: {e} — refusing to proceed in "
-                        f"main checkout to prevent contamination"
-                    )
-                    raise RuntimeError(
-                        f"Worktree provisioning failed for dev session "
-                        f"slug={slug}: {e}. Refusing to run in main checkout."
-                    ) from e
-                else:
-                    logger.warning(
-                        f"[branch-mapping] Failed to create worktree for "
-                        f"slug={slug}: {e} — using original working dir"
-                    )
-    else:
-        branch_name = _session_branch_name(session.session_id)
-
-    # Main-checkout protection guard (issue #887): dev sessions with a slug
-    # must NEVER run in the repo root. If worktree provisioning was skipped
-    # or silently failed, catch it here before any git operations run.
-    _stype = getattr(session, "session_type", None)
-    if _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir):
-        logger.critical(
-            f"[worktree-guard] Dev session {session.session_id} with slug={slug} "
-            f"resolved to main checkout ({working_dir}). Refusing to proceed — "
-            f"this would contaminate the shared working directory. "
-            f"See issue #887."
-        )
-        raise RuntimeError(
-            f"Dev session with slug={slug} must run in a worktree, "
-            f"but working_dir={working_dir} is not a worktree. "
-            f"This is a safety guard to prevent main checkout contamination (issue #887)."
-        )
-
-    # Compute task list ID for sub-agent task isolation
-    # Tier 2: planned work uses the slug directly
-    # Tier 1: ad-hoc sessions use thread-{chat_id}-{root_msg_id}
-    if session.slug:
-        task_list_id = session.slug
-    elif session.task_list_id:
-        task_list_id = session.task_list_id
-    else:
-        # Derive from session_id which encodes chat_id and root message
-        parts = session.session_id.split("_")
-        root_id = parts[-1] if "_" in session.session_id else session.telegram_message_id
-        task_list_id = f"thread-{session.chat_id}-{root_id}"
-
-    # Read correlation_id from session for end-to-end tracing
-    cid = session.correlation_id
-    log_prefix = f"[{cid}]" if cid else f"[{session.project_key}]"
-
-    logger.info(
-        f"{log_prefix} Executing session {session.agent_session_id} "
-        f"(session={session.session_id}, branch={branch_name}, cwd={working_dir})"
-    )
-
-    # Save session snapshot at session start
-    save_session_snapshot(
-        session_id=session.session_id,
-        event="resume",
-        project_key=session.project_key,
-        branch_name=branch_name,
-        task_summary=f"Session {session.agent_session_id} starting",
-        extra_context={
-            "agent_session_id": session.agent_session_id,
-            "sender": session.sender_name,
-            "message_preview": session.message_text[:200] if session.message_text else "",
-            "correlation_id": cid,
-        },
-        working_dir=str(working_dir),
-    )
-
-    # Update the AgentSession (already created at enqueue time) with session-phase fields
-    agent_session = None
-    try:
-        sessions = list(
-            AgentSession.query.filter(project_key=session.project_key, status="running")
-        )
-        for s in sessions:
-            if s.session_id == session.session_id:
-                agent_session = s
-                break
-        if agent_session:
-            agent_session.updated_at = datetime.now(tz=UTC)
-            agent_session.branch_name = branch_name
-            # Persist task_list_id so hooks can resolve this session
-            agent_session.task_list_id = task_list_id
-            agent_session.save(update_fields=["updated_at", "branch_name", "task_list_id"])
-            agent_session.append_history("user", (session.message_text or "")[:200])
-    except Exception as e:
-        logger.debug(f"AgentSession update failed (non-fatal): {e}")
-
-    # Determine session type for routing decisions
-    _session_type = getattr(agent_session, "session_type", None) if agent_session else None
-
-    # Calendar heartbeat at session start
-    asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
-
-    # Create messenger with bridge callbacks, falling back to file output
-    # Find the transport from extra_context to support multiple transports per project
-    _transport = None
-    if agent_session:
-        _extra = getattr(agent_session, "extra_context", None) or {}
-        _transport = _extra.get("transport")
-
-    send_cb, react_cb = _resolve_callbacks(session.project_key, _transport)
-
-    if not send_cb:
-        from agent.output_handler import FileOutputHandler
-
-        _fallback = FileOutputHandler()
-        send_cb = _fallback.send
-        react_cb = react_cb or _fallback.react
-        logger.info(
-            f"[{session.project_key}] No bridge callbacks registered, "
-            f"using FileOutputHandler fallback"
-        )
-
-    # Explicit state object replaces fragile nonlocal closures (_defer_reaction,
-    # _completion_sent, auto_continue_count). State is passed as a mutable object
-    # rather than mutated through shared closure references.
-    chat_state = SendToChatResult(
-        auto_continue_count=session.auto_continue_count or 0,
-    )
-
-    async def send_to_chat(msg: str) -> None:
-        """Route agent output via nudge loop.
-
-        Simple nudge model: the bridge has ONE response to any non-completion:
-        "Keep working -- only stop when you need human input or you're done."
-        The PM session owns all SDLC intelligence. The bridge just nudges.
-
-        Completion detection:
-        - stop_reason == "end_turn" AND output is non-empty → deliver
-        - stop_reason == "rate_limited" → wait with backoff, then nudge
-        - Empty output → nudge (not deliver)
-        - Safety cap of MAX_NUDGE_COUNT nudges → deliver regardless
-        """
-        nonlocal agent_session  # Re-read from Redis for fresh stage data
-
-        from agent.health_check import is_session_unhealthy
-        from agent.sdk_client import get_stop_reason
-
-        stop_reason = get_stop_reason(session.session_id) if session.session_id else None
-
-        # Re-read agent_session from Redis for fresh status.  The in-memory
-        # copy was loaded with status="running" at session start and is stale
-        # when the PM calls wait-for-children (which updates Redis directly).
-        # Without this re-read the waiting_for_children guard in output_router
-        # never fires.  Issue #1004.
-        if agent_session is not None:
-            try:
-                from models.agent_session import AgentSession as _FreshAS
-
-                _fresh = list(_FreshAS.query.filter(session_id=session.session_id))
-                if _fresh:
-                    agent_session = sorted(
-                        _fresh,
-                        key=lambda s: s.created_at or 0,
-                        reverse=True,
-                    )[0]
-            except Exception:
-                pass  # Fall back to stale in-memory copy
-
-        session_status = agent_session.status if agent_session else None
-        unhealthy_reason = is_session_unhealthy(session.session_id) if session.session_id else None
-
-        if unhealthy_reason:
-            logger.warning(
-                f"[{session.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
-            )
-
-        # Resolve session type and classification for PM auto-continue
-        _session_type = (
-            getattr(agent_session, "session_mode", None)
-            or getattr(agent_session, "session_type", None)
-            if agent_session
-            else None
-        )
-        _classification = getattr(session, "classification_type", None)
-        _is_teammate = (
-            agent_session is not None
-            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
-        )
-
-        # Delegate routing decision to output_router (call site preserved here)
-        from agent.output_router import route_session_output
-
-        action, _effective_nudge_cap = route_session_output(
-            msg=msg,
-            stop_reason=stop_reason,
-            auto_continue_count=chat_state.auto_continue_count,
-            session_status=session_status,
-            completion_sent=chat_state.completion_sent,
-            watchdog_unhealthy=unhealthy_reason,
-            session_type=_session_type,
-            classification_type=_classification,
-            is_teammate=_is_teammate,
-        )
-
-        if action == "deliver_already_completed":
-            logger.info(
-                f"[{session.project_key}] Session already completed — "
-                f"delivering without nudge ({len(msg)} chars)"
-            )
-            await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
-            chat_state.completion_sent = True
-
-        elif action == "drop":
-            logger.info(
-                f"[{session.project_key}] Dropping suppressed output "
-                f"(completion sent or nudged) "
-                f"({len(msg)} chars): {msg[:100]!r}"
-            )
-
-        elif action == "nudge_rate_limited":
-            chat_state.auto_continue_count += 1
-            logger.warning(
-                f"[{session.project_key}] Rate limited — backoff then nudge "
-                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
-            )
-            await asyncio.sleep(5)
-            await _enqueue_nudge(
-                session,
-                branch_name,
-                task_list_id,
-                chat_state.auto_continue_count,
-                msg,
-                nudge_feedback=NUDGE_MESSAGE,
-            )
-            chat_state.completion_sent = True
-            chat_state.defer_reaction = True
-
-        elif action == "nudge_empty":
-            chat_state.auto_continue_count += 1
-            logger.info(
-                f"[{session.project_key}] Empty output — nudging "
-                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
-            )
-            await _enqueue_nudge(
-                session,
-                branch_name,
-                task_list_id,
-                chat_state.auto_continue_count,
-                msg,
-                nudge_feedback=NUDGE_MESSAGE,
-            )
-            chat_state.completion_sent = True
-            chat_state.defer_reaction = True
-
-        elif action == "nudge_continue":
-            chat_state.auto_continue_count += 1
-            logger.info(
-                f"[{session.project_key}] PM/SDLC session — nudging to continue pipeline "
-                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
-            )
-            await _enqueue_nudge(
-                session,
-                branch_name,
-                task_list_id,
-                chat_state.auto_continue_count,
-                msg,
-                nudge_feedback=NUDGE_MESSAGE,
-            )
-            chat_state.completion_sent = True
-            chat_state.defer_reaction = True
-
-        elif action == "deliver_pipeline_complete":
-            from agent.output_router import PIPELINE_COMPLETE_MARKER
-
-            clean_msg = msg.replace(PIPELINE_COMPLETE_MARKER, "").rstrip()
-            logger.info(
-                f"[{session.project_key}] PM pipeline complete — delivering final summary "
-                f"({len(clean_msg)} chars)"
-            )
-            if session.session_id:
+            resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
+            branch_name = resolved_branch
+            # If branch resolution says we need a worktree and working_dir isn't one
+            if needs_wt and WORKTREES_DIR not in str(working_dir):
                 try:
-                    from bridge.telegram_relay import get_outbox_length
+                    from agent.worktree_manager import get_or_create_worktree
 
-                    for _drain_i in range(20):
-                        if get_outbox_length(session.session_id) == 0:
-                            break
-                        await asyncio.sleep(0.1)
-                except Exception as drain_err:
-                    logger.debug(f"[{session.project_key}] Outbox drain check failed: {drain_err}")
-            await send_cb(session.chat_id, clean_msg, session.telegram_message_id, agent_session)
-            chat_state.completion_sent = True
-            try:
-                if agent_session is not None:
-                    agent_session.response_delivered_at = datetime.now(UTC)
-                    agent_session.save(update_fields=["response_delivered_at", "updated_at"])
-            except Exception as e:
-                logger.warning(f"Failed to stamp response_delivered_at: {e}")
-
-        elif action == "deliver_fallback":
-            logger.warning(
-                f"[{session.project_key}] Empty output and nudge cap reached — delivering fallback"
-            )
-            await send_cb(
-                session.chat_id,
-                "The task completed but produced no output. "
-                "Please re-trigger if you expected results.",
-                session.telegram_message_id,
-                agent_session,
-            )
-            chat_state.completion_sent = True
-
-        elif action == "deliver":
-            # PM outbox drain: if messages are pending in the relay queue,
-            # wait briefly for them to be sent before the summarizer fires.
-            # This prevents the race where PM queues a message but the session
-            # completes before the relay processes it (issue #497).
-            if session.session_id:
-                try:
-                    from bridge.telegram_relay import get_outbox_length
-
-                    for _drain_i in range(20):  # 20 x 100ms = 2s max
-                        if get_outbox_length(session.session_id) == 0:
-                            break
-                        await asyncio.sleep(0.1)
-                    # Re-read session for fresh pm_sent_message_ids
-                    try:
-                        fresh_sessions = list(
-                            AgentSession.query.filter(session_id=session.session_id)
+                    wt_path = get_or_create_worktree(working_dir, slug)
+                    working_dir = Path(wt_path)
+                    logger.info(
+                        f"[branch-mapping] Resolved worktree for slug={slug} "
+                        f"stage={stage}: {working_dir}"
+                    )
+                except Exception as e:
+                    _stype = getattr(session, "session_type", None)
+                    if _stype == "dev":
+                        # Dev sessions with a slug MUST have worktree isolation.
+                        # Falling back to the main checkout would contaminate it.
+                        # See issue #887: session-isolation-bypass incident (2026-04-10).
+                        logger.critical(
+                            f"[branch-mapping] FATAL: Failed to create worktree for "
+                            f"dev session slug={slug}: {e} — refusing to proceed in "
+                            f"main checkout to prevent contamination"
                         )
-                        if fresh_sessions:
-                            fresh_sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-                            agent_session = fresh_sessions[0]
-                    except Exception:
-                        pass
-                except Exception as drain_err:
-                    logger.debug(f"[{session.project_key}] Outbox drain check failed: {drain_err}")
+                        raise RuntimeError(
+                            f"Worktree provisioning failed for dev session "
+                            f"slug={slug}: {e}. Refusing to run in main checkout."
+                        ) from e
+                    else:
+                        logger.warning(
+                            f"[branch-mapping] Failed to create worktree for "
+                            f"slug={slug}: {e} — using original working dir"
+                        )
+        else:
+            branch_name = _session_branch_name(session.session_id)
 
-            await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
-            chat_state.completion_sent = True
-            logger.info(
-                f"[{session.project_key}] Output delivered "
-                f"(stop_reason={stop_reason}, {len(msg)} chars)"
+        # Main-checkout protection guard (issue #887): dev sessions with a slug
+        # must NEVER run in the repo root. If worktree provisioning was skipped
+        # or silently failed, catch it here before any git operations run.
+        _stype = getattr(session, "session_type", None)
+        if _stype == "dev" and slug and WORKTREES_DIR not in str(working_dir):
+            logger.critical(
+                f"[worktree-guard] Dev session {session.session_id} with slug={slug} "
+                f"resolved to main checkout ({working_dir}). Refusing to proceed — "
+                f"this would contaminate the shared working directory. "
+                f"See issue #887."
             )
-            # Stamp response_delivered_at so health check won't re-queue (#918)
+            raise RuntimeError(
+                f"Dev session with slug={slug} must run in a worktree, "
+                f"but working_dir={working_dir} is not a worktree. "
+                f"This is a safety guard to prevent main checkout contamination (issue #887)."
+            )
+
+        # Compute task list ID for sub-agent task isolation
+        # Tier 2: planned work uses the slug directly
+        # Tier 1: ad-hoc sessions use thread-{chat_id}-{root_msg_id}
+        if session.slug:
+            task_list_id = session.slug
+        elif session.task_list_id:
+            task_list_id = session.task_list_id
+        else:
+            # Derive from session_id which encodes chat_id and root message
+            parts = session.session_id.split("_")
+            root_id = parts[-1] if "_" in session.session_id else session.telegram_message_id
+            task_list_id = f"thread-{session.chat_id}-{root_id}"
+
+        # Read correlation_id from session for end-to-end tracing
+        cid = session.correlation_id
+        log_prefix = f"[{cid}]" if cid else f"[{session.project_key}]"
+
+        logger.info(
+            f"{log_prefix} Executing session {session.agent_session_id} "
+            f"(session={session.session_id}, branch={branch_name}, cwd={working_dir})"
+        )
+
+        # Save session snapshot at session start
+        save_session_snapshot(
+            session_id=session.session_id,
+            event="resume",
+            project_key=session.project_key,
+            branch_name=branch_name,
+            task_summary=f"Session {session.agent_session_id} starting",
+            extra_context={
+                "agent_session_id": session.agent_session_id,
+                "sender": session.sender_name,
+                "message_preview": session.message_text[:200] if session.message_text else "",
+                "correlation_id": cid,
+            },
+            working_dir=str(working_dir),
+        )
+
+        # Update the AgentSession (already created at enqueue time) with session-phase fields
+        agent_session = None
+        try:
+            sessions = list(
+                AgentSession.query.filter(project_key=session.project_key, status="running")
+            )
+            for s in sessions:
+                if s.session_id == session.session_id:
+                    agent_session = s
+                    break
+            if agent_session:
+                agent_session.updated_at = datetime.now(tz=UTC)
+                agent_session.branch_name = branch_name
+                # Persist task_list_id so hooks can resolve this session
+                agent_session.task_list_id = task_list_id
+                agent_session.save(update_fields=["updated_at", "branch_name", "task_list_id"])
+                agent_session.append_history("user", (session.message_text or "")[:200])
+        except Exception as e:
+            logger.debug(f"AgentSession update failed (non-fatal): {e}")
+
+        # Determine session type for routing decisions
+        _session_type = getattr(agent_session, "session_type", None) if agent_session else None
+
+        # Calendar heartbeat at session start
+        asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
+
+        # Create messenger with bridge callbacks, falling back to file output
+        # Find the transport from extra_context to support multiple transports per project
+        _transport = None
+        if agent_session:
+            _extra = getattr(agent_session, "extra_context", None) or {}
+            _transport = _extra.get("transport")
+
+        send_cb, react_cb = _resolve_callbacks(session.project_key, _transport)
+
+        if not send_cb:
+            from agent.output_handler import FileOutputHandler
+
+            _fallback = FileOutputHandler()
+            send_cb = _fallback.send
+            react_cb = react_cb or _fallback.react
+            logger.info(
+                f"[{session.project_key}] No bridge callbacks registered, "
+                f"using FileOutputHandler fallback"
+            )
+
+        # Explicit state object replaces fragile nonlocal closures (_defer_reaction,
+        # _completion_sent, auto_continue_count). State is passed as a mutable object
+        # rather than mutated through shared closure references.
+        chat_state = SendToChatResult(
+            auto_continue_count=session.auto_continue_count or 0,
+        )
+
+        async def send_to_chat(msg: str) -> None:
+            """Route agent output via nudge loop.
+
+            Simple nudge model: the bridge has ONE response to any non-completion:
+            "Keep working -- only stop when you need human input or you're done."
+            The PM session owns all SDLC intelligence. The bridge just nudges.
+
+            Completion detection:
+            - stop_reason == "end_turn" AND output is non-empty → deliver
+            - stop_reason == "rate_limited" → wait with backoff, then nudge
+            - Empty output → nudge (not deliver)
+            - Safety cap of MAX_NUDGE_COUNT nudges → deliver regardless
+            """
+            nonlocal agent_session  # Re-read from Redis for fresh stage data
+
+            from agent.health_check import is_session_unhealthy
+            from agent.sdk_client import get_stop_reason
+
+            stop_reason = get_stop_reason(session.session_id) if session.session_id else None
+
+            # Re-read agent_session from Redis for fresh status.  The in-memory
+            # copy was loaded with status="running" at session start and is stale
+            # when the PM calls wait-for-children (which updates Redis directly).
+            # Without this re-read the waiting_for_children guard in output_router
+            # never fires.  Issue #1004.
+            if agent_session is not None:
+                try:
+                    from models.agent_session import AgentSession as _FreshAS
+
+                    _fresh = list(_FreshAS.query.filter(session_id=session.session_id))
+                    if _fresh:
+                        agent_session = sorted(
+                            _fresh,
+                            key=lambda s: s.created_at or 0,
+                            reverse=True,
+                        )[0]
+                except Exception:
+                    pass  # Fall back to stale in-memory copy
+
+            session_status = agent_session.status if agent_session else None
+            unhealthy_reason = (
+                is_session_unhealthy(session.session_id) if session.session_id else None
+            )
+
+            if unhealthy_reason:
+                logger.warning(
+                    f"[{session.project_key}] Watchdog flagged session "
+                    f"unhealthy: {unhealthy_reason}"
+                )
+
+            # Resolve session type and classification for PM auto-continue
+            _session_type = (
+                getattr(agent_session, "session_mode", None)
+                or getattr(agent_session, "session_type", None)
+                if agent_session
+                else None
+            )
+            _classification = getattr(session, "classification_type", None)
+            _is_teammate = (
+                agent_session is not None
+                and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
+            )
+
+            # Delegate routing decision to output_router (call site preserved here)
+            from agent.output_router import route_session_output
+
+            action, _effective_nudge_cap = route_session_output(
+                msg=msg,
+                stop_reason=stop_reason,
+                auto_continue_count=chat_state.auto_continue_count,
+                session_status=session_status,
+                completion_sent=chat_state.completion_sent,
+                watchdog_unhealthy=unhealthy_reason,
+                session_type=_session_type,
+                classification_type=_classification,
+                is_teammate=_is_teammate,
+            )
+
+            if action == "deliver_already_completed":
+                logger.info(
+                    f"[{session.project_key}] Session already completed — "
+                    f"delivering without nudge ({len(msg)} chars)"
+                )
+                await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
+                chat_state.completion_sent = True
+
+            elif action == "drop":
+                logger.info(
+                    f"[{session.project_key}] Dropping suppressed output "
+                    f"(completion sent or nudged) "
+                    f"({len(msg)} chars): {msg[:100]!r}"
+                )
+
+            elif action == "nudge_rate_limited":
+                chat_state.auto_continue_count += 1
+                logger.warning(
+                    f"[{session.project_key}] Rate limited — backoff then nudge "
+                    f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
+                )
+                await asyncio.sleep(5)
+                await _enqueue_nudge(
+                    session,
+                    branch_name,
+                    task_list_id,
+                    chat_state.auto_continue_count,
+                    msg,
+                    nudge_feedback=NUDGE_MESSAGE,
+                )
+                chat_state.completion_sent = True
+                chat_state.defer_reaction = True
+
+            elif action == "nudge_empty":
+                chat_state.auto_continue_count += 1
+                logger.info(
+                    f"[{session.project_key}] Empty output — nudging "
+                    f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
+                )
+                await _enqueue_nudge(
+                    session,
+                    branch_name,
+                    task_list_id,
+                    chat_state.auto_continue_count,
+                    msg,
+                    nudge_feedback=NUDGE_MESSAGE,
+                )
+                chat_state.completion_sent = True
+                chat_state.defer_reaction = True
+
+            elif action == "nudge_continue":
+                chat_state.auto_continue_count += 1
+                logger.info(
+                    f"[{session.project_key}] PM/SDLC session — nudging to continue pipeline "
+                    f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
+                )
+                await _enqueue_nudge(
+                    session,
+                    branch_name,
+                    task_list_id,
+                    chat_state.auto_continue_count,
+                    msg,
+                    nudge_feedback=NUDGE_MESSAGE,
+                )
+                chat_state.completion_sent = True
+                chat_state.defer_reaction = True
+
+            elif action == "deliver_pipeline_complete":
+                from agent.output_router import PIPELINE_COMPLETE_MARKER
+
+                clean_msg = msg.replace(PIPELINE_COMPLETE_MARKER, "").rstrip()
+                logger.info(
+                    f"[{session.project_key}] PM pipeline complete — delivering final summary "
+                    f"({len(clean_msg)} chars)"
+                )
+                if session.session_id:
+                    try:
+                        from bridge.telegram_relay import get_outbox_length
+
+                        for _drain_i in range(20):
+                            if get_outbox_length(session.session_id) == 0:
+                                break
+                            await asyncio.sleep(0.1)
+                    except Exception as drain_err:
+                        logger.debug(
+                            f"[{session.project_key}] Outbox drain check failed: {drain_err}"
+                        )
+                await send_cb(
+                    session.chat_id, clean_msg, session.telegram_message_id, agent_session
+                )
+                chat_state.completion_sent = True
+                try:
+                    if agent_session is not None:
+                        agent_session.response_delivered_at = datetime.now(UTC)
+                        agent_session.save(update_fields=["response_delivered_at", "updated_at"])
+                except Exception as e:
+                    logger.warning(f"Failed to stamp response_delivered_at: {e}")
+
+            elif action == "deliver_fallback":
+                logger.warning(
+                    f"[{session.project_key}] Empty output and nudge cap "
+                    f"reached — delivering fallback"
+                )
+                await send_cb(
+                    session.chat_id,
+                    "The task completed but produced no output. "
+                    "Please re-trigger if you expected results.",
+                    session.telegram_message_id,
+                    agent_session,
+                )
+                chat_state.completion_sent = True
+
+            elif action == "deliver":
+                # PM outbox drain: if messages are pending in the relay queue,
+                # wait briefly for them to be sent before the summarizer fires.
+                # This prevents the race where PM queues a message but the session
+                # completes before the relay processes it (issue #497).
+                if session.session_id:
+                    try:
+                        from bridge.telegram_relay import get_outbox_length
+
+                        for _drain_i in range(20):  # 20 x 100ms = 2s max
+                            if get_outbox_length(session.session_id) == 0:
+                                break
+                            await asyncio.sleep(0.1)
+                        # Re-read session for fresh pm_sent_message_ids
+                        try:
+                            fresh_sessions = list(
+                                AgentSession.query.filter(session_id=session.session_id)
+                            )
+                            if fresh_sessions:
+                                fresh_sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+                                agent_session = fresh_sessions[0]
+                        except Exception:
+                            pass
+                    except Exception as drain_err:
+                        logger.debug(
+                            f"[{session.project_key}] Outbox drain check failed: {drain_err}"
+                        )
+
+                await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
+                chat_state.completion_sent = True
+                logger.info(
+                    f"[{session.project_key}] Output delivered "
+                    f"(stop_reason={stop_reason}, {len(msg)} chars)"
+                )
+                # Stamp response_delivered_at so health check won't re-queue (#918)
+                try:
+                    if agent_session is not None:
+                        agent_session.response_delivered_at = datetime.now(UTC)
+                        agent_session.save(update_fields=["response_delivered_at", "updated_at"])
+                        logger.info(
+                            f"Stamped response_delivered_at for session {session.session_id}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to stamp response_delivered_at for {session.session_id}: {e}"
+                    )
+
+        # === Two-tier no-progress detector callbacks (#1036) ===
+        # These closures bump per-session ORM fields on each signal. They are
+        # passed to BossMessenger so the messenger itself imports nothing from
+        # models/ — it just blindly invokes callbacks (notify_* wrappers catch
+        # exceptions). Each save is scoped to a single field so it cannot
+        # clobber status or any other field.
+        def _on_sdk_started(pid: int) -> None:
+            handle = _active_sessions.get(session.agent_session_id)
+            if handle is not None:
+                handle.pid = pid
             try:
-                if agent_session is not None:
-                    agent_session.response_delivered_at = datetime.now(UTC)
-                    agent_session.save(update_fields=["response_delivered_at", "updated_at"])
-                    logger.info(f"Stamped response_delivered_at for session {session.session_id}")
+                session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
+                session.save(update_fields=["last_sdk_heartbeat_at"])
             except Exception as e:
                 logger.warning(
-                    f"Failed to stamp response_delivered_at for {session.session_id}: {e}"
+                    "[%s] on_sdk_started save failed (pid=%s): %s",
+                    session.session_id,
+                    pid,
+                    e,
                 )
 
-    messenger = BossMessenger(
-        _send_callback=send_to_chat,
-        chat_id=session.chat_id,
-        session_id=session.session_id,
-    )
+        def _on_heartbeat_tick() -> None:
+            try:
+                session.last_sdk_heartbeat_at = datetime.now(tz=UTC)
+                session.save(update_fields=["last_sdk_heartbeat_at"])
+            except Exception as e:
+                logger.warning(
+                    "[%s] on_heartbeat_tick save failed: %s",
+                    session.session_id,
+                    e,
+                )
 
-    # Deferred enrichment: process media, YouTube, links, reply chain.
-    # Reads enrichment params exclusively from TelegramMessage via telegram_message_key.
-    enriched_text = session.message_text
-    enrich_has_media = False
-    enrich_media_type = None
-    enrich_youtube_urls = None
-    enrich_non_youtube_urls = None
-    enrich_reply_to_msg_id = None
+        def _on_stdout_event() -> None:
+            try:
+                session.last_stdout_at = datetime.now(tz=UTC)
+                session.save(update_fields=["last_stdout_at"])
+            except Exception as e:
+                logger.warning(
+                    "[%s] on_stdout_event save failed: %s",
+                    session.session_id,
+                    e,
+                )
 
-    if session.telegram_message_key:
-        try:
-            from models.telegram import TelegramMessage
+        messenger = BossMessenger(
+            _send_callback=send_to_chat,
+            chat_id=session.chat_id,
+            session_id=session.session_id,
+            on_sdk_started=_on_sdk_started,
+            on_heartbeat_tick=_on_heartbeat_tick,
+            on_stdout_event=_on_stdout_event,
+        )
 
-            trigger_msgs = list(TelegramMessage.query.filter(msg_id=session.telegram_message_key))
-            if trigger_msgs:
-                tm = trigger_msgs[0]
-                enrich_has_media = bool(tm.has_media)
-                enrich_media_type = tm.media_type
-                enrich_youtube_urls = tm.youtube_urls
-                enrich_non_youtube_urls = tm.non_youtube_urls
-                enrich_reply_to_msg_id = tm.reply_to_msg_id
+        # Deferred enrichment: process media, YouTube, links, reply chain.
+        # Reads enrichment params exclusively from TelegramMessage via telegram_message_key.
+        enriched_text = session.message_text
+        enrich_has_media = False
+        enrich_media_type = None
+        enrich_youtube_urls = None
+        enrich_non_youtube_urls = None
+        enrich_reply_to_msg_id = None
+
+        if session.telegram_message_key:
+            try:
+                from models.telegram import TelegramMessage
+
+                trigger_msgs = list(
+                    TelegramMessage.query.filter(msg_id=session.telegram_message_key)
+                )
+                if trigger_msgs:
+                    tm = trigger_msgs[0]
+                    enrich_has_media = bool(tm.has_media)
+                    enrich_media_type = tm.media_type
+                    enrich_youtube_urls = tm.youtube_urls
+                    enrich_non_youtube_urls = tm.non_youtube_urls
+                    enrich_reply_to_msg_id = tm.reply_to_msg_id
+                    logger.debug(
+                        f"[{session.project_key}] Resolved enrichment from "
+                        f"TelegramMessage {session.telegram_message_key}"
+                    )
+                else:
+                    logger.debug(
+                        f"[{session.project_key}] telegram_message_key "
+                        f"{session.telegram_message_key} not found, skipping enrichment"
+                    )
+            except Exception as e:
+                logger.debug(f"[{session.project_key}] TelegramMessage lookup failed: {e}")
+
+        # Idempotency guard (Plan IN-1 / Race 1): belt-and-suspenders against
+        # double-hydration when the handler already prepended a REPLY THREAD
+        # CONTEXT block (e.g. resume-completed branch pre-hydrates synchronously).
+        #   Primary:   extra_context["reply_chain_hydrated"] flag stamped by the
+        #              bridge handler at enqueue time — explicit and reviewable.
+        #   Defensive: REPLY_THREAD_CONTEXT_HEADER substring scan of message_text
+        #              — catches sessions enqueued before the flag shipped and
+        #              any future code path that pre-hydrates without the flag.
+        # Either guard triggering skips the deferred reply-chain fetch.
+        from bridge.context import REPLY_THREAD_CONTEXT_HEADER
+
+        if enrich_reply_to_msg_id:
+            _extra_ctx = getattr(session, "extra_context", None) or {}
+            _flag_hydrated = bool(_extra_ctx.get("reply_chain_hydrated"))
+            _header_present = REPLY_THREAD_CONTEXT_HEADER in (session.message_text or "")
+            if _flag_hydrated or _header_present:
                 logger.debug(
-                    f"[{session.project_key}] Resolved enrichment from "
-                    f"TelegramMessage {session.telegram_message_key}"
+                    f"[{session.project_key}] Reply chain already hydrated by handler; "
+                    f"skipping deferred fetch (session={session.session_id}, "
+                    f"flag={_flag_hydrated}, header={_header_present})"
                 )
-            else:
+                enrich_reply_to_msg_id = None
+
+        if (
+            enrich_has_media
+            or enrich_youtube_urls
+            or enrich_non_youtube_urls
+            or enrich_reply_to_msg_id
+        ):
+            try:
+                from bridge.enrichment import enrich_message, get_telegram_client
+
+                tg_client = get_telegram_client()
+                enriched_text = await enrich_message(
+                    telegram_client=tg_client,
+                    message_text=session.message_text,
+                    has_media=enrich_has_media,
+                    media_type=enrich_media_type,
+                    raw_media_message_id=session.telegram_message_id,
+                    youtube_urls=enrich_youtube_urls,
+                    non_youtube_urls=enrich_non_youtube_urls,
+                    reply_to_msg_id=enrich_reply_to_msg_id,
+                    chat_id=session.chat_id,
+                    sender_name=session.sender_name,
+                    message_id=session.telegram_message_id,
+                )
+            except Exception as e:
+                logger.warning(f"[{session.project_key}] Enrichment failed, using raw text: {e}")
+
+        # Set back-reference: TelegramMessage.agent_session_id -> this session's agent_session_id
+        if session.telegram_message_key:
+            try:
+                from models.telegram import TelegramMessage
+
+                trigger_msgs = list(
+                    TelegramMessage.query.filter(msg_id=session.telegram_message_key)
+                )
+                if trigger_msgs and not trigger_msgs[0].agent_session_id:
+                    trigger_msgs[0].agent_session_id = session.agent_session_id
+                    trigger_msgs[0].save()
+            except Exception:
+                pass  # Non-critical: best-effort cross-reference
+
+        # Run agent work directly in the project working directory.
+        # Read project config from the session (populated at enqueue time).
+        # Transitional fallback: if session.project_config is empty (legacy sessions
+        # created before this migration), load from projects.json directly.
+        project_config = getattr(session, "project_config", None) or {}
+        if not project_config:
+            try:
+                from bridge.routing import load_config as _load_projects_config
+
+                _all_projects = _load_projects_config().get("projects", {})
+                project_config = _all_projects.get(session.project_key, {})
+            except Exception as e:
                 logger.debug(
-                    f"[{session.project_key}] telegram_message_key {session.telegram_message_key} "
-                    f"not found, skipping enrichment"
+                    f"Failed to load project config for {session.project_key} "
+                    f"from projects.json (non-fatal): {e}"
                 )
-        except Exception as e:
-            logger.debug(f"[{session.project_key}] TelegramMessage lookup failed: {e}")
+        if not project_config:
+            project_config = {
+                "_key": session.project_key,
+                "working_directory": str(working_dir),
+                "name": session.project_key,
+            }
 
-    # Idempotency guard (Plan IN-1 / Race 1): belt-and-suspenders against
-    # double-hydration when the handler already prepended a REPLY THREAD
-    # CONTEXT block (e.g. resume-completed branch pre-hydrates synchronously).
-    #   Primary:   extra_context["reply_chain_hydrated"] flag stamped by the
-    #              bridge handler at enqueue time — explicit and reviewable.
-    #   Defensive: REPLY_THREAD_CONTEXT_HEADER substring scan of message_text
-    #              — catches sessions enqueued before the flag shipped and
-    #              any future code path that pre-hydrates without the flag.
-    # Either guard triggering skips the deferred reply-chain fetch.
-    from bridge.context import REPLY_THREAD_CONTEXT_HEADER
-
-    if enrich_reply_to_msg_id:
-        _extra_ctx = getattr(session, "extra_context", None) or {}
-        _flag_hydrated = bool(_extra_ctx.get("reply_chain_hydrated"))
-        _header_present = REPLY_THREAD_CONTEXT_HEADER in (session.message_text or "")
-        if _flag_hydrated or _header_present:
-            logger.debug(
-                f"[{session.project_key}] Reply chain already hydrated by handler; "
-                f"skipping deferred fetch (session={session.session_id}, "
-                f"flag={_flag_hydrated}, header={_header_present})"
-            )
-            enrich_reply_to_msg_id = None
-
-    if enrich_has_media or enrich_youtube_urls or enrich_non_youtube_urls or enrich_reply_to_msg_id:
-        try:
-            from bridge.enrichment import enrich_message, get_telegram_client
-
-            tg_client = get_telegram_client()
-            enriched_text = await enrich_message(
-                telegram_client=tg_client,
-                message_text=session.message_text,
-                has_media=enrich_has_media,
-                media_type=enrich_media_type,
-                raw_media_message_id=session.telegram_message_id,
-                youtube_urls=enrich_youtube_urls,
-                non_youtube_urls=enrich_non_youtube_urls,
-                reply_to_msg_id=enrich_reply_to_msg_id,
-                chat_id=session.chat_id,
-                sender_name=session.sender_name,
-                message_id=session.telegram_message_id,
-            )
-        except Exception as e:
-            logger.warning(f"[{session.project_key}] Enrichment failed, using raw text: {e}")
-
-    # Set back-reference: TelegramMessage.agent_session_id -> this session's agent_session_id
-    if session.telegram_message_key:
-        try:
-            from models.telegram import TelegramMessage
-
-            trigger_msgs = list(TelegramMessage.query.filter(msg_id=session.telegram_message_key))
-            if trigger_msgs and not trigger_msgs[0].agent_session_id:
-                trigger_msgs[0].agent_session_id = session.agent_session_id
-                trigger_msgs[0].save()
-        except Exception:
-            pass  # Non-critical: best-effort cross-reference
-
-    # Run agent work directly in the project working directory.
-    # Read project config from the session (populated at enqueue time).
-    # Transitional fallback: if session.project_config is empty (legacy sessions
-    # created before this migration), load from projects.json directly.
-    project_config = getattr(session, "project_config", None) or {}
-    if not project_config:
-        try:
-            from bridge.routing import load_config as _load_projects_config
-
-            _all_projects = _load_projects_config().get("projects", {})
-            project_config = _all_projects.get(session.project_key, {})
-        except Exception as e:
-            logger.debug(
-                f"Failed to load project config for {session.project_key} "
-                f"from projects.json (non-fatal): {e}"
-            )
-    if not project_config:
-        project_config = {
-            "_key": session.project_key,
-            "working_directory": str(working_dir),
-            "name": session.project_key,
-        }
-
-    # Check queued_steering_messages before starting this agent turn.
-    # If the session has pending steering messages (written by steer_session()
-    # or the PM), pop the first one and use it as the user input for this turn.
-    # This is the mechanism that replaces hardcoded nudge text — any process
-    # can write to queued_steering_messages to steer the session externally.
-    _turn_input = enriched_text
-    if agent_session:
-        try:
-            steering_msgs = agent_session.pop_steering_messages()
-            if steering_msgs:
-                _turn_input = steering_msgs[0]
-                logger.info(
-                    f"[{session.project_key}] Injecting steering message for session "
-                    f"{session.session_id}: {_turn_input[:80]!r} "
-                    f"({len(steering_msgs)} queued, used first)"
+        # Check queued_steering_messages before starting this agent turn.
+        # If the session has pending steering messages (written by steer_session()
+        # or the PM), pop the first one and use it as the user input for this turn.
+        # This is the mechanism that replaces hardcoded nudge text — any process
+        # can write to queued_steering_messages to steer the session externally.
+        _turn_input = enriched_text
+        if agent_session:
+            try:
+                steering_msgs = agent_session.pop_steering_messages()
+                if steering_msgs:
+                    _turn_input = steering_msgs[0]
+                    logger.info(
+                        f"[{session.project_key}] Injecting steering message for session "
+                        f"{session.session_id}: {_turn_input[:80]!r} "
+                        f"({len(steering_msgs)} queued, used first)"
+                    )
+                    if len(steering_msgs) > 1:
+                        # Re-queue remaining messages for future turns
+                        for _remaining in steering_msgs[1:]:
+                            agent_session.push_steering_message(_remaining)
+            except Exception as _steer_err:
+                logger.debug(
+                    f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}"
                 )
-                if len(steering_msgs) > 1:
-                    # Re-queue remaining messages for future turns
-                    for _remaining in steering_msgs[1:]:
-                        agent_session.push_steering_message(_remaining)
-        except Exception as _steer_err:
-            logger.debug(f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}")
 
-    # All session types route to CLI harness (claude -p)
-    from agent.sdk_client import (
-        _get_prior_session_uuid,
-        build_harness_turn_input,
-        get_response_via_harness,
-    )
+        # All session types route to CLI harness (claude -p)
+        from agent.sdk_client import (
+            _get_prior_session_uuid,
+            build_harness_turn_input,
+            get_response_via_harness,
+        )
 
-    project_key = project_config.get("_key", "valor") if project_config else "valor"
-    _classification = getattr(agent_session, "classification_type", None) if agent_session else None
+        project_key = project_config.get("_key", "valor") if project_config else "valor"
+        _classification = (
+            getattr(agent_session, "classification_type", None) if agent_session else None
+        )
 
-    # Look up prior Claude Code session UUID for --resume (#976, extends PR #909 pattern)
-    _prior_uuid = _get_prior_session_uuid(session.session_id)
+        # Look up prior Claude Code session UUID for --resume (#976, extends PR #909 pattern)
+        _prior_uuid = _get_prior_session_uuid(session.session_id)
 
-    _harness_input = await build_harness_turn_input(
-        message=_turn_input,
-        session_id=session.session_id,
-        sender_name=session.sender_name,
-        chat_title=session.chat_title,
-        project=project_config,
-        task_list_id=task_list_id,
-        session_type=_session_type,
-        sender_id=session.sender_id,
-        classification=_classification,
-        is_cross_repo=(project_key != "valor"),
-    )
-
-    # On resumed turns, also build the minimal message (no context prefix)
-    _minimal_input = None
-    if _prior_uuid:
-        _minimal_input = await build_harness_turn_input(
+        _harness_input = await build_harness_turn_input(
             message=_turn_input,
             session_id=session.session_id,
             sender_name=session.sender_name,
@@ -4075,276 +4479,334 @@ async def _execute_agent_session(session: AgentSession) -> None:
             sender_id=session.sender_id,
             classification=_classification,
             is_cross_repo=(project_key != "valor"),
-            skip_prefix=True,
         )
 
-    logger.info(
-        f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness"
-        + (f" (--resume {_prior_uuid[:8]}...)" if _prior_uuid else " (first turn)")
-    )
-
-    # Streaming chunks from the CLI harness are suppressed for all session types
-    # (Telegram and email). Forwarding them bypasses the nudge loop and sends
-    # mid-sentence fragments directly. BackgroundTask delivers the final result instead.
-
-    # PM and Teammate sessions set VALOR_PARENT_SESSION_ID so child subprocesses
-    # (spawned via valor_session create --parent or via Agent tool) can link their
-    # AgentSession records back to this session in user_prompt_submit.py.
-    _harness_env: dict[str, str] = {
-        "AGENT_SESSION_ID": session.agent_session_id or "",
-        "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
-    }
-    if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
-        _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
-
-    _harness_requeued = False
-
-    async def do_work() -> str:
-        nonlocal _harness_requeued
-        raw = await get_response_via_harness(
-            message=_minimal_input if _prior_uuid else _harness_input,
-            working_dir=str(working_dir),
-            env=_harness_env,
-            prior_uuid=_prior_uuid,
-            session_id=session.session_id,
-            full_context_message=_harness_input,
-        )
-        if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
-            result, requeued = await _handle_harness_not_found(raw, agent_session)
-            if requeued:
-                _harness_requeued = True
-            return result
-        return raw
-
-    task = BackgroundTask(messenger=messenger)
-    await task.run(do_work(), send_result=True)
-
-    # Wait for the background task to complete, with periodic calendar heartbeats
-    # and updated_at writes to keep the session alive during long Claude API calls.
-    async def _heartbeat_loop():
-        while not task._task.done():
-            await asyncio.sleep(CALENDAR_HEARTBEAT_INTERVAL)
-            if not task._task.done():
-                asyncio.create_task(
-                    _calendar_heartbeat(session.project_key, project=session.project_key)
-                )
-                # Write updated_at heartbeat so stale cleanup doesn't kill this session
-                # Use partial save to avoid clobbering status on stale references (#950)
-                if agent_session:
-                    try:
-                        agent_session.updated_at = datetime.now(tz=UTC)
-                        agent_session.save(update_fields=["updated_at"])
-                    except Exception as hb_err:
-                        logger.warning(
-                            "[%s] updated_at heartbeat save failed: %s",
-                            session.session_id,
-                            hb_err,
-                        )
-
-    heartbeat = asyncio.create_task(_heartbeat_loop())
-    try:
-        # Await the actual task future -- propagates exceptions immediately
-        await task._task
-    except Exception as e:
-        # Exception escaped BackgroundTask._run_work's handler
-        if not task.error:
-            task._error = e
-            logger.error(
-                "[%s] Task crashed outside _run_work: %s",
-                session.session_id,
-                e,
+        # On resumed turns, also build the minimal message (no context prefix)
+        _minimal_input = None
+        if _prior_uuid:
+            _minimal_input = await build_harness_turn_input(
+                message=_turn_input,
+                session_id=session.session_id,
+                sender_name=session.sender_name,
+                chat_title=session.chat_title,
+                project=project_config,
+                task_list_id=task_list_id,
+                session_type=_session_type,
+                sender_id=session.sender_id,
+                classification=_classification,
+                is_cross_repo=(project_key != "valor"),
+                skip_prefix=True,
             )
-    finally:
-        heartbeat.cancel()
 
-    # Post-completion SDLC handling for dev sessions (Phase 3)
-    # Skip if the session was silently re-queued for harness retry — the re-queued
-    # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-    # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-    # has a chance to succeed.
-    if _harness_requeued:
-        return
+        logger.info(
+            f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness"
+            + (f" (--resume {_prior_uuid[:8]}...)" if _prior_uuid else " (first turn)")
+        )
 
-    # Update session status in Redis via AgentSession
-    # When auto-continue deferred, session is still active (not completed)
-    if agent_session:
+        # Streaming chunks from the CLI harness are suppressed for all session types
+        # (Telegram and email). Forwarding them bypasses the nudge loop and sends
+        # mid-sentence fragments directly. BackgroundTask delivers the final result instead.
+
+        # PM and Teammate sessions set VALOR_PARENT_SESSION_ID so child subprocesses
+        # (spawned via valor_session create --parent or via Agent tool) can link their
+        # AgentSession records back to this session in user_prompt_submit.py.
+        _harness_env: dict[str, str] = {
+            "AGENT_SESSION_ID": session.agent_session_id or "",
+            "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
+        }
+        if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
+            _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
+
+        _harness_requeued = False
+
+        async def do_work() -> str:
+            nonlocal _harness_requeued
+            raw = await get_response_via_harness(
+                message=_minimal_input if _prior_uuid else _harness_input,
+                working_dir=str(working_dir),
+                env=_harness_env,
+                prior_uuid=_prior_uuid,
+                session_id=session.session_id,
+                full_context_message=_harness_input,
+                # Two-tier no-progress detector callbacks (#1036). These route
+                # through messenger.notify_* wrappers so exceptions are caught
+                # and the queue-layer closures bump ORM fields on AgentSession.
+                on_sdk_started=messenger.notify_sdk_started,
+                on_stdout_event=messenger.notify_stdout_event,
+            )
+            if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
+                result, requeued = await _handle_harness_not_found(raw, agent_session)
+                if requeued:
+                    _harness_requeued = True
+                return result
+            return raw
+
+        task = BackgroundTask(messenger=messenger)
+        await task.run(do_work(), send_result=True)
+
+        # === Two-tier no-progress detector: populate cancellable task ref (#1036) ===
+        # Now that BackgroundTask.run() has created its session-scoped task at
+        # messenger.py:198, record it on the handle so the health-check kill path
+        # targets the SDK work — NOT the worker-loop task (plan spike-1; #1039
+        # review). Until this line the handle's task is None, and the health
+        # check must no-op on cancel.
+        _handle_for_task_ref = _active_sessions.get(session.agent_session_id)
+        if _handle_for_task_ref is not None and task._task is not None:
+            _handle_for_task_ref.task = task._task
+
+        # Wait for the background task to complete, with periodic heartbeats.
+        # The loop now ticks at HEARTBEAT_WRITE_INTERVAL (60s) for the two-tier
+        # no-progress detector's queue-layer heartbeat (#1036). Every N ticks
+        # (where N*interval == CALENDAR_HEARTBEAT_INTERVAL, i.e. every 25 min)
+        # it also fires the calendar heartbeat and updated_at save to keep the
+        # prior behavior intact.
+        async def _heartbeat_loop():
+            elapsed = 0
+            while not task._task.done():
+                await asyncio.sleep(HEARTBEAT_WRITE_INTERVAL)
+                elapsed += HEARTBEAT_WRITE_INTERVAL
+                if task._task.done():
+                    break
+
+                # Tier 1 queue-layer heartbeat (#1036): write every tick.
+                try:
+                    session.last_heartbeat_at = datetime.now(tz=UTC)
+                    session.save(update_fields=["last_heartbeat_at"])
+                except Exception as hb_err:
+                    logger.warning(
+                        "[%s] last_heartbeat_at save failed: %s",
+                        session.session_id,
+                        hb_err,
+                    )
+
+                # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
+                if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:
+                    elapsed = 0
+                    asyncio.create_task(
+                        _calendar_heartbeat(session.project_key, project=session.project_key)
+                    )
+                    if agent_session:
+                        try:
+                            agent_session.updated_at = datetime.now(tz=UTC)
+                            agent_session.save(update_fields=["updated_at"])
+                        except Exception as hb_err:
+                            logger.warning(
+                                "[%s] updated_at heartbeat save failed: %s",
+                                session.session_id,
+                                hb_err,
+                            )
+
+        heartbeat = asyncio.create_task(_heartbeat_loop())
         try:
-            from bridge.session_transcript import complete_transcript
-
-            final_status = (
-                "active"
-                if chat_state.defer_reaction
-                else ("completed" if not task.error else "failed")
-            )
-            if not chat_state.defer_reaction:
-                complete_transcript(session.session_id, status=final_status)
-            # else: nudge path — _enqueue_nudge already wrote the authoritative
-            # post-nudge state (status=pending, auto_continue_count, nudge event,
-            # new message_text). Do NOT save the stale `agent_session` local here;
-            # it would clobber the nudge. updated_at is refreshed on the next
-            # worker pop. See #898 for the regression history.
+            # Await the actual task future -- propagates exceptions immediately
+            await task._task
         except Exception as e:
-            logger.warning(
-                f"AgentSession update failed for session {session.agent_session_id} "
-                f"session {session.session_id} (operation: finalize status to "
-                f"{'completed' if not task.error else 'failed'}): {e}"
-            )
-    else:
-        # agent_session lookup returned None (race on status="running" filter,
-        # e.g. after health-check recovery). Finalize using outer `session`
-        # param directly to prevent session from staying in `running` state
-        # permanently. Uses complete_transcript() (not finalize_session()
-        # directly) to ensure the SESSION_END transcript marker is written —
-        # complete_transcript queries by session_id alone (no status filter),
-        # so it works here. See issue #917.
-        if not chat_state.defer_reaction:
-            try:
-                from bridge.session_transcript import complete_transcript
-                from models.session_lifecycle import StatusConflictError
-
-                final_status = "completed" if not task.error else "failed"
-                complete_transcript(session.session_id, status=final_status)
-                logger.info(
-                    "Fallback finalization: session %s → %s (agent_session was None)",
-                    session.agent_session_id,
-                    final_status,
-                )
-            except StatusConflictError:
-                # CAS conflict = another process already finalized. This is success.
-                logger.info(
-                    "Fallback finalization skipped: session %s already transitioned "
-                    "(CAS conflict — expected)",
-                    session.agent_session_id,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Fallback finalization failed for session %s: %s",
-                    session.agent_session_id,
+            # Exception escaped BackgroundTask._run_work's handler
+            if not task.error:
+                task._error = e
+                logger.error(
+                    "[%s] Task crashed outside _run_work: %s",
+                    session.session_id,
                     e,
                 )
+        finally:
+            heartbeat.cancel()
 
-    # Post-completion SDLC handling for dev sessions (Phase 3)
-    # IMPORTANT ORDERING INVARIANT: This call is placed AFTER the entire
-    # `if agent_session / else` block above. That block calls complete_transcript(),
-    # which calls finalize_session() → _finalize_parent_sync() synchronously
-    # (bridge/session_transcript.py:252, line 292). By the time
-    # _handle_dev_session_completion runs here, _finalize_parent_sync has already
-    # completed on BOTH the `if agent_session:` and `else:` paths. The re-check
-    # guard inside _handle_dev_session_completion will therefore correctly observe
-    # the PM's post-finalization (terminal) status and create a continuation PM.
-    # Moving this call earlier (before complete_transcript) causes the race
-    # described in issue #987: steer is accepted, then _finalize_parent_sync runs
-    # and the PM goes terminal, orphaning the steering message.
-    #
-    # Nudge path note: on the nudge path (defer_reaction=True), complete_transcript
-    # is skipped above, but _finalize_parent_sync still runs via the nudge path's
-    # own finalize_session call. This call is guarded by `_session_type == "dev"`,
-    # not by `defer_reaction`, so it executes on both the nudge and non-nudge paths.
-    #
-    # Skip if the session was silently re-queued for harness retry — the re-queued
-    # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-    # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-    # has a chance to succeed. (The _harness_requeued early-return above handles this.)
-    if _session_type == "dev" and not task.error:
-        await _handle_dev_session_completion(
-            session=session,
-            agent_session=agent_session,
-            result=task._result or "",
-        )
+        # Post-completion SDLC handling for dev sessions (Phase 3)
+        # Skip if the session was silently re-queued for harness retry — the re-queued
+        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
+        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
+        # has a chance to succeed.
+        if _harness_requeued:
+            return
 
-    # Save session snapshot for error cases
-    if task.error:
-        save_session_snapshot(
-            session_id=session.session_id,
-            event="error",
-            project_key=session.project_key,
-            branch_name=branch_name,
-            task_summary=f"Session {session.agent_session_id} failed: {task.error}",
-            extra_context={
-                "agent_session_id": session.agent_session_id,
-                "error": str(task.error),
-                "sender": session.sender_name,
-                "correlation_id": cid,
-            },
-            working_dir=str(working_dir),
-        )
+        # Update session status in Redis via AgentSession
+        # When auto-continue deferred, session is still active (not completed)
+        if agent_session:
+            try:
+                from bridge.session_transcript import complete_transcript
 
-    # Clean up steering queue — log content of any unconsumed messages
-    try:
-        from agent.steering import pop_all_steering_messages
-
-        leftover = pop_all_steering_messages(session.session_id)
-        if leftover:
-            # Use 500-char limit (not 120) to preserve enough intent for forensics
-            texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:500]}" for m in leftover]
-            logger.warning(
-                f"[{session.project_key}] {len(leftover)} unconsumed steering "
-                f"message(s) dropped for session {session.session_id}:\n" + "\n".join(texts)
-            )
-    except Exception as e:
-        logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
-
-    # Set reaction based on result and delivery state
-    # Skip if a continuation session was enqueued (defer reaction to that session)
-    if react_cb and not chat_state.defer_reaction:
-        # Teammate sessions: clear the processing reaction instead of setting completion emoji
-        if (
-            agent_session
-            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
-            and not task.error
-        ):
-            emoji = None  # Clear reaction
-        elif task.error:
-            emoji = REACTION_ERROR
-        elif messenger.has_communicated():
-            emoji = REACTION_COMPLETE
+                final_status = (
+                    "active"
+                    if chat_state.defer_reaction
+                    else ("completed" if not task.error else "failed")
+                )
+                if not chat_state.defer_reaction:
+                    complete_transcript(session.session_id, status=final_status)
+                # else: nudge path — _enqueue_nudge already wrote the authoritative
+                # post-nudge state (status=pending, auto_continue_count, nudge event,
+                # new message_text). Do NOT save the stale `agent_session` local here;
+                # it would clobber the nudge. updated_at is refreshed on the next
+                # worker pop. See #898 for the regression history.
+            except Exception as e:
+                logger.warning(
+                    f"AgentSession update failed for session {session.agent_session_id} "
+                    f"session {session.session_id} (operation: finalize status to "
+                    f"{'completed' if not task.error else 'failed'}): {e}"
+                )
         else:
-            emoji = REACTION_SUCCESS
-        try:
-            await react_cb(session.chat_id, session.telegram_message_id, emoji)
-        except Exception as e:
-            logger.warning(f"Failed to set reaction: {e}")
+            # agent_session lookup returned None (race on status="running" filter,
+            # e.g. after health-check recovery). Finalize using outer `session`
+            # param directly to prevent session from staying in `running` state
+            # permanently. Uses complete_transcript() (not finalize_session()
+            # directly) to ensure the SESSION_END transcript marker is written —
+            # complete_transcript queries by session_id alone (no status filter),
+            # so it works here. See issue #917.
+            if not chat_state.defer_reaction:
+                try:
+                    from bridge.session_transcript import complete_transcript
+                    from models.session_lifecycle import StatusConflictError
 
-    # Auto-mark session as done after successful completion
-    # Skip when auto-continue deferred — continuation session will handle cleanup
-    if not task.error and not chat_state.defer_reaction:
-        try:
-            from agent.branch_manager import mark_work_done
+                    final_status = "completed" if not task.error else "failed"
+                    complete_transcript(session.session_id, status=final_status)
+                    logger.info(
+                        "Fallback finalization: session %s → %s (agent_session was None)",
+                        session.agent_session_id,
+                        final_status,
+                    )
+                except StatusConflictError:
+                    # CAS conflict = another process already finalized. This is success.
+                    logger.info(
+                        "Fallback finalization skipped: session %s already transitioned "
+                        "(CAS conflict — expected)",
+                        session.agent_session_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Fallback finalization failed for session %s: %s",
+                        session.agent_session_id,
+                        e,
+                    )
 
-            mark_work_done(working_dir, branch_name)
-            # Also delete the session branch to keep git clean
-            subprocess.run(
-                ["git", "branch", "-D", branch_name],
-                cwd=working_dir,
-                capture_output=True,
-                timeout=10,
+        # Post-completion SDLC handling for dev sessions (Phase 3)
+        # IMPORTANT ORDERING INVARIANT: This call is placed AFTER the entire
+        # `if agent_session / else` block above. That block calls complete_transcript(),
+        # which calls finalize_session() → _finalize_parent_sync() synchronously
+        # (bridge/session_transcript.py:252, line 292). By the time
+        # _handle_dev_session_completion runs here, _finalize_parent_sync has already
+        # completed on BOTH the `if agent_session:` and `else:` paths. The re-check
+        # guard inside _handle_dev_session_completion will therefore correctly observe
+        # the PM's post-finalization (terminal) status and create a continuation PM.
+        # Moving this call earlier (before complete_transcript) causes the race
+        # described in issue #987: steer is accepted, then _finalize_parent_sync runs
+        # and the PM goes terminal, orphaning the steering message.
+        #
+        # Nudge path note: on the nudge path (defer_reaction=True), complete_transcript
+        # is skipped above, but _finalize_parent_sync still runs via the nudge path's
+        # own finalize_session call. This call is guarded by `_session_type == "dev"`,
+        # not by `defer_reaction`, so it executes on both the nudge and non-nudge paths.
+        #
+        # Skip if the session was silently re-queued for harness retry — the re-queued
+        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
+        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
+        # has a chance to succeed. (The _harness_requeued early-return above handles this.)
+        if _session_type == "dev" and not task.error:
+            await _handle_dev_session_completion(
+                session=session,
+                agent_session=agent_session,
+                result=task._result or "",
             )
+
+        # Save session snapshot for error cases
+        if task.error:
+            save_session_snapshot(
+                session_id=session.session_id,
+                event="error",
+                project_key=session.project_key,
+                branch_name=branch_name,
+                task_summary=f"Session {session.agent_session_id} failed: {task.error}",
+                extra_context={
+                    "agent_session_id": session.agent_session_id,
+                    "error": str(task.error),
+                    "sender": session.sender_name,
+                    "correlation_id": cid,
+                },
+                working_dir=str(working_dir),
+            )
+
+        # Clean up steering queue — log content of any unconsumed messages
+        try:
+            from agent.steering import pop_all_steering_messages
+
+            leftover = pop_all_steering_messages(session.session_id)
+            if leftover:
+                # Use 500-char limit (not 120) to preserve enough intent for forensics
+                texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:500]}" for m in leftover]
+                logger.warning(
+                    f"[{session.project_key}] {len(leftover)} unconsumed steering "
+                    f"message(s) dropped for session {session.session_id}:\n" + "\n".join(texts)
+                )
+        except Exception as e:
+            logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
+
+        # Set reaction based on result and delivery state
+        # Skip if a continuation session was enqueued (defer reaction to that session)
+        if react_cb and not chat_state.defer_reaction:
+            # Teammate sessions: clear the processing reaction instead of setting completion emoji
+            if (
+                agent_session
+                and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
+                and not task.error
+            ):
+                emoji = None  # Clear reaction
+            elif task.error:
+                emoji = REACTION_ERROR
+            elif messenger.has_communicated():
+                emoji = REACTION_COMPLETE
+            else:
+                emoji = REACTION_SUCCESS
+            try:
+                await react_cb(session.chat_id, session.telegram_message_id, emoji)
+            except Exception as e:
+                logger.warning(f"Failed to set reaction: {e}")
+
+        # Auto-mark session as done after successful completion
+        # Skip when auto-continue deferred — continuation session will handle cleanup
+        if not task.error and not chat_state.defer_reaction:
+            try:
+                from agent.branch_manager import mark_work_done
+
+                mark_work_done(working_dir, branch_name)
+                # Also delete the session branch to keep git clean
+                subprocess.run(
+                    ["git", "branch", "-D", branch_name],
+                    cwd=working_dir,
+                    capture_output=True,
+                    timeout=10,
+                )
+                logger.info(
+                    f"[{session.project_key}] Auto-marked session done "
+                    f"and cleaned up branch {branch_name}"
+                )
+            except Exception as e:
+                logger.warning(f"[{session.project_key}] Failed to auto-mark session done: {e}")
+
+            # Save session snapshot on successful completion
+            save_session_snapshot(
+                session_id=session.session_id,
+                event="complete",
+                project_key=session.project_key,
+                branch_name=branch_name,
+                task_summary=f"Session {session.agent_session_id} completed successfully",
+                extra_context={
+                    "agent_session_id": session.agent_session_id,
+                    "sender": session.sender_name,
+                    "correlation_id": cid,
+                },
+                working_dir=str(working_dir),
+            )
+        elif chat_state.defer_reaction:
             logger.info(
-                f"[{session.project_key}] Auto-marked session done "
-                f"and cleaned up branch {branch_name}"
+                f"[{session.project_key}] Skipping session cleanup — "
+                f"continuation session enqueued (auto-continue {chat_state.auto_continue_count})"
             )
-        except Exception as e:
-            logger.warning(f"[{session.project_key}] Failed to auto-mark session done: {e}")
-
-        # Save session snapshot on successful completion
-        save_session_snapshot(
-            session_id=session.session_id,
-            event="complete",
-            project_key=session.project_key,
-            branch_name=branch_name,
-            task_summary=f"Session {session.agent_session_id} completed successfully",
-            extra_context={
-                "agent_session_id": session.agent_session_id,
-                "sender": session.sender_name,
-                "correlation_id": cid,
-            },
-            working_dir=str(working_dir),
-        )
-    elif chat_state.defer_reaction:
-        logger.info(
-            f"[{session.project_key}] Skipping session cleanup — "
-            f"continuation session enqueued (auto-continue {chat_state.auto_continue_count})"
-        )
+    finally:
+        # === Two-tier no-progress detector cleanup (#1036) ===
+        # Always pop the registry entry, regardless of how the session body exited
+        # (normal return, exception, CancelledError). This prevents leaking entries
+        # into _active_sessions across sessions on the same worker.
+        if _session_id_for_registry:
+            _active_sessions.pop(_session_id_for_registry, None)
 
 
 def _session_branch_name(session_id: str) -> str:

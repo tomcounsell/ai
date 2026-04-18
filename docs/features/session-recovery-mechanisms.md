@@ -28,11 +28,12 @@ The session system has 9 mechanisms that can revive, recover, or re-enqueue sess
 |----------|-------|
 | Location | `agent/agent_session_queue.py` |
 | Trigger | Periodic timer (every 5 min, `AGENT_SESSION_HEALTH_CHECK_INTERVAL`) |
-| What it does | Recovers stuck `running` sessions back to `pending` on three signals: (1) dead/missing worker, (2) worker alive but no progress after the 300s startup guard (issue #944), (3) exceeded session timeout. Starts workers for stalled `pending` sessions. |
-| Progress signal | `_has_progress(entry)` returns True iff ANY of `turn_count > 0`, non-empty `log_path`, or non-empty `claude_session_uuid`. Covers the full SDK subprocess warmup arc so long-warmup BUILD sessions are not misclassified. |
+| What it does | Recovers stuck `running` sessions on three signals: (1) dead/missing worker, (2) worker alive but no progress after the 300s startup guard (issue #944), (3) exceeded session timeout. Starts workers for stalled `pending` sessions. |
+| Progress signal | `_has_progress(entry)` uses a **two-tier** detector (issue #1036). Tier 1: either `last_heartbeat_at` (queue-layer) or `last_sdk_heartbeat_at` (messenger-layer) fresh within 90s counts as progress; both must be stale to flag stuck. The three original own-progress signals (`turn_count > 0`, `log_path`, `claude_session_uuid`) and the #963 child-activity check are preserved. Tier 2 (`no_progress` only): `_tier2_reprieve_signal()` checks process-alive / has-children / recent-stdout; any one passing gate reprieves the kill for this cycle. See [Bridge Self-Healing §Two-tier no-progress detector](bridge-self-healing.md#two-tier-no-progress-detector) for the full design. |
+| Kill path | Cancels `handle.task` from `_active_sessions` registry (0.25s grace). Increments `recovery_attempts`; at `MAX_RECOVERY_ATTEMPTS=2` finalizes as `failed` (history preserved); otherwise transitions `running → pending`. `DISABLE_PROGRESS_KILL=1` suppresses kills while keeping flagging active. `worker_dead` and `timeout` recoveries skip Tier 2 entirely. |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"` and `status="pending"` |
 | Guard | Query filter (only non-terminal statuses) + `transition_status()` with default `reject_from_terminal=True` |
-| Observability | Each recovery increments `{project_key}:session-health:recoveries:{worker_dead\|no_progress\|timeout}` in Redis (counter write is non-fatal) |
+| Observability | Each recovery increments `{project_key}:session-health:recoveries:{worker_dead\|no_progress\|timeout}` in Redis. Tier 2 reprieve increments `tier2_reprieve_total:{alive\|children\|stdout}`. Kills increment `kill_total`. (all counter writes are non-fatal) |
 
 #### Finalization gap on re-execution (issue #917)
 
@@ -240,11 +241,21 @@ Additional coverage in `tests/unit/test_health_check_recovery_finalization.py` (
 | `test_unexpected_exception_is_warning_not_propagated` | Unexpected exception caught at warning level, not propagated |
 | `test_fallback_finalization_present_in_agent_session_queue` | Structural: fallback code present in source |
 
+Additional coverage in `tests/integration/test_session_heartbeat_progress.py` (issue #1036 — 12 tests):
+
+| Test class | What it proves |
+|------------|---------------|
+| `TestHeartbeatFreshness` | Tier 1: fresh queue-only / SDK-only heartbeat is progress; both stale flags stuck |
+| `TestTier2ReprieveIntegration` | Tier 2: recent `last_stdout_at` reprieves; all-stale proceeds to kill |
+| `TestRecoveryAttemptsIntegration` | `recovery_attempts` and `reprieve_count` fields round-trip through Popoto; `MAX_RECOVERY_ATTEMPTS` constant |
+| `TestDisableProgressKillIntegration` | `DISABLE_PROGRESS_KILL=1` suppresses kill; unset by default |
+| `TestFreshnessWindowConstants` | `HEARTBEAT_FRESHNESS_WINDOW` and `STDOUT_FRESHNESS_WINDOW` are 90s |
+
 ## Related
 
 - [Session Lifecycle](session-lifecycle.md) -- State machine and lifecycle module
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Health check details
-- [Bridge Self-Healing](bridge-self-healing.md) -- Bridge watchdog and crash recovery
+- [Bridge Self-Healing](bridge-self-healing.md) -- Bridge watchdog, crash recovery, and two-tier no-progress detector
 - Issue #875 / PR #885 -- CAS authority upgrade (compare-and-set conflict detection)
 - Issue #723 -- Original audit issue
 - Issue #727 -- Startup recovery timing guard (race condition fix)
@@ -252,3 +263,4 @@ Additional coverage in `tests/unit/test_health_check_recovery_finalization.py` (
 - PR #721 -- Lifecycle consolidation
 - Issue #917 -- Health-check recovery finalization gap (fallback else branch)
 - Issue #986 -- Startup recovery local session guard (do not hijack interactive CLI sessions)
+- Issue #1036 -- Two-tier no-progress detector (dual heartbeat + Tier 2 reprieve gates)

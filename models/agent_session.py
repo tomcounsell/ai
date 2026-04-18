@@ -257,6 +257,26 @@ class AgentSession(Model):
     # _create_continuation_pm increments from parent's value; capped at 3.
     continuation_depth = IntField(default=0)
 
+    # === Two-tier no-progress detector fields (issue #1036) ===
+    # Queue-layer heartbeat, written by `_heartbeat_loop` inside
+    # `_execute_agent_session` every HEARTBEAT_WRITE_INTERVAL (60s). Health
+    # check reads this as Tier-1 liveness signal #1.
+    last_heartbeat_at = DatetimeField(null=True)
+    # Messenger-sourced heartbeat, written by the `on_heartbeat_tick` callback
+    # invoked from `BackgroundTask._watchdog`. Health check reads this as
+    # Tier-1 liveness signal #2 (dual-heartbeat OR semantics).
+    last_sdk_heartbeat_at = DatetimeField(null=True)
+    # Messenger-sourced stdout event timestamp, written by `on_stdout_event`
+    # callback. Feeds the Tier-2 "recent stdout" reprieve gate.
+    last_stdout_at = DatetimeField(null=True)
+    # Health-check owned counters. Incremented ONLY on actual kills
+    # (Tier 1 + Tier 2 both stuck); never on reprieves or worker restart.
+    # At MAX_RECOVERY_ATTEMPTS, recovery finalizes as `failed` instead of
+    # re-queueing to `pending`, preserving terminal history.
+    recovery_attempts = IntField(default=0)
+    # Count of Tier 2 reprieves (activity-positive saves) for post-hoc analysis.
+    reprieve_count = IntField(default=0)
+
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 
@@ -294,6 +314,10 @@ class AgentSession(Model):
         "updated_at",
         "completed_at",
         "response_delivered_at",
+        # Two-tier no-progress detector heartbeat/stdout fields (issue #1036)
+        "last_heartbeat_at",
+        "last_sdk_heartbeat_at",
+        "last_stdout_at",
     }
 
     # Known roles for validation
