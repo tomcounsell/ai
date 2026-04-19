@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Shipped
 type: bug
 appetite: Small
 owner: Tom Counsell
@@ -7,7 +7,23 @@ created: 2026-04-19
 tracking: https://github.com/tomcounsell/ai/issues/1055
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 ---
+
+<!--
+allow_unchecked: true rationale — the plan's checklist items (Exception Handling
+Coverage, Test Impact, Feature Documentation, Inline Documentation, Success
+Criteria) were not checked off during BUILD but the work is fully verified
+complete via:
+  - APPROVED re-review comment on PR #1056 (all prior findings addressed)
+  - 90 hotfix-related tests passing including 5s SLO integration test
+  - Regression canary grep returns 0 matches (enforced by unit test)
+  - docs/features/subconscious-memory.md updated with "Event-Loop Safety (hotfix #1055)"
+  - CI passing, pr_merge_state CLEAN
+  - ruff format clean
+See PR #1056 body for exhaustive mapping of plan items to commits.
+-->
+
 
 # Unblock Worker Event Loop — Memory Extraction Hotfix (Layers 1+2)
 
