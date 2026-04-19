@@ -35,6 +35,7 @@ All metric names use dotted notation.
 | `sdlc.stage_completed` | `bridge/pipeline_state.py` | SDLC stage completion (dimensions: stage) |
 | `memory.recall_attempt` | `agent/memory_retrieval.py` | Memory recall attempt (dimensions: hits, project_key) |
 | `memory.extraction` | `agent/memory_extraction.py` | Post-session memory extraction (dimensions: count, project_key) |
+| `memory.extraction.error` | `agent/memory_extraction.py` | Extraction failure counter (dimensions: error_class, session_id, project_key). Emitted on every `except` branch except `CancelledError`. Introduced by hotfix #1055 to surface silent async extraction failures. |
 | `crash.recorded` | `monitoring/crash_tracker.py` | Crash event recorded (dimensions: service, exit_code) |
 | `health.check` | `monitoring/health.py` | Health check result (dimensions: component, status) |
 

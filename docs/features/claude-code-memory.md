@@ -225,7 +225,7 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
 | State management | In-memory dicts | JSON sidecar files |
 | Entry point | `agent/memory_hook.py` | `.claude/hooks/hook_utils/memory_bridge.py` |
 | Recall trigger | `check_and_inject()` in health check | `recall()` called from PostToolUse hook |
-| Extraction trigger | `run_post_session_extraction()` in messenger | `extract()` called from Stop hook |
+| Extraction trigger | `_schedule_post_session_extraction()` in session_executor (fire-and-forget after `complete_transcript`; hotfix #1055) | `extract()` called from Stop hook |
 | Ingestion | `Memory.safe_save()` in bridge | `ingest()` called from UserPromptSubmit hook |
 | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
 | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |

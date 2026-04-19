@@ -347,7 +347,7 @@ Pruning of superseded records is delegated to the future `memory-decay-prune` re
 | `scripts/memory_consolidation.py` | Nightly `memory-dedup` reflection callable: `run_consolidation(project_key=None, dry_run=True, max_merges=10)`. Haiku-based semantic dedup with dry-run/apply modes, rate cap, importance exemption, and contradiction flagging. |
 | `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
-| `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
+| `agent/session_executor.py` | Integration point: `_schedule_post_session_extraction()` fires `run_post_session_extraction()` as a background task AFTER `complete_transcript()` (hotfix #1055); `drain_pending_extractions()` drains pending tasks on worker shutdown |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |
 | `.claude/hooks/hook_utils/memory_bridge.py` | Claude Code hook memory bridge (recall, ingest, extract, agent session sidecar helpers, post-merge extract) |
 | `.claude/hooks/user_prompt_submit.py` | Claude Code prompt ingestion hook and AgentSession creation |
@@ -483,7 +483,7 @@ The memory system has high reversibility:
 
 1. Remove `Memory.safe_save()` call from `bridge/telegram_bridge.py`
 2. Remove memory hook integration from `agent/health_check.py`
-3. Remove extraction hook from `agent/messenger.py`
+3. Remove `_schedule_post_session_extraction()` and `drain_pending_extractions()` from `agent/session_executor.py` and their call sites in `_execute_agent_session` and `worker/__main__.py`
 4. Delete `models/memory.py`, `config/memory_defaults.py`, `agent/memory_hook.py`, `agent/memory_extraction.py`
 5. Remove Memory from `models/__init__.py`
 6. Flush Redis keys: `redis-cli KEYS "*Memory*" | xargs redis-cli DEL`
