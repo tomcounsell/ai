@@ -203,24 +203,23 @@ class BackgroundTask:
         logger.info(f"[{self.messenger.session_id}] Background task started")
 
     async def _run_work(self, coro: Awaitable[str], send_result: bool) -> None:
-        """Execute the work and handle completion."""
+        """Execute the work and handle completion.
+
+        Note (hotfix #1055): Post-session memory extraction is NO LONGER called
+        from here. It is scheduled by ``agent/session_executor.py::
+        _schedule_post_session_extraction`` AFTER ``complete_transcript(...)``
+        runs, as a fire-and-forget ``asyncio.create_task`` — so a hang in
+        extraction cannot block session finalization or the dev→PM nudge.
+        Do NOT re-introduce an ``await run_post_session_extraction(...)``
+        block here: it would couple extraction latency to ``_run_work`` and
+        regress the 6-hour stall observed in #1055.
+        """
         try:
             self._result = await coro
             self._completed_at = utc_now()
 
             if send_result and self._result:
                 await self.messenger.send(self._result, message_type="result")
-
-            # Post-session memory extraction (non-fatal, async)
-            try:
-                from agent.memory_extraction import run_post_session_extraction
-
-                await run_post_session_extraction(
-                    session_id=self.messenger.session_id,
-                    response_text=str(self._result or ""),
-                )
-            except Exception as mem_err:
-                logger.debug(f"[{self.messenger.session_id}] Memory extraction skipped: {mem_err}")
 
         except Exception as e:
             self._error = e

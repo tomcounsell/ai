@@ -29,6 +29,105 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
+# -----------------------------------------------------------------------------
+# Post-session memory extraction scheduling (hotfix #1055)
+# -----------------------------------------------------------------------------
+# Keyed by session_id to deduplicate when _execute_agent_session runs twice for
+# the same session (health-check revival, retry, manual resume). dict (not set)
+# is required so duplicate schedules can be detected and skipped BEFORE a second
+# create_task fires.
+_pending_extraction_tasks: dict[str, asyncio.Task] = {}
+
+
+def _schedule_post_session_extraction(session_id: str, response_text: str) -> None:
+    """Fire-and-forget post-session memory extraction (hotfix #1055).
+
+    Synchronous — creates and registers an ``asyncio.create_task``; does NOT
+    await it. Preserves the #987 ordering invariant:
+    ``_handle_dev_session_completion`` must run before this extraction task
+    completes, so the PM nudge fires promptly while extraction is still pending.
+
+    **CRITICAL**: this function is declared ``def`` (not ``async def``) and
+    returns ``None``. Any ``await`` or ``asyncio.gather(...)`` on its result
+    would re-couple extraction latency to the PM nudge and regress #987 /
+    #1055. A review-time invariant guards against this.
+
+    Deduplicates by ``session_id``: if a non-done task is already registered
+    for this session, logs at INFO and returns. Prevents duplicate observation
+    saves and a race on ``clear_session(session_id)`` when
+    ``_execute_agent_session`` runs twice for the same session (health-check
+    revival, retry, manual resume).
+
+    Extraction failures (including the hard timeout in
+    ``agent/memory_extraction.py``) are swallowed inside the task wrapper and
+    never propagate out of this scheduler. ``CancelledError`` is re-raised so
+    ``drain_pending_extractions`` can cooperate with worker shutdown.
+    """
+    existing = _pending_extraction_tasks.get(session_id)
+    if existing is not None and not existing.done():
+        logger.info(
+            "[memory_extraction] Extraction already in-flight for %s, skipping duplicate",
+            session_id,
+        )
+        return
+
+    async def _wrapper() -> None:
+        try:
+            from agent.memory_extraction import run_post_session_extraction
+
+            await run_post_session_extraction(session_id, response_text)
+        except asyncio.CancelledError:
+            raise  # preserve cancellation semantics for shutdown drain
+        except Exception as e:
+            logger.debug(
+                "[memory_extraction] Background extraction failed for %s (non-fatal): %s",
+                session_id,
+                e,
+            )
+
+    task = asyncio.create_task(_wrapper(), name=f"post_session_extraction:{session_id}")
+    _pending_extraction_tasks[session_id] = task
+    task.add_done_callback(lambda t: _pending_extraction_tasks.pop(session_id, None))
+
+
+async def drain_pending_extractions(timeout: float = 5.0) -> None:
+    """Drain in-flight post-session extraction tasks on worker shutdown (hotfix #1055).
+
+    No-op if ``_pending_extraction_tasks`` is empty (first-deploy case / worker
+    that never ran a session).
+
+    Wiring: called from ``worker/__main__.py`` shutdown sequence AFTER the
+    worker-task wait (line ~408, ``await asyncio.gather(*pending, ...)``)
+    and BEFORE the health/notify/reflection cancels. At that ordering:
+
+    - All worker loops have drained → every extraction that will be scheduled
+      has been scheduled.
+    - The event loop is still running → pending extractions can complete or be
+      cancelled cleanly.
+    - Health/notify/reflection tasks are still live → we are ordered before
+      their cancellation, avoiding a mid-cancel scheduling race.
+
+    Common case (extraction near-complete): the 5s window lets the typical
+    1-5s extraction finish. Stall case (extraction wedged past the 35s hard
+    timeout internally): we accept losing this on shutdown; the internal
+    hard-timeout already caps worst-case latency.
+    """
+    if not _pending_extraction_tasks:
+        return  # First-deploy case — nothing to drain
+
+    pending = list(_pending_extraction_tasks.values())
+    logger.info("[memory_extraction] Draining %d pending extraction task(s)", len(pending))
+    done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    for task in still_pending:
+        task.cancel()
+    if still_pending:
+        logger.warning(
+            "[memory_extraction] Cancelled %d extraction task(s) that did not complete within %.1fs",
+            len(still_pending),
+            timeout,
+        )
+
+
 # Harness startup retry constants
 _HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"
 _HARNESS_NOT_FOUND_MAX_RETRIES = 3
@@ -1266,6 +1365,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         session.agent_session_id,
                         e,
                     )
+
+        # Schedule post-session memory extraction (hotfix #1055) — fire-and-forget.
+        #
+        # CRITICAL: synchronous call (no await, no gather). Any awaiting here would
+        # re-couple extraction latency to the PM nudge below, regressing the 6-hour
+        # stall observed in #1055 and the #987 ordering invariant.
+        #
+        # Runs AFTER both complete_transcript paths above (happy path at ~L1320
+        # and the #917 fallback at ~L1346), and BEFORE _handle_dev_session_completion
+        # below. Extraction runs in the background; its completion or failure does
+        # not delay the PM nudge. See drain_pending_extractions() for shutdown wiring.
+        _schedule_post_session_extraction(session.session_id, task._result or "")
 
         # Post-completion SDLC handling for dev sessions (Phase 3)
         # IMPORTANT ORDERING INVARIANT: This call is placed AFTER the entire
