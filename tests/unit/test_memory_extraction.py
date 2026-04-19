@@ -1004,8 +1004,7 @@ class TestEventLoopSafety:
             "must log WARNING with 'hard timeout' wording"
         )
         assert any(
-            name == "memory.extraction.error"
-            and tags.get("error_class") == "timeouterror"
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
             for name, tags in recorded
         ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
 
@@ -1054,8 +1053,7 @@ class TestEventLoopSafety:
         assert isinstance(result, dict), "detect_outcomes_async must never raise on timeout"
         assert elapsed < 5.0, f"hard-timeout path must return quickly (got {elapsed:.2f}s)"
         assert any(
-            name == "memory.extraction.error"
-            and tags.get("error_class") == "timeouterror"
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
             for name, tags in recorded
         ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
 
@@ -1104,8 +1102,7 @@ class TestEventLoopSafety:
             "must log WARNING with 'hard timeout' wording"
         )
         assert any(
-            name == "memory.extraction.error"
-            and tags.get("error_class") == "timeouterror"
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
             for name, tags in recorded
         ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
 
@@ -1153,8 +1150,7 @@ class TestEventLoopSafety:
         # Outer except Exception catches the SDK APITimeoutError and records
         # the metric with error_class from type(e).__name__.
         assert any(
-            name == "memory.extraction.error"
-            and tags.get("error_class") == "apitimeouterror"
+            name == "memory.extraction.error" and tags.get("error_class") == "apitimeouterror"
             for name, tags in recorded
         ), f"must emit memory.extraction.error with error_class=apitimeouterror (got {recorded})"
 

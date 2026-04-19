@@ -159,12 +159,8 @@ class TestSessionFinalizationDecoupled:
             await asyncio.wait_for(task, timeout=0.5)
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
-        assert task.done() or task.cancelled(), (
-            "drain must have cancelled the hung task"
-        )
-        warning_messages = [
-            r.message for r in caplog.records if r.levelname == "WARNING"
-        ]
+        assert task.done() or task.cancelled(), "drain must have cancelled the hung task"
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
         assert any("did not complete" in msg for msg in warning_messages), (
             f"drain should log WARNING when cancelling hung tasks (got {warning_messages})"
         )

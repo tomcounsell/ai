@@ -71,6 +71,7 @@ def _record_extraction_error(
     except Exception:
         pass
 
+
 # Extraction prompt for Haiku — structured JSON output
 EXTRACTION_PROMPT = (
     "Extract novel observations from this agent session response.\n"
