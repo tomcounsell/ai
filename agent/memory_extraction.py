@@ -9,10 +9,19 @@ into ObservationProtocol.
 
 All operations are async, wrapped in try/except — failures must never
 crash the agent or block session completion.
+
+Event-loop safety invariant (hotfix #1055):
+    Every Anthropic call in this module MUST use ``anthropic.AsyncAnthropic``
+    inside ``async with`` for deterministic httpx cleanup, wrapped in
+    ``asyncio.wait_for(..., timeout=_EXTRACTION_HARD_TIMEOUT)`` with an
+    SDK-level ``timeout=_EXTRACTION_SDK_TIMEOUT`` kwarg. Sync ``anthropic.Anthropic``
+    is forbidden here — it blocks the worker event loop for arbitrary durations
+    on half-open TCP sockets (empirically observed: 6-hour stall on #1055).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -20,6 +29,47 @@ import re
 import time
 
 logger = logging.getLogger(__name__)
+
+# Timeout constants for Anthropic extraction calls (hotfix #1055).
+#
+# Double-timeout rationale:
+#   - _EXTRACTION_SDK_TIMEOUT: passed to messages.create(timeout=...) so the
+#     Anthropic SDK (httpx) raises APITimeoutError on idle/slow sockets.
+#   - _EXTRACTION_HARD_TIMEOUT: outer asyncio.wait_for; fires from a separate
+#     asyncio timer so it still fires even when the SDK timer does not (e.g.,
+#     half-open TCP sockets where no socket event ever arrives).
+#   - 5s buffer lets the SDK raise its own typed error first for cleaner logs.
+_EXTRACTION_SDK_TIMEOUT = 30.0
+_EXTRACTION_HARD_TIMEOUT = 35.0
+
+
+def _record_extraction_error(
+    error_class: str,
+    session_id: str,
+    project_key: str | None = None,
+) -> None:
+    """Emit ``memory.extraction.error`` analytics counter (hotfix #1055).
+
+    Non-fatal — silent if analytics unavailable. Skips ``CancelledError`` which
+    is expected on worker shutdown and carries no signal. Every ``except``
+    branch in this module's three async-Anthropic call sites must call this.
+    """
+    if error_class == "CancelledError":
+        return
+    try:
+        from analytics.collector import record_metric
+
+        record_metric(
+            "memory.extraction.error",
+            1.0,
+            {
+                "error_class": error_class.lower(),
+                "session_id": session_id,
+                "project_key": project_key or "",
+            },
+        )
+    except Exception:
+        pass
 
 # Extraction prompt for Haiku — structured JSON output
 EXTRACTION_PROMPT = (
@@ -97,21 +147,38 @@ async def extract_observations_async(
             logger.warning("[memory_extraction] No Anthropic API key, skipping extraction")
             return []
 
-        client = anthropic.Anthropic(api_key=api_key)
-
         # Truncate response to avoid token limits
         truncated = response_text[:8000]
 
-        message = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=500,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"{EXTRACTION_PROMPT}\n\n---\n\n{truncated}",
-                }
-            ],
-        )
+        # hotfix #1055: AsyncAnthropic + double-timeout + async with for httpx cleanup.
+        # Sync anthropic.Anthropic is forbidden here — it blocks the worker event loop.
+        try:
+            async with anthropic.AsyncAnthropic(
+                api_key=api_key, timeout=_EXTRACTION_SDK_TIMEOUT
+            ) as client:
+                message = await asyncio.wait_for(
+                    client.messages.create(
+                        model=MODEL_FAST,
+                        max_tokens=500,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"{EXTRACTION_PROMPT}\n\n---\n\n{truncated}",
+                            }
+                        ],
+                        timeout=_EXTRACTION_SDK_TIMEOUT,
+                    ),
+                    timeout=_EXTRACTION_HARD_TIMEOUT,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[memory_extraction] Anthropic call exceeded %.1fs hard timeout (non-fatal); "
+                "extraction skipped for session_id=%s",
+                _EXTRACTION_HARD_TIMEOUT,
+                session_id,
+            )
+            _record_extraction_error("TimeoutError", session_id, project_key)
+            return []
 
         raw_text = message.content[0].text.strip()
 
@@ -171,6 +238,7 @@ async def extract_observations_async(
 
     except Exception as e:
         logger.warning(f"[memory_extraction] Extraction failed (non-fatal): {e}")
+        _record_extraction_error(type(e).__name__, session_id, project_key)
         return []
 
 
@@ -274,19 +342,39 @@ async def extract_post_merge_learning(
             )
             return None
 
-        client = anthropic.Anthropic(api_key=api_key)
-
         prompt = POST_MERGE_EXTRACTION_PROMPT.format(
             title=pr_title,
             body=(pr_body or "")[:4000],
             diff_summary=(diff_summary or "")[:4000],
         )
 
-        message = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # hotfix #1055: AsyncAnthropic + double-timeout + async with.
+        # Called from .claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()
+        # via asyncio.run(...). The async-with + asyncio.wait_for pattern is still
+        # safe under asyncio.run because both helpers are reentrant-free and
+        # produce no nested loops. Guarded by
+        # test_extract_post_merge_learning_runs_inside_asyncio_run.
+        try:
+            async with anthropic.AsyncAnthropic(
+                api_key=api_key, timeout=_EXTRACTION_SDK_TIMEOUT
+            ) as client:
+                message = await asyncio.wait_for(
+                    client.messages.create(
+                        model=MODEL_FAST,
+                        max_tokens=200,
+                        messages=[{"role": "user", "content": prompt}],
+                        timeout=_EXTRACTION_SDK_TIMEOUT,
+                    ),
+                    timeout=_EXTRACTION_HARD_TIMEOUT,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[memory_extraction] Post-merge Anthropic call exceeded %.1fs hard timeout "
+                "(non-fatal); post-merge learning skipped",
+                _EXTRACTION_HARD_TIMEOUT,
+            )
+            _record_extraction_error("TimeoutError", "post-merge", project_key)
+            return None
 
         raw_text = message.content[0].text.strip()
 
@@ -342,6 +430,7 @@ async def extract_post_merge_learning(
 
     except Exception as e:
         logger.warning(f"[memory_extraction] Post-merge extraction failed (non-fatal): {e}")
+        _record_extraction_error(type(e).__name__, "post-merge", project_key)
         return None
 
 
@@ -374,7 +463,7 @@ _OUTCOME_THOUGHT_MAX_CHARS = 500
 _OUTCOME_MAX_THOUGHTS = 5
 
 
-def _judge_outcomes_llm(
+async def _judge_outcomes_llm(
     injected_thoughts: list[tuple[str, str]],
     response_text: str,
 ) -> dict[str, dict] | None:
@@ -385,6 +474,9 @@ def _judge_outcomes_llm(
 
     Maps "echoed" to "dismissed" for ObservationProtocol compatibility --
     echoed keywords without causal influence are noise, not signal.
+
+    Event-loop safety (hotfix #1055): uses AsyncAnthropic with double-timeout
+    inside ``async with`` for deterministic httpx cleanup.
     """
     try:
         import anthropic
@@ -409,12 +501,28 @@ def _judge_outcomes_llm(
             response=truncated_response,
         )
 
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # hotfix #1055: AsyncAnthropic + double-timeout + async with.
+        try:
+            async with anthropic.AsyncAnthropic(
+                api_key=api_key, timeout=_EXTRACTION_SDK_TIMEOUT
+            ) as client:
+                message = await asyncio.wait_for(
+                    client.messages.create(
+                        model=MODEL_FAST,
+                        max_tokens=300,
+                        messages=[{"role": "user", "content": prompt}],
+                        timeout=_EXTRACTION_SDK_TIMEOUT,
+                    ),
+                    timeout=_EXTRACTION_HARD_TIMEOUT,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[memory_extraction] Outcome judgment Anthropic call exceeded %.1fs "
+                "hard timeout (non-fatal); falling back to bigram overlap",
+                _EXTRACTION_HARD_TIMEOUT,
+            )
+            _record_extraction_error("TimeoutError", "outcome-judgment", None)
+            return None
 
         raw_text = message.content[0].text.strip()
         judgments = json.loads(raw_text)
@@ -450,6 +558,7 @@ def _judge_outcomes_llm(
 
     except Exception as e:
         logger.debug(f"[memory_extraction] LLM outcome judgment failed, will use fallback: {e}")
+        _record_extraction_error(type(e).__name__, "outcome-judgment", None)
         return None
 
 
@@ -579,8 +688,8 @@ async def detect_outcomes_async(
         reasoning_map: dict[str, str] = {}
         memory_keys: list[str] = []
 
-        # Try LLM judgment first
-        llm_result = _judge_outcomes_llm(injected_thoughts, response_text)
+        # Try LLM judgment first (hotfix #1055: now async-native via AsyncAnthropic)
+        llm_result = await _judge_outcomes_llm(injected_thoughts, response_text)
 
         if llm_result is not None:
             # LLM judgment succeeded -- use it
@@ -652,6 +761,7 @@ async def detect_outcomes_async(
 
     except Exception as e:
         logger.warning(f"[memory_extraction] Outcome detection failed (non-fatal): {e}")
+        _record_extraction_error(type(e).__name__, "detect-outcomes", None)
         return {}
 
 
