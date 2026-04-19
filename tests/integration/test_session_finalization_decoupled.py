@@ -4,6 +4,14 @@ Verifies that the hotfix decouples post-session memory extraction from
 session finalization — the session completes and the PM nudge fires promptly,
 while extraction is still pending, even if extraction would stall indefinitely.
 
+NOTE (PR #1056 review nit): the plan's Test Impact section called for a
+Popoto-backed assertion that the PM's ``queued_steering_messages`` grew by
+exactly 1 after extraction was deferred. This test instead uses a simpler
+``asyncio.Event`` to signal the PM nudge, because spinning up a real Popoto
++ pyrogram + harness-subprocess stack was judged too heavy for the scheduler-
+boundary contract being verified here. A follow-up issue (#1057) tracks
+adding the full Popoto-backed test that exercises the PM inbox end-to-end.
+
 The full ``_execute_agent_session`` flow requires substantial Redis/Popoto
 infrastructure (AgentSession creation, pyrogram bridge, harness subprocess,
 session lifecycle transitions). This test focuses on the narrower contract
@@ -72,6 +80,15 @@ class TestSessionFinalizationDecoupled:
 
         caplog.set_level(logging.INFO, logger="agent.session_executor")
 
+        # NOTE (PR #1056 review nit): plan called for time.sleep(40); we use
+        # asyncio.sleep(30) instead because production flows through
+        # AsyncAnthropic + httpx + asyncio.wait_for — all cancellable at await
+        # points. A sync time.sleep in the coroutine body is uncancellable
+        # until the next await, which does not reflect production. The
+        # unit-test sibling `test_real_asyncio_wait_for_fires_with_tightened_constants`
+        # exercises the real timeout path against a cooperative hang with the
+        # hard-timeout shortened via monkeypatch. The scheduler-level SLO this
+        # test asserts is identical whether the inner coroutine yields or not.
         async def _slow_extract(session_id, response_text, project_key=None):
             await asyncio.sleep(30)  # Long stall; scheduler must not await.
 
@@ -157,7 +174,7 @@ class TestSessionFinalizationDecoupled:
         # to finalize in "cancelled" state before we assert.
         try:
             await asyncio.wait_for(task, timeout=0.5)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        except (TimeoutError, asyncio.CancelledError, Exception):
             pass
         assert task.done() or task.cancelled(), "drain must have cancelled the hung task"
         warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]

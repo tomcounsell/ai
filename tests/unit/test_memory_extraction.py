@@ -1107,6 +1107,83 @@ class TestEventLoopSafety:
         ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
 
     @pytest.mark.asyncio
+    async def test_real_asyncio_wait_for_fires_with_tightened_constants(self, caplog):
+        """Exercise the real asyncio.wait_for with tightened constants (hotfix #1055 review nit).
+
+        The three tests above patch ``asyncio.wait_for`` directly to raise
+        ``TimeoutError`` immediately, which verifies the ``except asyncio.TimeoutError``
+        code path fires and the counter is recorded — but does NOT prove that
+        ``asyncio.wait_for`` is still wired in. A future refactor that silently
+        removes the ``wait_for`` wrapper would pass those three tests.
+
+        This test tightens ``_EXTRACTION_SDK_TIMEOUT`` to 0.05s and
+        ``_EXTRACTION_HARD_TIMEOUT`` to 0.1s, then lets the REAL ``asyncio.wait_for``
+        run against a cooperatively-hung ``AsyncAnthropic`` stub. If the
+        production code no longer wraps the call in ``asyncio.wait_for``, the
+        test will hang past its 2s assertion budget and fail — catching the
+        regression that the mocked-``wait_for`` tests miss.
+        """
+        import logging
+        import time
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import agent.memory_extraction as ext
+
+        caplog.set_level(logging.WARNING, logger="agent.memory_extraction")
+
+        # Cooperative hang (asyncio.sleep, not time.sleep) so the REAL
+        # asyncio.wait_for can cancel the inner coroutine at its await point
+        # — production flows through AsyncAnthropic + httpx which are
+        # cancellable the same way.
+        async def _cooperative_hang(*args, **kwargs):
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(10)  # long enough to always exceed 0.1s
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.messages.create = _cooperative_hang
+
+        recorded = []
+
+        def _stub_record(name, value, tags):
+            recorded.append((name, tags))
+
+        with (
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("analytics.collector.record_metric", side_effect=_stub_record),
+            # Tighten the module constants — the REAL asyncio.wait_for runs
+            # against these, NOT a mock. If the wrapper is removed, the test
+            # hangs past its 2s budget.
+            patch.object(ext, "_EXTRACTION_SDK_TIMEOUT", 0.05),
+            patch.object(ext, "_EXTRACTION_HARD_TIMEOUT", 0.1),
+        ):
+            start = time.time()
+            result = await ext.extract_observations_async(
+                "sess-real-timeout",
+                "A" * 200,
+                project_key="test-proj",
+            )
+            elapsed = time.time() - start
+
+        assert result == [], "extract_observations_async must return [] on real timeout"
+        assert elapsed < 2.0, (
+            f"real asyncio.wait_for must fire within ~0.1s + overhead (got {elapsed:.2f}s). "
+            "If elapsed >> 2s, the production code likely no longer wraps "
+            "messages.create in asyncio.wait_for — hotfix #1055 regression."
+        )
+        assert elapsed >= 0.05, (
+            f"elapsed ({elapsed:.2f}s) is suspiciously short — did asyncio.wait_for "
+            "short-circuit? The test must actually exercise the timeout wait."
+        )
+        assert any(
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
+            for name, tags in recorded
+        ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
+
+    @pytest.mark.asyncio
     async def test_sdk_api_timeout_caught_and_logged(self):
         """anthropic.APITimeoutError is caught by outer except Exception and counter recorded."""
         from unittest.mock import AsyncMock, MagicMock, patch
