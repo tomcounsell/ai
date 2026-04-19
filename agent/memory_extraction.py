@@ -171,7 +171,7 @@ async def extract_observations_async(
                     ),
                     timeout=_EXTRACTION_HARD_TIMEOUT,
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[memory_extraction] Anthropic call exceeded %.1fs hard timeout (non-fatal); "
                 "extraction skipped for session_id=%s",
@@ -368,7 +368,7 @@ async def extract_post_merge_learning(
                     ),
                     timeout=_EXTRACTION_HARD_TIMEOUT,
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[memory_extraction] Post-merge Anthropic call exceeded %.1fs hard timeout "
                 "(non-fatal); post-merge learning skipped",
@@ -516,7 +516,7 @@ async def _judge_outcomes_llm(
                     ),
                     timeout=_EXTRACTION_HARD_TIMEOUT,
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[memory_extraction] Outcome judgment Anthropic call exceeded %.1fs "
                 "hard timeout (non-fatal); falling back to bigram overlap",

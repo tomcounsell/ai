@@ -122,7 +122,8 @@ async def drain_pending_extractions(timeout: float = 5.0) -> None:
         task.cancel()
     if still_pending:
         logger.warning(
-            "[memory_extraction] Cancelled %d extraction task(s) that did not complete within %.1fs",
+            "[memory_extraction] Cancelled %d extraction task(s) that did not complete "
+            "within %.1fs",
             len(still_pending),
             timeout,
         )

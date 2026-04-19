@@ -41,7 +41,7 @@ class TestScheduleExtractionDecoupling:
         from agent import session_executor as se
 
         async def _raise_timeout(session_id, response_text, project_key=None):
-            raise asyncio.TimeoutError("simulated extraction timeout")
+            raise TimeoutError("simulated extraction timeout")
 
         monkeypatch.setattr(
             "agent.memory_extraction.run_post_session_extraction",
@@ -57,7 +57,7 @@ class TestScheduleExtractionDecoupling:
         if task is not None:
             try:
                 await asyncio.wait_for(task, timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 task.cancel()
                 raise AssertionError("wrapper task did not complete")
 
@@ -147,7 +147,8 @@ class TestScheduleExtractionDecoupling:
         elapsed = time.time() - start
 
         assert elapsed < 0.2, (
-            f"drain must return almost immediately when no tasks are pending (got {elapsed:.2f}s) — "
+            f"drain must return almost immediately when no tasks are pending "
+            f"(got {elapsed:.2f}s) — "
             "protects graceful shutdown from unnecessary 5s wait on first-deploy"
         )
         # No WARNING messages should have been emitted for the empty case
