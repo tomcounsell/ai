@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
 created: 2026-04-18
 tracking: https://github.com/tomcounsell/ai/issues/1026
 last_comment_id:
+revision_applied: true
 ---
 
 # Collapse Overlapping AgentSession Fields: session_type, role, session_mode
@@ -19,7 +20,7 @@ last_comment_id:
 - `session_mode` (PersonaType.TEAMMATE or None) — a runtime-mutable override read by the summarizer and QA nudge caps to switch output format
 
 **Current behavior:** Three different code paths each read a different field:
-- `agent_session_queue.py` reads `session_mode` first, then falls back to `session_type` (`getattr(agent_session, "session_mode", None) or getattr(agent_session, "session_type", None)`) — a priority flip that can shadow the canonical discriminator
+- `agent/session_executor.py` (formerly in `agent_session_queue.py`, moved by #1023 refactor) reads `session_mode` first, then falls back to `session_type` (`getattr(agent_session, "session_mode", None) or getattr(agent_session, "session_type", None)`) — a priority flip that can shadow the canonical discriminator
 - `bridge/summarizer.py` reads `session_mode == PersonaType.TEAMMATE` to skip structured formatting
 - `agent/sdk_client.py` runtime-writes `session_mode = PersonaType.TEAMMATE` mid-session after intent classification
 - `tools/valor_session.py:195` does `session_type = role` at CLI boundary, erasing any distinction
@@ -31,31 +32,25 @@ last_comment_id:
 
 **Baseline commit:** `4e79e6d25a95b077bfe5dcdd28c7b1ca3cab92a0`
 **Issue filed at:** 2026-04-17T08:43:40Z
-**Disposition:** Minor drift — line numbers shifted due to new heartbeat fields added in #1036/#1048
+**Disposition (updated 2026-04-19):** Major drift — `agent_session_queue.py` was split into multiple files by PR #1023 (merged 2026-04-19). Session execution logic including the `session_mode` read sites moved to `agent/session_executor.py`.
 
-**File:line references re-verified:**
-- `models/agent_session.py:147` (`session_type = KeyField`) — now at line 147, still holds
-- `models/agent_session.py:235` (`role = Field(null=True)`) — now at line 235, still holds
-- `models/agent_session.py:203` (`session_mode = Field(null=True)`) — now at line 203, still holds
-- `tools/valor_session.py:195` (`session_type = role`) — confirmed at line 195, still holds
-- `agent/sdk_client.py:2112, 2170` (session_mode write sites) — now at 2156 and 2214 after PR #1039 added new code; still holds
+**File:line references re-verified (2026-04-19):**
+- `models/agent_session.py` (`session_type`, `role`, `session_mode` fields) — still present; exact lines may shift but fields hold
+- `tools/valor_session.py:~195` (`session_type = role`) — confirmed, still holds
+- `agent/sdk_client.py:~2156, ~2214` (session_mode write sites) — still holds
+- **MOVED:** `agent_session_queue.py` session_mode read sites → now in `agent/session_executor.py:662-671` (_session_type derivation and _is_teammate) and `agent/session_executor.py:1337` (reaction-clearing check)
 
 **Cited sibling issues/PRs re-checked:**
 - #1022 — still open; parent umbrella for PM orchestration audit open questions
 - PR #652 (SessionType.CHAT → PM rename) — merged 2026-04-03; relevant prior art
 - PR #596 (replace magic strings with enums) — merged 2026-03-30; relevant prior art
-
-**Commits on main since issue was filed (touching referenced files):**
-- `d76232f4` feat(health-check): promote last_stdout_at to Tier-1 — touches `agent_session_queue.py`; adds new fields to `AgentSession` — irrelevant to session type fields
-- `b847ae4a` Fix orphan detection crash — touches `agent_session_queue.py` only; irrelevant
-- `350df702` feat(health): two-tier no-progress detector — adds heartbeat fields to `AgentSession` and `sdk_client.py`; shifts line numbers but does not touch `session_type`, `role`, or `session_mode`
-- `29f8b450` Collapse session concurrency — touches `agent_session_queue.py`; irrelevant to discriminator fields
+- PR #1023 (split agent_session_queue.py) — merged 2026-04-19; moved session execution logic to `agent/session_executor.py`
 
 **Active plans in `docs/plans/` overlapping this area:**
 - `agent_session_field_cleanup.md` (tracking #609, CLOSED) — historical; completed field cleanup but explicitly excluded `session_mode`
 - `agent_session_role_generalization.md` (tracking #634, CLOSED) — introduced the `role` field as a supplement to `session_type`; the current issue is the follow-up cleanup
 
-**Notes:** Line numbers for `sdk_client.py` write sites shifted from 2112/2170 (issue) to 2156/2214 (current). Claims still hold. The `role` field was intentionally added by #634 as a non-KeyField supplement — the current issue marks it vestigial because it was never actually read for routing.
+**Notes:** The #1023 refactor moved `session_mode` read sites from `agent_session_queue.py` to `agent/session_executor.py`. All plan task step bullets referencing `agent_session_queue.py` for session_mode reads must use `agent/session_executor.py` instead. The `session_mode` write sites in `agent/sdk_client.py` are unaffected.
 
 ## Prior Art
 
@@ -75,7 +70,7 @@ The discriminator fields participate in two key flows:
 
 1. **Entry:** `tools/valor_session.py create` CLI or bridge enqueue
 2. **CLI path:** `role = args.role or "pm"` → `session_type = role` (line 195 conflation) → `AgentSession(session_type=session_type, role=role, ...)`
-3. **Worker routing:** `agent_session_queue.py` reads `session_mode or session_type` for nudge cap and reaction decisions
+3. **Worker routing:** `agent/session_executor.py` reads `session_mode or session_type` for nudge cap and reaction decisions (code moved from `agent_session_queue.py` by #1023 refactor)
 4. **Permission injection:** `agent/sdk_client.py` reads `session_type` to set read-only vs full-permission SDK mode
 
 **Flow 2: Runtime teammate reclassification**
@@ -129,7 +124,7 @@ SDK runtime reclassification → `_s.session_type = SessionType.TEAMMATE; _s.sav
 1. **`models/agent_session.py`**: Remove `role = Field(null=True)` field declaration. Remove the `save()` soft-validation check that warns on `role=None`. Remove `role=role` from `create_child()`. Mark `session_mode` as deprecated with a comment; keep the Field declaration but remove all reads.
 2. **`tools/valor_session.py`**: Replace `session_type = role` (line 195) with an explicit `_ROLE_TO_SESSION_TYPE` dict mapping. Update list/status display code that falls back to `.role`.
 3. **`agent/sdk_client.py`**: Replace both `_s.session_mode = PersonaType.TEAMMATE` writes with `_s.session_type = SessionType.TEAMMATE`. The guard `if _session_type != SessionType.PM` already prevents PM sessions from being reclassified — keep it.
-4. **`agent/agent_session_queue.py`**: Replace the `getattr(agent_session, "session_mode", None) or getattr(agent_session, "session_type", None)` expression with just `getattr(agent_session, "session_type", None)`. Update the `is_teammate` checks to read `session_type`.
+4. **`agent/session_executor.py`** (formerly `agent/agent_session_queue.py` — moved by #1023 refactor): Replace the `getattr(agent_session, "session_mode", None) or getattr(agent_session, "session_type", None)` expression (~lines 661-666) with just `getattr(agent_session, "session_type", None)`. Update `_is_teammate` derivation (~lines 668-671) from `session_mode == PersonaType.TEAMMATE` to `session_type == SessionType.TEAMMATE`. Update reaction-clearing check (~line 1337) from `session_mode` to `session_type`. The `is_teammate` flag flows into `route_session_output()` for nudge cap selection — all three read sites must be updated together.
 5. **`bridge/summarizer.py`**: Replace `getattr(session, "session_mode", None) == PersonaType.TEAMMATE` with `getattr(session, "session_type", None) == SessionType.TEAMMATE`.
 6. **`ui/data/sdlc.py`**: Update `_resolve_display_persona()` to read only `session_type` (remove `session_mode` priority override).
 
@@ -151,6 +146,7 @@ SDK runtime reclassification → `_s.session_type = SessionType.TEAMMATE; _s.sav
 - [ ] `tests/unit/test_summarizer.py` — UPDATE: replace `session.session_mode = "teammate"` with `session.session_type = SessionType.TEAMMATE` (lines 1097, 1287); replace `session.session_mode = None` with no-op or remove (lines 39, 1116, 1145, 1163)
 - [ ] `tests/unit/test_ui_sdlc_data.py` — UPDATE: replace `"session_mode": None` and `mock_session.session_mode = None` with `session_type`-based setup; verify `_resolve_display_persona()` tests pass
 - [ ] `tests/integration/test_bridge_routing.py` — CHECK: verify no `session_mode` references that need updating
+- [ ] `tests/unit/test_agent_session_queue.py` — CHECK: verify no `session_mode` references after #1023 refactor split the queue (code moved to `session_executor.py`, `session_health.py`, etc.)
 
 ## Rabbit Holes
 
@@ -200,7 +196,7 @@ No agent integration required — this is a model field consolidation with no ne
 - [ ] `session_mode` field kept as deprecated `Field(null=True)` with zero readers and zero writers
 - [ ] `tools/valor_session.py` uses explicit `_ROLE_TO_SESSION_TYPE` mapping; no `session_type = role` conflation
 - [ ] `agent/sdk_client.py` runtime Teammate reclassification writes `session_type = SessionType.TEAMMATE`
-- [ ] `agent/agent_session_queue.py` reads `session_type` only (no `session_mode` fallback)
+- [ ] `agent/session_executor.py` reads `session_type` only (no `session_mode` fallback) — all three read sites updated
 - [ ] `bridge/summarizer.py` reads `session_type == SessionType.TEAMMATE` only
 - [ ] Grep confirms zero non-deprecated reads of `session_mode` and zero reads of `.role` on `AgentSession`
 - [ ] Tests pass (`/do-test`)
@@ -244,8 +240,10 @@ builder, validator, documentarian
 - Remove `role = Field(null=True)` from `models/agent_session.py`
 - Remove `save()` soft-validation `role=None` warning block
 - Remove `role=role` kwarg from `create_child()` method; remove `role` parameter from signature
-- In `tools/valor_session.py`, replace `session_type = role` (line 195) with an explicit `_ROLE_TO_SESSION_TYPE = {"pm": SessionType.PM, "dev": SessionType.DEV, "teammate": SessionType.TEAMMATE}` mapping; raise `ValueError` for unknown values
-- Remove all `getattr(s, "role", None)` fallback reads in `valor_session.py` list/status display
+- Update `create_dev()` to call `cls.create_child(session_id=..., ...)` without `role=` kwarg (role is implied by `session_type=SESSION_TYPE_DEV` hardcoded in `create_child()`); rewrite `create_dev()` docstring to remove deprecated notice referencing `create_child(role=...)` (B1)
+- Update module-level docstring on `AgentSession` to remove `create_child(role=...)` reference (B1)
+- In `tools/valor_session.py`, replace `session_type = role` (line ~195) with an explicit `_ROLE_TO_SESSION_TYPE = {"pm": SessionType.PM, "dev": SessionType.DEV, "teammate": SessionType.TEAMMATE}` dict; map `role` through it; raise `ValueError` for unknown values
+- Replace `getattr(s, "session_type", None) or getattr(s, "role", None) or "—"` with `getattr(s, "session_type", None) or "—"` at the two display lines (~843 and ~865) in `valor_session.py` (C2)
 
 ### 2. Collapse `session_mode` into `session_type`
 - **Task ID**: build-session-mode-collapse
@@ -254,10 +252,12 @@ builder, validator, documentarian
 - **Assigned To**: session-fields-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `agent/sdk_client.py` (lines 2156, 2214): replace `_s.session_mode = PersonaType.TEAMMATE` with `_s.session_type = SessionType.TEAMMATE`
-- In `agent/agent_session_queue.py` (lines 4169, 4177, 4844): replace `getattr(agent_session, "session_mode", None) or getattr(agent_session, "session_type", None)` with `getattr(agent_session, "session_type", None)`; update `is_teammate` checks to read `session_type`
-- In `bridge/summarizer.py` (lines 988, 1396): replace `getattr(session, "session_mode", None) == PersonaType.TEAMMATE` with `getattr(session, "session_type", None) == SessionType.TEAMMATE`
-- In `ui/data/sdlc.py` (lines 478+): update `_resolve_display_persona()` to read `session_type` only, removing `session_mode` priority override
+- In `agent/sdk_client.py` (~lines 2156, 2214): replace `_s.session_mode = PersonaType.TEAMMATE` with `_s.session_type = SessionType.TEAMMATE`
+- In `agent/session_executor.py` (~lines 661-666): replace `getattr(agent_session, "session_mode", None) or getattr(agent_session, "session_type", None)` with `getattr(agent_session, "session_type", None)` (NOTE: code moved from agent_session_queue.py by #1023 refactor)
+- In `agent/session_executor.py` (~lines 668-671): change `_is_teammate` derivation from `getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE` to `getattr(agent_session, "session_type", None) == SessionType.TEAMMATE` (C1)
+- In `agent/session_executor.py` (~line 1337): update reaction-clearing check from `getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE` to `getattr(agent_session, "session_type", None) == SessionType.TEAMMATE`
+- In `bridge/summarizer.py` (~lines 988, 1396): replace `getattr(session, "session_mode", None) == PersonaType.TEAMMATE` with `getattr(session, "session_type", None) == SessionType.TEAMMATE`
+- In `ui/data/sdlc.py` (~lines 478+): update `_resolve_display_persona()` to read `session_type` only, removing `session_mode` priority override
 - In `models/agent_session.py`: add deprecation comment to `session_mode` field: `# deprecated — use session_type. Kept as no-op for 30-day Redis TTL safety.`
 
 ### 3. Update tests
@@ -267,9 +267,9 @@ builder, validator, documentarian
 - **Assigned To**: session-fields-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Update `tests/unit/test_qa_nudge_cap.py`: replace `session.session_mode = "teammate"` with `session.session_type = SessionType.TEAMMATE` (3 occurrences)
-- Update `tests/unit/test_summarizer.py`: replace `session.session_mode = "teammate"` with `session.session_type = SessionType.TEAMMATE`; remove `session.session_mode = None` no-op assignments
-- Update `tests/unit/test_ui_sdlc_data.py`: update `"session_mode": None` dict entries and `mock_session.session_mode = None` assignments
+- Update `tests/unit/test_qa_nudge_cap.py` `TestTeammateReactionClearing`: rename mock variable `session` → `agent_session`; change `session.session_mode = "teammate"` to `agent_session.session_type = SessionType.TEAMMATE`; change `session.session_mode = None` to `agent_session.session_type = "pm"`; update the inline condition in each test to `if agent_session and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE and not task_error`; add `from config.enums import SessionType` import (B2)
+- Update `tests/unit/test_summarizer.py`: replace `session.session_mode = "teammate"` with `session.session_type = SessionType.TEAMMATE` (lines 1097, 1287); remove `session.session_mode = None` no-op assignments (lines 39, 1116, 1145, 1163); add `from config.enums import SessionType` import if missing
+- Update `tests/unit/test_ui_sdlc_data.py`: update `"session_mode": None` dict entries and `mock_session.session_mode = None` assignments to use `session_type`-based setup for `_resolve_display_persona()` tests
 
 ### 4. Validate
 - **Task ID**: validate-session-fields
@@ -278,7 +278,8 @@ builder, validator, documentarian
 - **Agent Type**: validator
 - **Parallel**: false
 - Run `pytest tests/unit/test_qa_nudge_cap.py tests/unit/test_summarizer.py tests/unit/test_ui_sdlc_data.py -v`
-- Verify `grep -rn "session_mode" models/ agent/ bridge/ tools/ ui/ --include="*.py"` shows only the deprecated field declaration and no readers/writers
+- Verify `grep -rn "session_mode" models/ agent/ bridge/ tools/ ui/ --include="*.py"` shows only the deprecated field declaration in `models/agent_session.py` and no other readers/writers
+- Verify `grep -rn "PersonaType.TEAMMATE" agent/ bridge/ --include="*.py"` shows no remaining `session_mode` comparisons (check particularly `agent/session_executor.py`, `bridge/summarizer.py`)
 - Verify `grep -rn "\.role\b" models/ agent/ bridge/ tools/ ui/ --include="*.py"` shows zero results (excluding `SessionEvent.role`)
 - Verify `grep -rn "session_type = role" tools/ --include="*.py"` returns no results
 - Run full unit test suite: `pytest tests/unit/ -q`
@@ -315,9 +316,13 @@ builder, validator, documentarian
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Consistency | `create_dev()` calls `create_child(role="dev", ...)` — after removing `role` from `create_child()` signature, `create_dev()` breaks. Plan says "`create_dev()` is kept as a backward-compat wrapper" but does not update its implementation. | Task 1 (build-role-delete) | In `create_dev()`, change the call to `cls.create_child(session_id=..., project_key=..., ...)` without `role=` kwarg (role is implied by `session_type=SESSION_TYPE_DEV` which is already hardcoded in `create_child()`). Also update `create_dev()` docstring to remove "Deprecated: Use create_child(role='dev', ...) instead" since that pattern is being removed. Update module-level docstring on `AgentSession` that references `create_child(role=...)`. |
+| BLOCKER | Consistency | `test_qa_nudge_cap.py` `TestTeammateReactionClearing` tests replicate the queue conditional inline using `session.session_mode`. After migration, those inline copies reference `session.session_mode` but the actual queue code at line 4844 reads `agent_session.session_mode`. The plan updates the tests to use `session.session_type` — but the tests are testing a mock object that stands in for `agent_session`, not `session`. The mock object name must change to `agent_session = MagicMock()` with `agent_session.session_type = SessionType.TEAMMATE` to match the actual queue code path. | Task 3 (build-test-updates) | In `test_qa_nudge_cap.py` `TestTeammateReactionClearing`, rename `session` → `agent_session` in the mock setup, change `session.session_mode = "teammate"` to `agent_session.session_type = SessionType.TEAMMATE`, update inline condition to match updated queue code: `if agent_session and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE and not task_error`. |
+| CONCERN | Skeptic | Plan's Technical Approach item 4 says to update `agent_session_queue.py` lines 4169, 4177, 4844 but does not mention the `_is_teammate` derivation at lines 4175-4178. After the migration, `_is_teammate` must be derived from `session_type == SessionType.TEAMMATE` not `session_mode == PersonaType.TEAMMATE`. The `is_teammate` flag flows into `route_session_output()` in `output_router.py` which selects the TEAMMATE nudge cap — missing this update would silently keep using `session_mode` for cap selection. | Task 2 (build-session-mode-collapse) | In `agent_session_queue.py` lines 4175-4178, change `_is_teammate = (agent_session is not None and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE)` to `_is_teammate = (agent_session is not None and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE)`. Add this as an explicit bullet in Task 2. |
+| CONCERN | Skeptic | `valor_session.py` fallback reads use `getattr(s, "session_type", None) or getattr(s, "role", None) or "—"` (lines 843, 865), not `getattr(s, "role", None)` standalone. Task 1 says "Remove all `getattr(s, 'role', None)` fallback reads" — this phrasing is imprecise. The actual removal is the `or getattr(s, "role", None)` suffix in the two display lines. | Task 1 (build-role-delete) | Replace `getattr(s, "session_type", None) or getattr(s, "role", None) or "—"` with `getattr(s, "session_type", None) or "—"` at lines 843 and 865 of `valor_session.py`. Update task bullet to use exact code form. |
+| NIT | Consistency | `create_dev()` docstring says "Deprecated: Use create_child(role='dev', ...) instead." — after this plan ships, `create_child()` no longer accepts `role=` so the deprecation notice becomes misleading. | Task 1 (build-role-delete) | Rewrite `create_dev()` docstring to "Create a Dev session. Preferred factory method for spawning dev child sessions." — remove the Deprecated notice entirely since `create_child(role=...)` is being retired. |
 
 ---
 
