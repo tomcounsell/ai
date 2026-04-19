@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -39,6 +40,24 @@ def repo(tmp_path: Path) -> Path:
 @pytest.fixture()
 def auditor(repo: Path) -> DocsAuditor:
     return DocsAuditor(repo_root=repo, dry_run=True)
+
+
+@pytest.fixture(autouse=True)
+def bypass_auth_check(request):
+    """Bypass _check_auth for all tests except those in TestCheckAuth / TestRunAuthProbe.
+
+    Auth-specific tests exercise the real `_check_auth` method directly (or via
+    instance-level `patch.object` calls), so this class-level patch must be
+    skipped for them. All other tests just need auth to pass so they can test
+    other behavior without needing ANTHROPIC_API_KEY.
+    """
+    # Skip the bypass for tests that exercise _check_auth directly.
+    cls = request.cls.__name__ if request.cls else ""
+    if cls in ("TestCheckAuth", "TestRunAuthProbe"):
+        yield
+        return
+    with patch.object(DocsAuditor, "_check_auth", return_value=(True, "")):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -635,3 +654,240 @@ class TestApiCallCap:
 
         mock_analyze.assert_not_called()
         assert len(summary.verdicts) == 0
+
+
+# ---------------------------------------------------------------------------
+# _check_auth
+# ---------------------------------------------------------------------------
+
+
+class TestCheckAuth:
+    """Tests for DocsAuditor._check_auth().
+
+    NOTE: These tests patch _check_auth at the INSTANCE level to override the
+    autouse bypass_auth_check fixture (which patches at the CLASS level). Instance
+    patches take precedence, so individual tests that call _check_auth directly
+    work correctly.
+    """
+
+    def test_check_auth_key_missing(self, repo: Path) -> None:
+        """No ANTHROPIC_API_KEY in env → returns (False, 'ANTHROPIC_API_KEY not set')."""
+        a = DocsAuditor(repo_root=repo)
+        with patch.dict("os.environ", {}, clear=True):
+            ok, reason = a._check_auth()
+        assert ok is False
+        assert "not set" in reason
+
+    def test_check_auth_key_empty(self, repo: Path) -> None:
+        """ANTHROPIC_API_KEY='' → returns (False, ...)."""
+        a = DocsAuditor(repo_root=repo)
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}, clear=False):
+            ok, reason = a._check_auth()
+        assert ok is False
+
+    def test_check_auth_key_sentinel_none(self, repo: Path) -> None:
+        """ANTHROPIC_API_KEY='None' → returns (False, ...) via sentinel guard."""
+        a = DocsAuditor(repo_root=repo)
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "None"}, clear=False):
+            ok, reason = a._check_auth()
+        assert ok is False
+
+    def test_check_auth_key_sentinel_null(self, repo: Path) -> None:
+        """ANTHROPIC_API_KEY='null' → returns (False, ...) via sentinel guard."""
+        a = DocsAuditor(repo_root=repo)
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "null"}, clear=False):
+            ok, reason = a._check_auth()
+        assert ok is False
+
+    def test_check_auth_key_whitespace_only(self, repo: Path) -> None:
+        """ANTHROPIC_API_KEY='   ' (whitespace) → strips to empty → returns (False, ...)."""
+        a = DocsAuditor(repo_root=repo)
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "   "}, clear=False):
+            ok, reason = a._check_auth()
+        assert ok is False
+
+    def test_check_auth_key_valid(self, repo: Path) -> None:
+        """Valid key + successful probe → returns (True, '')."""
+        a = DocsAuditor(repo_root=repo)
+        mock_client = MagicMock()
+        mock_client.models.list.return_value = []
+
+        import scripts.docs_auditor as da_module
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-valid-key"}, clear=False):
+            with patch.object(da_module, "_anthropic_module") as mock_anthropic:
+                mock_anthropic.Anthropic.return_value = mock_client
+                ok, reason = a._check_auth()
+
+        assert ok is True
+        assert reason == ""
+
+    def test_check_auth_key_invalid(self, repo: Path) -> None:
+        """Key present but models.list raises AuthenticationError → (False, '...invalid...')."""
+        a = DocsAuditor(repo_root=repo)
+        mock_client = MagicMock()
+        mock_client.models.list.side_effect = Exception("authentication failed: invalid api_key")
+
+        import scripts.docs_auditor as da_module
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-bad-key"}, clear=False):
+            with patch.object(da_module, "_anthropic_module") as mock_anthropic:
+                mock_anthropic.Anthropic.return_value = mock_client
+                ok, reason = a._check_auth()
+
+        assert ok is False
+        assert "invalid" in reason.lower() or "expired" in reason.lower()
+
+    def test_check_auth_non_auth_error(self, repo: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Non-auth probe error (e.g., ConnectionError) → returns (True, '') and logs WARNING."""
+        import logging
+
+        a = DocsAuditor(repo_root=repo)
+        mock_client = MagicMock()
+        mock_client.models.list.side_effect = ConnectionError("network unreachable")
+
+        import scripts.docs_auditor as da_module
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-any-key"}, clear=False):
+            with patch.object(da_module, "_anthropic_module") as mock_anthropic:
+                mock_anthropic.Anthropic.return_value = mock_client
+                with caplog.at_level(logging.WARNING, logger="docs_auditor"):
+                    ok, reason = a._check_auth()
+
+        assert ok is True
+        assert reason == ""
+        assert any(
+            "non-auth" in r.message.lower() or "proceeding" in r.message.lower()
+            for r in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# run() — auth probe behavior
+# ---------------------------------------------------------------------------
+
+
+class TestRunAuthProbe:
+    """Tests for run() behavior when auth probe returns True/False.
+
+    These tests bypass the autouse fixture by explicitly patching _check_auth
+    at the instance level INSIDE the test, which takes precedence.
+    """
+
+    def test_run_skips_when_api_key_missing(self, repo: Path) -> None:
+        """run() returns AuditSummary(skipped=True, skip_type='auth') when key absent."""
+        a = DocsAuditor(repo_root=repo)
+        # Override the autouse bypass to inject a real (False, ...) result
+        with patch.object(a, "_check_auth", return_value=(False, "ANTHROPIC_API_KEY not set")):
+            summary = a.run()
+
+        assert summary.skipped is True
+        assert summary.skip_type == "auth"
+        assert "not set" in summary.skip_reason
+
+    def test_run_skips_when_api_key_invalid(self, repo: Path) -> None:
+        """run() returns AuditSummary(skipped=True, skip_type='auth') when key is invalid."""
+        a = DocsAuditor(repo_root=repo)
+        with patch.object(
+            a, "_check_auth", return_value=(False, "ANTHROPIC_API_KEY invalid or expired")
+        ):
+            summary = a.run()
+
+        assert summary.skipped is True
+        assert summary.skip_type == "auth"
+
+    def test_run_completes_fast_when_key_absent(self, repo: Path) -> None:
+        """run() completes within 1 second when ANTHROPIC_API_KEY is absent (timing assertion)."""
+        a = DocsAuditor(repo_root=repo)
+        with patch.object(a, "_check_auth", return_value=(False, "ANTHROPIC_API_KEY not set")):
+            start = time.time()
+            summary = a.run()
+            elapsed = time.time() - start
+
+        assert summary.skipped is True
+        assert elapsed < 1.0, f"run() took {elapsed:.2f}s — should be < 1s when key absent"
+
+    def test_run_proceeds_when_auth_ok(self, repo: Path) -> None:
+        """run() does NOT return a skipped summary when _check_auth returns (True, '')."""
+        a = DocsAuditor(repo_root=repo)
+        # Explicitly patch _check_auth — the autouse bypass is skipped for this class,
+        # so we must inject a passing result ourselves.
+        with patch.object(a, "_check_auth", return_value=(True, "")):
+            # No docs → run completes with empty non-skipped summary
+            summary = a.run()
+        assert not summary.skipped
+
+
+# ---------------------------------------------------------------------------
+# Consecutive error circuit break
+# ---------------------------------------------------------------------------
+
+
+class TestConsecutiveErrorCircuitBreak:
+    def test_run_breaks_on_consecutive_errors(self, repo: Path) -> None:
+        """run() stops doc loop after 3 consecutive exceptions and logs WARNING."""
+
+        # Create 5 docs
+        for i in range(5):
+            (repo / "docs" / f"doc{i}.md").write_text(f"# Doc {i}")
+
+        a = DocsAuditor(repo_root=repo, dry_run=True)
+
+        call_count = 0
+
+        def always_fail(path):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("simulated API error")
+
+        with patch.object(a, "analyze_doc", side_effect=always_fail):
+            summary = a.run()
+
+        # Should stop after 3 consecutive errors (MAX_CONSECUTIVE_ERRORS = 3)
+        assert call_count == 3
+        assert len(summary.errors) == 3
+
+    def test_run_resets_consecutive_errors_on_success(self, repo: Path) -> None:
+        """Successful analyze_doc resets the consecutive error counter."""
+        for i in range(5):
+            (repo / "docs" / f"doc{i}.md").write_text(f"# Doc {i}")
+
+        a = DocsAuditor(repo_root=repo, dry_run=True)
+        call_count = 0
+
+        def alternating(path):
+            nonlocal call_count
+            call_count += 1
+            # Fail on calls 1 and 2, succeed on 3, fail on 4 and 5 → total 5 processed
+            if call_count in (1, 2, 4, 5):
+                raise RuntimeError("transient error")
+            return Verdict(action="KEEP", rationale="ok")
+
+        with patch.object(a, "analyze_doc", side_effect=alternating):
+            a.run()
+
+        # All 5 processed: the reset on call 3 prevents early break
+        assert call_count == 5
+
+
+# ---------------------------------------------------------------------------
+# AuditSummary.skip_type
+# ---------------------------------------------------------------------------
+
+
+class TestAuditSummarySkipType:
+    def test_skip_type_default_empty(self) -> None:
+        """AuditSummary.skip_type defaults to '' (normal run)."""
+        s = AuditSummary()
+        assert s.skip_type == ""
+
+    def test_skip_type_auth(self) -> None:
+        """AuditSummary with skip_type='auth' serializes correctly."""
+        s = AuditSummary(skipped=True, skip_type="auth", skip_reason="ANTHROPIC_API_KEY not set")
+        assert s.skip_type == "auth"
+        assert s.skipped is True
+
+    def test_skip_type_schedule(self) -> None:
+        """AuditSummary with skip_type='schedule' is valid."""
+        s = AuditSummary(skipped=True, skip_type="schedule", skip_reason="last run: 2026-04-12")
+        assert s.skip_type == "schedule"

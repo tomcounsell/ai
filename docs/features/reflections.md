@@ -77,7 +77,7 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and deprecated typing imports |
+| `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and `deprecated` typing imports |
 | `redis-ttl-cleanup` | `reflections.maintenance.run_redis_ttl_cleanup` | Prune expired records across all Redis models |
 | `redis-quality-audit` | `reflections.maintenance.run_redis_data_quality` | Audit data quality: unsummarized links, dead channels, error patterns |
 | `merged-branch-cleanup` | `reflections.maintenance.run_branch_plan_cleanup` | Delete merged branches; audit docs/plans/ for stale/orphaned plans **(disabled — calls gh CLI)** |
@@ -246,7 +246,30 @@ Deduplication tracker for PR review audit findings. Prevents re-filing GitHub is
 redis.Redis.from_url(settings.REDIS_URL).get("docs_auditor:last_audit_date")
 ```
 
-This replaced the former `ReflectionRun` dependency (removed in issue #748).
+This replaced the former `ReflectionRun` dependency (see issue #748 for the migration history).
+
+### Docs Auditor Authentication
+
+The docs auditor uses the **Anthropic Python SDK directly** (not the OAuth subprocess harness used by AgentSessions). This means it requires a different credential:
+
+| Component | Credential Used |
+|-----------|----------------|
+| AgentSessions (Claude Code via `claude -p`) | `CLAUDE_CODE_OAUTH_TOKEN` |
+| DocsAuditor (`scripts/docs_auditor.py`) | `ANTHROPIC_API_KEY` |
+
+**Behavior when `ANTHROPIC_API_KEY` is absent or invalid:**
+
+The auditor performs a startup auth probe (`_check_auth()`) before iterating any docs. If the key is missing, a sentinel string (`"None"`, `"null"`, `"false"`, `"0"`), or invalid (rejected by the Anthropic API), the auditor logs a single `WARNING` and returns immediately:
+
+```
+WARNING  docs_auditor: Docs auditor skipping: ANTHROPIC_API_KEY not set
+```
+
+No `ERROR` lines are emitted, no docs are processed, and the worker heartbeat is unaffected. The reflection wrapper (`run_documentation_audit()` in `reflections/auditing.py`) returns `{"status": "disabled", ...}` — distinct from `{"status": "ok", ...}` for a schedule-based skip — so dashboards and monitoring can distinguish a permanently-disabled auditor from a temporarily-skipped one.
+
+**To enable docs auditing**, add `ANTHROPIC_API_KEY` to the worker's environment (e.g., in `~/Desktop/Valor/.env` or the worker's launchd plist). The auditor will automatically begin running on its weekly schedule once the key is present and valid.
+
+**Non-auth API failures** (rate limits, transient network errors) are handled by a consecutive-error circuit break: if 3 or more consecutive doc-audit errors occur during a run, the loop exits early with a `WARNING`. This caps error cascade for transient failures without requiring a full circuit breaker integration.
 
 ## Session Analysis (part of `session_intelligence` pipeline)
 
