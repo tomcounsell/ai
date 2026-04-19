@@ -25,7 +25,7 @@ class TestMaybeSendRevivalPrompt:
 
     def test_calls_check_revival_with_correct_args(self):
         """Delegates to check_revival with all three arguments."""
-        with patch("agent.agent_session_queue.check_revival", return_value=None) as mock_check:
+        with patch("agent.session_revival.check_revival", return_value=None) as mock_check:
             maybe_send_revival_prompt("proj", "/work/dir", "chat456")
             mock_check.assert_called_once_with("proj", "/work/dir", "chat456")
 
@@ -33,8 +33,8 @@ class TestMaybeSendRevivalPrompt:
         """Records cooldown when check_revival returns revival info."""
         revival_info = {"branch": "session/my-feature", "project_key": "proj"}
         with (
-            patch("agent.agent_session_queue.check_revival", return_value=revival_info),
-            patch("agent.agent_session_queue.record_revival_cooldown") as mock_cooldown,
+            patch("agent.session_revival.check_revival", return_value=revival_info),
+            patch("agent.session_revival.record_revival_cooldown") as mock_cooldown,
         ):
             result = maybe_send_revival_prompt("proj", "/work/dir", "chat789")
             assert result == revival_info
@@ -43,8 +43,8 @@ class TestMaybeSendRevivalPrompt:
     def test_does_not_record_cooldown_when_no_revival(self):
         """Does not record cooldown when check_revival returns None."""
         with (
-            patch("agent.agent_session_queue.check_revival", return_value=None),
-            patch("agent.agent_session_queue.record_revival_cooldown") as mock_cooldown,
+            patch("agent.session_revival.check_revival", return_value=None),
+            patch("agent.session_revival.record_revival_cooldown") as mock_cooldown,
         ):
             result = maybe_send_revival_prompt("proj", "/work/dir", "chat000")
             assert result is None
@@ -59,8 +59,8 @@ class TestMaybeSendRevivalPrompt:
             "working_dir": "/work/dir",
         }
         with (
-            patch("agent.agent_session_queue.check_revival", return_value=revival_info),
-            patch("agent.agent_session_queue.record_revival_cooldown"),
+            patch("agent.session_revival.check_revival", return_value=revival_info),
+            patch("agent.session_revival.record_revival_cooldown"),
         ):
             result = maybe_send_revival_prompt("myproject", "/work/dir", "chatXYZ")
             assert result is revival_info

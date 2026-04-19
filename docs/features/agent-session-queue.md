@@ -1,6 +1,48 @@
-# Agent Session Queue: Reliability Fixes
+# Agent Session Queue
 
 **Status**: Complete
+
+## Module Structure (Post-Refactor)
+
+`agent/agent_session_queue.py` was split from 5545 lines into six focused modules in PR #1051
+(issue #1023). The file now sits at ~1709 lines and owns only the queue dispatch surface.
+
+### Extracted Modules
+
+| Module | LOC | One-sentence purpose |
+|--------|-----|----------------------|
+| `agent/session_state.py` | ~84 | Shared mutable session-tracking state for the worker — prevents circular imports between executor and health modules. |
+| `agent/session_revival.py` | ~276 | Revival detection, cooldown tracking, and stale branch cleanup for AgentSession. |
+| `agent/session_pickup.py` | ~462 | Session selection, pop locking, startup steering drain, and dependency readiness checks. |
+| `agent/session_health.py` | ~1231 | Periodic health monitoring, no-progress detection, orphan cleanup, and startup recovery. |
+| `agent/session_completion.py` | ~535 | Post-execution lifecycle: session finalization, parent transitions, dev completion handling, and continuation-PM creation. |
+| `agent/session_executor.py` | ~1398 | Core session execution: CLI harness subprocess lifecycle, turn-boundary steering, nudge/re-enqueue paths, and calendar heartbeat. |
+| `agent/agent_session_queue.py` | ~1709 | Queue dispatch surface — the entry points that bridge and worker import. |
+
+### Module Relationship
+
+```
+worker/__main__.py
+    └── agent_session_queue.py  (entry points: enqueue, worker loop, callbacks)
+            ├── session_state.py        (shared globals: SessionHandle, _active_sessions, etc.)
+            ├── session_pickup.py       (pop + lock + steering drain; imports session_state)
+            ├── session_revival.py      (revival + cooldown; standalone, no agent/ deps)
+            ├── session_health.py       (health monitor + recovery; imports session_state)
+            ├── session_executor.py     (execute loop; imports session_state, session_pickup)
+            └── session_completion.py   (finalization + continuation-PM; imports session_state)
+```
+
+All six modules re-export their public symbols from `agent_session_queue.py` for backward
+compatibility — existing callers (bridge, tools, tests) continue to import from
+`agent.agent_session_queue` without change.
+
+### Import Rules
+
+- `session_state.py` imports ONLY from stdlib and `models/` — never from other `agent/` modules
+- `session_revival.py` has no `agent/` imports (it uses `subprocess` + `models/`)
+- `session_health.py` and `session_completion.py` use deferred imports (`# noqa: PLC0415`)
+  to break circular dependencies with `session_executor.py`
+- Bridge hooks (`bridge.telegram_bridge`) always use inline deferred imports in all modules
 
 ## KeyField Index Corruption Fix
 
@@ -151,4 +193,10 @@ See [Agent Session Scheduling](agent-session-scheduling.md) for usage details an
 - `docs/features/agent-session-scheduling.md` -- Agent-initiated scheduling tool
 - `docs/features/agent-session-model.md` -- AgentSession model fields and lifecycle
 - `docs/features/session-lifecycle.md` -- Session state machine, zombie loop prevention
-- `agent/agent_session_queue.py` -- Implementation
+- `agent/agent_session_queue.py` -- Queue dispatch surface (entry points)
+- `agent/session_executor.py` -- Core execute loop
+- `agent/session_health.py` -- Health monitor and recovery
+- `agent/session_completion.py` -- Finalization and continuation-PM
+- `agent/session_pickup.py` -- Pop locking and steering drain
+- `agent/session_revival.py` -- Revival detection
+- `agent/session_state.py` -- Shared mutable globals

@@ -160,7 +160,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     7. Starts health monitor
     8. Waits for shutdown signal
     """
-    import agent.agent_session_queue as _queue
     from agent.agent_session_queue import (
         _active_workers,
         _agent_session_health_loop,
@@ -178,7 +177,9 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Initialize global concurrency semaphore BEFORE any worker loops are created.
     # Clamp to minimum 1 to prevent deadlock if MAX_CONCURRENT_SESSIONS=0.
     _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
-    _queue._global_session_semaphore = asyncio.Semaphore(_max_sessions)
+    import agent.session_state as _ss  # noqa: PLC0415
+
+    _ss._global_session_semaphore = asyncio.Semaphore(_max_sessions)
     logger.info(f"Global session semaphore initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
 
     handler = TelegramRelayOutputHandler(file_handler=FileOutputHandler())
