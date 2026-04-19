@@ -130,7 +130,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |
 | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
 | [Standardized Enums](standardized-enums.md) | StrEnum definitions for session types, personas, classifications, and chat modes replacing magic strings | Shipped |
-| [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child PM session-to-Dev session steering | Shipped |
+| [Steering Queue: Historical Spec](steering-implementation-spec.md) | Original Redis list design, watchdog hook, and SDK client registry for mid-execution course correction (historical design spec) | Shipped |
 | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
 | [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, category-weighted recall re-ranking, and nightly LLM-based semantic consolidation (`memory-dedup` reflection) with `superseded_by` tracking and recall filter | Shipped |
 | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress, markdown links, and self-summary fallback via session steering for Telegram delivery | Shipped |

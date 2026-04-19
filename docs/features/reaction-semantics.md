@@ -102,5 +102,5 @@ Three paths to silent text loss have been identified and guarded:
 ## See Also
 
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Output classification and auto-continue behavior
-- [Steering Queue](steering-queue.md) -- The steering mechanism (now only used for live human corrections, not auto-continue)
+- [Steering Queue: Historical Spec](steering-implementation-spec.md) -- The steering mechanism (now only used for live human corrections, not auto-continue)
 - [Session Isolation](session-isolation.md) -- How session context is preserved across re-enqueued jobs

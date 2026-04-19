@@ -50,4 +50,4 @@ bridge/telegram_bridge.py (edit_handler)
 
 - [Mid-Session Steering](mid-session-steering.md) — Steering queue mechanics used by the running-session branch
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) — Session routing and output classification context
-- [Steering Queue](steering-queue.md) — Redis list push/pop implementation
+- [Steering Queue: Historical Spec](steering-implementation-spec.md) — Redis list push/pop implementation

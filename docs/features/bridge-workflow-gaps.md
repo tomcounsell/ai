@@ -102,4 +102,4 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 
 - [Session Isolation](session-isolation.md) -- Task list and worktree isolation per session
 - [Bridge Self-Healing](bridge-self-healing.md) -- Crash recovery and watchdog system
-- [Steering Queue](steering-queue.md) -- Mid-execution course correction mechanism
+- [Steering Queue: Historical Spec](steering-implementation-spec.md) -- Mid-execution course correction mechanism

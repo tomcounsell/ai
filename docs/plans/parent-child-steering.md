@@ -22,7 +22,7 @@ PM session can push steering messages to any active child Dev session at any tim
 
 ## Prior Art
 
-- **Issue #292 / PR #308**: Fixed reply-to steering reaching running agents. Established the bridge-to-steering-queue routing pattern. Directly relevant -- this work extends the same push mechanism to a new caller (PM session instead of bridge).
+- **Issue #292 / PR #308**: Fixed reply-to steering reaching running agents. Established the bridge-to-steering-queue routing pattern. Directly relevant -- this work extends the same push mechanism to a new caller (PM session instead of bridge). See [Steering Queue: Historical Spec](../features/steering-implementation-spec.md).
 - **Issue #329 / PR #349**: Context fidelity modes for sub-agent steering. Added fidelity levels to steering payloads. Relevant -- the new tool should respect existing fidelity conventions.
 - **Issue #318 / PR #366**: Route unthreaded messages into active sessions via expectations + queued_steering_messages. Extended steering routing beyond reply-to threads.
 - **Issue #459 / PR #464**: SDLC Redesign introducing PM/Dev session split. Created the parent-child relationship (`parent_chat_session_id`) that this feature relies on.
@@ -151,7 +151,7 @@ No MCP server integration required. The steering tool is a bash-callable script 
 
 ## Documentation
 
-- [ ] Update `docs/features/steering-queue.md` to document parent-child steering as a new steering path alongside bridge steering
+- [x] Update `docs/features/steering-implementation-spec.md` to document parent-child steering as a new steering path alongside bridge steering (consolidated into `session-steering.md` via #1027)
 - [ ] Update `docs/features/pm-dev-session-architecture.md` to document the steering capability in the PM/Dev session relationship section
 - [ ] Add entry to `docs/features/README.md` index table if not already covered
 
@@ -226,7 +226,7 @@ Using core tier only: builder, validator, documentarian.
 - **Assigned To**: steering-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/steering-queue.md` with parent-child steering section
+- Update `docs/features/steering-implementation-spec.md` with parent-child steering section (consolidated into `session-steering.md` via #1027)
 - Update `docs/features/pm-dev-session-architecture.md` with steering capability
 - Update `docs/features/README.md` index if needed
 

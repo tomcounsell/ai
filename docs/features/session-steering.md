@@ -2,6 +2,10 @@
 
 **Scope:** Turn-boundary inbox (`AgentSession.queued_steering_messages`) consumed by the worker executor. Used by `valor-session steer` and `scripts/steer_child.py`.
 
+**See also:**
+- [Mid-Session Steering](mid-session-steering.md) — Telegram reply-thread flow (user-facing)
+- [Steering Queue: Historical Spec](steering-implementation-spec.md) — Original Redis list design and bridge coalescing
+
 External steering for `AgentSession` via `queued_steering_messages`. Any process — the PM, a CLI user, another agent — can write messages to a running session's inbox. The worker injects them at the next turn boundary.
 
 ## Problem
@@ -118,6 +122,72 @@ When both summarizer backends (Haiku and OpenRouter) fail, `send_response_with_f
 **Fallback chain:** If steering cannot be used (no session, Redis down, loop prevention), the system falls through to `is_narration_only()` as a last-resort gate before delivering text.
 
 See [Summarizer Format: Self-Summary Fallback](summarizer-format.md#self-summary-fallback-via-session-steering) for the full data flow.
+
+## Parent-Child Steering (PM session to Dev session)
+
+In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering** where a PM session (PM persona) pushes steering messages to its spawned Dev sessions.
+
+### How It Works
+
+The PM session invokes `scripts/steer_child.py` via bash to push steering messages to a running child Dev session. The script validates the parent-child relationship before pushing to the same Redis steering queue used by bridge steering.
+
+```
+PM session decides to steer
+    |
+    v
+python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>
+    |
+    v
+Script validates: child exists, is a Dev session, parent_chat_session_id matches, status is "running"
+    |
+    v
+push_steering_message(child_session_id, text, sender="PM session")
+    |
+    v
+Child's watchdog picks up on next tool call (existing _handle_steering in health_check.py)
+    |
+    v
+Dev session adjusts behavior
+```
+
+### CLI Usage
+
+```bash
+# Steer a child Dev session
+python scripts/steer_child.py --session-id <child_id> --message "skip docs, focus on tests" --parent-id <parent_id>
+
+# Send abort signal to a child
+python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-id <parent_id> --abort
+
+# List active child Dev sessions
+python scripts/steer_child.py --list --parent-id <parent_id>
+```
+
+The `--parent-id` can also be read from the `VALOR_SESSION_ID` environment variable, which is set by `sdk_client.py` for running sessions.
+
+### Validation
+
+The script enforces strict parent-child relationship validation:
+
+- Target must be an existing AgentSession
+- Target must be a Dev session (`is_dev` check)
+- Target's `parent_chat_session_id` must match the caller's ID
+- Target must be in `running` status
+
+All validation failures exit with non-zero code and print an error to stderr.
+
+### Relationship to Bridge Steering
+
+| Aspect | Bridge Steering | Parent-Child Steering |
+|--------|----------------|----------------------|
+| Caller | Telegram user (via reply thread) | PM session (via bash script) |
+| Entry point | `bridge/telegram_bridge.py` | `scripts/steer_child.py` |
+| Validation | Session ID match + running status | Parent-child relationship + running status |
+| Redis queue | Same (`steering:{session_id}`) | Same (`steering:{session_id}`) |
+| Consumption | Same (watchdog `_handle_steering`) | Same (watchdog `_handle_steering`) |
+| Sender field | User's name | "PM session" |
+
+Both paths converge on the same `push_steering_message()` function in `agent/steering.py` and the same consumption path in the watchdog hook.
 
 ## No-Gos
 
