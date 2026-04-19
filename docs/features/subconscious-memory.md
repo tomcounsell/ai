@@ -76,14 +76,28 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on 
 
 ### Flow 3: Post-Session Extraction
 
-After a session completes in `agent/messenger.py`:
+After a session completes, extraction is scheduled from `agent/session_executor.py` **after** `complete_transcript(...)` finalizes the session (hotfix #1055):
 
-1. `run_post_session_extraction()` is called after `BackgroundTask._result` is set
-2. Haiku extracts novel observations as structured JSON (category, observation text, file_paths, tags), with a line-based fallback parser for robustness
-3. Each observation is saved as Memory with categorized importance (corrections/decisions at 4.0, patterns/surprises at 1.0) and structured metadata attached via `DictField`
-4. Outcome detection uses LLM judgment (Haiku) to classify each injected thought as `"acted"` (response was influenced), `"echoed"` (keyword overlap but no causal link), or `"dismissed"` (no relationship). `"echoed"` maps to `"dismissed"` for scoring. Bigram overlap is retained as a zero-cost fallback when the Haiku call fails or is rate-limited.
-5. `ObservationProtocol.on_context_used()` strengthens acted-on memories and weakens dismissed ones
-6. `_persist_outcome_metadata()` runs after ObservationProtocol, updating `dismissal_count`, `last_outcome`, and `outcome_history` in each memory's metadata. Each history entry includes `outcome`, `reasoning` (one-sentence LLM explanation), and `ts` (unix timestamp), capped at 10 entries. When a memory reaches the dismissal threshold (3 consecutive dismissals), its importance is decayed by 0.7x (floor: 0.2). Acting on a memory resets the dismissal counter
+1. `_schedule_post_session_extraction(session_id, response_text)` registers a fire-and-forget `asyncio.create_task` in `_pending_extraction_tasks` (a `dict[str, asyncio.Task]` keyed by `session_id` for dedup). The scheduler is **synchronous** — it does not `await` — so the dev→PM nudge fires immediately, independent of extraction latency.
+2. Inside the task wrapper, `run_post_session_extraction()` runs extract_observations → detect_outcomes → cleanup in sequence.
+3. Haiku extracts novel observations as structured JSON (category, observation text, file_paths, tags), with a line-based fallback parser for robustness
+4. Each observation is saved as Memory with categorized importance (corrections/decisions at 4.0, patterns/surprises at 1.0) and structured metadata attached via `DictField`
+5. Outcome detection uses LLM judgment (Haiku) to classify each injected thought as `"acted"` (response was influenced), `"echoed"` (keyword overlap but no causal link), or `"dismissed"` (no relationship). `"echoed"` maps to `"dismissed"` for scoring. Bigram overlap is retained as a zero-cost fallback when the Haiku call fails or is rate-limited.
+6. `ObservationProtocol.on_context_used()` strengthens acted-on memories and weakens dismissed ones
+7. `_persist_outcome_metadata()` runs after ObservationProtocol, updating `dismissal_count`, `last_outcome`, and `outcome_history` in each memory's metadata. Each history entry includes `outcome`, `reasoning` (one-sentence LLM explanation), and `ts` (unix timestamp), capped at 10 entries. When a memory reaches the dismissal threshold (3 consecutive dismissals), its importance is decayed by 0.7x (floor: 0.2). Acting on a memory resets the dismissal counter
+
+#### Event-Loop Safety (hotfix #1055)
+
+Extraction is the only part of the memory system that runs on the worker event loop (the Telegram bridge and hook-subprocess paths are out-of-loop). Event-loop safety is enforced by four invariants:
+
+- **Async-native Anthropic client, never sync.** All three Anthropic call sites in `agent/memory_extraction.py` (`extract_observations_async`, `extract_post_merge_learning`, `_judge_outcomes_llm`) use `async with anthropic.AsyncAnthropic(...) as client:` + `await client.messages.create(...)`. The sync `anthropic.Anthropic(...)` client is forbidden in this module — it blocked the worker for six hours in a production incident on a half-open TCP socket. A unit test grep-canary (`test_no_sync_anthropic_client_grep_canary`) guards against regressions.
+- **Double-timeout** on every Anthropic call: an SDK-level `timeout=_EXTRACTION_SDK_TIMEOUT` (30s) passed to `messages.create(...)` AND an outer `asyncio.wait_for(..., timeout=_EXTRACTION_HARD_TIMEOUT)` (35s, 5s buffer). The inner SDK timeout raises `anthropic.APITimeoutError` cleanly under normal slow-path behavior; the outer `asyncio.wait_for` hard-stops when the SDK timer does not fire (e.g., half-open sockets where no socket event ever arrives). Both constants live at module scope in `agent/memory_extraction.py`.
+- **Fire-and-forget ordering.** `_schedule_post_session_extraction(...)` is declared `def` (not `async def`) and is called synchronously in `_execute_agent_session` AFTER `complete_transcript(...)` runs on both the happy path and the #917 fallback, and BEFORE `await _handle_dev_session_completion(...)`. Any `await` on the scheduler would regress #987 and #1055 — a review-time invariant.
+- **Graceful shutdown drain.** `drain_pending_extractions(timeout=5.0)` is called from `worker/__main__.py` in the shutdown sequence, after the worker-task drain and before the health/notify/reflection task cancels. Pending tasks exceeding 5s are cancelled. Abrupt shutdown (SIGKILL) loses in-flight extractions; the 35s internal hard-timeout caps worst-case latency so the loss is bounded.
+
+**Loss tolerance:** Memory extraction is best-effort. A lost extraction on worker restart or Anthropic outage never crashes the agent, blocks a session, or surfaces to the user. Failures emit a `memory.extraction.error` analytics counter (tagged with `error_class`, `session_id`, `project_key`) so silent failures are visible on `/dashboard.json`. `CancelledError` is not counted — it is expected during graceful shutdown and carries no signal.
+
+**Orphan safety:** If a session's Popoto record is deleted while its extraction task is still running, the task is safe: `clear_session(session_id)` in the `finally` block of `run_post_session_extraction` only touches an in-memory dict and is a no-op on missing keys. Saved Memory records persist independently, keyed by `project_key`, not `session_id`.
 
 ### Flow 4: System Prompt Priming
 
@@ -490,3 +504,4 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Project key isolation: [#811](https://github.com/tomcounsell/ai/issues/811) (PR [#820](https://github.com/tomcounsell/ai/pull/820)) -- DEFAULT_PROJECT_KEY changed from "dm" to "default", cwd threading, migration script
 - Memory consolidation: [#795](https://github.com/tomcounsell/ai/issues/795) -- `memory-dedup` reflection, `superseded_by` fields, recall filter, semantic dedup via Haiku
 - Memory status CLI: [#964](https://github.com/tomcounsell/ai/issues/964) -- `python -m tools.memory_search status` health subcommand
+- Event-loop unblock (Layers 1+2): [#1055](https://github.com/tomcounsell/ai/issues/1055) -- `AsyncAnthropic` with double-timeout, fire-and-forget scheduler decoupled from finalization, shutdown drain, `memory.extraction.error` analytics counter
