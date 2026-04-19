@@ -256,12 +256,21 @@ async def run_documentation_audit() -> dict:
     try:
         from scripts.docs_auditor import DocsAuditor
 
+        # NOTE: A fresh DocsAuditor instance must be created per call to isolate _api_call_count
         auditor = DocsAuditor(repo_root=PROJECT_ROOT, dry_run=False)
         summary_obj = await asyncio.to_thread(auditor.run)
 
         findings = []
         if summary_obj.skipped:
-            findings.append(f"Docs audit skipped: {summary_obj.skip_reason}")
+            if summary_obj.skip_type == "auth":
+                # Auth failure is a permanent condition until the key is added — report as disabled
+                findings.append(f"Docs audit disabled: {summary_obj.skip_reason}")
+                summary = f"Docs audit disabled (auth): {summary_obj.skip_reason}"
+                logger.warning(summary)
+                return {"status": "disabled", "findings": findings, "summary": summary}
+            else:
+                # Schedule skip or other transient skip — report as ok (will run next time)
+                findings.append(f"Docs audit skipped: {summary_obj.skip_reason}")
         else:
             if len(summary_obj.updated) > 0:
                 findings.append(f"Updated {len(summary_obj.updated)} docs with corrections")

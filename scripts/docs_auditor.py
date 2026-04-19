@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -55,6 +56,11 @@ _UNCERTAIN_PHRASES = [
     "ambiguous",
 ]
 
+# Circuit-break threshold: stop the doc loop after this many consecutive analyze failures.
+# Caps error cascade for non-auth API failures (rate limits, transient network errors)
+# that the startup auth probe cannot catch.
+MAX_CONSECUTIVE_ERRORS = 3
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -68,6 +74,7 @@ class Verdict:
     rationale: str
     corrections: list[str] = field(default_factory=list)
     low_confidence: bool = False
+    auth_failure: bool = False  # Reserved for future per-call auth tracking; not set by current fix
 
 
 @dataclass
@@ -76,6 +83,7 @@ class AuditSummary:
 
     skipped: bool = False
     skip_reason: str = ""
+    skip_type: str = ""  # "auth" | "schedule" | "" (normal run)
     kept: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
@@ -512,11 +520,19 @@ class DocsAuditor:
 
         Returns AuditSummary with full results.
         """
+        # --- Auth probe (before frequency gate — fail fast on missing/invalid API key) ---
+        auth_ok, auth_reason = self._check_auth()
+        if not auth_ok:
+            logger.warning("Docs auditor skipping: %s", auth_reason)
+            return AuditSummary(skipped=True, skip_type="auth", skip_reason=auth_reason)
+
         # --- Weekly frequency gate ---
         if self._should_skip():
             state = self._load_state()
             last = state.get("last_audit_date", "never")
-            summary = AuditSummary(skipped=True, skip_reason=f"last run: {last}")
+            summary = AuditSummary(
+                skipped=True, skip_type="schedule", skip_reason=f"last run: {last}"
+            )
             logger.info("Skipping docs audit: %s", summary.skip_reason)
             return summary
 
@@ -533,6 +549,8 @@ class DocsAuditor:
             self.max_api_calls,
         )
 
+        consecutive_errors = 0
+
         for path in docs:
             # Check API call cap before processing next file
             if self._api_call_count >= self.max_api_calls:
@@ -544,8 +562,17 @@ class DocsAuditor:
                 )
                 break
 
+            # Circuit break on consecutive errors to prevent cascade
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                logger.warning(
+                    "Stopping audit after %d consecutive errors to prevent cascade",
+                    consecutive_errors,
+                )
+                break
+
             try:
                 verdict = self.analyze_doc(path)
+                consecutive_errors = 0  # reset on success
                 summary.verdicts[str(path)] = verdict
 
                 if verdict.action == "DELETE":
@@ -558,6 +585,7 @@ class DocsAuditor:
                 self.execute_verdict(path, verdict)
 
             except Exception as e:
+                consecutive_errors += 1
                 msg = f"Error auditing {path}: {e}"
                 logger.error(msg)
                 summary.errors.append(msg)
@@ -601,6 +629,37 @@ class DocsAuditor:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _check_auth(self) -> tuple[bool, str]:
+        """Check ANTHROPIC_API_KEY presence and validity.
+
+        Returns (ok: bool, reason: str). Performs a minimal API probe to catch
+        rotated/expired keys at startup rather than per-doc.
+
+        - Missing or sentinel key → returns (False, reason) immediately (no network call)
+        - Present key → makes a minimal client.models.list() probe
+          - AuthenticationError → returns (False, reason)
+          - Non-auth error (network, etc.) → logs WARNING, returns (True, "") to allow run
+          - Success → returns (True, "")
+        """
+        if _anthropic_module is None:
+            return False, "anthropic package is not installed"
+
+        key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not key or key.lower() in ("none", "null", "false", "0"):
+            return False, "ANTHROPIC_API_KEY not set"
+
+        try:
+            client = _anthropic_module.Anthropic(api_key=key)
+            client.models.list()  # minimal probe — no tokens consumed
+            return True, ""
+        except Exception as e:
+            err_str = str(e).lower()
+            if "authentication" in err_str or "api_key" in err_str or "auth_token" in err_str:
+                return False, f"ANTHROPIC_API_KEY invalid or expired: {e}"
+            # Non-auth error during probe (network, timeout, etc.) — treat as transient; allow run
+            logger.warning("Auth probe encountered non-auth error: %s — proceeding", e)
+            return True, ""
 
     def _get_client(self) -> Any:
         """Lazy-init Anthropic client."""

@@ -28,7 +28,9 @@ def assert_valid_result(result: dict, expected_status: str = "ok") -> None:
     assert "status" in result, f"Missing 'status' key in {result}"
     assert "findings" in result, f"Missing 'findings' key in {result}"
     assert "summary" in result, f"Missing 'summary' key in {result}"
-    assert result["status"] in ("ok", "error", "skipped"), f"Invalid status: {result['status']}"
+    assert result["status"] in ("ok", "error", "skipped", "disabled"), (
+        f"Invalid status: {result['status']}"
+    )
     assert isinstance(result["findings"], list), "'findings' must be a list"
     assert isinstance(result["summary"], str), "'summary' must be a str"
 
@@ -235,6 +237,7 @@ class TestAuditingCallables:
         mock_summary = MagicMock()
         mock_summary.skipped = False
         mock_summary.skip_reason = ""
+        mock_summary.skip_type = ""
         mock_summary.kept = ["doc.md"]
         mock_summary.updated = []
         mock_summary.deleted = []
@@ -245,6 +248,49 @@ class TestAuditingCallables:
             mock_da.return_value = mock_instance
             result = run_async(run_documentation_audit())
         assert_valid_result(result)
+
+    def test_run_documentation_audit_auth_skip_returns_disabled(self):
+        """When DocsAuditor skips due to auth, wrapper returns status='disabled'."""
+        from reflections.auditing import run_documentation_audit
+
+        mock_summary = MagicMock()
+        mock_summary.skipped = True
+        mock_summary.skip_reason = "ANTHROPIC_API_KEY not set"
+        mock_summary.skip_type = "auth"
+        mock_summary.kept = []
+        mock_summary.updated = []
+        mock_summary.deleted = []
+
+        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
+            mock_instance = MagicMock()
+            mock_instance.run.return_value = mock_summary
+            mock_da.return_value = mock_instance
+            result = run_async(run_documentation_audit())
+
+        assert_valid_result(result)
+        assert result["status"] == "disabled"
+        assert any("disabled" in f.lower() for f in result["findings"])
+
+    def test_run_documentation_audit_schedule_skip_returns_ok(self):
+        """When DocsAuditor skips due to frequency gate, wrapper returns status='ok'."""
+        from reflections.auditing import run_documentation_audit
+
+        mock_summary = MagicMock()
+        mock_summary.skipped = True
+        mock_summary.skip_reason = "last run: 2026-04-12"
+        mock_summary.skip_type = "schedule"
+        mock_summary.kept = []
+        mock_summary.updated = []
+        mock_summary.deleted = []
+
+        with patch("scripts.docs_auditor.DocsAuditor") as mock_da:
+            mock_instance = MagicMock()
+            mock_instance.run.return_value = mock_summary
+            mock_da.return_value = mock_instance
+            result = run_async(run_documentation_audit())
+
+        assert_valid_result(result)
+        assert result["status"] == "ok"
 
     def test_run_skills_audit_no_script(self):
         """run_skills_audit() returns ok when script not found."""
