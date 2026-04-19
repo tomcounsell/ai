@@ -184,7 +184,8 @@ class AgentSession(Model):
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
-    # === Session mode (deprecated — use session_type. Kept as no-op for 30-day Redis TTL safety.) ===
+    # === Session mode (deprecated — use session_type) ===
+    # Kept as no-op Field(null=True) for 30-day Redis TTL safety on old records.
     session_mode = Field(null=True)
 
     # === Semantic routing fields ===

@@ -2018,7 +2018,7 @@ async def get_agent_response_sdk(
     bridge.routing) to determine session behavior for PM sessions:
 
     - Teammate persona: bypasses the Haiku intent classifier, sets
-      session_mode=PersonaType.TEAMMATE directly on the session, reducing
+      session_type=SessionType.TEAMMATE directly on the session, reducing
       latency and API cost for DMs and groups with "teammate" persona.
     - Project Manager/Developer persona: bypasses the classifier, uses
       the config-determined persona without reclassification.

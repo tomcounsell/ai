@@ -20,6 +20,7 @@ from bridge.message_drafter import (
     draft_message,
     extract_artifacts,
 )
+from config.enums import SessionType
 from models.agent_session import SDLC_STAGES
 
 
@@ -36,7 +37,6 @@ def _mock_session_with_stages(stage_dict, links=None):
     session.issue_url = (links or {}).get("issue")
     session.plan_url = (links or {}).get("plan")
     session.pr_url = (links or {}).get("pr")
-    session.session_mode = None  # Default: not a Teammate session
     return session
 
 
@@ -1110,7 +1110,7 @@ class TestComposeStructuredDraft:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_mode = "teammate"
+        session.session_type = SessionType.TEAMMATE
         session.session_id = None  # Skip Redis refresh
 
         result = _compose_structured_draft(
@@ -1125,11 +1125,11 @@ class TestComposeStructuredDraft:
         assert "bridge uses Telethon" in result
 
     def test_non_teammate_mode_still_gets_structured(self):
-        """Non-Teammate sessions with session_mode=None still get structured formatting."""
+        """Non-Teammate sessions (session_type != TEAMMATE) still get structured formatting."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_mode = None
+        session.session_type = SessionType.PM
         session.session_id = None
         session.status = "completed"
 
@@ -1158,7 +1158,7 @@ class TestNoMessageEcho:
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
-        session.session_mode = None
+        session.session_type = SessionType.PM
 
         result = _compose_structured_draft(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
@@ -1176,7 +1176,7 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
-        session.session_mode = None
+        session.session_type = SessionType.PM
         session.get_links.return_value = {}
 
         result = _compose_structured_draft("It's 3pm UTC+7", session=session, is_completion=True)
@@ -1300,7 +1300,7 @@ class TestComposeStructuredDraftWithSession:
     def test_teammate_mode_session_returns_prose(self):
         """Teammate session bypasses all structured formatting."""
         session = _mock_session_with_stages({})
-        session.session_mode = "teammate"
+        session.session_type = SessionType.TEAMMATE
         session.session_id = None  # Skip Redis refresh
         session.message_text = "How does the bridge work?"
         session.status = "completed"

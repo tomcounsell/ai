@@ -288,7 +288,7 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
 
 Standalone Worker (python -m worker) → Sole session execution engine
               (worker/__main__.py)         → Startup: index rebuild → recovery → orphan cleanup
-                                           → Executes PM session (AgentSession role=pm, read-only)
+                                           → Executes PM session (AgentSession session_type=pm, read-only)
                                                → PM creates Dev session via valor_session CLI
                                                    → Worker executes Dev session via CLI harness (claude -p → Claude API)
                                                    → _handle_dev_session_completion() → steers PM

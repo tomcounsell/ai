@@ -169,14 +169,19 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         from agent.agent_session_queue import _push_agent_session
         from bridge.utc import utc_now
+        from config.enums import SessionType
 
-        _ROLE_TO_SESSION_TYPE = {"pm": "pm", "dev": "dev", "teammate": "teammate"}
+        _role_to_session_type = {
+            "pm": SessionType.PM,
+            "dev": SessionType.DEV,
+            "teammate": SessionType.TEAMMATE,
+        }
         role = args.role or "pm"
-        if role not in _ROLE_TO_SESSION_TYPE:
+        if role not in _role_to_session_type:
             raise ValueError(
-                f"Unknown --role value: {role!r}. Allowed values: {sorted(_ROLE_TO_SESSION_TYPE)}"
+                f"Unknown --role value: {role!r}. Allowed values: {sorted(_role_to_session_type)}"
             )
-        session_type = _ROLE_TO_SESSION_TYPE[role]
+        session_type = _role_to_session_type[role]
         message = args.message
         chat_id = args.chat_id or "0"
         parent_id = getattr(args, "parent", None)
@@ -611,9 +616,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         # Client-side role filter — matches on session_type only
         if role_filter:
             all_sessions = [
-                s
-                for s in all_sessions
-                if getattr(s, "session_type", None) == role_filter
+                s for s in all_sessions if getattr(s, "session_type", None) == role_filter
             ]
 
         # Sort by created_at descending

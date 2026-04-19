@@ -758,9 +758,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
 
             # Resolve session type and classification for PM auto-continue
-            _session_type = (
-                getattr(agent_session, "session_type", None) if agent_session else None
-            )
+            _session_type = getattr(agent_session, "session_type", None) if agent_session else None
             _classification = getattr(session, "classification_type", None)
             _is_teammate = (
                 agent_session is not None

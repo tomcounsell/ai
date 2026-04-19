@@ -20,7 +20,6 @@ def _make_mock_session(**overrides):
         "agent_session_id": "mock-session-1",
         "session_id": "sess-1",
         "session_type": "dev",
-        "session_mode": None,
         "status": "running",
         "slug": None,
         "message_text": "test message",
@@ -542,7 +541,6 @@ class TestSessionToPipeline:
         mock_session.agent_session_id = "old-session"
         mock_session.session_id = "sess-1"
         mock_session.session_type = "dev"
-        mock_session.session_mode = None
         mock_session.status = "completed"
         mock_session.slug = None
         mock_session.message_text = "old message"
