@@ -77,7 +77,7 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and deprecated typing imports |
+| `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and `deprecated` typing imports |
 | `redis-ttl-cleanup` | `reflections.maintenance.run_redis_ttl_cleanup` | Prune expired records across all Redis models |
 | `redis-quality-audit` | `reflections.maintenance.run_redis_data_quality` | Audit data quality: unsummarized links, dead channels, error patterns |
 | `merged-branch-cleanup` | `reflections.maintenance.run_branch_plan_cleanup` | Delete merged branches; audit docs/plans/ for stale/orphaned plans **(disabled — calls gh CLI)** |
@@ -246,7 +246,7 @@ Deduplication tracker for PR review audit findings. Prevents re-filing GitHub is
 redis.Redis.from_url(settings.REDIS_URL).get("docs_auditor:last_audit_date")
 ```
 
-This replaced the former `ReflectionRun` dependency (removed in issue #748).
+This replaced the former `ReflectionRun` dependency (see issue #748 for the migration history).
 
 ### Docs Auditor Authentication
 
