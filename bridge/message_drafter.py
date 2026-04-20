@@ -342,6 +342,15 @@ def format_violations(violations: list[Violation], medium: str) -> str:
     return "\n".join(lines)
 
 
+def _validate_for_medium(text: str, medium: str) -> list[Violation]:
+    """Dispatch to the per-medium validator. Unknown medium returns []."""
+    if medium == "telegram":
+        return validate_telegram(text)
+    if medium == "email":
+        return validate_email(text)
+    return []
+
+
 def extract_artifacts(text: str) -> dict[str, list[str]]:
     """
     Extract key artifacts from agent output.
@@ -1580,6 +1589,7 @@ async def draft_message(
             text=raw_response,
             was_drafted=False,
             artifacts=artifacts,
+            violations=_validate_for_medium(raw_response, medium),
         )
 
     # Write full output file for very long responses
@@ -1631,6 +1641,11 @@ async def draft_message(
         # Compose structured output with stage progress and links
         summary_text = _compose_structured_draft(summary_text, session=session, is_completion=True)
 
+        # Run the per-medium validator. Violations are informational —
+        # the caller (stop-hook review gate) surfaces them to the agent
+        # so they can edit before sending. We do not re-draft server-side.
+        violations = _validate_for_medium(summary_text, medium)
+
         return MessageDraft(
             text=summary_text,
             full_output_file=full_output_file,
@@ -1638,6 +1653,7 @@ async def draft_message(
             artifacts=artifacts,
             context_summary=structured.context_summary or None,
             expectations=expectations,
+            violations=violations,
         )
 
     # All backends failed — signal self-draft via session steering instead

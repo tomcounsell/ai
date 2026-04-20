@@ -387,14 +387,12 @@ Save this URL as `{review_url}` for the output summary.
 
 ### 7. Output Summary
 
-**Present review summary:**
+**Present review summary** (use bullets — Telegram-bound output must not contain markdown tables; see docs/features/message-drafter.md):
 
-| | |
-|---|---|
-| **Branch** | `{head_branch}` -> `{base_branch}` |
-| **Plan** | `{plan_file}` or "none" |
-| **Result** | {Approved \| Changes Requested} |
-| **Review** | [{review_url}]({review_url}) |
+- **Branch** — `{head_branch}` → `{base_branch}`
+- **Plan** — `{plan_file}` or "none"
+- **Result** — {Approved | Changes Requested}
+- **Review** — [{review_url}]({review_url})
 
 **Issues Found: {total}**
 - **Blockers: {count}**
