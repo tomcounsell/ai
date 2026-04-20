@@ -181,6 +181,8 @@ After all critics complete:
 
 ### Step 5: Report
 
+Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header.
+
 Output the final report in this format:
 
 ```markdown
