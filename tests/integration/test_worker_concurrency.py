@@ -382,14 +382,16 @@ class TestPMProjectKeySerialization:
 
 
 class TestDevWorktreeParallelism:
-    """Dev sessions with slug (worktree-isolated) on different chat_ids run concurrently."""
+    """Dev sessions with slug (worktree-isolated) run concurrently, across
+    chats AND across slugs in the same chat (issue #1085)."""
 
     @pytest.mark.asyncio
     async def test_two_slugged_dev_sessions_execute_concurrently(self):
-        """Dev sessions with slug set should use chat_id as worker_key,
+        """Dev sessions with slug set use slug as worker_key,
         allowing parallel execution across different chats."""
         project_key = "test-dev-parallel"
         chat_ids = ["dev-chat-A", "dev-chat-B"]
+        slugs = ["feat-0", "feat-1"]
 
         running_count = [0]
         peak_running = [0]
@@ -401,7 +403,7 @@ class TestDevWorktreeParallelism:
                 session_id=f"dev-parallel-{i}",
                 project_key=project_key,
                 session_type=SessionType.DEV,
-                slug=f"feat-{i}",
+                slug=slugs[i],
                 created_at=time.time() + i * 0.001,
             )
 
@@ -417,12 +419,12 @@ class TestDevWorktreeParallelism:
         try:
             _queue._global_session_semaphore = asyncio.Semaphore(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
-                # Each slugged dev session gets its own chat-keyed worker.
+                # Each slugged dev session gets its own slug-keyed worker.
                 # Stagger starts so Worker A can pop its session before Worker B
                 # starts — avoids Popoto async_filter shared-connection race
                 # where concurrent reads can return empty results.
-                for cid in chat_ids:
-                    _ensure_worker(cid, is_project_keyed=False)
+                for sl in slugs:
+                    _ensure_worker(sl, is_project_keyed=False)
                     await asyncio.sleep(0.05)
                 await asyncio.sleep(0.5)
 
@@ -432,8 +434,98 @@ class TestDevWorktreeParallelism:
             )
         finally:
             _queue._global_session_semaphore = original_semaphore
-            for cid in chat_ids:
-                task = _active_workers.pop(cid, None)
+            for sl in slugs:
+                task = _active_workers.pop(sl, None)
                 if task:
                     task.cancel()
-                _starting_workers.discard(cid)
+                _starting_workers.discard(sl)
+
+    @pytest.mark.asyncio
+    async def test_two_slugged_dev_sessions_same_chat_id_execute_concurrently(self):
+        """Two slugged dev sessions sharing a chat_id must still run concurrently.
+
+        This is the exact #1085 bug scenario: five slugged dev sessions created
+        via `valor_session create --role dev` all defaulted to chat_id=0 and
+        serialized through a single project-keyed worker. With slug-keyed
+        routing, each slug gets its own worker loop.
+        """
+        project_key = "test-dev-same-chat-parallel"
+        shared_chat_id = "0"
+        slugs = ["feat-A", "feat-B"]
+
+        running_count = [0]
+        peak_running = [0]
+        count_lock = asyncio.Lock()
+
+        for i, sl in enumerate(slugs):
+            _create_test_session(
+                chat_id=shared_chat_id,
+                session_id=f"dev-same-chat-{i}",
+                project_key=project_key,
+                session_type=SessionType.DEV,
+                slug=sl,
+                created_at=time.time() + i * 0.001,
+            )
+
+        async def fake_execute(session):
+            async with count_lock:
+                running_count[0] += 1
+                peak_running[0] = max(peak_running[0], running_count[0])
+            await asyncio.sleep(0.1)
+            async with count_lock:
+                running_count[0] -= 1
+
+        original_semaphore = _queue._global_session_semaphore
+        try:
+            _queue._global_session_semaphore = asyncio.Semaphore(5)
+            with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
+                # Each slugged dev session gets its own slug-keyed worker,
+                # regardless of shared chat_id.
+                for sl in slugs:
+                    _ensure_worker(sl, is_project_keyed=False)
+                    await asyncio.sleep(0.05)
+                await asyncio.sleep(0.5)
+
+            assert peak_running[0] == 2, (
+                f"Peak concurrent dev sessions was {peak_running[0]}, expected 2. "
+                "Slugged dev sessions with the same chat_id should run in parallel "
+                "via slug-keyed workers (issue #1085)."
+            )
+        finally:
+            _queue._global_session_semaphore = original_semaphore
+            for sl in slugs:
+                task = _active_workers.pop(sl, None)
+                if task:
+                    task.cancel()
+                _starting_workers.discard(sl)
+
+    @pytest.mark.asyncio
+    async def test_slug_keyed_pop_finds_session_by_slug(self):
+        """_pop_agent_session must find a slugged dev session when keyed by slug.
+
+        Regression test for the _pop_agent_session filter: if the non-project-keyed
+        branch filtered only by chat_id (the pre-#1085 behavior), a slug-keyed
+        worker would never find its session because the session's chat_id does
+        not equal its worker_key anymore.
+        """
+        project_key = "test-slug-pop"
+        slug = "slug-pop-regression"
+        chat_id = "unrelated-chat-id"
+        _create_test_session(
+            chat_id=chat_id,
+            session_id="slug-pop-1",
+            project_key=project_key,
+            session_type=SessionType.DEV,
+            slug=slug,
+        )
+        try:
+            result = await _pop_agent_session(slug, is_project_keyed=False)
+            assert result is not None, (
+                "Slug-keyed worker failed to pop its slugged dev session. "
+                "_pop_agent_session must try slug=worker_key before falling back to chat_id."
+            )
+            assert result.slug == slug
+            assert result.status == "running"
+        finally:
+            _active_workers.pop(slug, None)
+            _starting_workers.discard(slug)

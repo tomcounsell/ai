@@ -359,13 +359,14 @@ async def _push_agent_session(
     try:
         from popoto.redis_db import POPOTO_REDIS_DB
 
+        # KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py
         # Compute worker_key inline from the same inputs as AgentSession.worker_key
         if session_type == SessionType.TEAMMATE:
             _wk = chat_id or project_key
         elif session_type == SessionType.PM:
             _wk = project_key
         elif slug:
-            _wk = chat_id or project_key
+            _wk = slug
         else:
             _wk = project_key
         payload = json.dumps(
@@ -1107,13 +1108,14 @@ async def enqueue_agent_session(
         project_config=project_config,
         extra_context_overrides=extra_context_overrides,
     )
+    # KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py
     # Compute worker_key from the same inputs the property uses, without re-querying Redis
     if session_type == SessionType.TEAMMATE:
         wk = chat_id or project_key
     elif session_type == SessionType.PM:
         wk = project_key
     elif slug:
-        wk = chat_id or project_key
+        wk = slug
     else:
         wk = project_key
     is_pk = wk == project_key

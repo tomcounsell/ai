@@ -157,9 +157,14 @@ async def _pop_agent_session(
 ) -> AgentSession | None:
     """Pop the highest priority pending session for a worker.
 
-    Queue is keyed by worker_key (either project_key or chat_id depending on
+    Queue is keyed by worker_key (project_key, slug, or chat_id depending on
     session type).  Project-keyed workers filter by project_key and only pop
-    pm/dev-without-slug sessions.  Chat-keyed workers filter by chat_id as before.
+    pm/dev-without-slug sessions.  For non-project-keyed workers we attempt a
+    slug=worker_key indexed lookup first (captures slugged dev sessions —
+    issue #1085), then fall back to chat_id=worker_key (captures teammate
+    sessions).  The slug lookup is empty for teammate sessions (whose chat_id
+    is a Telegram thread ID, not a slug) — at typical teammate pop rates this
+    extra indexed query is imperceptible.
 
     Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
     Sessions with scheduled_at in the future are skipped (deferred execution).
@@ -209,7 +214,17 @@ async def _pop_agent_session(
             # Only pop sessions that belong to project-keyed workers (pm, dev-without-slug)
             pending = [s for s in pending if s.worker_key == worker_key]
         else:
-            pending = await AgentSession.query.async_filter(chat_id=worker_key, status="pending")
+            # For non-project-keyed workers we attempt a slug=worker_key indexed
+            # lookup first (captures slugged dev sessions — issue #1085), then
+            # fall back to chat_id=worker_key (captures teammate sessions).
+            # The slug lookup is empty for teammate sessions (whose chat_id is a
+            # Telegram thread ID, not a slug) — at typical teammate pop rates
+            # this extra indexed query is imperceptible.
+            pending = await AgentSession.query.async_filter(slug=worker_key, status="pending")
+            if not pending:
+                pending = await AgentSession.query.async_filter(
+                    chat_id=worker_key, status="pending"
+                )
         if not pending:
             return None
 
@@ -370,7 +385,11 @@ async def _pop_agent_session_with_fallback(
             pending = AgentSession.query.filter(project_key=worker_key, status="pending")
             pending = [s for s in pending if s.worker_key == worker_key]
         else:
-            pending = AgentSession.query.filter(chat_id=worker_key, status="pending")
+            # Mirror the async branch: try slug first (captures slugged dev
+            # sessions — issue #1085), then fall back to chat_id.
+            pending = AgentSession.query.filter(slug=worker_key, status="pending")
+            if not pending:
+                pending = AgentSession.query.filter(chat_id=worker_key, status="pending")
         if not pending:
             return None
 

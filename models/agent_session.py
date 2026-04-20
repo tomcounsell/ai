@@ -213,7 +213,9 @@ class AgentSession(Model):
     project_config = DictField(null=True)
 
     # === Dev session fields (null when session_type="pm" or "teammate") ===
-    slug = Field(null=True)  # Derives branch, plan path, worktree
+    # KeyField so `query.filter(slug=...)` is an indexed lookup — required for
+    # worker pop to find slugged dev sessions by slug (issue #1085).
+    slug = KeyField(null=True)  # Derives branch, plan path, worktree
 
     # === Session hierarchy fields ===
     parent_agent_session_id = KeyField(null=True)
@@ -267,18 +269,24 @@ class AgentSession(Model):
     def worker_key(self) -> str:
         """Compute the worker loop routing key based on isolation level.
 
-        Teammate sessions and dev sessions with a slug (worktree-isolated) are
-        keyed by chat_id — they can run in parallel safely.  PM sessions and
-        dev sessions without a slug share the project's main working tree, so
-        they serialize by project_key.
+        Teammate sessions run in parallel across chats, keyed by chat_id.
+        PM sessions and slugless dev sessions share the main working tree,
+        keyed by project_key.  Slugged dev sessions have their own worktree
+        (.worktrees/{slug}/) and branch (session/{slug}), so they route by
+        slug — two slugged dev sessions with the same chat_id still land on
+        different worker loops and run in parallel.
+
+        Slugs are assumed unique across the active session keyspace.  If two
+        dev sessions in different projects share a slug, they will share a
+        worker loop and serialize.
         """
         if self.session_type == SessionType.TEAMMATE:
             return self.chat_id or self.project_key
         if self.session_type == SessionType.PM:
             return self.project_key
-        # dev: isolated if slug present (worktree), serialized if not
+        # dev: isolated by slug (worktree) if present, serialized by project otherwise
         if self.slug:
-            return self.chat_id or self.project_key
+            return self.slug
         return self.project_key
 
     @property
