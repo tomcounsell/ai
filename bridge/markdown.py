@@ -70,8 +70,32 @@ def format_link(text: str, url: str) -> str:
     return f"[{text}]({url})"
 
 
+TELEGRAM_MAX_LENGTH = 4096
+
+
+def _split_text(text: str, max_len: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+    """Split text into chunks of at most max_len chars, breaking at newlines where possible."""
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Try to break at a newline within the last 20% of the chunk
+        split_at = max_len
+        newline_pos = text.rfind("\n", max_len - max_len // 5, max_len)
+        if newline_pos > 0:
+            split_at = newline_pos + 1
+        chunks.append(text[:split_at])
+        text = text[split_at:]
+    return chunks
+
+
 async def send_markdown(client, chat_id: int, text: str, reply_to: int | None = None):
     """Send a message with Markdown parse mode, falling back to plain text.
+
+    Automatically splits messages exceeding Telegram's 4096-char limit.
 
     Args:
         client: Telethon TelegramClient
@@ -80,15 +104,22 @@ async def send_markdown(client, chat_id: int, text: str, reply_to: int | None = 
         reply_to: Optional message ID to reply to
 
     Returns:
-        The sent message object
+        The last sent message object
     """
     import logging
 
     from telethon import errors
 
-    try:
-        return await client.send_message(chat_id, text, reply_to=reply_to, parse_mode="md")
-    except errors.BadRequestError:
-        # Markdown parse failed — send plain text without parse mode
-        logging.getLogger(__name__).debug("Markdown send failed, falling back to plain text")
-        return await client.send_message(chat_id, text, reply_to=reply_to)
+    log = logging.getLogger(__name__)
+    chunks = _split_text(text)
+    last = None
+    for i, chunk in enumerate(chunks):
+        current_reply_to = reply_to if i == 0 else None
+        try:
+            last = await client.send_message(
+                chat_id, chunk, reply_to=current_reply_to, parse_mode="md"
+            )
+        except errors.BadRequestError:
+            log.debug("Markdown send failed, falling back to plain text")
+            last = await client.send_message(chat_id, chunk, reply_to=current_reply_to)
+    return last
