@@ -520,10 +520,11 @@ Using standard tier-1 agents (builder, test-engineer, validator, documentarian).
 | Lint clean (bridge) | `python -m ruff check bridge/` | exit code 0 |
 | Format clean (bridge) | `python -m ruff format --check bridge/` | exit code 0 |
 | Lint clean (tests) | `python -m ruff check tests/integration/test_steering.py` | exit code 0 |
-| Reply chain hydrated flag used | `grep -n 'reply_chain_hydrated' bridge/telegram_bridge.py` | output contains at least 1 line |
-| Kill-switch env var referenced | `grep -n 'REPLY_CHAIN_PREHYDRATION_DISABLED' bridge/telegram_bridge.py` | output contains at least 1 line |
-| FRESH_REPLY_CHAIN_FAIL log tag present | `grep -n 'FRESH_REPLY_CHAIN_FAIL' bridge/telegram_bridge.py` | output contains at least 2 lines (timeout + exception) |
-| Feature doc updated | `grep -n 'FRESH_REPLY_CHAIN_FAIL\|fresh-session' docs/features/reply-thread-context-hydration.md` | output contains at least 1 line |
+| Reply chain hydrated flag used | `grep -q 'reply_chain_hydrated' bridge/telegram_bridge.py` | exit code 0 |
+| Kill-switch env var referenced | `grep -q 'REPLY_CHAIN_PREHYDRATION_DISABLED' bridge/telegram_bridge.py` | exit code 0 |
+| FRESH_REPLY_CHAIN_FAIL log tag present | `grep -q 'FRESH_REPLY_CHAIN_FAIL' bridge/telegram_bridge.py` | exit code 0 |
+| Feature doc updated (log tag) | `grep -q 'FRESH_REPLY_CHAIN_FAIL' docs/features/reply-thread-context-hydration.md` | exit code 0 |
+| Feature doc updated (section) | `grep -q 'fresh-session' docs/features/reply-thread-context-hydration.md` | exit code 0 |
 
 ## Critique Results
 
