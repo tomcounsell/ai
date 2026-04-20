@@ -1146,7 +1146,8 @@ def cleanup_corrupted_agent_sessions() -> int:
     """Delete AgentSession records with corrupted data that prevent .save().
 
     Detects sessions where the ID field has an invalid length (e.g., 60 chars
-    instead of the expected 32 for uuid4), or where .save() raises ModelException.
+    instead of the expected 32 for uuid4), or where ``.save()`` raises a
+    validation-type exception (``"invalid"`` or ``"validation"`` in the message).
     These records jam the health check and startup recovery loops with repeated
     errors because they can't be transitioned or finalized through normal ORM ops.
 
@@ -1172,8 +1173,6 @@ def cleanup_corrupted_agent_sessions() -> int:
     Returns the number of corrupted sessions deleted. The phantom count and
     orphan-cleanup stats are logged at INFO but not returned.
     """
-    from popoto.exceptions import ModelException
-
     cleaned = 0
     raw_sessions = list(AgentSession.query.all())
     all_sessions = _filter_hydrated_sessions(raw_sessions)
@@ -1198,7 +1197,7 @@ def cleanup_corrupted_agent_sessions() -> int:
         if not is_corrupt:
             try:
                 session.save()
-            except (ModelException, Exception) as e:
+            except Exception as e:
                 if "invalid" in str(e).lower() or "validation" in str(e).lower():
                     logger.warning(
                         "[agent-session-cleanup] Unsaveable session detected: "

@@ -122,7 +122,7 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 **Solution**: On worker startup, `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) purges Redis set entries that point to missing or invalid objects. This is the first step in the worker's startup sequence. The bridge does not call `rebuild_indexes()` — index management is the worker's exclusive responsibility. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
 
-### 7. Agent Session Cleanup (`agent/agent_session_queue.py`)
+### 7. Agent Session Cleanup (`agent/session_health.py`)
 
 **Problem**: Sessions with corrupted IDs (e.g., length 60 instead of expected 32 for uuid4) or invalid fields cause `ModelException` on every health check and startup recovery cycle, spamming error logs and potentially blocking worker startup.
 
