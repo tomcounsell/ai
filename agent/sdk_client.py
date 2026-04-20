@@ -1553,6 +1553,20 @@ _HARNESS_COMMANDS: dict[str, list[str]] = {
 
 _UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
+# Sentinel string used to detect Claude Code's image-dimension error.
+#
+# Design note: this checks ``result_text`` (stdout, structured result), NOT stderr.
+# The stale-UUID fallback intentionally avoids stderr substring gates because stderr
+# is unstructured log noise that changes across CLI versions and locales.
+# This sentinel is distinct for three reasons:
+#   1. It checks result_text (stdout result), not stderr — stdout result strings are
+#      stable protocol output produced by Claude Code as the turn's text response.
+#   2. It only fires when prior_uuid was set (resume path) — the error is meaningless
+#      on first-turn paths and would never appear there.
+#   3. The image-dimension error arrives with exit code 0, making the returncode != 0
+#      fallback structurally unable to catch it — a separate check is required.
+IMAGE_DIMENSION_SENTINEL = "exceeds the dimension limit"
+
 
 async def get_response_via_harness(
     message: str,
@@ -1583,6 +1597,12 @@ async def get_response_via_harness(
     If the resumed subprocess exits with **any** non-zero return code, retries
     once using ``full_context_message`` without ``--resume`` (no stderr substring
     gate — substring matching is brittle across CLI versions and locales).
+
+    A separate exit-code-0 sentinel check (``IMAGE_DIMENSION_SENTINEL``) is placed
+    **above** the ``returncode != 0`` guard to handle Claude Code's image-dimension
+    error, which returns exit code 0.  This check fires only on resume paths and
+    inspects ``result_text`` (stdout), not stderr.  See ``IMAGE_DIMENSION_SENTINEL``
+    for the full design rationale.
 
     When ``session_id`` is provided, stores the captured Claude Code UUID on
     the AgentSession record after a successful turn (Popoto/Redis side effect).
@@ -1638,6 +1658,35 @@ async def get_response_via_harness(
         on_sdk_started=on_sdk_started,
         on_stdout_event=on_stdout_event,
     )
+
+    # Image-dimension sentinel: Claude Code returns the image-dimension error with
+    # exit code 0, so the returncode != 0 fallback below cannot catch it.  This
+    # check fires only on resume paths (prior_uuid set) and inspects result_text
+    # (stdout result), not stderr.  See IMAGE_DIMENSION_SENTINEL for rationale.
+    if prior_uuid and result_text and IMAGE_DIMENSION_SENTINEL in result_text:
+        logger.warning(
+            f"[harness] Image dimension error on --resume for session_id={session_id}; "
+            "triggering full_context_message fallback"
+        )
+        if full_context_message is not None:
+            fallback_msg = _apply_context_budget(full_context_message)
+            fallback_cmd = harness_cmd + [fallback_msg]
+            result_text, session_id_from_harness, _ = await _run_harness_subprocess(
+                fallback_cmd,
+                working_dir,
+                proc_env,
+                on_sdk_started=on_sdk_started,
+                on_stdout_event=on_stdout_event,
+            )
+        else:
+            logger.error(
+                f"[harness] Image dimension error on --resume for session_id={session_id}, "
+                "no full_context_message available — returning plain-language error"
+            )
+            result_text = (
+                "I couldn't resume because the session history contains images that are "
+                "too large. Please start a new thread."
+            )
 
     # Mandatory stale-UUID fallback: when prior_uuid was set and the subprocess
     # exits with ANY non-zero return code, retry once without --resume using the
