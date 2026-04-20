@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Small
 owner: Tom Counsell
@@ -172,21 +172,21 @@ No agent integration required — `parent_agent_session_id` is an internal ORM f
 
 ## Documentation
 
-- [ ] Update `docs/features/agent-session-model.md` — remove references to deprecated alias names, update the field table to show only `parent_agent_session_id` as the FK
-- [ ] Update module-level docstring in `models/agent_session.py` (lines ~25, 105-108) — remove mentions of deprecated aliases after they are deleted
+- [x] Update `docs/features/agent-session-model.md` — remove references to deprecated alias names, update the field table to show only `parent_agent_session_id` as the FK
+- [x] Update module-level docstring in `models/agent_session.py` (lines ~25, 105-108) — remove mentions of deprecated aliases after they are deleted
 
 ## Success Criteria
 
-- [ ] Migration script runs cleanly with `--apply` and reports 0 remaining records to migrate on re-run
-- [ ] `grep -rn 'parent_session_id\|parent_chat_session_id' --include="*.py"` on THIS PR returns only: the three migration scripts at their current `scripts/` paths (`scripts/migrate_unify_parent_session_field.py`, `scripts/migrate_parent_session_field.py`, `scripts/migrate_agent_session_keyfield_rename.py`) and historical doc plans under `docs/plans/completed/` or `docs/plans/parent-child-steering.md`. Archival to `scripts/archive/` is deferred to the follow-up PR per the Update System section.
-- [ ] `@property` aliases deleted from `models/agent_session.py`
-- [ ] Kwarg normalization blocks for the aliases deleted from `_normalize_kwargs`
-- [ ] `create_child()` signature uses `parent_agent_session_id` as parameter name
-- [ ] `create_dev()` internal `parent_chat_session_id` fallback removed
-- [ ] `scripts/steer_child.py:99` reads `child.parent_agent_session_id`
-- [ ] All affected tests updated and `pytest tests/unit/ tests/integration/ tests/e2e/ -x -q` passes
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated
+- [x] Migration script runs cleanly with `--apply` and reports 0 remaining records to migrate on re-run
+- [x] `grep -rn 'parent_session_id\|parent_chat_session_id' --include="*.py"` on THIS PR returns only: the three migration scripts at their current `scripts/` paths (`scripts/migrate_unify_parent_session_field.py`, `scripts/migrate_parent_session_field.py`, `scripts/migrate_agent_session_keyfield_rename.py`) and historical doc plans under `docs/plans/completed/` or `docs/plans/parent-child-steering.md`. Archival to `scripts/archive/` is deferred to the follow-up PR per the Update System section.
+- [x] `@property` aliases deleted from `models/agent_session.py`
+- [x] Kwarg normalization blocks for the aliases deleted from `_normalize_kwargs`
+- [x] `create_child()` signature uses `parent_agent_session_id` as parameter name
+- [x] `create_dev()` internal `parent_chat_session_id` fallback removed
+- [x] `scripts/steer_child.py:99` reads `child.parent_agent_session_id`
+- [x] All affected tests updated and `pytest tests/unit/ tests/integration/ tests/e2e/ -x -q` passes
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated
 
 ## Team Orchestration
 
