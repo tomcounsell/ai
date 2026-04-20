@@ -160,7 +160,7 @@ class TestUnifiedSearch:
             patch("tools.emoji_embedding._custom_embedding_cache", fake_custom),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
-                "tools.knowledge_search._compute_embedding",
+                "tools.emoji_embedding._compute_embedding",
                 return_value=[0.99, 0.0, 0.0],
             ),
         ):
@@ -189,7 +189,7 @@ class TestUnifiedSearch:
             patch("tools.emoji_embedding._custom_embedding_cache", fake_custom),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
-                "tools.knowledge_search._compute_embedding",
+                "tools.emoji_embedding._compute_embedding",
                 return_value=[1.0, 0.0, 0.0],
             ),
         ):
@@ -217,7 +217,7 @@ class TestUnifiedSearch:
             patch("tools.emoji_embedding._custom_embedding_cache", {}),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
-                "tools.knowledge_search._compute_embedding",
+                "tools.emoji_embedding._compute_embedding",
                 return_value=[0.9, 0.1],
             ),
         ):
@@ -299,7 +299,7 @@ class TestBuildCustomEmojiIndex:
                 patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
                 patch("tools.emoji_embedding.CUSTOM_CACHE_PATH", tmp_cache),
                 patch(
-                    "tools.knowledge_search._compute_embedding",
+                    "tools.emoji_embedding._compute_embedding",
                     return_value=[0.1, 0.2, 0.3],
                 ),
             ):
@@ -426,7 +426,7 @@ class TestGracefulDegradation:
             patch("tools.emoji_embedding._custom_embedding_cache", {}),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
-                "tools.knowledge_search._compute_embedding",
+                "tools.emoji_embedding._compute_embedding",
                 return_value=[0.9, 0.1, 0.0],
             ),
         ):

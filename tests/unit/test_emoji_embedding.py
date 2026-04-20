@@ -112,7 +112,7 @@ class TestEmbeddingApiFallback:
         with (
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
-                "tools.knowledge_search._compute_embedding",
+                "tools.emoji_embedding._compute_embedding",
                 return_value=None,
             ),
         ):
@@ -205,7 +205,7 @@ class TestEmojiSelection:
             patch("tools.emoji_embedding._custom_embedding_cache", {}),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
-                "tools.knowledge_search._compute_embedding",
+                "tools.emoji_embedding._compute_embedding",
                 return_value=[0.9, 0.1, 0.0],  # Close to fire
             ),
         ):
@@ -230,7 +230,7 @@ class TestEmojiSelection:
             patch("tools.emoji_embedding._custom_embedding_cache", {}),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
-                "tools.knowledge_search._compute_embedding",
+                "tools.emoji_embedding._compute_embedding",
                 return_value=[0.9, 0.1],
             ),
         ):

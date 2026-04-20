@@ -69,8 +69,10 @@ from agent.session_executor import (  # noqa: F401
 
 # Health monitoring — re-exported here for backward compatibility.
 from agent.session_health import (  # noqa: F401
+    AGENT_SESSION_HEALTH_CHECK_INTERVAL,
     AGENT_SESSION_HEALTH_MIN_RUNNING,
     AGENT_SESSION_TIMEOUT_BUILD,
+    AGENT_SESSION_TIMEOUT_DEFAULT,
     HEARTBEAT_FRESHNESS_WINDOW,
     HEARTBEAT_WRITE_INTERVAL,
     MAX_RECOVERY_ATTEMPTS,

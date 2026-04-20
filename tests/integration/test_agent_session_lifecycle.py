@@ -262,10 +262,10 @@ class TestGetStatusEmoji:
         assert _get_status_emoji(sdlc_session) == "✅"
 
     def test_active_session_completion(self, session):
-        """Active session with is_completion=True (default) returns ✅."""
+        """Active session with is_completion=True (default) returns "" (milestone-selective)."""
         from bridge.message_drafter import _get_status_emoji
 
-        assert _get_status_emoji(session) == "✅"
+        assert _get_status_emoji(session) == ""
 
     def test_active_session_non_completion(self, session):
         """Active session with is_completion=False returns ⏳."""
@@ -320,8 +320,8 @@ class TestComposeStructuredDraft:
         # No stage progress (no history)
         assert "☑" not in result
         assert "☐" not in result
-        # Has emoji and text
-        assert "✅" in result
+        # Completed Teammate session with no PR link is non-milestone — no emoji
+        assert "✅" not in result
         assert "FILO" in result
 
     def test_chat_session_minimal(self, chat_session):
@@ -358,8 +358,8 @@ class TestSummarizeWithSession:
     """Tests for draft_message passing session context."""
 
     @pytest.mark.asyncio
-    async def test_short_response_still_summarized(self):
-        """All non-empty responses are now summarized (no threshold)."""
+    async def test_short_response_bypasses_drafter(self):
+        """Short non-SDLC responses (<200 chars, no artifacts/?) bypass the LLM drafter."""
         from bridge.message_drafter import StructuredDraft, draft_message
 
         mock_haiku = AsyncMock(
@@ -367,8 +367,10 @@ class TestSummarizeWithSession:
         )
         with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
             result = await draft_message("Done.", session=None)
-        assert result.was_drafted is True
-        mock_haiku.assert_called_once()
+        # Short-output early return (SHORT_OUTPUT_THRESHOLD): bypasses drafter
+        assert result.was_drafted is False
+        assert result.text == "Done."
+        mock_haiku.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_long_response_with_sdlc_session(self, sdlc_session):
@@ -735,8 +737,9 @@ class TestQALifecycle:
             is_completion=True,
         )
 
-        # Should have emoji + label + answer, no stages, no links
-        assert "✅" in result
+        # Completed Teammate session with no PR link is non-milestone — no emoji,
+        # just the answer, no stages, no links
+        assert "✅" not in result
         assert "session queue" in result.lower()
         assert "FILO" in result
         assert "☑" not in result
@@ -766,8 +769,8 @@ class TestChitChatLifecycle:
             is_completion=True,
         )
 
-        # Minimal output — emoji, label, prose
-        assert "✅" in result
+        # Minimal output — completed non-milestone session has no emoji, just prose
+        assert "✅" not in result
         assert "Working through the backlog" in result
         # No SDLC artifacts
         assert "☑" not in result

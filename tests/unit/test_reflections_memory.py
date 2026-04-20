@@ -48,8 +48,7 @@ class TestMemoryDecayPrune:
         mock_memory.importance = 0.05  # below WF_MIN_THRESHOLD
         mock_memory.access_count = 0
         mock_memory.superseded_by = ""
-        mock_memory.created_at = MagicMock()
-        mock_memory.created_at.timestamp.return_value = old_time
+        mock_memory.created_at = old_time
 
         with (
             patch("models.memory.Memory") as mock_model,
@@ -73,8 +72,7 @@ class TestMemoryDecayPrune:
         mock_memory.importance = 0.05
         mock_memory.access_count = 0
         mock_memory.superseded_by = ""
-        mock_memory.created_at = MagicMock()
-        mock_memory.created_at.timestamp.return_value = old_time
+        mock_memory.created_at = old_time
 
         with (
             patch("models.memory.Memory") as mock_model,
@@ -99,8 +97,7 @@ class TestMemoryDecayPrune:
             m.importance = 0.05
             m.access_count = 0
             m.superseded_by = ""
-            m.created_at = MagicMock()
-            m.created_at.timestamp.return_value = old_time
+            m.created_at = old_time
             return m
 
         candidates = [make_candidate(i) for i in range(MAX_PRUNE_PER_RUN + 20)]
@@ -137,8 +134,7 @@ class TestMemoryDecayPrune:
         important_memory.importance = 7.5  # above exempt threshold
         important_memory.access_count = 0
         important_memory.superseded_by = ""
-        important_memory.created_at = MagicMock()
-        important_memory.created_at.timestamp.return_value = old_time
+        important_memory.created_at = old_time
 
         with (
             patch("models.memory.Memory") as mock_model,
@@ -160,8 +156,7 @@ class TestMemoryDecayPrune:
         accessed_memory.importance = 0.05
         accessed_memory.access_count = 3  # has been accessed
         accessed_memory.superseded_by = ""
-        accessed_memory.created_at = MagicMock()
-        accessed_memory.created_at.timestamp.return_value = old_time
+        accessed_memory.created_at = old_time
 
         with (
             patch("models.memory.Memory") as mock_model,
@@ -185,8 +180,7 @@ class TestMemoryDecayPrune:
             m.importance = 0.05
             m.access_count = 0
             m.superseded_by = ""
-            m.created_at = MagicMock()
-            m.created_at.timestamp.return_value = old_time
+            m.created_at = old_time
             if fail:
                 m.delete.side_effect = Exception("already deleted")
             return m
@@ -245,8 +239,7 @@ class TestMemoryQualityAudit:
         old_memory.importance = 1.0
         old_memory.access_count = 0
         old_memory.superseded_by = ""
-        old_memory.created_at = MagicMock()
-        old_memory.created_at.timestamp.return_value = old_time
+        old_memory.created_at = old_time
         old_memory.confidence = 0.5
 
         with patch("models.memory.Memory") as mock_model:
@@ -267,8 +260,7 @@ class TestMemoryQualityAudit:
         low_conf_memory.importance = 1.0
         low_conf_memory.access_count = 5
         low_conf_memory.superseded_by = ""
-        low_conf_memory.created_at = MagicMock()
-        low_conf_memory.created_at.timestamp.return_value = new_time
+        low_conf_memory.created_at = new_time
         low_conf_memory.confidence = 0.05  # very low confidence
 
         with patch("models.memory.Memory") as mock_model:
@@ -289,8 +281,7 @@ class TestMemoryQualityAudit:
         superseded.importance = 0.05
         superseded.access_count = 0
         superseded.superseded_by = "mem_new"  # superseded
-        superseded.created_at = MagicMock()
-        superseded.created_at.timestamp.return_value = old_time
+        superseded.created_at = old_time
         superseded.confidence = 0.05
 
         with patch("models.memory.Memory") as mock_model:
