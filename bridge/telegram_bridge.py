@@ -1909,7 +1909,12 @@ async def main():
         # normalization match the sibling check verbatim (Implementation Note C3).
         _prehydration_disabled = os.getenv(
             "REPLY_CHAIN_PREHYDRATION_DISABLED", ""
-        ).strip().lower() in ("1", "true", "yes", "on")
+        ).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         extra_overrides: dict | None = None
         if message.reply_to_msg_id and not is_reply_to_valor and not _prehydration_disabled:
             reply_chain_context: str | None = None

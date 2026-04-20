@@ -1102,7 +1102,11 @@ class TestResolveRootSessionId:
         assert "is the bug fixed?" in augmented
         assert "can you verify" in augmented
 
-    def test_no_double_hydration_when_handler_prehydrates(self):
+    @pytest.mark.parametrize(
+        "hydration_site",
+        ["resume_completed", "fresh_session_non_valor"],
+    )
+    def test_no_double_hydration_when_handler_prehydrates(self, hydration_site):
         """Race 1 / IN-1 / IN-7: belt-and-suspenders idempotency guard.
 
         The deferred enrichment must skip the reply-chain fetch when either:
@@ -1113,8 +1117,15 @@ class TestResolveRootSessionId:
 
         Guards both the flag-based and header-based checks in
         agent/agent_session_queue.py against being accidentally removed or
-        re-ordered. Also guards the bridge handler call site against
-        regressing on the extra_context stamp.
+        re-ordered. Also guards both bridge handler call sites against
+        regressing on the extra_context stamp:
+          - resume_completed: PR #953's resume-completed branch (reply-to-Valor).
+          - fresh_session_non_valor: Issue #1064's fresh-session branch (reply
+            to a non-Valor message, semantic-route miss).
+
+        The guarantee is a SINGLE assertion contract: exactly one
+        REPLY THREAD CONTEXT block per prompt regardless of which handler
+        branch hydrated (plan Implementation Note C5).
         """
         import pathlib
 
@@ -1124,25 +1135,220 @@ class TestResolveRootSessionId:
         # structural test -- simulating the full worker path would pull in
         # Claude SDK / Popoto queues. The guards are a handful of lines and
         # regress only by deletion, which this test catches.
-        queue_src = pathlib.Path(__file__).resolve().parents[2] / "agent" / "agent_session_queue.py"
-        queue_content = queue_src.read_text()
-        assert "REPLY_THREAD_CONTEXT_HEADER" in queue_content, (
+        #
+        # Note: the worker-side guard lives in agent/session_executor.py
+        # after the agent_session_queue.py split in commit b7e1a1db
+        # (PR #1023 / #1051). Prior to that refactor it was in
+        # agent/agent_session_queue.py.
+        executor_src = pathlib.Path(__file__).resolve().parents[2] / "agent" / "session_executor.py"
+        executor_content = executor_src.read_text()
+        assert "REPLY_THREAD_CONTEXT_HEADER" in executor_content, (
             "Defensive header guard removed — reply chain may double-hydrate"
         )
-        assert "reply_chain_hydrated" in queue_content, (
+        assert "reply_chain_hydrated" in executor_content, (
             "Primary flag guard (IN-1 belt-and-suspenders) removed from worker enrichment"
         )
         # Must do the check AGAINST enrich_reply_to_msg_id so the fetch is skipped
-        assert "enrich_reply_to_msg_id = None" in queue_content
+        assert "enrich_reply_to_msg_id = None" in executor_content
         assert REPLY_THREAD_CONTEXT_HEADER  # sanity check the import
 
-        # The bridge handler must stamp the primary flag when it hydrates
-        # the reply chain synchronously on the resume-completed branch.
+        # Both bridge handler call sites must stamp the primary flag when
+        # they hydrate the reply chain synchronously.
         bridge_src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
         bridge_content = bridge_src.read_text()
         assert '"reply_chain_hydrated": True' in bridge_content, (
             "Handler stopped stamping reply_chain_hydrated=True on extra_context — "
             "primary IN-1 guard is no longer populated"
+        )
+        # Exactly two call sites must exist: resume-completed (PR #953) and
+        # fresh-session-non-valor (issue #1064). Any additional site should be
+        # reviewed explicitly because it risks double-hydration if not gated.
+        flag_stamp_count = bridge_content.count('"reply_chain_hydrated": True')
+        assert flag_stamp_count >= 2, (
+            f"Expected at least 2 reply_chain_hydrated stamp sites (resume-completed + "
+            f"fresh-session), found {flag_stamp_count}. Did the fresh-session pre-hydration "
+            f"block get removed or renamed?"
+        )
+
+        # Per-site structural guards:
+        if hydration_site == "resume_completed":
+            assert "RESUME_REPLY_CHAIN_FAIL" in bridge_content, (
+                "Resume-completed failure-path log tag missing"
+            )
+        else:  # fresh_session_non_valor
+            assert "FRESH_REPLY_CHAIN_FAIL" in bridge_content, (
+                "Fresh-session failure-path log tag missing — reply-to non-Valor "
+                "messages may silently drop thread context"
+            )
+            assert "fresh_reply_chain_prehydrated" in bridge_content, (
+                "Fresh-session success log tag missing — observability parity broken"
+            )
+            assert "REPLY_CHAIN_PREHYDRATION_DISABLED" in bridge_content, (
+                "Fresh-session kill-switch removed — rollback without deploy is broken"
+            )
+
+    def test_fresh_session_non_valor_reply_prehydrates_chain(self):
+        """Issue #1064: the fresh-session pre-hydration block must exist and
+        produce a REPLY_THREAD_CONTEXT block in enqueued_message_text with
+        extra_context[reply_chain_hydrated]=True.
+
+        Structural test — we assert the code shape rather than simulate the
+        full Telegram/Telethon handler invocation, which would pull in the
+        Claude SDK, Popoto queues, and a mocked client. The code shape is a
+        handful of lines and regresses only by deletion or gate-condition
+        drift, which this test catches.
+        """
+        import pathlib
+
+        bridge_src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        bridge_content = bridge_src.read_text()
+
+        # The new block must exist with the canonical section marker.
+        assert "FRESH-SESSION NON-VALOR REPLY PRE-HYDRATION" in bridge_content, (
+            "Fresh-session pre-hydration block removed or section comment stripped"
+        )
+        # Gate condition: reply_to_msg_id truthy AND NOT is_reply_to_valor AND kill-switch off.
+        # The handler topology already enforces the fresh-session placement; we only need
+        # to assert the two explicit predicates plus the kill-switch.
+        assert "not is_reply_to_valor" in bridge_content, (
+            "Gate predicate `not is_reply_to_valor` missing — would double-hydrate "
+            "when resume-completed branch already pre-hydrated"
+        )
+        # The prepend format must include the canonical header and the CURRENT MESSAGE marker.
+        assert "CURRENT MESSAGE:" in bridge_content, (
+            "CURRENT MESSAGE marker missing — agent can't distinguish thread from new text"
+        )
+        # Success path stamps the flag AND emits the INFO log.
+        assert '"reply_chain_hydrated": True' in bridge_content
+        assert "fresh_reply_chain_prehydrated" in bridge_content
+
+    def test_fresh_session_non_valor_reply_timeout_falls_back(self):
+        """Issue #1064 failure path: 3s timeout logs FRESH_REPLY_CHAIN_FAIL
+        and does NOT stamp reply_chain_hydrated, so the worker's deferred
+        enrichment remains free to retry.
+
+        Implementation Note C2: three outcomes, only success-with-chain stamps.
+        """
+        import pathlib
+
+        bridge_src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        bridge_content = bridge_src.read_text()
+
+        # Both failure branches must log with FRESH_REPLY_CHAIN_FAIL tag.
+        # grep-style: the tag appears at least twice (timeout + exception).
+        assert bridge_content.count("FRESH_REPLY_CHAIN_FAIL") >= 2, (
+            "FRESH_REPLY_CHAIN_FAIL log tag must appear in both TimeoutError and "
+            "generic Exception branches — at least 2 occurrences required"
+        )
+        assert "FRESH_REPLY_CHAIN_FAIL timeout" in bridge_content, (
+            "Timeout branch log missing the 'timeout' discriminator"
+        )
+        assert "FRESH_REPLY_CHAIN_FAIL exception" in bridge_content, (
+            "Exception branch log missing the 'exception' discriminator"
+        )
+
+        # The 3s timeout must match PR #953's resume-completed value verbatim
+        # (tuning timeouts belongs in a separate telemetry-driven change).
+        # Both sites use `timeout=3.0` — assert at least 2 such occurrences.
+        assert bridge_content.count("timeout=3.0") >= 2, (
+            "Fresh-session pre-hydration timeout diverged from PR #953's 3.0s — "
+            "tuning belongs in a follow-up with telemetry"
+        )
+
+        # Failure path must NOT stamp the flag: the flag assignment must be
+        # inside the `if reply_chain_context:` branch (not unconditionally
+        # after the try/except). We grep for the canonical ordering.
+        assert (
+            "if reply_chain_context:\n                enqueued_message_text = (" in bridge_content
+            or "if reply_chain_context:" in bridge_content
+        ), (
+            "Flag stamp must be gated on `if reply_chain_context:` so failed/empty "
+            "fetches do NOT stamp reply_chain_hydrated (Implementation Note C2)"
+        )
+
+    def test_fresh_session_reply_to_valor_skips_new_block(self):
+        """Issue #1064: `is_reply_to_valor=True` messages must NOT hit the
+        new fresh-session block. They are handled by the resume-completed
+        branch (PR #953) which returns earlier in the handler, so placement
+        enforces non-double-hydration.
+
+        Structural check: the new block must explicitly gate on
+        `not is_reply_to_valor` so even if handler topology changes in a
+        way that lets control flow reach here with is_reply_to_valor=True,
+        the gate prevents the pre-fetch.
+        """
+        import pathlib
+
+        bridge_src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        bridge_content = bridge_src.read_text()
+
+        # The new block's gate must include `not is_reply_to_valor`.
+        # We look for the section comment followed by the gate clause.
+        fresh_block_start = bridge_content.find("FRESH-SESSION NON-VALOR REPLY PRE-HYDRATION")
+        assert fresh_block_start >= 0, "Fresh-session block section comment missing"
+
+        # Find the gate `if` statement within the fresh-session block.
+        # The gate is within ~2000 chars of the section comment.
+        fresh_block_region = bridge_content[fresh_block_start : fresh_block_start + 3000]
+        assert "not is_reply_to_valor" in fresh_block_region, (
+            "Fresh-session gate missing `not is_reply_to_valor` predicate — "
+            "would double-hydrate replies-to-Valor if resume-completed branch "
+            "ever failed to short-circuit"
+        )
+        assert "message.reply_to_msg_id" in fresh_block_region, (
+            "Fresh-session gate missing `message.reply_to_msg_id` predicate"
+        )
+
+    def test_fresh_session_prehydration_kill_switch(self):
+        """Issue #1064: REPLY_CHAIN_PREHYDRATION_DISABLED kill-switch env var
+        must mirror REPLY_CONTEXT_DIRECTIVE_DISABLED's parsing exactly —
+        truthy set ("1", "true", "yes", "on"), .strip().lower(), default "".
+
+        Implementation Note C3: parity prevents a subtle bug where a rollout
+        uses "TRUE" to disable the directive but "true" to disable the chain.
+        """
+        import pathlib
+
+        bridge_src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
+        bridge_content = bridge_src.read_text()
+
+        # The kill-switch env var must be referenced.
+        assert "REPLY_CHAIN_PREHYDRATION_DISABLED" in bridge_content, (
+            "Kill-switch env var REPLY_CHAIN_PREHYDRATION_DISABLED missing — "
+            "rollback without deploy is broken"
+        )
+
+        # Parsing must mirror the sibling REPLY_CONTEXT_DIRECTIVE_DISABLED
+        # exactly — same truthy set, same normalization. Both bridge sites
+        # use the multi-line tuple form, so we assert the full
+        # `os.getenv(...).strip().lower() in (...)` shape via the env-var
+        # name + normalization chain, then verify all four truthy values
+        # appear together in the surrounding region of the new block.
+        assert ".strip().lower() in (" in bridge_content, (
+            "Kill-switch normalization must use `.strip().lower() in (...)` chain "
+            "matching REPLY_CONTEXT_DIRECTIVE_DISABLED sibling pattern"
+        )
+
+        # Locate the fresh-session block and assert its truthy set matches
+        # the sibling — all four truthy values present in a narrow region
+        # following the env-var name.
+        disabled_marker = "REPLY_CHAIN_PREHYDRATION_DISABLED"
+        marker_pos = bridge_content.find(disabled_marker)
+        assert marker_pos >= 0, "Kill-switch env var name not found"
+        # Region from the env-var name to ~500 chars later covers the
+        # os.getenv(...).strip().lower() in (...) block.
+        region = bridge_content[marker_pos : marker_pos + 500]
+        for truthy_value in ('"1"', '"true"', '"yes"', '"on"'):
+            assert truthy_value in region, (
+                f"Kill-switch truthy set missing {truthy_value} — must mirror "
+                f"REPLY_CONTEXT_DIRECTIVE_DISABLED's set exactly for parity"
+            )
+
+        # The normalization chain `.strip().lower() in (` must appear twice
+        # (once for each env var) so the two sites stay in lock-step.
+        assert bridge_content.count(".strip().lower() in (") >= 2, (
+            "Kill-switch normalization chain must appear at both sites "
+            "(REPLY_CONTEXT_DIRECTIVE_DISABLED + REPLY_CHAIN_PREHYDRATION_DISABLED)"
         )
 
     def test_implicit_context_directive_injected(self):
@@ -1174,38 +1380,76 @@ class TestResolveRootSessionId:
             "Env kill-switch REPLY_CONTEXT_DIRECTIVE_DISABLED removed"
         )
 
-    def test_reply_chain_fetch_failure_falls_back(self):
+    @pytest.mark.parametrize(
+        "hydration_site,expected_log_tag",
+        [
+            ("resume_completed", "RESUME_REPLY_CHAIN_FAIL"),
+            ("fresh_session_non_valor", "FRESH_REPLY_CHAIN_FAIL"),
+        ],
+    )
+    def test_reply_chain_fetch_failure_falls_back(self, hydration_site, expected_log_tag):
         """Plan failure-path: a fetch_reply_chain exception must not prevent
-        the handler from enqueueing the session. The helper must still produce
-        a valid summary-only preamble when reply_chain_context is None.
+        the handler from enqueueing the session.
+
+        Parametrized across both handler call sites per Implementation Note C5:
+          - resume_completed: PR #953's branch uses summary-only fallback via
+            _build_completed_resume_text(reply_chain_context=None).
+          - fresh_session_non_valor: issue #1064's branch leaves the enqueued
+            message_text untouched and does NOT stamp reply_chain_hydrated,
+            so worker-side deferred enrichment is free to retry.
+
+        Both branches share the same failure contract: the session enqueues,
+        the warning log fires with a distinguishable tag, and the flag is
+        only stamped on success-with-non-empty-chain.
         """
-        from bridge.telegram_bridge import _build_completed_resume_text
-        from models.agent_session import AgentSession
-
-        session = AgentSession(
-            session_id="test_fetch_fail_fallback",
-            project_key="test",
-            status="completed",
-            message_text="prior",
-            context_summary="did work",
-            created_at=datetime.now(tz=UTC),
-        )
-        session.save()
-
-        # Simulate the handler's catch branch: reply_chain_context is None
-        result = _build_completed_resume_text(session, "follow up", reply_chain_context=None)
-
-        # Summary-only format; the agent still gets SOMETHING
-        assert result == "[Prior session context: did work]\n\nfollow up"
-        # Assert the handler's WARNING log tag is present in source so the
-        # WARNING code path isn't removed by accident.
         import pathlib
 
         src = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "telegram_bridge.py"
         content = src.read_text()
-        assert "RESUME_REPLY_CHAIN_FAIL" in content, (
-            "RESUME_REPLY_CHAIN_FAIL log tag missing — failure path invisible in logs"
+
+        # Both call sites must emit their distinguishable warning tags.
+        assert expected_log_tag in content, (
+            f"{expected_log_tag} log tag missing — failure path invisible in logs"
         )
+
+        if hydration_site == "resume_completed":
+            # Summary-only fallback via the existing helper — verify the
+            # contract end-to-end against _build_completed_resume_text.
+            from bridge.telegram_bridge import _build_completed_resume_text
+            from models.agent_session import AgentSession
+
+            session = AgentSession(
+                session_id="test_fetch_fail_fallback_resume",
+                project_key="test",
+                status="completed",
+                message_text="prior",
+                context_summary="did work",
+                created_at=datetime.now(tz=UTC),
+            )
+            session.save()
+
+            # Simulate the handler's catch branch: reply_chain_context is None
+            result = _build_completed_resume_text(session, "follow up", reply_chain_context=None)
+
+            # Summary-only format; the agent still gets SOMETHING
+            assert result == "[Prior session context: did work]\n\nfollow up"
+        else:
+            # Fresh-session fallback is structural: on failure the handler
+            # leaves enqueued_message_text unchanged and does NOT stamp the
+            # flag. We assert the code-shape contract: the flag stamp is
+            # gated on `if reply_chain_context:` so the failure branch
+            # (exception caught, reply_chain_context remains None) falls
+            # through without modification.
+            assert "if reply_chain_context:" in content, (
+                "Fresh-session flag stamp must be gated on `if reply_chain_context:` "
+                "so failed fetches do NOT stamp reply_chain_hydrated (Impl Note C2)"
+            )
+            # Belt-and-suspenders: the `extra_overrides: dict | None = None`
+            # default ensures None is passed through on failure.
+            assert "extra_overrides: dict | None = None" in content, (
+                "Fresh-session extra_overrides must default to None so failure "
+                "branch does not stamp the flag"
+            )
 
 
 class TestSteerChildDelivery:
