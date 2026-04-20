@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -26,6 +27,47 @@ from pathlib import Path
 from reflections.utils import PROJECT_ROOT, extract_structured_errors, load_local_projects
 
 logger = logging.getLogger("reflections.auditing")
+
+# Hotfix (sibling of PR #1056): bound the bytes read from any single log file so
+# a runaway log (e.g. `logs/worker.log`) cannot stall the reflection scheduler.
+# If a file exceeds _LOG_READ_MAX_BYTES, we tail-read only the last
+# _LOG_READ_TAIL_BYTES. These callables are now plain `def` (dispatched via
+# `run_in_executor`) so even a slow disk read does not freeze the event loop,
+# but the size guard still keeps memory and CPU bounded.
+_LOG_READ_MAX_BYTES = 50 * 1024 * 1024  # 50 MB trip point
+_LOG_READ_TAIL_BYTES = 1 * 1024 * 1024  # Tail-read the last 1 MB
+
+
+def _read_log_text_bounded(log_file: Path) -> str:
+    """Read a log file as text, tail-reading if it exceeds the size cap.
+
+    Returns the decoded text content (errors replaced). Always closes the
+    file. If the file is larger than ``_LOG_READ_MAX_BYTES``, only the last
+    ``_LOG_READ_TAIL_BYTES`` are returned (with a leading truncation marker).
+    """
+    try:
+        size = os.path.getsize(log_file)
+    except OSError:
+        size = 0
+
+    if size > _LOG_READ_MAX_BYTES:
+        # Seek from end to avoid loading a multi-GB file into memory.
+        with open(log_file, "rb") as f:
+            f.seek(-_LOG_READ_TAIL_BYTES, os.SEEK_END)
+            chunk = f.read()
+        text = chunk.decode("utf-8", errors="replace")
+        return f"[... truncated: showing last {_LOG_READ_TAIL_BYTES} bytes of {size} ...]\n{text}"
+
+    with open(log_file, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def _read_log_tail_lines(log_file: Path, n: int = 1000) -> list[str]:
+    """Return the last ``n`` lines of a log file, honoring the size cap."""
+    text = _read_log_text_bounded(log_file)
+    lines = text.splitlines(keepends=True)
+    return lines[-n:]
+
 
 # PR Review audit helper patterns (from monolith module level)
 _FINDING_SEVERITY_RE = re.compile(r"\*\*Severity:\*\*\s*(blocker|tech_debt|nit)", re.IGNORECASE)
@@ -142,10 +184,19 @@ def _format_audit_issue_body(
     return "\n".join(lines)
 
 
-async def run_log_review() -> dict:
+def run_log_review() -> dict:
     """Review previous day's logs per project.
 
-    Maps to monolith step: step_review_logs
+    Maps to monolith step: step_review_logs.
+
+    Hotfix (sibling of PR #1056): this used to be ``async def`` but did
+    synchronous file I/O (``open(...).read()``) on potentially unbounded
+    log files. That froze the reflection-scheduler event loop for the full
+    duration of the read, killing the worker heartbeat. It is now plain
+    ``def`` so ``ReflectionScheduler`` dispatches it via
+    ``loop.run_in_executor(None, func)``. All reads go through
+    :func:`_read_log_text_bounded` / :func:`_read_log_tail_lines` which
+    tail-read when a file exceeds 50 MB.
     """
     from bridge.utc import utc_now
 
@@ -217,8 +268,7 @@ async def run_log_review() -> dict:
                         msg = error["message"][:200]
                         findings.append(f"  [{error['level']}] {error['timestamp']}: {msg}")
 
-                with open(log_file) as f:
-                    lines = f.readlines()[-1000:]
+                lines = _read_log_tail_lines(log_file, n=1000)
                 warning_count = sum(1 for line in lines if "WARNING" in line)
                 if warning_count > 10:
                     findings.append(
@@ -226,8 +276,7 @@ async def run_log_review() -> dict:
                     )
 
                 # Detect nudge-stomp regression
-                with open(log_file) as f:
-                    log_content = f.read()
+                log_content = _read_log_text_bounded(log_file)
                 stale_index_count = log_content.count("Stale index entry")
                 if stale_index_count > 0:
                     findings.append(
@@ -338,11 +387,17 @@ def run_skills_audit() -> dict:
         return {"status": "error", "findings": [], "summary": f"Skills audit error: {e}"}
 
 
-async def run_hooks_audit() -> dict:
+def run_hooks_audit() -> dict:
     """Audit Claude Code hooks for safety and configuration issues.
 
-    Maps to monolith step: step_hooks_audit
+    Maps to monolith step: step_hooks_audit.
     Checks: hooks.log for recent errors, settings.json hook configuration.
+
+    Hotfix (sibling of PR #1056): converted from ``async def`` to plain
+    ``def`` so the reflection scheduler runs it via ``run_in_executor``
+    instead of inline on the event loop. The body does only sync I/O
+    (``extract_structured_errors``, ``json.loads``, ``Path.read_text``,
+    ``Path.exists``) with no awaits.
     """
     findings: list[str] = []
     error_count = 0
@@ -406,11 +461,16 @@ async def run_hooks_audit() -> dict:
     return {"status": "ok", "findings": findings, "summary": summary}
 
 
-async def run_feature_docs_audit() -> dict:
+def run_feature_docs_audit() -> dict:
     """Audit feature documentation for staleness and accuracy.
 
-    Maps to monolith step: step_feature_docs_audit
+    Maps to monolith step: step_feature_docs_audit.
     Checks: stale references, README index, stub docs, dead code refs.
+
+    Hotfix (sibling of PR #1056): converted from ``async def`` to plain
+    ``def`` so the reflection scheduler runs it via ``run_in_executor``.
+    The body does only sync I/O (``Path.read_text``, ``Path.glob``, regex)
+    with no awaits.
     """
     findings: list[str] = []
     features_dir = PROJECT_ROOT / "docs" / "features"

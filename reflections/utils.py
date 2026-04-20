@@ -227,9 +227,26 @@ def extract_structured_errors(log_file: Path) -> list[dict[str, str]]:
         r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})" r".*?(ERROR|CRITICAL)\s*[-:]\s*(.*)"
     )
 
+    # Hotfix (sibling of PR #1056): guard against unbounded log files. If the
+    # file is over 50 MB, seek to the last 1 MB instead of loading the whole
+    # thing into memory just to discard all but the last 1000 lines.
+    max_bytes = 50 * 1024 * 1024
+    tail_bytes = 1 * 1024 * 1024
+
     try:
-        with open(log_file) as f:
-            lines = f.readlines()[-1000:]
+        try:
+            size = os.path.getsize(log_file)
+        except OSError:
+            size = 0
+
+        if size > max_bytes:
+            with open(log_file, "rb") as f:
+                f.seek(-tail_bytes, os.SEEK_END)
+                chunk = f.read()
+            lines = chunk.decode("utf-8", errors="replace").splitlines(keepends=True)[-1000:]
+        else:
+            with open(log_file, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()[-1000:]
 
         for i, line in enumerate(lines):
             match = log_pattern.search(line)

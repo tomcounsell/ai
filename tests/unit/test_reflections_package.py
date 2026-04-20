@@ -18,8 +18,18 @@ from unittest.mock import MagicMock, patch
 
 
 def run_async(coro):
-    """Run a coroutine synchronously."""
-    return asyncio.run(coro)
+    """Run a coroutine synchronously.
+
+    If given a non-coroutine value (e.g. a sync function's already-returned
+    dict), return it as-is. This lets tests call reflection callables
+    uniformly whether they are sync or async — the sibling-of-#1056 hotfix
+    converted several callables from ``async def`` to plain ``def`` so they
+    get dispatched via ``run_in_executor`` by the reflection scheduler and
+    no longer block its event loop.
+    """
+    if asyncio.iscoroutine(coro):
+        return asyncio.run(coro)
+    return coro
 
 
 def assert_valid_result(result: dict, expected_status: str = "ok") -> None:
@@ -317,6 +327,56 @@ class TestAuditingCallables:
         with patch("reflections.auditing.PROJECT_ROOT", tmp_path):
             result = run_async(run_feature_docs_audit())
         assert_valid_result(result)
+
+    def test_event_loop_safe_callables_are_sync(self):
+        """Regression canary (sibling of PR #1056).
+
+        These three callables did synchronous file I/O on unbounded log
+        files while being declared ``async def``. That froze the reflection
+        scheduler's event loop. They are now plain ``def`` so
+        ``ReflectionScheduler.execute_function_reflection`` dispatches them
+        via ``loop.run_in_executor(None, func)`` instead of running inline.
+
+        If anyone re-declares these as ``async def`` without also guarding
+        every blocking read with ``asyncio.to_thread`` + ``wait_for``, this
+        canary fails loudly.
+        """
+        import inspect
+
+        from reflections.auditing import (
+            run_feature_docs_audit,
+            run_hooks_audit,
+            run_log_review,
+        )
+
+        for fn in (run_log_review, run_hooks_audit, run_feature_docs_audit):
+            assert not inspect.iscoroutinefunction(fn), (
+                f"{fn.__name__} must stay sync `def` — it does blocking file I/O "
+                "that would freeze the reflection scheduler's event loop if "
+                "declared `async def`. See PR #1056 (memory_extraction) for the "
+                "async-native alternative if a rewrite is ever needed."
+            )
+
+    def test_read_log_text_bounded_tails_large_files(self, tmp_path):
+        """_read_log_text_bounded returns only the tail for files over the size cap."""
+        from reflections import auditing
+
+        log_file = tmp_path / "huge.log"
+        # Build a file larger than the 50 MB trip point cheaply.
+        chunk = b"x" * (1024 * 1024)  # 1 MB of 'x'
+        size_mb = 55
+        with open(log_file, "wb") as f:
+            for _ in range(size_mb):
+                f.write(chunk)
+            # Trailing marker we expect to see after the truncation header.
+            f.write(b"TAIL_MARKER\n")
+
+        text = auditing._read_log_text_bounded(log_file)
+        # Truncation notice is present and we still saw the final marker.
+        assert "truncated: showing last" in text
+        assert "TAIL_MARKER" in text
+        # The returned string is bounded: 1 MB tail + a short header, not 55 MB.
+        assert len(text) < 2 * 1024 * 1024
 
     def test_run_pr_review_audit_no_projects(self):
         """run_pr_review_audit() returns valid dict with no projects."""
