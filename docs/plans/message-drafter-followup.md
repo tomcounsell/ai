@@ -5,7 +5,7 @@ appetite: Medium
 owner: valor
 created: 2026-04-20
 revised: 2026-04-20
-revision_reason: "Address /do-plan-critique blockers B1 (caller inventory), B2 (baseline LOC math), B3 (Open Question #1 reframed as resolved decision)"
+revision_reason: "Cycle 2: Address /do-plan-critique re-verdict — B1-R (caller inventory expanded to cover 4 additional test files: test_message_drafter_integration, test_reply_delivery, test_worker_entry, test_message_pipeline) and merged duplicate ## Test Impact H2 sections into one."
 tracking: https://github.com/tomcounsell/ai/issues/1074
 last_comment_id:
 ---
@@ -63,7 +63,13 @@ Issue #1074 enumerates those deferred tasks. But during reconnaissance (see the 
 - `agent/hooks/stop.py:217` (`classify_delivery_outcome`) — confirmed.
 - `tests/integration/test_worker_pm_long_output.py` — exists, 180+ lines, covers enabled + rollback paths.
 - `tests/unit/test_tool_call_delivery.py` — exists.
-- `bridge/response.py` — still 753 lines; still imported by `bridge/update.py`, `bridge/routing.py:1031`, `bridge/telegram_relay.py:95`, `bridge/telegram_bridge.py:120`, and `tests/unit/test_emoji_embedding.py`, `tests/unit/test_message_drafter.py`.
+- `bridge/response.py` — still 753 lines; still imported by production callers `bridge/update.py`, `bridge/routing.py:1031`, `bridge/telegram_relay.py:95`, `bridge/telegram_bridge.py:120`. Full test-side caller inventory (re-verified via `grep -rn "from bridge.response\|import bridge.response" tests/`):
+  - `tests/unit/test_message_drafter.py` — 5 `send_response_with_files` sites (lines 1924, 1947, 1985, 2012, 2038); 7 `_truncate_at_sentence_boundary` sites (lines 2123, 2129, 2138, 2146, 2152, 2159, 2166).
+  - `tests/unit/test_emoji_embedding.py` — 3 `VALIDATED_REACTIONS` sites (lines 19, 27, 34).
+  - `tests/unit/test_worker_entry.py` — `VALIDATED_REACTIONS` (line 236), `REACTION_*` backward-compat imports (line 248).
+  - `tests/integration/test_message_drafter_integration.py` — 1 `send_response_with_files` site (line 43).
+  - `tests/integration/test_reply_delivery.py` — multiple sites: `REACTION_COMPLETE/ERROR/SUCCESS/RECEIVED` + `VALIDATED_REACTIONS` (lines 131, 137, 143, 149), `INVALID_REACTIONS` (lines 155, 185), multi-symbol import (line 165), 5 `filter_tool_logs` sites (lines 196, 203, 210, 217, 223).
+  - `tests/e2e/test_message_pipeline.py` — top-level import of `clean_message`, `extract_files_from_response`, `filter_tool_logs` (line 13).
 - `mcp_servers/` — contains only `__pycache__` on main. No Python modules.
 - `.mcp.json` — does NOT exist at repo root. `config/mcp_library.json` exists but is a descriptor library for third-party MCPs (Sentry, Linear, Notion), not the tool-registration file the issue implies.
 
@@ -114,13 +120,22 @@ No relevant external findings — proceeding with codebase context. All remainin
 - **Confidence:** high — the CLI tool surface is already the shipped behavior in production as of #1072 merge on 2026-04-20. The stop hook's `classify_delivery_outcome` already recognizes these tool_use patterns. There is nothing to decide; there is only something to document.
 - **Impact on plan:** Task 9 becomes a documentation-only task: add a "Delivery Tool Surface" section to `docs/features/message-drafter.md` explaining the CLI-tool choice, noting the reversibility path. Captured as **RD-1 (Resolved Decision)** below, not as an Open Question — the decision is *already* in production.
 
-### spike-3: Are there callers of `send_response_with_files` outside `bridge/`?
+### spike-3: Are there callers of `send_response_with_files` (and other `bridge/response.py` symbols) outside `bridge/`?
 
 - **Assumption:** "Deleting `send_response_with_files` only requires changes inside `bridge/`."
-- **Method:** code-read (grep)
-- **Finding:** Confirmed with one caveat. Production callers: `bridge/telegram_bridge.py:120` (top-level import), `bridge/routing.py:1031` (deferred import inside a function). Test callers: `tests/unit/test_message_drafter.py` (5 call sites, lines 1924-2038) and `tests/unit/test_emoji_embedding.py` (3 references to `VALIDATED_REACTIONS`). The test file `test_message_drafter.py` is the canonical test suite for the drafter feature; its calls should migrate to the new consolidated entry point (`TelegramRelayOutputHandler.send`) or be rewritten to target `bridge/message_drafter.py::draft_message` directly if they are really testing draft construction.
+- **Method:** code-read (`grep -rn "from bridge.response\|import bridge.response" tests/` + same pattern for production dirs)
+- **Finding:** Confirmed, with expanded test-side scope (this expansion addresses B1-R from the re-critique).
+  - **Production callers of `send_response_with_files`:** `bridge/telegram_bridge.py:120` (top-level import), `bridge/routing.py:1031` (deferred import inside a function).
+  - **Production callers of other `bridge/response.py` symbols (`set_reaction`, `VALIDATED_REACTIONS`, `REACTION_*`, `filter_tool_logs`):** `bridge/update.py`, `bridge/telegram_relay.py:95`, `bridge/routing.py`.
+  - **Test callers — complete list:**
+    1. `tests/unit/test_message_drafter.py` — 5 `send_response_with_files` call sites (lines 1924, 1947, 1985, 2012, 2038) + 7 `_truncate_at_sentence_boundary` sites (lines 2123-2166). These are the canonical drafter tests; migrate each to either `TelegramRelayOutputHandler.send` or `bridge.message_drafter.draft_message`, depending on what behavior each test actually asserts.
+    2. `tests/unit/test_emoji_embedding.py` — 3 `VALIDATED_REACTIONS` sites (lines 19, 27, 34). Pure constant import; redirect to wherever `VALIDATED_REACTIONS` ends up (remains in `bridge/response.py` if the module survives, or moves to `bridge/reactions.py`).
+    3. `tests/unit/test_worker_entry.py` — `VALIDATED_REACTIONS` (line 236) + `REACTION_*` backward-compat symbols (line 248). Same redirect treatment as (2). The REACTION_* aliases already exist as backward-compat shims; this test exists precisely to guard that compat surface, so keep the symbols live wherever they move.
+    4. `tests/integration/test_message_drafter_integration.py` — 1 `send_response_with_files` site (line 43). Integration path — migrate to `TelegramRelayOutputHandler.send` and verify the integration behavior still holds end-to-end.
+    5. `tests/integration/test_reply_delivery.py` — heaviest consumer: `REACTION_COMPLETE/ERROR/SUCCESS/RECEIVED` + `VALIDATED_REACTIONS` (lines 131-149), `INVALID_REACTIONS` (lines 155, 185), consolidated multi-symbol import (line 165), 5 `filter_tool_logs` sites (lines 196-223). If `filter_tool_logs` is deleted as part of the `send_response_with_files` cleanup (spike-1 listed it for removal), these 5 tests need to either (a) be deleted if they were only guarding `send_response_with_files`-specific log filtering, or (b) assert the equivalent behavior on whatever path replaces it. Case-by-case.
+    6. `tests/e2e/test_message_pipeline.py` — top-level import of `clean_message`, `extract_files_from_response`, `filter_tool_logs` (line 13). All three are in spike-1's deletion bucket. E2E path — tests probably need to be rewritten to run against the consolidated `TelegramRelayOutputHandler.send` path, or deleted if the specific helpers are no longer exposed.
 - **Confidence:** high
-- **Impact on plan:** The consolidation touches `bridge/telegram_bridge.py`, `bridge/routing.py`, `tests/unit/test_message_drafter.py`, and (possibly) `tests/unit/test_emoji_embedding.py`. The test-side changes fall into the "tests/" exclusion for Task 15's line count, so they don't threaten net-negative.
+- **Impact on plan:** Consolidation touches production files `bridge/telegram_bridge.py`, `bridge/routing.py` (callers), `bridge/update.py` and `bridge/telegram_relay.py` (if `set_reaction`/`VALIDATED_REACTIONS` move modules), plus six test files (all listed above). All test changes fall into the `tests/` exclusion for Task 15's line count so they don't threaten net-negative. However, the test-migration surface is larger than spike-3 originally claimed — builder should budget additional time for `test_reply_delivery.py` and `test_message_pipeline.py` since those two files have non-trivial symbol surface to migrate or delete.
 
 ### spike-4: Which tables in `.claude/skills/do-pr-review/` are producer vs. reference?
 
@@ -278,12 +293,18 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/message-drafte
 
 ## Test Impact
 
-- [ ] `tests/unit/test_message_drafter.py::test_*` (5 sites importing `send_response_with_files` at lines 1924, 1947, 1985, 2012, 2038) — UPDATE: migrate to the consolidated delivery path. Each test either exercises draft construction (call `draft_message` directly) or delivery (call `TelegramRelayOutputHandler.send` with a mock session). Case-by-case judgment by builder. Two sites import `_truncate_at_sentence_boundary` (lines 2123, 2129, 2138) — UPDATE import path if the helper moves to `bridge/message_drafter.py`, or DELETE if the helper is fully absorbed inline.
-- [ ] `tests/unit/test_emoji_embedding.py` (3 sites importing `VALIDATED_REACTIONS`) — UPDATE import path if `set_reaction` + `VALIDATED_REACTIONS` move to `bridge/reactions.py`.
+Complete test-side caller inventory for `bridge/response.py` (re-verified via `grep -rn "from bridge.response\|import bridge.response" tests/`). Six existing test files reference `bridge/response.py` symbols; all are listed below.
+
+- [ ] `tests/unit/test_message_drafter.py` — UPDATE: 5 `send_response_with_files` sites (lines 1924, 1947, 1985, 2012, 2038) migrate to the consolidated delivery path. Each test either exercises draft construction (call `draft_message` directly) or delivery (call `TelegramRelayOutputHandler.send` with a mock session). Case-by-case judgment by builder. Additionally, 7 `_truncate_at_sentence_boundary` sites (lines 2123, 2129, 2138, 2146, 2152, 2159, 2166) — UPDATE import path if the helper moves to `bridge/message_drafter.py`, or DELETE tests that only exercised that helper if it is absorbed inline.
+- [ ] `tests/unit/test_emoji_embedding.py` — UPDATE: 3 `VALIDATED_REACTIONS` import sites (lines 19, 27, 34) redirect to whichever module survives (`bridge/response.py` thin-module OR `bridge/reactions.py` if rename is taken).
+- [ ] `tests/unit/test_worker_entry.py` — UPDATE: `VALIDATED_REACTIONS` (line 236) and `REACTION_*` backward-compat imports (line 248) redirect to the surviving module. This test exists specifically to guard the backward-compat shim surface — the shim symbols must remain importable wherever they move.
+- [ ] `tests/integration/test_message_drafter_integration.py` — UPDATE: 1 `send_response_with_files` site (line 43) migrates to `TelegramRelayOutputHandler.send`. Verify integration behavior (end-to-end delivery + drafter validation) still holds.
+- [ ] `tests/integration/test_reply_delivery.py` — UPDATE or REPLACE (case-by-case): imports `REACTION_COMPLETE/ERROR/SUCCESS/RECEIVED` + `VALIDATED_REACTIONS` (lines 131-149), `INVALID_REACTIONS` (155, 185), multi-symbol bundle (165), and 5 `filter_tool_logs` sites (196, 203, 210, 217, 223). Reaction-constant imports redirect like `test_emoji_embedding.py`. `filter_tool_logs` is in spike-1's deletion bucket — the 5 tests guarding its behavior need to either (a) DELETE if they were only asserting `send_response_with_files`-specific log filtering, or (b) REPLACE with equivalent assertions against `TelegramRelayOutputHandler.send`.
+- [ ] `tests/e2e/test_message_pipeline.py` — REPLACE or DELETE (builder decides per case): top-level import of `clean_message`, `extract_files_from_response`, `filter_tool_logs` (line 13). All three symbols are in spike-1's deletion bucket. E2E tests should be rewritten to drive `TelegramRelayOutputHandler.send` directly, or deleted if the specific helper behavior is no longer surfaced.
 - [ ] `tests/unit/test_medium_validators.py` — CREATE (new file): unit tests for the validators, ≈20 tests total. Covers the Task 12 residual gap.
-- [ ] `tests/integration/test_worker_pm_long_output.py` — no changes expected; validates consolidation did not regress the worker-bypass fix.
-- [ ] `tests/unit/test_output_handler.py` — may need one new test asserting the consolidated handler handles the handler-event entry path (reply_to, file_paths). UPDATE: add `test_handler_event_entry_parity` or similar.
-- [ ] `tests/unit/test_tool_call_delivery.py` — no changes expected; stop-hook classification already covered.
+- [ ] `tests/integration/test_worker_pm_long_output.py` — NO CHANGE expected; run to validate consolidation did not regress the worker-bypass fix.
+- [ ] `tests/unit/test_output_handler.py` — UPDATE: add one new test asserting the consolidated handler handles the handler-event entry path (reply_to, file_paths). Suggested name: `test_handler_event_entry_parity`.
+- [ ] `tests/unit/test_tool_call_delivery.py` — NO CHANGE expected; stop-hook classification already covered.
 
 ## Rabbit Holes
 
@@ -356,10 +377,6 @@ See **RD-1 (Resolved Decisions)** below for the recorded rationale. This is not 
 
 ### External Documentation Site
 - Not applicable — no Sphinx / MkDocs / Read the Docs site in this repo.
-
-## Test Impact
-
-See the Test Impact section above (rendered separately per template ordering; same content).
 
 ## Success Criteria
 
