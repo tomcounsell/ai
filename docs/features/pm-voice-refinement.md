@@ -10,7 +10,7 @@ The PM persona leaked implementation details into stakeholder-facing messages: r
 
 ### SDLC Stage Naturalization
 
-The `SUMMARIZER_SYSTEM_PROMPT` in `bridge/summarizer.py` instructs the LLM to translate raw SDLC stage labels to natural language: PLAN becomes "planning", BUILD becomes "building", TEST becomes "testing", REVIEW becomes "reviewing", DOCS becomes "documenting", MERGE becomes "merging". The term "SDLC" itself remains acceptable as a process reference. This is a prompt-only change -- the LLM handles the translation at summarization time.
+The `DRAFTER_SYSTEM_PROMPT` in `bridge/message_drafter.py` (formerly `SUMMARIZER_SYSTEM_PROMPT` in `bridge/summarizer.py`) instructs the LLM to translate raw SDLC stage labels to natural language: PLAN becomes "planning", BUILD becomes "building", TEST becomes "testing", REVIEW becomes "reviewing", DOCS becomes "documenting", MERGE becomes "merging". The term "SDLC" itself remains acceptable as a process reference. This is a prompt-only change -- the LLM handles the translation at draft time.
 
 ### Crash Message Pool
 
@@ -18,11 +18,11 @@ The `SUMMARIZER_SYSTEM_PROMPT` in `bridge/summarizer.py` instructs the LLM to tr
 
 ### Question Prefix
 
-The question prefix changed from `? ` to `>> ` for better visual distinction in Telegram. The `_normalize_question_prefix()` function provides backward compatibility by converting any legacy `? ` prefixes to `>> `. Both `SUMMARIZER_SYSTEM_PROMPT` and `_parse_summary_and_questions()` use the new format.
+The question prefix changed from `? ` to `>> ` for better visual distinction in Telegram. The `_normalize_question_prefix()` function provides backward compatibility by converting any legacy `? ` prefixes to `>> `. Both `DRAFTER_SYSTEM_PROMPT` and `_parse_summary_and_questions()` use the new format.
 
 ### Link Footer Standardization
 
-The summarizer prompt now explicitly instructs the LLM to use short-form references only in bullet text (e.g., "PR #N", "issue #N") and never include full URLs in bullets. Full URL rendering is handled by the existing `_linkify_references()` post-processor.
+The drafter prompt now explicitly instructs the LLM to use short-form references only in bullet text (e.g., "PR #N", "issue #N") and never include full URLs in bullets. Full URL rendering is handled by the existing `_linkify_references()` post-processor.
 
 ### Sentence-Aware Truncation
 
@@ -30,15 +30,15 @@ The summarizer prompt now explicitly instructs the LLM to use short-form referen
 
 ### Developer Metrics Suppression
 
-The summarizer prompt instructs the LLM to avoid line counts, file counts, addition/deletion counts, and exact test pass/fail numbers. Instead it should use outcome language: "shipped and tested", "all tests passing", "reviewed and approved".
+The drafter prompt instructs the LLM to avoid line counts, file counts, addition/deletion counts, and exact test pass/fail numbers. Instead it should use outcome language: "shipped and tested", "all tests passing", "reviewed and approved".
 
 ### Dual-Personality Guard
 
-The `pm_bypass` path in `response.py` has clarified documentation confirming it prevents sending both PM self-messages and a summarized version of the same content. The guard blocks both summarization and text sending when the PM has already delivered its own messages.
+The `pm_bypass` path in `response.py` has clarified documentation confirming it prevents sending both PM self-messages and a drafted version of the same content. The guard blocks both drafting and text sending when the PM has already delivered its own messages.
 
 ### Milestone-Selective Emoji
 
-`_get_status_emoji()` in `bridge/summarizer.py` now reserves the completion emoji for true milestones. The logic:
+`_get_status_emoji()` in `bridge/message_drafter.py` now reserves the completion emoji for true milestones. The logic:
 
 | Condition | Emoji |
 |-----------|-------|
@@ -53,14 +53,14 @@ Routine completions produce no emoji prefix, reducing noise. Only merged PRs and
 
 ## Files Modified
 
-- `bridge/summarizer.py` -- Prompt updates (naturalization, question prefix, link format, metrics suppression), `_get_status_emoji()` milestone logic, `_normalize_question_prefix()`, `_parse_summary_and_questions()` updates
+- `bridge/message_drafter.py` (née `bridge/summarizer.py`) -- Prompt updates (naturalization, question prefix, link format, metrics suppression), `_get_status_emoji()` milestone logic, `_normalize_question_prefix()`, `_parse_summary_and_questions()` updates
 - `bridge/response.py` -- `_truncate_at_sentence_boundary()`, dual-personality guard documentation
 - `agent/sdk_client.py` -- `CRASH_MESSAGE_POOL`, `_get_crash_message()`
-- `tests/unit/test_summarizer.py` -- Updated and new tests for all changes
+- `tests/unit/test_message_drafter.py` -- Updated and new tests for all changes
 
 ## Related
 
-- [Summarizer Format](summarizer-format.md) -- Output format specification (updated by this feature)
+- [Message Drafter](message-drafter.md) -- Output format specification (formerly "Summarizer Format"; renamed per #1035)
 - [Bridge Response Improvements](bridge-response-improvements.md) -- Response pipeline
 - [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- PM/Dev session split
 - Issue [#540](https://github.com/tomcounsell/ai/issues/540) -- Tracking issue

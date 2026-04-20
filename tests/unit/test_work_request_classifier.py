@@ -190,7 +190,7 @@ class TestProcessNarrationStripping:
     """Tests for the process narration stripping in summarizer."""
 
     def test_strips_check_narration(self):
-        from bridge.summarizer import _strip_process_narration
+        from bridge.message_drafter import _strip_process_narration
 
         text = "Let me check the code.\nThe function returns 42."
         result = _strip_process_narration(text)
@@ -198,7 +198,7 @@ class TestProcessNarrationStripping:
         assert "The function returns 42." in result
 
     def test_strips_look_narration(self):
-        from bridge.summarizer import _strip_process_narration
+        from bridge.message_drafter import _strip_process_narration
 
         text = "Looking at the file:\nThe config is correct."
         result = _strip_process_narration(text)
@@ -206,21 +206,21 @@ class TestProcessNarrationStripping:
         assert "The config is correct." in result
 
     def test_preserves_meaningful_ill_statements(self):
-        from bridge.summarizer import _strip_process_narration
+        from bridge.message_drafter import _strip_process_narration
 
         text = "I'll document the API changes in docs/api.md"
         result = _strip_process_narration(text)
         assert "I'll document" in result
 
     def test_preserves_meaningful_content(self):
-        from bridge.summarizer import _strip_process_narration
+        from bridge.message_drafter import _strip_process_narration
 
         text = "The fix is deployed and working."
         result = _strip_process_narration(text)
         assert text == result
 
     def test_does_not_return_empty(self):
-        from bridge.summarizer import _strip_process_narration
+        from bridge.message_drafter import _strip_process_narration
 
         text = "Let me check this.\nLet me look at that."
         result = _strip_process_narration(text)
@@ -228,7 +228,7 @@ class TestProcessNarrationStripping:
         assert len(result) > 0
 
     def test_strips_multiple_narration_lines(self):
-        from bridge.summarizer import _strip_process_narration
+        from bridge.message_drafter import _strip_process_narration
 
         text = (
             "Let me check the code.\n"

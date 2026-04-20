@@ -333,8 +333,7 @@ def _start_pipeline_stage(pm_session_id: str, stage: str) -> None:
         logger.info(f"[pre_tool_use] Started pipeline stage {stage} on session {pm_session_id}")
     except Exception as e:
         logger.warning(
-            f"[pre_tool_use] Failed to start pipeline stage {stage} "
-            f"on session {pm_session_id}: {e}"
+            f"[pre_tool_use] Failed to start pipeline stage {stage} on session {pm_session_id}: {e}"
         )
 
 

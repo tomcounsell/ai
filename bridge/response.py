@@ -190,14 +190,6 @@ def filter_tool_logs(response: str) -> str:
         r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
     )
 
-    # Delivery-choice prefixes: internal agent control signals that should never
-    # be sent as user-facing text. These are parsed by the stop hook to set
-    # delivery_action on the session, but can leak through the nudge loop's
-    # parallel send path if the stop hook hasn't written to Redis yet.
-    delivery_choice_pattern = re.compile(
-        r"^(REACT:\s*|SEND\s*$|EDIT:\s*|SILENT\s*$|CONTINUE\s*$)", re.IGNORECASE
-    )
-
     for line in lines:
         stripped = line.strip()
 
@@ -206,11 +198,6 @@ def filter_tool_logs(response: str) -> str:
             # Only add blank line if last line wasn't blank
             if filtered and filtered[-1].strip():
                 filtered.append(line)
-            continue
-
-        # Skip delivery-choice control signals (REACT:, SEND, EDIT:, SILENT, CONTINUE)
-        # These are internal protocol between agent and stop hook, never user-facing.
-        if delivery_choice_pattern.match(stripped):
             continue
 
         # Skip lines matching explicit tool log patterns
@@ -399,7 +386,7 @@ async def send_response_with_files(
     Callers that only need a truthy/falsy check can still use `if sent:`.
 
     Args:
-        session: Optional AgentSession for summarizer context enrichment.
+        session: Optional AgentSession for drafter context enrichment.
     """
     # Resolve chat_id and reply_to from event or explicit params
     _chat_id = chat_id or (event.chat_id if event else None)
@@ -426,8 +413,8 @@ async def send_response_with_files(
 
     text, files = extract_files_from_response(response)
 
-    # Summarize SDK agent responses for consistent PM-quality output.
-    # SDLC sessions: always summarize (need stage lines + link footers).
+    # Draft SDK agent responses for consistent PM-quality output.
+    # SDLC sessions: always draft (need stage lines + link footers).
     # Non-SDLC short responses (< 200 chars): skip — these are typically
     # programmatic skill output (e.g., /update) that's already formatted.
     # Re-read session from Redis for fresh stage/link data written during execution
@@ -441,74 +428,17 @@ async def send_response_with_files(
         except Exception:
             pass  # Fall back to existing session object
 
-    # ── Delivery instruction check ──
-    # If the stop-hook review gate wrote a delivery instruction, execute it
-    # directly instead of running the summarizer. The agent already reviewed
-    # and approved the output.
-    if session and getattr(session, "delivery_action", None):
-        delivery_action = session.delivery_action
-
-        if delivery_action == "send":
-            # Agent approved or edited the message — send delivery_text
-            delivery_text = getattr(session, "delivery_text", None) or text
-            # Still send any extracted files first
-            if files:
-                for f in files:
-                    try:
-                        await client.send_file(_chat_id, f, reply_to=_reply_to)
-                    except Exception as e:
-                        logger.error(f"Failed to send file: {e}")
-            if delivery_text:
-                if len(delivery_text) > 4096:
-                    delivery_text = _truncate_at_sentence_boundary(delivery_text, limit=4096)
-                try:
-                    from bridge.markdown import send_markdown
-
-                    return await send_markdown(client, _chat_id, delivery_text, reply_to=_reply_to)
-                except Exception as e:
-                    logger.error(f"Delivery send failed: {e}")
-            return None
-
-        if delivery_action == "react":
-            # Agent chose emoji-only reaction; fall back to SEND if reaction fails
-            delivery_emoji = getattr(session, "delivery_emoji", None) or "👍"
-            reacted = False
-            if _reply_to:
-                reacted = await set_reaction(client, _chat_id, _reply_to, delivery_emoji)
-            if reacted:
-                logger.info(
-                    f"Delivery: react-only ({delivery_emoji}) for "
-                    f"session {getattr(session, 'session_id', 'unknown')}"
-                )
-                return None
-            # Reaction failed — fall back to sending the draft text
-            logger.warning(
-                f"Delivery: react failed, falling back to SEND for "
-                f"session {getattr(session, 'session_id', 'unknown')}"
-            )
-            fallback_text = getattr(session, "delivery_text", None) or text
-            if fallback_text:
-                if len(fallback_text) > 4096:
-                    fallback_text = _truncate_at_sentence_boundary(fallback_text, limit=4096)
-                try:
-                    from bridge.markdown import send_markdown
-
-                    return await send_markdown(client, _chat_id, fallback_text, reply_to=_reply_to)
-                except Exception as e:
-                    logger.error(f"React fallback send also failed: {e}")
-            return None
-
-        if delivery_action == "silent":
-            # Agent chose silence — no text, no emoji
-            logger.info(f"Delivery: silent for session {getattr(session, 'session_id', 'unknown')}")
-            return None
-
-        # Unknown delivery_action → fall through to normal summarizer path
+    # NOTE: delivery_action/delivery_text/delivery_emoji session fields are no
+    # longer read here. The stop-hook review gate now steers the agent via a
+    # prepopulated tool_call (tools/send_message.py, tools/react_with_emoji.py)
+    # which delivers directly through the OutputHandler. The schema fields
+    # remain on AgentSession pending a dedicated migration (Tom owns; see the
+    # follow-up chore issue opened from plan #1035 Step 13.5).
 
     # PM self-messaging bypass: if the PM already sent messages via the
     # send_telegram tool during this session (or its parent PM session in
-    # SDLC flows), skip the summarizer entirely. The PM authored its own
-    # messages — the summarizer would be redundant.
+    # SDLC flows), skip the drafter entirely. The PM authored its own
+    # messages — the drafter would be redundant.
     # Only set emoji reaction (handled by the caller). See issue #497, #571.
     # NOTE: We still send any extracted files (<<FILE:>> markers) before
     # returning, so file attachments are not lost on PM self-message sessions.
@@ -527,41 +457,41 @@ async def send_response_with_files(
         else:
             _bypass_ids = getattr(session, "pm_sent_message_ids", [])
         logger.info(
-            f"Skipping summarizer: PM self-messaged during {pm_bypass_source} "
+            f"Skipping drafter: PM self-messaged during {pm_bypass_source} "
             f"{getattr(session, 'session_id', 'unknown')} "
             f"(pm_sent_message_ids={_bypass_ids})"
         )
 
     is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
-    should_summarize = not pm_bypass and text and (is_sdlc or len(text) >= 200)
-    if should_summarize:
+    should_draft = not pm_bypass and text and (is_sdlc or len(text) >= 200)
+    if should_draft:
         try:
-            from bridge.summarizer import summarize_response
+            from bridge.message_drafter import draft_message
 
-            summarized = await summarize_response(text, session=session)
-            text = summarized.text
-            if summarized.full_output_file:
-                files.append(summarized.full_output_file)
-            if summarized.was_summarized:
-                logger.info(f"Summarized response: {len(response)} -> {len(text)} chars")
+            drafted = await draft_message(text, session=session)
+            text = drafted.text
+            if drafted.full_output_file:
+                files.append(drafted.full_output_file)
+            if drafted.was_drafted:
+                logger.info(f"Drafted response: {len(response)} -> {len(text)} chars")
 
-            # ── Self-summary fallback via session steering ──
-            # When all summarizer backends fail, inject a steering message
-            # asking the agent to self-summarize. Send any files immediately
+            # ── Self-draft fallback via session steering ──
+            # When all drafter backends fail, inject a steering message
+            # asking the agent to self-draft. Send any files immediately
             # (they would be lost if deferred), then return the STEERING_DEFERRED
             # sentinel so the bridge callback knows this is intentional.
-            if summarized.needs_self_summary:
+            if drafted.needs_self_draft:
                 _session_id = getattr(session, "session_id", None) if session else None
                 _should_steer = bool(_session_id)
 
                 # Loop prevention: check if a self-summary steering message was
                 # already pushed for this session (avoids infinite loops if the
-                # agent's self-summary also fails summarization).
+                # agent's self-draft also fails drafting).
                 if _should_steer:
                     try:
                         from agent.steering import peek_steering_sender
 
-                        if peek_steering_sender(_session_id) == "summarizer-fallback":
+                        if peek_steering_sender(_session_id) == "drafter-fallback":
                             logger.warning(
                                 "Self-summary steering already pending, "
                                 "falling through to narration gate"
@@ -581,15 +511,15 @@ async def send_response_with_files(
                     # Push the self-summary instruction to the session steering queue
                     try:
                         from agent.steering import push_steering_message
-                        from bridge.summarizer import SELF_SUMMARY_INSTRUCTION
+                        from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
 
                         push_steering_message(
                             _session_id,
-                            SELF_SUMMARY_INSTRUCTION,
-                            sender="summarizer-fallback",
+                            SELF_DRAFT_INSTRUCTION,
+                            sender="drafter-fallback",
                         )
                         logger.info(f"Injected self-summary steering for session {_session_id}")
-                        from bridge.summarizer import STEERING_DEFERRED
+                        from bridge.message_drafter import STEERING_DEFERRED
 
                         return STEERING_DEFERRED  # type: ignore[return-value]
                     except Exception as steer_err:
@@ -599,7 +529,7 @@ async def send_response_with_files(
                         # Fall through to narration gate below
 
                 # No session available or steering failed — apply narration gate
-                # on the original (pre-summarization) text as last resort
+                # on the original (pre-drafting) text as last resort
                 try:
                     from bridge.message_quality import (
                         NARRATION_FALLBACK_MESSAGE,
@@ -612,7 +542,7 @@ async def send_response_with_files(
                         logger.info("Narration gate triggered on fallback path")
                     else:
                         # Not narration — truncate as last resort
-                        from bridge.summarizer import SAFETY_TRUNCATE
+                        from bridge.message_drafter import SAFETY_TRUNCATE
 
                         if len(_fallback_text) > SAFETY_TRUNCATE:
                             text = _fallback_text[: SAFETY_TRUNCATE - 3] + "..."
@@ -620,7 +550,7 @@ async def send_response_with_files(
                             text = _fallback_text
                 except Exception:
                     # is_narration_only raised — deliver as-is (non-fatal)
-                    from bridge.summarizer import SAFETY_TRUNCATE
+                    from bridge.message_drafter import SAFETY_TRUNCATE
 
                     if len(response) > SAFETY_TRUNCATE:
                         text = response[: SAFETY_TRUNCATE - 3] + "..."
@@ -628,19 +558,19 @@ async def send_response_with_files(
                         text = response
 
             # Persist semantic routing fields to session for future routing
-            if session and summarized.was_summarized:
+            if session and drafted.was_drafted:
                 try:
-                    if summarized.context_summary:
-                        session.context_summary = summarized.context_summary
-                    if summarized.expectations is not None:
-                        session.expectations = summarized.expectations
-                    if summarized.context_summary or summarized.expectations is not None:
+                    if drafted.context_summary:
+                        session.context_summary = drafted.context_summary
+                    if drafted.expectations is not None:
+                        session.expectations = drafted.expectations
+                    if drafted.context_summary or drafted.expectations is not None:
                         session.save()
                         logger.debug(
                             f"Persisted routing fields to session "
                             f"{session.session_id}: "
-                            f"context_summary={bool(summarized.context_summary)}, "
-                            f"expectations={bool(summarized.expectations)}"
+                            f"context_summary={bool(drafted.context_summary)}, "
+                            f"expectations={bool(drafted.expectations)}"
                         )
                 except Exception as persist_err:
                     # Non-fatal: routing field persistence should never
@@ -706,7 +636,7 @@ async def send_response_with_files(
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
         finally:
-            # Clean up temp files created by the summarizer
+            # Clean up temp files created by the drafter
             if str(file_path).startswith("/tmp/valor_full_output_"):
                 try:
                     Path(file_path).unlink(missing_ok=True)
@@ -715,9 +645,9 @@ async def send_response_with_files(
                     pass  # Non-fatal: OS will clean /tmp eventually
 
     # PM bypass (dual-personality guard): files have been sent above,
-    # skip text/summarizer output. This prevents sending both PM
-    # self-messages AND a summarized version of the same content.
-    # Guard coverage: pm_bypass blocks summarization AND text sending.
+    # skip text/drafter output. This prevents sending both PM
+    # self-messages AND a drafted version of the same content.
+    # Guard coverage: pm_bypass blocks drafting AND text sending.
     # Return a sentinel truthy value (True casts to int 1 which is truthy) since
     # PM self-messages aren't tracked via the text send path.
     if pm_bypass:

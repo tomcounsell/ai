@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bridge.summarizer import ClassificationResult, OutputType, classify_output
+from bridge.message_drafter import ClassificationResult, OutputType, classify_output
 
 
 @pytest.mark.integration
@@ -39,7 +39,7 @@ async def test_classify_output_real_api():
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_response_summarizer_wiring():
-    """Verify that send_response_with_files invokes summarize_response for long text."""
+    """Verify that send_response_with_files invokes draft_message for long text."""
     from bridge.response import send_response_with_files
 
     # Build a response long enough to trigger summarization (>= 200 chars)
@@ -74,14 +74,12 @@ async def test_response_summarizer_wiring():
     with (
         patch("bridge.response.filter_tool_logs", return_value=long_text),
         patch("bridge.response.extract_files_from_response", return_value=(long_text, [])),
-        patch("bridge.summarizer.summarize_response") as mock_summarize,
+        patch("bridge.message_drafter.draft_message") as mock_summarize,
         patch("models.agent_session.AgentSession") as mock_agent_session_cls,
     ):
-        from bridge.summarizer import SummarizedResponse
+        from bridge.message_drafter import MessageDraft
 
-        mock_summarize.return_value = SummarizedResponse(
-            text="Summarized output", was_summarized=True
-        )
+        mock_summarize.return_value = MessageDraft(text="Summarized output", was_drafted=True)
 
         # Make the session query return our mock
         mock_agent_session_cls.query.filter.return_value = [mock_session]
@@ -93,7 +91,7 @@ async def test_response_summarizer_wiring():
             session=mock_session,
         )
 
-        # Verify summarize_response was called with the long text and session
+        # Verify draft_message was called with the long text and session
         mock_summarize.assert_called_once()
         call_args = mock_summarize.call_args
         assert call_args[0][0] == long_text  # first positional arg is text

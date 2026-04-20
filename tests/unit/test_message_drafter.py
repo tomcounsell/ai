@@ -1,24 +1,24 @@
-"""Tests for bridge.summarizer — response summarization and classification."""
+"""Tests for bridge.message_drafter — response summarization and classification."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bridge.summarizer import (
+from bridge.message_drafter import (
     CLASSIFICATION_CONFIDENCE_THRESHOLD,
     ClassificationResult,
     OutputType,
-    StructuredSummary,
+    StructuredDraft,
     _classify_with_heuristics,
-    _compose_structured_summary,
+    _compose_structured_draft,
     _get_status_emoji,
     _linkify_references,
     _parse_classification_response,
-    _parse_summary_and_questions,
+    _parse_draft_and_questions,
     classify_output,
+    draft_message,
     extract_artifacts,
-    summarize_response,
 )
 from models.agent_session import SDLC_STAGES
 
@@ -89,40 +89,56 @@ class TestExtractArtifacts:
         assert artifacts["commits"].count("abc1234") == 1
 
     def test_git_status_file_patterns(self):
-        text = "M  bridge/summarizer.py\nA  tests/test_summarizer.py"
+        text = "M  bridge/message_drafter.py\nA  tests/test_message_drafter.py"
         artifacts = extract_artifacts(text)
         assert "files_changed" in artifacts
-        assert "bridge/summarizer.py" in artifacts["files_changed"]
+        assert "bridge/message_drafter.py" in artifacts["files_changed"]
 
 
-class TestSummarizeResponse:
-    """Tests for the main summarize_response function."""
+class TestDraftMessage:
+    """Tests for the main draft_message function."""
 
     @pytest.mark.asyncio
-    async def test_short_response_still_summarized(self):
-        """All non-empty responses are summarized (no threshold)."""
+    async def test_short_response_skips_drafter(self):
+        """Non-SDLC responses under 200 chars bypass the drafter entirely (D5a).
+
+        The short-output early-return bounds per-message latency on brief
+        replies — see docs/plans/message-drafter.md Risk 1 + D5a.
+        """
         short_text = "Done. Committed abc1234."
+        mock_haiku = AsyncMock()  # should not be called
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(short_text)
+        # Raw text returned verbatim; drafter was skipped.
+        assert result.text == short_text
+        assert result.was_drafted is False
+        mock_haiku.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_long_response_still_uses_drafter(self):
+        """Responses >=200 chars trigger the drafter even without SDLC context."""
+        long_text = "Done and committed. " * 30  # 600 chars
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Committed changes",
                 response="Done ✅ `abc1234`",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(short_text)
-        assert result.was_summarized is True
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(long_text)
+        assert result.was_drafted is True
         mock_haiku.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_empty_response(self):
-        result = await summarize_response("")
+        result = await draft_message("")
         assert result.text == ""
-        assert result.was_summarized is False
+        assert result.was_drafted is False
 
     @pytest.mark.asyncio
     async def test_none_response(self):
-        result = await summarize_response(None)
+        result = await draft_message(None)
         assert result.text == ""
 
     @pytest.mark.asyncio
@@ -131,16 +147,16 @@ class TestSummarizeResponse:
         long_text = "Detailed work output. " * 200
 
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Working on output",
                 response="Summary: did the work. `abc1234`",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(long_text)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(long_text)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         # Structured composer prepends emoji prefix for non-session summaries
         assert "Summary: did the work. `abc1234`" in result.text
         mock_haiku.assert_called_once()
@@ -152,19 +168,19 @@ class TestSummarizeResponse:
 
         mock_haiku = AsyncMock(return_value=None)
         mock_openrouter = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Working on output",
                 response="OpenRouter summary of work.",
                 expectations=None,
             )
         )
         with (
-            patch("bridge.summarizer._summarize_with_haiku", mock_haiku),
-            patch("bridge.summarizer._summarize_with_openrouter", mock_openrouter),
+            patch("bridge.message_drafter._draft_with_haiku", mock_haiku),
+            patch("bridge.message_drafter._draft_with_openrouter", mock_openrouter),
         ):
-            result = await summarize_response(long_text)
+            result = await draft_message(long_text)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         assert "OpenRouter summary of work." in result.text
         mock_haiku.assert_called_once()
         mock_openrouter.assert_called_once()
@@ -177,24 +193,24 @@ class TestSummarizeResponse:
         mock_haiku = AsyncMock(return_value=None)
         mock_openrouter = AsyncMock(return_value=None)
         with (
-            patch("bridge.summarizer._summarize_with_haiku", mock_haiku),
-            patch("bridge.summarizer._summarize_with_openrouter", mock_openrouter),
+            patch("bridge.message_drafter._draft_with_haiku", mock_haiku),
+            patch("bridge.message_drafter._draft_with_openrouter", mock_openrouter),
         ):
-            result = await summarize_response(long_text)
+            result = await draft_message(long_text)
 
-        assert result.was_summarized is False
-        assert result.needs_self_summary is True
+        assert result.was_drafted is False
+        assert result.needs_self_draft is True
         assert result.text == ""
 
     @pytest.mark.asyncio
     async def test_self_summary_instruction_quality(self):
-        """SELF_SUMMARY_INSTRUCTION contains key quality markers."""
-        from bridge.summarizer import SELF_SUMMARY_INSTRUCTION
+        """SELF_DRAFT_INSTRUCTION contains key quality markers."""
+        from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
 
-        assert "outcome" in SELF_SUMMARY_INSTRUCTION.lower()
-        assert "narration" in SELF_SUMMARY_INSTRUCTION.lower()
-        assert "bullet" in SELF_SUMMARY_INSTRUCTION.lower()
-        assert len(SELF_SUMMARY_INSTRUCTION) < 1000  # compact, not the full system prompt
+        assert "outcome" in SELF_DRAFT_INSTRUCTION.lower()
+        assert "narration" in SELF_DRAFT_INSTRUCTION.lower()
+        assert "bullet" in SELF_DRAFT_INSTRUCTION.lower()
+        assert len(SELF_DRAFT_INSTRUCTION) < 1000  # compact, not the full system prompt
 
     @pytest.mark.asyncio
     async def test_very_long_response_creates_file(self):
@@ -202,14 +218,14 @@ class TestSummarizeResponse:
         long_text = "Output line.\n" * 500
 
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Work output",
                 response="Summary of work.",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(long_text)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(long_text)
 
         assert result.full_output_file is not None
         assert result.full_output_file.exists()
@@ -225,20 +241,20 @@ class TestSummarizeResponse:
         text = "x" * 2000  # Over 1500, under 3000
 
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Mid-length content",
                 response="Short summary.",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(text)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(text)
 
         assert result.full_output_file is None
-        assert result.was_summarized is True
+        assert result.was_drafted is True
 
 
-class TestSummarizeResponseIntegration:
+class TestDraftMessageIntegration:
     """Integration test with real Haiku API call."""
 
     @pytest.mark.asyncio
@@ -263,18 +279,18 @@ class TestSummarizeResponseIntegration:
                 "blocks, producing very long outputs.",
                 "I examined agent/completion.py and its format_summary() "
                 "method. While useful, it's a separate concern.",
-                "I created bridge/summarizer.py with components:\n"
+                "I created bridge/message_drafter.py with components:\n"
                 "1. extract_artifacts() - Regex extraction of commits, "
                 "URLs, file paths, test results, errors\n"
-                "2. summarize_response() - Async Haiku summarization\n"
-                "3. SummarizedResponse dataclass",
+                "2. draft_message() - Async Haiku summarization\n"
+                "3. MessageDraft dataclass",
                 "The summarizer follows a tiered approach:\n"
                 "- Under 1500 chars: passed through unchanged\n"
                 "- 1500-3000 chars: summarized via Haiku\n"
                 "- Over 3000 chars: summarized + full output as file",
                 "Changes made:\nmodified: bridge/telegram_bridge.py\n"
-                "created: bridge/summarizer.py\n"
-                "created: tests/test_summarizer.py",
+                "created: bridge/message_drafter.py\n"
+                "created: tests/test_message_drafter.py",
                 "Test suite results: 17 passed, 0 failed",
                 "Created commit a1b2c3d and pushed to origin/main.\n"
                 "PR: https://github.com/org/repo/pull/99",
@@ -288,9 +304,9 @@ class TestSummarizeResponseIntegration:
             ]
         )
 
-        result = await summarize_response(agent_output)
+        result = await draft_message(agent_output)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         assert len(result.text) < len(agent_output)
         # Summary should be concise — a few sentences, not a wall
         assert len(result.text) <= 800
@@ -705,7 +721,7 @@ class TestApplyHeuristicConfidenceGate:
 
     def test_high_confidence_passes_through(self):
         """Results above threshold are returned unchanged."""
-        from bridge.summarizer import _apply_heuristic_confidence_gate
+        from bridge.message_drafter import _apply_heuristic_confidence_gate
 
         result = ClassificationResult(
             output_type=OutputType.COMPLETION,
@@ -718,7 +734,7 @@ class TestApplyHeuristicConfidenceGate:
 
     def test_low_confidence_becomes_question(self):
         """Results below threshold become QUESTION."""
-        from bridge.summarizer import _apply_heuristic_confidence_gate
+        from bridge.message_drafter import _apply_heuristic_confidence_gate
 
         result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
@@ -732,7 +748,7 @@ class TestApplyHeuristicConfidenceGate:
 
     def test_threshold_boundary_exact(self):
         """Exactly at threshold passes through (not below)."""
-        from bridge.summarizer import _apply_heuristic_confidence_gate
+        from bridge.message_drafter import _apply_heuristic_confidence_gate
 
         result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
@@ -744,7 +760,7 @@ class TestApplyHeuristicConfidenceGate:
 
     def test_below_threshold_preserves_original_confidence(self):
         """The original confidence value is preserved in the gated result."""
-        from bridge.summarizer import _apply_heuristic_confidence_gate
+        from bridge.message_drafter import _apply_heuristic_confidence_gate
 
         result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
@@ -762,8 +778,8 @@ class TestClassificationAuditLog:
         """_write_classification_audit creates a JSONL entry."""
         import json
 
-        import bridge.summarizer as mod
-        from bridge.summarizer import _write_classification_audit
+        import bridge.message_drafter as mod
+        from bridge.message_drafter import _write_classification_audit
 
         # Redirect audit log to temp path
         original_path = mod._AUDIT_LOG_PATH
@@ -793,8 +809,8 @@ class TestClassificationAuditLog:
         """Text preview is truncated to 200 chars."""
         import json
 
-        import bridge.summarizer as mod
-        from bridge.summarizer import _write_classification_audit
+        import bridge.message_drafter as mod
+        from bridge.message_drafter import _write_classification_audit
 
         original_path = mod._AUDIT_LOG_PATH
         mod._AUDIT_LOG_PATH = tmp_path / "test_audit2.jsonl"
@@ -849,8 +865,8 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Should I use approach A or B?")
 
@@ -868,8 +884,8 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Some ambiguous output")
 
@@ -881,9 +897,9 @@ class TestClassifyOutput:
     async def test_llm_failure_falls_back_to_heuristics(self):
         """When LLM call fails, heuristics are used."""
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
             patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic",
+                "bridge.message_drafter.anthropic.AsyncAnthropic",
                 side_effect=Exception("API error"),
             ),
         ):
@@ -895,7 +911,7 @@ class TestClassifyOutput:
     @pytest.mark.asyncio
     async def test_no_api_key_falls_back_to_heuristics(self):
         """When no API key, heuristics are used."""
-        with patch("bridge.summarizer.get_anthropic_api_key", return_value=""):
+        with patch("bridge.message_drafter.get_anthropic_api_key", return_value=""):
             result = await classify_output("Error: ModuleNotFoundError: No module named 'foo'")
 
         assert result.output_type == OutputType.ERROR
@@ -909,8 +925,8 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Done. Committed abc1234.")
 
@@ -929,8 +945,8 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(long_text)
 
@@ -956,8 +972,8 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("I think the bug is fixed now. Should work.")
 
@@ -980,8 +996,8 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("All tests pass. Task complete.")
 
@@ -1004,8 +1020,8 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(
                 "All 42 tests passed. Committed abc1234. PR: https://github.com/org/repo/pull/99"
@@ -1022,30 +1038,30 @@ class TestClassifyOutput:
 
 
 class TestParseSummaryAndQuestions:
-    """Tests for _parse_summary_and_questions."""
+    """Tests for _parse_draft_and_questions."""
 
     def test_bullets_only(self):
         text = "• Built the feature\n• Pushed to main"
-        bullets, questions = _parse_summary_and_questions(text)
+        bullets, questions = _parse_draft_and_questions(text)
         assert bullets == text
         assert questions is None
 
     def test_bullets_and_questions(self):
         text = "• Built the feature\n• Pushed to main\n---\n>> Should I merge?"
-        bullets, questions = _parse_summary_and_questions(text)
+        bullets, questions = _parse_draft_and_questions(text)
         assert bullets == "• Built the feature\n• Pushed to main"
         assert questions == ">> Should I merge?"
 
     def test_bullets_and_questions_legacy_prefix(self):
         """Legacy ? prefix is normalized to >> prefix."""
         text = "• Built the feature\n• Pushed to main\n---\n? Should I merge?"
-        bullets, questions = _parse_summary_and_questions(text)
+        bullets, questions = _parse_draft_and_questions(text)
         assert bullets == "• Built the feature\n• Pushed to main"
         assert questions == ">> Should I merge?"
 
     def test_multiple_questions(self):
         text = "• Done\n---\n>> Q1\n>> Q2\n>> Q3"
-        bullets, questions = _parse_summary_and_questions(text)
+        bullets, questions = _parse_draft_and_questions(text)
         assert bullets == "• Done"
         assert ">> Q1" in questions
         assert ">> Q2" in questions
@@ -1053,40 +1069,40 @@ class TestParseSummaryAndQuestions:
 
     def test_empty_questions_section(self):
         text = "• Done\n---\n"
-        bullets, questions = _parse_summary_and_questions(text)
+        bullets, questions = _parse_draft_and_questions(text)
         assert bullets == "• Done"
         assert questions is None
 
     def test_leading_separator(self):
         text = "---\n? Only questions here"
-        bullets, questions = _parse_summary_and_questions(text)
+        bullets, questions = _parse_draft_and_questions(text)
         assert bullets == ""
         assert questions is not None
         assert "Only questions here" in questions
 
     def test_no_separator(self):
         text = "Simple summary without questions."
-        bullets, questions = _parse_summary_and_questions(text)
+        bullets, questions = _parse_draft_and_questions(text)
         assert bullets == text
         assert questions is None
 
 
-class TestComposeStructuredSummary:
-    """Tests for _compose_structured_summary."""
+class TestComposeStructuredDraft:
+    """Tests for _compose_structured_draft."""
 
     def test_no_session_returns_emoji_and_bullets(self):
-        result = _compose_structured_summary("• Built it\n• Shipped it", session=None)
+        result = _compose_structured_draft("• Built it\n• Shipped it", session=None)
         assert "✅" in result
         assert "• Built it" in result
         assert "• Shipped it" in result
 
     def test_questions_appended(self):
-        result = _compose_structured_summary("• Done\n---\n>> Should I merge?", session=None)
+        result = _compose_structured_draft("• Done\n---\n>> Should I merge?", session=None)
         assert ">> Should I merge?" in result
         assert "• Done" in result
 
     def test_not_completion_uses_pending_emoji(self):
-        result = _compose_structured_summary("• Working on it", session=None, is_completion=False)
+        result = _compose_structured_draft("• Working on it", session=None, is_completion=False)
         assert "⏳" in result
 
     def test_teammate_mode_returns_prose_without_emoji(self):
@@ -1097,7 +1113,7 @@ class TestComposeStructuredSummary:
         session.session_mode = "teammate"
         session.session_id = None  # Skip Redis refresh
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "The bridge uses Telethon for Telegram integration. See bridge/telegram_bridge.py.",
             session=session,
         )
@@ -1117,7 +1133,7 @@ class TestComposeStructuredSummary:
         session.session_id = None
         session.status = "completed"
 
-        result = _compose_structured_summary("• Built it", session=session)
+        result = _compose_structured_draft("• Built it", session=session)
         assert "✅" in result
         assert "• Built it" in result
 
@@ -1144,7 +1160,7 @@ class TestNoMessageEcho:
         session.is_sdlc = True
         session.session_mode = None
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
         )
         first_line = result.split("\n")[0]
@@ -1163,7 +1179,7 @@ class TestNoMessageEcho:
         session.session_mode = None
         session.get_links.return_value = {}
 
-        result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
+        result = _compose_structured_draft("It's 3pm UTC+7", session=session, is_completion=True)
         assert "What time is it?" not in result
 
 
@@ -1231,8 +1247,8 @@ class TestGetStatusEmojiRegression:
         assert _get_status_emoji(None, is_completion=False) == "⏳"
 
 
-class TestComposeStructuredSummaryWithSession:
-    """Tests for _compose_structured_summary with session context."""
+class TestComposeStructuredDraftWithSession:
+    """Tests for _compose_structured_draft with session context."""
 
     def test_sdlc_session_renders_summary(self):
         """Full SDLC session gets emoji prefix and summary bullets."""
@@ -1250,7 +1266,7 @@ class TestComposeStructuredSummaryWithSession:
         session.message_text = "continue"
         session.status = "running"
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "\u2022 Implemented the bypass\n\u2022 135 tests passing",
             session=session,
             is_completion=True,
@@ -1272,7 +1288,7 @@ class TestComposeStructuredSummaryWithSession:
         session.message_text = "What time is it?"
         session.status = "running"
 
-        result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
+        result = _compose_structured_draft("It's 3pm UTC+7", session=session, is_completion=True)
 
         # No stage-related content for non-SDLC
         assert "ISSUE" not in result
@@ -1289,7 +1305,7 @@ class TestComposeStructuredSummaryWithSession:
         session.message_text = "How does the bridge work?"
         session.status = "completed"
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "The bridge connects Telegram to Claude via Telethon. "
             "See bridge/telegram_bridge.py for the main entry point.",
             session=session,
@@ -1302,7 +1318,7 @@ class TestComposeStructuredSummaryWithSession:
         assert "bridge connects Telegram" in result
 
 
-class TestSummarizationBypass:
+class TestDraftingBypass:
     """Tests for the non-SDLC short response bypass in response.py."""
 
     @pytest.mark.asyncio
@@ -1394,7 +1410,7 @@ class TestQuestionFabricationPrevention:
             "I will fix auto-continue to carry forward session state."
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Planning classifier and auto-continue fixes",
                 response=(
                     "• Adding sdlc to classifier categories\n"
@@ -1403,8 +1419,8 @@ class TestQuestionFabricationPrevention:
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(agent_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(agent_output)
 
         assert result.expectations is None
         # Verify no --- separator (which precedes questions)
@@ -1423,7 +1439,7 @@ class TestQuestionFabricationPrevention:
             "Should we use exponential backoff or fixed intervals?"
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Auth module with backoff decision",
                 response=(
                     "• Built auth module with token rotation\n"
@@ -1433,8 +1449,8 @@ class TestQuestionFabricationPrevention:
                 expectations="Should we use exponential backoff or fixed intervals?",
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(agent_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(agent_output)
 
         assert result.expectations is not None
         assert "exponential backoff" in result.expectations
@@ -1449,7 +1465,7 @@ class TestQuestionFabricationPrevention:
             "The API rate limit is 100/min — should we add client-side throttling?"
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Retry logic with rate limit question",
                 response=(
                     "• Implemented retry logic with 3 attempts\n"
@@ -1459,8 +1475,8 @@ class TestQuestionFabricationPrevention:
                 expectations="Should we add client-side throttling?",
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(agent_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(agent_output)
 
         assert result.expectations is not None
         assert "throttling" in result.expectations
@@ -1480,7 +1496,7 @@ class TestQuestionFabricationPrevention:
             "will add index to users table, will run load test."
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Planning migration and performance work",
                 response=(
                     "• Will update migration script\n"
@@ -1490,8 +1506,8 @@ class TestQuestionFabricationPrevention:
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(agent_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(agent_output)
 
         assert result.expectations is None
         assert "\n---\n" not in result.text
@@ -1504,14 +1520,14 @@ class TestQuestionFabricationPrevention:
             "this path. Fixed by adding integration test."
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Fixed missing test coverage",
                 response="• Fixed missing test coverage by adding integration test",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(agent_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(agent_output)
 
         assert result.expectations is None
 
@@ -1522,14 +1538,14 @@ class TestQuestionFabricationPrevention:
             "Fixed the regex: `if line.endswith('?'):` now handles edge cases. All 8 tests passing."
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Fixed regex edge case handling",
                 response="• Fixed regex `endswith('?')` edge case\n• 8 tests passing",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(agent_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(agent_output)
 
         assert result.expectations is None
         assert "\n---\n" not in result.text
@@ -1542,38 +1558,38 @@ class TestQuestionFabricationPrevention:
             "Whether to retry depends on the error type."
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="CI pipeline deployment notes",
                 response="• CI failure blocks deploy; retry depends on error type",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(agent_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(agent_output)
 
         assert result.expectations is None
 
     def test_prompt_contains_anti_fabrication_instruction(self):
-        """Verify SUMMARIZER_SYSTEM_PROMPT includes anti-fabrication rules."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        """Verify DRAFTER_SYSTEM_PROMPT includes anti-fabrication rules."""
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        assert "NEVER fabricate questions" in SUMMARIZER_SYSTEM_PROMPT
-        assert "NEVER reframe declarative statements as questions" in SUMMARIZER_SYSTEM_PROMPT
-        assert "VERBATIM" in SUMMARIZER_SYSTEM_PROMPT
+        assert "NEVER fabricate questions" in DRAFTER_SYSTEM_PROMPT
+        assert "NEVER reframe declarative statements as questions" in DRAFTER_SYSTEM_PROMPT
+        assert "VERBATIM" in DRAFTER_SYSTEM_PROMPT
 
     def test_prompt_contains_negative_examples(self):
-        """Verify SUMMARIZER_SYSTEM_PROMPT includes negative examples."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        """Verify DRAFTER_SYSTEM_PROMPT includes negative examples."""
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        assert "WRONG" in SUMMARIZER_SYSTEM_PROMPT
-        assert "FABRICATED" in SUMMARIZER_SYSTEM_PROMPT
-        assert "I will add sdlc to classifier categories" in SUMMARIZER_SYSTEM_PROMPT
+        assert "WRONG" in DRAFTER_SYSTEM_PROMPT
+        assert "FABRICATED" in DRAFTER_SYSTEM_PROMPT
+        assert "I will add sdlc to classifier categories" in DRAFTER_SYSTEM_PROMPT
 
     def test_expectations_tool_schema_updated(self):
         """Verify the tool schema description for expectations reflects anti-fabrication."""
-        from bridge.summarizer import STRUCTURED_SUMMARY_TOOL
+        from bridge.message_drafter import STRUCTURED_DRAFT_TOOL
 
-        schema = STRUCTURED_SUMMARY_TOOL["input_schema"]
+        schema = STRUCTURED_DRAFT_TOOL["input_schema"]
         expectations_desc = schema["properties"]["expectations"]["description"]
         assert "explicit question" in expectations_desc.lower()
 
@@ -1599,9 +1615,9 @@ class TestQuestionFabricationIntegration:
             "Both fixes are straightforward — modifying the classifier prompt and "
             "the auto-continue handler in the bridge."
         )
-        result = await summarize_response(agent_output)
+        result = await draft_message(agent_output)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         assert result.expectations is None, (
             f"Haiku fabricated expectations from declarative output: {result.expectations}"
         )
@@ -1624,9 +1640,9 @@ class TestQuestionFabricationIntegration:
             "Committed abc1234 and pushed to session/db-refactor.\n\n"
             "Should I merge to main or wait for the design review?"
         )
-        result = await summarize_response(agent_output)
+        result = await draft_message(agent_output)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         assert result.expectations is not None, (
             "Haiku failed to surface the genuine question about merging"
         )
@@ -1642,23 +1658,23 @@ class TestQuestionFabricationIntegration:
         agent_output = (
             "Plan execution complete for fix-session-tracking.\n\n"
             "Changes made:\n"
-            "- Modified bridge/summarizer.py: updated classifier categories\n"
+            "- Modified bridge/message_drafter.py: updated classifier categories\n"
             "- Modified bridge/telegram_bridge.py: fixed auto-continue propagation\n"
             "- Created tests/test_session_tracking.py: 8 new tests\n\n"
             "Test results: 135 passed, 0 failed\n"
             "Committed def5678 and pushed to session/fix-session-tracking.\n"
             "PR created: https://github.com/org/repo/pull/277"
         )
-        result = await summarize_response(agent_output)
+        result = await draft_message(agent_output)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         assert result.expectations is None, (
             f"Haiku fabricated expectations from SDLC completion: {result.expectations}"
         )
 
 
 class TestErrorStateRendering:
-    """Tests for _compose_structured_summary with error/failed states (Gap 4).
+    """Tests for _compose_structured_draft with error/failed states (Gap 4).
 
     Verifies that error states render correctly with:
     - Failure emoji (X)
@@ -1679,7 +1695,7 @@ class TestErrorStateRendering:
         session.status = "failed"
         session.is_sdlc = True
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "• Build failed: pytest returned exit code 1\n• 3 tests failing",
             session=session,
             is_completion=False,
@@ -1698,7 +1714,7 @@ class TestErrorStateRendering:
         session.message_text = "test"
         session.status = "failed"
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "• Tests failed",
             session=session,
             is_completion=True,  # Even with completion flag, failed session shows X
@@ -1721,7 +1737,7 @@ class TestErrorStateRendering:
         session.status = "failed"
         session.is_sdlc = True
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "• Build failed at test stage",
             session=session,
             is_completion=False,
@@ -1738,7 +1754,7 @@ class TestErrorStateRendering:
         session.status = "failed"
 
         error_text = "Error: ModuleNotFoundError: No module named 'foo'"
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             f"• {error_text}",
             session=session,
             is_completion=False,
@@ -1758,7 +1774,7 @@ class TestErrorStateRendering:
         session.status = "failed"
         session.is_sdlc = True
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "• Build failed: 3 tests failing",
             session=session,
             is_completion=False,
@@ -1805,14 +1821,14 @@ class TestLinkifyReferences:
     def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
         """Set up project config mock for testing.
 
-        Patches bridge.formatting.load_config to return a config with the
+        Patches bridge.routing.load_config to return a config with the
         specified GitHub org/repo, replacing the old register_project_config approach.
         """
         self._project_configs[project_key] = {"github": {"org": org, "repo": repo}}
         mock_config = {"projects": self._project_configs}
         if self._patcher:
             self._patcher.stop()
-        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
+        self._patcher = patch("bridge.routing.load_config", return_value=mock_config)
         self._patcher.start()
 
     def test_pr_reference_linkified(self):
@@ -1865,7 +1881,7 @@ class TestLinkifyReferences:
         mock_config = {"projects": self._project_configs}
         if self._patcher:
             self._patcher.stop()
-        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
+        self._patcher = patch("bridge.routing.load_config", return_value=mock_config)
         self._patcher.start()
         session = self._make_session("no-github")
         result = _linkify_references("PR #323", session)
@@ -1894,7 +1910,7 @@ class TestLinkifyReferences:
         assert result == "PR #323"
 
 
-class TestSummarizerBypass:
+class TestDrafterBypass:
     """Tests for PM self-messaging summarizer bypass (issue #497).
 
     When the PM sends messages via tools/send_telegram.py during a session,
@@ -1955,7 +1971,7 @@ class TestSummarizerBypass:
         assert mock_send.called or result is True
 
 
-class TestSummarizerBypassParentSession:
+class TestDrafterBypassParentSession:
     """Tests for PM bypass guard with parent PM session lookup (issue #571).
 
     In SDLC flows, the Dev session (child) is passed to send_response_with_files,
@@ -2044,47 +2060,47 @@ class TestSummarizerBypassParentSession:
         assert mock_send.called or result is True
 
 
-class TestSummarizerInternalsSuppressionPrompt:
-    """Tests that SUMMARIZER_SYSTEM_PROMPT bans implementation details (issue #571)."""
+class TestDrafterInternalsSuppressionPrompt:
+    """Tests that DRAFTER_SYSTEM_PROMPT bans implementation details (issue #571)."""
 
     def test_prompt_contains_internals_suppression_section(self):
         """The prompt should have DEVELOPER INTERNALS SUPPRESSION, not just metrics."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        assert "DEVELOPER INTERNALS SUPPRESSION" in SUMMARIZER_SYSTEM_PROMPT
+        assert "DEVELOPER INTERNALS SUPPRESSION" in DRAFTER_SYSTEM_PROMPT
 
     def test_prompt_bans_root_cause_explanations(self):
         """The prompt should explicitly prohibit root-cause explanations."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        assert "root-cause" in SUMMARIZER_SYSTEM_PROMPT.lower()
+        assert "root-cause" in DRAFTER_SYSTEM_PROMPT.lower()
 
     def test_prompt_bans_internal_method_names(self):
         """The prompt should prohibit internal method/function/class names."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        assert "method" in SUMMARIZER_SYSTEM_PROMPT.lower()
-        assert "function" in SUMMARIZER_SYSTEM_PROMPT.lower()
-        assert "class name" in SUMMARIZER_SYSTEM_PROMPT.lower()
+        assert "method" in DRAFTER_SYSTEM_PROMPT.lower()
+        assert "function" in DRAFTER_SYSTEM_PROMPT.lower()
+        assert "class name" in DRAFTER_SYSTEM_PROMPT.lower()
 
 
 class TestNormalizeQuestionPrefix:
     """Tests for _normalize_question_prefix."""
 
     def test_legacy_prefix_normalized(self):
-        from bridge.summarizer import _normalize_question_prefix
+        from bridge.message_drafter import _normalize_question_prefix
 
         result = _normalize_question_prefix("? Should I merge?")
         assert result == ">> Should I merge?"
 
     def test_new_prefix_unchanged(self):
-        from bridge.summarizer import _normalize_question_prefix
+        from bridge.message_drafter import _normalize_question_prefix
 
         result = _normalize_question_prefix(">> Should I merge?")
         assert result == ">> Should I merge?"
 
     def test_mixed_prefixes(self):
-        from bridge.summarizer import _normalize_question_prefix
+        from bridge.message_drafter import _normalize_question_prefix
 
         text = "? First question\n>> Second question\n? Third"
         result = _normalize_question_prefix(text)
@@ -2094,7 +2110,7 @@ class TestNormalizeQuestionPrefix:
         assert "? " not in result
 
     def test_non_question_lines_unchanged(self):
-        from bridge.summarizer import _normalize_question_prefix
+        from bridge.message_drafter import _normalize_question_prefix
 
         result = _normalize_question_prefix("Normal text here")
         assert result == "Normal text here"
@@ -2154,29 +2170,29 @@ class TestSentenceAwareTruncation:
         assert result.rstrip().endswith("?")
 
 
-class TestSummarizerPromptUpdates:
-    """Tests for new SUMMARIZER_SYSTEM_PROMPT content (#540)."""
+class TestDrafterPromptUpdates:
+    """Tests for new DRAFTER_SYSTEM_PROMPT content (#540)."""
 
     def test_prompt_contains_sdlc_naturalization(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        assert "planning" in SUMMARIZER_SYSTEM_PROMPT
-        assert "building" in SUMMARIZER_SYSTEM_PROMPT
-        assert "testing" in SUMMARIZER_SYSTEM_PROMPT
+        assert "planning" in DRAFTER_SYSTEM_PROMPT
+        assert "building" in DRAFTER_SYSTEM_PROMPT
+        assert "testing" in DRAFTER_SYSTEM_PROMPT
 
     def test_prompt_contains_question_prefix_instruction(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        assert ">> " in SUMMARIZER_SYSTEM_PROMPT
+        assert ">> " in DRAFTER_SYSTEM_PROMPT
 
     def test_prompt_contains_link_format_instruction(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        prompt_lower = SUMMARIZER_SYSTEM_PROMPT.lower()
+        prompt_lower = DRAFTER_SYSTEM_PROMPT.lower()
         assert "short-form references" in prompt_lower
 
     def test_prompt_contains_metrics_suppression(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
 
-        prompt_lower = SUMMARIZER_SYSTEM_PROMPT.lower()
+        prompt_lower = DRAFTER_SYSTEM_PROMPT.lower()
         assert "line counts" in prompt_lower

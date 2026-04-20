@@ -364,3 +364,121 @@ class TestTelegramRelayOutputHandler:
             log_file = Path(tmp) / "chat-1.log"
             assert log_file.exists()
             assert "REACTION" in log_file.read_text()
+
+
+class TestDrafterInHandler:
+    """Tests for task 7 in docs/plans/message-drafter.md — the drafter-at-the-handler fix.
+
+    TelegramRelayOutputHandler.send must route its text through draft_message
+    before writing to Redis. This closes the worker-bypass gap where worker-
+    executed PM sessions previously wrote raw oversize text straight to the
+    outbox and triggered MessageTooLongError at the relay.
+    """
+
+    def _make_handler(self, *, drafter_enabled: bool = True):
+        import os
+        from unittest.mock import MagicMock
+
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        old = os.environ.get("MESSAGE_DRAFTER_IN_HANDLER")
+        os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = "true" if drafter_enabled else "false"
+        try:
+            h = TelegramRelayOutputHandler()
+        finally:
+            if old is None:
+                os.environ.pop("MESSAGE_DRAFTER_IN_HANDLER", None)
+            else:
+                os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = old
+        h._redis = MagicMock()
+        return h
+
+    def test_flag_is_read_at_init_time(self):
+        """Per Race 3 in the plan: flag is read once at __init__, not per-send."""
+        handler_on = self._make_handler(drafter_enabled=True)
+        handler_off = self._make_handler(drafter_enabled=False)
+        assert handler_on._drafter_enabled is True
+        assert handler_off._drafter_enabled is False
+
+    def test_send_invokes_draft_message_when_enabled(self):
+        """With drafter enabled, send() must call bridge.message_drafter.draft_message."""
+        from unittest.mock import AsyncMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler(drafter_enabled=True)
+        drafted = MessageDraft(
+            text="drafted version",
+            full_output_file=None,
+            was_drafted=True,
+            artifacts={},
+        )
+        mock_draft = AsyncMock(return_value=drafted)
+
+        with patch("bridge.message_drafter.draft_message", mock_draft):
+            # A '?' forces full drafter path (short-output early-return skips).
+            asyncio.run(handler.send("123", "Raw agent output? Maybe ask the human.", 0))
+
+        mock_draft.assert_awaited_once()
+        # Redis got the *drafted* text, not the raw input
+        handler._redis.rpush.assert_called_once()
+        args, _ = handler._redis.rpush.call_args
+        payload = json.loads(args[1])
+        assert payload["text"] == "drafted version"
+
+    def test_send_bypasses_draft_message_when_disabled(self):
+        """With flag off, send() must NOT invoke draft_message (raw text to outbox)."""
+        from unittest.mock import AsyncMock, patch
+
+        handler = self._make_handler(drafter_enabled=False)
+        mock_draft = AsyncMock()
+
+        with patch("bridge.message_drafter.draft_message", mock_draft):
+            asyncio.run(handler.send("123", "Raw text passes through.", 0))
+
+        mock_draft.assert_not_awaited()
+        # Redis still got the raw text
+        handler._redis.rpush.assert_called_once()
+        args, _ = handler._redis.rpush.call_args
+        payload = json.loads(args[1])
+        assert payload["text"] == "Raw text passes through."
+
+    def test_send_includes_file_paths_when_drafter_returns_file(self):
+        """If the draft has a full_output_file, the payload carries file_paths."""
+        from pathlib import Path
+        from unittest.mock import AsyncMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler(drafter_enabled=True)
+        drafted = MessageDraft(
+            text="short caption",
+            full_output_file=Path("/tmp/valor_full_output_xyz.txt"),
+            was_drafted=True,
+            artifacts={},
+        )
+
+        with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
+            # Force long enough to skip early-return
+            asyncio.run(handler.send("123", "Long text? Y" * 100, 0))
+
+        args, _ = handler._redis.rpush.call_args
+        payload = json.loads(args[1])
+        assert payload["text"] == "short caption"
+        assert payload["file_paths"] == ["/tmp/valor_full_output_xyz.txt"]
+
+    def test_send_falls_back_to_raw_text_on_drafter_exception(self):
+        """Drafter exception must NOT block delivery — fall back to raw text."""
+        from unittest.mock import AsyncMock, patch
+
+        handler = self._make_handler(drafter_enabled=True)
+        mock_draft = AsyncMock(side_effect=RuntimeError("drafter broken"))
+
+        with patch("bridge.message_drafter.draft_message", mock_draft):
+            asyncio.run(handler.send("123", "Raw text survives? yes.", 0))
+
+        handler._redis.rpush.assert_called_once()
+        args, _ = handler._redis.rpush.call_args
+        payload = json.loads(args[1])
+        # Raw text reached the outbox even though drafter raised.
+        assert payload["text"] == "Raw text survives? yes."

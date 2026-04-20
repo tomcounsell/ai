@@ -1,7 +1,7 @@
 """Tests for open question extraction and stage-aware gate behavior.
 
 Tests the _extract_open_questions() function and its integration with:
-1. summarize_response() — populating expectations when open questions found
+1. draft_message() — populating expectations when open questions found
 2. Stage-aware auto-continue in agent_session_queue.py — pausing when open questions detected
 
 Run with: pytest tests/test_open_question_gate.py -v
@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from bridge.summarizer import (
-    StructuredSummary,
+from bridge.message_drafter import (
+    StructuredDraft,
     _extract_open_questions,
-    summarize_response,
+    draft_message,
 )
 
 
@@ -209,7 +209,7 @@ class TestExtractOpenQuestions:
 
 
 class TestSummarizeResponseOpenQuestions:
-    """Tests for open question integration with summarize_response()."""
+    """Tests for open question integration with draft_message()."""
 
     @pytest.mark.asyncio
     async def test_open_questions_populate_expectations(self):
@@ -223,14 +223,14 @@ class TestSummarizeResponseOpenQuestions:
             "## Solution\n\nBuild it.\n"
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Planning feature X",
                 response="• Created plan for feature X",
                 expectations=None,  # LLM did not detect questions
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(raw_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(raw_output)
 
         assert result.expectations is not None
         assert "Should we use approach A or B?" in result.expectations
@@ -246,14 +246,14 @@ class TestSummarizeResponseOpenQuestions:
             "Should I merge this now?"
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Work in progress",
                 response="• Working on it\n---\n? Should I merge this now?",
                 expectations="Should I merge this now?",
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(raw_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(raw_output)
 
         # LLM expectations should take priority
         assert result.expectations == "Should I merge this now?"
@@ -263,14 +263,14 @@ class TestSummarizeResponseOpenQuestions:
         """When raw output has no open questions, expectations stay None."""
         raw_output = "Built the feature. All tests passing."
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Feature complete",
                 response="• Built the feature\n• All tests passing",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(raw_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(raw_output)
 
         assert result.expectations is None
 
@@ -279,14 +279,14 @@ class TestSummarizeResponseOpenQuestions:
         """Empty ## Open Questions section does not populate expectations."""
         raw_output = "Plan created.\n\n## Open Questions\n\n## Solution\n\nBuild it.\n"
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Plan created",
                 response="• Created plan",
                 expectations=None,
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(raw_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(raw_output)
 
         assert result.expectations is None
 
@@ -301,14 +301,14 @@ class TestSummarizeResponseOpenQuestions:
             "## Solution\n\nImplement with Redis.\n"
         )
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Planning feature X",
                 response="• Will implement feature X with Redis",
                 expectations=None,  # LLM correctly doesn't fabricate
             )
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(raw_output)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(raw_output)
 
         # Expectations should contain the real open question, not fabricated ones
         assert result.expectations is not None
@@ -341,7 +341,7 @@ class TestStageAwareOpenQuestionGate:
     def test_no_open_questions_allows_auto_continue(self):
         """Output without open questions should not trigger the gate."""
         status_output = (
-            "Working on the implementation.\nModified bridge/summarizer.py\nRunning tests...\n"
+            "Working on the implementation.\nModified bridge/message_drafter.py\nRunning tests...\n"
         )
         questions = _extract_open_questions(status_output)
         assert questions == []
@@ -367,7 +367,7 @@ class TestStageAwareOpenQuestionGate:
         text = "## Open Questions\n\n1. Question one?\n2. Question two?\n"
         questions = _extract_open_questions(text)
         # This is how agent_session_queue.py would not format them, but how
-        # summarize_response formats them for the expectations field
+        # draft_message formats them for the expectations field
         expectations = "\n".join(f"? {q}" for q in questions)
         assert "? Question one?" in expectations
         assert "? Question two?" in expectations

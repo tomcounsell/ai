@@ -59,7 +59,7 @@ Provides teammate-specific instructions that replace the PM dispatch block when 
 - **Tools blocked**: file writes, branch creation, test execution, Agent tool (no Dev session spawning)
 - **Nudge cap**: 10 (vs 50 for normal sessions), set via `TEAMMATE_MAX_NUDGE_COUNT`
 - **Persona**: same PM persona with teammate-specific additions (conversational tone, cite file paths, direct answers)
-- **Delivery**: teammate sessions use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). Falls through to the summarizer when no delivery instruction is set.
+- **Delivery**: teammate sessions use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). Falls through to the message drafter when no delivery instruction is set.
 
 ### Metrics (`agent/teammate_metrics.py`)
 
@@ -86,13 +86,13 @@ In `_execute_agent_request()`, after determining the session type is "pm" or "te
 3. If `is_teammate` is true, injects teammate instructions via `build_teammate_instructions()` instead of PM dispatch instructions
 4. If `is_work` or classifier fails, preserves current behavior exactly
 
-### `bridge/summarizer.py`
+### `bridge/message_drafter.py` (née `bridge/summarizer.py`)
 
 Teammate sessions bypass structured formatting entirely:
 
-- `_build_summary_prompt()` appends `persona=teammate` context so the LLM produces conversational prose instead of bullets
-- `_compose_structured_summary()` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
-- `SUMMARIZER_SYSTEM_PROMPT` includes a teammate format rule: respond in prose, no bullets, no status emoji
+- `_build_draft_prompt()` appends `persona=teammate` context so the LLM produces conversational prose instead of bullets
+- `_compose_structured_draft()` returns the LLM draft directly without emoji prefix, bullet parsing, or structured template
+- `DRAFTER_SYSTEM_PROMPT` includes a teammate format rule: respond in prose, no bullets, no status emoji
 
 ### `agent/output_router.py` + `agent/agent_session_queue.py`
 
@@ -115,7 +115,7 @@ In the output router (`route_session_output()`), checks the `is_teammate` flag:
 |------|---------|
 | `agent/intent_classifier.py` | Haiku-based four-way classifier (teammate/collaboration/other/work) |
 | `agent/teammate_handler.py` | Teammate instruction builder (research-first) and nudge cap constant |
-| `bridge/summarizer.py` | Teammate prose bypass in `_compose_structured_summary()` and prompt context |
+| `bridge/message_drafter.py` | Teammate prose bypass in `_compose_structured_draft()` and prompt context |
 | `agent/teammate_metrics.py` | Popoto-backed classification and response time counters (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
 | `agent/sdk_client.py` | Integration point: classifier call and instruction injection |
 | `agent/agent_session_queue.py` | Integration point: reduced nudge cap for teammate sessions |

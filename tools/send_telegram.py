@@ -2,7 +2,7 @@
 """Send a Telegram message from the PM session via Redis outbox queue.
 
 This tool is called by the PM session via Bash to compose and send its own
-Telegram messages, bypassing the summarizer. The bridge relay task
+Telegram messages, bypassing the drafter. The bridge relay task
 (bridge/telegram_relay.py) processes the queue and sends via Telethon.
 
 Usage:
@@ -48,11 +48,11 @@ def _get_redis_connection():
 def _linkify_text(text: str) -> str:
     """Apply PR/Issue linkification to the message text.
 
-    Uses bridge.formatting.linkify_references with a default project key
+    Uses bridge.message_drafter.linkify_references with a default project key
     derived from the environment, falling back to 'ai' (this project).
     """
     try:
-        from bridge.formatting import linkify_references
+        from bridge.message_drafter import linkify_references
 
         # Try to get project key from session context
         project_key = os.environ.get("PROJECT_KEY", "ai")

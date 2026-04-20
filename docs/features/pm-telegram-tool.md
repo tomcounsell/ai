@@ -1,6 +1,6 @@
 # PM Telegram Tool
 
-PM session (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports text messages, single file attachments, and multi-file albums (up to 10 files grouped as a Telegram album).
+PM session (the PM persona) composes and sends its own Telegram messages directly, bypassing the message drafter. This gives the PM full control over tone and content when communicating with stakeholders. Supports text messages, single file attachments, and multi-file albums (up to 10 files grouped as a Telegram album).
 
 ## When to Use the Tool
 
@@ -22,11 +22,11 @@ The PM works silently through the pipeline and communicates only at decision poi
 
 ### Problem
 
-Previously, all PM session output was rewritten by the summarizer (a Haiku-powered compressor in `bridge/response.py`). The PM persona had communication guidelines but they were effectively discarded -- the summarizer overwrote everything with structured bullet points.
+Previously, all PM session output was rewritten by the message drafter (a Haiku-powered compressor in `bridge/response.py`). The PM persona had communication guidelines but they were effectively discarded -- the drafter overwrote everything with structured bullet points.
 
 ### Solution
 
-A Redis-based IPC mechanism lets PM session queue messages from a subprocess, and the bridge relay delivers them via Telethon. The summarizer becomes a safety net that only fires if the PM ends a session without self-messaging.
+A Redis-based IPC mechanism lets PM session queue messages from a subprocess, and the bridge relay delivers them via Telethon. The message drafter becomes a safety net that only fires if the PM ends a session without self-messaging.
 
 ```
 PM session (Claude Code subprocess)
@@ -48,8 +48,8 @@ Telethon send_markdown() or send_file() -> Telegram
 |-----------|------|---------|
 | Send tool | `tools/send_telegram.py` | CLI script called by PM session via Bash. Validates input, applies linkification, enforces 4096-char limit, pushes to Redis queue. Supports `--file` for single attachments and multi-file albums (repeatable, max 10 files). |
 | Bridge relay | `bridge/telegram_relay.py` | Async task in the bridge event loop. Polls `telegram:outbox:*` keys, sends via Telethon (`send_markdown` for text, `send_file` for single files or albums), records message IDs on AgentSession. Normalizes legacy `file_path` payloads to `file_paths` for backward compatibility. |
-| Formatting | `bridge/formatting.py` | Shared `linkify_references()` utility extracted from the summarizer. Converts `PR #N` and `Issue #N` to markdown links. |
-| Summarizer bypass | `bridge/response.py` | Before calling the summarizer, checks `session.has_pm_messages()`. If the PM already sent messages, skips summarizer and returns True. |
+| Formatting | `bridge/message_drafter.py` | Shared `linkify_references()` utility (folded in from the deleted `bridge/formatting.py`). Converts `PR #N` and `Issue #N` to markdown links. |
+| Drafter bypass | `bridge/response.py` | Before calling the drafter, checks `session.has_pm_messages()`. If the PM already sent messages, skips drafter and returns True. |
 | AgentSession field | `models/agent_session.py` | `pm_sent_message_ids` ListField tracks Telegram message IDs sent by the PM during a session. Helper methods: `record_pm_message()`, `has_pm_messages()`. |
 | Env injection | `agent/sdk_client.py` | Injects `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` environment variables for chat-type sessions. |
 
@@ -113,16 +113,16 @@ When a session completes, the delivery path in `agent/agent_session_queue.py` ch
 
 ## Fallback Behavior
 
-The summarizer is retained as a safety net. The decision tree in `bridge/response.py` is:
+The message drafter is retained as a safety net. The decision tree in `bridge/response.py` is:
 
 1. Refresh the AgentSession from Redis to get the latest `pm_sent_message_ids`.
-2. If `session.has_pm_messages()` returns True: skip summarizer, return True. The PM already delivered its own messages.
-3. **Parent session lookup** (issue #571): If the session itself has no PM messages but has a `parent_agent_session_id` (i.e., it is a Dev session in an SDLC flow), look up the parent PM session via `get_parent_chat_session()` and check `has_pm_messages()` on the parent. If the parent has PM messages, skip the summarizer. This prevents dual messages in SDLC flows where the PM (PM session) self-messages and the Dev session output would otherwise also be summarized and sent.
-4. If neither session nor parent has PM messages: fall through to the existing summarizer path. The response text is compressed and sent as before.
+2. If `session.has_pm_messages()` returns True: skip drafter, return True. The PM already delivered its own messages.
+3. **Parent session lookup** (issue #571): If the session itself has no PM messages but has a `parent_agent_session_id` (i.e., it is a Dev session in an SDLC flow), look up the parent PM session via `get_parent_chat_session()` and check `has_pm_messages()` on the parent. If the parent has PM messages, skip the drafter. This prevents dual messages in SDLC flows where the PM (PM session) self-messages and the Dev session output would otherwise also be drafted and sent.
+4. If neither session nor parent has PM messages: fall through to the existing drafter path. The response text is compressed and sent as before.
 
 This means:
-- If the PM persona crashes before calling the tool, the summarizer catches the output.
-- If the PM deliberately returns text without using the tool, the summarizer formats and sends it.
+- If the PM persona crashes before calling the tool, the drafter catches the output.
+- If the PM deliberately returns text without using the tool, the drafter formats and sends it.
 - If the tool or Redis fails, PM session sees a Bash tool error and can fall back to returning text.
 
 ## Environment Variables
@@ -155,6 +155,6 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 - Issue: [#641](https://github.com/tomcounsell/ai/issues/641) (file attachment support)
 - Issue: [#644](https://github.com/tomcounsell/ai/issues/644) (multi-file album support)
 - Plan: `docs/plans/pm-telegram-tool.md`
-- Prior art on summarizer architecture: PR #275 (semantic session routing), PR #456 (summarizer evidence hardening)
-- [Summarizer Format](summarizer-format.md) -- the existing summarizer that this feature partially bypasses
+- Prior art on drafter architecture (formerly "summarizer"): PR #275 (semantic session routing), PR #456 (drafter evidence hardening)
+- [Message Drafter](message-drafter.md) -- the medium-aware drafting layer (formerly the "summarizer") that this feature partially bypasses
 - [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- PM/Dev session split that this feature extends

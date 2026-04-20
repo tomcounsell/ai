@@ -24,7 +24,7 @@ class TestClassifierInformationalCompletion:
 
     def test_qa_answer_heuristic_not_status(self):
         """Informational answers should not be classified as STATUS_UPDATE by heuristics."""
-        from bridge.summarizer import OutputType, _classify_with_heuristics
+        from bridge.message_drafter import OutputType, _classify_with_heuristics
 
         # Typical informational answer about a system feature (Teammate mode)
         qa_answer = (
@@ -43,7 +43,7 @@ class TestClassifierInformationalCompletion:
 
     def test_architecture_explanation_heuristic_not_status(self):
         """Architecture explanations should not be status updates."""
-        from bridge.summarizer import OutputType, _classify_with_heuristics
+        from bridge.message_drafter import OutputType, _classify_with_heuristics
 
         explanation = (
             "Here's how the routing system handles messages: When a Telegram message "
@@ -58,7 +58,7 @@ class TestClassifierInformationalCompletion:
     @pytest.mark.asyncio
     async def test_qa_answer_classified_as_completion(self):
         """Full classifier should classify informational answers as COMPLETION."""
-        from bridge.summarizer import OutputType, classify_output
+        from bridge.message_drafter import OutputType, classify_output
 
         qa_answer = (
             "The summarizer feature works by classifying agent output into five categories: "

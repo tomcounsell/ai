@@ -77,7 +77,7 @@ The sessions table column previously labeled "Type" is now "Persona" with displa
 | `models/agent_session.py` | Enum imports, factory methods (create_pm, create_teammate), properties (is_pm, is_teammate) |
 | `bridge/telegram_bridge.py` | SessionType routing: PM, TEAMMATE, or DEV based on persona |
 | `bridge/routing.py` | PersonaType, ClassificationType, `resolve_persona()` |
-| `bridge/summarizer.py` | session_mode checks with PersonaType.TEAMMATE |
+| `bridge/message_drafter.py` | session_mode checks with PersonaType.TEAMMATE |
 | `agent/sdk_client.py` | SessionType.PM and SessionType.TEAMMATE for routing |
 | `agent/agent_session_queue.py` | SessionType.PM defaults, TEAMMATE detection |
 | `agent/hooks/pre_tool_use.py` | SessionType.PM for env var comparison |

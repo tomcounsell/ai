@@ -10,6 +10,8 @@ last_comment_id: IC_kwDOEYGa0877y3Va
 
 # Summarizer Fallback: Agent Self-Summary via Session Steering
 
+> **Note (2026-04-20):** Implementation renamed to `message_drafter` per [issue #1035](https://github.com/tomcounsell/ai/issues/1035). All references below to `bridge/summarizer.py`, `summarize_response`, `SUMMARIZER_SYSTEM_PROMPT`, `SummarizedResponse`, and `SELF_SUMMARY_INSTRUCTION` now live in `bridge/message_drafter.py` as `draft_message`, `DRAFTER_SYSTEM_PROMPT`, `MessageDraft`, and `SELF_DRAFT_INSTRUCTION` respectively. The fallback-steering mechanism is unchanged — only the names moved. See `docs/features/message-drafter.md` for the current feature doc.
+
 ## Problem
 
 When both summarizer backends (Haiku and OpenRouter) fail, the delivery path at `bridge/summarizer.py:1495-1506` truncates raw agent output and sends it verbatim to Telegram. This raw output contains narrated train-of-thought text ("Let me investigate...", "Let me check...") that violates PM-voice communication standards.

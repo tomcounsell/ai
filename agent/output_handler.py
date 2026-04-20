@@ -153,6 +153,31 @@ class LoggingOutputHandler:
         logger.info(f"[worker] Reaction: chat={chat_id} msg={msg_id} emoji={emoji}")
 
 
+def _read_drafter_in_handler_flag() -> bool:
+    """Read MESSAGE_DRAFTER_IN_HANDLER flag once, defaulting to true.
+
+    Per plan docs/plans/message-drafter.md Race 3: the flag is a startup-config,
+    not a runtime-config. Reading once at handler __init__ time keeps the flag
+    sticky across the lifetime of the handler even if an operator flips it
+    mid-session.
+
+    Resolution order: environment variable (for quick rollback via
+    ``~/Desktop/Valor/.env``), then ``config.settings.FeatureSettings``
+    (canonical default = True). Accepts "0", "false", "no", "off"
+    (case-insensitive) as disable.
+    """
+    env_val = os.environ.get("MESSAGE_DRAFTER_IN_HANDLER")
+    if env_val is not None:
+        return env_val.strip().lower() not in {"0", "false", "no", "off"}
+    try:
+        from config.settings import Settings
+
+        return bool(Settings().features.message_drafter_in_handler)
+    except Exception:
+        # Settings load failed (e.g. .env missing during tests) — fail safe True.
+        return True
+
+
 class TelegramRelayOutputHandler:
     """Route agent output to the Redis outbox for Telegram delivery.
 
@@ -160,8 +185,15 @@ class TelegramRelayOutputHandler:
     format as ``tools/send_telegram.py``.  The bridge relay
     (``bridge/telegram_relay.py``) polls these keys and delivers via Telethon.
 
+    When ``MESSAGE_DRAFTER_IN_HANDLER`` is true (default), every ``send()``
+    invocation routes through ``bridge.message_drafter.draft_message`` before
+    the payload is written to Redis. This closes the worker-bypass gap where
+    worker-executed PM sessions previously wrote raw text straight to the
+    outbox, producing `MessageTooLongError` on content >4096 chars
+    (see docs/plans/message-drafter.md §Problem, evidence §4–§7).
+
     An optional *file_handler* enables dual-write so output is also persisted
-    to the local file log for debugging and audit.  Redis errors are caught and
+    to the local file log for debugging and audit. Redis errors are caught and
     logged -- they never propagate to the caller.
     """
 
@@ -176,6 +208,9 @@ class TelegramRelayOutputHandler:
         self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self._file_handler = file_handler
         self._redis = None  # Lazy connection
+        # Read the drafter flag ONCE at init (Race 3 in the plan). Flipping the
+        # env var mid-session does not affect an already-constructed handler.
+        self._drafter_enabled = _read_drafter_in_handler_flag()
 
     def _get_redis(self):
         """Return a Redis connection, creating one lazily on first use."""
@@ -210,20 +245,59 @@ class TelegramRelayOutputHandler:
         session_id = getattr(session, "session_id", None) or chat_id
         reply_to = int(reply_to_msg_id) if reply_to_msg_id else None
 
-        payload = {
+        # Run the drafter in-process BEFORE writing to the outbox. This is the
+        # critical fix from docs/plans/message-drafter.md §Part C — it closes
+        # the worker-bypass gap where the worker's send_cb path wrote raw text
+        # straight to Redis and bypassed all length/format compliance.
+        delivery_text = text
+        file_paths: list[str] | None = None
+        if self._drafter_enabled:
+            try:
+                from bridge.message_drafter import draft_message
+
+                draft = await draft_message(
+                    text,
+                    session=session,
+                    medium="telegram",
+                )
+                # If the drafter produced a drafted result, use its text. When
+                # was_drafted is False (short output or empty), keep the original
+                # raw text (drafter returns it verbatim in that case).
+                if draft.text:
+                    delivery_text = draft.text
+                if draft.full_output_file is not None:
+                    file_paths = [str(draft.full_output_file)]
+            except Exception as e:
+                # Drafter failure MUST NOT block delivery. Fall back to raw text;
+                # the relay length guard (bridge/telegram_relay.py) catches any
+                # oversize payloads as a last line of defense.
+                logger.warning(
+                    "Drafter failed in TelegramRelayOutputHandler.send (%s); "
+                    "falling back to raw text",
+                    e,
+                )
+
+        payload: dict[str, Any] = {
             "chat_id": chat_id,
             "reply_to": reply_to,
-            "text": text,
+            "text": delivery_text,
             "session_id": session_id,
             "timestamp": time.time(),
         }
+        if file_paths:
+            payload["file_paths"] = file_paths
 
         queue_key = f"telegram:outbox:{session_id}"
         try:
             r = self._get_redis()
             r.rpush(queue_key, json.dumps(payload))
             r.expire(queue_key, self.OUTBOX_TTL)
-            logger.info(f"Queued output to {queue_key} ({len(text)} chars)")
+            logger.info(
+                "Queued output to %s (%d chars, files=%d)",
+                queue_key,
+                len(delivery_text),
+                len(file_paths or []),
+            )
         except Exception as e:
             logger.error(f"Failed to write to Redis outbox {queue_key}: {e}")
 

@@ -3,8 +3,8 @@
 Covers the gaps identified in PR #180 review:
 1. AgentSession history tracking (append_history, cap at 20, get_stage_progress)
 2. AgentSession link tracking (set_link, get_links)
-3. Summarizer composition (_compose_structured_summary)
-4. Summarizer with session context (summarize_response with session param)
+3. Summarizer composition (_compose_structured_draft)
+4. Summarizer with session context (draft_message with session param)
 5. Markdown send (send_markdown fallback behavior)
 6. Backward compat (SessionLog shim, sender property)
 7. Full lifecycle simulations (SDLC, Teammate, chit-chat)
@@ -247,34 +247,34 @@ class TestGetStatusEmoji:
     """Tests for _get_status_emoji."""
 
     def test_no_session_completion(self):
-        from bridge.summarizer import _get_status_emoji
+        from bridge.message_drafter import _get_status_emoji
 
         assert _get_status_emoji(None, is_completion=True) == "✅"
 
     def test_no_session_non_completion(self):
-        from bridge.summarizer import _get_status_emoji
+        from bridge.message_drafter import _get_status_emoji
 
         assert _get_status_emoji(None, is_completion=False) == "⏳"
 
     def test_completed_session(self, sdlc_session):
-        from bridge.summarizer import _get_status_emoji
+        from bridge.message_drafter import _get_status_emoji
 
         assert _get_status_emoji(sdlc_session) == "✅"
 
     def test_active_session_completion(self, session):
         """Active session with is_completion=True (default) returns ✅."""
-        from bridge.summarizer import _get_status_emoji
+        from bridge.message_drafter import _get_status_emoji
 
         assert _get_status_emoji(session) == "✅"
 
     def test_active_session_non_completion(self, session):
         """Active session with is_completion=False returns ⏳."""
-        from bridge.summarizer import _get_status_emoji
+        from bridge.message_drafter import _get_status_emoji
 
         assert _get_status_emoji(session, is_completion=False) == "⏳"
 
     def test_failed_session(self, redis_test_db):
-        from bridge.summarizer import _get_status_emoji
+        from bridge.message_drafter import _get_status_emoji
 
         s = AgentSession.create(
             session_id="failed-1",
@@ -285,20 +285,20 @@ class TestGetStatusEmoji:
         assert _get_status_emoji(s) == "❌"
 
 
-class TestComposeStructuredSummary:
-    """Tests for _compose_structured_summary."""
+class TestComposeStructuredDraft:
+    """Tests for _compose_structured_draft."""
 
     def test_no_session_plain_text(self):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
-        result = _compose_structured_summary("Done.", session=None, is_completion=True)
+        result = _compose_structured_draft("Done.", session=None, is_completion=True)
         assert "✅" in result
         assert "Done." in result
 
     def test_sdlc_session_full_structure(self, sdlc_session):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "\u2022 Unified AgentSession model\n\u2022 Bullet-point summarizer",
             session=sdlc_session,
             is_completion=True,
@@ -310,9 +310,9 @@ class TestComposeStructuredSummary:
         assert "\u2022 Unified AgentSession model" in result
 
     def test_qa_session_no_stages(self, qa_session):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "The session queue uses FILO ordering per project.",
             session=qa_session,
             is_completion=True,
@@ -325,9 +325,9 @@ class TestComposeStructuredSummary:
         assert "FILO" in result
 
     def test_chat_session_minimal(self, chat_session):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "Hey! All good here.",
             session=chat_session,
             is_completion=True,
@@ -335,18 +335,18 @@ class TestComposeStructuredSummary:
         assert "Hey! All good here." in result
 
     def test_no_message_echo_in_summary(self, sdlc_session):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
         # New format: no message echo on first line, just emoji
-        result = _compose_structured_summary("• Work done", session=sdlc_session)
+        result = _compose_structured_draft("• Work done", session=sdlc_session)
         first_line = result.split("\n")[0]
         # First line is just the emoji, no message text
         assert first_line.strip() == "✅"
 
     def test_emoji_not_doubled(self):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
-        result = _compose_structured_summary("✅ Already has emoji")
+        result = _compose_structured_draft("✅ Already has emoji")
         # Emoji is on its own line, the text follows — but only one emoji prefix
         assert result.startswith("✅\n")
 
@@ -355,68 +355,66 @@ class TestComposeStructuredSummary:
 
 
 class TestSummarizeWithSession:
-    """Tests for summarize_response passing session context."""
+    """Tests for draft_message passing session context."""
 
     @pytest.mark.asyncio
     async def test_short_response_still_summarized(self):
         """All non-empty responses are now summarized (no threshold)."""
-        from bridge.summarizer import StructuredSummary, summarize_response
+        from bridge.message_drafter import StructuredDraft, draft_message
 
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
-                context_summary="", response="Done ✅", expectations=None
-            )
+            return_value=StructuredDraft(context_summary="", response="Done ✅", expectations=None)
         )
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response("Done.", session=None)
-        assert result.was_summarized is True
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message("Done.", session=None)
+        assert result.was_drafted is True
         mock_haiku.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_long_response_with_sdlc_session(self, sdlc_session):
-        from bridge.summarizer import StructuredSummary, summarize_response
+        from bridge.message_drafter import StructuredDraft, draft_message
 
         long_text = "Detailed implementation work. " * 200
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="Building feature",
                 response="\u2022 Built the feature\n\u2022 Tests passing",
                 expectations=None,
             )
         )
 
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(long_text, session=sdlc_session)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(long_text, session=sdlc_session)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         # The haiku output is included
         assert "Built the feature" in result.text
 
     @pytest.mark.asyncio
     async def test_long_response_with_qa_session(self, qa_session):
-        from bridge.summarizer import StructuredSummary, summarize_response
+        from bridge.message_drafter import StructuredDraft, draft_message
 
         long_text = "Here is a very long explanation. " * 200
         mock_haiku = AsyncMock(
-            return_value=StructuredSummary(
+            return_value=StructuredDraft(
                 context_summary="",
                 response="The session queue uses FILO ordering.",
                 expectations=None,
             )
         )
 
-        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
-            result = await summarize_response(long_text, session=qa_session)
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(long_text, session=qa_session)
 
-        assert result.was_summarized is True
+        assert result.was_drafted is True
         # No stage-related content for Teammate
         assert "FILO" in result.text
 
     @pytest.mark.asyncio
     async def test_build_prompt_includes_session_context(self, sdlc_session):
-        from bridge.summarizer import _build_summary_prompt
+        from bridge.message_drafter import _build_draft_prompt
 
-        prompt = _build_summary_prompt(
+        prompt = _build_draft_prompt(
             "some output text",
             {"commits": ["abc1234"]},
             session=sdlc_session,
@@ -559,7 +557,7 @@ class TestSDLCLifecycle:
 
     @pytest.mark.asyncio
     async def test_full_sdlc_flow(self, redis_test_db):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
         # 1. Create session (enqueue)
         s = AgentSession.create(
@@ -612,7 +610,7 @@ class TestSDLCLifecycle:
         s.set_link("pr", "https://github.com/org/repo/pull/180")
 
         # 6. Compose structured summary
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "\u2022 Unified AgentSession model\n\u2022 Tests passing",
             session=s,
             is_completion=True,
@@ -632,7 +630,7 @@ class TestSDLCClassificationTypeLifecycle:
     @pytest.mark.asyncio
     async def test_sdlc_classified_session_renders_structured(self, redis_test_db):
         """Session with classification_type='sdlc' renders stage progress after stages are added."""
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
         # Create session with classification_type='sdlc' (set by classifier)
         s = AgentSession.create(
@@ -659,7 +657,7 @@ class TestSDLCClassificationTypeLifecycle:
         s.save()
         s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "\u2022 Fixed classifier to support sdlc type\n\u2022 Fixed auto-continue propagation",
             session=s,
             is_completion=False,
@@ -676,7 +674,7 @@ class TestSDLCClassificationTypeLifecycle:
         a new AgentSession is created with classification_type='sdlc' and the
         stage history from the original session.
         """
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
         # Simulate the continuation session (created by _push_agent_session with propagated type)
         s = AgentSession.create(
@@ -703,7 +701,7 @@ class TestSDLCClassificationTypeLifecycle:
         s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
         s.set_link("pr", "https://github.com/valorengels/ai/pull/277")
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "\u2022 All stages complete\n\u2022 PR created",
             session=s,
             is_completion=True,
@@ -718,7 +716,7 @@ class TestQALifecycle:
 
     @pytest.mark.asyncio
     async def test_qa_flow(self, redis_test_db):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
         s = AgentSession.create(
             session_id="qa-full-1",
@@ -731,7 +729,7 @@ class TestQALifecycle:
         )
         s.append_history("user", "How does the session queue work?")
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "The session queue uses a FILO stack with per-project sequential workers.",
             session=s,
             is_completion=True,
@@ -750,7 +748,7 @@ class TestChitChatLifecycle:
 
     @pytest.mark.asyncio
     async def test_chat_flow(self, redis_test_db):
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
         s = AgentSession.create(
             session_id="chat-full-1",
@@ -762,7 +760,7 @@ class TestChitChatLifecycle:
             message_text="Hey, how's it going?",
         )
 
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "All good! Working through the backlog.",
             session=s,
             is_completion=True,

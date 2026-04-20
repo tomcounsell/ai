@@ -309,12 +309,12 @@ class TestFullChainIntegration:
     """Integration: hook fires -> session resolved -> stage written -> summarizer renders."""
 
     def test_hook_to_summarizer_chain(self, redis_test_db):
-        """Full chain: session renders summary text via _compose_structured_summary.
+        """Full chain: session renders summary text via _compose_structured_draft.
 
         Stage progress lines and link footers were removed in #488 (SDLC stage
         consolidation). The structured summary now renders emoji + summary text.
         """
-        from bridge.summarizer import _compose_structured_summary
+        from bridge.message_drafter import _compose_structured_draft
 
         # 1. Create session with stage history (as hooks would write)
         s = AgentSession.create(
@@ -340,7 +340,7 @@ class TestFullChainIntegration:
         s.set_link("pr", "https://github.com/tomcounsell/ai/pull/210")
 
         # 2. Compose structured summary
-        result = _compose_structured_summary(
+        result = _compose_structured_draft(
             "Fixed connectivity gaps",
             session=s,
             is_completion=True,

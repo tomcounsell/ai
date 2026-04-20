@@ -88,7 +88,7 @@ Previously used raw `r.keys(f"*{session_id}*")` which is O(N) across the entire 
 ## Testing
 
 - 28 new tests in `tests/unit/test_pipeline_integrity.py`
-- Updated existing tests in `test_pipeline_graph.py`, `test_observer.py`, `test_summarizer.py`
+- Updated existing tests in `test_pipeline_graph.py`, `test_observer.py`, `test_message_drafter.py`
 - 30 tests in `tests/unit/test_health_check.py` covering watchdog unhealthy flag and stage injection
 
 ## Tracking

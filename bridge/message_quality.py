@@ -7,7 +7,7 @@ to the user as-is.
 
 import re
 
-# Process narration patterns — shared with bridge/summarizer.py
+# Process narration patterns — shared with bridge/message_drafter.py
 # These detect "Let me check...", "I'll look at...", etc.
 PROCESS_NARRATION_PATTERNS = [
     re.compile(r"^Let me (check|look|read|examine|review|investigate|search|explore)"),

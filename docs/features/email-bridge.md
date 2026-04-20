@@ -57,6 +57,20 @@ Messages that do match are marked `SEEN` immediately on fetch (before parsing) t
 
 `AgentSession` callbacks are keyed by `(project_key, transport)`. The worker resolves the correct `OutputHandler` by looking up `(project_key, "email")` instead of the Telegram default. This keeps email and Telegram sessions fully isolated with no cross-contamination of delivery channels.
 
+### Outbound Drafting (medium="email")
+
+`EmailOutputHandler.send()` routes every outbound reply through `bridge.message_drafter.draft_message(text, session=session, medium="email")` before the body is wrapped as MIME. This is the same plumbing the Telegram handler uses — the drafter is the single wire-format compliance point for all agent output (see [message-drafter.md](message-drafter.md)).
+
+Per-medium rules for email today:
+
+- **Plain prose, no markdown on the wire.** Future validator work will reject markdown tables, headings, and fenced code blocks for `medium="email"` (staged in the message-drafter plan follow-ups).
+- **No HTML / multipart bodies.** `text/plain` MIME only — see the drafter's No-Gos.
+- **Reactions are no-ops.** `EmailOutputHandler.react()` returns early (there is no emoji-reaction analog for SMTP).
+
+**Feature flag: `MESSAGE_DRAFTER_IN_HANDLER`** (default `true`). Set to `false` in `~/Desktop/Valor/.env` and restart the worker to revert to raw-text pass-through; the drafter is skipped and the agent's text is wrapped as MIME verbatim. The flag is a temporary rollback safety net and is read once at handler `__init__` (not per-send).
+
+**Fail-open.** If `draft_message` raises, the handler falls back to the raw text — email delivery is never blocked by a drafter failure.
+
 ### Worker Registration
 
 At startup, `worker/__main__.py` registers `EmailOutputHandler` for each project that has **any** email routing configured — either `email.contacts` or `email.domains` (or both). The gate condition is:
@@ -214,6 +228,7 @@ Or via the service script:
 
 ## See Also
 
+- [Message Drafter](message-drafter.md) — the medium-aware drafting layer that owns wire-format compliance for outbound email (and Telegram)
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — how the worker resolves output handlers
 - [Worker Service](worker-service.md) — standalone worker details
 - [Deployment](deployment.md) — email bridge setup in the service topology
