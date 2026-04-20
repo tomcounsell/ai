@@ -122,12 +122,12 @@ Note: `pre_tool_use.py`'s `_start_pipeline_stage(parent_session_id: str, ...)` u
 
 ## Test Impact
 
-- [ ] `tests/e2e/test_context_propagation.py` (lines 82, 88, 111, 118, 133, 149, 185, 231, 252) — UPDATE: replace `parent_session_id=...` kwarg and `.parent_session_id` property read with `parent_agent_session_id`
-- [ ] `tests/unit/test_steer_child.py` (lines 31, 154) — UPDATE: replace `.parent_session_id` property set/read with `.parent_agent_session_id`
-- [ ] `tests/integration/test_agent_session_queue_session_type.py:47` — UPDATE: replace `parent_session_id=...` kwarg with `parent_agent_session_id`
-- [ ] `tests/integration/test_parent_child_round_trip.py:125` — UPDATE (required): rename `test_parent_session_id_none_without_parent` → `test_no_parent_when_not_set` so the Success Criterion grep stays clean
-- [ ] `tests/unit/test_hook_user_prompt_submit.py:239` — UPDATE (required): rename `test_main_creates_session_when_parent_session_id_set` → `test_main_creates_session_when_parent_set`; confirm test body uses `parent_agent_session_id`
-- [ ] `tests/unit/test_summarizer.py:1995,2021` — UPDATE (required): rewrite docstrings to use `parent_agent_session_id` / "parent link" phrasing so the grep stays clean
+- [x] `tests/e2e/test_context_propagation.py` (lines 82, 88, 111, 118, 133, 149, 185, 231, 252) — UPDATE: replace `parent_session_id=...` kwarg and `.parent_session_id` property read with `parent_agent_session_id`
+- [x] `tests/unit/test_steer_child.py` (lines 31, 154) — UPDATE: replace `.parent_session_id` property set/read with `.parent_agent_session_id`
+- [x] `tests/integration/test_agent_session_queue_session_type.py:47` — UPDATE: replace `parent_session_id=...` kwarg with `parent_agent_session_id`
+- [x] `tests/integration/test_parent_child_round_trip.py:125` — UPDATE (required): rename `test_parent_session_id_none_without_parent` → `test_no_parent_when_not_set` so the Success Criterion grep stays clean
+- [x] `tests/unit/test_hook_user_prompt_submit.py:239` — UPDATE (required): rename `test_main_creates_session_when_parent_session_id_set` → `test_main_creates_session_when_parent_set`; confirm test body uses `parent_agent_session_id`
+- [x] `tests/unit/test_summarizer.py:1995,2021` — UPDATE (required): rewrite docstrings to use `parent_agent_session_id` / "parent link" phrasing so the grep stays clean
 
 ## Rabbit Holes
 
