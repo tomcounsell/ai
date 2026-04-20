@@ -482,3 +482,283 @@ class TestDrafterInHandler:
         payload = json.loads(args[1])
         # Raw text reached the outbox even though drafter raised.
         assert payload["text"] == "Raw text survives? yes."
+
+
+class TestDrafterFailureRecovery:
+    """Tests for restored drafter-failure recovery paths (PR #1077 review tech debt).
+
+    When the consolidation folded bridge/response.py::send_response_with_files
+    into TelegramRelayOutputHandler.send, three recovery paths were dropped.
+    These tests exercise the restored branches:
+
+    1. ``needs_self_draft`` → inject ``SELF_DRAFT_INSTRUCTION`` via steering.
+    2. Self-draft loop prevention via ``peek_steering_sender``.
+    3. Narration fallback substitution when steering is unavailable.
+    4. Persistence of ``context_summary`` / ``expectations`` on success.
+    """
+
+    def _make_handler(self, *, drafter_enabled: bool = True):
+        import os
+        from unittest.mock import MagicMock
+
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        old = os.environ.get("MESSAGE_DRAFTER_IN_HANDLER")
+        os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = "true" if drafter_enabled else "false"
+        try:
+            h = TelegramRelayOutputHandler()
+        finally:
+            if old is None:
+                os.environ.pop("MESSAGE_DRAFTER_IN_HANDLER", None)
+            else:
+                os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = old
+        h._redis = MagicMock()
+        return h
+
+    # ── 1. needs_self_draft injects steering and defers delivery ──
+
+    def test_needs_self_draft_pushes_steering_and_defers_outbox_write(self):
+        """When drafter returns needs_self_draft=True, steering is injected
+        and the outbox write is skipped (delivery deferred to agent turn)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler(drafter_enabled=True)
+        session = MagicMock()
+        session.session_id = "sess-self-draft"
+
+        drafted = MessageDraft(
+            text="",
+            full_output_file=None,
+            was_drafted=False,
+            needs_self_draft=True,
+            artifacts={},
+        )
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch("agent.steering.peek_steering_sender", return_value=None),
+            patch("agent.steering.push_steering_message") as mock_push,
+        ):
+            asyncio.run(handler.send("123", "Needs a self draft? yes", 0, session=session))
+
+        # Steering was pushed with the drafter-fallback sender tag.
+        mock_push.assert_called_once()
+        args, kwargs = mock_push.call_args
+        assert args[0] == "sess-self-draft"
+        assert kwargs.get("sender") == "drafter-fallback" or (
+            len(args) > 2 and args[2] == "drafter-fallback"
+        )
+
+        # Outbox write was skipped (delivery deferred).
+        handler._redis.rpush.assert_not_called()
+
+    # ── 2. Loop prevention: don't push steering twice for the same session ──
+
+    def test_needs_self_draft_skips_steering_if_already_pending(self):
+        """If peek_steering_sender returns 'drafter-fallback' (already pending),
+        skip pushing a second steering and fall through to narration gate."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler(drafter_enabled=True)
+        session = MagicMock()
+        session.session_id = "sess-loop-guard"
+
+        drafted = MessageDraft(
+            text="",
+            full_output_file=None,
+            was_drafted=False,
+            needs_self_draft=True,
+            artifacts={},
+        )
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch(
+                "agent.steering.peek_steering_sender",
+                return_value="drafter-fallback",
+            ),
+            patch("agent.steering.push_steering_message") as mock_push,
+        ):
+            # Non-narration raw text to prove narration fallback does NOT fire.
+            raw = "Here is the actual result: see https://example.com/foo for details."
+            asyncio.run(handler.send("123", raw, 0, session=session))
+
+        # Steering must NOT be pushed a second time.
+        mock_push.assert_not_called()
+        # Outbox was written (no deferral).
+        handler._redis.rpush.assert_called_once()
+        args, _ = handler._redis.rpush.call_args
+        payload = json.loads(args[1])
+        # Raw text survives since it is not narration-only.
+        assert payload["text"] == raw
+
+    # ── 3. Narration fallback triggers when steering unavailable ──
+
+    def test_narration_fallback_substitutes_when_steering_skipped(self):
+        """When needs_self_draft=True, steering loop-guard blocks it, AND the
+        raw text is pure narration, substitute NARRATION_FALLBACK_MESSAGE."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+        from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
+
+        handler = self._make_handler(drafter_enabled=True)
+        session = MagicMock()
+        session.session_id = "sess-narration"
+
+        drafted = MessageDraft(
+            text="",
+            full_output_file=None,
+            was_drafted=False,
+            needs_self_draft=True,
+            artifacts={},
+        )
+
+        # Pure process narration → is_narration_only returns True.
+        narration_text = "Let me check the logs. Now let me look at the config."
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch(
+                "agent.steering.peek_steering_sender",
+                return_value="drafter-fallback",  # skips steering
+            ),
+            patch("agent.steering.push_steering_message") as mock_push,
+        ):
+            asyncio.run(handler.send("123", narration_text, 0, session=session))
+
+        mock_push.assert_not_called()
+        handler._redis.rpush.assert_called_once()
+        args, _ = handler._redis.rpush.call_args
+        payload = json.loads(args[1])
+        assert payload["text"] == NARRATION_FALLBACK_MESSAGE
+
+    def test_narration_fallback_skipped_when_text_has_substance(self):
+        """If raw text is substantive (not pure narration), the fallback
+        message must NOT be substituted — deliver the raw text instead."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+        from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
+
+        handler = self._make_handler(drafter_enabled=True)
+        session = MagicMock()
+        session.session_id = "sess-substance"
+
+        drafted = MessageDraft(
+            text="",
+            full_output_file=None,
+            was_drafted=False,
+            needs_self_draft=True,
+            artifacts={},
+        )
+
+        substantive_text = "Let me check the config. Found the bug at agent/output_handler.py:42."
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch(
+                "agent.steering.peek_steering_sender",
+                return_value="drafter-fallback",
+            ),
+        ):
+            asyncio.run(handler.send("123", substantive_text, 0, session=session))
+
+        args, _ = handler._redis.rpush.call_args
+        payload = json.loads(args[1])
+        assert payload["text"] == substantive_text
+        assert payload["text"] != NARRATION_FALLBACK_MESSAGE
+
+    # ── 4. context_summary / expectations persisted on success ──
+
+    def test_routing_fields_persisted_on_successful_draft(self):
+        """When drafter succeeds with was_drafted=True, context_summary and
+        expectations must be written back to the AgentSession and saved."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler(drafter_enabled=True)
+
+        # Build a session that records field assignments.
+        session = MagicMock()
+        session.session_id = "sess-routing"
+
+        drafted = MessageDraft(
+            text="final drafted text",
+            full_output_file=None,
+            was_drafted=True,
+            needs_self_draft=False,
+            artifacts={},
+            context_summary="Investigating the router bug",
+            expectations="Needs a yes/no from human",
+        )
+
+        with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
+            asyncio.run(handler.send("123", "Raw? yes raw.", 0, session=session))
+
+        assert session.context_summary == "Investigating the router bug"
+        assert session.expectations == "Needs a yes/no from human"
+        session.save.assert_called_once()
+
+    def test_routing_fields_not_persisted_when_draft_skipped(self):
+        """If was_drafted=False (short output / no drafting), routing fields
+        must NOT be written to the session."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler(drafter_enabled=True)
+        session = MagicMock()
+        session.session_id = "sess-no-persist"
+        # Clear the auto-generated attributes to detect writes.
+        del session.context_summary
+        del session.expectations
+
+        drafted = MessageDraft(
+            text="short raw text",
+            full_output_file=None,
+            was_drafted=False,
+            needs_self_draft=False,
+            artifacts={},
+            context_summary="Should NOT be persisted",
+            expectations="Neither should this",
+        )
+
+        with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
+            asyncio.run(handler.send("123", "Short? yes.", 0, session=session))
+
+        # save() must not have been called since was_drafted=False.
+        session.save.assert_not_called()
+
+    def test_routing_field_persistence_failure_is_silent(self):
+        """A save() exception must NOT propagate — delivery must still succeed."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._make_handler(drafter_enabled=True)
+        session = MagicMock()
+        session.session_id = "sess-save-fails"
+        session.save.side_effect = RuntimeError("redis write failed")
+
+        drafted = MessageDraft(
+            text="drafted text",
+            full_output_file=None,
+            was_drafted=True,
+            needs_self_draft=False,
+            artifacts={},
+            context_summary="topic",
+            expectations=None,
+        )
+
+        with patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)):
+            # Must not raise.
+            asyncio.run(handler.send("123", "Text? yes.", 0, session=session))
+
+        # Delivery still happened.
+        handler._redis.rpush.assert_called_once()

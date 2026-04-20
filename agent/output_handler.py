@@ -251,6 +251,7 @@ class TelegramRelayOutputHandler:
         # straight to Redis and bypassed all length/format compliance.
         delivery_text = text
         file_paths: list[str] | None = None
+        steering_deferred = False
         if self._drafter_enabled:
             try:
                 from bridge.message_drafter import draft_message
@@ -267,6 +268,29 @@ class TelegramRelayOutputHandler:
                     delivery_text = draft.text
                 if draft.full_output_file is not None:
                     file_paths = [str(draft.full_output_file)]
+
+                # ── Self-draft fallback via session steering ──
+                # When all drafter backends fail (needs_self_draft=True), inject
+                # a steering message asking the agent to self-draft. This
+                # mirrors the pre-consolidation behavior from the deleted
+                # bridge/response.py::send_response_with_files. Silent failure:
+                # any error here MUST NOT block delivery.
+                if getattr(draft, "needs_self_draft", False):
+                    steering_deferred = self._inject_self_draft_steering(session)
+                    if not steering_deferred:
+                        # Steering unavailable or failed — apply narration gate
+                        # on the original text as a last resort. Substitutes the
+                        # NARRATION_FALLBACK_MESSAGE when the raw text is pure
+                        # process narration with no substantive content.
+                        delivery_text = self._apply_narration_fallback(text)
+
+                # ── Persist routing fields to session ──
+                # When the drafter succeeds, write context_summary and
+                # expectations back to the AgentSession. bridge/session_router.py
+                # and bridge/telegram_bridge.py still read session.expectations
+                # from the outbound path. Silent failure.
+                if session is not None and getattr(draft, "was_drafted", False):
+                    self._persist_routing_fields(session, draft)
             except Exception as e:
                 # Drafter failure MUST NOT block delivery. Fall back to raw text;
                 # the relay length guard (bridge/telegram_relay.py) catches any
@@ -276,6 +300,17 @@ class TelegramRelayOutputHandler:
                     "falling back to raw text",
                     e,
                 )
+
+        # If steering was deferred, the agent will self-draft on the next turn.
+        # Skip the outbox write but still dual-write to file for audit.
+        if steering_deferred:
+            logger.info(
+                "Delivery deferred to agent self-draft (steering injected) for session %s",
+                session_id,
+            )
+            if self._file_handler is not None:
+                await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+            return
 
         payload: dict[str, Any] = {
             "chat_id": chat_id,
@@ -304,6 +339,123 @@ class TelegramRelayOutputHandler:
         # Dual-write to file handler for audit/debugging
         if self._file_handler is not None:
             await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+
+    def _inject_self_draft_steering(self, session: Any) -> bool:
+        """Push a self-draft instruction to the session's steering queue.
+
+        Called when ``draft.needs_self_draft`` is True (all LLM drafter backends
+        failed). The agent will notice the steering message at its next turn
+        boundary and re-draft its own output.
+
+        Includes loop prevention via ``peek_steering_sender``: if a prior
+        self-draft steering message is already pending, returns False so the
+        caller falls through to the narration gate rather than looping.
+
+        Returns:
+            True if steering was successfully pushed (delivery should be
+            deferred), False if steering was skipped or failed (caller should
+            apply narration fallback).
+        """
+        session_id = getattr(session, "session_id", None) if session else None
+        if not session_id:
+            return False
+
+        # Loop prevention: don't push a second self-draft steering message if
+        # one is already pending (the agent's self-draft also failed).
+        try:
+            from agent.steering import peek_steering_sender
+
+            if peek_steering_sender(session_id) == "drafter-fallback":
+                logger.warning(
+                    "Self-summary steering already pending for session %s; "
+                    "falling through to narration gate",
+                    session_id,
+                )
+                return False
+        except Exception:
+            # peek failed, continue with steering attempt
+            pass
+
+        try:
+            from agent.steering import push_steering_message
+            from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
+
+            push_steering_message(
+                session_id,
+                SELF_DRAFT_INSTRUCTION,
+                sender="drafter-fallback",
+            )
+            logger.info(
+                "Injected self-summary steering for session %s (drafter failed)",
+                session_id,
+            )
+            return True
+        except Exception as steer_err:
+            logger.warning(
+                "Steering push failed (non-fatal) for session %s: %s",
+                session_id,
+                steer_err,
+            )
+            return False
+
+    def _apply_narration_fallback(self, text: str) -> str:
+        """Substitute NARRATION_FALLBACK_MESSAGE when text is pure narration.
+
+        Invoked when the drafter fails AND self-draft steering is unavailable
+        or already-pending. Mirrors the narration gate in the deleted
+        ``bridge/response.py::send_response_with_files``.
+
+        Returns the NARRATION_FALLBACK_MESSAGE if ``is_narration_only`` judges
+        the first 500 chars of ``text`` to be pure process narration.
+        Otherwise returns the original text unchanged.
+        """
+        try:
+            from bridge.message_quality import (
+                NARRATION_FALLBACK_MESSAGE,
+                is_narration_only,
+            )
+
+            if is_narration_only(text[:500]):
+                logger.info("Narration gate triggered on drafter fallback path")
+                return NARRATION_FALLBACK_MESSAGE
+        except Exception as narr_err:
+            logger.warning(
+                "Narration gate check failed (non-fatal): %s",
+                narr_err,
+            )
+        return text
+
+    def _persist_routing_fields(self, session: Any, draft: Any) -> None:
+        """Write drafter-derived routing fields back to the AgentSession.
+
+        ``draft.context_summary`` and ``draft.expectations`` are consumed by
+        ``bridge/session_router.py`` and ``bridge/telegram_bridge.py`` for
+        conversation routing. Silent failure: persistence errors MUST NOT
+        block delivery.
+        """
+        try:
+            context_summary = getattr(draft, "context_summary", None)
+            expectations = getattr(draft, "expectations", None)
+
+            if context_summary:
+                session.context_summary = context_summary
+            if expectations is not None:
+                session.expectations = expectations
+
+            if context_summary or expectations is not None:
+                session.save()
+                logger.debug(
+                    "Persisted routing fields to session %s (context_summary=%s, expectations=%s)",
+                    getattr(session, "session_id", "<unknown>"),
+                    bool(context_summary),
+                    bool(expectations),
+                )
+        except Exception as persist_err:
+            # Non-fatal: routing field persistence should never block delivery
+            logger.warning(
+                "Failed to persist routing fields (non-fatal): %s",
+                persist_err,
+            )
 
     async def react(
         self,
