@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -294,14 +294,17 @@ No agent integration required — this is a background reflection running on the
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/reflections.md` (if it exists and documents the agent-session-cleanup reflection) to note the phantom-filter invariant and the `repair_indexes()` cleanup step. Skip if the doc doesn't mention this reflection by name.
-- [ ] Update `docs/features/bridge-self-healing.md` if it references `cleanup_corrupted_agent_sessions` — add a one-sentence note that cleanup filters phantoms before mutation.
-- [ ] Check `docs/features/README.md` index — no new entry needed; this is a bug fix, not a new feature.
+- [x] Update `docs/features/reflections.md` (if it exists and documents the agent-session-cleanup reflection) to note the phantom-filter invariant and the `repair_indexes()` cleanup step. Skip if the doc doesn't mention this reflection by name.
+- [x] Update `docs/features/bridge-self-healing.md` if it references `cleanup_corrupted_agent_sessions` — add a one-sentence note that cleanup filters phantoms before mutation.
+- [x] Check `docs/features/README.md` index — no new entry needed; this is a bug fix, not a new feature.
+- [x] Additional (cascade): update `docs/features/agent-session-queue.md` startup cleanup description (removed raw-Redis fallback claim, added phantom-filter note and `repair_indexes()` switch).
+- [x] Additional (cascade): update `docs/features/bridge-worker-architecture.md` worker-startup table to mention phantom-filter guard on step 2.
+- [x] Additional (cascade): fix broken anchor link in `docs/features/reflections.md` (`#7-agent-session-cleanup-agentagent_session_queuepy` → `#7-agent-session-cleanup-agentsession_healthpy`) — reflected the file move from `agent_session_queue.py` to `session_health.py` in PR #1051.
 
 ### Inline Documentation
-- [ ] Docstring on `_filter_hydrated_sessions` explaining: what a phantom is, why the filter is needed, which attribute is the canonical hydration marker, and a cross-reference to `session_health.py:900` as the established pattern.
-- [ ] Update docstring on `cleanup_corrupted_agent_sessions` (lines 1053-1067) to mention the phantom-filter step and the switch from `rebuild_indexes()` to `repair_indexes()`.
-- [ ] Inline comment at each sibling call site referencing the shared helper.
+- [x] Docstring on `_filter_hydrated_sessions` explaining: what a phantom is, why the filter is needed, which attribute is the canonical hydration marker, and a cross-reference to `session_health.py:900` as the established pattern.
+- [x] Update docstring on `cleanup_corrupted_agent_sessions` (lines 1053-1067) to mention the phantom-filter step and the switch from `rebuild_indexes()` to `repair_indexes()`.
+- [x] Inline comment at each sibling call site referencing the shared helper.
 
 ### External Documentation Site
 No external docs site in this repo.
