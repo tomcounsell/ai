@@ -12,13 +12,35 @@ The cleanup process is SCAN-based (production-safe) and self-correcting:
 See docs/features/popoto-index-hygiene.md for full design details.
 """
 
+import concurrent.futures
 import logging
 
 logger = logging.getLogger(__name__)
 
+_REBUILD_TIMEOUT_SECONDS = 30
+
+
+def _has_embedding_field(model_class) -> bool:
+    """Return True if a model has any EmbeddingField.
+
+    EmbeddingField models require live Ollama calls during rebuild_indexes()
+    (the on_save() hook regenerates embeddings), making them unsuitable for
+    startup cleanup. They're skipped here to avoid hanging the worker.
+    """
+    try:
+        from popoto.fields.embedding_field import EmbeddingField
+
+        return any(isinstance(field, EmbeddingField) for field in model_class._meta.fields.values())
+    except Exception:
+        return False
+
 
 def _get_all_models() -> list:
-    """Import and return all Popoto models from models/__init__.__all__."""
+    """Import and return all Popoto models from models/__init__.__all__.
+
+    Excludes models with EmbeddingField — those require live Ollama calls
+    during rebuild_indexes() and are handled separately.
+    """
     try:
         import models as models_pkg
 
@@ -26,6 +48,11 @@ def _get_all_models() -> list:
         for name in models_pkg.__all__:
             obj = getattr(models_pkg, name, None)
             if obj is not None and hasattr(obj, "rebuild_indexes"):
+                if _has_embedding_field(obj):
+                    logger.debug(
+                        f"[popoto-cleanup] Skipping {name} (has EmbeddingField — requires Ollama)"
+                    )
+                    continue
                 model_classes.append(obj)
         return model_classes
     except Exception as e:
@@ -90,8 +117,19 @@ def run_cleanup() -> dict:
             orphan_count = _count_orphans(model_class)
             total_orphans += orphan_count
 
-            # Run rebuild
-            rebuilt_count = model_class.rebuild_indexes()
+            # Run rebuild with timeout — EmbeddingField models can hang on Redis SCAN
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(model_class.rebuild_indexes)
+                    rebuilt_count = future.result(timeout=_REBUILD_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                error_msg = (
+                    f"{model_name}: rebuild_indexes timed out after {_REBUILD_TIMEOUT_SECONDS}s"
+                )
+                errors.append(error_msg)
+                results[model_name] = {"status": "timeout"}
+                logger.warning(f"[popoto-cleanup] {error_msg} — skipping")
+                continue
             total_rebuilt += rebuilt_count
 
             results[model_name] = {
