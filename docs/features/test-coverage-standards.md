@@ -9,7 +9,7 @@ Several classes of bugs can pass all existing tests while silently degrading the
 1. **Silent exception swallowing** -- `except Exception: pass` blocks hide failures with no logging or observable side effects
 2. **Empty output loops** -- empty agent output classified as STATUS_UPDATE triggers infinite auto-continue cycles
 3. **Coupled test logic** -- tests that replicate production routing logic inline rather than calling the production function, meaning tests pass even when production behavior changes
-4. **Missing error state rendering** -- summarizer tests only cover success paths, not failure/error rendering
+4. **Missing error state rendering** -- message drafter tests only cover success paths, not failure/error rendering
 5. **Silent build completion** -- builders that produce zero commits complete without any user-visible warning
 
 ## Solution
@@ -41,9 +41,9 @@ When the guard triggers, the empty output is delivered to the user with a "(empt
 
 > **Updated**: `classify_routing_decision()` and `RoutingDecision` were removed in PR #321 (Observer Agent). Routing decisions are now made by the [Observer Agent](observer-agent.md) with full session context. The `TestClassifyRoutingDecision` test class was removed from `tests/test_auto_continue.py`. Observer decision quality is now validated by 13 integration tests in `tests/test_observer.py` using real API calls with Haiku as a robustness floor.
 
-### Gap 4: Error State Rendering (bridge/summarizer.py)
+### Gap 4: Error State Rendering (bridge/message_drafter.py)
 
-Added 7 tests for error/failure rendering paths in `_compose_structured_summary`:
+Added 7 tests for error/failure rendering paths in `_compose_structured_draft`:
 - Failed session emoji rendering
 - Failed session with completion flag (error takes precedence)
 - Failed stage in stage progress display
@@ -52,7 +52,7 @@ Added 7 tests for error/failure rendering paths in `_compose_structured_summary`
 - `_get_status_emoji` with failed status
 - `_render_stage_progress` with failed stages
 
-**Tests:** `TestErrorStateRendering` in `tests/test_summarizer.py`.
+**Tests:** `TestErrorStateRendering` in `tests/unit/test_message_drafter.py`.
 
 ### Gap 5: Build Output Validation
 
@@ -84,7 +84,7 @@ Added a **Quality Checks (Post-Test)** section to the test skill (`.claude/skill
 Run the full test suite to verify all coverage standards are met:
 
 ```bash
-python -m pytest tests/test_silent_failures.py tests/test_build_validation.py tests/test_auto_continue.py tests/test_enqueue_continuation.py tests/test_summarizer.py -v
+python -m pytest tests/test_silent_failures.py tests/test_build_validation.py tests/test_auto_continue.py tests/test_enqueue_continuation.py tests/unit/test_message_drafter.py -v
 ```
 
 Verify no bare exception handlers remain in critical paths:
@@ -101,7 +101,7 @@ grep -rn "except.*Exception.*:" --include="*.py" agent/ bridge/ | grep -v "logge
 | `tests/test_silent_failures.py` | New: 8 test classes for Gap 1 exception logging |
 | `tests/test_auto_continue.py` | Add `TestClassifyRoutingDecision` (10 tests) and `TestEmptyOutputAnomalyDetection` (6 tests calling production `should_guard_empty_output`) |
 | `tests/test_enqueue_continuation.py` | Add `TestEmptyOutputLoopTermination` (3 tests) |
-| `tests/test_summarizer.py` | Add `TestErrorStateRendering` (7 tests) |
+| `tests/unit/test_message_drafter.py` | Add `TestErrorStateRendering` (7 tests) |
 | `tests/test_build_validation.py` | New: 6 tests for build output verification |
 | `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Add Failure Path Test Strategy section |
 | `.claude/skills/do-test/SKILL.md` | Add Quality Checks (Post-Test) section |

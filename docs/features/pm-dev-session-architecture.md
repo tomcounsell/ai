@@ -410,16 +410,16 @@ The PM persona uses different output formatting for Q&A sessions versus work ses
 
 When `session_type="teammate"`:
 - **Instructions**: `build_teammate_instructions()` in `agent/teammate_handler.py` emphasizes research-first behavior -- search code, query memory, consult docs, cite findings
-- **Summarizer**: The summarizer LLM receives teammate context and produces conversational prose instead of bullets
-- **Structured summary bypass**: `_compose_structured_summary()` in `bridge/summarizer.py` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
+- **Drafter**: The drafter LLM receives teammate context and produces conversational prose instead of bullets
+- **Structured draft bypass**: `_compose_structured_draft()` in `bridge/message_drafter.py` returns the LLM draft directly without emoji prefix, bullet parsing, or structured template
 - **Reaction**: Processing reaction is cleared (set to `None`) after delivery instead of setting a completion emoji
-- **Single delivery path**: Teammate always goes through the summarizer -- no dual-path ambiguity with `send_telegram.py`
+- **Single delivery path**: Teammate always goes through the message drafter -- no dual-path ambiguity with `send_telegram.py`
 
 ### Work Mode (structured formatting)
 
 For PM and Dev sessions:
-- **Summarizer**: Produces bullet points with status emoji prefix
-- **Structured summary**: Full formatting with emoji, stage line (for SDLC), bullets, question section, and link footer
+- **Drafter**: Produces bullet points with status emoji prefix
+- **Structured draft**: Full formatting with emoji, stage line (for SDLC), bullets, question section, and link footer
 - **Reaction**: Completion emoji set on success
 
 ### Data Flow

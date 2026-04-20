@@ -56,7 +56,7 @@ Routine completions produce no emoji prefix, reducing noise. Only merged PRs and
 - `bridge/message_drafter.py` (née `bridge/summarizer.py`) -- Prompt updates (naturalization, question prefix, link format, metrics suppression), `_get_status_emoji()` milestone logic, `_normalize_question_prefix()`, `_parse_summary_and_questions()` updates
 - `bridge/response.py` -- `_truncate_at_sentence_boundary()`, dual-personality guard documentation
 - `agent/sdk_client.py` -- `CRASH_MESSAGE_POOL`, `_get_crash_message()`
-- `tests/unit/test_summarizer.py` -- Updated and new tests for all changes
+- `tests/unit/test_message_drafter.py` -- Updated and new tests for all changes
 
 ## Related
 

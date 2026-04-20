@@ -110,6 +110,6 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 ## Related
 
 - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
-- [Summarizer Format](summarizer-format.md) -- Process narration stripping added alongside routing
+- [Message Drafter](message-drafter.md) -- Process narration stripping added alongside routing
 - [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- Session routing and orchestration
 - [PM Routing: Collaboration](pm-routing-collaboration.md) -- Four-way classification extending this two-way system

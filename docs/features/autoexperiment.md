@@ -4,7 +4,7 @@ Offline optimization tool that iteratively improves system prompts using ultra-c
 
 ## How It Works
 
-1. **Target Selection**: Pick a prompt to optimize (observer routing or summarizer voice)
+1. **Target Selection**: Pick a prompt to optimize (observer routing or message drafter voice)
 2. **Baseline Measurement**: Run the eval function against the current prompt to get a score
 3. **Hypothesis Generation**: Ask a cheap LLM to propose a targeted improvement
 4. **Apply & Evaluate**: Write the change, re-run eval, compare scores
@@ -20,7 +20,7 @@ All experiments run on isolated git branches (`experiment/{target-name}`). Winni
 # Run 50 iterations on observer routing accuracy
 python scripts/autoexperiment.py --target observer --iterations 50 --budget 2.0
 
-# Dry-run (no git operations) on summarizer
+# Dry-run (no git operations) on message drafter (target name is historical)
 python scripts/autoexperiment.py --target summarizer --dry-run
 
 # List available targets
@@ -40,8 +40,8 @@ python scripts/autoexperiment.py --target observer --report
 
 Only the static body template is optimized. The dynamic prompt construction logic (`_build_observer_system_prompt`) is off-limits.
 
-### Summarizer Voice (`summarizer`)
-- **File**: `bridge/summarizer.py` (variable: `SUMMARIZER_SYSTEM_PROMPT`)
+### Message Drafter Voice (`summarizer` — historical name; optimizes the message drafter prompt)
+- **File**: `bridge/message_drafter.py` (variable: `DRAFTER_SYSTEM_PROMPT`)
 - **Eval**: 10 sample agent outputs judged for voice quality
 - **Metric**: Average quality score 0-1 (higher is better)
 - **Corpus**: `data/experiments/summarizer/eval_samples.jsonl`
@@ -134,7 +134,7 @@ Using OpenRouter ultra-cheap models:
 | `scripts/autoexperiment.py` | Core framework, CLI, targets, eval functions |
 | `config/models.py` | Model aliases (`MODEL_EXPERIMENT`) |
 | `data/experiments/observer/eval_corpus.jsonl` | Observer routing test scenarios |
-| `data/experiments/summarizer/eval_samples.jsonl` | Summarizer voice test samples |
+| `data/experiments/summarizer/eval_samples.jsonl` | Message drafter voice test samples (directory name is historical) |
 | `com.valor.autoexperiment.plist` | launchd schedule config |
 | `scripts/install_autoexperiment.sh` | Schedule installer |
 | `tests/unit/test_autoexperiment.py` | Unit tests |

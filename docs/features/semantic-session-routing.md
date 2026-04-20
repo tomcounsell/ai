@@ -13,10 +13,10 @@ This solves a common workflow problem: PM feedback often arrives as fresh messag
 The message drafter (`bridge/message_drafter.py`, formerly `bridge/summarizer.py` — renamed per [#1035](https://github.com/tomcounsell/ai/issues/1035)) produces structured output via Haiku `tool_use` calls, extracting three fields:
 
 - **context_summary** (max 200 chars): A brief description of what the session is working on. Example: "Building dark mode toggle for settings page"
-- **response**: The summarized text sent to Telegram (existing behavior, now structured).
+- **response**: The drafted text sent to Telegram (existing behavior, now structured).
 - **expectations** (nullable, max 500 chars): What the agent needs from the human next. Example: "Waiting for feedback on the color palette choices". Null when the session is complete or not waiting for input.
 
-These fields are persisted to the `AgentSession` model after every summarization call (`bridge/response.py`).
+These fields are persisted to the `AgentSession` model after every drafting call (`bridge/response.py`).
 
 ### Phase 2: Semantic Router
 
@@ -96,20 +96,20 @@ Two fields added to `AgentSession` (`models/agent_session.py`):
 
 These are nullable Popoto/Redis fields. No migration is needed -- Redis is schemaless, so existing sessions simply have `None` for these fields.
 
-## Summarizer Changes
+## Drafter Changes
 
-The summarizer was upgraded from plain text output to structured extraction:
+The message drafter was upgraded from plain text output to structured extraction:
 
-- **Primary path**: Haiku `tool_use` with `structured_summary` tool schema returning `StructuredSummary` dataclass
+- **Primary path**: Haiku `tool_use` with `structured_draft` tool schema returning `StructuredDraft` dataclass
 - **Fallback within Haiku**: If tool_use fails, falls back to text-only Haiku response
 - **Secondary fallback**: OpenRouter (replaces Ollama) with the same structured extraction attempt
 - **Final fallback**: Truncation (unchanged)
 
-The `StructuredSummary` dataclass:
+The `StructuredDraft` dataclass (formerly `StructuredSummary`):
 
 ```python
 @dataclass
-class StructuredSummary:
+class StructuredDraft:
     context_summary: str
     response: str
     expectations: str | None
@@ -152,7 +152,7 @@ The threshold is intentionally conservative. False positives (routing to the wro
 | `bridge/session_router.py` | Semantic router: `find_matching_session()` (always-on, no feature flag) |
 | `bridge/response.py` | Persist routing fields after drafting |
 | `bridge/telegram_bridge.py` | Integrate semantic router in non-reply-to message handling; active session steering (#318) |
-| `tests/test_summarizer.py` | Updated mocks for `StructuredSummary` returns and OpenRouter fallback |
+| `tests/unit/test_message_drafter.py` | Updated mocks for `StructuredDraft` returns and OpenRouter fallback |
 | `tests/test_unthreaded_routing.py` | Decision matrix tests: active steering, dormant passthrough, abort detection, FIFO ordering, missing session fallthrough |
 
 ## In-Memory Coalescing Guard
@@ -183,11 +183,11 @@ The in-memory coalescing guard (`_recent_session_by_chat`) bridges the Redis vis
 
 ## Testing
 
-All 120 summarizer tests pass. The semantic router is tested through the existing test infrastructure. Key test updates:
+All 120 message drafter tests pass. The semantic router is tested through the existing test infrastructure. Key test updates:
 
-- Mock returns changed from `str` to `StructuredSummary` objects
+- Mock returns changed from `str` to `StructuredDraft` objects
 - Ollama fallback tests renamed to OpenRouter fallback tests
-- All `_summarize_with_ollama` patches replaced with `_summarize_with_openrouter`
+- All `_summarize_with_ollama` patches replaced with `_draft_with_openrouter`
 
 ### Unthreaded Routing Tests (`tests/test_unthreaded_routing.py`)
 

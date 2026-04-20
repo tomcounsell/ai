@@ -233,4 +233,4 @@ python scripts/migrate_datetime_fields.py
 
 - [Session Transcripts](session-transcripts.md) - Transcript file logging
 - [Session Tagging](session-tagging.md) - Auto-tagging system
-- [Summarizer Format](summarizer-format.md) - Bullet-point summaries
+- [Message Drafter](message-drafter.md) - Drafter format and validation
