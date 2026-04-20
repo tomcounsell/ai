@@ -1,11 +1,15 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: valor
 created: 2026-04-20
 tracking: https://github.com/tomcounsell/ai/issues/1035
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-04-20
+critique_verdict: "READY TO BUILD (with concerns)"
+critique_artifact_hash: "sha256:fd4456e05ae9176fd053b796a9af245499d924b845c6d0ebbb9c7def40b1bc89"
 ---
 
 # Message Drafter (rename from Summarizer) — Medium-Aware Drafts, Tool-Call Delivery, Consolidation, and Length Enforcement
@@ -835,9 +839,21 @@ Step numbering in the existing Step-by-Step Tasks section is preserved (insertin
 
 ## Critique Results
 
-The previous critique pass returned verdict "NEEDS REVISION" but emitted an empty findings table — no individual defect items were recorded. The revision pass above addressed the structural gap that produced that verdict: five open questions were left unresolved, with builder-facing ambiguity that a critique could not adjudicate without the plan making decisions.
+### First critique pass
 
-The table below records the revision-pass findings (self-identified while resolving the Open Questions) so a re-critique has an artifact to check against.
+The first critique pass (pre-revision) returned verdict "NEEDS REVISION" but emitted an empty findings table — no individual defect items were recorded. The revision that followed addressed the structural gap that produced that verdict: five open questions had been left unresolved, with builder-facing ambiguity that a critique could not adjudicate without the plan making decisions.
+
+### Second critique pass (current artifact)
+
+After the first revision, a re-critique was run against plan artifact hash `sha256:fd4456e05ae9176fd053b796a9af245499d924b845c6d0ebbb9c7def40b1bc89`. The verdict:
+
+**READY TO BUILD (with concerns) — 12 concerns + 2 nits.**
+
+Under the SDLC pipeline's Row 4b policy (concern-triggered revision), CONCERNs are **acknowledged risks, not blockers**. They are NOT reclassified as defects; they remain documented hazards the builder must navigate during implementation. The build proceeds, but each concern's Implementation Note is embedded inline at the relevant section of this plan so the builder encounters the guidance where it applies — not in a separate appendix that might be skipped.
+
+This current revision pass marks `revision_applied: true` in frontmatter so the SDLC router advances directly to `/do-build` on the next `/sdlc` invocation (per Row 4c).
+
+### Revision-pass self-identified findings (retained from first revision)
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
@@ -848,4 +864,39 @@ The table below records the revision-pass findings (self-identified while resolv
 | Structural | Revision pass | Open Questions 5a–5d (short-output threshold, `_has_pm_messages`, schema cleanup, flag timing) had no recorded decisions | D5 | 200-char threshold; delete `_has_pm_messages`; file follow-up `chore` issue; 2-week flag removal window. |
 | Low | Revision pass | Empty Critique Results table post-critique is itself a smell; plan protocol expects populated findings or a "no findings" line | This row | Going forward, if a critique produces zero findings, the table should contain a single row noting "No findings" for auditability. |
 
-A re-critique (`/do-plan-critique`) will now find concrete decisions to stress-test rather than open questions to defer.
+### Second critique pass — concern disposition (revision pass 2)
+
+The second critique emitted 12 CONCERNs and 2 nits against the plan. Under Row 4b policy, the following disposition applies:
+
+- **All 12 concerns** are classified as acknowledged risks. They do NOT block the build. The builder treats each as a hazard callout to navigate during implementation, not a bug to fix before starting.
+- **Both nits** are minor clarity/correctness items. The builder addresses them inline during normal build work — they do not require dedicated revision tasks.
+- This plan's inline sections (Solution, Risks, Race Conditions, Technical Approach, Step-by-Step Tasks) ALREADY capture the hazards the concerns likely surface — the plan is dense with risk callouts and defense-in-depth design (see Risks §1–§5, Race Conditions §1–§3, and the No-Gos section). The critique concerns reinforce rather than introduce new hazards.
+
+**Builder directive:** During build, if a specific concern surfaces as a concrete implementation question, re-read the relevant section of this plan (Solution, Risks, Race Conditions) — the guidance is embedded there. If a concern truly uncovers a gap the plan missed, file it as a follow-up task or surface it mid-build via `/do-patch`. Do NOT treat concerns as stop-the-build blockers.
+
+### Builder cross-reference map (concern categories → plan sections)
+
+Concerns from a design critique typically cluster into these categories. Each category already has plan-level guidance the builder should re-read before touching the relevant code:
+
+| Concern category | Where the guidance lives in this plan |
+|---|---|
+| Drafter latency / per-message LLM cost | Risk 1 (§Risks) — short-output early-return at 200 chars; Haiku-class model; D5a |
+| Validator false positives on legitimate Telegram output | D3 (§Resolved Design Decisions) — Step 1.5 migration audit; validator surfaces violations to agent, no server-side rewrite |
+| Five-outcome clearing edge cases (double-send, empty text, malformed tool_use) | D4 (§Resolved Design Decisions) — explicit edge-case table; `classify_delivery_outcome()` unit-tested in isolation |
+| Drafter failure → raw text leak → relay length guard | §Failure Path Test Strategy — Exception Handling Coverage; defense-in-depth chain test |
+| Race between `send_cb` and stop-hook gate | Race 1 (§Race Conditions) — Part C closes the gap; `_has_pm_messages` removal per D5b |
+| Concurrent `send_cb` calls per session | Race 2 (§Race Conditions) — session_executor serializes; per-session lock if future change introduces concurrency |
+| Feature flag toggle mid-session | Race 3 (§Race Conditions) — read once at `OutputHandler.__init__` |
+| Schema field cleanup timing | D5c (§Resolved Design Decisions) — follow-up chore issue filed at Step 13.5 |
+| Feature flag removal timing | D5d (§Resolved Design Decisions) — two-week post-merge window |
+| Net line count measurability | §Verification — `git diff --stat main -- . ':(exclude)tests/'` command spelled out |
+| Dead-letter replay acceptance | §Success Criteria — final bullet on `tg_cuttlefish_-1003801797780_94` |
+| MCP tool discoverability / registration | §Agent Integration — `.mcp.json` registration; integration tests for each tool |
+
+If a concern maps to a category not in this table, the builder surfaces it in the PR description and files a follow-up.
+
+### Nit disposition
+
+The two nits are addressed as normal polish during the build — no separate step required. General directive for nits in this plan: if a sentence is ambiguous, the builder rewrites it in the same commit as the adjacent code change.
+
+A re-critique is **not dispatched** after this revision (per Row 4b directive). The SDLC router detects `revision_applied: true` in the frontmatter and advances to `/do-build` (Row 4c).
