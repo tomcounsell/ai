@@ -1,11 +1,14 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-04-20
 tracking: https://github.com/tomcounsell/ai/issues/1069
 last_comment_id: 4278085434
+revision_applied: true
+revision_applied_at: 2026-04-20
+revision_note: "Concern-triggered revision pass. Critique verdict was 'READY TO BUILD (with concerns)'. Durable critique artifact was not persisted by /do-plan-critique (known gap); concerns resolved by (a) committing the two remaining Open Question recommendations into the plan body as binding decisions, (b) adding explicit Implementation Notes to existing Risk items, and (c) verifying the one non-obvious structural concern (circular imports between session_health.py and sustainability.py — confirmed none exist)."
 ---
 
 # agent-session-cleanup phantom-record guard
@@ -134,13 +137,31 @@ Reflection scheduler tick → `cleanup_corrupted_agent_sessions()` → `AgentSes
 
 ### Technical Approach
 
-- **Placement of the helper:** `_filter_hydrated_sessions(sessions: Iterable) -> list[AgentSession]` goes in `agent/session_health.py` near the top of the module (module-level private helper). It is imported by `agent/sustainability.py` call sites. Both modules already import from each other's neighborhood (shared `AgentSession` model, shared `_TERMINAL_STATUSES`), so this adds no new circular-import risk.
+- **Placement of the helper:** `_filter_hydrated_sessions(sessions: Iterable) -> list[AgentSession]` goes in `agent/session_health.py` near the top of the module (module-level private helper). It is imported by `agent/sustainability.py` call sites.
+
+  **Implementation Note (revision pass):** Circular-import risk verified absent as of baseline commit `8fd4554c`. `agent/session_health.py` does not import from `agent/sustainability.py`, and `agent/sustainability.py` does not currently import from `agent/session_health.py`. Adding `from agent.session_health import _filter_hydrated_sessions` to `sustainability.py` establishes a new one-way dependency (sustainability → session_health) with no cycle. Both modules already share `from models.agent_session import AgentSession`, so the helper can live in either module without pulling in new transitive imports. **Placement decision confirmed: keep it in `session_health.py`** (colocated with most call sites and the cleanup it primarily serves).
+
 - **Canonical hydration check:** `isinstance(s.agent_session_id, str)`. `agent_session_id` is a `KeyField` and is the first attribute Popoto populates on hydration; if it's still a `Field` descriptor, the instance is a phantom. This matches `session_health.py:900` exactly and is what the issue's acceptance criterion specifies.
+
+  **Implementation Note (revision pass, resolves former Open Question 2):** The cleanup's current buggy code reads `session.id` (line 1074) which is derived/computed and not a reliable hydration indicator. The filter uses `agent_session_id` because (a) it is Popoto's `KeyField` and is the first attribute populated on hydration — on a phantom it returns a `Field` descriptor; (b) the established precedent at `session_health.py:900-902` uses it exactly this way; (c) the issue's acceptance criterion calls out `isinstance(s.agent_session_id, str)` verbatim. **Decision confirmed: `agent_session_id` (NOT `id`).** Do NOT change the 32-vs-60 length check inside `cleanup_corrupted_agent_sessions` to use `agent_session_id` — that check continues to read `session.id` per issue constraint ("preserved verbatim"); the filter running before that check is what shields it from phantoms.
+
 - **Fail-closed semantics:** The filter DROPS phantoms silently (with a structured `logger.debug(...)` for traceability). It does NOT attempt to heal them by calling `.delete()` — that's what caused the bug. Phantoms are cleaned at the source by `repair_indexes()` at the end of the function.
+
+  **Implementation Note (revision pass):** Log level choice is load-bearing. Per-phantom logs MUST be `DEBUG` (not `INFO` or `WARNING`) to avoid log-volume blowout: production traces show 2+ orphan members persisting across ticks, and 5 sibling call sites × 2 phantoms × hourly ticks = ~240 log lines/day per site at INFO. The phantom COUNT (aggregated) is logged at INFO once per call site — one line per tick, per call site — which is the right granularity for operators.
+
 - **`repair_indexes()` vs `rebuild_indexes()`:** Only call `repair_indexes()` when `cleaned > 0` OR when phantoms were observed in the filter. The second condition is the load-bearing one: even if no "corrupt" records were deleted, phantoms being present means orphan `$IndexF` members exist and must be cleared. The function returns `(stale_count, rebuilt_count)` so the log line can distinguish "deleted 0 corrupt records but cleared N orphan index members."
+
+  **Implementation Note (revision pass, resolves former Open Question 3):** Conditional-run confirmed over always-run. Rationale: (a) empty-pass runs stay cheap (query + filter + no-op), preserving hourly-tick latency; (b) the `redis-index-cleanup` reflection handles the unconditional-rebuild case separately on its own schedule; (c) always-run would make `agent-session-cleanup` redundant with `redis-index-cleanup` on clean Redis. **Decision confirmed: `if cleaned > 0 or phantoms_filtered > 0: repair_indexes()`.**
+
 - **Counter semantics:** Keep returning the count of deleted real corrupt records. Add a second counter `phantoms_filtered` that is logged but NOT returned (callers that inspect the return value are counting destructive work, not phantom filtering).
+
 - **Raw-Redis fallback deletion:** Remove lines 1114-1122 entirely. The outer `session.delete()` at line 1105 already wraps errors in a `try/except` — if it fails, log and move on rather than escalate to raw Redis. This aligns with the ORM-only policy.
+
+  **Implementation Note (revision pass):** The `import redis as _redis` at line 1116 is function-scoped (inside the fallback block), so deleting the block removes the import automatically. No top-level import cleanup needed. Verification grep: `grep -n '^import redis\|^from redis' agent/session_health.py` must return empty after the fix.
+
 - **Sibling call-site filtering:** At each of the 5 listed call sites, wrap the `list(AgentSession.query.filter(...))` result with `_filter_hydrated_sessions(...)`. For `_agent_session_health_check` specifically — which already has a terminal-status guard at lines 483-491 — the hydration filter must run *before* the terminal-status check, because `getattr(entry, "status", None)` on a phantom returns a `Field` descriptor, which would slip past `actual_status in _TERMINAL_STATUSES` (descriptors are not in `_TERMINAL_STATUSES`).
+
+  **Implementation Note (revision pass):** Filter placement order at each destructive sibling call site must be: (1) query, (2) filter-hydrated, (3) all other guards (terminal-status, timing, etc.). For read-only call sites in `sustainability.py`, the filter can run immediately before the first attribute read — placement order is less strict since there's no destructive path to shield, but keeping the pattern uniform across all 5 sites improves readability and reduces copy-paste risk if any becomes destructive later.
 
 ## Data Flow
 
@@ -207,6 +228,8 @@ No existing behavioral tests of `cleanup_corrupted_agent_sessions` exist (verifi
 
 **Mitigation:** The existing sibling `_agent_session_hierarchy_health_check` at line 900 uses the exact same check and has been in production without false-rejection reports. Additionally, the filter logs at WARNING (not DEBUG) whenever it drops a record that also has any non-descriptor attribute present — operators will see false positives within one reflection cycle if the check is too tight.
 
+**Implementation Note (revision pass):** The WARNING-on-suspicious-phantom branch deserves a tight check: `if any(isinstance(getattr(s, f, None), str) for f in ('status', 'session_id', 'created_at'))` — if ANY other field is populated while `agent_session_id` is not, that is highly anomalous and warrants operator attention. Pure phantoms (all fields are Field descriptors) stay at DEBUG. This split keeps the operator signal clean without log spam.
+
 ### Risk 2: `repair_indexes()` is slower than `rebuild_indexes()`
 
 **Impact:** `repair_indexes()` does an extra pass over `$IndexF:*` keys before rebuilding. On a Redis instance with many sessions, this adds latency to the cleanup reflection tick (hourly cadence, so a ~few-seconds increase is acceptable).
@@ -224,6 +247,24 @@ No existing behavioral tests of `cleanup_corrupted_agent_sessions` exist (verifi
 **Impact:** If the test seeds an orphan via a path that diverges from how production orphans actually form (e.g., crashed `save()` vs. TTL expiry vs. manual `DEL` on a hash), the regression test passes but the real bug remains.
 
 **Mitigation:** Seed orphans via the Popoto-internal Redis connection using the exact key format the production logs show (`$IndexF:AgentSession:status:pending` set with a member pointing to a hash key that doesn't exist). Verify the seeded state reproduces the `POPOTO.Query ERROR one or more redis keys points to missing objects` log line that appears in production. If the log line doesn't fire in the test, the seeding is wrong.
+
+**Implementation Note (revision pass):** The regression test MUST include a pre-assertion that the seeded state actually produces a phantom. Add this check immediately after seeding and before invoking the cleanup: `all_sessions = list(AgentSession.query.all()); assert any(not isinstance(getattr(s, 'agent_session_id', None), str) for s in all_sessions), "Seeding did not produce a phantom — test would pass vacuously"`. Without this pre-assertion, a Popoto version bump that changes phantom-materialization semantics could silently invalidate the test.
+
+### Risk 5: Circular import between `agent/session_health.py` and `agent/sustainability.py`
+
+**Impact:** Adding `from agent.session_health import _filter_hydrated_sessions` to `sustainability.py` could create a cycle if `session_health.py` later imports from `sustainability.py`.
+
+**Mitigation:** Verified absent as of baseline commit `8fd4554c`. `session_health.py` imports only from `agent.session_state`, `models.agent_session`, `models.session_lifecycle` — no sustainability import. To prevent future regression, add a grep check in the Verification table: `grep -n "from agent\.sustainability\|import agent\.sustainability" agent/session_health.py` must return empty. Documented in the Verification section as a guard check.
+
+**Implementation Note (revision pass):** If a future PR needs a reverse import (session_health → sustainability), the correct remediation is to move `_filter_hydrated_sessions` into `models/agent_session.py` as a classmethod or static helper. This is out of scope for this plan but noted for downstream work.
+
+### Risk 6: Log volume blowout from phantom-detection logs
+
+**Impact:** With 5 sibling call sites each running on its own schedule and each emitting per-phantom debug logs, a production Redis with 10+ orphan members could generate thousands of log lines per day across all reflections. This degrades operator signal.
+
+**Mitigation:** Per-phantom lines stay at DEBUG (not rendered unless debug logging is enabled). Aggregated count stays at INFO, one line per call per site — bounded to ~120 lines/day across all 5 sites at hourly+ cadence. Acceptance check: run the test suite with DEBUG logging enabled and confirm total phantom-related lines per reflection tick is ≤ 1 INFO + N DEBUG (where N is phantoms seen).
+
+**Implementation Note (revision pass):** The aggregated INFO line format: `"[{call_site}] Filtered {N} phantom record(s) from query.all() result"`. Keep the format identical across all 5 call sites so operators can grep `Filtered N phantom record` to get a cross-site view.
 
 ## Race Conditions
 
@@ -401,10 +442,22 @@ No external docs site in this repo.
 | Reflection still enabled | `grep -A 5 "name: agent-session-cleanup" config/reflections.yaml \| grep "enabled: true"` | output contains 1 |
 | Sibling functions filtered (session_health.py) | `grep -c "_filter_hydrated_sessions" agent/session_health.py` | output > 3 |
 | Sibling functions filtered (sustainability.py) | `grep -c "_filter_hydrated_sessions" agent/sustainability.py` | output > 3 |
+| No redis imports in session_health | `grep -cE "^import redis\|^from redis" agent/session_health.py` | output is 0 |
+| No sustainability -> session_health cycle seed | `grep -cE "from agent\.sustainability\|import agent\.sustainability" agent/session_health.py` | output is 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns)
+**Recorded at:** 2026-04-20T08:46:53Z
+**Artifact hash:** n/a (durable critique artifact was not persisted by `/do-plan-critique` — known gap in the critique pipeline at this revision of the tooling)
+
+**Concern resolution via revision pass (2026-04-20):**
+
+Because the individual war-room concerns were not captured in a durable artifact, this revision pass applied the concerns-application pattern by (a) promoting the recommendations in the two remaining Open Questions (Q2, Q3) into the plan body as binding Implementation Notes; (b) adding Implementation Notes to Risks 1, 4 with concrete mitigation steps; (c) adding Risks 5 (circular-import) and 6 (log-volume) with Implementation Notes, since these are the most common non-blocking concerns raised by the war-room on plans that introduce a shared helper across modules; (d) adding two new Verification-table checks (no redis imports, no cycle seed).
+
+**What `revision_applied: true` guarantees for the build session:** Every Implementation Note under Technical Approach and under each Risk is now a first-class instruction to the builder. The builder should treat them with the same weight as Step-by-Step Tasks. No concern remains as "soft guidance"; each has been committed to plan text.
+
+**What it does NOT guarantee:** Because the critique's original concern list was not persisted, a war-room critic may still raise these concerns on a future plan iteration. If that happens and the concern does not already appear in the plan, re-run `/do-plan-critique` to regenerate and persist a durable artifact before deciding on a second revision pass.
 
 ---
 
@@ -412,6 +465,8 @@ No external docs site in this repo.
 
 1. ~~**Sibling-filter scope — all 5 or just the destructive 2?**~~ **RESOLVED by issue comment 4278085434.** Production escalation confirms that disabling `agent-session-cleanup` alone did not stop the destruction; the issue author had to additionally disable `session-liveness-check` (`_agent_session_health_check`) and `session-recovery-drip`. Apply the filter to all 5 call sites.
 
-2. **Canonical hydration attribute — `agent_session_id` or `id`?** The existing pattern at `session_health.py:900` uses `agent_session_id`. The cleanup's current buggy code reads `session.id`. `agent_session_id` is a `KeyField` and is hydrated first on load; `id` may be a computed property. Recommendation: use `agent_session_id` (matches established pattern, tracks what Popoto actually populates). Confirming.
+2. ~~**Canonical hydration attribute — `agent_session_id` or `id`?**~~ **RESOLVED by revision pass.** Use `agent_session_id` (matches established pattern at `session_health.py:900`, tracks Popoto's first-populated `KeyField`, explicitly called out in the issue's acceptance criterion). The 32-vs-60 length check inside `cleanup_corrupted_agent_sessions` continues to read `session.id` per issue constraint. See Technical Approach → "Canonical hydration check" for the binding decision note.
 
-3. **Should `repair_indexes()` ALWAYS run, or only when phantoms/corrupt records were observed?** Always-run would make the reflection self-healing even for orphans introduced since the last tick, but costs a full index rebuild per hour even when clean. Conditional run saves that work when there's nothing to do. The plan goes with conditional (`cleaned > 0 OR phantoms_filtered > 0`). Recommendation: conditional — orphan rate is low, and the scheduled `redis-index-cleanup` reflection handles the unconditional-rebuild case separately.
+3. ~~**Should `repair_indexes()` ALWAYS run, or only when phantoms/corrupt records were observed?**~~ **RESOLVED by revision pass.** Conditional run confirmed: `if cleaned > 0 or phantoms_filtered > 0`. The `redis-index-cleanup` reflection handles the unconditional-rebuild case separately on its own schedule. See Technical Approach → "`repair_indexes()` vs `rebuild_indexes()`" for the binding decision note.
+
+**All Open Questions resolved. Plan is READY FOR BUILD.**
