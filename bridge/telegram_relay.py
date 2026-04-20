@@ -289,6 +289,63 @@ async def _send_queued_message(
                     )
                     return None
 
+        # Belt-and-suspenders length guard: Telegram rejects text messages >4096 chars
+        # with MessageTooLongError. Primary fix lives in the drafter (bridge/message_drafter.py),
+        # but if any caller bypasses the drafter and writes >4096 chars to the outbox, we
+        # convert to a .txt file attachment rather than split or drop. NEVER split messages
+        # (see docs/plans/message-drafter.md No-Gos: "No message splitting. Ever.").
+        if text and len(text) > 4096:
+            session_id = message.get("session_id") or "unknown"
+            preview = text[:200].replace("\n", " ")
+            logger.error(
+                "Relay: oversized text reached relay (len=%d > 4096) — "
+                "converting to .txt attachment. session_id=%s chat_id=%s preview=%r",
+                len(text),
+                session_id,
+                chat_id,
+                preview,
+            )
+            try:
+                import tempfile
+                import time as _time
+
+                ts = int(_time.time())
+                safe_sid = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(session_id))
+                fd, overflow_path = tempfile.mkstemp(
+                    suffix=".txt",
+                    prefix=f"relay_overlong_{safe_sid}_{ts}_",
+                )
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(text)
+
+                caption = "[auto-attached: response exceeded 4096 chars]"
+                sent = await telegram_client.send_file(
+                    int(chat_id),
+                    overflow_path,
+                    caption=caption,
+                    reply_to=reply_to_id,
+                )
+                if isinstance(sent, list):
+                    msg_id = getattr(sent[0], "id", None) if sent else None
+                else:
+                    msg_id = getattr(sent, "id", None)
+                logger.info(
+                    "Relay: sent oversized text as .txt attachment to chat %s "
+                    "(file=%s, orig_len=%d, msg_id=%s)",
+                    chat_id,
+                    overflow_path,
+                    len(text),
+                    msg_id,
+                )
+                return msg_id
+            except Exception as overflow_err:
+                # Fall through to normal text send; Telethon will raise MessageTooLongError
+                # which is handled by the existing retry + dead-letter path.
+                logger.error(
+                    "Relay: length-guard .txt conversion failed (%s); falling back to normal send",
+                    overflow_err,
+                )
+
         # Text-only send path
         from bridge.markdown import send_markdown
 

@@ -28,16 +28,16 @@ from scripts.autoexperiment import (
 # ---------------------------------------------------------------------------
 
 SAMPLE_SUMMARIZER_FILE = '''\
-"""Summarizer module."""
+"""Drafter module."""
 
-SUMMARIZER_SYSTEM_PROMPT = """\
+DRAFTER_SYSTEM_PROMPT = """\
 You condense messages into Telegram-length updates.
 
 FORMAT RULES:
 - Be concise
 - No preamble"""
 
-async def summarize():
+async def draft():
     pass
 '''
 

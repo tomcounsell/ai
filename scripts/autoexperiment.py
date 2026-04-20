@@ -229,8 +229,8 @@ def eval_summarizer(corpus_path: str | None = None) -> float:
         logger.warning("Summarizer eval corpus is empty")
         return 0.0
 
-    # Read current summarizer prompt
-    summarizer_path = "bridge/summarizer.py"
+    # Read current drafter prompt
+    summarizer_path = "bridge/message_drafter.py"
     with open(summarizer_path) as f:
         file_content = f.read()
     prompt_text = extract_summarizer_prompt(file_content)
@@ -559,7 +559,7 @@ def get_targets() -> dict[str, ExperimentTarget]:
     return {
         "summarizer": ExperimentTarget(
             name="summarizer",
-            file_path="bridge/summarizer.py",
+            file_path="bridge/message_drafter.py",
             extract_fn=extract_summarizer_prompt,
             inject_fn=inject_summarizer_prompt,
             eval_fn=eval_summarizer,
