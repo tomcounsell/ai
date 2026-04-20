@@ -208,8 +208,22 @@ class BackgroundTask:
             self._result = await coro
             self._completed_at = utc_now()
 
-            if send_result and self._result:
-                await self.messenger.send(self._result, message_type="result")
+            if send_result:
+                if self._result:
+                    await self.messenger.send(self._result, message_type="result")
+                else:
+                    # Empty result from harness: invoke the send_callback directly with ""
+                    # so the router can apply nudge_empty or deliver_fallback logic.
+                    # Without this, sessions that produce no output complete silently
+                    # and the user never receives a final Telegram message.
+                    try:
+                        await self.messenger._send_callback("")
+                    except Exception as _cb_err:
+                        logger.debug(
+                            "[%s] Empty-result router call failed: %s",
+                            self.messenger.session_id,
+                            _cb_err,
+                        )
 
             # Post-session memory extraction (non-fatal, async)
             try:
