@@ -6,7 +6,31 @@ owner: Valor Engels
 created: 2026-04-20
 tracking: https://github.com/tomcounsell/ai/issues/1064
 last_comment_id:
+revision_applied: true
+critique_verdict: READY TO BUILD (with concerns)
+critique_recorded_at: 2026-04-20T05:48:19Z
 ---
+
+<!--
+REVISION PASS (2026-04-20): /do-plan-critique returned "READY TO BUILD (with concerns)"
+with 0 blockers, 5 concerns, and 3 nits (artifact_hash sha256:943ae3592876cc52cb9054947afe4d251c2b428fc7b0ea538ae4301b8c41afe8).
+This revision pass (Row 4b of SDLC dispatch table) embeds Implementation Notes at the plan
+sections the critique targeted. Concerns remain acknowledged risks (not defects);
+Implementation Notes give the builder mid-flight guidance so the concerns cannot silently
+bite during build. Nits are captured in the "Critique Nits (Informational)" section at the
+bottom for PR-body reference but NOT embedded — out of scope for the revision pass per
+Row 4b semantics.
+
+The raw concern bodies from the critique subagent were not persisted outside the
+stage_states verdict summary. The Implementation Notes below are derived from a careful
+re-read of this plan against the critique verdict — they target the highest-risk
+mid-flight pitfalls a Sonnet builder could hit when executing the plan as written:
+handler line-number drift, gate-condition precision, idempotency flag semantics,
+kill-switch truthy-value coverage, and double-fetch prevention. If the original
+critique concerns differ materially from these, the builder should surface the gap
+in PR review rather than silently correcting it.
+-->
+
 
 # Reply-Chain Hydration For Fresh Non-Valor Reply Sessions
 
@@ -204,6 +228,13 @@ No prerequisites — this work has no external dependencies. All required primit
 - **Kill-switch env var** `REPLY_CHAIN_PREHYDRATION_DISABLED` — checked at handler entry, mirrors the existing `REPLY_CONTEXT_DIRECTIVE_DISABLED` pattern for safe rollback without redeploy.
 - **Stamp `reply_chain_hydrated` on `extra_context_overrides`** when the pre-fetch succeeds, so the existing worker-side idempotency guard at `agent/session_executor.py:1045-1055` skips the deferred fetch.
 - **3s `asyncio.wait_for` timeout with `FRESH_REPLY_CHAIN_FAIL` warning logs** — copies the exact pattern from PR #953's resume-completed branch. On timeout/exception, the handler falls through with raw `clean_text` and the worker's deferred enrichment attempts to hydrate.
+
+<!-- Implementation Note (C2 — Idempotency flag semantics on empty/failed chain): The flag `reply_chain_hydrated` has THREE possible outcomes, not two:
+       - (a) Fetch succeeded, chain non-empty → stamp `reply_chain_hydrated=True`, prepend `REPLY_THREAD_CONTEXT` to message_text.
+       - (b) Fetch succeeded, chain empty (`format_reply_chain([])` returns "") → do NOT stamp the flag, do NOT modify message_text. Worker-side deferred enrichment will also find no chain to fetch — this is correct behavior, not a bug.
+       - (c) Fetch timed out or raised → do NOT stamp the flag, do NOT modify message_text. Worker's deferred enrichment MUST remain free to retry.
+     The reason (b) does NOT stamp the flag: stamping it would short-circuit the worker's deferred enrichment for a chain that was never retrieved — a subtle dead zone. Better to leave the flag unset and let the worker's retry discover the chain is empty too, confirming via a second fetch that nothing was missed. The plan's Failure Path Test Strategy already asserts this (line 230: "empty chain produces enqueued_message_text == clean_text and reply_chain_hydrated is NOT set") — the builder MUST honor this assertion. -->
+
 - **No worker-side changes required.** The existing idempotency guard handles the new call site transparently because both paths use the same `reply_chain_hydrated` flag.
 
 ### Flow
@@ -239,6 +270,12 @@ Telegram group chat → User replies to non-Valor message → Bridge handler res
 
 - [ ] `tests/integration/test_steering.py::test_no_double_hydration_when_handler_prehydrates` — UPDATE: extend the test to also cover the new fresh-session pre-hydration path (currently only covers resume-completed). Rename from `test_no_double_hydration_when_handler_prehydrates` if the new coverage makes the name misleading; otherwise leave it. The existing assertion ("exactly one REPLY THREAD CONTEXT block per prompt") must hold for both call sites.
 - [ ] `tests/integration/test_steering.py::test_reply_chain_fetch_failure_falls_back` — UPDATE: add a fresh-session variant parallel to the existing resume-completed variant.
+
+<!-- Implementation Note (C5 — Test extension strategy: prefer parametrize over copy-paste): Before editing `test_no_double_hydration_when_handler_prehydrates`, the test-engineer MUST open the existing test and determine its shape:
+       - If it's a flat test body: convert to `@pytest.mark.parametrize("hydration_site", ["resume_completed", "fresh_session_non_valor"])` and thread the site through the fixture setup. This makes the "exactly one REPLY THREAD CONTEXT block" invariant explicit for both sites.
+       - If it's already parametrized on something else: add a second parametrize decorator or add a sibling test `test_no_double_hydration_fresh_session_prehydrates` rather than shoving a second site into a copy-pasted body.
+     The goal is a SINGLE assertion contract ("exactly one REPLY THREAD CONTEXT block per prompt, regardless of which handler branch hydrated") — copy-pasted tests drift apart over time. Same principle for `test_reply_chain_fetch_failure_falls_back`: parametrize across `["resume_completed", "fresh_session_non_valor"]` rather than writing a parallel file. If parametrization turns out to require untangling of conflicting fixtures (e.g., one path uses a mocked resume cache, the other doesn't), the test-engineer MAY write parallel tests — but must note the reason in a module-level comment so the next engineer doesn't unify them and break assertions. -->
+
 - [ ] `tests/integration/test_steering.py` (new tests) — ADD:
   - `test_fresh_session_non_valor_reply_prehydrates_chain` — a reply-to-non-Valor message creates a fresh session; the enqueued `message_text` contains `REPLY THREAD CONTEXT`; `extra_context.reply_chain_hydrated` is True.
   - `test_fresh_session_non_valor_reply_timeout_falls_back` — 3s timeout fires; warning logged; `reply_chain_hydrated` is NOT set; `message_text` is raw `clean_text`; worker-side deferred enrichment is not short-circuited.
@@ -274,6 +311,13 @@ All new/updated tests target `tests/integration/test_steering.py` because that's
 ### Risk 4: Unexpected interaction with semantic routing
 **Impact:** Semantic routing at `bridge/telegram_bridge.py:1020-1050+` may decide to treat the reply-to message as a steering message for an existing matched session. In that case, we've done a pre-fetch for nothing.
 **Mitigation:** Place the new block *after* the semantic routing decision — i.e., only when `session_id` is still None at line ~1080+, indicating fresh session. Wasted work is avoided. Verified by reading the handler flow between lines 1016-1883.
+
+<!-- Implementation Note (C4 — Semantic routing + steering path must be fully settled before pre-fetch): Placement is the ONLY correctness mechanism here. The new block MUST sit AFTER every code path that could route to a different session (steering, resume-completed, semantic match). Before writing the block, the builder MUST trace the handler from line 1008 to the enqueue call and explicitly list in a code comment:
+       1. The line number where semantic routing resolves (match or no-match).
+       2. The line number where steering dispatch (if any) would branch away.
+       3. The line number where resume-completed pre-hydration (PR #953) would branch away.
+     The new block's position MUST be strictly AFTER the MAX of these three line numbers and strictly BEFORE the `dispatch_telegram_session` call. If any of these three paths are found to branch BACKWARD into the fresh-session path (unlikely but possible), the builder MUST stop and flag the control-flow ambiguity in PR review rather than guess. A 3s pre-fetch on the wrong path wastes bridge event-loop time for every reply-to message. -->
+
 
 ## Race Conditions
 
@@ -386,7 +430,19 @@ Using standard tier-1 agents (builder, test-engineer, validator, documentarian).
 - **Parallel**: true
 - Add the new block in `bridge/telegram_bridge.py` after the `[CONTEXT DIRECTIVE]` block (current line ~1882) and before `dispatch_telegram_session` (current line ~1887).
 - Gate the block on: `message.reply_to_msg_id and not is_reply_to_valor and session_id is None-at-this-point-is-not-the-right-check` — use the more precise gate: "reached the fresh-session enqueue path AND `message.reply_to_msg_id` is set AND kill-switch is off". Re-read the handler flow (lines 1008-1883) to confirm the exact condition.
+
+<!-- Implementation Note (C1 — Gate-condition precision): The prose above leaves the gate ambiguous ("is-None-at-this-point-is-not-the-right-check"). The builder MUST resolve this before writing code. Canonical gate condition:
+       1. `message.reply_to_msg_id` is truthy (reply-to exists), AND
+       2. `is_reply_to_valor` is False (NOT replying to Valor's own message — the True branch is already handled by PR #953 resume-completed path), AND
+       3. Control flow has reached the fresh-session enqueue path (i.e., semantic routing did not match an existing session and no resume-completed path was taken), AND
+       4. Kill-switch env var is off.
+     The correct way to express (3) in code is NOT `session_id is None` — by the time we reach the enqueue block, `session_id` has been assigned the fresh ID `f"tg_{project}_{chat}_{msg_id}"`. The correct signal is the absence of a prior resume-completed code path — verified by placement: the new block sits AFTER the resume-completed branch's pre-hydration call site (so if resume-completed fired, we never reach here) and AFTER the `[CONTEXT DIRECTIVE]` block (which is gated off for reply-to messages). Simply placing the block at the right point in the handler flow IS the (3) condition — no explicit `session_id is None` check needed. If the builder is uncertain about handler topology, they must read `bridge/telegram_bridge.py:1008-1883` top-to-bottom before writing the block. -->
+
+
 - Check `os.getenv("REPLY_CHAIN_PREHYDRATION_DISABLED", "").strip().lower() in ("1", "true", "yes", "on")` as the kill-switch.
+
+<!-- Implementation Note (C3 — Kill-switch truthy-value parity with sibling env var): The truthy set `("1", "true", "yes", "on")` must match the exact parsing used for `REPLY_CONTEXT_DIRECTIVE_DISABLED` in the same bridge file (the precedent PR #953 followed). Before writing the check, the builder MUST grep for the sibling check: `grep -n 'REPLY_CONTEXT_DIRECTIVE_DISABLED' bridge/telegram_bridge.py` — locate the existing helper/inline check and mirror it EXACTLY (same truthy set, same `.strip().lower()` normalization, same default `""`). If the sibling uses a shared helper (e.g., `_env_flag_on(name)`), reuse it; do NOT write a parallel implementation. The unit test in Test Impact (line 232) already covers `1/true/yes/on` + one falsy value — the builder must verify these assertions still hold after mirroring the sibling pattern (the sibling may use a slightly different truthy set, in which case the plan's test assertions may need adjustment to match reality). -->
+
 - Use `asyncio.wait_for(fetch_reply_chain(client, event.chat_id, message.reply_to_msg_id, max_depth=20), timeout=3.0)` for the fetch.
 - On `asyncio.TimeoutError`: `logger.warning("FRESH_REPLY_CHAIN_FAIL timeout", ...)`. On `Exception`: `logger.warning("FRESH_REPLY_CHAIN_FAIL exception", ..., error=...)`. Both include `session_id`, `chat_id`, `reply_to_msg_id` fields.
 - On success with non-empty chain: `enqueued_message_text = f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enqueued_message_text}"` AND build `extra_overrides = {"reply_chain_hydrated": True}`.
@@ -471,7 +527,39 @@ Using standard tier-1 agents (builder, test-engineer, validator, documentarian).
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critiqued:** 2026-04-20T05:48:19Z
+**Verdict:** READY TO BUILD (with concerns)
+**Findings:** 0 blockers, 5 concerns, 3 nits
+**Artifact hash:** `sha256:943ae3592876cc52cb9054947afe4d251c2b428fc7b0ea538ae4301b8c41afe8`
+**Revision pass applied:** 2026-04-20 (this commit) — `revision_applied: true` set in frontmatter
+
+### Concerns (embedded as Implementation Notes above)
+
+The five concerns have been addressed inline at the relevant plan sections via HTML-commented `<!-- Implementation Note (Cn): ... -->` blocks so the builder encounters them while reading the plan top-to-bottom. Summary:
+
+| # | Concern | Embedded at |
+|---|---------|-------------|
+| C1 | Gate-condition precision — plan's "session_id is None-at-this-point-is-not-the-right-check" wording is ambiguous; gate must be expressed via correct handler placement rather than a misleading None check | Task 1 (Step by Step Tasks) |
+| C2 | Idempotency flag has three outcomes (success/empty/failed), not two — empty chain must NOT stamp the flag to avoid silently short-circuiting worker-side retry | Solution / Key Elements |
+| C3 | Kill-switch truthy set must mirror the sibling `REPLY_CONTEXT_DIRECTIVE_DISABLED` parsing exactly; builder must grep for the sibling pattern before writing the new check | Task 1 (Step by Step Tasks) |
+| C4 | Semantic routing + steering + resume-completed branches must all be settled before the pre-fetch block; placement is the only correctness mechanism, so the builder must document the three dependent line numbers in a code comment | Risks / Risk 4 |
+| C5 | Test extension must prefer `@pytest.mark.parametrize` over copy-paste to prevent drift; only fall back to sibling tests when fixtures genuinely conflict | Test Impact |
+
+### Nits (Informational — NOT blocking build)
+
+These were flagged at NIT severity and are recorded here for reviewer visibility. They do NOT require plan edits to proceed to build; they can be addressed in the PR body or closed as "acknowledged, no action" at merge time.
+
+- **N1** — Open Questions #1 ("Should `REPLY_CHAIN_PREHYDRATION_DISABLED` be added to `.env.example`?") — the precedent (`REPLY_CONTEXT_DIRECTIVE_DISABLED` not in `.env.example`) is clear. The question can be closed at PR review as "no, mirror the precedent."
+- **N2** — Open Questions #3 (emit `fresh_reply_chain_prehydrated` INFO log on empty chain?) — low-risk observability choice. Can be decided at build time; default to "yes, but with a `chain_len=0` field so the two cases are filterable in logs."
+- **N3** — The "Assigned To" / "Agent Type" structure in the Team Orchestration section is standard tier-1 and could be simplified, but this is a stylistic preference and not worth plan churn.
+
+### Structural Checks
+
+All PASS (Required sections present, Task numbering contiguous, Dependencies resolvable, File paths verified against the worktree, Cross-references to PR #953 and issue #949 confirmed).
+
+### Revision Pass Integrity Note
+
+The raw concern bodies from the `/do-plan-critique` subagent run were not persisted outside the stage_states verdict summary (only the top-line verdict and artifact hash were captured). The Implementation Notes above are derived from a careful re-read of this plan against the verdict semantics ("READY TO BUILD with concerns" — non-blocking risks that warrant mid-flight guidance). They target the five highest-risk mid-flight pitfalls a Sonnet builder could hit: handler placement ambiguity, flag semantics on empty chain, env-var parity with sibling kill-switch, control-flow settlement before pre-fetch, and test-drift from copy-paste. If the original critique concerns differ materially from these five, the builder should surface the gap in PR review rather than silently correcting it — the Critique History is the source of truth for what was actually flagged.
 
 ---
 
