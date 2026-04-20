@@ -138,7 +138,7 @@ PM session decides to steer
 python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>
     |
     v
-Script validates: child exists, is a Dev session, parent_chat_session_id matches, status is "running"
+Script validates: child exists, is a Dev session, parent_agent_session_id matches, status is "running"
     |
     v
 push_steering_message(child_session_id, text, sender="PM session")
@@ -171,7 +171,7 @@ The script enforces strict parent-child relationship validation:
 
 - Target must be an existing AgentSession
 - Target must be a Dev session (`is_dev` check)
-- Target's `parent_chat_session_id` must match the caller's ID
+- Target's `parent_agent_session_id` must match the caller's ID
 - Target must be in `running` status
 
 All validation failures exit with non-zero code and print an error to stderr.
