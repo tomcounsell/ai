@@ -499,7 +499,42 @@ Standard (Tier 1): `builder`, `validator`, `test-engineer`, `documentarian`.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict**: NEEDS REVISION — 5 blockers must be resolved before build.
+**Run**: 2026-04-20 | Critics: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor
+**Findings**: 11 total (5 blockers, 5 concerns, 1 nit)
+
+### Blockers (must resolve before build)
+
+**B1 — Missing behavior migration map for `send_response_with_files` consolidation** *(Skeptic, Adversary, User, Archaeologist)*
+`TelegramRelayOutputHandler.send()` currently lacks at least 7 behaviors from `send_response_with_files`: (1) PM bypass, (2) needs_self_draft steering, (3) routing fields persistence, (4) file type detection (image/video/audio/document), (5) dead-letter queue, (6) `_truncate_at_sentence_boundary`, (7) `filter_tool_logs` + `extract_files_from_response`. Technical Approach Part C says "absorb the unique behavior" but doesn't specify which behaviors are ported vs. deleted.
+→ **Fix**: Add a Decomposition Table in Part C listing each of the 7 behaviors with its destination (port to handler, port to drafter, port to caller, or delete with justification).
+
+**B2 — PM bypass logic not ported — duplicate delivery risk** *(Adversary, User)*
+`send_response_with_files` lines 445-463 guard against duplicate delivery when a PM session self-messages (`session.has_pm_messages()` + parent session check). `TelegramRelayOutputHandler.send()` has no such guard. If not ported, PM orchestration sessions will double-deliver.
+→ **Fix**: Trace the PM bypass path explicitly: confirm whether stop-hook fires before the handler writes to outbox (making porting unnecessary), or add `if session and getattr(session, 'has_pm_messages', lambda: False)(): return` to the handler.
+
+**B3 — Dead-letter queue regression** *(Operator)*
+`send_response_with_files` enqueues failed sends to `bridge/dead_letters.py`. `TelegramRelayOutputHandler.send()` only logs Redis errors to stderr — messages are silently lost on Redis failure. Operational regression.
+→ **Fix**: Add dead-letter enqueue to the handler's exception handler using `bridge.dead_letters.persist_failed_delivery(chat_id, reply_to, delivery_text)` (signature at `bridge/dead_letters.py:84`).
+
+**B4 — Feature flag rollback breaks after `send_response_with_files` deletion** *(Consistency Auditor)*
+Success Criteria: "Feature flag `MESSAGE_DRAFTER_IN_HANDLER` still toggleable; rollback path verified by `test_worker_pm_long_output.py`." But Part C deletes `send_response_with_files`, which is the flag=0 path. Toggling the flag off after this PR would invoke code that no longer exists.
+→ **Fix**: Either (a) keep `send_response_with_files` as a thin stub delegating to the handler, or (b) update the Success Criterion to state the flag is deprecated and update the disabled-drafter test assertion. Choose one.
+
+**B5 — Pre-Verdict Checklist new prose format unspecified** *(User)*
+Task 1 step-by-step says "replace the markdown table with a bulleted list" but doesn't include a concrete example of the migrated 12-item checklist. Builder ambiguity, especially regarding bold/italic usage and whether the format itself passes `validate_telegram`.
+→ **Fix**: Add a 3-item example of the migrated format in Task 1. Confirm `validate_telegram(new_checklist_text)` returns `[]`.
+
+### Concerns (address before review)
+
+- **C1**: Verification table uses `$(git merge-base main HEAD)` but plan body specifies baseline `26c0ed5e` — hardcode the literal commit.
+- **C2**: Race Conditions section is one line for a hot-path consolidation — document deployment atomicity and session object lifetime guarantees.
+- **C3**: `validate_telegram(None)` contract unresolved — choose: raise `TypeError` or document caller must pre-check. *Note: current impl's `if not text: return []` may already handle None; verify before writing the test.*
+- **C4**: Handler's INFO-level log on Redis success is present (output_handler.py:295-299) — verify log level is not suppressed in prod.
+- **C5**: Rollback runbook missing: add `git revert <merge-commit> && ./scripts/valor-service.sh restart` to Risk 1 mitigation.
+
+### Nits
+- **N1**: Verification table net-negative check shell command is overly complex — simplify to `git diff --stat 26c0ed5e..HEAD -- . ':(exclude)tests/' ':(exclude)docs/plans/' | tail -1`.
 
 ---
 
