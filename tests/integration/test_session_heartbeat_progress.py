@@ -83,6 +83,7 @@ class TestHeartbeatFreshness:
         s = _mk_session(
             last_heartbeat_at=_ago(30),
             last_sdk_heartbeat_at=_ago(30),
+            last_stdout_at=_ago(30),
         )
         assert _has_progress(s) is True
 
@@ -91,6 +92,7 @@ class TestHeartbeatFreshness:
         s = _mk_session(
             last_heartbeat_at=_ago(30),
             last_sdk_heartbeat_at=_ago(300),
+            last_stdout_at=_ago(30),
         )
         assert _has_progress(s) is True
 
@@ -118,11 +120,15 @@ class TestTier2ReprieveIntegration:
         assert signal == "stdout"
 
     def test_no_reprieve_when_all_signals_stale(self):
-        """Scenario 4 setup: no reprieve signals → None (kill would proceed)."""
+        """Scenario 4 setup: no reprieve signals → None (kill would proceed).
+
+        ``STDOUT_FRESHNESS_WINDOW`` is 600s, so ``last_stdout_at`` must be older
+        than that for the stdout reprieve gate to decline.
+        """
         s = _mk_session(
-            last_heartbeat_at=_ago(300),
-            last_sdk_heartbeat_at=_ago(300),
-            last_stdout_at=_ago(300),
+            last_heartbeat_at=_ago(800),
+            last_sdk_heartbeat_at=_ago(800),
+            last_stdout_at=_ago(800),
         )
         assert _has_progress(s) is False
         assert _tier2_reprieve_signal(None, s) is None
@@ -176,5 +182,5 @@ class TestFreshnessWindowConstants:
     def test_heartbeat_freshness_window_is_90_seconds(self):
         assert HEARTBEAT_FRESHNESS_WINDOW == 90
 
-    def test_stdout_freshness_window_is_90_seconds(self):
-        assert STDOUT_FRESHNESS_WINDOW == 90
+    def test_stdout_freshness_window_is_600_seconds(self):
+        assert STDOUT_FRESHNESS_WINDOW == 600
