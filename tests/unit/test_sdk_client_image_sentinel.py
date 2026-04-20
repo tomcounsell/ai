@@ -14,8 +14,6 @@ import pytest
 @pytest.mark.asyncio
 async def test_sentinel_fires_full_context_message(monkeypatch):
     """When --resume returns the sentinel string (exit 0), full_context_message is used."""
-    from unittest.mock import AsyncMock
-
     from agent.sdk_client import IMAGE_DIMENSION_SENTINEL, get_response_via_harness
 
     call_log: list[list[str]] = []
@@ -124,7 +122,7 @@ async def test_sentinel_does_not_fire_on_empty_result(monkeypatch):
 
     from agent.sdk_client import get_response_via_harness
 
-    result = await get_response_via_harness(
+    await get_response_via_harness(
         message="hello",
         working_dir="/tmp",
         prior_uuid="12345678-1234-1234-1234-123456789abc",

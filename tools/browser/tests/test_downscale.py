@@ -6,8 +6,6 @@ These tests are pure unit tests — no browser, no network.
 
 from io import BytesIO
 
-import pytest
-
 
 def _make_png(width: int, height: int) -> bytes:
     """Create a minimal valid PNG image of the given dimensions using Pillow."""
