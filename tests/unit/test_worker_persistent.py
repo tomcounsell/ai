@@ -24,10 +24,15 @@ from agent.agent_session_queue import (
 
 @pytest.fixture(autouse=True)
 def reset_shutdown_flag():
-    """Reset the shutdown flag before and after each test."""
-    asq._shutdown_requested = False
+    """Reset the shutdown flag before and after each test.
+
+    The runtime reads/writes the canonical binding at
+    ``agent.session_state._shutdown_requested``; ``asq._shutdown_requested``
+    is a stale import-time copy that the worker loop never consults.
+    """
+    asq._session_state._shutdown_requested = False
     yield
-    asq._shutdown_requested = False
+    asq._session_state._shutdown_requested = False
 
 
 def _mock_session(text="test", chat_id="test_chat", session_id="s1"):
@@ -55,7 +60,7 @@ class TestPersistentMode:
 
         async def wake_and_shutdown():
             await asyncio.sleep(0.1)
-            asq._shutdown_requested = True
+            asq._session_state._shutdown_requested = True
             event.set()  # Wake the worker
 
         # Mock pop to always return None (empty queue)
@@ -181,9 +186,9 @@ class TestGracefulShutdown:
 
     def test_request_shutdown_sets_flag(self):
         """request_shutdown() sets the module-level flag."""
-        assert asq._shutdown_requested is False
+        assert asq._session_state._shutdown_requested is False
         request_shutdown()
-        assert asq._shutdown_requested is True
+        assert asq._session_state._shutdown_requested is True
 
     def test_request_shutdown_wakes_events(self):
         """request_shutdown() sets all active events to wake waiting workers."""
@@ -223,7 +228,7 @@ class TestGracefulShutdown:
         async def fake_execute(session):
             sessions_executed.append(session.message_text)
             # Request shutdown during first session execution
-            asq._shutdown_requested = True
+            asq._session_state._shutdown_requested = True
 
         mock_fresh = MagicMock()
         mock_fresh.status = "running"
@@ -268,7 +273,7 @@ class TestGracefulShutdown:
 
         async def trigger_shutdown():
             await asyncio.sleep(0.05)
-            asq._shutdown_requested = True
+            asq._session_state._shutdown_requested = True
             event.set()
 
         with (
