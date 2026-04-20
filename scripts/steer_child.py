@@ -96,7 +96,7 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
         return 1
 
     # Validate parent-child relationship
-    if child.parent_session_id != parent_id:
+    if child.parent_agent_session_id != parent_id:
         print(
             f"Error: session '{session_id}' is not a child of '{parent_id}'",
             file=sys.stderr,
