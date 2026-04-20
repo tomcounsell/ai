@@ -97,7 +97,7 @@ The worker's startup sequence is deterministic:
 | Step | Function | Purpose |
 |------|----------|---------|
 | 1 | `AgentSession.rebuild_indexes()` | Repair stale/corrupt Redis index entries |
-| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records |
+| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issue #1069) |
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Kill orphaned Claude SDK subprocesses (PPID=1) |
 | 4.5 | `verify_harness_health()` | Verify CLI harness binary (`claude`) is available and healthy; fatal if missing (see [Harness Abstraction](harness-abstraction.md)) |
