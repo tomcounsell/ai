@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import time as _time
 from collections import Counter, defaultdict
-from datetime import datetime
 
 logger = logging.getLogger("reflections.behavioral_learning")
 
@@ -82,8 +81,10 @@ async def run() -> dict:
             ca = session.completed_at
             if ca is None:
                 continue
-            completed_ts = ca.timestamp() if isinstance(ca, datetime) else float(ca)
-            if completed_ts < cutoff:
+            from bridge.utc import to_unix_ts
+
+            completed_ts = to_unix_ts(ca)
+            if completed_ts is None or completed_ts < cutoff:
                 continue
 
             if not session.is_sdlc:

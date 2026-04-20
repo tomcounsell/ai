@@ -1569,12 +1569,12 @@ class AgentSession(Model):
             started = session.started_at or session.created_at
             if started is None:
                 continue
-            # Handle both datetime and float timestamps (migration period)
-            if isinstance(started, datetime):
-                ts = started.timestamp()
-            elif isinstance(started, int | float):
-                ts = float(started)
-            else:
+            # Handle both datetime and float timestamps (migration period).
+            # to_unix_ts treats naive datetimes as UTC (Popoto strips tzinfo).
+            from bridge.utc import to_unix_ts
+
+            ts = to_unix_ts(started)
+            if ts is None:
                 continue
             if ts < cutoff:
                 session.delete()

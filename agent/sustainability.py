@@ -156,15 +156,9 @@ def session_recovery_drip() -> None:
 
         # Pop oldest session (FIFO by created_at) — paused_circuit has priority
         def _ts(session):
-            ca = getattr(session, "created_at", None)
-            if ca is None:
-                return 0.0
-            if isinstance(ca, int | float):
-                return float(ca)
-            try:
-                return ca.timestamp()
-            except Exception:
-                return 0.0
+            from bridge.utc import to_unix_ts
+
+            return to_unix_ts(getattr(session, "created_at", None)) or 0.0
 
         if paused_circuit:
             paused_circuit.sort(key=_ts)
@@ -282,18 +276,13 @@ def session_count_throttle() -> None:
 
         cutoff = time.time() - 3600  # 1 hour ago
         all_sessions = list(AgentSession.query.filter(project_key=project_key))
+        from bridge.utc import to_unix_ts
+
         recent = []
         for s in all_sessions:
-            started_at = getattr(s, "started_at", None)
-            if started_at is None:
+            ts = to_unix_ts(getattr(s, "started_at", None))
+            if ts is None:
                 continue
-            if isinstance(started_at, int | float):
-                ts = started_at
-            else:
-                try:
-                    ts = started_at.timestamp()
-                except Exception:
-                    continue
             if ts >= cutoff:
                 recent.append(s)
 
@@ -339,22 +328,17 @@ def failure_loop_detector() -> None:
             logger.info("[failure-loop-detector] Queue paused (API outage) — skipping failure scan")
             return
 
+        from bridge.utc import to_unix_ts
+
         cutoff = time.time() - (4 * 3600)  # 4 hours ago
         all_sessions = list(AgentSession.query.filter(project_key=project_key))
         failed_sessions = []
         for s in all_sessions:
             if s.status not in ("failed", "abandoned"):
                 continue
-            completed_at = getattr(s, "completed_at", None)
-            if completed_at is None:
+            ts = to_unix_ts(getattr(s, "completed_at", None))
+            if ts is None:
                 continue
-            if isinstance(completed_at, int | float):
-                ts = completed_at
-            else:
-                try:
-                    ts = completed_at.timestamp()
-                except Exception:
-                    continue
             if ts >= cutoff:
                 failed_sessions.append(s)
 

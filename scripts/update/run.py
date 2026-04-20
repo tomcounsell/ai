@@ -173,8 +173,8 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
         because they had recent heartbeat activity.
     """
     import time
-    from datetime import datetime
 
+    from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
     from models.session_lifecycle import finalize_session
 
@@ -209,43 +209,18 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
                     continue  # live worker exists — do not kill
 
             # Primary liveness check: updated_at recency
-            updated = getattr(s, "updated_at", None)
-            if updated is not None:
-                if isinstance(updated, datetime):
-                    recency = now - updated.timestamp()
-                elif isinstance(updated, str):
-                    try:
-                        dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
-                        recency = now - dt.timestamp()
-                    except (ValueError, TypeError):
-                        recency = None
-                else:
-                    try:
-                        recency = now - float(updated)
-                    except (TypeError, ValueError):
-                        recency = None
-
-                if recency is not None and recency < RECENT_ACTIVITY_WINDOW:
+            updated_ts = to_unix_ts(getattr(s, "updated_at", None))
+            if updated_ts is not None:
+                recency = now - updated_ts
+                if recency < RECENT_ACTIVITY_WINDOW:
                     skipped_live += 1
                     continue  # recent heartbeat activity — session is live
 
             # Fallback liveness check: created_at age (for sessions without updated_at)
-            created = s.created_at
-            if not created:
+            created_ts = to_unix_ts(s.created_at)
+            if created_ts is None:
                 continue
-            if isinstance(created, datetime):
-                age = now - created.timestamp()
-            elif isinstance(created, str):
-                try:
-                    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                    age = now - dt.timestamp()
-                except (ValueError, TypeError):
-                    continue
-            else:
-                try:
-                    age = now - float(created)
-                except (TypeError, ValueError):
-                    continue
+            age = now - created_ts
 
             if age < threshold:
                 continue

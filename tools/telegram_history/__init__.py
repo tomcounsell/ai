@@ -86,18 +86,17 @@ def _ts_to_iso(ts: float | None) -> str | None:
 
 
 def _parse_ts(ts_val) -> float:
-    """Parse a timestamp value to unix float."""
+    """Parse a timestamp value to unix float.
+
+    Uses ``bridge.utc.to_unix_ts`` to treat naive datetimes as UTC so age
+    calculations stay correct on non-UTC hosts.
+    """
+    from bridge.utc import to_unix_ts
+
     if ts_val is None:
         return time.time()
-    if isinstance(ts_val, int | float):
-        return float(ts_val)
-    if hasattr(ts_val, "timestamp"):
-        return ts_val.timestamp()
-    # Try parsing ISO string
-    try:
-        return datetime.fromisoformat(str(ts_val)).timestamp()
-    except (ValueError, TypeError):
-        return time.time()
+    result = to_unix_ts(ts_val)
+    return result if result is not None else time.time()
 
 
 # =============================================================================

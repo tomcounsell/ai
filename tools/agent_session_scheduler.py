@@ -37,14 +37,16 @@ from models.session_lifecycle import NON_TERMINAL_STATUSES
 
 
 def _to_ts(val):
-    """Convert datetime or float to Unix timestamp."""
-    if val is None:
-        return None
-    if isinstance(val, datetime):
-        return val.timestamp()
-    if isinstance(val, int | float):
-        return float(val)
-    return None
+    """Convert datetime or float to Unix timestamp.
+
+    Delegates to ``bridge.utc.to_unix_ts`` which treats naive datetimes as UTC
+    (Popoto strips tzinfo on save). Directly calling ``val.timestamp()`` on a
+    naive datetime would interpret it as machine-local time and silently offset
+    every derived age by the machine's UTC offset.
+    """
+    from bridge.utc import to_unix_ts
+
+    return to_unix_ts(val)
 
 
 def _to_iso(val):

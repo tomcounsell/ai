@@ -85,9 +85,11 @@ async def run_memory_decay_prune() -> dict:
             created_at = getattr(memory, "created_at", None)
             if created_at is None:
                 continue
-            created_ts = (
-                created_at.timestamp() if hasattr(created_at, "timestamp") else float(created_at)
-            )
+            from bridge.utc import to_unix_ts
+
+            created_ts = to_unix_ts(created_at)
+            if created_ts is None:
+                continue
             if created_ts > cutoff:
                 # Less than 30 days old — exempt
                 continue
@@ -173,9 +175,11 @@ async def run_memory_quality_audit() -> dict:
             created_at = getattr(memory, "created_at", None)
             if created_at is None:
                 continue
-            created_ts = (
-                created_at.timestamp() if hasattr(created_at, "timestamp") else float(created_at)
-            )
+            from bridge.utc import to_unix_ts
+
+            created_ts = to_unix_ts(created_at)
+            if created_ts is None:
+                continue
 
             # Flag: zero access after 30 days
             access_count = memory.access_count or 0
