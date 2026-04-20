@@ -9,6 +9,7 @@ Integration tests call the real Haiku API for accuracy validation.
 """
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -79,7 +80,11 @@ class TestMockedClassification:
     def test_interjection_classification(self):
         """High-confidence interjection is returned correctly."""
         mock_client = self._mock_haiku_response(
-            {"intent": "interjection", "confidence": 0.95, "reason": "Course correction"}
+            {
+                "intent": "interjection",
+                "confidence": 0.95,
+                "reason": "Course correction",
+            }
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
@@ -111,7 +116,11 @@ class TestMockedClassification:
     def test_acknowledgment_classification(self):
         """Acknowledgment is returned correctly."""
         mock_client = self._mock_haiku_response(
-            {"intent": "acknowledgment", "confidence": 0.92, "reason": "User approves work"}
+            {
+                "intent": "acknowledgment",
+                "confidence": 0.92,
+                "reason": "User approves work",
+            }
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
@@ -129,7 +138,11 @@ class TestMockedClassification:
     def test_low_confidence_defaults_to_new_work(self):
         """Below 0.80 confidence threshold, intent defaults to new_work."""
         mock_client = self._mock_haiku_response(
-            {"intent": "interjection", "confidence": 0.60, "reason": "Unclear follow-up"}
+            {
+                "intent": "interjection",
+                "confidence": 0.60,
+                "reason": "Unclear follow-up",
+            }
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
@@ -302,6 +315,10 @@ class TestSessionSteeringIntegration:
 # =============================================================================
 
 
+@pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"),
+    reason="requires ANTHROPIC_API_KEY",
+)
 class TestRealHaikuClassification:
     """Integration tests using real Haiku API calls.
 

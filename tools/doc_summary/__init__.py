@@ -51,15 +51,6 @@ def summarize(
             - word_count: Summary word count
             - compression_ratio: Original vs summary size
     """
-    # Try Anthropic first, fall back to OpenRouter
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    use_anthropic = bool(api_key)
-
-    if not use_anthropic:
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            return {"error": "ANTHROPIC_API_KEY or OPENROUTER_API_KEY required"}
-
     # If content looks like a file path, try to read it
     if content and len(content) < 500 and "\n" not in content:
         path = Path(content)
@@ -71,6 +62,15 @@ def summarize(
 
     if not content or not content.strip():
         return {"error": "Content cannot be empty"}
+
+    # Try Anthropic first, fall back to OpenRouter
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    use_anthropic = bool(api_key)
+
+    if not use_anthropic:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            return {"error": "ANTHROPIC_API_KEY or OPENROUTER_API_KEY required"}
 
     original_word_count = len(content.split())
 

@@ -60,6 +60,12 @@ def judge_test_result(
             - criteria_results: Pass/fail for each criterion
             - suggestions: Improvement suggestions
     """
+    if not test_output:
+        return {"error": "Test output cannot be empty"}
+
+    if not expected_criteria:
+        return {"error": "Expected criteria cannot be empty"}
+
     # Try Anthropic first, fall back to OpenRouter
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     use_anthropic = bool(api_key)
@@ -68,12 +74,6 @@ def judge_test_result(
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             return {"error": "ANTHROPIC_API_KEY or OPENROUTER_API_KEY required"}
-
-    if not test_output:
-        return {"error": "Test output cannot be empty"}
-
-    if not expected_criteria:
-        return {"error": "Expected criteria cannot be empty"}
 
     strictness_instructions = {
         "lenient": "Be generous in interpretation. Accept reasonable approximations.",

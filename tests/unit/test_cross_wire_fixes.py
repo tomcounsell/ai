@@ -55,6 +55,10 @@ class TestClassifierInformationalCompletion:
         if result.output_type is not None:
             assert result.output_type != OutputType.STATUS_UPDATE
 
+    @pytest.mark.skipif(
+        not os.getenv("ANTHROPIC_API_KEY"),
+        reason="requires ANTHROPIC_API_KEY",
+    )
     @pytest.mark.asyncio
     async def test_qa_answer_classified_as_completion(self):
         """Full classifier should classify informational answers as COMPLETION."""
