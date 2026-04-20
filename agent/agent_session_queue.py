@@ -134,7 +134,6 @@ from agent.session_state import (  # noqa: F401
     _shutdown_requested,
     _starting_workers,
 )
-from bridge.context import REPLY_THREAD_CONTEXT_HEADER  # noqa: F401
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 

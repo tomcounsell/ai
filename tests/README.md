@@ -48,6 +48,10 @@ Every test is auto-tagged by filename via `tests/conftest.py`. When a feature ch
 
 Check counts with: `pytest -m <marker> --collect-only -q`
 
+## Patch-Target Convention
+
+When a test patches a symbol, patch the **canonical module that owns the symbol**, not the shim that re-exports it. After PR #1023 split `agent/agent_session_queue.py` into purpose-specific modules (`session_health`, `session_completion`, `session_executor`, `branch_manager`, etc.), tests that still patched `agent.agent_session_queue.<X>` silently no-op'd because the new modules import helpers via direct paths (`from agent.session_executor import steer_session as _steer_session`). The shim keeps re-exports for type checkers and editor navigation, but patch targets must hit the runtime import site. See #1041 and the post-mortem in its plan for details.
+
 ## Directory Structure
 
 ```
