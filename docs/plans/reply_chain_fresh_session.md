@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -359,8 +359,9 @@ Integration test coverage: `tests/integration/test_steering.py` already exercise
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/reply-thread-context-hydration.md` — add a new subsection (or extend the existing "Reply-To Arrives, Resolves To Completed Session" section) documenting the fresh-session + non-Valor-reply flow. Include the updated table showing both call sites in "Precedence Between Pre-Hydration And Deferred Enrichment".
-- [ ] No entry needed in `docs/features/README.md` index table (feature already indexed).
+- [x] Update `docs/features/reply-thread-context-hydration.md` — add a new subsection (or extend the existing "Reply-To Arrives, Resolves To Completed Session" section) documenting the fresh-session + non-Valor-reply flow. Include the updated table showing both call sites in "Precedence Between Pre-Hydration And Deferred Enrichment".
+- [x] Updated `docs/features/README.md` index table entry to reference the fresh-session non-Valor reply pre-hydration (cascade update).
+- [x] Updated `docs/features/operational-logging.md` to document the new `FRESH_REPLY_CHAIN_FAIL` WARNING and `fresh_reply_chain_prehydrated` INFO log lines (cascade update).
 
 ### External Documentation Site
 
@@ -368,8 +369,8 @@ Integration test coverage: `tests/integration/test_steering.py` already exercise
 
 ### Inline Documentation
 
-- [ ] Code comment on the new handler block explaining the scope delta vs. PR #953 (resume-completed vs. fresh-session, and why both exist).
-- [ ] Docstring/comment on the `REPLY_CHAIN_PREHYDRATION_DISABLED` env var at the check site.
+- [x] Code comment on the new handler block explaining the scope delta vs. PR #953 (resume-completed vs. fresh-session, and why both exist).
+- [x] Docstring/comment on the `REPLY_CHAIN_PREHYDRATION_DISABLED` env var at the check site.
 
 ## Success Criteria
 
