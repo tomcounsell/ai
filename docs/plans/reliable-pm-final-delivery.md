@@ -266,7 +266,7 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 **Trigger:** Two child sessions complete near-simultaneously; both invoke `_handle_dev_session_completion`. The first detects pipeline completion and spawns the runner. The second sees the parent still `"running"` and invokes `_finalize_parent_sync`, which transitions parent to `"completed"` before the runner's `send_cb` fires. The runner's subsequent `send_cb` delivers a valid message, but the parent is already terminal — the router's `deliver_already_completed` branch handles it (which is actually correct).
 **Data prerequisite:** Parent must NOT be finalized to `"completed"` by any path OTHER than the completion runner.
 **State prerequisite:** A "completion pending" flag set atomically before the runner starts.
-**Mitigation:** Set `pipeline_complete_pending = True` on parent AgentSession at the very start of `_deliver_pipeline_completion`. `_finalize_parent_sync` checks this flag; if set, transitions to `"completing"` (a new intermediate non-terminal status already documented in `docs/features/session-lifecycle.md`) or just returns early. The runner is the sole transition to `"completed"`. If the flag is unset and the runner never fires (e.g., pipeline not actually complete), existing behavior applies.
+**Mitigation:** Set `pipeline_complete_pending = True` on parent AgentSession's `extra_context` dict at the very start of `_deliver_pipeline_completion` (no schema migration — `extra_context` is an existing `DictField` at `models/agent_session.py:152`). `_finalize_parent_sync` checks this flag; if set, it returns early without transitioning the parent (no new intermediate status is introduced — prior draft incorrectly cited a `"completing"` status that does not exist in `docs/features/session-lifecycle.md` or the `TERMINAL_STATUSES`/`session_lifecycle.py` tables). The runner is the sole transition to `"completed"`. If the flag is unset and the runner never fires (e.g., pipeline not actually complete), existing behavior applies.
 
 ### Race 2: Concurrent completion runner invocations
 **Location:** `_handle_dev_session_completion` called multiple times for the same parent.
@@ -576,7 +576,17 @@ Integration verification: existing `tests/integration/test_session_finalization_
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** NEEDS REVISION (recorded `2026-04-20T22:50:22Z`, artifact_hash `sha256:fc4d9e47…0e1bb6a`)
+
+**Finding artifact status:** The `/do-plan-critique` skill ran but did not persist its detailed findings to a retrievable location (no `docs/plans/critiques/1058-*.md` file, no issue comment, no payload on the verdict record). This is a system-level observability gap: the war-room output was emitted as assistant text that was not captured in a session transcript.
+
+**Verifiable findings applied in this revision:**
+- **F1 (FIXED): fabricated `"completing"` status.** Race 1 mitigation (Risk section) cited `"completing"` as "a new intermediate non-terminal status already documented in `docs/features/session-lifecycle.md`." Verified by `grep` that no such status exists in session-lifecycle.md, nor in `TERMINAL_STATUSES` or any status-value declaration in `models/session_lifecycle.py`. The function parameters `completing_child_id` / `completing_child_status` are unrelated — they describe a child's completion state, not a parent status. Revised Race 1 mitigation to use the `extra_context.pipeline_complete_pending` flag alone (already proposed), with `_finalize_parent_sync` returning early when set. No new status is introduced.
+
+**Findings not yet addressed (pending retrieval of the full critique output):**
+- The detailed findings from the war-room agents (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User) are not recoverable from the stored verdict. Re-running `/do-plan-critique` with findings-persistence to `docs/plans/critiques/1058-reliable-pm-final-delivery.md` (or as an issue comment) is required before this plan can advance to `Ready`.
+
+**Open Questions status:** The 5 Open Questions surfaced in Phase 3 of the original plan remain unresolved. A critique verdict of "NEEDS REVISION" is expected and appropriate while these are open — the plan cannot transition to `Ready` until answers are recorded and folded into Solution / Risks / Technical Approach.
 
 ---
 
