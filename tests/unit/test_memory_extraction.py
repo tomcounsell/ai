@@ -3,6 +3,22 @@
 import pytest
 
 
+def _make_async_anthropic_mock(mock_message):
+    """Build a MagicMock that mimics anthropic.AsyncAnthropic for `async with` (hotfix #1055).
+
+    Returns a ``MagicMock`` instance that:
+      * supports ``async with AsyncAnthropic(...) as client:`` (__aenter__/__aexit__)
+      * exposes ``client.messages.create`` as an ``AsyncMock`` returning ``mock_message``
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.messages.create = AsyncMock(return_value=mock_message)
+    return mock_client
+
+
 class TestExtractBigrams:
     """Test agent/memory_extraction.py _extract_bigrams()."""
 
@@ -345,14 +361,13 @@ class TestPostMergeJsonParsing:
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=json_response)]
 
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         mock_memory = MagicMock()
         mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
             patch("models.memory.Memory", mock_memory),
             patch("models.memory.SOURCE_AGENT", "agent"),
@@ -380,14 +395,13 @@ class TestPostMergeJsonParsing:
             MagicMock(text="Post-query re-ranking is safer than pre-query filtering")
         ]
 
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         mock_memory = MagicMock()
         mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
             patch("models.memory.Memory", mock_memory),
             patch("models.memory.SOURCE_AGENT", "agent"),
@@ -415,14 +429,13 @@ class TestPostMergeJsonParsing:
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=json_response)]
 
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         mock_memory = MagicMock()
         mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
             patch("models.memory.Memory", mock_memory),
             patch("models.memory.SOURCE_AGENT", "agent"),
@@ -534,9 +547,14 @@ class TestPersistOutcomeMetadata:
 
 
 class TestJudgeOutcomesLlm:
-    """Test agent/memory_extraction.py _judge_outcomes_llm()."""
+    """Test agent/memory_extraction.py _judge_outcomes_llm().
 
-    def test_parses_valid_llm_response(self):
+    hotfix #1055: _judge_outcomes_llm is async-native (AsyncAnthropic). All
+    tests use @pytest.mark.asyncio and await the call.
+    """
+
+    @pytest.mark.asyncio
+    async def test_parses_valid_llm_response(self):
         import json
         from unittest.mock import MagicMock, patch
 
@@ -555,14 +573,13 @@ class TestJudgeOutcomesLlm:
 
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=llm_response)]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
         ):
-            result = _judge_outcomes_llm(
+            result = await _judge_outcomes_llm(
                 [("key1", "use blue-green deployment"), ("key2", "kubernetes config")],
                 "We deployed using blue-green strategy.",
             )
@@ -572,7 +589,8 @@ class TestJudgeOutcomesLlm:
         assert result["key2"]["outcome"] == "dismissed"
         assert "deployment" in result["key1"]["reasoning"]
 
-    def test_echoed_maps_to_dismissed(self):
+    @pytest.mark.asyncio
+    async def test_echoed_maps_to_dismissed(self):
         import json
         from unittest.mock import MagicMock, patch
 
@@ -590,14 +608,13 @@ class TestJudgeOutcomesLlm:
 
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=llm_response)]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
         ):
-            result = _judge_outcomes_llm(
+            result = await _judge_outcomes_llm(
                 [("key1", "redis connection pooling")],
                 "Redis connections are managed via pooling.",
             )
@@ -605,34 +622,37 @@ class TestJudgeOutcomesLlm:
         assert result is not None
         assert result["key1"]["outcome"] == "dismissed"
 
-    def test_returns_none_on_api_failure(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_on_api_failure(self):
         from unittest.mock import patch
 
         from agent.memory_extraction import _judge_outcomes_llm
 
         with patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"):
-            with patch("anthropic.Anthropic", side_effect=Exception("API down")):
-                result = _judge_outcomes_llm(
+            with patch("anthropic.AsyncAnthropic", side_effect=Exception("API down")):
+                result = await _judge_outcomes_llm(
                     [("key1", "some thought")],
                     "some response",
                 )
 
         assert result is None
 
-    def test_returns_none_when_no_api_key(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_api_key(self):
         from unittest.mock import patch
 
         from agent.memory_extraction import _judge_outcomes_llm
 
         with patch("utils.api_keys.get_anthropic_api_key", return_value=None):
-            result = _judge_outcomes_llm(
+            result = await _judge_outcomes_llm(
                 [("key1", "some thought")],
                 "some response",
             )
 
         assert result is None
 
-    def test_fills_missing_thoughts(self):
+    @pytest.mark.asyncio
+    async def test_fills_missing_thoughts(self):
         """Thoughts not covered by LLM response get dismissed by default."""
         import json
         from unittest.mock import MagicMock, patch
@@ -648,14 +668,13 @@ class TestJudgeOutcomesLlm:
 
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=llm_response)]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
         ):
-            result = _judge_outcomes_llm(
+            result = await _judge_outcomes_llm(
                 [("key1", "thought one"), ("key2", "thought two")],
                 "response text",
             )
@@ -664,7 +683,8 @@ class TestJudgeOutcomesLlm:
         assert result["key1"]["outcome"] == "acted"
         assert result["key2"]["outcome"] == "dismissed"
 
-    def test_caps_at_max_thoughts(self):
+    @pytest.mark.asyncio
+    async def test_caps_at_max_thoughts(self):
         """Only first 5 thoughts are sent to the LLM."""
         import json
         from unittest.mock import MagicMock, patch
@@ -683,14 +703,13 @@ class TestJudgeOutcomesLlm:
 
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text=llm_response)]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
         ):
-            result = _judge_outcomes_llm(thoughts, "response text")
+            result = await _judge_outcomes_llm(thoughts, "response text")
 
         assert result is not None
         # Only the first 5 should be in the result
@@ -698,21 +717,21 @@ class TestJudgeOutcomesLlm:
         assert "key5" not in result
         assert "key6" not in result
 
-    def test_invalid_json_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_invalid_json_returns_none(self):
         from unittest.mock import MagicMock, patch
 
         from agent.memory_extraction import _judge_outcomes_llm
 
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="not valid json at all")]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_message
+        mock_client = _make_async_anthropic_mock(mock_message)
 
         with (
-            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
             patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
         ):
-            result = _judge_outcomes_llm(
+            result = await _judge_outcomes_llm(
                 [("key1", "thought")],
                 "response",
             )
@@ -899,3 +918,388 @@ class TestPersonaPromptContainsIntentionalMemory:
         assert "When to Search" in content
         assert "--category correction" in content
         assert "--tag" in content
+
+
+# -----------------------------------------------------------------------------
+# Hotfix #1055 — event-loop safety guards for async Anthropic extraction.
+# -----------------------------------------------------------------------------
+
+
+class TestEventLoopSafety:
+    """Verify memory_extraction never blocks the worker event loop (hotfix #1055).
+
+    Tests model the exact failure mode observed in #1055: a half-open TCP
+    socket where the sync client never returns. We stub AsyncAnthropic with a
+    ``messages.create`` coroutine that calls ``time.sleep(40)`` (REAL sync
+    block, not ``asyncio.sleep`` — cooperative suspension does not model the
+    observed failure).
+    """
+
+    @staticmethod
+    def _make_hung_async_anthropic_mock():
+        """Build an AsyncAnthropic mock whose messages.create internally ``time.sleep(40)``."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        async def _hung_create(*args, **kwargs):
+            import time
+
+            time.sleep(40)  # REAL sync block — models half-open TCP socket stall
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.messages.create = _hung_create
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_hard_timeout_caught_and_logged_extract_observations(self, caplog):
+        """extract_observations_async times out within ~35s on hung client."""
+        import logging
+        import time
+        from unittest.mock import patch
+
+        import agent.memory_extraction as ext
+
+        caplog.set_level(logging.WARNING, logger="agent.memory_extraction")
+
+        mock_client = self._make_hung_async_anthropic_mock()
+
+        # Tighten the outer hard timeout so the test runs in <2s while still
+        # exercising the asyncio.TimeoutError path. The sleep(40) inside the
+        # stubbed create() is synchronous and will be cancelled by the
+        # asyncio event loop when wait_for fires — except the coroutine's
+        # body is still blocking a thread. To keep the test fast while still
+        # hitting the TimeoutError branch, we mock asyncio.wait_for to raise
+        # TimeoutError immediately.
+        async def _raise_timeout(coro_or_awaitable=None, *a, **kw):
+            # Close the unwawaited coroutine to suppress RuntimeWarning, then
+            # raise TimeoutError to exercise the outer branch.
+            if coro_or_awaitable is not None and hasattr(coro_or_awaitable, "close"):
+                coro_or_awaitable.close()
+            raise __import__("asyncio").TimeoutError
+
+        # Capture analytics counter calls
+        recorded = []
+
+        def _stub_record(name, value, tags):
+            recorded.append((name, tags))
+
+        with (
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("asyncio.wait_for", side_effect=_raise_timeout),
+            patch("analytics.collector.record_metric", side_effect=_stub_record),
+        ):
+            start = time.time()
+            result = await ext.extract_observations_async(
+                "sess-test",
+                "A" * 200,  # >50 chars to pass the short-circuit guard
+                project_key="test-proj",
+            )
+            elapsed = time.time() - start
+
+        assert result == [], "extract_observations_async must return [] on timeout"
+        assert elapsed < 5.0, f"hard-timeout path must return quickly (got {elapsed:.2f}s)"
+        assert any("hard timeout" in rec.message.lower() for rec in caplog.records), (
+            "must log WARNING with 'hard timeout' wording"
+        )
+        assert any(
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
+            for name, tags in recorded
+        ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
+
+    @pytest.mark.asyncio
+    async def test_hard_timeout_caught_and_logged_detect_outcomes(self, caplog):
+        """detect_outcomes_async (via _judge_outcomes_llm) times out gracefully."""
+        import logging
+        import time
+        from unittest.mock import patch
+
+        import agent.memory_extraction as ext
+
+        caplog.set_level(logging.WARNING, logger="agent.memory_extraction")
+
+        mock_client = self._make_hung_async_anthropic_mock()
+
+        async def _raise_timeout(coro_or_awaitable=None, *a, **kw):
+            # Close the unwawaited coroutine to suppress RuntimeWarning, then
+            # raise TimeoutError to exercise the outer branch.
+            if coro_or_awaitable is not None and hasattr(coro_or_awaitable, "close"):
+                coro_or_awaitable.close()
+            raise __import__("asyncio").TimeoutError
+
+        recorded = []
+
+        def _stub_record(name, value, tags):
+            recorded.append((name, tags))
+
+        with (
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("asyncio.wait_for", side_effect=_raise_timeout),
+            patch("analytics.collector.record_metric", side_effect=_stub_record),
+        ):
+            start = time.time()
+            # detect_outcomes_async first tries LLM; on LLM timeout, falls back
+            # to bigram. We want to confirm: (a) the TimeoutError does NOT
+            # propagate, (b) the counter is recorded, (c) the fallback still
+            # returns something sensible.
+            result = await ext.detect_outcomes_async(
+                [("key1", "some thought content text goes here")],
+                "some response text that mentions different topics entirely",
+            )
+            elapsed = time.time() - start
+
+        assert isinstance(result, dict), "detect_outcomes_async must never raise on timeout"
+        assert elapsed < 5.0, f"hard-timeout path must return quickly (got {elapsed:.2f}s)"
+        assert any(
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
+            for name, tags in recorded
+        ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
+
+    @pytest.mark.asyncio
+    async def test_hard_timeout_caught_and_logged_post_merge_learning(self, caplog):
+        """extract_post_merge_learning times out gracefully."""
+        import logging
+        import time
+        from unittest.mock import patch
+
+        import agent.memory_extraction as ext
+
+        caplog.set_level(logging.WARNING, logger="agent.memory_extraction")
+
+        mock_client = self._make_hung_async_anthropic_mock()
+
+        async def _raise_timeout(coro_or_awaitable=None, *a, **kw):
+            # Close the unwawaited coroutine to suppress RuntimeWarning, then
+            # raise TimeoutError to exercise the outer branch.
+            if coro_or_awaitable is not None and hasattr(coro_or_awaitable, "close"):
+                coro_or_awaitable.close()
+            raise __import__("asyncio").TimeoutError
+
+        recorded = []
+
+        def _stub_record(name, value, tags):
+            recorded.append((name, tags))
+
+        with (
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("asyncio.wait_for", side_effect=_raise_timeout),
+            patch("analytics.collector.record_metric", side_effect=_stub_record),
+        ):
+            start = time.time()
+            result = await ext.extract_post_merge_learning(
+                "PR Title",
+                "PR body content",
+                "diff summary",
+            )
+            elapsed = time.time() - start
+
+        assert result is None, "extract_post_merge_learning must return None on timeout"
+        assert elapsed < 5.0, f"hard-timeout path must return quickly (got {elapsed:.2f}s)"
+        assert any("hard timeout" in rec.message.lower() for rec in caplog.records), (
+            "must log WARNING with 'hard timeout' wording"
+        )
+        assert any(
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
+            for name, tags in recorded
+        ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
+
+    @pytest.mark.asyncio
+    async def test_real_asyncio_wait_for_fires_with_tightened_constants(self, caplog):
+        """Exercise the real asyncio.wait_for with tightened constants (hotfix #1055 review nit).
+
+        The three tests above patch ``asyncio.wait_for`` directly to raise
+        ``TimeoutError`` immediately, which verifies the ``except asyncio.TimeoutError``
+        code path fires and the counter is recorded — but does NOT prove that
+        ``asyncio.wait_for`` is still wired in. A future refactor that silently
+        removes the ``wait_for`` wrapper would pass those three tests.
+
+        This test tightens ``_EXTRACTION_SDK_TIMEOUT`` to 0.05s and
+        ``_EXTRACTION_HARD_TIMEOUT`` to 0.1s, then lets the REAL ``asyncio.wait_for``
+        run against a cooperatively-hung ``AsyncAnthropic`` stub. If the
+        production code no longer wraps the call in ``asyncio.wait_for``, the
+        test will hang past its 2s assertion budget and fail — catching the
+        regression that the mocked-``wait_for`` tests miss.
+        """
+        import logging
+        import time
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import agent.memory_extraction as ext
+
+        caplog.set_level(logging.WARNING, logger="agent.memory_extraction")
+
+        # Cooperative hang (asyncio.sleep, not time.sleep) so the REAL
+        # asyncio.wait_for can cancel the inner coroutine at its await point
+        # — production flows through AsyncAnthropic + httpx which are
+        # cancellable the same way.
+        async def _cooperative_hang(*args, **kwargs):
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(10)  # long enough to always exceed 0.1s
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.messages.create = _cooperative_hang
+
+        recorded = []
+
+        def _stub_record(name, value, tags):
+            recorded.append((name, tags))
+
+        with (
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("analytics.collector.record_metric", side_effect=_stub_record),
+            # Tighten the module constants — the REAL asyncio.wait_for runs
+            # against these, NOT a mock. If the wrapper is removed, the test
+            # hangs past its 2s budget.
+            patch.object(ext, "_EXTRACTION_SDK_TIMEOUT", 0.05),
+            patch.object(ext, "_EXTRACTION_HARD_TIMEOUT", 0.1),
+        ):
+            start = time.time()
+            result = await ext.extract_observations_async(
+                "sess-real-timeout",
+                "A" * 200,
+                project_key="test-proj",
+            )
+            elapsed = time.time() - start
+
+        assert result == [], "extract_observations_async must return [] on real timeout"
+        assert elapsed < 2.0, (
+            f"real asyncio.wait_for must fire within ~0.1s + overhead (got {elapsed:.2f}s). "
+            "If elapsed >> 2s, the production code likely no longer wraps "
+            "messages.create in asyncio.wait_for — hotfix #1055 regression."
+        )
+        assert elapsed >= 0.05, (
+            f"elapsed ({elapsed:.2f}s) is suspiciously short — did asyncio.wait_for "
+            "short-circuit? The test must actually exercise the timeout wait."
+        )
+        assert any(
+            name == "memory.extraction.error" and tags.get("error_class") == "timeouterror"
+            for name, tags in recorded
+        ), f"must emit memory.extraction.error with error_class=timeouterror (got {recorded})"
+
+    @pytest.mark.asyncio
+    async def test_sdk_api_timeout_caught_and_logged(self):
+        """anthropic.APITimeoutError is caught by outer except Exception and counter recorded."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import anthropic
+
+        import agent.memory_extraction as ext
+
+        # APITimeoutError is raised inside messages.create
+        async def _raise_api_timeout(*args, **kwargs):
+            # The public constructor signature varies between SDK versions;
+            # construct via __new__ to avoid coupling to arg shape.
+            try:
+                raise anthropic.APITimeoutError(request=MagicMock())
+            except TypeError:
+                # Older SDK signature: may need a message arg
+                raise anthropic.APITimeoutError("simulated timeout")
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.messages.create = _raise_api_timeout
+
+        recorded = []
+
+        def _stub_record(name, value, tags):
+            recorded.append((name, tags))
+
+        with (
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("analytics.collector.record_metric", side_effect=_stub_record),
+        ):
+            result = await ext.extract_observations_async(
+                "sess-api-timeout",
+                "A" * 200,
+                project_key="test-proj",
+            )
+
+        assert result == [], "APITimeoutError must not crash extract_observations_async"
+        # Outer except Exception catches the SDK APITimeoutError and records
+        # the metric with error_class from type(e).__name__.
+        assert any(
+            name == "memory.extraction.error" and tags.get("error_class") == "apitimeouterror"
+            for name, tags in recorded
+        ), f"must emit memory.extraction.error with error_class=apitimeouterror (got {recorded})"
+
+    def test_no_sync_anthropic_client_grep_canary(self):
+        """Regression canary: no sync anthropic.Anthropic( calls in memory_extraction."""
+        import subprocess
+
+        result = subprocess.run(
+            ["grep", "-n", "anthropic\\.Anthropic(", "agent/memory_extraction.py"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1, (
+            "No sync anthropic.Anthropic( calls allowed in agent/memory_extraction.py — "
+            "use anthropic.AsyncAnthropic( with asyncio.wait_for (see hotfix #1055). "
+            f"Offending lines:\n{result.stdout}"
+        )
+
+
+def test_extract_post_merge_learning_runs_inside_asyncio_run(monkeypatch):
+    """Guards the .claude hook subprocess call path (hotfix #1055, nit 3).
+
+    Hook at .claude/hooks/hook_utils/memory_bridge.py::post_merge_extract()
+    calls asyncio.run(extract_post_merge_learning(...)) inside a short-lived
+    subprocess. Converting the function to AsyncAnthropic must NOT introduce
+    a nested ``asyncio.run()`` (which raises RuntimeError: This event loop is
+    already running). This test runs the function via asyncio.run with a
+    minimal valid AsyncAnthropic mock and asserts no such error is raised.
+
+    See docs/plans/agent_wiki.md:157 for the regression class this guards.
+    """
+    import asyncio
+    import json
+
+    from agent.memory_extraction import extract_post_merge_learning
+
+    json_response = json.dumps(
+        {
+            "observation": "Use dependency injection for testability in hooks",
+            "category": "pattern",
+            "tags": ["testing", "hooks"],
+            "file_paths": ["hooks/example.py"],
+        }
+    )
+
+    mock_message_content = [type("Block", (), {"text": json_response})()]
+    mock_message = type("Message", (), {"content": mock_message_content})()
+    mock_client = _make_async_anthropic_mock(mock_message)
+
+    # Also mock Memory.safe_save so we don't touch Redis from a subprocess-like test
+    from unittest.mock import MagicMock, patch
+
+    mock_memory_module = MagicMock()
+    mock_memory_module.safe_save.return_value = MagicMock(memory_id="mock-mem-id")
+
+    with (
+        patch("anthropic.AsyncAnthropic", return_value=mock_client),
+        patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        patch("models.memory.Memory", mock_memory_module),
+        patch("models.memory.SOURCE_AGENT", "agent"),
+    ):
+        # asyncio.run is the entry point used by .claude/hooks/hook_utils/memory_bridge.py.
+        # If the new AsyncAnthropic path inadvertently nested asyncio.run, this would
+        # raise "RuntimeError: This event loop is already running".
+        result = asyncio.run(
+            extract_post_merge_learning(
+                "PR title",
+                "PR body content longer than twenty chars",
+                "files_changed.py",
+            )
+        )
+
+    # Result may be a dict (memory saved) or None — the critical assertion is that
+    # asyncio.run did not raise. Accept either outcome.
+    assert result is None or isinstance(result, dict)

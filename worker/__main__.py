@@ -407,6 +407,17 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
 
+    # Drain in-flight post-session extractions (hotfix #1055).
+    # Ordering: after worker-task wait (so every extraction that will be scheduled
+    # has been scheduled), before health/notify/reflection cancels (so the event
+    # loop is still running and pending extractions can cooperate with cancel).
+    try:
+        from agent.session_executor import drain_pending_extractions
+
+        await drain_pending_extractions(timeout=5.0)
+    except Exception as e:
+        logger.warning(f"Extraction drain failed: {e}")
+
     # Cancel health monitor
     health_task.cancel()
     try:
