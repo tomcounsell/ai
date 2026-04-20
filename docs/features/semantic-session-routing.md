@@ -8,9 +8,9 @@ This solves a common workflow problem: PM feedback often arrives as fresh messag
 
 ## How It Works
 
-### Phase 1: Structured Summarizer Output
+### Phase 1: Structured Drafter Output
 
-The summarizer (`bridge/summarizer.py`) now produces structured output via Haiku `tool_use` calls, extracting three fields:
+The message drafter (`bridge/message_drafter.py`, formerly `bridge/summarizer.py` — renamed per [#1035](https://github.com/tomcounsell/ai/issues/1035)) produces structured output via Haiku `tool_use` calls, extracting three fields:
 
 - **context_summary** (max 200 chars): A brief description of what the session is working on. Example: "Building dark mode toggle for settings page"
 - **response**: The summarized text sent to Telegram (existing behavior, now structured).
@@ -115,17 +115,17 @@ class StructuredSummary:
     expectations: str | None
 ```
 
-The `SummarizedResponse` now carries `context_summary` and `expectations` fields through to the persistence layer in `bridge/response.py`.
+The `MessageDraft` (formerly `SummarizedResponse`) now carries `context_summary` and `expectations` fields through to the persistence layer in `bridge/response.py`.
 
 ## Persistence
 
-After summarization succeeds (`bridge/response.py`), routing fields are saved to the session:
+After drafting succeeds (`bridge/response.py`), routing fields are saved to the session:
 
 ```python
-if session and summarized.context_summary:
-    session.context_summary = summarized.context_summary
-if session and summarized.expectations is not None:
-    session.expectations = summarized.expectations
+if session and draft.context_summary:
+    session.context_summary = draft.context_summary
+if session and draft.expectations is not None:
+    session.expectations = draft.expectations
 elif session:
     session.expectations = None  # Clear stale expectations
 session.save()
@@ -148,9 +148,9 @@ The threshold is intentionally conservative. False positives (routing to the wro
 | File | Change |
 |------|--------|
 | `models/agent_session.py` | Added `context_summary` and `expectations` fields |
-| `bridge/summarizer.py` | Structured `tool_use` output, `StructuredSummary` dataclass, OpenRouter fallback (replaces Ollama) |
+| `bridge/message_drafter.py` (née `bridge/summarizer.py`) | Structured `tool_use` output, `StructuredDraft` dataclass (formerly `StructuredSummary`), OpenRouter fallback (replaces Ollama) |
 | `bridge/session_router.py` | Semantic router: `find_matching_session()` (always-on, no feature flag) |
-| `bridge/response.py` | Persist routing fields after summarization |
+| `bridge/response.py` | Persist routing fields after drafting |
 | `bridge/telegram_bridge.py` | Integrate semantic router in non-reply-to message handling; active session steering (#318) |
 | `tests/test_summarizer.py` | Updated mocks for `StructuredSummary` returns and OpenRouter fallback |
 | `tests/test_unthreaded_routing.py` | Decision matrix tests: active steering, dormant passthrough, abort detection, FIFO ordering, missing session fallthrough |

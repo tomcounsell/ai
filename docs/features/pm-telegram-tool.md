@@ -155,6 +155,6 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 - Issue: [#641](https://github.com/tomcounsell/ai/issues/641) (file attachment support)
 - Issue: [#644](https://github.com/tomcounsell/ai/issues/644) (multi-file album support)
 - Plan: `docs/plans/pm-telegram-tool.md`
-- Prior art on summarizer architecture: PR #275 (semantic session routing), PR #456 (summarizer evidence hardening)
-- [Summarizer Format](summarizer-format.md) -- the existing summarizer that this feature partially bypasses
+- Prior art on drafter architecture (formerly "summarizer"): PR #275 (semantic session routing), PR #456 (summarizer evidence hardening)
+- [Message Drafter](message-drafter.md) -- the medium-aware drafting layer (formerly the "summarizer") that this feature partially bypasses
 - [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- PM/Dev session split that this feature extends

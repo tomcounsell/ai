@@ -14,7 +14,7 @@ No broken code found. The refactor is functionally complete. All stale imports r
 1. **Core model** (`models/agent_session.py`) — All fields from both old models present, new helpers well-implemented
 2. **Job queue** (`agent/job_queue.py`) — Proper imports, field access, query patterns, backward-compat alias `RedisJob = AgentSession`
 3. **Session transcripts** (`bridge/session_transcript.py`) — Correct usage
-4. **Summarizer** (`bridge/summarizer.py`) — Correct stage progress rendering via `get_stage_progress()` and `get_links()`
+4. **Message drafter** (`bridge/message_drafter.py`, formerly `bridge/summarizer.py` — renamed per #1035) — Correct stage progress rendering via `get_stage_progress()` and `get_links()`
 5. **Session progress** (`tools/session_progress.py`) — Correct `append_history()`, `set_link()` calls
 6. **Session tags** (`tools/session_tags.py`) — Correct queries
 7. **Session watchdog** (`monitoring/session_watchdog.py`) — Correct queries

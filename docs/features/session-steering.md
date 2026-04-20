@@ -111,17 +111,17 @@ All symbols that previously lived only in `agent/agent_session_queue.py` are re-
 
 Existing callers (tests, integrations) that import from `agent.agent_session_queue` continue to work unchanged. The canonical location is now `agent.output_router`.
 
-## Summarizer Fallback Steering
+## Drafter Fallback Steering (née "Summarizer Fallback")
 
-When both summarizer backends (Haiku and OpenRouter) fail, `send_response_with_files()` uses the steering infrastructure to request agent self-summary rather than delivering raw truncated text to Telegram.
+When both drafter backends (Haiku and OpenRouter) fail, `send_response_with_files()` uses the steering infrastructure to request agent self-draft rather than delivering raw truncated text to Telegram.
 
-**Mechanism:** `push_steering_message(session_id, SELF_SUMMARY_INSTRUCTION, sender="summarizer-fallback")` injects a compact self-summary instruction. The agent produces a clean summary on its next turn.
+**Mechanism:** `push_steering_message(session_id, SELF_DRAFT_INSTRUCTION, sender="summarizer-fallback")` injects a compact self-draft instruction. The agent produces a clean draft on its next turn. (Constants were renamed from `SELF_SUMMARY_INSTRUCTION` per [#1035](https://github.com/tomcounsell/ai/issues/1035); the `sender="summarizer-fallback"` string is kept for backward compatibility with existing Redis-queued steering messages.)
 
-**Loop prevention:** `peek_steering_sender(session_id)` checks if a `"summarizer-fallback"` message is already queued before pushing another. This prevents infinite steering loops if the self-summary output also fails summarization.
+**Loop prevention:** `peek_steering_sender(session_id)` checks if a `"summarizer-fallback"` message is already queued before pushing another. This prevents infinite steering loops if the self-draft output also fails drafting.
 
 **Fallback chain:** If steering cannot be used (no session, Redis down, loop prevention), the system falls through to `is_narration_only()` as a last-resort gate before delivering text.
 
-See [Summarizer Format: Self-Summary Fallback](summarizer-format.md#self-summary-fallback-via-session-steering) for the full data flow.
+See [Message Drafter](message-drafter.md) for the current feature doc covering the drafter module. (The previous pointer to `summarizer-format.md` is gone — content migrated into `message-drafter.md`.)
 
 ## Parent-Child Steering (PM session to Dev session)
 
@@ -191,7 +191,7 @@ Both paths converge on the same `push_steering_message()` function in `agent/ste
 
 ## No-Gos
 
-- `bridge/summarizer.py` `nudge_feedback` is untouched — separate concept
+- `bridge/message_drafter.py` `nudge_feedback` is untouched — separate concept
 - The `send_to_chat()` call site remains mid-execution (not post-execution)
 - `OutputHandler` protocol is unchanged
 - No web UI — CLI only

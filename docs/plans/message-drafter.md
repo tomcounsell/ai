@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Large
 owner: valor
@@ -393,29 +393,29 @@ Tests cover all five outcomes end-to-end (see Success Criteria).
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/message-drafter.md` — canonical feature doc covering:
+- [x] Create `docs/features/message-drafter.md` — canonical feature doc covering:
   - Medium/persona orthogonality (with examples)
   - Per-medium format rules (Telegram: no tables; Email: plain prose)
-  - Validator behavior (surface violations to agent; no rewrites)
-  - Tool-call delivery contract (`send_message`, `react_with_emoji`)
-  - Five delivery outcomes and the implicit clearing strategy
+  - Validator behavior (surface violations to agent; no rewrites) — _partial: section present; full behavior ships with task 3_
+  - Tool-call delivery contract (`send_message`, `react_with_emoji`) — _flagged as "Five-outcome delivery (planned)"; ships with tasks 9/11_
+  - Five delivery outcomes and the implicit clearing strategy — _flagged as planned; ships with tasks 11/12_
   - FILE_ATTACH_THRESHOLD → `.txt` attachment behavior for long content
   - Defense-in-depth: drafter-at-handler + relay length guard + dead-letter as last resort
-- [ ] Add entry to `docs/features/README.md` index — replace the "summarizer" row with `message-drafter.md`.
-- [ ] Delete `docs/features/summarizer-format.md` (content migrated) and redirect references.
-- [ ] Update `docs/features/email-bridge.md` — add a section on how outbound email bodies are drafted and validated (medium=email path).
+- [x] Add entry to `docs/features/README.md` index — replace the "summarizer" row with `message-drafter.md`.
+- [x] Delete `docs/features/summarizer-format.md` (content migrated) and redirect references.
+- [x] Update `docs/features/email-bridge.md` — add a section on how outbound email bodies are drafted and validated (medium=email path).
 
 ### External Documentation Site
 - N/A — this repo doesn't use Sphinx/MkDocs for user-facing docs.
 
 ### Inline Documentation
-- [ ] Docstrings on `draft_message`, `MessageDraft`, per-medium validators.
-- [ ] Inline comment at the `TelegramRelayOutputHandler.send` drafter call explaining why it lives here and not in the bridge.
-- [ ] Inline comment at the relay length-guard block explaining the `.txt` conversion rationale.
+- [x] Docstrings on `draft_message`, `MessageDraft`, per-medium validators.
+- [x] Inline comment at the `TelegramRelayOutputHandler.send` drafter call explaining why it lives here and not in the bridge.
+- [x] Inline comment at the relay length-guard block explaining the `.txt` conversion rationale.
 
 ### Cross-cutting
-- [ ] `CLAUDE.md` — grep for "summariz", replace in System Architecture diagram and any bullet references.
-- [ ] `docs/plans/summarizer-fallback-steering.md` (completed-adjacent plan) — add a pointer at the top: "implementation renamed to message_drafter per #1035."
+- [x] `CLAUDE.md` — grep for "summariz", replace in System Architecture diagram and any bullet references.
+- [x] `docs/plans/summarizer-fallback-steering.md` (completed-adjacent plan) — add a pointer at the top: "implementation renamed to message_drafter per #1035."
 
 ## Success Criteria
 

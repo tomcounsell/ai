@@ -131,7 +131,7 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `./scripts/install_sdlc_reflection.sh` | Install SDLC reflection launchd schedule |
 | `tail -f logs/sdlc_reflection.log` | Stream SDLC reflection logs |
 | `python scripts/autoexperiment.py --target observer --iterations 50` | Run autoexperiment on observer prompt |
-| `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
+| `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on the message drafter (target name is historical) |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
 | `./scripts/install_nightly_tests.sh` | Install nightly regression test launchd schedule |
@@ -266,7 +266,7 @@ The standard flow from conversation to shipped feature:
 
 ### Auto-Continue Rules
 - The agent should only pause if there is a **legitimate open question** requiring human input
-- If there is no question -- just a status update -- the summarizer auto-sends "continue"
+- If there is no question -- just a status update -- the message drafter auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
 - **SDLC sessions**: the PM session steers pipeline progression between stages
