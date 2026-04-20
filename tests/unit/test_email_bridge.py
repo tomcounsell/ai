@@ -407,19 +407,25 @@ class TestPollImapBatchCap:
 
     @pytest.mark.asyncio
     async def test_batch_cap_limits_fetched_messages(self):
-        """When IMAP returns more than IMAP_MAX_BATCH unseen messages, only
-        IMAP_MAX_BATCH are fetched (store + fetch) and returned."""
+        """When IMAP returns more than IMAP_MAX_BATCH unseen UIDs, only
+        IMAP_MAX_BATCH are stored+fetched and returned."""
         total_unseen = IMAP_MAX_BATCH + 10
-        # Build fake message IDs as bytes (IMAP returns space-separated byte IDs)
-        fake_msg_ids = b" ".join(str(i).encode() for i in range(1, total_unseen + 1))
+        fake_uids = b" ".join(str(i).encode() for i in range(1, total_unseen + 1))
+
+        def _uid_side_effect(command, *args):
+            cmd = command.lower()
+            if cmd == "search":
+                return ("OK", [fake_uids])
+            if cmd == "store":
+                return ("OK", [])
+            if cmd == "fetch":
+                return ("OK", [(b"1", b"raw email bytes")])
+            return ("OK", [])
 
         mock_conn = MagicMock()
         mock_conn.login.return_value = ("OK", [])
         mock_conn.select.return_value = ("OK", [])
-        mock_conn.search.return_value = ("OK", [fake_msg_ids])
-        mock_conn.store.return_value = ("OK", [])
-        # conn.fetch returns a tuple with raw bytes for each message
-        mock_conn.fetch.return_value = ("OK", [(b"1", b"raw email bytes")])
+        mock_conn.uid.side_effect = _uid_side_effect
 
         imap_config = {
             "host": "imap.example.com",
@@ -435,24 +441,34 @@ class TestPollImapBatchCap:
                 "bridge.email_bridge.asyncio.to_thread",
                 side_effect=lambda fn: fn(),
             ):
-                result = await _poll_imap(imap_config)
+                result = await _poll_imap(imap_config, known_senders=["sender@example.com"])
 
-        assert mock_conn.store.call_count == IMAP_MAX_BATCH
-        assert mock_conn.fetch.call_count == IMAP_MAX_BATCH
+        store_calls = [c for c in mock_conn.uid.call_args_list if c.args[0].lower() == "store"]
+        fetch_calls = [c for c in mock_conn.uid.call_args_list if c.args[0].lower() == "fetch"]
+        assert len(store_calls) == IMAP_MAX_BATCH
+        assert len(fetch_calls) == IMAP_MAX_BATCH
         assert len(result) == IMAP_MAX_BATCH
 
     @pytest.mark.asyncio
     async def test_batch_cap_exact_boundary(self):
-        """When IMAP returns exactly IMAP_MAX_BATCH messages, all are fetched
+        """When IMAP returns exactly IMAP_MAX_BATCH UIDs, all are fetched
         (no truncation)."""
-        fake_msg_ids = b" ".join(str(i).encode() for i in range(1, IMAP_MAX_BATCH + 1))
+        fake_uids = b" ".join(str(i).encode() for i in range(1, IMAP_MAX_BATCH + 1))
+
+        def _uid_side_effect(command, *args):
+            cmd = command.lower()
+            if cmd == "search":
+                return ("OK", [fake_uids])
+            if cmd == "store":
+                return ("OK", [])
+            if cmd == "fetch":
+                return ("OK", [(b"1", b"raw email bytes")])
+            return ("OK", [])
 
         mock_conn = MagicMock()
         mock_conn.login.return_value = ("OK", [])
         mock_conn.select.return_value = ("OK", [])
-        mock_conn.search.return_value = ("OK", [fake_msg_ids])
-        mock_conn.store.return_value = ("OK", [])
-        mock_conn.fetch.return_value = ("OK", [(b"1", b"raw email bytes")])
+        mock_conn.uid.side_effect = _uid_side_effect
 
         imap_config = {
             "host": "imap.example.com",
@@ -467,10 +483,12 @@ class TestPollImapBatchCap:
                 "bridge.email_bridge.asyncio.to_thread",
                 side_effect=lambda fn: fn(),
             ):
-                result = await _poll_imap(imap_config)
+                result = await _poll_imap(imap_config, known_senders=["sender@example.com"])
 
-        assert mock_conn.store.call_count == IMAP_MAX_BATCH
-        assert mock_conn.fetch.call_count == IMAP_MAX_BATCH
+        store_calls = [c for c in mock_conn.uid.call_args_list if c.args[0].lower() == "store"]
+        fetch_calls = [c for c in mock_conn.uid.call_args_list if c.args[0].lower() == "fetch"]
+        assert len(store_calls) == IMAP_MAX_BATCH
+        assert len(fetch_calls) == IMAP_MAX_BATCH
         assert len(result) == IMAP_MAX_BATCH
 
 

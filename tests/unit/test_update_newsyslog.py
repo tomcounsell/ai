@@ -59,7 +59,7 @@ class TestCheckNewsyslog:
 
         assert status.installed is False
         assert status.needs_sudo is True
-        assert "sudo cp" in status.action_message
+        assert "sudo tee" in status.action_message
         assert str(fake_dst) in status.action_message
         assert "missing" in status.action_message
 

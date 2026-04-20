@@ -52,7 +52,18 @@ class TestInstallMechanism:
 
     def test_remote_update_no_silent_failures(self):
         """remote-update.sh must not use || true on launchctl calls, except
-        for intentional migration guards (daydream and reflections legacy unload)."""
+        for intentional migration guards and fallback-of-fallback paths.
+
+        Justified exceptions (each has a real error surface nearby):
+        - com.valor.daydream: legacy service, may not exist on all machines.
+        - REFLECTIONS_LABEL / com.valor.reflections: legacy unload,
+          same migration guard rationale.
+        - WORKER_LABEL bootout inside the kickstart-fallback block:
+          only runs after ``launchctl kickstart -k`` already failed, and the
+          subsequent ``launchctl bootstrap`` surfaces real errors via
+          ``echo "ERROR: Failed to bootstrap $WORKER_LABEL"``. Swallowing a
+          failed bootout here guards against a racy already-unloaded state.
+        """
         script = PROJECT_ROOT / "scripts" / "remote-update.sh"
         content = script.read_text()
         # Find all launchctl bootstrap/bootout lines and ensure none have || true
@@ -66,6 +77,10 @@ class TestInstallMechanism:
                     # NOTE: reflections legacy-unload bootout uses || true as a
                     # migration guard — the old service may not be loaded on all
                     # machines. This is intentional, not a silent failure swallower.
+                    continue
+                if "WORKER_LABEL" in line and "bootout" in line:
+                    # WORKER_LABEL bootout is only reached after kickstart -k
+                    # already failed; the next bootstrap surfaces real errors.
                     continue
                 assert "|| true" not in line, (
                     f"launchctl call should not swallow errors with || true: {line}"

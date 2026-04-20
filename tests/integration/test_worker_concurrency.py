@@ -121,16 +121,18 @@ class TestGlobalSemaphore:
     async def test_semaphore_limits_concurrent_sessions(self):
         """At most MAX_CONCURRENT_SESSIONS sessions should execute simultaneously.
 
-        Enqueues 3 sessions with the same chat_id and patches _execute_agent_session
-        to use a controlled delay. Verifies that at most 1 session is running per
-        chat_id at any point in time (per-chat serialization).
+        Enqueues sessions across distinct chat_ids and patches
+        _execute_agent_session with a controlled delay. Verifies the global
+        semaphore caps peak concurrent executions.
         """
+        import agent.session_state as _ss
+
         max_sessions = 2
-        original_semaphore = _queue._global_session_semaphore
+        original_semaphore = _ss._global_session_semaphore
 
         try:
             # Set up a semaphore with a low ceiling for testing
-            _queue._global_session_semaphore = asyncio.Semaphore(max_sessions)
+            _ss._global_session_semaphore = asyncio.Semaphore(max_sessions)
 
             chat_id_a = "test-semaphore-chat-a"
             chat_id_b = "test-semaphore-chat-b"
@@ -168,7 +170,7 @@ class TestGlobalSemaphore:
                 f"MAX_CONCURRENT_SESSIONS={max_sessions}"
             )
         finally:
-            _queue._global_session_semaphore = original_semaphore
+            _ss._global_session_semaphore = original_semaphore
             # Clean up workers
             for task in list(_active_workers.values()):
                 task.cancel()
@@ -266,11 +268,18 @@ class TestPerChatSerialization:
     async def test_global_ceiling_across_multiple_chat_ids(self):
         """Global semaphore ceiling must apply across all chat_ids combined.
 
-        With MAX_CONCURRENT_SESSIONS=2, at most 2 sessions should run at
-        any point regardless of how many different chat_ids are active.
+        Post-#1029 default is MAX_CONCURRENT_SESSIONS=8. We enqueue 12 sessions
+        across distinct chat_ids with a faster-than-ceiling arrival rate and
+        verify the semaphore caps peak concurrency at 8.
+
+        The runtime reads the semaphore from agent.session_state, not from
+        agent.agent_session_queue's import-time alias — so the test patches
+        the canonical module.
         """
-        max_sessions = 2
-        chat_ids = [f"global-ceil-chat-{i}" for i in range(4)]
+        import agent.session_state as _ss
+
+        max_sessions = 8
+        chat_ids = [f"global-ceil-chat-{i}" for i in range(max_sessions + 4)]
 
         running_count = [0]
         peak_running = [0]
@@ -284,27 +293,37 @@ class TestPerChatSerialization:
                 running_count[0] += 1
                 peak_running[0] = max(peak_running[0], running_count[0])
 
-            await asyncio.sleep(0.05)
+            # Hold long enough that all 12 sessions overlap if the semaphore
+            # wasn't enforced — at 50ms work + ~12 workers, an unbounded run
+            # would briefly hit peak=12.
+            await asyncio.sleep(0.1)
 
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._global_session_semaphore
+        original_semaphore = _ss._global_session_semaphore
         try:
-            _queue._global_session_semaphore = asyncio.Semaphore(max_sessions)
+            _ss._global_session_semaphore = asyncio.Semaphore(max_sessions)
 
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 for cid in chat_ids:
                     _ensure_worker(cid)
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(1.2)
 
             assert peak_running[0] <= max_sessions, (
                 f"Peak concurrent sessions ({peak_running[0]}) exceeded "
                 f"MAX_CONCURRENT_SESSIONS={max_sessions}. "
                 "Global semaphore is not working correctly."
             )
+            # Sanity: the ceiling should actually have been hit at least once,
+            # otherwise we're not exercising the cap.
+            assert peak_running[0] >= 2, (
+                f"Peak concurrent sessions ({peak_running[0]}) was too low to "
+                "meaningfully test the ceiling. Raise the arrival rate or "
+                "hold time."
+            )
         finally:
-            _queue._global_session_semaphore = original_semaphore
+            _ss._global_session_semaphore = original_semaphore
             for cid in chat_ids:
                 task = _active_workers.pop(cid, None)
                 if task:

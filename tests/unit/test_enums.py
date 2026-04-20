@@ -67,7 +67,7 @@ class TestPersonaType:
         assert PersonaType.TEAMMATE == "teammate"
 
     def test_all_members(self):
-        assert len(list(PersonaType)) == 3
+        assert len(list(PersonaType)) == 4
 
 
 class TestClassificationType:

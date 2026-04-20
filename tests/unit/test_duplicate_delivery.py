@@ -147,60 +147,72 @@ class TestCompletedSessionGuard:
     """Fix 3: Auto-continue skips when session is already completed."""
 
     def test_completed_session_skips_auto_continue(self):
-        """When session_status is terminal, output is delivered without nudge."""
-        # Verify the guard exists in the code — now in output_router.py (extracted from queue)
-        from pathlib import Path
+        """When session_status is terminal, the router returns deliver_already_completed
+        (not a nudge action) so the executor delivers to chat and skips auto-continue."""
+        from agent.output_router import determine_delivery_action
+        from models.session_lifecycle import TERMINAL_STATUSES
 
-        router_code = Path("agent/output_router.py").read_text()
-        queue_code = Path("agent/agent_session_queue.py").read_text()
+        # Every terminal status must short-circuit to deliver_already_completed,
+        # regardless of output content or stop_reason.
+        for status in TERMINAL_STATUSES:
+            action = determine_delivery_action(
+                msg="some agent output",
+                stop_reason="end_turn",
+                auto_continue_count=0,
+                max_nudge_count=50,
+                session_status=status,
+            )
+            assert action == "deliver_already_completed", (
+                f"status={status!r} should short-circuit to deliver_already_completed, "
+                f"got {action!r}"
+            )
 
-        # The guard should check session_status against all TERMINAL_STATUSES
-        # (was previously just == "completed", now checks all terminal statuses)
-        # Guard may be in output_router.py (canonical) or agent_session_queue.py (legacy)
-        assert (
-            "session_status in _TERMINAL_STATUSES" in router_code
-            or "session_status in _TERMINAL_STATUSES" in queue_code
+        # Also holds for empty output — must not emit a nudge action.
+        empty_action = determine_delivery_action(
+            msg="",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=50,
+            session_status=next(iter(TERMINAL_STATUSES)),
         )
-        # It should deliver to chat without nudge (this message is in the executor, not the router)
-        assert "delivering without nudge" in queue_code
+        assert empty_action == "deliver_already_completed"
+        assert "nudge" not in empty_action
 
     def test_guard_is_before_nudge_routing(self):
-        """The completed-session guard must come before the nudge routing logic.
+        """The completed-session guard must win over every nudge branch.
 
-        The guard now lives in output_router.determine_delivery_action() which
-        is called before any _enqueue_nudge() in the send_to_chat() execution path.
-        The test verifies the guard exists and that the nudge call site exists.
+        Behavioral check: for every (stop_reason, msg) permutation that would
+        otherwise drive a nudge action, a terminal session_status must still
+        return deliver_already_completed — proving the guard runs first.
         """
-        from pathlib import Path
+        from agent.output_router import determine_delivery_action
+        from models.session_lifecycle import TERMINAL_STATUSES
 
-        router_code = Path("agent/output_router.py").read_text()
-        queue_code = Path("agent/agent_session_queue.py").read_text()
+        terminal = next(iter(TERMINAL_STATUSES))
 
-        # Guard is now in output_router.py — confirm it returns deliver_already_completed
-        assert "deliver_already_completed" in router_code, (
-            "deliver_already_completed guard not found in output_router.py"
-        )
-        # Guard must check session_status against terminal statuses
-        assert "session_status in _TERMINAL_STATUSES" in router_code, (
-            "terminal status guard not found in output_router.py"
-        )
-        # The nudge call site should still exist in the queue executor (inside send_to_chat)
-        # Note: re_enqueue_session() also calls _enqueue_nudge, so find the one in send_to_chat
-        send_to_chat_pos = queue_code.find("async def send_to_chat(")
-        assert send_to_chat_pos > 0, "send_to_chat not found in agent_session_queue.py"
-        nudge_pos = queue_code.find("await _enqueue_nudge(", send_to_chat_pos)
-        assert nudge_pos > 0, "await _enqueue_nudge() call not found in send_to_chat"
+        # These inputs would produce a nudge for a non-terminal session.
+        nudge_inducing_cases = [
+            {"msg": "", "stop_reason": "end_turn"},  # nudge_empty
+            {"msg": "work", "stop_reason": "rate_limited"},  # nudge_rate_limited
+            {
+                "msg": "work",
+                "stop_reason": "end_turn",
+                "session_type": "pm",
+                "classification_type": "sdlc",
+            },  # nudge_continue
+        ]
 
-        # The executor must check the routing action before calling _enqueue_nudge
-        # i.e. action == "deliver_already_completed" check appears before the nudge call
-        deliver_check_pos = queue_code.find('"deliver_already_completed"', send_to_chat_pos)
-        assert deliver_check_pos > 0, (
-            "deliver_already_completed action check not found in agent_session_queue.py"
-        )
-        assert deliver_check_pos < nudge_pos, (
-            "deliver_already_completed check should appear before "
-            "_enqueue_nudge call in send_to_chat"
-        )
+        for case in nudge_inducing_cases:
+            action = determine_delivery_action(
+                auto_continue_count=0,
+                max_nudge_count=50,
+                session_status=terminal,
+                **case,
+            )
+            assert action == "deliver_already_completed", (
+                f"terminal session with nudge-inducing inputs {case!r} must still return "
+                f"deliver_already_completed, got {action!r} — guard is not firing first"
+            )
 
 
 class TestCatchupCodeStructure:

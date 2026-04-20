@@ -303,7 +303,7 @@ class TestWorkerRestartCheck:
 
         call_count = 0
 
-        async def pop_side_effect(project_key):
+        async def pop_side_effect(worker_key, is_project_keyed):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -372,7 +372,10 @@ class TestServiceManager:
 
     def test_update_plist_defined(self):
         source = Path(self.SERVICE_SCRIPT).read_text()
-        assert "com.valor.update" in source
+        # Label is built from ${SERVICE_LABEL_PREFIX}.update (defaulting to com.valor),
+        # not hardcoded. Assert the dynamic form.
+        assert "${SERVICE_LABEL_PREFIX}.update" in source
+        assert "SERVICE_LABEL_PREFIX:=com.valor" in source
 
     def test_install_creates_both_plists(self):
         source = Path(self.SERVICE_SCRIPT).read_text()
