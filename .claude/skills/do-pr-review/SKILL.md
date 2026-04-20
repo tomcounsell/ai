@@ -229,7 +229,7 @@ Include the verification results in the review comment under a "Verification Res
   - Future enhancements
   - Only skip nits that are genuinely subjective (e.g., naming preference) — requires human approval
 
-**For each issue found, use this format:**
+**For every issue found you MUST emit exactly this block, with every field present. A finding missing any field is invalid and MUST be dropped, not shortened:**
 
 ```
 **File:** `path/to/file.py:42` (verified: read this file)
@@ -240,6 +240,8 @@ Include the verification results in the review comment under a "Verification Res
 ```
 
 The `Code:` field MUST be a verbatim quote from the file, not paraphrased. The `File:` path MUST be a file you read with the Read tool during this review. If you cannot produce both of these, do not include the finding.
+
+**Empty-section rule (MANDATORY):** If a severity category has zero findings, you MUST still emit the heading with an explicit empty marker — `### Blockers\n- None`, `### Tech Debt\n- None`, `### Nits\n- None`. Do NOT omit the heading. Downstream parsing and the three-tier decision tree in Step 6 depend on every category appearing.
 
 ### 5.5. Verify Findings (mandatory)
 

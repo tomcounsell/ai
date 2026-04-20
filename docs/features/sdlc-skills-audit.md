@@ -83,3 +83,31 @@ PR #1039 exposed five recurring patterns where each layer of the SDLC pipeline's
 | `.claude/commands/do-merge.md` | Added Full Suite Gate with red-main recovery path and baseline comparison |
 | `.claude/skills/do-pr-review/sub-skills/code-review.md` | Added mandatory 12-item Pre-Verdict Checklist |
 | `docs/features/sdlc-skills-audit.md` | This document |
+
+---
+
+## Opus 4.7 Audit (2026-04-20)
+
+Anthropic shipped Opus 4.7 on 2026-04-16. This audit pass reviewed the four SDLC skills that explicitly dispatch via `--model opus` against the 4.7 behavioral model, and hardened their prompts where the older Opus behavior was load-bearing.
+
+**Skills reviewed:** `/do-plan`, `/do-plan-critique`, `/do-pr-review`, `daily-integration-audit`.
+
+**Three behavioral deltas checked** (sources: [Simon Willison's 4.7 system-prompt diff](https://simonwillison.net/2026/Apr/18/opus-system-prompt/), [keepmyprompts.com migration guide](https://www.keepmyprompts.com/en/blog/claude-opus-4-7-prompting-guide-whats-changed)):
+
+1. **Conciseness shift** — 4.7's system prompt adds explicit brevity instructions; soft format requests ("use this format") are the first casualty when the model judges the task simple. Remedy: promote "use this format" → "you MUST emit exactly this block, every field present."
+2. **Proactive tool-checking** — 4.7 calls `tool_search` before concluding it lacks a capability. Behavioral "announce-your-tools" scaffolding is redundant. Remedy: remove such announcements; keep `ToolSearch("select:X")` schema-loading (technical requirement, unaffected).
+3. **Reduced clarification** — 4.7 attempts the task instead of asking. Skills that relied on Opus surfacing ambiguity must front-load context. Remedy: expand evidence-gathering checklists; rewrite subagent briefs to be fully self-contained.
+
+**Edits applied:**
+
+| Skill | Edit |
+|------|------|
+| `.claude/skills/do-plan/SKILL.md` | Phase 1 Step 1 expanded into a 3-step evidence-gathering checklist (read issue body, read Recon Summary, follow sibling issues); "try to reproduce the bug" hedge replaced with direct directive. |
+| `.claude/skills/do-plan-critique/SKILL.md` | Added canonical sentence above Step 5: *"Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header."* Critic subagent prompts (Sonnet) unchanged. |
+| `.claude/skills/do-pr-review/SKILL.md` | Step 5 format block promoted from "use this format" to hard "you MUST emit exactly this block, every field present" directive. Explicit empty-section rule added for Blockers / Tech Debt / Nits headings. |
+| `.claude/skills/do-pr-review/sub-skills/code-review.md` | "Every row MUST be filled; blank cells invalidate the review" added above the 12-row Pre-Verdict Checklist. Section 6 format block tightened to match parent SKILL.md. |
+| `.claude/skills/daily-integration-audit/SKILL.md` | Step 2 Opus subagent brief rewritten into a self-contained structured block (`FEATURE_TOPIC` / `SEED_DOC_PATH` / `VERIFICATION_PASS` / `OUTPUT_FORMAT` / `FINAL_LINE`). |
+
+**Out of scope (explicitly dropped):** version-pinning `opus` to `claude-opus-4-7` — Anthropic's alias routes `opus` to the current Opus and pinning creates maintenance burden without predictability gain.
+
+**Plan:** `docs/plans/opus-skill-prompts-4-7.md` (issue #1066).

@@ -111,6 +111,8 @@ else:
 
 Before writing the verdict, evaluate each of the following items. Every item must receive a `PASS`, `FAIL`, or `N/A` verdict. No blank entries are allowed. Items marked `FAIL` automatically become findings.
 
+Every row MUST be filled. Blank cells invalidate the review.
+
 Emit the completed checklist as a markdown table in the review comment:
 
 ```markdown
@@ -142,7 +144,7 @@ An "Approved" verdict requires all 12 items evaluated (no blanks). Items that do
 - **tech_debt**: Fix before merge, patched by `/do-patch` (code quality, missing edge case tests)
 - **nit**: Fix before merge unless purely subjective (style, naming, docs wording)
 
-For each finding, use this format:
+For every finding you MUST emit exactly this block, with every field present. A finding missing any field is invalid and MUST be dropped, not shortened:
 ```
 **File:** `path/to/file.py:42` (verified: read this file)
 **Code:** `the_actual_code_on_that_line()`
@@ -150,6 +152,8 @@ For each finding, use this format:
 **Severity:** blocker | tech_debt | nit
 **Fix:** [suggested fix]
 ```
+
+**Empty-section rule:** If a severity category has zero findings, emit the heading with an explicit empty marker (`### Blockers\n- None`, `### Tech Debt\n- None`, `### Nits\n- None`). Do NOT omit the heading.
 
 ### 7. Verify All Findings
 

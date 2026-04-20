@@ -94,7 +94,7 @@ git log --oneline --since="$ISSUE_CREATED" -- <file1> <file2> ...
 1. If any commits touched those files since the issue was filed, read the diffs. Decide whether each change (a) is irrelevant, (b) partially addresses the problem, (c) changed the root cause, or (d) already fixes the problem.
 2. Check `docs/plans/*.md` for active plans touching the same area (`ls -lt docs/plans/` then inspect the most recent few). Overlap with an active plan is a coordination signal, not necessarily a blocker — but it must be surfaced.
 
-**For bug issues specifically**, try to reproduce the bug against current main (or at least read the code path and confirm the defect is still present). If the bug is now unreproducible or the cited symptoms no longer occur, stop and ask the user whether to close the issue rather than plan a fix for a non-bug.
+**For bug issues specifically**, reproduce the bug against current main — or, if reproduction is infeasible (e.g., the bug requires a production-only precondition), read the code path and confirm the defect is still present. If the bug is now unreproducible or the cited symptoms no longer occur, stop and ask the user whether to close the issue rather than plan a fix for a non-bug.
 
 **Produce a `## Freshness Check` section** in the plan document capturing what was re-verified, with one of four dispositions:
 
@@ -144,7 +144,10 @@ Gather relevant external context before planning. This surfaces current document
 
 ### Phase 1: Flesh Out at High Level
 
-1. **Understand the request** - What's being asked?
+1. **Understand the request** — gather evidence before scoping. Do NOT rely on inference; execute this checklist:
+   1. Read the full issue body (not just the title). Extract the Problem, Desired Outcome, and any Acceptance Criteria checklist items verbatim.
+   2. Read the `## Recon Summary` section of the issue if present. Extract the "Confirmed," "Revised," "Pre-requisites," and "Dropped" buckets — these are direct inputs to the plan's Solution and No-Gos sections.
+   3. Follow every cited sibling issue or PR referenced in the issue body. For each, summarize its relevance to the current work in one sentence. Record these under Prior Art.
 2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed)
 3. **Blast radius analysis** - If the change involves code modifications, run the code impact finder:
    ```bash
