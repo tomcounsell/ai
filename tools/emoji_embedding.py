@@ -28,6 +28,49 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+OPENROUTER_EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
+EMBEDDING_MODEL = "openai/text-embedding-3-small"
+
+
+def _compute_embedding(text: str, api_key: str) -> list[float] | None:
+    """Compute embedding for text using OpenRouter."""
+    import requests
+
+    try:
+        response = requests.post(
+            OPENROUTER_EMBEDDINGS_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": EMBEDDING_MODEL,
+                "input": text[:8000],
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result.get("data", [{}])[0].get("embedding")
+    except Exception:
+        return None
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+
+    dot_product = sum(x * y for x, y in zip(a, b, strict=False))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+
+    return dot_product / (norm_a * norm_b)
+
+
 # Cache location for pre-computed emoji embeddings
 CACHE_PATH = Path(__file__).parent.parent / "data" / "emoji_embeddings.json"
 
@@ -212,8 +255,6 @@ def _load_or_compute_embeddings() -> dict[str, list[float]]:
         _embedding_cache = {}
         return _embedding_cache
 
-    from tools.knowledge_search import _compute_embedding
-
     logger.info(f"Computing emoji embeddings for {len(EMOJI_LABELS)} emojis...")
     embeddings: dict[str, list[float]] = {}
 
@@ -266,8 +307,6 @@ def find_best_emoji(feeling: str) -> EmojiResult:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         return default_result
-
-    from tools.knowledge_search import _compute_embedding, _cosine_similarity
 
     start = time.time()
     query_embedding = _compute_embedding(feeling.strip(), api_key)
@@ -457,8 +496,6 @@ async def build_custom_emoji_index(client) -> dict[str, list[float]]:
         return {}
 
     # Compute embeddings
-    from tools.knowledge_search import _compute_embedding
-
     logger.info(f"Computing custom emoji embeddings for {len(labels)} emoji...")
     embeddings: dict[str, list[float]] = {}
 

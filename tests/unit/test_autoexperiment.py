@@ -103,7 +103,7 @@ class TestExtractInject:
         new_prompt = "New summarizer instructions."
         result = inject_summarizer_prompt(SAMPLE_SUMMARIZER_FILE, new_prompt)
         assert "New summarizer instructions" in result
-        assert "async def summarize():" in result
+        assert "async def draft():" in result
 
     def test_roundtrip_summarizer(self):
         """Extract then inject should preserve the prompt."""
