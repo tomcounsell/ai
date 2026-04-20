@@ -4,6 +4,8 @@ type: chore
 appetite: Medium
 owner: valor
 created: 2026-04-20
+revised: 2026-04-20
+revision_reason: "Address /do-plan-critique blockers B1 (caller inventory), B2 (baseline LOC math), B3 (Open Question #1 reframed as resolved decision)"
 tracking: https://github.com/tomcounsell/ai/issues/1074
 last_comment_id:
 ---
@@ -17,22 +19,30 @@ PR #1072 shipped a deliberately-scoped partial build of the message-drafter refa
 Issue #1074 enumerates those deferred tasks. But during reconnaissance (see the Recon Summary in the issue body), it turns out that **Tasks 3, 8, 11, and most of 12 already landed** on main after #1072 merged or as part of it. Only four items genuinely remain:
 
 1. **Table producers in `/do-pr-review` (Task 2.5 scope-narrowed):** the skill's `code-review.md:121-134` has a "Pre-Verdict Checklist" producer table that instructs reviewers to emit `| # | Item | Verdict | Notes |` markdown. When `validate_telegram` or `validate_email` runs on PR-review output, that table trips a violation. This is the last producer table blocking a clean validator run.
-2. **Task 9 as stated is out of date:** the issue wants `mcp_servers/message_delivery_server.py` registered in `.mcp.json`, but `mcp_servers/` is empty and no root `.mcp.json` exists. Meanwhile `tools/send_message.py` and `tools/react_with_emoji.py` already exist as CLI tools and the stop hook already classifies their tool_use blocks. We need to make a **decision** — wrap the CLI tools in a real MCP server, or formally declare the CLI-tool surface complete — and record the outcome.
+2. **Task 9 as stated is out of date:** the issue wants `mcp_servers/message_delivery_server.py` registered in `.mcp.json`, but `mcp_servers/` is empty and no root `.mcp.json` exists. Meanwhile `tools/send_message.py` and `tools/react_with_emoji.py` already exist as CLI tools and the stop hook already classifies their tool_use blocks. The decision was already made implicitly by #1072's design — the CLI-tool surface is the shipped delivery mechanism. This plan merely **documents** that outcome (see RD-1). No MCP server is introduced.
 3. **Validator unit tests (Task 12 residual):** `validate_telegram` / `validate_email` are pure functions at `bridge/message_drafter.py:266-331`. `test_tool_call_delivery.py` covers stop-hook classification but does NOT cover the validators as standalone units. Gap.
-4. **Net-negative line count outside tests (Task 15):** `git diff --stat 41382113^..main -- . ':(exclude)tests/'` shows `+2803 / -827` (net **+1976**). `bridge/summarizer.py` (−1,525) and `bridge/formatting.py` (−76) are gone, but `bridge/message_drafter.py` (+1,724) is larger than the file it replaced, and `bridge/response.py` only shrunk from 823→753. The plan required net-negative outside tests; we are +1976.
+4. **Net-negative line count outside tests (Task 15):** Task 15's net-negative constraint is **scoped to this follow-up PR against the post-#1072 baseline** (`26c0ed5e`), not against the pre-#1035 history. The #1072 delta (net positive outside tests due to `bridge/message_drafter.py` absorbing the worker-bypass fix at 1,724 LOC) has already landed on main and is locked in. The correct question for this plan is: **does this plan's diff against `26c0ed5e` show negative LOC outside tests?** Baseline stats below.
 5. **Full-diff code review (Task 14):** end-of-build, covers everything that lands here plus the #1072 delta. Not a build task — it runs during REVIEW stage.
 
+**Baseline LOC math (post-#1072 reference = commit `26c0ed5e`):**
+- `git diff --stat 26c0ed5e..main -- . ':(exclude)tests/' ':(exclude)docs/plans/'` on the current main → only `docs/features/` changes from plan-doc commits. No code changes on main since #1072.
+- `bridge/response.py` at main HEAD: **753 LOC** (starting point for this PR).
+- `bridge/message_drafter.py` at main HEAD: **1,724 LOC** (unchanged by this PR except inline absorption of `_truncate_at_sentence_boundary` if moved).
+- `agent/output_handler.py` at main HEAD: **348 LOC** (grows by ~100-180 LOC as `send_response_with_files` behavior is absorbed).
+- **Target outside tests (this PR only):** ≥ 150 LOC net negative. Concrete: ~300 LOC deleted from `bridge/response.py` − ~150 LOC added to `agent/output_handler.py` = −150 LOC minimum.
+- **Acknowledgment:** the original parent plan's "net-negative" aspiration was scoped to the full refactor trajectory. Because #1072 landed net-positive (intentionally, to put the worker-bypass fix in one place), the cumulative trajectory from pre-#1035 to post-this-PR may remain net-positive. That is an accepted consequence of the scope split, not a failure of this plan. **The commitment made by this PR is: this PR's own diff is net-negative outside tests.**
+
 **Current behavior:**
-- Reviewer agents run `/do-pr-review` and emit markdown tables. When those outputs route through a validated medium (Telegram with `validate_telegram`, email with `validate_email`), they trip a `no_markdown_tables` violation and the agent sees a `⚠️` nag.
-- `mcp_servers/` exists but is empty; there is no live MCP server for message delivery. The agent delivers by invoking `python tools/send_message.py '...'` as a Bash tool call. Whether that should be the final design is undecided.
+- Reviewer agents run `/do-pr-review` and emit markdown tables. When those outputs route through a validated medium (Telegram with `validate_telegram`, email with `validate_email`) — e.g., when a PM session echoes the verdict back to the user — they trip a `no_markdown_tables` violation and the agent sees a `⚠️` nag.
+- `mcp_servers/` exists but is empty; there is no live MCP server for message delivery. The agent delivers by invoking `python tools/send_message.py '...'` as a Bash tool call. This is the shipped behavior since #1072 merged on 2026-04-20; it is not a gap to fill, but an un-documented design choice.
 - Two high-value pure functions (`validate_telegram`, `validate_email`) have no direct unit tests.
-- The consolidation promised in #1035 left us net-positive by nearly 2k lines outside tests. Specifically, `bridge/response.py` still carries `send_response_with_files` (~322 lines) and supporting helpers that overlap heavily with what the `TelegramRelayOutputHandler` now does directly from the worker.
+- `bridge/response.py` still carries `send_response_with_files` (~322 lines) and supporting helpers that overlap heavily with what the `TelegramRelayOutputHandler` now does directly from the worker. Removing this duplication is the forcing function for the net-negative delta against the post-#1072 baseline.
 
 **Desired outcome:**
 - Every producer table in `.claude/skills/do-pr-review/` migrated to prose (reference tables describing env vars or sub-skill structure stay).
-- The Task 9 question resolved: either a real MCP server exists AND is registered, or the CLI-tool surface is formally declared as the final design with a short rationale in `docs/features/message-drafter.md`.
+- The Task 9 question formally closed: the CLI-tool surface (`tools/send_message.py` + `tools/react_with_emoji.py`, already in production since #1072) is documented as the final design in `docs/features/message-drafter.md` with a short rationale. See **RD-1** below. No new MCP server is built in this PR.
 - `tests/unit/test_medium_validators.py` covers `validate_telegram`, `validate_email`, `_validate_for_medium`, and `format_violations` — happy paths, edge cases, and one coverage case per rule.
-- `git diff --stat 41382113^..HEAD -- . ':(exclude)tests/' | tail -1` shows a **negative** net line count. This is the hardest constraint and is forced by decomposing `bridge/response.py` (its surviving behavior either moves into the output handlers, moves into `bridge/message_drafter.py`, or gets deleted).
+- `git diff --stat 26c0ed5e..HEAD -- . ':(exclude)tests/' ':(exclude)docs/plans/' | tail -1` shows a **negative** net line count for this PR's diff specifically. This is the hardest constraint and is forced by decomposing `bridge/response.py` (its surviving behavior either moves into the output handlers, moves into `bridge/message_drafter.py`, or gets deleted). The baseline is the post-#1072 commit, not pre-#1035 — we are not re-litigating the #1072 size delta.
 - A full-diff `/do-pr-review` pass signs off on the consolidated feature at merge time.
 
 ## Freshness Check
@@ -101,8 +111,8 @@ No relevant external findings — proceeding with codebase context. All remainin
   - **CLI-tools-as-surface (current)**: zero new code, zero new config, stop hook already classifies correctly (`_SEND_MESSAGE_PATTERN`, `_REACT_PATTERN`). Agent invokes via `Bash("python tools/send_message.py 'text'")`. Works today. Con: tool calls surface as Bash invocations in transcript, not as semantic tool calls; harder to audit.
   - **Real MCP server**: `mcp_servers/message_delivery_server.py` using `FastMCP` (or similar) with `send_message(text: str, reply_to: int | None)` and `react_with_emoji(emoji: str)` tool definitions. Requires a root `.mcp.json` file (does not currently exist in this repo — sdk_client would need to know about it), or registration via `claude_agent_sdk` config. Pro: semantic tool calls in transcript. Con: new infrastructure for a surface that already works; risks adding code when we need to subtract (Task 15).
   - **Tiebreaker:** Task 15 demands net-negative. Adding an MCP server is net-positive and conflicts directly with Task 15. Decision: **declare CLI-tool surface as the final design.** Document the rationale in `docs/features/message-drafter.md`. Keep the option open to revisit in a future chore if the transcript-readability cost becomes painful.
-- **Confidence:** medium (architectural judgment; final call is the user's via plan review)
-- **Impact on plan:** Task 9 becomes a documentation-only task: add a "Delivery Tool Surface" section to `docs/features/message-drafter.md` explaining the CLI-tool choice, noting the reversibility path. **This becomes Open Question #1 — user must confirm before build starts.**
+- **Confidence:** high — the CLI tool surface is already the shipped behavior in production as of #1072 merge on 2026-04-20. The stop hook's `classify_delivery_outcome` already recognizes these tool_use patterns. There is nothing to decide; there is only something to document.
+- **Impact on plan:** Task 9 becomes a documentation-only task: add a "Delivery Tool Surface" section to `docs/features/message-drafter.md` explaining the CLI-tool choice, noting the reversibility path. Captured as **RD-1 (Resolved Decision)** below, not as an Open Question — the decision is *already* in production.
 
 ### spike-3: Are there callers of `send_response_with_files` outside `bridge/`?
 
@@ -123,6 +133,35 @@ No relevant external findings — proceeding with codebase context. All remainin
   - `sub-skills/code-review.md:121-134` — `| # | Item | Verdict | Notes |` Pre-Verdict Checklist — **this one is filled out by the reviewer and emitted verbatim into the PR review comment body**. Producer.
 - **Confidence:** high
 - **Impact on plan:** Task 2.5 migration touches ONE file, ONE table. Scope is small.
+
+### spike-5: Complete producer inventory — which agent outputs reach `validate_telegram` / `validate_email`?
+
+- **Assumption:** "Only the `/do-pr-review` Pre-Verdict Checklist is at risk of tripping the validators. All other markdown tables in `.claude/` are reference documentation read by the agent, not produced as output."
+- **Method:** code-read of every callsite of `draft_message()` + `_validate_for_medium()`, cross-referenced with every markdown-table producer in the skill/agent surfaces.
+- **Finding:** Confirmed with one caveat — **conversational echo** is the subtle risk.
+
+  **Validator reach (who runs text through the validators):** The only codepaths that invoke `_validate_for_medium(text, medium)` on agent output are:
+  1. `agent/output_handler.py:258` — `TelegramRelayOutputHandler.send` → `draft_message(medium="telegram")` → validators run on the PM/dev session's final response text.
+  2. `bridge/email_bridge.py:310` — `EmailOutputHandler.send` → `draft_message(medium="email")` → validators run on email reply text.
+  3. `agent/hooks/stop.py:150` — stop-hook review-gate presentation → `draft_message(medium=<resolved>)` → validators run on the transcript tail before the agent decides to send/react/silent.
+  4. `bridge/response.py:471` — `send_response_with_files` legacy path → `draft_message(text, session=session)` (Telegram only, default medium) → validators run. Removed by this plan's Part C.
+
+  **Producer inventory (where markdown tables can originate in text that reaches the above codepaths):**
+
+  | Source | What it does | Medium(s) it reaches | Currently emits table? | Disposition |
+  |--------|-------------|---------------------|----------------------|-------------|
+  | `.claude/skills/do-pr-review/sub-skills/code-review.md:121-134` | Pre-Verdict Checklist; agent emits this verbatim. When posted via `gh pr comment`, bypasses the drafter. When a PM session **echoes the verdict back to the user via Telegram** (common pattern: "Review posted — here's the verdict"), the table text passes through `TelegramRelayOutputHandler.send`. | Telegram (via conversational echo); GitHub PR body bypasses drafter | YES | **MIGRATE** (Task 2.5) |
+  | `.claude/skills/do-pr-review/SKILL.md:31` | Reference table of `$SDLC_*` env vars. Agent reads it; does not emit it. | None — read-only | N/A | Leave alone |
+  | `.claude/skills/do-pr-review/sub-skills/README.md:9, 20` | Reference tables (sub-skill structure, env var sourcing). Read-only. | None — read-only | N/A | Leave alone |
+  | Other `.claude/skills/*` tables (46 files per `grep`) | All are reference tables in skill documentation, consumed by the agent as instructions. Not emitted as output. | None — read-only | N/A | Leave alone |
+  | `.claude/agents/*.md` (validator, notion, mcp-specialist, frontend-tester, documentation-specialist, dev-session, builder, baseline-verifier) | Agent-persona system prompts with reference tables (tool lists, capability matrices). Read-only. | None — read-only | N/A | Leave alone |
+  | `reflections/*` | No markdown tables in the Python package (grep returned zero hits). Reflection outputs are structured JSON, not markdown. | N/A | N/A | Leave alone |
+  | `mcp_servers/*` | Empty at baseline (only `__pycache__`). No producers. | N/A | N/A | Leave alone |
+  | `bridge/*`, `agent/*`, `worker/*`, `tools/*` Python code | Code does not emit literal markdown tables in response text. The PM/dev sessions construct response text at runtime; the only table-producing instruction in their prompt surface is `code-review.md:121-134` (already counted). | N/A | N/A | Leave alone |
+  | PM/dev session free-form responses | The agent can in principle emit a markdown table in any response (e.g., summarizing tabular data in chat). The validator catches these at wire time; the drafter either rewrites or surfaces `⚠️` to the agent. **This is by design** — the validator exists precisely because free-form output may violate, and the agent learns from the violation nag. | Telegram, Email | Occasionally | **NOT MIGRATE** — validator handles these at runtime, not a static producer |
+
+- **Confidence:** high — validator call graph is complete; producer list exhausted by `grep` across all skill/agent/reflection surfaces.
+- **Impact on plan:** Task 2.5 scope confirmed — ONE file, ONE table (`code-review.md:121-134`). The universe of *static* markdown-table producers that reach the validators is exhausted by this single migration. Dynamic producers (agent free-form output) are handled correctly by the validator's runtime behavior. No additional migration subtasks needed.
 
 ## Data Flow
 
@@ -165,12 +204,12 @@ The data flows relevant to this plan are already well-documented in the parent p
 **Team:** Solo dev (builder), code reviewer (PR review at REVIEW stage)
 
 **Interactions:**
-- PM check-ins: 1 (to resolve Open Question #1 — Task 9 CLI-vs-MCP decision — before build starts)
+- PM check-ins: 0 required before build (Task 9 is resolved as RD-1; Open Questions #1 and #2 in the review section concern margin target and module rename — non-blocking nice-to-haves).
 - Review rounds: 1 (full-diff `/do-pr-review` covers both #1072's delta and this plan's delta)
 
 **Justification for Medium (not Large):**
 - Only four items genuinely remain; three of them are small (table migration, validator unit tests, documentation note). The fourth (`bridge/response.py` consolidation + net-negative enforcement) is moderately-sized but mechanical: move ~322 lines into a handler that already does 90% of the job and delete the rest.
-- Total net-line-count target: from current **+1976** to **negative** — so the PR must delete at least ~2,000 lines outside tests (conservatively, ≥2,100 to have margin). That is achievable within a single PR because `bridge/response.py` and its helpers carry the bulk of the deletable surface.
+- Net-line-count target (against post-#1072 baseline `26c0ed5e`): this PR's diff must be at least **−150 LOC** outside tests (conservatively, ≥ −200 to have margin). The deletion comes from `bridge/response.py`'s 753 LOC; the addition comes from ~150 LOC of absorbed behavior landing in `agent/output_handler.py`. Achievable within a single PR.
 
 **Justification for single PR (rejecting the issue's 3-PR split):**
 - The issue recommended 3 PRs based on the obsolete task list. Now that most of the tasks are already done, splitting into 3 PRs would (a) create overhead disproportionate to the remaining scope, (b) make it harder to demonstrate net-negative in any single PR (each would be a small independent delta), and (c) spread the `/do-pr-review` gate across three reviews when one is sufficient.
@@ -196,8 +235,8 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/message-drafte
 - **`bridge/response.py` reduced or renamed**: whatever survives (just `set_reaction`, `VALIDATED_REACTIONS`, `_truncate_at_sentence_boundary` — roughly 100 lines) either stays as a slim module OR is renamed to something more honest like `bridge/reactions.py`. Builder decides based on which is cleaner.
 - **`code-review.md:121-134` Pre-Verdict Checklist migrates to bulleted prose**: same 12 items, no table syntax. Reviewer still emits a structured verdict; format becomes `- **[N] Item** — PASS/FAIL/N/A — *notes*` (one line per item).
 - **`tests/unit/test_medium_validators.py`** (new): direct unit tests on `validate_telegram`, `validate_email`, `_validate_for_medium`, `format_violations`.
-- **`docs/features/message-drafter.md`** gets a "Delivery Tool Surface" section documenting the CLI-tool decision (contingent on Open Question #1 resolution).
-- **No new MCP server**, no `.mcp.json` changes (contingent on Open Question #1 resolution).
+- **`docs/features/message-drafter.md`** gets a "Delivery Tool Surface" section documenting the CLI-tool decision per RD-1.
+- **No new MCP server**, no `.mcp.json` changes. RD-1 records the rationale; the CLI-tool surface is already shipped.
 
 ### Flow
 
@@ -217,7 +256,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/message-drafte
   5. Decide what to do with the remaining `set_reaction` + `VALIDATED_REACTIONS`. Two options: (a) leave `bridge/response.py` as a thin ≈100-line module named for reactions, or (b) rename the module to `bridge/reactions.py` and update all three call sites (`bridge/update.py:14`, `bridge/telegram_relay.py:95`, `bridge/routing.py:1031`). Builder picks whichever produces the cleaner final state.
   6. Update `tests/unit/test_message_drafter.py`: 5 call sites import `send_response_with_files`. Migrate each to call `TelegramRelayOutputHandler.send` via the test's existing session/handler fixtures, OR if the test is actually testing draft construction (not delivery), migrate to `bridge.message_drafter.draft_message` directly. Each migration is a small edit, not a rewrite.
   7. Verify net-negative: run `git diff --stat HEAD..target_sha -- . ':(exclude)tests/' | tail -1`. Loop back to step 4-5 if the number is not negative by at least 50 lines (safety margin).
-- **Part D — Task 9 decision documentation:** Contingent on Open Question #1 being answered "CLI tools are the final surface." Add a `### Delivery Tool Surface` subsection to `docs/features/message-drafter.md` explaining the choice (reversibility path, reasoning, current invocation pattern). If Open Question #1 comes back "build the MCP server," scope blows up and this plan becomes Large — rewrite required.
+- **Part D — Task 9 decision documentation:** Add a `### Delivery Tool Surface` subsection to `docs/features/message-drafter.md` explaining the CLI-tool choice (reversibility path, reasoning, current invocation pattern). This is executed against RD-1 (Resolved Decision): the CLI surface is already shipped and working since #1072. See Risk 4 for the contingency path if the user reverses RD-1 during review.
 - **Part E — Full-diff `/do-pr-review` (Task 14):** Runs automatically at REVIEW stage via `/sdlc`. This is not a build task — it is a pipeline stage.
 
 ## Failure Path Test Strategy
@@ -263,15 +302,15 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/message-drafte
 
 ### Risk 2: Net-negative target not reached even after consolidation
 **Impact:** Task 15 acceptance check fails; builder has to hunt for more deletions mid-PR, possibly breaking invariants.
-**Mitigation:** Track the line count as a first-class build signal. After Part C step 4 (deletion), run the diff stat. If margin is < 50 lines negative, pause and re-audit for dead code before adding new tests (which land in tests/ and don't count against the budget). Escalate to user if margin cannot be reached without breaking the stop-hook contract.
+**Mitigation:** Track the line count as a first-class build signal against the post-#1072 baseline (`26c0ed5e`). After Part C step 4 (deletion), run the diff stat against that baseline excluding tests/ and docs/plans/. If margin is < 150 lines negative, pause and re-audit for dead code before adding new tests (which land in tests/ and don't count against the budget). Escalate to user if margin cannot be reached without breaking the stop-hook contract.
 
 ### Risk 3: `tests/unit/test_message_drafter.py` migration introduces test failures
 **Impact:** Build goes red; unclear whether the failure is test migration bug or real regression.
 **Mitigation:** Migrate tests one at a time, running the single test after each change. Keep the old import available via a temporary alias during migration if helpful, then remove the alias at the end.
 
-### Risk 4: Open Question #1 answered "build the MCP server"
-**Impact:** Plan blows up. Task 9 becomes +300 to +500 lines (server, config registration, tests), which makes Task 15 nearly impossible without an extra round of consolidation that is not currently in scope.
-**Mitigation:** Open Question #1 is the first question in the plan review. If the answer is "build it," revise the plan appetite to Large and add a Part F for the MCP server implementation. Do not start Part C until the answer is in.
+### Risk 4: User overrides RD-1 and demands a real MCP server
+**Impact:** If RD-1 is reversed during review (user insists on `mcp_servers/message_delivery_server.py` + `.mcp.json`), the plan blows up. Task 9 becomes +300 to +500 lines (server, config registration, tests), which makes Task 15 nearly impossible without an extra round of consolidation that is not currently in scope.
+**Mitigation:** RD-1 is presented as a Resolved Decision (not an Open Question), reflecting that the CLI tool surface is already the shipped behavior since #1072. If the user reverses RD-1 during plan review or critique, this plan is paused, the appetite is revised to Large, and a Part F is added for the MCP server implementation. Part C (consolidation) would proceed in parallel since it is orthogonal to the delivery tool surface.
 
 ## Race Conditions
 
@@ -302,7 +341,7 @@ No update system changes required — all changes are internal to the `ai/` repo
 
 **No changes to `mcp_servers/`, no creation of `.mcp.json`**, no changes to `bridge/telegram_bridge.py` agent-facing plumbing. The agent-integration story is "unchanged by this plan; documented as a deliberate design choice."
 
-**Open Question #1 below** captures the user-review gate for this decision.
+See **RD-1 (Resolved Decisions)** below for the recorded rationale. This is not a gating question — it reflects the current production behavior shipped in PR #1072.
 
 ## Documentation
 
@@ -327,8 +366,8 @@ See the Test Impact section above (rendered separately per template ordering; sa
 - [ ] `.claude/skills/do-pr-review/sub-skills/code-review.md:121-134` Pre-Verdict Checklist migrated to bulleted prose. `grep -cE "^\|.*\|.*\|" .claude/skills/do-pr-review/sub-skills/code-review.md` returns 0.
 - [ ] `tests/unit/test_medium_validators.py` exists and passes. Coverage includes `validate_telegram`, `validate_email`, `_validate_for_medium`, `format_violations`.
 - [ ] `bridge/response.py::send_response_with_files` is deleted from main. `grep -rn "send_response_with_files" --include="*.py"` returns zero production matches (tests migrated).
-- [ ] `git diff --stat $(git merge-base main HEAD)..HEAD -- . ':(exclude)tests/' | tail -1` shows negative net lines. Concrete target: **≥ 50 lines negative** to have margin.
-- [ ] `docs/features/message-drafter.md` has a `### Delivery Tool Surface` subsection (assuming Open Question #1 resolves as expected).
+- [ ] `git diff --stat $(git merge-base main HEAD)..HEAD -- . ':(exclude)tests/' ':(exclude)docs/plans/' | tail -1` shows this PR's diff is negative against the post-#1072 baseline (`26c0ed5e`). Concrete target: **≥ 150 lines negative outside tests and plan docs** to have margin.
+- [ ] `docs/features/message-drafter.md` has a `### Delivery Tool Surface` subsection documenting RD-1.
 - [ ] `/do-test` passes.
 - [ ] `/do-pr-review` (full-diff pass, covers both #1072 delta and this PR) returns no unresolved blockers, nits, or tech debt.
 - [ ] Feature flag `MESSAGE_DRAFTER_IN_HANDLER` still toggleable; rollback path verified by `test_worker_pm_long_output.py`'s disabled-drafter test case.
@@ -361,24 +400,12 @@ Standard (Tier 1): `builder`, `validator`, `test-engineer`, `documentarian`.
 
 ## Step by Step Tasks
 
-### 1. Resolve Open Question #1 (Task 9 decision)
-
-- **Task ID**: resolve-q1
-- **Depends On**: none
-- **Validates**: user response to the Open Question below
-- **Informed By**: spike-2
-- **Assigned To**: user (via plan review)
-- **Agent Type**: n/a (human decision)
-- **Parallel**: true
-
-Before any build task runs, the user must confirm the Task 9 decision: CLI-tool surface as final (expected) OR build a real MCP server (blows up scope).
-
-### 2. Migrate producer table in code-review.md (Part A)
+### 1. Migrate producer table in code-review.md (Part A)
 
 - **Task ID**: build-table-migration
-- **Depends On**: resolve-q1
+- **Depends On**: none
 - **Validates**: `grep -cE "^\|.*\|.*\|" .claude/skills/do-pr-review/sub-skills/code-review.md` returns 0
-- **Informed By**: spike-4 (only one producer table exists)
+- **Informed By**: spike-4 (only one producer table exists); spike-5 (complete producer inventory confirms no other migrations needed)
 - **Assigned To**: consolidation-builder
 - **Agent Type**: builder
 - **Parallel**: true
@@ -386,10 +413,10 @@ Before any build task runs, the user must confirm the Task 9 decision: CLI-tool 
 - Keep surrounding prose and heading.
 - Do NOT touch any other markdown tables in the skill.
 
-### 3. Write medium validator unit tests (Part B)
+### 2. Write medium validator unit tests (Part B)
 
 - **Task ID**: build-validator-tests
-- **Depends On**: resolve-q1
+- **Depends On**: none
 - **Validates**: `pytest tests/unit/test_medium_validators.py -q` exits 0 with ≥ 18 tests run
 - **Informed By**: direct code-read of `bridge/message_drafter.py:260-342`
 - **Assigned To**: validator-test-writer
@@ -399,11 +426,11 @@ Before any build task runs, the user must confirm the Task 9 decision: CLI-tool 
 - Test classes: `TestValidateTelegram`, `TestValidateEmail`, `TestValidateForMedium`, `TestFormatViolations`.
 - Happy paths, each rule, empty inputs, unknown-medium dispatch.
 
-### 4. Consolidate bridge/response.py into TelegramRelayOutputHandler (Part C)
+### 3. Consolidate bridge/response.py into TelegramRelayOutputHandler (Part C)
 
 - **Task ID**: build-consolidation
-- **Depends On**: resolve-q1, build-table-migration, build-validator-tests
-- **Validates**: `pytest tests/ -x -q` passes; `grep -rn "send_response_with_files" --include="*.py" .` returns zero production hits; `git diff --stat $(git merge-base main HEAD)..HEAD -- . ':(exclude)tests/' | tail -1` shows ≥50 lines negative.
+- **Depends On**: build-table-migration, build-validator-tests
+- **Validates**: `pytest tests/ -x -q` passes; `grep -rn "send_response_with_files" --include="*.py" .` returns zero production hits; `git diff --stat $(git merge-base main HEAD)..HEAD -- . ':(exclude)tests/' ':(exclude)docs/plans/' | tail -1` shows ≥ 150 LOC net negative against post-#1072 baseline.
 - **Informed By**: spike-1 (≥250 lines of movable surface), spike-3 (caller list)
 - **Assigned To**: consolidation-builder
 - **Agent Type**: builder
@@ -412,22 +439,23 @@ Before any build task runs, the user must confirm the Task 9 decision: CLI-tool 
 - Migrate `tests/unit/test_message_drafter.py` import sites as part of this task.
 - Run the line-count check mid-task; adjust if margin insufficient.
 
-### 5. Update feature documentation (Part D)
+### 4. Update feature documentation (Part D)
 
 - **Task ID**: document-delivery-surface
 - **Depends On**: build-consolidation
 - **Validates**: `grep -c "### Delivery Tool Surface" docs/features/message-drafter.md` returns ≥ 1
-- **Informed By**: spike-2 (CLI-tool decision)
+- **Informed By**: spike-2 (CLI-tool decision); RD-1 (resolved decision)
 - **Assigned To**: consolidation-builder
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Add `### Delivery Tool Surface` subsection to `docs/features/message-drafter.md`.
 - Update any file-path references affected by the consolidation.
 
-### 6. Final validation
+### 5. Final validation
 
 - **Task ID**: validate-all
 - **Depends On**: build-table-migration, build-validator-tests, build-consolidation, document-delivery-surface
+- **Informed By**: RD-1, spike-5
 - **Validates**: all Success Criteria
 - **Assigned To**: followup-validator
 - **Agent Type**: validator
@@ -447,7 +475,7 @@ Before any build task runs, the user must confirm the Task 9 decision: CLI-tool 
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No producer tables in code-review.md | `grep -cE "^\\|.*\\|.*\\|" .claude/skills/do-pr-review/sub-skills/code-review.md` | output 0 |
 | No send_response_with_files callers | `grep -rn "send_response_with_files" --include="*.py" .` | exit code 1 |
-| Net-negative line count outside tests | `git diff --stat $(git merge-base main HEAD)..HEAD -- . ':(exclude)tests/' \| tail -1 \| grep -oE '[0-9]+ insertions.*[0-9]+ deletions' \| python -c "import sys; ins, dels = [int(x.split()[0]) for x in sys.stdin.read().split(',')]; sys.exit(0 if dels > ins else 1)"` | exit code 0 |
+| Net-negative line count outside tests and plan docs | `git diff --stat $(git merge-base main HEAD)..HEAD -- . ':(exclude)tests/' ':(exclude)docs/plans/' \| tail -1 \| grep -oE '[0-9]+ insertions.*[0-9]+ deletions' \| python -c "import sys; ins, dels = [int(x.split()[0]) for x in sys.stdin.read().split(',')]; sys.exit(0 if dels - ins >= 150 else 1)"` | exit code 0 |
 | Medium validator tests | `pytest tests/unit/test_medium_validators.py -q` | exit code 0 |
 | Worker-bypass integration test | `pytest tests/integration/test_worker_pm_long_output.py -q` | exit code 0 |
 | Feature doc has Delivery Tool Surface section | `grep -c "### Delivery Tool Surface" docs/features/message-drafter.md` | output ≥ 1 |
@@ -458,8 +486,12 @@ Before any build task runs, the user must confirm the Task 9 decision: CLI-tool 
 
 ---
 
+## Resolved Decisions
+
+**RD-1 — Delivery tool surface is the existing CLI-tool pattern (settles original Task 9).**
+Source: PR #1072 shipped `tools/send_message.py`, `tools/react_with_emoji.py`, and the stop-hook classification (`agent/hooks/stop.py:217`'s `classify_delivery_outcome` already pattern-matches tool_use blocks for these scripts). This is the *de facto* current design and has been in production since #1072 merged on 2026-04-20. No new MCP server is planned. Task 9's original ask ("create `mcp_servers/message_delivery_server.py`, register in `.mcp.json`") is **withdrawn** — the surface already exists and functions. This plan's Part D merely documents the decision in `docs/features/message-drafter.md` so future maintainers don't re-open the question. The MCP-server alternative remains reversible — a future chore can wrap the CLI tools if transcript readability becomes a pain point — but that is out of scope for this PR. No build task is gated on reaffirming this.
+
 ## Open Questions
 
-1. **Task 9 — CLI tool surface vs. real MCP server.** Spike-2 recommends declaring `tools/send_message.py` + `tools/react_with_emoji.py` as the final delivery tool surface and documenting the choice, rather than building a new `mcp_servers/message_delivery_server.py` + `.mcp.json` registration. Rationale: the CLI-tool surface works today, is already classified correctly by the stop hook, and adding an MCP server is net-positive (conflicts with Task 15's net-negative target). **Do you accept this recommendation, or do you want the MCP server built anyway (in which case the plan becomes Large and Task 15 may need to slip to a later PR)?**
-2. **Task 15 margin target.** Plan sets "≥50 lines negative" as the Success Criterion for net-line-count outside tests. Do you want a larger explicit margin (say, −200 lines) to ensure headroom, or is ≥50 sufficient?
-3. **`bridge/response.py` disposition.** After consolidation, should the surviving ≈100 lines (`set_reaction`, `VALIDATED_REACTIONS`, possibly `_truncate_at_sentence_boundary`) stay in `bridge/response.py` under a clearer-named module docstring, or be renamed to `bridge/reactions.py`? Either works; rename adds 3 call-site edits (`bridge/update.py`, `bridge/telegram_relay.py`, `bridge/routing.py`) to the diff but improves clarity.
+1. **Task 15 margin target.** Plan sets "≥150 lines negative against post-#1072 baseline, excluding tests/ and docs/plans/" as the Success Criterion for net-line-count. Do you want a larger explicit margin (say, −250 lines) to ensure headroom, or is ≥150 sufficient?
+2. **`bridge/response.py` disposition.** After consolidation, should the surviving ≈100 lines (`set_reaction`, `VALIDATED_REACTIONS`, possibly `_truncate_at_sentence_boundary`) stay in `bridge/response.py` under a clearer-named module docstring, or be renamed to `bridge/reactions.py`? Either works; rename adds 3 call-site edits (`bridge/update.py`, `bridge/telegram_relay.py`, `bridge/routing.py`) to the diff but improves clarity.
