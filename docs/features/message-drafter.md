@@ -153,7 +153,7 @@ The stop-hook review gate currently uses a `SEND/EDIT:/REACT:/SILENT/CONTINUE` s
 
 This work is staged in follow-up tasks (9 and 11 in the plan).
 
-## Delivery Tool Surface
+### Delivery Tool Surface
 
 The agent delivers user-visible messages and reactions via two CLI tools invoked through the `Bash` tool, not through a dedicated MCP server:
 
