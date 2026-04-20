@@ -216,9 +216,13 @@ class EmailOutputHandler:
         smtp_config: dict | None = None,
         redis_url: str | None = None,
     ):
+        from agent.output_handler import _read_drafter_in_handler_flag
+
         self._smtp_config = smtp_config or _get_smtp_config()
         self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self._redis = None
+        # Read drafter flag once per Race 3 — mirrors TelegramRelayOutputHandler.
+        self._drafter_enabled = _read_drafter_in_handler_flag()
 
     def _get_redis(self):
         if self._redis is None:
@@ -298,11 +302,8 @@ class EmailOutputHandler:
 
         # Drafter-at-the-handler (task 7 in plan). Fail open: any exception in
         # the drafter must not block the email send.
-        from agent.output_handler import _read_drafter_in_handler_flag
-
-        drafter_enabled = _read_drafter_in_handler_flag()
         body_text = text
-        if drafter_enabled:
+        if self._drafter_enabled:
             try:
                 from bridge.message_drafter import draft_message
 
