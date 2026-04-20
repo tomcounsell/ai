@@ -13,7 +13,7 @@ All timestamps in the system are stored and logged as **tz-aware UTC datetimes**
 Central utilities for timestamp handling:
 
 ```python
-from bridge.utc import utc_now, to_local, utc_iso
+from bridge.utc import utc_now, to_local, utc_iso, to_unix_ts
 ```
 
 ### `utc_now() -> datetime`
@@ -27,6 +27,14 @@ Converts a tz-aware UTC datetime to the machine's local timezone for display. Ra
 ### `utc_iso() -> str`
 
 Returns the current UTC time as an ISO 8601 string with `Z` suffix (e.g., `2026-03-26T14:30:00Z`). Convenience for JSON serialization.
+
+### `to_unix_ts(val) -> float | None`
+
+Canonical datetime → Unix timestamp converter for **read-path** code. Accepts `datetime` (naive or aware), `int`/`float`, ISO 8601 strings (with or without `Z`), or `None`.
+
+Naive datetimes are treated as UTC before `.timestamp()` is called. This is the defense against the most common bug in age math: calling `val.timestamp()` directly on a naive datetime returns a value offset by the machine's UTC offset (e.g., +420 min on UTC+7), because Python interprets naive datetimes as local time.
+
+Always use this helper when reading a Popoto-stored datetime and comparing it to `time.time()` or `utc_now().timestamp()`. Returns `None` when the input cannot be coerced — callers handle `None` explicitly.
 
 ## JSON Log Format
 
@@ -73,7 +81,7 @@ The CLI uses `_format_ts()` in `tools/valor_session.py` (appends ` UTC` to all o
 - The deprecated `datetime.utcnow()` (which returns naive datetimes) has been eliminated.
 - `time.time()` calls are unchanged -- epoch timestamps are timezone-neutral.
 - Telethon message timestamps were already UTC and are unchanged.
-- Popoto/Redis model timestamps (`created_at`/`updated_at`) are managed by the ORM and are out of scope for construction-site normalization. However, `SortedField` deserialization returns naive datetimes — code that calls `.timestamp()` on values read from `SortedField` must treat them as UTC. `_to_timestamp()` in `monitoring/session_watchdog.py` handles this with a `val.tzinfo is None` guard (issue #777).
+- Popoto/Redis model timestamps (`created_at`/`updated_at`) are managed by the ORM and are out of scope for construction-site normalization. However, `SortedField` / `DatetimeField` deserialization can return naive datetimes — code that calls `.timestamp()` on values read from Popoto must treat them as UTC. **Use `bridge.utc.to_unix_ts(val)` for all read-path conversions.** It normalizes naive datetimes to UTC before `.timestamp()`, handles `None`/float/ISO-string inputs, and is the single source of truth for this coercion. Rewire sites include `scripts/update/run.py::_cleanup_stale_sessions`, `tools/agent_session_scheduler._to_ts`, `agent/sustainability`, `reflections/memory_management`, `reflections/behavioral_learning`, `tools/telegram_history._parse_ts`, and `models.agent_session.cleanup_expired`. Three older helpers (`monitoring/session_watchdog._to_timestamp`, `agent/session_health._to_ts`, `ui/data/sdlc._safe_float`) already implement the same `val.tzinfo is None` guard inline — they pre-date the shared helper and are intentionally left untouched. New code must import `to_unix_ts` rather than add a fourth copy (issues #777, hotfix 9e3a64f5).
 
 ## Related
 
