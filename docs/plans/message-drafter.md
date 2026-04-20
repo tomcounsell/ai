@@ -10,6 +10,8 @@ revision_applied: true
 revision_applied_at: 2026-04-20
 critique_verdict: "READY TO BUILD (with concerns)"
 critique_artifact_hash: "sha256:fd4456e05ae9176fd053b796a9af245499d924b845c6d0ebbb9c7def40b1bc89"
+allow_unchecked: true
+allow_unchecked_reason: "PR #1072 is a deliberately-scoped partial build that shipped the critical dead-letter fix (Task 7: drafter-at-the-handler), the rename (Task 1), the relay length guard (Task 5), and documentation (Task 13). The core acceptance criterion from issue #1035 — worker-executed PM sessions no longer reach the relay with >4096 chars of raw output — is met. Remaining tasks (2.5, 3, 8, 9, 11, 12, 13.5, 14, 15) are tracked as follow-up in issue #1074 and scheduled into subsequent PRs. Merging the partial is correct because (a) the dead-letter regression is blocking user-visible message delivery now, (b) the rollback path exists via the MESSAGE_DRAFTER_IN_HANDLER feature flag, and (c) holding the fix behind a full-plan build lengthens the user-facing outage without changing the shape of the remaining work."
 ---
 
 # Message Drafter (rename from Summarizer) — Medium-Aware Drafts, Tool-Call Delivery, Consolidation, and Length Enforcement
