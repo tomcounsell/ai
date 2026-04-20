@@ -79,13 +79,13 @@ class TestDevParentLinkage:
             session_id=f"child_{ts}",
             project_key="valor",
             working_dir="/tmp/test/.worktrees/my-feature",
-            parent_session_id=chat.agent_session_id,
+            parent_agent_session_id=chat.agent_session_id,
             message_text="/do-build",
             slug="my-feature",
         )
 
         assert dev.session_type == SESSION_TYPE_DEV
-        assert dev.parent_session_id == chat.agent_session_id
+        assert dev.parent_agent_session_id == chat.agent_session_id
 
         # Navigate from child to parent via filter
         parents = list(AgentSession.query.filter(session_id=chat.session_id))
@@ -108,14 +108,14 @@ class TestDevParentLinkage:
             session_id=f"dev1_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id=chat.agent_session_id,
+            parent_agent_session_id=chat.agent_session_id,
             message_text="/do-build",
         )
         dev2 = AgentSession.create_dev(
             session_id=f"dev2_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id=chat.agent_session_id,
+            parent_agent_session_id=chat.agent_session_id,
             message_text="/do-test",
         )
 
@@ -130,7 +130,7 @@ class TestDevParentLinkage:
             session_id=f"orphan_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id="nonexistent_id",
+            parent_agent_session_id="nonexistent_id",
             message_text="lost",
         )
         assert dev.get_parent_session() is None
@@ -146,7 +146,7 @@ class TestDerivedPaths:
             session_id=f"slug_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id="parent_x",
+            parent_agent_session_id="parent_x",
             message_text="build",
             slug="my-cool-feature",
         )
@@ -182,7 +182,7 @@ class TestSDLCStagesPropagation:
             session_id=f"stages_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id="parent_y",
+            parent_agent_session_id="parent_y",
             message_text="/do-build",
             stage_states=stages,
         )
@@ -228,7 +228,7 @@ class TestSessionTypeDiscriminator:
             session_id=f"type_dev_{ts}",
             project_key="valor",
             working_dir="/tmp",
-            parent_session_id=chat.agent_session_id,
+            parent_agent_session_id=chat.agent_session_id,
             message_text="build",
         )
 
@@ -249,7 +249,7 @@ class TestSessionTypeDiscriminator:
             session_id=f"qt_dev_{ts}",
             project_key="query_test",
             working_dir="/tmp",
-            parent_session_id="parent_x",
+            parent_agent_session_id="parent_x",
             message_text="build",
         )
 

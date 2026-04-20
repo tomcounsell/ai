@@ -28,7 +28,7 @@ def mock_child():
     child.session_type = "dev"
     child.is_pm = False
     child.is_dev = True
-    child.parent_session_id = "parent-001"
+    child.parent_agent_session_id = "parent-001"
     child.status = "running"
     child.slug = "my-feature"
     child.current_stage = "BUILD"
@@ -151,7 +151,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_non_child_rejected(self, mock_agent_session_cls, mock_child):
         """Session that is not a child of the parent is rejected."""
-        mock_child.parent_session_id = "other-parent"
+        mock_child.parent_agent_session_id = "other-parent"
         mock_agent_session_cls.get_by_id.return_value = mock_child
 
         result = main(
