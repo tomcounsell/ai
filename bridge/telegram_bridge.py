@@ -118,13 +118,11 @@ from bridge.media import (  # noqa: E402
     validate_media_file,  # noqa: F401
 )
 from bridge.response import (  # noqa: E402
-    FILE_MARKER_PATTERN,  # noqa: F401
     REACTION_COMPLETE,
     REACTION_RECEIVED,
     clean_message,
-    extract_files_from_response,  # noqa: F401
+    extract_files_from_response,
     filter_tool_logs,
-    send_response_with_files,
     set_reaction,
 )
 from bridge.routing import (  # noqa: E402
@@ -2176,53 +2174,88 @@ async def main():
         if not _wd:
             continue
 
-        # Create send callback that uses the Telegram client
+        # Create send callback that routes through TelegramRelayOutputHandler
+        # (drafter + Redis outbox + relay). The bridge no longer sends directly
+        # via the Telethon client — the outbox/relay is the single delivery path
+        # for both the worker send_cb and the bridge's handler-event callback.
+        # See docs/plans/message-drafter-followup.md §Part C.
         async def _make_send_cb(_client=client):
+            from agent.output_handler import TelegramRelayOutputHandler
+
+            handler = TelegramRelayOutputHandler()
+
             async def _send(chat_id: str, text: str, reply_to_msg_id: int, session=None) -> None:
                 try:
                     filtered = filter_tool_logs(text)
-                    if filtered:
-                        sent = await send_response_with_files(
-                            _client,
-                            None,
-                            filtered,
-                            chat_id=int(chat_id),
-                            reply_to=reply_to_msg_id,
-                            session=session,
-                        )
-                        if sent:
-                            # Check for steering deferral sentinel — message was
-                            # intentionally held back for agent self-summary, not a
-                            # send failure. Don't store or log an error.
-                            from bridge.message_drafter import STEERING_DEFERRED
+                    if not filtered:
+                        return
 
-                            if sent == STEERING_DEFERRED:
-                                logger.info(
-                                    f"Session queue delivery deferred to self-summary "
-                                    f"steering for chat {chat_id}"
-                                )
-                            else:
-                                try:
-                                    # Capture the Telegram message_id from the returned
-                                    # Message object so outbound TelegramMessage records
-                                    # have message_id populated.
-                                    sent_msg_id = getattr(sent, "id", None)
-                                    store_message(
-                                        chat_id=chat_id,
-                                        content=filtered,
-                                        sender="Valor",
-                                        timestamp=utc_now(),
-                                        message_type="response",
-                                        message_id=sent_msg_id,
-                                        reply_to_msg_id=reply_to_msg_id,
-                                    )
-                                except Exception:
-                                    pass
-                        elif filtered:
-                            logger.error(
-                                f"Session queue send returned False for chat {chat_id} "
-                                f"({len(filtered)} chars)"
+                    # PM self-messaging bypass (issue #497, #571): if the PM
+                    # session already delivered messages via tools/send_telegram.py
+                    # during this session (or its parent PM session in SDLC
+                    # flows), skip the drafter entirely. File attachments still
+                    # send — they would be lost otherwise.
+                    pm_bypass = False
+                    if session and hasattr(session, "has_pm_messages"):
+                        if session.has_pm_messages():
+                            pm_bypass = True
+                        elif hasattr(session, "get_parent_session"):
+                            try:
+                                parent = session.get_parent_session()
+                                if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
+                                    pm_bypass = True
+                            except Exception:
+                                pass
+
+                    # Extract any <<FILE:>> markers before sending text.
+                    # File attachments route directly via Telethon since files
+                    # tend to carry agent-emitted output that should land even
+                    # when PM self-messaging has already fired.
+                    text_only, files = extract_files_from_response(filtered)
+
+                    for file_path in files:
+                        try:
+                            await _client.send_file(
+                                int(chat_id), file_path, reply_to=reply_to_msg_id
                             )
+                        except Exception as fe:
+                            logger.error(f"Failed to send file {file_path}: {fe}")
+
+                    if pm_bypass:
+                        logger.info(
+                            f"PM self-message bypass active for chat {chat_id}; "
+                            f"skipping drafter (files sent: {len(files)})"
+                        )
+                        return
+
+                    if not text_only or text_only.isspace():
+                        return
+
+                    # Route the text through the output handler (drafter + outbox).
+                    await handler.send(
+                        chat_id=str(chat_id),
+                        text=text_only,
+                        reply_to_msg_id=reply_to_msg_id,
+                        session=session,
+                    )
+
+                    # Record outbound message for conversation history.
+                    # Message ID is not available synchronously (relay assigns it
+                    # after the actual Telethon send); stored as None and the
+                    # relay's _record_sent_message fills the gap on the session
+                    # record. This preserves sender/content/timestamp tracking.
+                    try:
+                        store_message(
+                            chat_id=chat_id,
+                            content=text_only,
+                            sender="Valor",
+                            timestamp=utc_now(),
+                            message_type="response",
+                            message_id=None,
+                            reply_to_msg_id=reply_to_msg_id,
+                        )
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.error(
                         f"Session queue _send callback failed for chat {chat_id}: {e}",

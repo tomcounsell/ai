@@ -1910,154 +1910,10 @@ class TestLinkifyReferences:
         assert result == "PR #323"
 
 
-class TestDrafterBypass:
-    """Tests for PM self-messaging summarizer bypass (issue #497).
-
-    When the PM sends messages via tools/send_telegram.py during a session,
-    the summarizer should be skipped entirely in send_response_with_files.
-    """
-
-    @pytest.mark.asyncio
-    async def test_bypass_when_pm_has_messages(self):
-        """send_response_with_files should return True without summarizing
-        when pm_sent_message_ids is non-empty."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = True
-        mock_session.pm_sent_message_ids = [42, 43]
-        mock_session.session_id = "test-session"
-
-        result = await send_response_with_files(
-            mock_client,
-            None,
-            "Some agent output",
-            chat_id=12345,
-            reply_to=67890,
-            session=mock_session,
-        )
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_no_bypass_when_no_pm_messages(self):
-        """send_response_with_files should proceed normally when
-        pm_sent_message_ids is empty."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "test-session"
-        mock_session.is_sdlc = False
-        # Ensure parent lookup also returns no PM messages
-        mock_session.get_parent_session.return_value = None
-
-        # Mock send_markdown to avoid Telethon calls
-        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = MagicMock()
-            result = await send_response_with_files(
-                mock_client,
-                None,
-                "Short",
-                chat_id=12345,
-                reply_to=67890,
-                session=mock_session,
-            )
-
-        # Should have tried to send the text (not bypassed)
-        assert mock_send.called or result is True
-
-
-class TestDrafterBypassParentSession:
-    """Tests for PM bypass guard with parent PM session lookup (issue #571).
-
-    In SDLC flows, the Dev session (child) is passed to send_response_with_files,
-    but PM messages are recorded on the parent PM session. The guard must check
-    the parent session when the child has no PM messages.
-    """
-
-    @pytest.mark.asyncio
-    async def test_bypass_when_parent_has_pm_messages(self):
-        """Dev session with parent PM session that has PM messages -> bypass fires."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_parent = MagicMock()
-        mock_parent.has_pm_messages.return_value = True
-        mock_parent.pm_sent_message_ids = [100, 101]
-
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "dev-session-1"
-        mock_session.get_parent_session.return_value = mock_parent
-
-        result = await send_response_with_files(
-            mock_client,
-            None,
-            "Dev session agent output",
-            chat_id=12345,
-            reply_to=67890,
-            session=mock_session,
-        )
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_no_bypass_when_parent_is_dangling(self):
-        """Dev session with dangling parent_agent_session_id -> bypass does not fire."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "dev-session-2"
-        mock_session.get_parent_session.return_value = None
-        mock_session.is_sdlc = False
-
-        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = MagicMock()
-            result = await send_response_with_files(
-                mock_client,
-                None,
-                "Short",
-                chat_id=12345,
-                reply_to=67890,
-                session=mock_session,
-            )
-
-        assert mock_send.called or result is True
-
-    @pytest.mark.asyncio
-    async def test_no_bypass_when_no_parent(self):
-        """Session without parent link -> no parent lookup, no bypass."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "chat-session-1"
-        mock_session.is_sdlc = False
-        # Remove get_parent_session to simulate a plain session
-        del mock_session.get_parent_session
-
-        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = MagicMock()
-            result = await send_response_with_files(
-                mock_client,
-                None,
-                "Short",
-                chat_id=12345,
-                reply_to=67890,
-                session=mock_session,
-            )
-
-        assert mock_send.called or result is True
+# NOTE: TestDrafterBypass and TestDrafterBypassParentSession classes were removed
+# when send_response_with_files was deleted in the #1074 follow-up. The PM
+# self-messaging bypass (issue #497, #571) now lives in bridge/telegram_bridge.py's
+# send_cb callback, which is integration-tested via tests/integration/test_reply_delivery.py.
 
 
 class TestDrafterInternalsSuppressionPrompt:
@@ -2117,16 +1973,16 @@ class TestNormalizeQuestionPrefix:
 
 
 class TestSentenceAwareTruncation:
-    """Tests for _truncate_at_sentence_boundary in response.py."""
+    """Tests for _truncate_at_sentence_boundary in message_drafter.py."""
 
     def test_short_text_unchanged(self):
-        from bridge.response import _truncate_at_sentence_boundary
+        from bridge.message_drafter import _truncate_at_sentence_boundary
 
         text = "Short text."
         assert _truncate_at_sentence_boundary(text) == text
 
     def test_truncates_at_sentence_boundary(self):
-        from bridge.response import _truncate_at_sentence_boundary
+        from bridge.message_drafter import _truncate_at_sentence_boundary
 
         sentences = "First sentence. Second sentence. Third. "
         text = sentences * 50
@@ -2135,7 +1991,7 @@ class TestSentenceAwareTruncation:
         assert result.endswith(".")
 
     def test_fallback_to_ellipsis(self):
-        from bridge.response import _truncate_at_sentence_boundary
+        from bridge.message_drafter import _truncate_at_sentence_boundary
 
         text = "a" * 5000
         result = _truncate_at_sentence_boundary(text, limit=4096)
@@ -2143,27 +1999,27 @@ class TestSentenceAwareTruncation:
         assert result.endswith("...")
 
     def test_empty_text(self):
-        from bridge.response import _truncate_at_sentence_boundary
+        from bridge.message_drafter import _truncate_at_sentence_boundary
 
         assert _truncate_at_sentence_boundary("") == ""
         assert _truncate_at_sentence_boundary(None) == ""
 
     def test_exact_limit_unchanged(self):
-        from bridge.response import _truncate_at_sentence_boundary
+        from bridge.message_drafter import _truncate_at_sentence_boundary
 
         text = "x" * 4096
         result = _truncate_at_sentence_boundary(text, limit=4096)
         assert result == text
 
     def test_preserves_exclamation_boundary(self):
-        from bridge.response import _truncate_at_sentence_boundary
+        from bridge.message_drafter import _truncate_at_sentence_boundary
 
         text = "Done! " * 800 + "Extra text over limit"
         result = _truncate_at_sentence_boundary(text, limit=4096)
         assert result.rstrip().endswith("!")
 
     def test_question_mark_boundary(self):
-        from bridge.response import _truncate_at_sentence_boundary
+        from bridge.message_drafter import _truncate_at_sentence_boundary
 
         text = "Is it working? " * 300 + "Extra text"
         result = _truncate_at_sentence_boundary(text, limit=4096)
