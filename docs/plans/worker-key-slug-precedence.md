@@ -178,7 +178,7 @@ different worker loops and run in parallel.
 
 ## Rabbit Holes
 
-- **Reworking the `is_project_keyed` discriminator into an enum with three values** (`PROJECT_KEYED`, `CHAT_KEYED`, `SLUG_KEYED`). Tempting because the query-filter logic now has a third case. Rejected: the project-key-and-re-filter pattern handles slug-keyed pops without adding a third branch. Enum expansion is a refactor orthogonal to the bug fix and would bloat this PR.
+- **Reworking the `is_project_keyed` discriminator into an enum with three values** (`PROJECT_KEYED`, `CHAT_KEYED`, `SLUG_KEYED`). Tempting because the query-filter logic now has a third case. Rejected: the slug-first-then-chat-fallback pattern (Option A in Technical Approach) handles slug-keyed pops without adding a third branch to the discriminator. Enum expansion is a refactor orthogonal to the bug fix and would bloat this PR.
 - **Auditing every `session.chat_id` read to check whether it now drifts from `worker_key`**. Not required — the routing key is opaque to callers. Only the two inline duplicates and `_pop_agent_session` filter logic care about how the key is computed.
 - **Wiring `MAX_CONCURRENT_DEV_SESSIONS`**. Explicitly dropped by the issue. A separate cap is an orthogonal feature. With the corrected routing, the global `MAX_CONCURRENT_SESSIONS=8` already bounds the total; any additional dev-specific cap is a future concern.
 - **Dashboard widget showing "N dev sessions in N worker loops"**. Not needed for the fix; the existing dashboard aggregates by session_type and displays running counts correctly. Any visibility improvement is a separate follow-up.
@@ -330,7 +330,7 @@ Using Tier 1 agents only (builder, validator). No specialists required — this 
 - Run `python -m ruff format . && python -m ruff check .` — clean.
 - Verify by reading `models/agent_session.py` that the property returns `self.slug` for the slugged-dev case.
 - Verify `agent/agent_session_queue.py:362-370` and `:1110-1118` both changed and both have the sync comment.
-- Verify `agent/session_pickup.py` filter logic uses project-key + re-filter for non-project-keyed branch.
+- Verify `agent/session_pickup.py` filter logic tries `slug=worker_key` first then falls back to `chat_id=worker_key` for the non-project-keyed branch, and that `slug` is promoted to `KeyField(null=True)` at `models/agent_session.py:216`.
 - Verify `docs/features/bridge-worker-architecture.md` decision table row for slugged dev says `slug` (not `chat_id`).
 - Run the complete truth table unit test and confirm all three inline sites agree.
 - Report pass/fail with specific assertions.
