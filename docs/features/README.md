@@ -96,7 +96,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry; 30+ reflections across maintenance, auditing, task management, session intelligence, behavioral learning, memory management, and daily reporting; vault-first config resolution | Shipped |
 | [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
-| [Reply-Thread Context Hydration](reply-thread-context-hydration.md) | Always-carry reply-chain hydration on the resume-completed branch + implicit-context `[CONTEXT DIRECTIVE]` for messages that reference prior conversation without a reply-to | Shipped |
+| [Reply-Thread Context Hydration](reply-thread-context-hydration.md) | Always-carry reply-chain hydration on the resume-completed branch + fresh-session non-Valor reply pre-hydration (#1064) + implicit-context `[CONTEXT DIRECTIVE]` for messages that reference prior conversation without a reply-to | Shipped |
 | [Resume Hydration Context](resume-hydration-context.md) | Injects recent branch commits into resumed PM sessions so the agent skips already-completed SDLC stages | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
 | [Scale Agent Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |

@@ -1880,6 +1880,93 @@ async def main():
                 f"text_preview={clean_text[:80]!r}"
             )
 
+        # === FRESH-SESSION NON-VALOR REPLY PRE-HYDRATION (Issue #1064) ===
+        # Extends PR #953's resume-completed pre-hydration to the fresh-session
+        # branch. PR #953 scoped itself to `is_reply_to_valor=True` replies that
+        # resolve to completed sessions. The fresh-session path (semantic-route
+        # miss, reply-to a non-Valor message) had NEITHER the [CONTEXT DIRECTIVE]
+        # (gated off for reply-to messages above) NOR resume-completed
+        # pre-hydration — a dead zone where reply-to messages arrived without
+        # their thread context.
+        #
+        # Placement correctness (Implementation Note C4): by reaching this
+        # point, control flow has passed through:
+        #   - Semantic routing resolution (lines ~1020-1098) — no-match landed
+        #     us here with a fresh `session_id = f"tg_{...}_{msg_id}"`.
+        #   - Resume-completed branch (line ~1482 `return`) — would have
+        #     short-circuited earlier if it fired. It cannot reach this line.
+        #   - [CONTEXT DIRECTIVE] block (lines 1840-1881) — gated off for
+        #     reply-to messages (`not message.reply_to_msg_id`), so harmless.
+        # The new block sits AFTER all three paths and BEFORE the
+        # dispatch_telegram_session call — placement IS the correctness
+        # mechanism per Implementation Note C1 (no explicit `session_id is None`
+        # check needed, because `session_id` has been assigned the fresh ID by
+        # now).
+        #
+        # Honors env kill-switch REPLY_CHAIN_PREHYDRATION_DISABLED (truthy = off)
+        # mirroring REPLY_CONTEXT_DIRECTIVE_DISABLED's exact parsing so a bad
+        # rollout can be disabled without a code deploy. Truthy set and
+        # normalization match the sibling check verbatim (Implementation Note C3).
+        _prehydration_disabled = os.getenv(
+            "REPLY_CHAIN_PREHYDRATION_DISABLED", ""
+        ).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        extra_overrides: dict | None = None
+        if message.reply_to_msg_id and not is_reply_to_valor and not _prehydration_disabled:
+            reply_chain_context: str | None = None
+            try:
+                chain = await asyncio.wait_for(
+                    fetch_reply_chain(
+                        client,
+                        event.chat_id,
+                        message.reply_to_msg_id,
+                        max_depth=20,
+                    ),
+                    timeout=3.0,
+                )
+                if chain:
+                    reply_chain_context = format_reply_chain(chain)
+            except TimeoutError:
+                logger.warning(
+                    "FRESH_REPLY_CHAIN_FAIL timeout "
+                    f"session_id={session_id} "
+                    f"chat_id={event.chat_id} "
+                    f"reply_to_msg_id={message.reply_to_msg_id}"
+                )
+            except Exception as rc_exc:
+                logger.warning(
+                    "FRESH_REPLY_CHAIN_FAIL exception "
+                    f"session_id={session_id} "
+                    f"chat_id={event.chat_id} "
+                    f"reply_to_msg_id={message.reply_to_msg_id} "
+                    f"error={rc_exc!r}"
+                )
+
+            # Implementation Note C2: three outcomes, only (a) stamps the flag.
+            #   (a) Fetch succeeded, chain non-empty → stamp flag, prepend block.
+            #   (b) Fetch succeeded, chain empty (format returned "") →
+            #       do NOT stamp, do NOT modify text. Deferred enrichment will
+            #       also find an empty chain — confirming correctness by a
+            #       second fetch, not a silent dead zone.
+            #   (c) Fetch timed out / raised → do NOT stamp, do NOT modify text.
+            #       Worker's deferred enrichment MUST remain free to retry.
+            if reply_chain_context:
+                enqueued_message_text = (
+                    f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enqueued_message_text}"
+                )
+                extra_overrides = {"reply_chain_hydrated": True}
+                logger.info(
+                    "fresh_reply_chain_prehydrated "
+                    f"session_id={session_id} "
+                    f"chat_id={event.chat_id} "
+                    f"reply_to_msg_id={message.reply_to_msg_id} "
+                    f"chain_len={len(chain)}"
+                )
+
         # Enqueue: session_type drives PM vs Dev session creation.
         # Pass full project config so the session carries it through the pipeline.
         # dispatch_telegram_session wraps enqueue_agent_session + dedup record so
@@ -1900,6 +1987,7 @@ async def main():
             telegram_message_key=stored_msg_id,
             session_type=_session_type,
             project_config=project,
+            extra_context_overrides=extra_overrides,
         )
         logger.info(
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
