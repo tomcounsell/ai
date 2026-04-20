@@ -1471,6 +1471,7 @@ async def main():
                             telegram_message_key=stored_msg_id,
                             project_config=project,
                             extra_context_overrides=_completed_extra_overrides,
+                            session_type=getattr(completed, "session_type", None) or SessionType.PM,
                         )
                         _steering_session_enqueued = True
                         logger.info(

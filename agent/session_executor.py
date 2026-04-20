@@ -1425,18 +1425,53 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 working_dir=str(working_dir),
             )
 
-        # Clean up steering queue — log content of any unconsumed messages
+        # Clean up steering queue — re-enqueue unconsumed messages as a continuation
         try:
             from agent.steering import pop_all_steering_messages
 
             leftover = pop_all_steering_messages(session.session_id)
             if leftover:
-                # Use 500-char limit (not 120) to preserve enough intent for forensics
                 texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:500]}" for m in leftover]
                 logger.warning(
                     f"[{session.project_key}] {len(leftover)} unconsumed steering "
-                    f"message(s) dropped for session {session.session_id}:\n" + "\n".join(texts)
+                    f"message(s) for session {session.session_id} — re-enqueuing as continuation:\n"
+                    + "\n".join(texts)
                 )
+                try:
+                    from agent.agent_session_queue import enqueue_agent_session
+
+                    combined_text = "\n\n".join(
+                        m.get("text", "").strip() for m in leftover if m.get("text", "").strip()
+                    )
+                    _summary = (
+                        getattr(agent_session, "context_summary", None)
+                        or "This continues a previously completed session."
+                    )
+                    augmented = f"[Prior session context: {_summary}]\n\n{combined_text}"
+                    await enqueue_agent_session(
+                        project_key=session.project_key,
+                        session_id=session.session_id,
+                        working_dir=str(working_dir),
+                        message_text=augmented,
+                        sender_name=leftover[0].get("sender", session.sender_name or ""),
+                        chat_id=session.chat_id,
+                        telegram_message_id=session.telegram_message_id,
+                        chat_title=session.chat_title,
+                        priority=session.priority or "normal",
+                        sender_id=session.sender_id,
+                        session_type=session.session_type or "pm",
+                        project_config=getattr(session, "project_config", None),
+                    )
+                    logger.info(
+                        f"[{session.project_key}] Re-enqueued {len(leftover)} steering "
+                        f"message(s) as continuation for session {session.session_id} "
+                        f"(session_type={session.session_type})"
+                    )
+                except Exception as re_enqueue_err:
+                    logger.warning(
+                        f"[{session.project_key}] Failed to re-enqueue steering messages "
+                        f"for session {session.session_id} (dropping): {re_enqueue_err}"
+                    )
         except Exception as e:
             logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
 
