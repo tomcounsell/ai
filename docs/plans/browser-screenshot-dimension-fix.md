@@ -6,6 +6,7 @@ owner: valorengels
 created: 2026-04-20
 tracking: https://github.com/tomcounsell/ai/issues/1060
 last_comment_id:
+revision_applied: true
 ---
 
 # Browser Screenshot Dimension Fix
@@ -114,7 +115,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/browser-screen
    - Opens with `Image.open(BytesIO(data))`
    - If `max(img.width, img.height) > max_dim`, computes `scale = max_dim / max(img.width, img.height)`, resizes with `img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)`
    - Returns PNG bytes via `BytesIO`
-   - On any Pillow exception: logs a warning, returns original `data` unchanged (safe fallback)
+   - On any Pillow exception (including empty/invalid input): logs a warning, returns original `data` bytes unchanged — never returns empty bytes (safe fallback that preserves the screenshot even if downscaling fails)
 5. Update the `dimensions` dict reported in the return value to reflect actual output dimensions (post-downscale).
 
 **`agent/sdk_client.py`:**
@@ -124,6 +125,17 @@ After the `_run_harness_subprocess` call that uses `--resume`, and **before** th
 ```python
 IMAGE_DIMENSION_SENTINEL = "exceeds the dimension limit"
 
+# NOTE: This check is intentionally different from the stale-UUID fallback's design
+# decision to avoid stderr substring matching (documented in _run_claude_harness docstring
+# as "brittle across CLI versions and locales"). Key distinctions:
+#   1. This checks result_text (stdout assembled by Claude Code as a structured result),
+#      not stderr — stdout result strings are stable protocol output, not log noise.
+#   2. This fires ONLY when prior_uuid was set (resume path) — sentinel is meaningless
+#      outside that context.
+#   3. The image-dimension error arrives with exit code 0, making the returncode != 0
+#      fallback below structurally unable to catch it — a separate check is required.
+# The _run_claude_harness docstring should note that exit-code-0 image-dimension errors
+# have a separate sentinel check above the returncode check.
 if prior_uuid and result_text and IMAGE_DIMENSION_SENTINEL in result_text:
     logger.warning(
         f"[harness] Image dimension error on --resume for session_id={session_id}; "
@@ -146,7 +158,7 @@ if prior_uuid and result_text and IMAGE_DIMENSION_SENTINEL in result_text:
         )
 ```
 
-This sentinel check fires **only** when `prior_uuid` was set (i.e., a `--resume` was attempted) and the result text contains the known error string, so normal non-resume responses are unaffected.
+This sentinel check fires **only** when `prior_uuid` was set (i.e., a `--resume` was attempted) and the result text contains the known error string, so normal non-resume responses are unaffected. The builder must also update the `_run_claude_harness` docstring to note that exit-code-0 image-dimension errors have a separate sentinel check placed above the `returncode != 0` guard.
 
 ## Failure Path Test Strategy
 
@@ -155,7 +167,7 @@ This sentinel check fires **only** when `prior_uuid` was set (i.e., a `--resume`
 - `fill_form` already has `except Exception: pass` on line 239 (form field fill failures) — this is pre-existing and not in scope of this plan
 
 ### Empty/Invalid Input Handling
-- `_downscale_if_needed(b"", ...)` → Pillow will raise; catch and return empty bytes (or original)
+- `_downscale_if_needed(b"", ...)` → Pillow will raise; catch and return original `data` bytes unchanged (never empty bytes — returning empty bytes would corrupt the screenshot response). This matches the Pillow-unavailable fallback behavior already specified above.
 - `sdk_client` sentinel check: guard with `result_text and IMAGE_DIMENSION_SENTINEL in result_text` — never fires on empty/None `result_text`
 
 ### Error State Rendering
@@ -293,3 +305,6 @@ No feature documentation needed — this is a bug fix with no user-visible API c
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic, Archaeologist, Consistency Auditor | sdk_client sentinel check contradicts documented "no stderr substring gate" design decision without distinguishing rationale | Plan revision (revision_applied: true) | Added inline comment in code block distinguishing stdout result_text from stderr, resume-path scope, and exit-code-0 specificity. Builder must also update `_run_claude_harness` docstring. |
+| NIT | Adversary | `_downscale_if_needed` failure fallback ambiguity — "(or original)" was parenthetical, not committed | Plan revision (revision_applied: true) | Resolved: always return original `data` bytes unchanged on any Pillow exception including empty input. Never return empty bytes. |
+| NIT | Simplifier | Team Orchestration verbosity for Small appetite | No action — parallel structure is valid and compliant | Acceptable as-is. |
