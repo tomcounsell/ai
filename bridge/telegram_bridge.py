@@ -2202,7 +2202,11 @@ async def main():
                         elif hasattr(session, "get_parent_session"):
                             try:
                                 parent = session.get_parent_session()
-                                if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
+                                if (
+                                    parent
+                                    and hasattr(parent, "has_pm_messages")
+                                    and parent.has_pm_messages()
+                                ):
                                     pm_bypass = True
                             except Exception:
                                 pass

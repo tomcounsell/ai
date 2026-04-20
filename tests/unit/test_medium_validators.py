@@ -51,9 +51,7 @@ class TestValidateTelegram:
 
     def test_multiple_tables_each_produce_violation(self) -> None:
         text = (
-            "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n"
-            "Later:\n\n"
-            "| x | y |\n| --- | --- |\n| 3 | 4 |\n"
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\n\nLater:\n\n| x | y |\n| --- | --- |\n| 3 | 4 |\n"
         )
         violations = validate_telegram(text)
         assert len(violations) == 2
@@ -225,8 +223,6 @@ class TestValidatorContract:
             ("email", "[a](b)", "no_markdown_links"),
         ],
     )
-    def test_parametrized_rule_detection(
-        self, medium: str, text: str, expected_rule: str
-    ) -> None:
+    def test_parametrized_rule_detection(self, medium: str, text: str, expected_rule: str) -> None:
         vs = _validate_for_medium(text, medium)
         assert any(v.rule == expected_rule for v in vs)
