@@ -79,7 +79,7 @@ class TestStartupRecoverySkipsTerminalSessions:
         assert count == 0, f"Terminal session ({terminal_status}) was incorrectly recovered"
 
     @patch("models.session_lifecycle.update_session")
-    @patch("agent.agent_session_queue.AgentSession")
+    @patch("agent.session_health.AgentSession")
     def test_legitimate_running_session_still_recovered(self, mock_cls, mock_update):
         """A truly running session (non-terminal) should still be recovered."""
         from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
@@ -92,7 +92,7 @@ class TestStartupRecoverySkipsTerminalSessions:
         mock_update.assert_called_once()
 
     @patch("models.session_lifecycle.update_session")
-    @patch("agent.agent_session_queue.AgentSession")
+    @patch("agent.session_health.AgentSession")
     def test_mixed_terminal_and_running_only_recovers_running(self, mock_cls, mock_update):
         """When both zombie and legitimate sessions exist, only the running one is recovered."""
         from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
