@@ -293,6 +293,16 @@ Normal PATCH dispatch spawns a fresh Dev session that reads the review findings 
 
 See [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md) for when PM chooses resume vs fresh.
 
+#### Resuming Killed or Failed Sessions (issue #1061)
+
+`valor-session resume` also accepts sessions with status `killed` (operator-initiated kill) or `failed` (worker crash), not just `completed`. The gating condition is the presence of a stored `claude_session_uuid` — without a transcript UUID there is nothing to replay, and the CLI exits 1 with `"cannot resume: no transcript UUID stored (session was killed before first turn completed)"`.
+
+`sdk_client._get_prior_session_uuid()` includes `killed` and `failed` in its status filter so the worker can retrieve the stored UUID when processing the resumed session. The primary cross-wire defense (#374) is unchanged: the lookup is still keyed on `session_id` and sorted by `created_at` desc, so only this thread's newest record is considered.
+
+All five `valor-session` subcommands that take `--id` (`status`, `inspect`, `resume`, `steer`, `kill`) accept either `session_id` (the canonical routing key) or `agent_session_id` (the 32-char hex UUID the Claude Code CLI displays as "Session ID"). Resolution is `session_id` first with a fallback to `AgentSession.get_by_id()` — see `tools/valor_session._find_session()`.
+
+**Rollback order** if a regression is traced to this change: revert the one-line status-filter expansion in `agent/sdk_client.py::_get_prior_session_uuid` first. `_find_session` is additive — it only alters behavior on previously-failing UUID lookups — and can remain in place.
+
 ## Worker-Driven Lifecycle
 
 The parent-child session lifecycle is driven by the worker's post-completion handler and two SDK hooks for stage tracking.

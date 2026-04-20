@@ -17,7 +17,15 @@ _repo_root = Path(__file__).parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from tools.valor_session import cmd_release, cmd_resume  # noqa: E402
+from tools.valor_session import (  # noqa: E402
+    _find_session,
+    cmd_inspect,
+    cmd_kill,
+    cmd_release,
+    cmd_resume,
+    cmd_status,
+    cmd_steer,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,7 +38,7 @@ def _make_session(
     retain: bool = False,
     pr_url: str = "",
     slug: str = "",
-    claude_session_uuid: str | None = None,
+    claude_session_uuid: str | None = "uuid-default",
     model: str | None = None,
     steering: list[str] | None = None,
 ) -> MagicMock:
@@ -40,6 +48,10 @@ def _make_session(
     s.retain_for_resume = retain
     s.pr_url = pr_url
     s.slug = slug
+    # Default to a non-null UUID so existing happy-path tests continue to
+    # exercise the status-guard path without tripping the null-UUID guard
+    # added in issue #1061. Tests that want to exercise the null-UUID path
+    # must pass ``claude_session_uuid=None`` explicitly.
     s.claude_session_uuid = claude_session_uuid
     s.model = model
     s.queued_steering_messages = list(steering or [])
@@ -69,6 +81,8 @@ class TestCmdResumeNotFound:
         """cmd_resume with unknown ID returns 1 and prints error to stderr."""
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        # _find_session falls back to get_by_id when filter is empty (#1061).
+        mock_cls.get_by_id.return_value = None
 
         with (
             patch("tools.valor_session._load_env"),
@@ -117,11 +131,12 @@ class TestCmdResumeWrongStatus:
         assert result == 1
         assert "running" in err.lower()
 
-    def test_failed_returns_1(self, capsys):
-        """Only 'completed' sessions can be resumed; failed should be rejected."""
-        result, err = self._run_with_status("failed", capsys)
+    def test_dormant_returns_1(self, capsys):
+        """Dormant sessions are NOT operator-revival targets — they resume themselves."""
+        result, err = self._run_with_status("dormant", capsys)
         assert result == 1
-        assert "failed" in err.lower() or "completed" in err.lower()
+        # The error message must name the current status
+        assert "dormant" in err
 
 
 class TestCmdResumeHappyPath:
@@ -213,6 +228,351 @@ class TestCmdResumeHappyPath:
         assert data["session_id"] == "sess-j"
         assert data["status"] == "resumed"
         assert data["claude_session_uuid"] == "uuid-abc"
+
+
+# ---------------------------------------------------------------------------
+# cmd_resume: killed / failed support (#1061)
+# ---------------------------------------------------------------------------
+
+
+class TestCmdResumeKilledFailedSupport:
+    """Killed and failed sessions may be resumed when a claude_session_uuid is stored.
+
+    See issue #1061.
+    """
+
+    def _run_resume(self, session, message="Try again."):
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+        mock_transition = MagicMock()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(transition_status=mock_transition),
+                },
+            ),
+        ):
+            result = cmd_resume(_resume_args(session_id=session.session_id, message=message))
+        return result, mock_transition
+
+    def test_killed_with_uuid_resumes(self):
+        session = _make_session("sess-k", status="killed", claude_session_uuid="uuid-killed")
+        result, mock_transition = self._run_resume(session, message="Pick up where we left off.")
+        assert result == 0
+        assert "Pick up where we left off." in session.queued_steering_messages
+        mock_transition.assert_called_once_with(
+            session, "pending", reason="valor-session resume", reject_from_terminal=False
+        )
+
+    def test_failed_with_uuid_resumes(self):
+        session = _make_session("sess-f", status="failed", claude_session_uuid="uuid-failed")
+        result, mock_transition = self._run_resume(session, message="Recover.")
+        assert result == 0
+        assert "Recover." in session.queued_steering_messages
+        mock_transition.assert_called_once_with(
+            session, "pending", reason="valor-session resume", reject_from_terminal=False
+        )
+
+
+class TestCmdResumeNullUuidGuard:
+    """A killed session without a stored claude_session_uuid cannot be resumed."""
+
+    def _run_resume_and_capture(self, session, capsys):
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(transition_status=MagicMock()),
+                },
+            ),
+        ):
+            result = cmd_resume(_resume_args(session_id=session.session_id))
+        return result, capsys.readouterr().err
+
+    def test_killed_with_null_uuid_exits_1_with_exact_message(self, capsys):
+        """Exact error string is part of the operator-facing contract — see #1061."""
+        session = _make_session("sess-knone", status="killed", claude_session_uuid=None)
+        result, err = self._run_resume_and_capture(session, capsys)
+        assert result == 1
+        assert err.strip() == (
+            "Error: cannot resume: no transcript UUID stored "
+            "(session was killed before first turn completed)"
+        )
+
+    def test_failed_with_null_uuid_exits_1(self, capsys):
+        session = _make_session("sess-fnone", status="failed", claude_session_uuid=None)
+        result, err = self._run_resume_and_capture(session, capsys)
+        assert result == 1
+        assert "no transcript UUID stored" in err
+
+
+class TestCmdResumeStatusGuardExactMessage:
+    """The operator-facing wording of the status guard must be stable."""
+
+    def test_status_rejection_uses_completed_killed_failed_wording(self, capsys):
+        session = _make_session("sess-paused", status="paused_circuit")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(transition_status=MagicMock()),
+                },
+            ),
+        ):
+            result = cmd_resume(_resume_args(session_id="sess-paused"))
+
+        assert result == 1
+        err = capsys.readouterr().err.strip()
+        assert err == (
+            "Error: Session sess-paused has status 'paused_circuit'. "
+            "Only completed/killed/failed sessions can be resumed."
+        )
+
+
+# ---------------------------------------------------------------------------
+# _find_session: dual-id lookup (#1061)
+# ---------------------------------------------------------------------------
+
+
+class TestFindSessionByPrimarySessionId:
+    """_find_session returns the newest matching record by session_id."""
+
+    def test_single_match_returned(self):
+        session = _make_session("sess-1")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+        ):
+            result = _find_session("sess-1")
+
+        assert result is session
+        mock_cls.query.filter.assert_called_once_with(session_id="sess-1")
+        mock_cls.get_by_id.assert_not_called()
+
+    def test_multiple_matches_returns_newest_by_created_at(self):
+        old_session = _make_session("sess-1")
+        old_session.created_at = 100
+        new_session = _make_session("sess-1")
+        new_session.created_at = 500
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [old_session, new_session]
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+        ):
+            result = _find_session("sess-1")
+
+        assert result is new_session
+
+
+class TestFindSessionFallbackToAgentSessionId:
+    """When session_id filter is empty, fall back to AgentSession.get_by_id()."""
+
+    def test_uuid_fallback_when_session_id_empty(self):
+        uuid_session = _make_session("sess-from-uuid")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = uuid_session
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+        ):
+            result = _find_session("c00fd40d7a10432ba38b52bead17061f")
+
+        assert result is uuid_session
+        mock_cls.query.filter.assert_called_once_with(session_id="c00fd40d7a10432ba38b52bead17061f")
+        mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
+
+    def test_returns_none_when_neither_lookup_finds(self):
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = None
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+        ):
+            result = _find_session("nonexistent-id")
+
+        assert result is None
+
+    def test_empty_string_returns_none(self):
+        """Empty string must not raise — get_by_id has its own empty-string guard."""
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = None
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+        ):
+            result = _find_session("")
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Dual-id: cmd_status / cmd_inspect / cmd_kill / cmd_steer (#1061)
+# ---------------------------------------------------------------------------
+
+
+class TestDualIdLookupAcrossSubcommands:
+    """Each of cmd_status, cmd_inspect, cmd_kill, cmd_steer must resolve UUIDs."""
+
+    def _patch_agent_session(self, mock_cls):
+        return patch.dict(
+            "sys.modules",
+            {
+                "models.agent_session": MagicMock(AgentSession=mock_cls),
+                "models.session_lifecycle": MagicMock(
+                    TERMINAL_STATUSES={"completed", "killed", "failed"},
+                    finalize_session=MagicMock(),
+                ),
+            },
+        )
+
+    def test_cmd_status_resolves_by_agent_session_id(self, capsys):
+        session = _make_session("sess-status", status="completed")
+        mock_cls = MagicMock()
+        # session_id filter returns empty → UUID fallback path
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = session
+
+        args = argparse.Namespace(
+            id="c00fd40d7a10432ba38b52bead17061f", json=True, full_message=False
+        )
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch("tools.valor_session._check_worker_health", return_value=(True, None)),
+            self._patch_agent_session(mock_cls),
+        ):
+            result = cmd_status(args)
+
+        assert result == 0
+        mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
+
+    def test_cmd_inspect_resolves_by_agent_session_id(self, capsys):
+        session = _make_session("sess-inspect", status="completed")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = session
+
+        args = argparse.Namespace(id="c00fd40d7a10432ba38b52bead17061f", json=True)
+
+        with (
+            patch("tools.valor_session._load_env"),
+            self._patch_agent_session(mock_cls),
+        ):
+            result = cmd_inspect(args)
+
+        assert result == 0
+        mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
+
+    def test_cmd_kill_resolves_by_agent_session_id(self, capsys):
+        session = _make_session("sess-kill", status="running")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = session
+        mock_finalize = MagicMock()
+
+        args = argparse.Namespace(id="c00fd40d7a10432ba38b52bead17061f", json=True, all=False)
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(
+                        TERMINAL_STATUSES={"completed", "killed", "failed"},
+                        finalize_session=mock_finalize,
+                    ),
+                },
+            ),
+        ):
+            result = cmd_kill(args)
+
+        assert result == 0
+        mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
+        mock_finalize.assert_called_once()
+        # finalize_session must be called with the canonical session, and the
+        # returned killed id must be the session.session_id (not the UUID arg)
+        finalize_call = mock_finalize.call_args
+        assert finalize_call.args[0] is session
+
+    def test_cmd_steer_resolves_by_agent_session_id_and_delegates_with_session_id(self):
+        """cmd_steer resolves UUID → session, then calls steer_session with canonical session_id."""
+        session = _make_session("sess-steer", status="running")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = session
+        mock_steer = MagicMock(return_value={"success": True})
+
+        args = argparse.Namespace(
+            id="c00fd40d7a10432ba38b52bead17061f",
+            message="Hold up.",
+            json=False,
+        )
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "agent.agent_session_queue": MagicMock(steer_session=mock_steer),
+                },
+            ),
+        ):
+            result = cmd_steer(args)
+
+        assert result == 0
+        # steer_session must be called with the canonical session_id, not the UUID
+        mock_steer.assert_called_once_with("sess-steer", "Hold up.")
+
+    def test_cmd_steer_not_found_returns_1(self, capsys):
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = []
+        mock_cls.get_by_id.return_value = None
+        mock_steer = MagicMock()
+
+        args = argparse.Namespace(id="nope", message="x", json=False)
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "agent.agent_session_queue": MagicMock(steer_session=mock_steer),
+                },
+            ),
+        ):
+            result = cmd_steer(args)
+
+        assert result == 1
+        mock_steer.assert_not_called()
+        assert "not found" in capsys.readouterr().err.lower()
 
 
 # ---------------------------------------------------------------------------

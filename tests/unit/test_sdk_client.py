@@ -233,3 +233,68 @@ class TestApplyContextBudget:
         result = _apply_context_budget(msg, max_chars=50)
         assert result.startswith("[CONTEXT TRIMMED]")
         assert len(result) <= 50 + len("[CONTEXT TRIMMED]\n")
+
+
+# -----------------------------------------------------------------------------
+# _get_prior_session_uuid status filter — issue #1061
+#
+# The filter must include killed/failed so operator-initiated resume
+# (`valor-session resume --id <killed-id>`) can hand the stored UUID to
+# the Claude Code SDK for --resume replay.
+# -----------------------------------------------------------------------------
+
+
+class TestGetPriorSessionUuidStatusFilter:
+    """killed and failed sessions must expose their claude_session_uuid.
+
+    Prior to #1061 the filter excluded them, which meant resuming a killed
+    session would silently start a fresh transcript instead of replaying the
+    stored one.
+    """
+
+    def _make_session_row(self, status: str, uuid: str, created_at: int = 100):
+        from unittest.mock import MagicMock
+
+        s = MagicMock()
+        s.status = status
+        s.claude_session_uuid = uuid
+        s.created_at = created_at
+        return s
+
+    def _run_with_sessions(self, sessions):
+        from unittest.mock import MagicMock, patch
+
+        from agent.sdk_client import _get_prior_session_uuid
+
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = sessions
+
+        with patch.dict(
+            "sys.modules",
+            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+        ):
+            return _get_prior_session_uuid("sess-test")
+
+    def test_killed_session_uuid_returned(self):
+        sessions = [self._make_session_row("killed", "uuid-killed")]
+        assert self._run_with_sessions(sessions) == "uuid-killed"
+
+    def test_failed_session_uuid_returned(self):
+        sessions = [self._make_session_row("failed", "uuid-failed")]
+        assert self._run_with_sessions(sessions) == "uuid-failed"
+
+    def test_completed_still_returned(self):
+        sessions = [self._make_session_row("completed", "uuid-completed")]
+        assert self._run_with_sessions(sessions) == "uuid-completed"
+
+    def test_superseded_still_filtered_out(self):
+        """Only the documented statuses are eligible; others are skipped."""
+        sessions = [self._make_session_row("superseded", "uuid-old")]
+        assert self._run_with_sessions(sessions) is None
+
+    def test_newest_record_wins_when_multiple_status_eligible(self):
+        """created_at desc sort picks the newest; an older killed cannot shadow newer completed."""
+        old_killed = self._make_session_row("killed", "uuid-old-killed", created_at=100)
+        new_completed = self._make_session_row("completed", "uuid-new-completed", created_at=500)
+        # Pass them in non-sorted order to exercise the sort.
+        assert self._run_with_sessions([old_killed, new_completed]) == "uuid-new-completed"

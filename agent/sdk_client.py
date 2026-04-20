@@ -161,6 +161,16 @@ def _get_prior_session_uuid(session_id: str) -> str | None:
 
     See issue #232 for the original cross-wire bug, and issue #374 Bug 1
     for the UUID mapping fix.
+
+    ``killed`` and ``failed`` statuses are included since #1061 to support
+    operator-initiated resume via ``valor-session resume``. The original
+    narrow filter defended against fresh-session UUID reuse (#374). Today
+    the primary defense is keying the lookup on ``session_id`` (so only this
+    thread's records are considered) and ``created_at desc`` sort (so an
+    ancient killed record cannot shadow a newer completed one).
+    Killed/failed sessions are included because operator-initiated resume
+    is explicitly asking for this specific transcript to continue; the UUID
+    it needs is valid until the transcript file is cleaned up on disk.
     """
     try:
         from models.agent_session import AgentSession
@@ -168,7 +178,7 @@ def _get_prior_session_uuid(session_id: str) -> str | None:
         sessions = [
             s
             for s in AgentSession.query.filter(session_id=session_id)
-            if s.status in ("completed", "running", "active", "dormant")
+            if s.status in ("completed", "running", "active", "dormant", "killed", "failed")
         ]
         if not sessions:
             return None
