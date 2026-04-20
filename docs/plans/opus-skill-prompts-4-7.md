@@ -506,7 +506,7 @@ Default tier-1 types are sufficient: `builder`, `validator`, `documentarian`. No
 
 ## Critique Results
 
-**Critiqued:** 2026-04-20T04:49:20Z
+**Critiqued:** 2026-04-20T04:49:20Z (for issue #1066)
 **Verdict:** READY TO BUILD (with concerns)
 **Findings:** 0 blockers, 5 concerns, 3 nits
 **Revision pass applied:** 2026-04-20 (this commit) — `revision_applied: true` set in frontmatter
