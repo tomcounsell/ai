@@ -13,6 +13,8 @@ revision_note: "Concern-triggered revision pass. Critique verdict was 'READY TO 
 
 # agent-session-cleanup phantom-record guard
 
+**Tracks:** #1069
+
 ## Problem
 
 The `agent-session-cleanup` reflection, scheduled hourly in `config/reflections.yaml` and implemented at `agent/session_health.py:1052-1145` (`cleanup_corrupted_agent_sessions`), is destroying legitimate `AgentSession` records rather than corrupt ones.
