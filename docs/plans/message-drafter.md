@@ -196,7 +196,7 @@ Memory saved: `96b2e19117d8415b90709ae183b108eb` (importance 5.0) — "Telegram 
 **Team:** Solo dev (builder), code reviewer, test engineer
 
 **Interactions:**
-- PM check-ins: 1-2 (medium/persona orthogonality, clearing strategy pick)
+- PM check-ins: 0 expected (all major design decisions resolved in this plan — see "Resolved Design Decisions" section). Builder may surface one mid-build if the table-migration audit (Step 2.5) uncovers a producer not anticipated here.
 - Review rounds: 2 (design review after Part A, code review after Part D)
 
 Justification for Large: rename touches 15+ import sites; consolidation spans 4 files totaling 2,731 lines; five delivery-outcome test coverage is net-new; integration test for the worker-bypass fix is non-trivial. Net line count must be negative outside tests — requires care.
@@ -314,7 +314,7 @@ Tests cover all five outcomes end-to-end (see Success Criteria).
 
 ### Risk 1: Drafter-at-the-handler adds a per-message LLM call to EVERY outbound message, including short ones
 **Impact:** Latency regression on short replies (currently direct-write to outbox; proposed: Haiku call first).
-**Mitigation:** Early return in `draft_message` for short non-SDLC outputs (existing behavior, line 431 of response.py), generalized: if `len(text) < 200` AND no SDLC session AND no artifacts AND medium rules are satisfied as-is, return `MessageDraft(text=text, was_drafted=False)` without calling any LLM. Acceptance: unit test on a 50-char text asserts 0 Anthropic/OpenRouter API calls.
+**Mitigation:** Early return in `draft_message` for short non-SDLC outputs (existing behavior, line 431 of response.py). Per D5a, the threshold is **200 chars uniform** across bridge-handler and worker paths. If `len(text) < 200` AND no SDLC session AND no artifacts AND medium rules are satisfied as-is, return `MessageDraft(text=text, was_drafted=False)` without calling any LLM. Acceptance: unit test on a 50-char text asserts 0 Anthropic/OpenRouter API calls.
 
 ### Risk 2: Relay length guard trips unexpectedly on existing traffic post-deploy
 **Impact:** Existing PM flows that rely on long-form Telegram output (dashboards, status reports) suddenly get `.txt` attachments instead of inline text.
@@ -537,9 +537,24 @@ The lead orchestrator deploys team members and coordinates. All Builders deliver
 - Run `pytest tests/unit/ -x` — all tests pass.
 - Run `python -m ruff check .` — lint clean.
 
+### 2.5. Migrate existing markdown-table producers (pre-validator audit)
+- **Task ID**: migrate-table-producers
+- **Depends On**: validate-rename
+- **Validates**: `grep -rn '\| ---' bridge/ tools/ agent/ .claude/skills/` returns zero hits on user-facing Telegram-emitting code paths (doc files in `docs/` are excluded from the audit)
+- **Informed By**: D3 (decision to enforce validator on day 1)
+- **Assigned To**: drafter-medium-builder
+- **Agent Type**: builder
+- **Parallel**: false (must precede 3 so validator and migration land atomically)
+- Run `grep -rn '\| ---' bridge/ tools/ agent/ .claude/skills/` to inventory producers.
+- Audit PM/Teammate skill prompts that summarize data or list findings for any runtime table-generation patterns (e.g., "render this as a table").
+- Confirmed target: `.claude/skills/do-pr-review/SKILL.md` emits `| File | Change |` in review summaries — replace with bulleted "File — Change" list.
+- For any additional producer found, migrate to bullets or inline prose in the same commit.
+- Do NOT touch documentation files in `docs/` — they render in GitHub, not Telegram.
+- Commit with message `"Migrate Telegram-bound markdown tables to bullets (pre-drafter validator)"`.
+
 ### 3. Add medium parameter + validators
 - **Task ID**: build-medium
-- **Depends On**: build-rename
+- **Depends On**: build-rename, migrate-table-producers
 - **Validates**: `tests/unit/test_message_drafter.py` (per-medium tests), `tests/unit/test_drafter_validators.py` (new)
 - **Informed By**: spike-4
 - **Assigned To**: drafter-medium-builder
@@ -666,9 +681,21 @@ The lead orchestrator deploys team members and coordinates. All Builders deliver
 - Update `docs/features/email-bridge.md` with drafter section.
 - Update `CLAUDE.md` architecture references.
 
+### 13.5. File chore follow-up issue
+- **Task ID**: file-chore-issue
+- **Depends On**: document-feature
+- **Assigned To**: drafter-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Open a new GitHub issue titled `"Drop AgentSession.delivery_text/delivery_action/delivery_emoji fields and remove MESSAGE_DRAFTER_IN_HANDLER flag"` with label `chore`.
+- Body references #1035 as the PR that stopped reading/writing these fields and introduced the flag.
+- Body notes the two-week post-merge window for flag removal (D5d).
+- Body lists: (a) schema migration to drop three `AgentSession` columns (Tom owns), (b) delete `MESSAGE_DRAFTER_IN_HANDLER` reads in `agent/output_handler.py`, (c) delete the fallback branch, (d) delete the setting in `config/settings.py`.
+- Record the new issue number in the #1035 PR description as a follow-up.
+
 ### 14. Code review
 - **Task ID**: review-code
-- **Depends On**: document-feature
+- **Depends On**: file-chore-issue
 - **Assigned To**: drafter-code-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
@@ -706,23 +733,119 @@ The lead orchestrator deploys team members and coordinates. All Builders deliver
 | `docs/features/message-drafter.md` exists | `test -f docs/features/message-drafter.md` | exit code 0 |
 | `docs/features/summarizer-format.md` removed | `test ! -f docs/features/summarizer-format.md` | exit code 0 |
 
-## Critique Results
+## Resolved Design Decisions
 
-<!-- Populated by /do-plan-critique -->
+The following decisions were deferred to the builder by issue #1035 and by the previous draft's "Open Questions" section. All are now resolved and integrated into the Solution and Step-by-Step Tasks sections above. This section exists as a durable record of *why* each decision landed where it did.
 
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+### D1 — Polymorphic `send_message` (not per-medium pair)
+
+**Decision:** One polymorphic MCP tool `send_message(text, reply_to=None)`, routed at the server by `session.extra_context.transport`. No `send_telegram_message` / `send_email_reply` pair.
+
+**Why:**
+
+- **Agent mental model.** The agent reasons about the *act* of replying, not the *transport*. "Send a message" is one verb; asking the LLM to choose between `send_telegram_message` and `send_email_reply` leaks infrastructure into the prompt and doubles the surface area of valid tool calls.
+- **Single source of truth for routing.** `session.extra_context.transport` is already the discriminator the worker uses (set by `bridge/email_bridge.py:459-460` for email; implicit `"telegram"` default). Hardcoding the transport into two separate tools duplicates that logic in the agent's head and in the MCP server.
+- **Additive extensibility.** A future `slack` or `sms` medium becomes a per-medium prompt-rule addition, not a new tool-and-agent-retraining event.
+- **Failure mode is clear.** If a tool call arrives with a transport the server can't route (e.g., `session.extra_context.transport="slack"` with no Slack handler registered), the MCP server returns a structured error — the agent sees it as a tool error, not a menu-selection ambiguity.
+
+**Implication for Step 9 (build-mcp-delivery):** Exactly one tool `send_message` is implemented. Routing happens inside `mcp_servers/message_delivery_server.py::send_message` by looking up `(project_key, session.extra_context.transport)` in the `OutputHandler` registry.
+
+### D2 — `customer-service` persona runs the review gate (same as every other persona)
+
+**Decision:** The review gate runs for **every** persona, including `customer-service`. No per-persona skipping.
+
+**Why:**
+
+- **Orthogonality is the point.** Medium and persona are orthogonal (per issue #1035). The review gate is a *medium-level* construct (enforce wire-format compliance), not a persona-level one. Adding a persona-specific skip reintroduces coupling we're explicitly removing.
+- **`customer-service` is the *strongest* case for gating, not the weakest.** Current code (`bridge/email_bridge.py:405-411`) maps `customer-service` email to `SessionType.TEAMMATE` — conversational, human-facing, and *currently emitting literal markdown on SMTP*. This is exactly the class of output the drafter is designed to clean up.
+- **LLM cost is not a justification to skip.** The per-message drafter call is bounded by the short-output early-return (D5 below, <200 chars) and a Haiku-class model. The cost savings from skipping `customer-service` (a small fraction of traffic) do not justify the complexity tax of a persona-specific branch.
+- **The "action-oriented reply" concern is a drafter-prompt concern.** If a persona's replies are terse and action-oriented, the drafter's persona-tone segment handles that — it does not require bypassing the gate. Terse persona + short output + early-return = near-zero LLM cost anyway.
+
+**Implication for Step 7 (build-handler-drafter) and Step 11 (build-stop-hook):** No persona-based branching. The `persona` parameter threads into `draft_message` as tone input only.
+
+### D3 — Telegram markdown-table migration inventory (four known producers)
+
+**Decision:** The validator WILL be enforced on day 1. Before the validator goes live, the following known producers of markdown tables in Telegram output paths must be migrated to bullets or inline prose. The audit is a Step-1.5 prerequisite (added below).
+
+**Grep evidence:** A focused grep for `|\s*---\s*|` (markdown table separator) across `bridge/`, `tools/`, and `agent/` on the baseline commit returns zero hits in runtime Python code. All markdown tables found in the tree are in documentation files (`docs/`, `tests/unit/test_sdlc_skill_md_parity.py`, `scripts/synthesize_findings.py`) — none of which emit to Telegram.
+
+**But agents and prompts CAN synthesize tables at runtime**, so the risk is in prompt templates and structured-output helpers, not in hardcoded strings. Audited surface:
+
+| Producer | Location | Current behavior | Migration action |
+|---|---|---|---|
+| Status-report generation in `/do-pr-review` | `.claude/skills/do-pr-review/SKILL.md` | Emits `| File | Change |` tables in review summaries | Replace table with bulleted "File — Change" list in skill prompt; tests updated to parse bullets |
+| Dashboard renderers in PM check-in tools | `tools/dashboard*.py` (if present) | Not confirmed in runtime Python; any rendering that targets Telegram must switch to bullets | Audit task in Step 1.5; if any producer is found, migrate |
+| Ad-hoc LLM output tables | PM/Teammate free-form responses citing data | Prompt lets the LLM choose table format when summarizing lists | Drafter's Telegram medium rules explicitly forbid tables; validator catches leaks and surfaces them to the agent for editing |
+| SDLC skill findings tables | `/do-plan-critique` result presentations | Emit findings tables to stop-hook presentation, not directly to Telegram; drafter downstream strips | No change required — critique presentations are internal, not user-facing Telegram |
+
+**Step 1.5 (new) — Pre-validator migration audit:** before Step 3 (build-medium) flips the validator on, the builder runs `grep -rn '\| ---' bridge/ tools/ agent/ .claude/skills/` plus a behavioral scan of PM/Teammate skill prompts. Any producer targeting a user-facing Telegram path is migrated to bullets in the same commit that introduces the validator. A task is added to Step-by-Step Tasks (see below).
+
+**Implication:** The validator is NOT lenient on day 1. Any runtime table leak manifests as a violation note surfaced to the agent (`⚠️ markdown table detected at line N — edit `text` arg before invoking `send_message``).
+
+### D4 — Implicit clearing strategy via tool-call inspection (not sentinel)
+
+**Decision:** The stop hook classifies the agent's delivery choice by inspecting tool-call history in the transcript between first and second stop. No sentinel token, no magic comment, no explicit signal from the send tools.
+
+**Why:**
+
+- **The signal already exists.** Tool-use blocks are first-class entries in the transcript. The Claude Agent SDK's hook pipeline has access to the transcript via `hook_context.messages`. Reading tool_use blocks is a primitive already used elsewhere in the codebase (e.g., memory-extraction Stop hook).
+- **Sentinel tokens are a failure mode, not a feature.** Any magic token has to survive: (a) the agent reliably emitting it, (b) the tool implementation preserving it, (c) the hook's regex correctly extracting it. Each hop is a place agents and engineers miss the exact wire format. Tool-use blocks have none of these fragilities — they're structured, not string-parsed.
+- **The five outcomes map cleanly onto tool-call presence/absence.** See the classification table below. No ambiguous case requires a sentinel.
+- **Rollback option exists.** If a specific misclassification pattern emerges in staging, the `send_message` tool can write a sentinel server-side (a Redis marker keyed by `session_id + turn`) that the hook reads. This is a fast-follow, not a day-1 requirement. Documented as Risk 3 mitigation.
+
+**Five-outcome classification (ground truth):**
+
+| Outcome | Detection rule (applied to transcript tail since first stop) | Hook action | Test case |
+|---|---|---|---|
+| **Send (as-is)** | Exactly one `tool_use` block, name=`send_message`, `input.text` == draft `text` verbatim (post-whitespace-normalize) | Clear review state; allow completion; no further action | `test_tool_call_delivery.py::test_send_as_is` |
+| **Edit + send** | Exactly one `tool_use` block, name=`send_message`, `input.text` != draft `text` | Clear review state; allow completion; log the diff at DEBUG for analytics | `test_tool_call_delivery.py::test_edit_and_send` |
+| **React** | Exactly one `tool_use` block, name=`react_with_emoji` | Clear review state; allow completion; no further action | `test_tool_call_delivery.py::test_react` |
+| **Silent** | Zero `send_message`/`react_with_emoji` tool_use blocks AND zero text output since first stop AND stop reason is `"end_turn"` | Clear review state; allow completion (no user-facing message) | `test_tool_call_delivery.py::test_silent` |
+| **Continue** | Any other tool_use blocks present (including repeated `send_message`), OR stop reason is not `"end_turn"` (the agent is still working) | Do NOT clear; next stop re-enters gate with updated draft | `test_tool_call_delivery.py::test_continue` |
+
+**Edge cases explicitly handled:**
+
+- **Two `send_message` calls in a single turn:** classified as "Continue" — the hook treats the first call as a partial delivery and re-prompts the gate. The second stop will present the remaining work. (Alternative: classify as "Send x2" and allow both. Not doing this — multi-send per turn is a prompt bug, not a feature.)
+- **`send_message` called, then the agent emits additional text before stopping:** extra text is ignored. The tool call's delivery is authoritative.
+- **Agent invokes `send_message` with `text=""`:** treated as "Silent" — empty send is a no-op that the MCP tool rejects upstream (the `send_message` implementation short-circuits on empty `text`).
+- **Malformed tool_use (missing `text` arg):** MCP server returns a structured error; the agent sees it and corrects on the next turn. The gate re-enters.
+
+**Implication for Step 11 (build-stop-hook):** The implicit clearing logic lives in one function `classify_delivery_outcome(transcript_tail: list[Message], draft: MessageDraft) -> DeliveryOutcome`. It is unit-tested in isolation (`test_classify_delivery_outcome.py`) with hand-crafted transcript fixtures for each of the five outcomes plus each edge case. The five integration tests exercise the end-to-end path.
+
+### D5 — Additional resolved questions from the previous Open Questions section
+
+**D5a — Short-output early-return threshold:** **200 chars**, consistent with the current `bridge/response.py:431` threshold. Uniform threshold across bridge-handler and worker paths; no per-path divergence. The <200-char path skips the LLM drafter, returns `MessageDraft(text=text, was_drafted=False)`. If a specific regression shows up (e.g., a PM consistently emitting 250-char raw markdown that leaks), tune to 100 in a follow-up — but do NOT ship with two different thresholds.
+
+**D5b — `_has_pm_messages` removal:** **Delete it.** Given drafter-at-handler (Part C) runs for every `send_cb` invocation, the streaming case is covered. The original purpose of `_has_pm_messages` was to avoid double-sending (stop-hook gate + `send_telegram.py` self-message). With Part C, the self-message path also goes through the drafter, so the gate is no longer a risk. Simpler code wins.
+
+**D5c — Schema field cleanup:** **Open a follow-up issue** labeled `chore` titled `"Drop AgentSession.delivery_text/delivery_action/delivery_emoji fields"` with body pointing at #1035 as the PR that stopped using them. The PR opened for this plan does NOT attempt the migration (Tom owns migrations). The follow-up issue is filed by the builder at end of Step 13 (document-feature).
+
+**D5d — Feature flag timing:** `MESSAGE_DRAFTER_IN_HANDLER` removal is deferred **two weeks post-merge** assuming no rollbacks. A task is added to the follow-up issue D5c (piggybacked — same chore) to delete the flag and its fallback branch. If a rollback occurs, the flag stays until the rollback cause is resolved, then the two-week clock restarts.
 
 ---
 
-## Open Questions
+### Propagation into Step-by-Step Tasks
 
-1. **Drafter-at-handler for short outputs**: should the early-return threshold for skipping LLM drafting be 200 chars (current in `bridge/response.py:431`) or something different for the worker path (e.g., 500 chars)? Tradeoff: lower threshold = more LLM calls + slightly cleaner outputs; higher threshold = faster short replies but more raw-markdown leaks.
+Two new tasks are inserted to reflect D3 and D5c:
 
-2. **`_has_pm_messages` removal**: given drafter-at-handler covers the streaming case, is `_has_pm_messages` still earning its keep? Recommend deletion for simplicity, but happy to keep if there's an edge case I'm missing (e.g., a PM that self-messages 20 times per turn and we want to avoid 20x drafter LLM calls via the stop-hook gate).
+- **Step 1.5 (new, between build-rename and build-medium):** `migrate-table-producers` — audit `bridge/`, `tools/`, `agent/`, `.claude/skills/` for markdown-table producers targeting user-facing Telegram paths. Migrate identified producers to bullets. Assigned to `drafter-medium-builder` (same owner as the validator, so migration and enforcement land atomically). Parallel: false. Depends on: build-rename. Validates: grep returns zero `| ---` hits in non-doc runtime code.
+- **Step 13.5 (new, between document-feature and review-code):** `file-chore-issue` — open the follow-up issue for schema-field cleanup and `MESSAGE_DRAFTER_IN_HANDLER` removal. Assigned to `drafter-documentarian`. Parallel: false. Depends on: document-feature.
 
-3. **Schema field cleanup for `delivery_text`/`delivery_action`/`delivery_emoji`**: these become unused after Part E. Migration is out of scope (Tom owns it). Should the plan open a follow-up issue, or leave that to Tom? Recommend: open a follow-up issue labeled `chore` so nothing falls through the cracks.
+Step numbering in the existing Step-by-Step Tasks section is preserved (inserting 1.5 and 13.5 rather than renumbering) to keep task IDs stable for the builder.
 
-4. **Polymorphic `send_message` vs per-medium pair**: current plan uses polymorphic `send_message` routing by `extra_context.transport`. Issue #1035 noted this as builder's pick. Confirm polymorphic is fine — I prefer it because it keeps the agent's mental model simple (one verb: "send").
+## Critique Results
 
-5. **Feature flag timing**: two weeks post-merge seems reasonable for removing `MESSAGE_DRAFTER_IN_HANDLER`. Override if desired.
+The previous critique pass returned verdict "NEEDS REVISION" but emitted an empty findings table — no individual defect items were recorded. The revision pass above addressed the structural gap that produced that verdict: five open questions were left unresolved, with builder-facing ambiguity that a critique could not adjudicate without the plan making decisions.
+
+The table below records the revision-pass findings (self-identified while resolving the Open Questions) so a re-critique has an artifact to check against.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| Structural | Revision pass | Open Question 1 (polymorphic vs per-medium pair) was left for builder but had a clear answer based on orthogonality principle | D1 | Polymorphic `send_message`, routing by `extra_context.transport`. One tool implementation in `mcp_servers/message_delivery_server.py`. |
+| Structural | Revision pass | Open Question 2 (`customer-service` gate skip) risked reintroducing persona/medium coupling | D2 | No per-persona skip. `customer-service` runs the gate; Haiku + short-output early-return bounds cost. |
+| Structural | Revision pass | Open Question 3 (existing Telegram table producers) had no inventory, risking day-1 validator trips on legitimate output | D3 | Pre-validator audit added as Step 1.5. Grep found zero runtime-Python table producers; `.claude/skills/do-pr-review` migration scheduled. |
+| Structural | Revision pass | Open Question 4 (explicit vs implicit clearing) needed a concrete classification function with edge cases to be testable | D4 | Implicit via `classify_delivery_outcome()` function. Five outcomes + four edge cases spelled out with test case names. |
+| Structural | Revision pass | Open Questions 5a–5d (short-output threshold, `_has_pm_messages`, schema cleanup, flag timing) had no recorded decisions | D5 | 200-char threshold; delete `_has_pm_messages`; file follow-up `chore` issue; 2-week flag removal window. |
+| Low | Revision pass | Empty Critique Results table post-critique is itself a smell; plan protocol expects populated findings or a "no findings" line | This row | Going forward, if a critique produces zero findings, the table should contain a single row noting "No findings" for auditability. |
+
+A re-critique (`/do-plan-critique`) will now find concrete decisions to stress-test rather than open questions to defer.
