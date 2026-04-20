@@ -30,6 +30,7 @@ from pathlib import Path
 
 # Shared mutable session-tracking state — re-exported here for backward compatibility.
 import agent.session_state as _session_state  # noqa: F401 (also used for mutation sites)
+from agent.branch_manager import get_branch_state  # noqa: F401
 from agent.output_handler import OutputHandler
 
 # Output routing — decision logic lives in output_router; re-exported here
@@ -70,7 +71,10 @@ from agent.session_executor import (  # noqa: F401
 from agent.session_health import (  # noqa: F401
     AGENT_SESSION_HEALTH_MIN_RUNNING,
     AGENT_SESSION_TIMEOUT_BUILD,
+    HEARTBEAT_FRESHNESS_WINDOW,
     HEARTBEAT_WRITE_INTERVAL,
+    MAX_RECOVERY_ATTEMPTS,
+    STDOUT_FRESHNESS_WINDOW,
     _agent_session_health_check,
     _agent_session_health_loop,
     _agent_session_hierarchy_health_check,
@@ -128,6 +132,7 @@ from agent.session_state import (  # noqa: F401
     _shutdown_requested,
     _starting_workers,
 )
+from bridge.context import REPLY_THREAD_CONTEXT_HEADER  # noqa: F401
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 

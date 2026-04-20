@@ -195,8 +195,8 @@ class TestCheckRevivalTerminalFilter:
             return []
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
-            patch("agent.agent_session_queue._load_cooldowns", return_value={}),
+            patch("agent.session_revival.AgentSession") as mock_as,
+            patch("agent.session_revival._load_cooldowns", return_value={}),
         ):
             mock_as.query.filter.side_effect = mock_filter
             result = check_revival(
@@ -225,10 +225,10 @@ class TestCheckRevivalTerminalFilter:
             return []
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
-            patch("agent.agent_session_queue._load_cooldowns", return_value={}),
+            patch("agent.session_revival.AgentSession") as mock_as,
+            patch("agent.session_revival._load_cooldowns", return_value={}),
             patch("subprocess.run") as mock_run,
-            patch("agent.agent_session_queue.get_branch_state") as mock_bs,
+            patch("agent.session_revival.get_branch_state") as mock_bs,
         ):
             mock_as.query.filter.side_effect = mock_filter
             # Branch exists in git
@@ -302,7 +302,7 @@ class TestStartupRecoverySkipsTerminal:
 
         # The function queries AgentSession.query.filter(status="running").
         # Terminal sessions are never queried, so they cannot be recovered.
-        with patch("agent.agent_session_queue.AgentSession") as mock_as:
+        with patch("agent.session_health.AgentSession") as mock_as:
             mock_as.query.filter.return_value = []
             count = _recover_interrupted_agent_sessions_startup()
 
@@ -327,8 +327,8 @@ class TestStartupRecoverySkipsTerminal:
         )
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
-            patch("agent.agent_session_queue.time") as mock_time,
+            patch("agent.session_health.AgentSession") as mock_as,
+            patch("agent.session_health.time") as mock_time,
             patch("models.session_lifecycle.finalize_session"),
             patch("models.session_lifecycle.update_session") as mock_update,
         ):
@@ -374,8 +374,8 @@ class TestStartupRecoveryLocalSessionGuard:
         )
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
-            patch("agent.agent_session_queue.time") as mock_time,
+            patch("agent.session_health.AgentSession") as mock_as,
+            patch("agent.session_health.time") as mock_time,
             patch("models.session_lifecycle.finalize_session") as mock_finalize,
         ):
             mock_time.time.return_value = time.time()
@@ -406,8 +406,8 @@ class TestStartupRecoveryLocalSessionGuard:
         )
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
-            patch("agent.agent_session_queue.time") as mock_time,
+            patch("agent.session_health.AgentSession") as mock_as,
+            patch("agent.session_health.time") as mock_time,
             patch("models.session_lifecycle.update_session") as mock_update,
         ):
             mock_time.time.return_value = time.time()
@@ -446,8 +446,8 @@ class TestStartupRecoveryLocalSessionGuard:
             update_calls.append((session_id, kwargs))
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
-            patch("agent.agent_session_queue.time") as mock_time,
+            patch("agent.session_health.AgentSession") as mock_as,
+            patch("agent.session_health.time") as mock_time,
             patch("models.session_lifecycle.finalize_session", side_effect=fake_finalize),
             patch("models.session_lifecycle.update_session", side_effect=fake_update),
         ):

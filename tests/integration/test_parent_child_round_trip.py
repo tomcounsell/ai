@@ -172,8 +172,8 @@ class TestHandleDevSessionCompletion:
             return {"success": True, "session_id": session_id, "error": None}
 
         with (
-            patch("agent.agent_session_queue.steer_session", side_effect=_steer_ok) as mock_steer,
-            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+            patch("agent.session_executor.steer_session", side_effect=_steer_ok) as mock_steer,
+            patch("agent.session_completion._extract_issue_number", return_value=None),
         ):
             await _handle_dev_session_completion(
                 session=updated_pm,
@@ -207,7 +207,7 @@ class TestHandleDevSessionCompletion:
 
         from agent.agent_session_queue import _handle_dev_session_completion
 
-        with patch("agent.agent_session_queue.steer_session") as mock_steer:
+        with patch("agent.session_executor.steer_session") as mock_steer:
             await _handle_dev_session_completion(
                 session=standalone_dev,
                 agent_session=standalone_dev,
@@ -243,8 +243,8 @@ class TestHandleDevSessionCompletion:
             return {"success": True, "session_id": session_id, "error": None}
 
         with (
-            patch("agent.agent_session_queue.steer_session", side_effect=_capture_steer),
-            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+            patch("agent.session_executor.steer_session", side_effect=_capture_steer),
+            patch("agent.session_completion._extract_issue_number", return_value=None),
         ):
             await _handle_dev_session_completion(
                 session=updated_pm,
@@ -271,7 +271,7 @@ class TestHandleDevSessionCompletion:
             patch(
                 "agent.agent_session_queue.steer_session", side_effect=RuntimeError("steer failed")
             ),
-            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+            patch("agent.session_completion._extract_issue_number", return_value=None),
         ):
             # Should not raise — all exceptions are caught
             await _handle_dev_session_completion(
@@ -308,7 +308,7 @@ class TestPipelineStateMachineTransitions:
                 "agent.agent_session_queue.steer_session",
                 return_value={"success": True, "error": None},
             ),
-            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+            patch("agent.session_completion._extract_issue_number", return_value=None),
         ):
             await _handle_dev_session_completion(
                 session=updated_pm,
@@ -358,7 +358,7 @@ class TestPipelineStateMachineTransitions:
                     "error": "Session is in terminal status 'completed' — steering rejected",
                 },
             ),
-            patch("agent.agent_session_queue._extract_issue_number", return_value=780),
+            patch("agent.session_completion._extract_issue_number", return_value=780),
         ):
             await _handle_dev_session_completion(
                 session=terminal_pm,
@@ -389,7 +389,7 @@ class TestPipelineStateMachineTransitions:
                 "agent.agent_session_queue.steer_session",
                 return_value={"success": True, "error": None},
             ),
-            patch("agent.agent_session_queue._extract_issue_number", return_value=None),
+            patch("agent.session_completion._extract_issue_number", return_value=None),
         ):
             # Should not raise
             await _handle_dev_session_completion(
