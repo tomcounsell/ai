@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor Engels
 created: 2026-04-20
 tracking: https://github.com/tomcounsell/ai/issues/1069
-last_comment_id:
+last_comment_id: 4278085434
 ---
 
 # agent-session-cleanup phantom-record guard
@@ -62,7 +62,9 @@ Observed impact (2026-04-20): three PM `AgentSession` records for issues #1060, 
 
 **Active plans in `docs/plans/` overlapping this area:** none.
 
-**Drift note (MINOR):** The issue says `enabled: false` is currently set on `agent-session-cleanup` in `config/reflections.yaml` as a temp mitigation. Current main has `enabled: true` — the disable was never committed. The reflection is therefore **actively running destructively in production until this fix lands**. The plan keeps `enabled: true` (which is already the state) after the fix, so the re-enable acceptance criterion is effectively a no-op assertion that the value remains `true`.
+**Drift note (MINOR):** The issue says `enabled: false` is currently set on `agent-session-cleanup` in `config/reflections.yaml` as a temp mitigation. Current main has `enabled: true` — the disable was never committed to main (it may live on an uncommitted local branch on the author's machine). The reflection is therefore still running destructively on the shared server until this fix lands. The plan keeps `enabled: true` (which is already the state) after the fix, so the re-enable acceptance criterion is effectively a no-op assertion that the value remains `true`.
+
+**Escalation note (from issue comment 4278085434, 2026-04-20 05:34 UTC):** Disabling `agent-session-cleanup` alone did NOT stop the destruction. The issue author also had to disable `session-liveness-check` (the `_agent_session_health_check` reflection) and `session-recovery-drip`. This is direct production-derived evidence that the phantom-record blind spot is shared across multiple sibling reflections. The plan's scope — harden ALL 5 sibling iterators, not just the cleanup — is now load-bearing, not speculative. Success criteria MUST include re-enabling `session-liveness-check` and `session-recovery-drip` if they were disabled on deploy machines during the escalation (check each machine's local yaml drift). Note: the plan cannot pre-enable these in `config/reflections.yaml` if they're already `enabled: true` on main; the test `test_reflections_config_all_enabled` asserts the post-fix state.
 
 ## Prior Art
 
@@ -408,7 +410,7 @@ No external docs site in this repo.
 
 ## Open Questions
 
-1. **Sibling-filter scope — all 5 or just the destructive 2?** The issue lists 5 sibling functions but three of them (`session_recovery_drip`, `session_count_throttle`, `failure_loop_detector`) are read-only or only transition status via `transition_status()`. The plan applies the filter to all 5 for defense-in-depth. Should we narrow to just the 2 destructive call sites (`_recover_interrupted_agent_sessions_startup`, `_agent_session_health_check`) to minimize diff size, accepting that the 3 read-only call sites could still hit `AttributeError` on a phantom — which would at worst log a traceback and skip the tick? Recommendation: apply to all 5 (issue asks for it, diff is small).
+1. ~~**Sibling-filter scope — all 5 or just the destructive 2?**~~ **RESOLVED by issue comment 4278085434.** Production escalation confirms that disabling `agent-session-cleanup` alone did not stop the destruction; the issue author had to additionally disable `session-liveness-check` (`_agent_session_health_check`) and `session-recovery-drip`. Apply the filter to all 5 call sites.
 
 2. **Canonical hydration attribute — `agent_session_id` or `id`?** The existing pattern at `session_health.py:900` uses `agent_session_id`. The cleanup's current buggy code reads `session.id`. `agent_session_id` is a `KeyField` and is hydrated first on load; `id` may be a computed property. Recommendation: use `agent_session_id` (matches established pattern, tracks what Popoto actually populates). Confirming.
 
