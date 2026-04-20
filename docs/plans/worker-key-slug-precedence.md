@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -160,26 +160,26 @@ different worker loops and run in parallel.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `models/agent_session.py` `worker_key` property has no exception handlers. State: "No exception handlers in scope for the property itself."
-- [ ] `agent/session_pickup.py` `_pop_agent_session` has a broad `except Exception` around the query block (already tested by existing `TestPopLockContention` and `TestPerChatSerialization` suites). No new exception paths introduced by this change.
+- [x] `models/agent_session.py` `worker_key` property has no exception handlers. State: "No exception handlers in scope for the property itself."
+- [x] `agent/session_pickup.py` `_pop_agent_session` has a broad `except Exception` around the query block (already tested by existing `TestPopLockContention` and `TestPerChatSerialization` suites). No new exception paths introduced by this change.
 
 ### Empty/Invalid Input Handling
-- [ ] `worker_key` when `self.slug` is empty string: the current `if self.slug:` truthy check already handles empty strings identically to `None` (falls through to `project_key`). Preserve this — no change.
-- [ ] `worker_key` when `self.slug is None` but `session_type == DEV`: falls through to `project_key`. Preserve this — no change.
-- [ ] Add explicit assertion test for slug=`""` → `project_key` (not the slug).
+- [x] `worker_key` when `self.slug` is empty string: the current `if self.slug:` truthy check already handles empty strings identically to `None` (falls through to `project_key`). Preserve this — no change.
+- [x] `worker_key` when `self.slug is None` but `session_type == DEV`: falls through to `project_key`. Preserve this — no change.
+- [x] Add explicit assertion test for slug=`""` → `project_key` (not the slug).
 
 ### Error State Rendering
-- [ ] This change has no user-visible output rendering. The only observable effect is worker parallelism. Verified by the integration test asserting `peak_running == 2` for two same-`chat_id` slugged dev sessions.
+- [x] This change has no user-visible output rendering. The only observable effect is worker parallelism. Verified by the integration test asserting `peak_running == 2` for two same-`chat_id` slugged dev sessions.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session.py::TestWorkerKeyProperty::test_dev_with_slug_uses_chat_id` — REPLACE: rename to `test_dev_with_slug_uses_slug`, assert `s.worker_key == "my-feature"` (the slug). The old test encoded the exact behaviour this plan removes.
-- [ ] `tests/unit/test_agent_session.py::TestWorkerKeyProperty::test_two_slugged_dev_sessions_different_chats_different_worker_keys` — UPDATE: the existing assertion (`s1.worker_key != s2.worker_key`) still holds because both have distinct slugs. Add a second assertion that each `worker_key` equals the corresponding slug, and add a sibling test `test_two_slugged_dev_sessions_same_chat_different_slugs_different_worker_keys` for the exact bug scenario.
-- [ ] `tests/integration/test_worker_concurrency.py::TestDevWorktreeParallelism::test_two_slugged_dev_sessions_execute_concurrently` — UPDATE: the test currently uses distinct `chat_ids`. Add a new test `test_two_slugged_dev_sessions_same_chat_id_execute_concurrently` that uses the same `chat_id` for both sessions (the #1085 bug scenario) and different slugs; assert `peak_running == 2`. The existing test remains as a separate regression coverage for the distinct-chat case.
-- [ ] `tests/integration/test_worker_drain.py::TestEnqueueEventSignal::test_enqueue_sets_worker_event` (lines 63-99) — UPDATE: the test uses a teammate session and asserts `worker_key == chat_id` — teammate behaviour is unchanged, so the test passes unmodified. Verify no changes needed; add a comment noting that teammate routing is intentionally unchanged.
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: lines 598-702 construct sessions and assert `session.worker_key == "valor"` for slugless dev (unchanged by this plan) and `== "local-valor"` for local sessions. No code changes; verify by re-running.
-- [ ] Existing integration tests `tests/integration/test_remote_update.py:306` use `worker_key` as a function parameter in a mock side effect — opaque to the routing change. No update needed.
-- [ ] Regression test to add: `tests/integration/test_worker_concurrency.py::TestDevWorktreeParallelism::test_slug_keyed_pop_finds_session_by_slug` — create a slugged dev session, spawn a worker loop with `worker_key=<slug>`, assert the worker successfully pops the session. This catches the `_pop_agent_session` filter regression if the project-key-and-re-filter fix is missed.
+- [x] `tests/unit/test_agent_session.py::TestWorkerKeyProperty::test_dev_with_slug_uses_chat_id` — REPLACE: rename to `test_dev_with_slug_uses_slug`, assert `s.worker_key == "my-feature"` (the slug). The old test encoded the exact behaviour this plan removes.
+- [x] `tests/unit/test_agent_session.py::TestWorkerKeyProperty::test_two_slugged_dev_sessions_different_chats_different_worker_keys` — UPDATE: the existing assertion (`s1.worker_key != s2.worker_key`) still holds because both have distinct slugs. Add a second assertion that each `worker_key` equals the corresponding slug, and add a sibling test `test_two_slugged_dev_sessions_same_chat_different_slugs_different_worker_keys` for the exact bug scenario.
+- [x] `tests/integration/test_worker_concurrency.py::TestDevWorktreeParallelism::test_two_slugged_dev_sessions_execute_concurrently` — UPDATE: the test currently uses distinct `chat_ids`. Add a new test `test_two_slugged_dev_sessions_same_chat_id_execute_concurrently` that uses the same `chat_id` for both sessions (the #1085 bug scenario) and different slugs; assert `peak_running == 2`. The existing test remains as a separate regression coverage for the distinct-chat case.
+- [x] `tests/integration/test_worker_drain.py::TestEnqueueEventSignal::test_enqueue_sets_worker_event` (lines 63-99) — UPDATE: the test uses a teammate session and asserts `worker_key == chat_id` — teammate behaviour is unchanged, so the test passes unmodified. Verify no changes needed; add a comment noting that teammate routing is intentionally unchanged.
+- [x] `tests/unit/test_agent_session_queue.py` — UPDATE: lines 598-702 construct sessions and assert `session.worker_key == "valor"` for slugless dev (unchanged by this plan) and `== "local-valor"` for local sessions. No code changes; verify by re-running.
+- [x] Existing integration tests `tests/integration/test_remote_update.py:306` use `worker_key` as a function parameter in a mock side effect — opaque to the routing change. No update needed.
+- [x] Regression test to add: `tests/integration/test_worker_concurrency.py::TestDevWorktreeParallelism::test_slug_keyed_pop_finds_session_by_slug` — create a slugged dev session, spawn a worker loop with `worker_key=<slug>`, assert the worker successfully pops the session. This catches the `_pop_agent_session` filter regression if the project-key-and-re-filter fix is missed.
 
 ## Rabbit Holes
 
@@ -238,32 +238,33 @@ No agent integration required — `worker_key` is an internal worker routing sig
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-worker-architecture.md`:
+- [x] Update `docs/features/bridge-worker-architecture.md`:
   - Revise the Decision Table (lines 160-167) to change the `dev` + slug row: `worker_key` column from `chat_id` to `slug`, Behavior note to mention slug-keyed parallelism (e.g., "Parallel-safe across chats AND across slugs in the same chat").
   - Update the "Two Worker Loop Archetypes" section (lines 173-181) to describe three archetypes: project-keyed (PM + slugless dev), chat-keyed (teammate), and slug-keyed (slugged dev).
   - Update the "Why `chat_id` Is Not the Isolation Key" paragraph (lines 169-171) to add: "Similarly, `chat_id` is insufficient for dev sessions — two dev sessions for different work items in the same chat would serialize even though they share no state. Slug is the correct routing key for worktree-isolated dev sessions."
-- [ ] Update `docs/features/pm-dev-session-architecture.md` line 195 (the inline sentence matching the decision table) to reference slug-keyed dev routing.
-- [ ] No new feature doc needed — this is a fix to an existing documented feature, not a new one.
+- [x] Update `docs/features/pm-dev-session-architecture.md` line 195 (the inline sentence matching the decision table) to reference slug-keyed dev routing.
+- [x] Stale reference sweep: `docs/features/session-lifecycle.md:219` updated from "chat_id for teammate/slugged-dev" to "slug for slugged-dev, chat_id for teammate" to match new routing.
+- [x] No new feature doc needed — this is a fix to an existing documented feature, not a new one.
 
 ### External Documentation Site
-- [ ] No external docs site for this repo — skip.
+- [x] No external docs site for this repo — skip.
 
 ### Inline Documentation
-- [ ] Update the `worker_key` property docstring in `models/agent_session.py:267-274` to describe the new precedence (see Technical Approach for the new text).
-- [ ] Add an inline comment at `agent/agent_session_queue.py:362` and `:1110` noting the duplication: `# KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py`.
+- [x] Update the `worker_key` property docstring in `models/agent_session.py:267-274` to describe the new precedence (see Technical Approach for the new text).
+- [x] Add an inline comment at `agent/agent_session_queue.py:362` and `:1110` noting the duplication: `# KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py`.
 
 ## Success Criteria
 
-- [ ] `AgentSession.worker_key` returns `self.slug` for slugged dev sessions, regardless of `chat_id`. (Issue AC 1)
-- [ ] Two slugged dev sessions created with the same `chat_id` (e.g., both defaulting to `0`) run concurrently in the worker. Demonstrated by an integration test. (Issue AC 2)
-- [ ] Non-slugged dev sessions still serialize by `project_key`. (Issue AC 3)
-- [ ] PM and teammate session routing is unchanged. Verified by unchanged tests in `test_agent_session.py::TestWorkerKeyProperty`. (Issue AC 4)
-- [ ] No new failing tests on `main`; the one test that encoded the old behaviour is renamed and updated with justification. (Issue AC 5)
-- [ ] `models/agent_session.py` `worker_key` docstring reflects the new precedence. (Issue AC 6)
-- [ ] All three inline computation sites produce identical values for every session-type × slug combination (unit test asserts the truth table).
-- [ ] `_pop_agent_session` successfully pops a slug-keyed session from a slug-keyed worker loop (integration test).
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`): the decision table in `bridge-worker-architecture.md` matches the new behaviour.
+- [x] `AgentSession.worker_key` returns `self.slug` for slugged dev sessions, regardless of `chat_id`. (Issue AC 1)
+- [x] Two slugged dev sessions created with the same `chat_id` (e.g., both defaulting to `0`) run concurrently in the worker. Demonstrated by an integration test. (Issue AC 2)
+- [x] Non-slugged dev sessions still serialize by `project_key`. (Issue AC 3)
+- [x] PM and teammate session routing is unchanged. Verified by unchanged tests in `test_agent_session.py::TestWorkerKeyProperty`. (Issue AC 4)
+- [x] No new failing tests on `main`; the one test that encoded the old behaviour is renamed and updated with justification. (Issue AC 5)
+- [x] `models/agent_session.py` `worker_key` docstring reflects the new precedence. (Issue AC 6)
+- [x] All three inline computation sites produce identical values for every session-type × slug combination (unit test asserts the truth table).
+- [x] `_pop_agent_session` successfully pops a slug-keyed session from a slug-keyed worker loop (integration test).
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`): the decision table in `bridge-worker-architecture.md` matches the new behaviour.
 
 ## Team Orchestration
 
