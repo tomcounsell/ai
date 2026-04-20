@@ -120,7 +120,7 @@ def _migrate_unify_parent_session_field(project_dir: Path) -> str | None:
         return None
     except subprocess.TimeoutExpired:
         return "migration timed out after 120s"
-    except Exception as e:
+    except Exception as e:  # swallow-ok: error returned as string to caller for logging
         return str(e)
 
 
