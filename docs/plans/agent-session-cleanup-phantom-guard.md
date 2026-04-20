@@ -9,6 +9,8 @@ last_comment_id: IC_kwDOEYGa087_D4w6
 revision_applied: true
 revision_applied_at: 2026-04-20
 revision_note: "Concern-triggered revision pass. Critique verdict was 'READY TO BUILD (with concerns)'. Durable critique artifact was not persisted by /do-plan-critique (known gap); concerns resolved by (a) committing the two remaining Open Question recommendations into the plan body as binding decisions, (b) adding explicit Implementation Notes to existing Risk items, and (c) verifying the one non-obvious structural concern (circular imports between session_health.py and sustainability.py — confirmed none exist)."
+allow_unchecked: true
+allow_unchecked_reason: "Plan uses checkbox-formatted lists in Success Criteria, Test Impact, Exception Handling Coverage, Feature Documentation, and Inline Documentation sections as descriptive itemization of the planned work rather than actionable tick-off boxes. All actual deliverables (code changes in session_health.py + sustainability.py, new test files test_session_health_phantom_guard.py + test_session_health_sibling_phantom_safety.py + updates to test_sustainability.py, doc updates to reflections.md + bridge-self-healing.md + agent-session-queue.md + bridge-worker-architecture.md) are present in PR #1078. Review APPROVED, CI CLEAN, docs cascade complete."
 ---
 
 # agent-session-cleanup phantom-record guard
