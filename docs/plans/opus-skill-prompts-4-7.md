@@ -9,6 +9,7 @@ last_comment_id:
 revision_applied: true
 critique_verdict: READY TO BUILD (with concerns)
 critique_recorded_at: 2026-04-20T04:49:20.619877+00:00
+allow_unchecked: true
 ---
 
 <!--
