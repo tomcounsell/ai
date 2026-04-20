@@ -178,11 +178,7 @@ def screenshot(
             # Derive actual output dimensions from the (possibly downscaled) image
             try:
                 if PILLOW_AVAILABLE:
-                    from io import BytesIO as _BytesIO
-
-                    from PIL import Image as _Image
-
-                    _img = _Image.open(_BytesIO(screenshot_bytes))
+                    _img = Image.open(BytesIO(screenshot_bytes))
                     dimensions = {"width": _img.width, "height": _img.height}
                 elif full_page:
                     dimensions = page.evaluate("""() => {
