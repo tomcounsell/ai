@@ -5,7 +5,7 @@ Tests real API calls and the response->summarizer wiring chain.
 """
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -39,60 +39,43 @@ async def test_classify_output_real_api():
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_response_summarizer_wiring():
-    """Verify that send_response_with_files invokes draft_message for long text."""
-    from bridge.response import send_response_with_files
+    """Verify that TelegramRelayOutputHandler.send invokes draft_message for all text.
+
+    Post-#1074 consolidation: send_response_with_files is gone. The canonical
+    drafter entry point is TelegramRelayOutputHandler.send, which unconditionally
+    runs the drafter when MESSAGE_DRAFTER_IN_HANDLER is enabled (default True).
+    """
+    from agent.output_handler import TelegramRelayOutputHandler
 
     # Build a response long enough to trigger summarization (>= 200 chars)
     long_text = "Here is a detailed status update. " * 20  # ~680 chars
 
-    # Mock Telegram client that captures sent messages
-    mock_client = AsyncMock()
-    sent_message = MagicMock()
-    sent_message.id = 999
-    mock_client.send_message = AsyncMock(return_value=sent_message)
-
-    # Mock event with chat_id
-    mock_event = MagicMock()
-    mock_event.chat_id = 12345
-    mock_event.message.id = 1
-
-    # Create a minimal session that is not SDLC (to test the len>=200 path)
-    # Must explicitly set has_pm_messages to return False to avoid pm_bypass,
-    # and is_sdlc to False so we test the len>=200 path.
     mock_session = MagicMock()
     mock_session.session_id = "test-session-123"
     mock_session.session_type = "teammate"
     mock_session.sdlc_stage = None
-    mock_session.github_issue_url = None
-    mock_session.github_pr_url = None
-    mock_session.delivery_action = None
     mock_session.has_pm_messages = MagicMock(return_value=False)
     mock_session.get_parent_session = MagicMock(return_value=None)
     mock_session.is_sdlc = False
 
-    # Patch AgentSession.query to return our mock session, and the summarizer
+    handler = TelegramRelayOutputHandler()
     with (
-        patch("bridge.response.filter_tool_logs", return_value=long_text),
-        patch("bridge.response.extract_files_from_response", return_value=(long_text, [])),
-        patch("bridge.message_drafter.draft_message") as mock_summarize,
-        patch("models.agent_session.AgentSession") as mock_agent_session_cls,
+        patch("bridge.message_drafter.draft_message") as mock_draft,
+        patch.object(handler, "_get_redis") as mock_redis,
     ):
         from bridge.message_drafter import MessageDraft
 
-        mock_summarize.return_value = MessageDraft(text="Summarized output", was_drafted=True)
+        mock_draft.return_value = MessageDraft(text="Summarized output", was_drafted=True)
+        mock_redis.return_value = MagicMock()
 
-        # Make the session query return our mock
-        mock_agent_session_cls.query.filter.return_value = [mock_session]
-
-        await send_response_with_files(
-            client=mock_client,
-            event=mock_event,
-            response=long_text,
+        await handler.send(
+            chat_id="12345",
+            text=long_text,
+            reply_to_msg_id=1,
             session=mock_session,
         )
 
-        # Verify draft_message was called with the long text and session
-        mock_summarize.assert_called_once()
-        call_args = mock_summarize.call_args
+        mock_draft.assert_called_once()
+        call_args = mock_draft.call_args
         assert call_args[0][0] == long_text  # first positional arg is text
         assert call_args[1]["session"] == mock_session  # session kwarg

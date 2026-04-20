@@ -1,5 +1,21 @@
-"""Message cleaning, tool log filtering, file extraction,
-response sending, and reaction management."""
+"""Reactions, file-marker extraction, tool-log filtering, and message cleaning.
+
+This module is the slim residue of the pre-#1074 `bridge/response.py`. The
+heavyweight delivery path (`send_response_with_files`) has been removed — the
+worker path (`TelegramRelayOutputHandler.send` in `agent/output_handler.py`)
+and the bridge's event-handler path (`bridge/telegram_bridge.py`) now both
+deliver via the Redis outbox + relay, with the drafter running once at the
+OutputHandler boundary.
+
+What remains here:
+- Reactions: `set_reaction`, `VALIDATED_REACTIONS`, `INVALID_REACTIONS`, and
+  the `REACTION_*` backward-compat re-exports from `agent.constants`.
+- `filter_tool_logs`: strips emoji-prefixed tool-trace lines. Used by the
+  bridge's send callback before enqueuing agent output.
+- `extract_files_from_response`: parses `<<FILE:/path>>` markers. Used by the
+  bridge's direct send path to pull out file attachments.
+- `clean_message`: strips @-mention triggers from inbound user text.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +29,7 @@ if TYPE_CHECKING:
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import Message, ReactionCustomEmoji, ReactionEmoji
+from telethon.tl.types import ReactionCustomEmoji, ReactionEmoji
 
 from agent.constants import (
     REACTION_COMPLETE,  # noqa: F401
@@ -24,79 +40,16 @@ from agent.constants import (
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# File Detection and Sending
+# File Marker Extraction
 # =============================================================================
 
 # Explicit file marker: <<FILE:/path/to/file>>
 FILE_MARKER_PATTERN = re.compile(r"<<FILE:([^>]+)>>")
 
 # =============================================================================
-# Response Filtering - Remove Tool Logs
+# Validated Reactions (tested 2026-02-13 via scripts/test_emoji_reactions.py)
 # =============================================================================
 
-# Patterns for tool execution logs that should be filtered from responses
-# These are internal logs that shouldn't be shown to users
-TOOL_LOG_PATTERNS = [
-    re.compile(r"^🛠️\s*exec:", re.IGNORECASE),  # Bash execution
-    re.compile(r"^📖\s*read:", re.IGNORECASE),  # File read
-    re.compile(r"^🔎\s*web_search:", re.IGNORECASE),  # Web search
-    re.compile(r"^✏️\s*edit:", re.IGNORECASE),  # File edit
-    re.compile(r"^📝\s*write:", re.IGNORECASE),  # File write
-    re.compile(r"^✍️\s*write:", re.IGNORECASE),  # File write (alternate emoji)
-    re.compile(r"^🔍\s*search:", re.IGNORECASE),  # Search
-    re.compile(r"^📁\s*glob:", re.IGNORECASE),  # Glob
-    re.compile(r"^🌐\s*fetch:", re.IGNORECASE),  # Web fetch
-    re.compile(r"^🧰\s*process:", re.IGNORECASE),  # Process/task
-    re.compile(r"^🔧\s*tool:", re.IGNORECASE),  # Tool usage
-    re.compile(r"^⚙️\s*config:", re.IGNORECASE),  # Config
-    re.compile(r"^📂\s*list:", re.IGNORECASE),  # Directory listing
-    re.compile(r"^🗂️\s*file:", re.IGNORECASE),  # File operations
-    re.compile(r"^💻\s*run:", re.IGNORECASE),  # Run command
-    re.compile(r"^🖥️\s*shell:", re.IGNORECASE),  # Shell command
-    re.compile(r"^📋\s*task:", re.IGNORECASE),  # Task
-    re.compile(r"^🔄\s*sync:", re.IGNORECASE),  # Sync
-    re.compile(r"^📦\s*package:", re.IGNORECASE),  # Package operations
-    re.compile(r"^🗑️\s*delete:", re.IGNORECASE),  # Delete
-    re.compile(r"^➡️\s*move:", re.IGNORECASE),  # Move
-    re.compile(r"^📋\s*copy:", re.IGNORECASE),  # Copy
-]
-
-# Fallback: detect absolute paths to common file types
-# Matches paths like /Users/foo/bar.png or /tmp/output.pdf
-# Includes: images, documents, audio, video, code, data files
-ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(/(?:Users|home|tmp|var)[^\s'\"<>|]*\."
-    r"(?:png|jpg|jpeg|gif|webp|bmp|svg|ico"  # Images
-    r"|pdf|doc|docx|txt|md|rtf|csv|json|xml|yaml|yml"  # Documents
-    r"|mp3|mp4|wav|ogg|m4a|flac|aac|webm|mov|avi"  # Audio/Video
-    r"|py|js|ts|html|css|sh|sql|log"  # Code/logs
-    r"|zip|tar|gz|rar))",  # Archives
-    re.IGNORECASE,
-)
-
-# Relative paths in known output directories (resolved to absolute before sending)
-# Matches: generated_images/foo.png, data/output.json, etc.
-RELATIVE_PATH_PATTERN = re.compile(
-    r"(?:^|[\s`'\"])("
-    r"(?:generated_images|data|output|tmp)[^\s'\"<>|]*\."
-    r"(?:png|jpg|jpeg|gif|webp|bmp|svg|ico"
-    r"|pdf|doc|docx|txt|md|rtf|csv|json|xml|yaml|yml"
-    r"|mp3|mp4|wav|ogg|m4a|flac|aac|webm|mov|avi"
-    r"|py|js|ts|html|css|sh|sql|log"
-    r"|zip|tar|gz|rar))",
-    re.IGNORECASE,
-)
-
-# Image extensions (for choosing send method - images sent without caption)
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
-
-# Video extensions (Telegram can preview these)
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm"}
-
-# Audio extensions (Telegram can play these)
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac"}
-
-# Validated 73 emojis on 2026-02-13 via scripts/test_emoji_reactions.py
 # fmt: off
 VALIDATED_REACTIONS = [
     # Hearts/love
@@ -126,30 +79,21 @@ VALIDATED_REACTIONS = [
 # fmt: off
 INVALID_REACTIONS = [
     "😂",  # ReactionInvalidError - tears of joy not allowed!
-    "💻",  # Laptop - not a reaction
-    "🎨",  # Art palette - not a reaction
-    "❌",  # Cross mark - not a reaction
-    "✅",  # Check mark - not a reaction
-    "🔄",  # Refresh - not a reaction
-    "⏳",  # Hourglass - not a reaction
-    "🚀",  # Rocket - not a reaction
-    "💡",  # Light bulb - not a reaction
-    "📝",  # Memo - not a reaction
-    "🔍",  # Magnifying glass - not a reaction
+    "💻", "🎨", "❌", "✅", "🔄", "⏳", "🚀", "💡", "📝", "🔍",
     # Emojis with U+FE0F variation selector (use base forms instead):
     "❤️", "❤️‍🔥", "✍️", "☃️", "🤷‍♂️", "🤷‍♀️",
     # Stars (all invalid, tested 2026-02-13)
     "⭐", "🌟", "✨", "💫", "🌠",
     # Checks/marks (all invalid - Telegram doesn't allow any check emojis!)
     "✔", "☑", "✓",
-    # Stamps/seals/medals (all invalid)
+    # Stamps/seals/medals
     "🔖", "📌", "🏅", "🥇", "🥈", "🥉", "🎖",
-    # Arrows/indicators (all invalid)
+    # Arrows/indicators
     "➡", "⬆", "↗", "▶",
-    # "Done" candidates (all invalid)
+    # "Done" candidates
     "🔔", "📣", "📢", "🎯", "🪄", "✌", "🤘", "🤙",
     "💪", "🙌", "🫶", "🤞", "💐", "🌹", "🌺",
-    # Misc symbols (all invalid)
+    # Misc symbols
     "♥", "☀", "🌈", "⚽", "🏈", "🎲", "🧩",
     "🎵", "🎶", "🔑", "💎", "🧲", "🪬", "🧿",
     # Animals (all invalid - only 🕊🐳🦄🙈🙉🙊 work)
@@ -169,101 +113,92 @@ REACTION_PROCESSING = "🤔"  # Default thinking emoji
 # resolved lazily via find_best_emoji() on first access with hardcoded fallbacks.
 
 
+# =============================================================================
+# Tool Log Filtering
+# =============================================================================
+
+# Generic emoji-prefix pattern: catches lines like "🛠️ exec: ls", "📖 read: foo.py",
+# "🔎 web_search: query". The pattern ranges cover the Misc Symbols, Dingbats, and
+# Supplemental Symbols blocks where tool-trace emojis typically live. The
+# U+FE0F variation selector is optional after the emoji.
+_TOOL_LOG_GENERIC_PATTERN = re.compile(
+    r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\uFE0F?\s*\w+:", re.UNICODE
+)
+
+# Backtick-wrapped shell command lines (e.g. "`cd foo && ls`") — these are
+# typically tool-trace echoes, not real agent output. Detected after stripping.
+_SHELL_COMMAND_HINTS = ("cd ", "ls ", "cat ", "grep ", "find ", "mkdir ", "rm ", "mv ", "cp ")
+
+
 def filter_tool_logs(response: str) -> str:
-    """
-    Remove tool execution traces from response.
+    """Remove emoji-prefixed tool-trace lines from ``response``.
 
-    Agent may include lines like "🛠️ exec: ls -la" in stdout.
-    These are internal logs, not meant for the user.
+    Agent stdout can include traces like ``🛠️ exec: ls -la`` or ``📖 read: foo.py``.
+    These are internal tooling artifacts, not meant for human readers. This
+    filter strips them while preserving meaningful prose.
 
-    Returns:
-        Filtered response, or empty string if only logs remain.
+    Returns the filtered text. If filtering removes everything (i.e. the
+    response was pure tooling output), returns ``""``.
     """
     if not response:
         return ""
 
     lines = response.split("\n")
-    filtered = []
-
-    # Generic pattern: emoji followed by word and colon (catches most tool logs)
-    generic_tool_pattern = re.compile(
-        r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
-    )
-
+    filtered: list[str] = []
     for line in lines:
         stripped = line.strip()
 
-        # Skip empty lines in sequence (but keep some structure)
+        # Preserve blank-line structure but collapse runs of blanks
         if not stripped:
-            # Only add blank line if last line wasn't blank
             if filtered and filtered[-1].strip():
                 filtered.append(line)
             continue
 
-        # Skip lines matching explicit tool log patterns
-        if any(pattern.match(stripped) for pattern in TOOL_LOG_PATTERNS):
+        # Drop emoji-prefix tool traces
+        if _TOOL_LOG_GENERIC_PATTERN.match(stripped):
             continue
 
-        # Skip lines matching generic emoji+word: pattern (tool logs)
-        if generic_tool_pattern.match(stripped):
-            continue
-
-        # Skip backtick-wrapped command lines (like `cd foo && ls`)
+        # Drop backtick-wrapped shell command echoes
         if stripped.startswith("`") and stripped.endswith("`") and len(stripped) > 2:
-            inner = stripped[1:-1]
-            if any(
-                cmd in inner.lower()
-                for cmd in [
-                    "cd ",
-                    "ls ",
-                    "cat ",
-                    "grep ",
-                    "find ",
-                    "mkdir ",
-                    "rm ",
-                    "mv ",
-                    "cp ",
-                ]
-            ):
+            inner = stripped[1:-1].lower()
+            if any(cmd in inner for cmd in _SHELL_COMMAND_HINTS):
                 continue
 
         filtered.append(line)
 
     result = "\n".join(filtered).strip()
-
-    # Clean up multiple consecutive blank lines
     while "\n\n\n" in result:
         result = result.replace("\n\n\n", "\n\n")
 
-    # If filtering removed everything meaningful, return empty
-    # (response was just tool logs)
+    # If filtering removed everything meaningful, return empty string so the
+    # caller can choose a fallback (e.g. "Done.").
     if not result or len(result) < 5:
         return ""
-
     return result
+
+
+# =============================================================================
+# File Extraction
+# =============================================================================
 
 
 def extract_files_from_response(
     response: str, working_dir: Path | None = None
 ) -> tuple[str, list[Path]]:
-    """
-    Extract files to send from response text.
+    """Pull file paths out of ``<<FILE:/path>>`` markers in ``response``.
 
-    Returns (cleaned_text, list_of_file_paths).
+    Returns a tuple of ``(cleaned_text, file_paths)`` where ``cleaned_text`` has
+    the markers stripped and ``file_paths`` is a list of existing-on-disk
+    ``Path`` objects referenced by markers (duplicates are dropped).
 
-    Detection methods:
-    1. Explicit markers: <<FILE:/path/to/file>>
-    2. Absolute paths to existing media files
-    3. Relative paths in known directories (generated_images/, data/, etc.)
+    Args:
+        response: Raw response text.
+        working_dir: Unused (retained for backward compatibility with callers).
     """
+    _ = working_dir  # accepted but unused; callers may still pass it
     files_to_send: list[Path] = []
-    seen_paths: set[str] = set()  # Use resolved paths to avoid duplicates from symlinks
+    seen_paths: set[str] = set()
 
-    # Default working directory for resolving relative paths
-    if working_dir is None:
-        working_dir = Path(__file__).parent.parent  # ai/ repo root
-
-    # Method 1: Explicit file markers (highest priority)
     for match in FILE_MARKER_PATTERN.finditer(response):
         path_str = match.group(1).strip()
         path = Path(path_str)
@@ -273,48 +208,29 @@ def extract_files_from_response(
                 files_to_send.append(path)
                 seen_paths.add(resolved)
 
-    # Method 2: Absolute paths to media files
-    for match in ABSOLUTE_PATH_PATTERN.finditer(response):
-        path_str = match.group(1).strip()
-        path = Path(path_str)
-        if path.exists() and path.is_file():
-            resolved = str(path.resolve())
-            if resolved not in seen_paths:
-                files_to_send.append(path)
-                seen_paths.add(resolved)
-
-    # Method 3: Relative paths in known directories (resolve to absolute)
-    for match in RELATIVE_PATH_PATTERN.finditer(response):
-        path_str = match.group(1).strip()
-        # Try resolving relative to working directory
-        path = working_dir / path_str
-        if path.exists() and path.is_file():
-            resolved = str(path.resolve())
-            if resolved not in seen_paths:
-                files_to_send.append(path)
-                seen_paths.add(resolved)
-                logger.debug(f"Resolved relative path: {path_str} -> {path}")
-
-    # Clean response: remove file markers
+    # Clean response: remove file markers and strip now-empty lines
     cleaned = FILE_MARKER_PATTERN.sub("", response)
-
-    # Optionally clean up lines that are just file paths (cosmetic)
     lines = cleaned.split("\n")
-    cleaned_lines = []
-    for line in lines:
-        stripped = line.strip()
-        # Skip lines that are just a detected file path
-        if stripped and any(stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send):
-            continue
-        cleaned_lines.append(line)
-
+    cleaned_lines = [
+        line
+        for line in lines
+        if not (
+            line.strip()
+            and any(line.strip() == str(f) or line.strip().endswith(str(f)) for f in files_to_send)
+        )
+    ]
     cleaned = "\n".join(cleaned_lines).strip()
 
     return cleaned, files_to_send
 
 
+# =============================================================================
+# Mention Stripping
+# =============================================================================
+
+
 def clean_message(text: str, project: dict | None) -> str:
-    """Remove mention triggers from message for cleaner processing."""
+    """Strip @-mention triggers from inbound user text."""
     # Import here to avoid circular dependencies
     from bridge.routing import DEFAULT_MENTIONS
 
@@ -329,362 +245,9 @@ def clean_message(text: str, project: dict | None) -> str:
     return result.strip()
 
 
-def _truncate_at_sentence_boundary(text: str, limit: int = 4096) -> str:
-    """Truncate text at a sentence boundary within the character limit.
-
-    Finds the last sentence-ending punctuation (. ! ?) followed by whitespace
-    or end-of-string within the limit. Falls back to raw truncation with
-    ellipsis if no sentence boundary is found within the last 500 characters.
-
-    Args:
-        text: The text to truncate.
-        limit: Maximum character count (default: Telegram's 4096 limit).
-
-    Returns:
-        Truncated text ending at a complete sentence, or '...' fallback.
-    """
-    if not text or len(text) <= limit:
-        return text or ""
-
-    # Reserve space for potential ellipsis
-    search_text = text[: limit - 3]
-
-    # Look for sentence boundaries in the last 500 chars
-    search_start = max(0, len(search_text) - 500)
-    search_window = search_text[search_start:]
-
-    # Match . or ! or ? followed by whitespace or end
-    matches = list(re.finditer(r"[.!?](?:\s|$)", search_window))
-
-    if matches:
-        last_match = matches[-1]
-        cut_pos = search_start + last_match.start() + 1
-        return text[:cut_pos].rstrip()
-
-    # No sentence boundary found -- fall back to raw truncation
-    return text[: limit - 3] + "..."
-
-
-async def send_response_with_files(
-    client: TelegramClient,
-    event,
-    response: str,
-    chat_id: int | None = None,
-    reply_to: int | None = None,
-    session=None,
-) -> Message | None:
-    """
-    Send response to Telegram, handling both files and text.
-
-    1. Filter out tool execution logs
-    2. Extract any files from the response
-    3. Send files first (as separate messages)
-    4. Send remaining text (if any) with Markdown formatting
-
-    Can be called with event (handler context) or chat_id+reply_to (queue context).
-    Returns the sent Message object if text was sent, None if nothing was sent.
-    Callers that only need a truthy/falsy check can still use `if sent:`.
-
-    Args:
-        session: Optional AgentSession for drafter context enrichment.
-    """
-    # Resolve chat_id and reply_to from event or explicit params
-    _chat_id = chat_id or (event.chat_id if event else None)
-    _reply_to = reply_to or (event.message.id if event and hasattr(event, "message") else None)
-
-    if not _chat_id:
-        logger.error("send_response_with_files: no chat_id available")
-        return None
-
-    # Filter out tool logs before processing
-    original_response = response
-    response = filter_tool_logs(response)
-
-    # If filtering removed everything but original had content, use fallback
-    if not response:
-        if original_response and original_response.strip():
-            logger.warning(
-                f"filter_tool_logs stripped entire response ({len(original_response)} chars), "
-                f"using fallback"
-            )
-            response = "Done."
-        else:
-            return None
-
-    text, files = extract_files_from_response(response)
-
-    # Draft SDK agent responses for consistent PM-quality output.
-    # SDLC sessions: always draft (need stage lines + link footers).
-    # Non-SDLC short responses (< 200 chars): skip — these are typically
-    # programmatic skill output (e.g., /update) that's already formatted.
-    # Re-read session from Redis for fresh stage/link data written during execution
-    if session and hasattr(session, "session_id") and session.session_id:
-        try:
-            from models.agent_session import AgentSession
-
-            fresh = list(AgentSession.query.filter(session_id=session.session_id))
-            if fresh:
-                session = fresh[0]
-        except Exception:
-            pass  # Fall back to existing session object
-
-    # NOTE: delivery_action/delivery_text/delivery_emoji session fields are no
-    # longer read here. The stop-hook review gate now steers the agent via a
-    # prepopulated tool_call (tools/send_message.py, tools/react_with_emoji.py)
-    # which delivers directly through the OutputHandler. The schema fields
-    # remain on AgentSession pending a dedicated migration (Tom owns; see the
-    # follow-up chore issue opened from plan #1035 Step 13.5).
-
-    # PM self-messaging bypass: if the PM already sent messages via the
-    # send_telegram tool during this session (or its parent PM session in
-    # SDLC flows), skip the drafter entirely. The PM authored its own
-    # messages — the drafter would be redundant.
-    # Only set emoji reaction (handled by the caller). See issue #497, #571.
-    # NOTE: We still send any extracted files (<<FILE:>> markers) before
-    # returning, so file attachments are not lost on PM self-message sessions.
-    pm_bypass = session and hasattr(session, "has_pm_messages") and session.has_pm_messages()
-    pm_bypass_source = "session"
-    if not pm_bypass and session and hasattr(session, "get_parent_session"):
-        parent = session.get_parent_session()
-        if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
-            pm_bypass = True
-            pm_bypass_source = "parent"
-    if pm_bypass:
-        # Log pm_sent_message_ids from the source that triggered the bypass
-        if pm_bypass_source == "parent" and hasattr(session, "get_parent_session"):
-            _parent = session.get_parent_session()
-            _bypass_ids = getattr(_parent, "pm_sent_message_ids", []) if _parent else []
-        else:
-            _bypass_ids = getattr(session, "pm_sent_message_ids", [])
-        logger.info(
-            f"Skipping drafter: PM self-messaged during {pm_bypass_source} "
-            f"{getattr(session, 'session_id', 'unknown')} "
-            f"(pm_sent_message_ids={_bypass_ids})"
-        )
-
-    is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
-    should_draft = not pm_bypass and text and (is_sdlc or len(text) >= 200)
-    if should_draft:
-        try:
-            from bridge.message_drafter import draft_message
-
-            drafted = await draft_message(text, session=session)
-            text = drafted.text
-            if drafted.full_output_file:
-                files.append(drafted.full_output_file)
-            if drafted.was_drafted:
-                logger.info(f"Drafted response: {len(response)} -> {len(text)} chars")
-
-            # ── Self-draft fallback via session steering ──
-            # When all drafter backends fail, inject a steering message
-            # asking the agent to self-draft. Send any files immediately
-            # (they would be lost if deferred), then return the STEERING_DEFERRED
-            # sentinel so the bridge callback knows this is intentional.
-            if drafted.needs_self_draft:
-                _session_id = getattr(session, "session_id", None) if session else None
-                _should_steer = bool(_session_id)
-
-                # Loop prevention: check if a self-summary steering message was
-                # already pushed for this session (avoids infinite loops if the
-                # agent's self-draft also fails drafting).
-                if _should_steer:
-                    try:
-                        from agent.steering import peek_steering_sender
-
-                        if peek_steering_sender(_session_id) == "drafter-fallback":
-                            logger.warning(
-                                "Self-summary steering already pending, "
-                                "falling through to narration gate"
-                            )
-                            _should_steer = False
-                    except Exception:
-                        pass  # peek failed, proceed with steering attempt
-
-                if _should_steer:
-                    # Send files before returning (critique: don't lose full_output_file)
-                    for f in files:
-                        try:
-                            await client.send_file(_chat_id, f, reply_to=_reply_to)
-                        except Exception as fe:
-                            logger.error(f"Failed to send file during steering deferral: {fe}")
-
-                    # Push the self-summary instruction to the session steering queue
-                    try:
-                        from agent.steering import push_steering_message
-                        from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
-
-                        push_steering_message(
-                            _session_id,
-                            SELF_DRAFT_INSTRUCTION,
-                            sender="drafter-fallback",
-                        )
-                        logger.info(f"Injected self-summary steering for session {_session_id}")
-                        from bridge.message_drafter import STEERING_DEFERRED
-
-                        return STEERING_DEFERRED  # type: ignore[return-value]
-                    except Exception as steer_err:
-                        logger.warning(
-                            f"Steering push failed (non-fatal), falling through: {steer_err}"
-                        )
-                        # Fall through to narration gate below
-
-                # No session available or steering failed — apply narration gate
-                # on the original (pre-drafting) text as last resort
-                try:
-                    from bridge.message_quality import (
-                        NARRATION_FALLBACK_MESSAGE,
-                        is_narration_only,
-                    )
-
-                    _fallback_text = response  # original filtered text
-                    if is_narration_only(_fallback_text[:500]):
-                        text = NARRATION_FALLBACK_MESSAGE
-                        logger.info("Narration gate triggered on fallback path")
-                    else:
-                        # Not narration — truncate as last resort
-                        from bridge.message_drafter import SAFETY_TRUNCATE
-
-                        if len(_fallback_text) > SAFETY_TRUNCATE:
-                            text = _fallback_text[: SAFETY_TRUNCATE - 3] + "..."
-                        else:
-                            text = _fallback_text
-                except Exception:
-                    # is_narration_only raised — deliver as-is (non-fatal)
-                    from bridge.message_drafter import SAFETY_TRUNCATE
-
-                    if len(response) > SAFETY_TRUNCATE:
-                        text = response[: SAFETY_TRUNCATE - 3] + "..."
-                    else:
-                        text = response
-
-            # Persist semantic routing fields to session for future routing
-            if session and drafted.was_drafted:
-                try:
-                    if drafted.context_summary:
-                        session.context_summary = drafted.context_summary
-                    if drafted.expectations is not None:
-                        session.expectations = drafted.expectations
-                    if drafted.context_summary or drafted.expectations is not None:
-                        session.save()
-                        logger.debug(
-                            f"Persisted routing fields to session "
-                            f"{session.session_id}: "
-                            f"context_summary={bool(drafted.context_summary)}, "
-                            f"expectations={bool(drafted.expectations)}"
-                        )
-                except Exception as persist_err:
-                    # Non-fatal: routing field persistence should never
-                    # block message delivery
-                    logger.warning(f"Failed to persist routing fields (non-fatal): {persist_err}")
-        except Exception as e:
-            logger.warning(f"Summarization failed, using original: {e}")
-
-    # Send files first
-    for file_path in files:
-        try:
-            ext = file_path.suffix.lower()
-            is_image = ext in IMAGE_EXTENSIONS
-            is_video = ext in VIDEO_EXTENSIONS
-            is_audio = ext in AUDIO_EXTENSIONS
-
-            # Choose appropriate send options based on file type
-            if is_image:
-                # Images: send as photo (no caption, Telegram displays inline)
-                await client.send_file(
-                    _chat_id,
-                    file_path,
-                    reply_to=_reply_to,
-                    caption=None,
-                )
-            elif is_video:
-                # Videos: send as video (Telegram can preview/play)
-                await client.send_file(
-                    _chat_id,
-                    file_path,
-                    reply_to=_reply_to,
-                    caption=f"🎬 {file_path.name}",
-                    supports_streaming=True,
-                )
-            elif is_audio:
-                # Audio: send as audio (Telegram shows player)
-                await client.send_file(
-                    _chat_id,
-                    file_path,
-                    reply_to=_reply_to,
-                    caption=f"🎵 {file_path.name}",
-                )
-            else:
-                # Other files: send as document with filename caption
-                await client.send_file(
-                    _chat_id,
-                    file_path,
-                    reply_to=_reply_to,
-                    caption=f"📎 {file_path.name}",
-                    force_document=True,
-                )
-            file_type = (
-                "image"
-                if is_image
-                else "video"
-                if is_video
-                else "audio"
-                if is_audio
-                else "document"
-            )
-            logger.info(f"Sent file: {file_path} (type: {file_type})")
-        except Exception as e:
-            logger.error(f"Failed to send file {file_path}: {e}")
-            await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
-        finally:
-            # Clean up temp files created by the drafter
-            if str(file_path).startswith("/tmp/valor_full_output_"):
-                try:
-                    Path(file_path).unlink(missing_ok=True)
-                    logger.debug(f"Cleaned up temp file: {file_path}")
-                except Exception:
-                    pass  # Non-fatal: OS will clean /tmp eventually
-
-    # PM bypass (dual-personality guard): files have been sent above,
-    # skip text/drafter output. This prevents sending both PM
-    # self-messages AND a drafted version of the same content.
-    # Guard coverage: pm_bypass blocks drafting AND text sending.
-    # Return a sentinel truthy value (True casts to int 1 which is truthy) since
-    # PM self-messages aren't tracked via the text send path.
-    if pm_bypass:
-        return True  # type: ignore[return-value]  # PM already delivered it
-
-    # Send text if there's meaningful content
-    sent_msg = None
-    if text and not text.isspace():
-        # Sentence-aware truncation at Telegram's 4096-char limit
-        if len(text) > 4096:
-            text = _truncate_at_sentence_boundary(text, limit=4096)
-        try:
-            # Use markdown parse mode with plain-text fallback
-            from bridge.markdown import send_markdown
-
-            sent_msg = await send_markdown(client, _chat_id, text, reply_to=_reply_to)
-        except Exception as e:
-            logger.error(f"Failed to send text message to chat {_chat_id} ({len(text)} chars): {e}")
-            # Persist to dead-letter queue for later retry
-            try:
-                from bridge.dead_letters import persist_failed_delivery
-
-                await persist_failed_delivery(
-                    chat_id=_chat_id,
-                    reply_to=_reply_to,
-                    text=text,
-                )
-            except Exception as dl_err:
-                logger.error(f"Dead-letter persist also failed: {dl_err}")
-
-    # Return the sent Message object if text was sent; fall back to truthy if
-    # only files were sent (no message_id available from file sends).
-    if sent_msg is not None:
-        return sent_msg
-    if files:
-        return True  # type: ignore[return-value]  # files were sent, no text Message object
-    return None
+# =============================================================================
+# Reactions (Telegram message reactions)
+# =============================================================================
 
 
 async def set_reaction(
@@ -692,20 +255,20 @@ async def set_reaction(
 ) -> bool:
     """Set a reaction on a message.
 
-    Supports both standard emoji strings and ``EmojiResult`` objects from
-    the emoji embedding system. When an ``EmojiResult`` with ``is_custom=True``
-    is provided, attempts to set a custom emoji reaction via
-    ``ReactionCustomEmoji(document_id=...)``. Falls back to the standard
-    emoji from the same result on failure (non-Premium, restricted chat, etc.).
+    Supports both standard emoji strings and ``EmojiResult`` objects from the
+    emoji embedding system. When an ``EmojiResult`` with ``is_custom=True`` is
+    provided, attempts to set a custom emoji reaction via
+    ``ReactionCustomEmoji(document_id=...)``; falls back to the standard emoji
+    from the same result on failure (non-Premium, restricted chat, etc.).
 
     Args:
         client: Telegram client.
         chat_id: Chat ID.
         msg_id: Message ID.
-        emoji: Emoji string, EmojiResult, or None to remove reactions.
+        emoji: Emoji string, ``EmojiResult``, or ``None`` to remove reactions.
 
     Returns:
-        True if successful, False otherwise.
+        ``True`` if successful, ``False`` otherwise.
     """
     from tools.emoji_embedding import EmojiResult
 

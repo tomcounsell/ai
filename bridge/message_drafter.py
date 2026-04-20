@@ -74,6 +74,42 @@ SAFETY_TRUNCATE = _safe_int("SAFETY_TRUNCATE", 4096)
 CLASSIFICATION_CONFIDENCE_THRESHOLD = _safe_float("CLASSIFICATION_CONFIDENCE_THRESHOLD", 0.80)
 
 
+def _truncate_at_sentence_boundary(text: str, limit: int = 4096) -> str:
+    """Truncate text at a sentence boundary within the character limit.
+
+    Finds the last sentence-ending punctuation (. ! ?) followed by whitespace
+    or end-of-string within the limit. Falls back to raw truncation with
+    ellipsis if no sentence boundary is found within the last 500 characters.
+
+    Args:
+        text: The text to truncate.
+        limit: Maximum character count (default: Telegram's 4096 limit).
+
+    Returns:
+        Truncated text ending at a complete sentence, or '...' fallback.
+    """
+    if not text or len(text) <= limit:
+        return text or ""
+
+    # Reserve space for potential ellipsis
+    search_text = text[: limit - 3]
+
+    # Look for sentence boundaries in the last 500 chars
+    search_start = max(0, len(search_text) - 500)
+    search_window = search_text[search_start:]
+
+    # Match . or ! or ? followed by whitespace or end
+    matches = list(re.finditer(r"[.!?](?:\s|$)", search_window))
+
+    if matches:
+        last_match = matches[-1]
+        cut_pos = search_start + last_match.start() + 1
+        return text[:cut_pos].rstrip()
+
+    # No sentence boundary found -- fall back to raw truncation
+    return text[: limit - 3] + "..."
+
+
 def _extract_open_questions(text: str) -> list[str]:
     """Extract questions from '## Open Questions' sections in agent output.
 
@@ -1303,9 +1339,11 @@ SELF_DRAFT_INSTRUCTION = (
     "If your work produced no substantive results, say so plainly."
 )
 
-# Sentinel returned by send_response_with_files when self-draft steering was
-# injected. Distinguishes "message deferred to agent self-draft" from "send
-# failed" so the bridge callback does not log a spurious error.
+# Sentinel returned by drafter callers when self-draft steering was injected.
+# Distinguishes "message deferred to agent self-draft" from "send failed" so the
+# bridge callback does not log a spurious error. Retained as a module symbol for
+# external references even though the primary historical caller
+# (send_response_with_files) was deleted in the #1074 follow-up.
 STEERING_DEFERRED = "STEERING_DEFERRED"
 
 
@@ -1711,9 +1749,9 @@ async def draft_message(
         )
 
     # All backends failed — signal self-draft via session steering instead
-    # of delivering raw truncated text. The caller (send_response_with_files)
-    # will push a steering message and the agent will self-draft on its
-    # next turn. Files and artifacts are preserved for immediate delivery.
+    # of delivering raw truncated text. The caller will push a steering
+    # message and the agent will self-draft on its next turn. Files and
+    # artifacts are preserved for immediate delivery.
     logger.error("All drafting backends failed, requesting self-draft via steering")
     return MessageDraft(
         text="",

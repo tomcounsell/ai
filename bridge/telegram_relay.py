@@ -22,7 +22,7 @@ Retry and dead-letter behavior:
 
 After successful send, records the Telegram message ID on the AgentSession's
 pm_sent_message_ids field. This list is checked by the PM self-message bypass
-in bridge/response.py.
+in bridge/telegram_bridge.py's send callback.
 """
 
 import asyncio

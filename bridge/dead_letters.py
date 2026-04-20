@@ -1,7 +1,8 @@
 """Dead-letter queue for failed Telegram message deliveries.
 
-When send_response_with_files fails to deliver a message, the payload
-is persisted here. On bridge startup, pending dead letters are replayed.
+When the relay (``bridge/telegram_relay.py``) fails to deliver a message after
+exhausting its retry budget, the payload is persisted here. On bridge startup,
+pending dead letters are replayed.
 
 Uses popoto Redis model for atomic persistence (no file race conditions).
 """
