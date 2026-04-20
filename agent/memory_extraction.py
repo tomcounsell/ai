@@ -87,6 +87,8 @@ async def extract_observations_async(
         return []
 
     try:
+        import asyncio
+
         import anthropic
 
         from config.models import MODEL_FAST
@@ -97,20 +99,23 @@ async def extract_observations_async(
             logger.warning("[memory_extraction] No Anthropic API key, skipping extraction")
             return []
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.AsyncAnthropic(api_key=api_key)
 
         # Truncate response to avoid token limits
         truncated = response_text[:8000]
 
-        message = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=500,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"{EXTRACTION_PROMPT}\n\n---\n\n{truncated}",
-                }
-            ],
+        message = await asyncio.wait_for(
+            client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=500,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"{EXTRACTION_PROMPT}\n\n---\n\n{truncated}",
+                    }
+                ],
+            ),
+            timeout=30,
         )
 
         raw_text = message.content[0].text.strip()
@@ -262,6 +267,8 @@ async def extract_post_merge_learning(
         return None
 
     try:
+        import asyncio
+
         import anthropic
 
         from config.models import MODEL_FAST
@@ -274,7 +281,7 @@ async def extract_post_merge_learning(
             )
             return None
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.AsyncAnthropic(api_key=api_key)
 
         prompt = POST_MERGE_EXTRACTION_PROMPT.format(
             title=pr_title,
@@ -282,10 +289,13 @@ async def extract_post_merge_learning(
             diff_summary=(diff_summary or "")[:4000],
         )
 
-        message = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
+        message = await asyncio.wait_for(
+            client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+            timeout=30,
         )
 
         raw_text = message.content[0].text.strip()
@@ -374,7 +384,7 @@ _OUTCOME_THOUGHT_MAX_CHARS = 500
 _OUTCOME_MAX_THOUGHTS = 5
 
 
-def _judge_outcomes_llm(
+async def _judge_outcomes_llm(
     injected_thoughts: list[tuple[str, str]],
     response_text: str,
 ) -> dict[str, dict] | None:
@@ -387,6 +397,8 @@ def _judge_outcomes_llm(
     echoed keywords without causal influence are noise, not signal.
     """
     try:
+        import asyncio
+
         import anthropic
 
         from config.models import MODEL_FAST
@@ -409,11 +421,14 @@ def _judge_outcomes_llm(
             response=truncated_response,
         )
 
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        message = await asyncio.wait_for(
+            client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+            timeout=30,
         )
 
         raw_text = message.content[0].text.strip()
@@ -580,7 +595,7 @@ async def detect_outcomes_async(
         memory_keys: list[str] = []
 
         # Try LLM judgment first
-        llm_result = _judge_outcomes_llm(injected_thoughts, response_text)
+        llm_result = await _judge_outcomes_llm(injected_thoughts, response_text)
 
         if llm_result is not None:
             # LLM judgment succeeded -- use it
