@@ -23,7 +23,7 @@ from agent.session_state import (
     _active_sessions,
 )
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
-from config.enums import PersonaType, SessionType  # noqa: F401
+from config.enums import SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -758,16 +758,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
 
             # Resolve session type and classification for PM auto-continue
-            _session_type = (
-                getattr(agent_session, "session_mode", None)
-                or getattr(agent_session, "session_type", None)
-                if agent_session
-                else None
-            )
+            _session_type = getattr(agent_session, "session_type", None) if agent_session else None
             _classification = getattr(session, "classification_type", None)
             _is_teammate = (
                 agent_session is not None
-                and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
+                and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE
             )
 
             # Delegate routing decision to output_router (call site preserved here)
@@ -1481,7 +1476,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # Teammate sessions: clear the processing reaction instead of setting completion emoji
             if (
                 agent_session
-                and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
+                and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE
                 and not task.error
             ):
                 emoji = None  # Clear reaction

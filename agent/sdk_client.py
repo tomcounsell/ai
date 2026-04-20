@@ -2018,7 +2018,7 @@ async def get_agent_response_sdk(
     bridge.routing) to determine session behavior for PM sessions:
 
     - Teammate persona: bypasses the Haiku intent classifier, sets
-      session_mode=PersonaType.TEAMMATE directly on the session, reducing
+      session_type=SessionType.TEAMMATE directly on the session, reducing
       latency and API cost for DMs and groups with "teammate" persona.
     - Project Manager/Developer persona: bypasses the classifier, uses
       the config-determined persona without reclassification.
@@ -2195,14 +2195,14 @@ async def get_agent_response_sdk(
                 )
             except Exception:
                 pass  # Best-effort metrics
-            # Update session mode flag (skip PM sessions — they must stay PM)
+            # Update session type to Teammate (skip PM sessions — they must stay PM)
             if session_id and _session_type != SessionType.PM:
                 try:
                     from models.agent_session import AgentSession as _TMSession
 
                     for _s in _TMSession.query.filter(session_id=session_id):
                         if _s.status in ("running", "active", "pending"):
-                            _s.session_mode = PersonaType.TEAMMATE
+                            _s.session_type = SessionType.TEAMMATE
                             _s.save()
                             break
                 except Exception:
@@ -2252,7 +2252,7 @@ async def get_agent_response_sdk(
                         f"[{request_id}] Routing to collaboration mode "
                         f"(direct action, intent={_intent_result.intent})"
                     )
-                    # Update session mode so nudge loop uses reduced cap
+                    # Update session type to Teammate so nudge loop uses reduced cap
                     # (skip PM sessions — they must stay PM)
                     if session_id and _session_type != SessionType.PM:
                         try:
@@ -2260,7 +2260,7 @@ async def get_agent_response_sdk(
 
                             for _s in _TMSession.query.filter(session_id=session_id):
                                 if _s.status in ("running", "active", "pending"):
-                                    _s.session_mode = PersonaType.TEAMMATE
+                                    _s.session_type = SessionType.TEAMMATE
                                     _s.save()
                                     break
                         except Exception:

@@ -31,7 +31,7 @@ import anthropic
 import httpx
 
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
-from config.enums import PersonaType
+from config.enums import PersonaType, SessionType
 from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
 from utils.api_keys import get_anthropic_api_key
 
@@ -1176,7 +1176,7 @@ def _build_draft_prompt(
                 recent = history[-5:]  # Last 5 entries
                 context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
         # Signal Teammate mode so the LLM uses prose format
-        if getattr(session, "session_mode", None) == PersonaType.TEAMMATE:
+        if getattr(session, "session_type", None) == SessionType.TEAMMATE:
             context_parts.append("persona=teammate (use conversational prose, no bullets or emoji)")
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
@@ -1586,7 +1586,7 @@ def _compose_structured_draft(summary_text: str, session=None, is_completion: bo
 
     # Teammate bypass: return prose directly without emoji prefix, bullet parsing,
     # or structured template. The LLM draft is already in conversational form.
-    if session and (getattr(session, "session_mode", None) == PersonaType.TEAMMATE):
+    if session and (getattr(session, "session_type", None) == SessionType.TEAMMATE):
         return summary_text.strip()
 
     # Parse questions from LLM output

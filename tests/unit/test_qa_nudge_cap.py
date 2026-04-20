@@ -46,13 +46,19 @@ class TestTeammateReactionClearing:
         """Teammate sessions should clear the processing reaction (None) on success."""
         from unittest.mock import MagicMock
 
-        session = MagicMock()
-        session.session_mode = "teammate"
+        from config.enums import SessionType
 
-        # The reaction logic in agent_session_queue.py checks session_mode and returns None
+        agent_session = MagicMock()
+        agent_session.session_type = SessionType.TEAMMATE
+
+        # The reaction logic in agent/session_executor.py checks session_type and returns None
         # for successful Teammate sessions. We test the conditional directly.
         task_error = False
-        if session and getattr(session, "session_mode", None) == "teammate" and not task_error:
+        if (
+            agent_session
+            and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE
+            and not task_error
+        ):
             emoji = None
         else:
             emoji = "completion"
@@ -62,11 +68,17 @@ class TestTeammateReactionClearing:
         """Non-Teammate sessions should still get a completion emoji."""
         from unittest.mock import MagicMock
 
-        session = MagicMock()
-        session.session_mode = None
+        from config.enums import SessionType
+
+        agent_session = MagicMock()
+        agent_session.session_type = SessionType.PM
 
         task_error = False
-        if session and getattr(session, "session_mode", None) == "teammate" and not task_error:
+        if (
+            agent_session
+            and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE
+            and not task_error
+        ):
             emoji = None
         else:
             emoji = "completion"
@@ -76,11 +88,17 @@ class TestTeammateReactionClearing:
         """Teammate sessions with errors should still get error reaction."""
         from unittest.mock import MagicMock
 
-        session = MagicMock()
-        session.session_mode = "teammate"
+        from config.enums import SessionType
+
+        agent_session = MagicMock()
+        agent_session.session_type = SessionType.TEAMMATE
 
         task_error = True
-        if session and getattr(session, "session_mode", None) == "teammate" and not task_error:
+        if (
+            agent_session
+            and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE
+            and not task_error
+        ):
             emoji = None
         else:
             emoji = "error"

@@ -169,8 +169,19 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         from agent.agent_session_queue import _push_agent_session
         from bridge.utc import utc_now
+        from config.enums import SessionType
 
+        _role_to_session_type = {
+            "pm": SessionType.PM,
+            "dev": SessionType.DEV,
+            "teammate": SessionType.TEAMMATE,
+        }
         role = args.role or "pm"
+        if role not in _role_to_session_type:
+            raise ValueError(
+                f"Unknown --role value: {role!r}. Allowed values: {sorted(_role_to_session_type)}"
+            )
+        session_type = _role_to_session_type[role]
         message = args.message
         chat_id = args.chat_id or "0"
         parent_id = getattr(args, "parent", None)
@@ -191,8 +202,6 @@ def cmd_create(args: argparse.Namespace) -> int:
             wt_path = get_or_create_worktree(Path(working_dir), slug)
             working_dir = str(wt_path)
             print(f"  Worktree:    {working_dir}", file=sys.stderr)
-
-        session_type = role  # pm, dev, teammate
 
         # Resolve project_key: explicit flag takes priority, else derive from cwd
         explicit_key = getattr(args, "project_key", None)
@@ -402,7 +411,6 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "session_id": session.session_id,
                 "status": session.status,
                 "session_type": getattr(session, "session_type", None),
-                "role": getattr(session, "role", None),
                 "auto_continue_count": session.auto_continue_count,
                 "created_at": str(session.created_at) if session.created_at else None,
                 "started_at": str(session.started_at) if session.started_at else None,
@@ -428,8 +436,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         if worker_healthy is False:
             print("  WARNING: No active worker — session may wait indefinitely.", file=sys.stderr)
         stype = getattr(session, "session_type", "—")
-        srole = getattr(session, "role", "—")
-        print(f"  Type/Role:     {stype} / {srole}")
+        print(f"  Type:          {stype}")
         print(f"  Auto-continue: {session.auto_continue_count}")
         print(f"  Created:       {_format_ts(session.created_at)}")
         print(f"  Started:       {_format_ts(session.started_at)}")
@@ -548,7 +555,6 @@ def cmd_children(args: argparse.Namespace) -> int:
                     "agent_session_id": s.agent_session_id,
                     "status": s.status,
                     "session_type": getattr(s, "session_type", None),
-                    "role": getattr(s, "role", None),
                     "created_at": str(s.created_at) if s.created_at else None,
                     "message_preview": (s.message_text or "")[:120],
                 }
@@ -566,7 +572,7 @@ def cmd_children(args: argparse.Namespace) -> int:
         for s in all_children:
             sid = s.session_id or "—"
             status = s.status or "—"
-            stype = getattr(s, "session_type", None) or getattr(s, "role", None) or "—"
+            stype = getattr(s, "session_type", None) or "—"
             created = _format_ts(s.created_at)
             msg = (s.message_text or "")[:60]
             print(f"  {sid:<38} {status:<12} {stype:<8} {created:<22} {msg}")
@@ -607,13 +613,10 @@ def cmd_list(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
 
-        # Client-side role filter
+        # Client-side role filter — matches on session_type only
         if role_filter:
             all_sessions = [
-                s
-                for s in all_sessions
-                if getattr(s, "role", None) == role_filter
-                or getattr(s, "session_type", None) == role_filter
+                s for s in all_sessions if getattr(s, "session_type", None) == role_filter
             ]
 
         # Sort by created_at descending
@@ -638,7 +641,6 @@ def cmd_list(args: argparse.Namespace) -> int:
                     "status": s.status,
                     "priority": getattr(s, "priority", None) or "normal",
                     "session_type": getattr(s, "session_type", None),
-                    "role": getattr(s, "role", None),
                     "auto_continue_count": s.auto_continue_count,
                     "created_at": str(s.created_at) if s.created_at else None,
                     "message_preview": (s.message_text or "")[:60],
@@ -665,7 +667,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 sid = sid[:31] + "..."
             status = s.status or "—"
             priority = getattr(s, "priority", None) or "normal"
-            stype = getattr(s, "session_type", None) or getattr(s, "role", None) or "—"
+            stype = getattr(s, "session_type", None) or "—"
             nudges = s.auto_continue_count or 0
             created = _format_ts(s.created_at)
             msg = (s.message_text or "")[:38]
