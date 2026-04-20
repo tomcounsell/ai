@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -306,17 +306,17 @@ Integration validation for the smoke-test (AC #6): after the edit merges, invoke
 This is an internal prompt-text edit. No user-facing feature documentation is needed, but a brief note in the SDLC skill docs captures the audit.
 
 ### Feature Documentation
-- [ ] **Append** a new dated sub-section (`## Opus 4.7 Audit (2026-04-20)`) to the END of `docs/features/sdlc-skills-audit.md` recording: the four skills were audited for Opus 4.7 behavior on 2026-04-20, the three behavioral deltas checked, and the outcome (which skills were edited, which weren't). This gives future readers a pointer when `/do-plan-critique` or `/do-pr-review` is re-audited for a future Opus version. The file **already exists** with prior audit content from 2026-04-18 (#1042 "Five Blind Spots Closed") — do NOT overwrite or edit the existing body; append only.
-- [ ] No update to `docs/features/README.md` index — this is an addendum to an existing feature doc.
+- [x] **Append** a new dated sub-section (`## Opus 4.7 Audit (2026-04-20)`) to the END of `docs/features/sdlc-skills-audit.md` recording: the four skills were audited for Opus 4.7 behavior on 2026-04-20, the three behavioral deltas checked, and the outcome (which skills were edited, which weren't). This gives future readers a pointer when `/do-plan-critique` or `/do-pr-review` is re-audited for a future Opus version. The file **already exists** with prior audit content from 2026-04-18 (#1042 "Five Blind Spots Closed") — do NOT overwrite or edit the existing body; append only.
+- [x] No update to `docs/features/README.md` index — this is an addendum to an existing feature doc.
 
 <!-- Implementation Note (C5, continued): The Documentation section and Task 9 BOTH say "append to existing file". This is intentional consistency — the file is real, the prior content is real, and the builder must not use a "create if missing" fallback branch. If the builder finds the file missing at build time, they MUST stop and investigate (someone deleted it) before proceeding. -->
 
 
 ### External Documentation Site
-- [ ] N/A — repo does not publish to Sphinx/RTD/MkDocs for this area.
+- [x] N/A — repo does not publish to Sphinx/RTD/MkDocs for this area.
 
 ### Inline Documentation
-- [ ] Not applicable — no code changes. Markdown edits are self-documenting.
+- [x] Not applicable — no code changes. Markdown edits are self-documenting.
 
 ## Success Criteria
 
