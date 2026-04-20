@@ -5,6 +5,8 @@ Web automation using Playwright for navigation, screenshots, and interaction.
 """
 
 import base64
+import logging
+from io import BytesIO
 from typing import Literal
 
 # Check if playwright is available
@@ -15,6 +17,18 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+
+# Check if Pillow is available for image downscaling
+try:
+    from PIL import Image
+
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+_VIEWPORT = {"width": 1280, "height": 720}
 
 
 class BrowserError(Exception):
@@ -36,6 +50,45 @@ def _check_playwright():
             )
         }
     return None
+
+
+def _downscale_if_needed(data: bytes, max_dim: int = 1280) -> bytes:
+    """Downscale image bytes so the longest edge does not exceed max_dim.
+
+    Uses Pillow to proportionally resize the image if needed.  If Pillow is
+    unavailable or any error occurs the original bytes are returned unchanged —
+    this function never raises and never returns empty bytes.
+
+    Args:
+        data: Raw PNG (or other Pillow-readable) image bytes.
+        max_dim: Maximum allowed length for the longest edge in pixels.
+
+    Returns:
+        PNG bytes, possibly downscaled.  Always equal to or smaller than
+        max_dim on the longest edge when Pillow is available and the image
+        parsed successfully.
+    """
+    if not PILLOW_AVAILABLE:
+        logger.warning("Pillow not available; screenshot will not be downscaled")
+        return data
+
+    if not data:
+        return data
+
+    try:
+        img = Image.open(BytesIO(data))
+        if max(img.width, img.height) <= max_dim:
+            return data  # Already within bounds — no resize needed
+        scale = max_dim / max(img.width, img.height)
+        new_w = max(1, int(img.width * scale))
+        new_h = max(1, int(img.height * scale))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        logger.warning("Screenshot downscale failed (%s); returning original bytes", exc)
+        return data
 
 
 def navigate(
@@ -66,7 +119,7 @@ def navigate(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(viewport=_VIEWPORT)
 
             page.goto(url, wait_until=wait_for, timeout=timeout_ms)
 
@@ -114,24 +167,34 @@ def screenshot(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page = browser.new_page(viewport=_VIEWPORT)
 
             page.goto(url, wait_until="networkidle", timeout=timeout_ms)
 
             screenshot_bytes = page.screenshot(full_page=full_page)
+            screenshot_bytes = _downscale_if_needed(screenshot_bytes)
             image_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
-            # Get dimensions from viewport or page
-            if full_page:
-                # Get full page dimensions
-                dimensions = page.evaluate("""() => {
-                    return {
-                        width: document.documentElement.scrollWidth,
-                        height: document.documentElement.scrollHeight
-                    }
-                }""")
-            else:
-                dimensions = {"width": 1280, "height": 720}
+            # Derive actual output dimensions from the (possibly downscaled) image
+            try:
+                if PILLOW_AVAILABLE:
+                    from io import BytesIO as _BytesIO
+
+                    from PIL import Image as _Image
+
+                    _img = _Image.open(_BytesIO(screenshot_bytes))
+                    dimensions = {"width": _img.width, "height": _img.height}
+                elif full_page:
+                    dimensions = page.evaluate("""() => {
+                        return {
+                            width: document.documentElement.scrollWidth,
+                            height: document.documentElement.scrollHeight
+                        }
+                    }""")
+                else:
+                    dimensions = {"width": _VIEWPORT["width"], "height": _VIEWPORT["height"]}
+            except Exception:
+                dimensions = {"width": _VIEWPORT["width"], "height": _VIEWPORT["height"]}
 
             result = {
                 "image_base64": image_base64,
@@ -176,7 +239,7 @@ def extract_text(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(viewport=_VIEWPORT)
 
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
@@ -227,7 +290,7 @@ def fill_form(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(viewport=_VIEWPORT)
 
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
@@ -291,7 +354,7 @@ def click(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(viewport=_VIEWPORT)
 
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
@@ -342,7 +405,7 @@ def wait_for_element(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(viewport=_VIEWPORT)
 
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
