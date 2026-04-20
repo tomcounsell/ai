@@ -122,7 +122,7 @@ class TestDevSessionParentLinkage:
         assert len(children) >= 1
         assert any(c.session_id == "dev-linkage-query-001" for c in children)
 
-    def test_parent_session_id_none_without_parent(self, redis_test_db):
+    def test_no_parent_when_not_set(self, redis_test_db):
         """Dev session without --parent has parent_agent_session_id=None."""
         standalone_dev = AgentSession.create(
             session_id="dev-no-parent-001",

@@ -306,7 +306,7 @@ def _extract_stage_from_prompt(prompt: str) -> str | None:
     return None
 
 
-def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
+def _start_pipeline_stage(pm_session_id: str, stage: str) -> None:
     """Start an SDLC stage on the parent PM session's PipelineStateMachine.
 
     Loads the parent AgentSession from Redis, creates a PipelineStateMachine,
@@ -319,10 +319,10 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
         from agent.pipeline_state import PipelineStateMachine
         from models.agent_session import AgentSession
 
-        parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))
+        parent_sessions = list(AgentSession.query.filter(session_id=pm_session_id))
         if not parent_sessions:
             logger.warning(
-                f"[pre_tool_use] Parent session {parent_session_id} not found, "
+                f"[pre_tool_use] Parent session {pm_session_id} not found, "
                 f"skipping start_stage({stage})"
             )
             return
@@ -330,11 +330,11 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
         parent = parent_sessions[0]
         sm = PipelineStateMachine(parent)
         sm.start_stage(stage)
-        logger.info(f"[pre_tool_use] Started pipeline stage {stage} on session {parent_session_id}")
+        logger.info(f"[pre_tool_use] Started pipeline stage {stage} on session {pm_session_id}")
     except Exception as e:
         logger.warning(
             f"[pre_tool_use] Failed to start pipeline stage {stage} "
-            f"on session {parent_session_id}: {e}"
+            f"on session {pm_session_id}: {e}"
         )
 
 

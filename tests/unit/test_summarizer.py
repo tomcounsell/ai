@@ -1992,7 +1992,7 @@ class TestSummarizerBypassParentSession:
 
     @pytest.mark.asyncio
     async def test_no_bypass_when_parent_is_dangling(self):
-        """Dev session with dangling parent_session_id -> bypass does not fire."""
+        """Dev session with dangling parent_agent_session_id -> bypass does not fire."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()
@@ -2018,7 +2018,7 @@ class TestSummarizerBypassParentSession:
 
     @pytest.mark.asyncio
     async def test_no_bypass_when_no_parent(self):
-        """Session without parent_session_id -> no parent lookup, no bypass."""
+        """Session without parent link -> no parent lookup, no bypass."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()

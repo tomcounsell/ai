@@ -134,8 +134,6 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 
 ### Dev session-specific fields
 - `parent_agent_session_id` (KeyField) -- **canonical** parent link (role-neutral). Set by all session creators (`create_child`, `create_dev`, `enqueue_session`) and read by all hierarchy walkers (`scheduling_depth`, `get_parent_session`, `get_child_sessions`, the zombie health check, the dashboard).
-- `parent_session_id` -- backward-compat `@property` alias delegating to `parent_agent_session_id`. Kept for one release cycle. New code should use `parent_agent_session_id` directly.
-- `parent_chat_session_id` -- backward-compat `@property` alias also delegating to `parent_agent_session_id` (the alias chain `parent_chat_session_id -> parent_session_id -> parent_agent_session_id` continues to resolve transparently).
 - `role` (DataField) -- session specialization ("pm", "dev", or null for unspecialized sessions)
 - `stage_states` -- derived property reading from `session_events`
 - `slug` -- derives branch name, plan path, worktree
@@ -382,7 +380,7 @@ The PM session can push steering messages to its running child Dev sessions, ena
 
 ### Mechanism
 
-The PM invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_session_id`) and writes to the child's turn-boundary inbox (`AgentSession.queued_steering_messages`). The worker delivers the message at the next turn boundary.
+The PM invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_agent_session_id`) and writes to the child's turn-boundary inbox (`AgentSession.queued_steering_messages`). The worker delivers the message at the next turn boundary.
 
 **Delivery paths by harness type:**
 - **CLI-harness sessions** (default): `steer_child.py` calls `steer_session()` which writes to `queued_steering_messages`. The worker injects the message as user input at the next turn boundary. There is no mid-turn injection — the Dev session sees the message at most one turn late.

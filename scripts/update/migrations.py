@@ -95,6 +95,35 @@ _SDLC_STUBS = [
 ]
 
 
+def _migrate_unify_parent_session_field(project_dir: Path) -> str | None:
+    """Normalize parent_session_id Redis hash fields into parent_agent_session_id.
+
+    Copies any leftover parent_session_id values into parent_agent_session_id where
+    the latter is empty, then deletes the stale field. Idempotent — safe to re-run.
+    Returns None on success, error string on failure.
+    """
+    script = project_dir / "scripts" / "migrate_unify_parent_session_field.py"
+    if not script.exists():
+        return "migration script not found"
+
+    python = project_dir / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python), str(script), "--apply"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            return f"exit code {result.returncode}: {result.stderr[-500:]}"
+        return None
+    except subprocess.TimeoutExpired:
+        return "migration timed out after 120s"
+    except Exception as e:  # swallow-ok: error returned as string to caller for logging
+        return str(e)
+
+
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing.
 
@@ -123,6 +152,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "create_sdlc_stubs": (
         _migrate_create_sdlc_stubs,
         "Create docs/sdlc/ per-stage addendum stub files",
+    ),
+    "unify_parent_session_field": (
+        _migrate_unify_parent_session_field,
+        "Normalize parent_session_id Redis fields into parent_agent_session_id",
     ),
 }
 

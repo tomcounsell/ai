@@ -117,7 +117,7 @@ The summarizer is retained as a safety net. The decision tree in `bridge/respons
 
 1. Refresh the AgentSession from Redis to get the latest `pm_sent_message_ids`.
 2. If `session.has_pm_messages()` returns True: skip summarizer, return True. The PM already delivered its own messages.
-3. **Parent session lookup** (issue #571): If the session itself has no PM messages but has a `parent_chat_session_id` (i.e., it is a Dev session in an SDLC flow), look up the parent PM session via `get_parent_chat_session()` and check `has_pm_messages()` on the parent. If the parent has PM messages, skip the summarizer. This prevents dual messages in SDLC flows where the PM (PM session) self-messages and the Dev session output would otherwise also be summarized and sent.
+3. **Parent session lookup** (issue #571): If the session itself has no PM messages but has a `parent_agent_session_id` (i.e., it is a Dev session in an SDLC flow), look up the parent PM session via `get_parent_chat_session()` and check `has_pm_messages()` on the parent. If the parent has PM messages, skip the summarizer. This prevents dual messages in SDLC flows where the PM (PM session) self-messages and the Dev session output would otherwise also be summarized and sent.
 4. If neither session nor parent has PM messages: fall through to the existing summarizer path. The response text is compressed and sent as before.
 
 This means:

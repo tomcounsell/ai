@@ -236,7 +236,7 @@ class TestMainCallChain:
 
         mock_create.assert_called_once()
 
-    def test_main_creates_session_when_parent_session_id_set(self, monkeypatch):
+    def test_main_creates_session_when_parent_set(self, monkeypatch):
         """VALOR_PARENT_SESSION_ID set -> create AgentSession."""
         hook = _load_hook_module()
 

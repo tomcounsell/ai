@@ -22,8 +22,6 @@ Roles (specialization within a session type):
 
 Parent-child relationship:
   parent_agent_session_id is the canonical parent link (role-neutral).
-  parent_session_id and parent_chat_session_id are deprecated aliases that
-  delegate to parent_agent_session_id via property.
   Use create_child(role=...) to spawn child sessions.
 
 Status lifecycle (see models/session_lifecycle.py for canonical mutation functions):
@@ -102,10 +100,6 @@ class AgentSession(Model):
     Parent-child hierarchy:
         parent_agent_session_id: Canonical parent link (role-neutral). Set
             by all session creators (create_child, create_dev, enqueue_session).
-        parent_session_id: Deprecated alias property delegating to
-            parent_agent_session_id (kept for one release cycle).
-        parent_chat_session_id: Deprecated alias property delegating to
-            parent_agent_session_id via parent_session_id.
 
     Factory methods:
         create_pm(): Create a PM session (PM persona, read-only).
@@ -227,8 +221,6 @@ class AgentSession(Model):
     project_config = DictField(null=True)
 
     # === Dev session fields (null when session_type="pm" or "teammate") ===
-    # Note: parent_session_id is now a deprecated @property alias for
-    # parent_agent_session_id. See the alias block below.
     slug = Field(null=True)  # Derives branch, plan path, worktree
 
     # === Role field (flexible specialization beyond session_type) ===
@@ -439,22 +431,6 @@ class AgentSession(Model):
         elif "parent_job_id" in kwargs:  # legacy
             kwargs.pop("parent_job_id")  # legacy
 
-        # Map deprecated parent_chat_session_id → parent_agent_session_id
-        if "parent_chat_session_id" in kwargs and "parent_agent_session_id" not in kwargs:
-            logger.warning(
-                "Deprecated: parent_chat_session_id passed to AgentSession; "
-                "use parent_agent_session_id instead"
-            )
-            kwargs["parent_agent_session_id"] = kwargs.pop("parent_chat_session_id")
-        elif "parent_chat_session_id" in kwargs:
-            kwargs.pop("parent_chat_session_id")
-
-        # Map deprecated parent_session_id → parent_agent_session_id
-        if "parent_session_id" in kwargs and "parent_agent_session_id" not in kwargs:
-            kwargs["parent_agent_session_id"] = kwargs.pop("parent_session_id")
-        elif "parent_session_id" in kwargs:
-            kwargs.pop("parent_session_id")
-
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
 
@@ -598,33 +574,6 @@ class AgentSession(Model):
                 agent_session_id,
             )
         return results[0]
-
-    # === Deprecated alias chain: parent_chat_session_id -> parent_session_id
-    # ===                          -> parent_agent_session_id (canonical)
-    #
-    # parent_agent_session_id is the only KeyField. The two aliases below are
-    # kept for one release cycle so legacy callers continue to work. New code
-    # should write parent_agent_session_id directly.
-
-    @property
-    def parent_session_id(self) -> str | None:
-        """Deprecated alias for parent_agent_session_id."""
-        return self.parent_agent_session_id
-
-    @parent_session_id.setter
-    def parent_session_id(self, value: str | None) -> None:
-        """Deprecated setter for parent_agent_session_id."""
-        self.parent_agent_session_id = value
-
-    @property
-    def parent_chat_session_id(self) -> str | None:
-        """Deprecated alias for parent_agent_session_id."""
-        return self.parent_agent_session_id
-
-    @parent_chat_session_id.setter
-    def parent_chat_session_id(self, value: str | None) -> None:
-        """Deprecated setter for parent_agent_session_id."""
-        self.parent_agent_session_id = value
 
     # === Backward-compatible property: agent_session_id -> id ===
 
@@ -1126,7 +1075,7 @@ class AgentSession(Model):
         session_id: str,
         project_key: str,
         working_dir: str,
-        parent_session_id: str,
+        parent_agent_session_id: str,
         message_text: str,
         slug: str | None = None,
         stage_states: dict | None = None,
@@ -1139,8 +1088,7 @@ class AgentSession(Model):
             session_id: Unique session identifier.
             project_key: Project this session belongs to.
             working_dir: Working directory for the session.
-            parent_session_id: ID of the parent session. Stored as
-                parent_agent_session_id (the canonical field).
+            parent_agent_session_id: ID of the parent session.
             message_text: Initial message text.
             slug: Optional work item slug.
             stage_states: Optional initial SDLC stage states.
@@ -1159,7 +1107,7 @@ class AgentSession(Model):
             session_type=SESSION_TYPE_DEV,
             project_key=project_key,
             working_dir=working_dir,
-            parent_agent_session_id=parent_session_id,
+            parent_agent_session_id=parent_agent_session_id,
             initial_telegram_message=itm,
             slug=slug,
             role=role,
@@ -1177,7 +1125,7 @@ class AgentSession(Model):
         session_id: str,
         project_key: str,
         working_dir: str,
-        parent_session_id: str | None = None,
+        parent_agent_session_id: str | None = None,
         message_text: str,
         slug: str | None = None,
         stage_states: dict | None = None,
@@ -1187,20 +1135,12 @@ class AgentSession(Model):
 
         Deprecated: Use create_child(role="dev", ...) instead.
         """
-        # Support old kwarg name via _normalize_kwargs
-        if parent_session_id is None:
-            parent_session_id = kwargs.pop("parent_chat_session_id", None)
-            if parent_session_id is not None:
-                logger.warning(
-                    "Deprecated: parent_chat_session_id passed to create_dev(); "
-                    "use parent_session_id instead"
-                )
         return cls.create_child(
             role="dev",
             session_id=session_id,
             project_key=project_key,
             working_dir=working_dir,
-            parent_session_id=parent_session_id or "",
+            parent_agent_session_id=parent_agent_session_id or "",
             message_text=message_text,
             slug=slug,
             stage_states=stage_states,
