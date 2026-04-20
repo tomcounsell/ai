@@ -21,7 +21,7 @@ Retry and dead-letter behavior:
     immediately without entering the retry loop.
 
 After successful send, records the Telegram message ID on the AgentSession's
-pm_sent_message_ids field. This list is checked by the summarizer bypass
+pm_sent_message_ids field. This list is checked by the PM self-message bypass
 in bridge/response.py.
 """
 
@@ -575,7 +575,7 @@ async def relay_loop(telegram_client) -> None:
 def get_outbox_length(session_id: str) -> int:
     """Check the number of pending messages in a session's outbox queue.
 
-    Used by the summarizer bypass to wait for the relay to drain
+    Used by the PM self-message bypass to wait for the relay to drain
     before checking pm_sent_message_ids.
 
     Args:

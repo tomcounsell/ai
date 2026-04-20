@@ -310,9 +310,7 @@ class EmailOutputHandler:
                 if draft.text:
                     body_text = draft.text
             except Exception as e:
-                logger.warning(
-                    "[email] Drafter failed, falling back to raw text: %s", e
-                )
+                logger.warning("[email] Drafter failed, falling back to raw text: %s", e)
 
         original_message_id = extra.get("email_message_id", "")
         original_subject = extra.get("email_subject", "")
@@ -335,7 +333,10 @@ class EmailOutputHandler:
             try:
                 await asyncio.to_thread(self._send_smtp, chat_id, mime_msg)
                 logger.info(
-                    f"[email] Sent reply to {chat_id} (session={session_id}, {len(body_text)} chars)"
+                    "[email] Sent reply to %s (session=%s, %d chars)",
+                    chat_id,
+                    session_id,
+                    len(body_text),
                 )
 
                 # Store outbound Message-ID for future thread continuation

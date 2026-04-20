@@ -899,7 +899,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
             elif action == "deliver":
                 # PM outbox drain: if messages are pending in the relay queue,
-                # wait briefly for them to be sent before the summarizer fires.
+                # wait briefly for them to be sent before the drafter fires.
                 # This prevents the race where PM queues a message but the session
                 # completes before the relay processes it (issue #497).
                 if session.session_id:

@@ -463,16 +463,16 @@ async def send_response_with_files(
         )
 
     is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
-    should_summarize = not pm_bypass and text and (is_sdlc or len(text) >= 200)
-    if should_summarize:
+    should_draft = not pm_bypass and text and (is_sdlc or len(text) >= 200)
+    if should_draft:
         try:
             from bridge.message_drafter import draft_message
 
-            summarized = await draft_message(text, session=session)
-            text = summarized.text
-            if summarized.full_output_file:
-                files.append(summarized.full_output_file)
-            if summarized.was_drafted:
+            drafted = await draft_message(text, session=session)
+            text = drafted.text
+            if drafted.full_output_file:
+                files.append(drafted.full_output_file)
+            if drafted.was_drafted:
                 logger.info(f"Drafted response: {len(response)} -> {len(text)} chars")
 
             # ── Self-draft fallback via session steering ──
@@ -480,7 +480,7 @@ async def send_response_with_files(
             # asking the agent to self-draft. Send any files immediately
             # (they would be lost if deferred), then return the STEERING_DEFERRED
             # sentinel so the bridge callback knows this is intentional.
-            if summarized.needs_self_draft:
+            if drafted.needs_self_draft:
                 _session_id = getattr(session, "session_id", None) if session else None
                 _should_steer = bool(_session_id)
 
@@ -491,7 +491,7 @@ async def send_response_with_files(
                     try:
                         from agent.steering import peek_steering_sender
 
-                        if peek_steering_sender(_session_id) == "summarizer-fallback":
+                        if peek_steering_sender(_session_id) == "drafter-fallback":
                             logger.warning(
                                 "Self-summary steering already pending, "
                                 "falling through to narration gate"
@@ -516,7 +516,7 @@ async def send_response_with_files(
                         push_steering_message(
                             _session_id,
                             SELF_DRAFT_INSTRUCTION,
-                            sender="summarizer-fallback",
+                            sender="drafter-fallback",
                         )
                         logger.info(f"Injected self-summary steering for session {_session_id}")
                         from bridge.message_drafter import STEERING_DEFERRED
@@ -558,19 +558,19 @@ async def send_response_with_files(
                         text = response
 
             # Persist semantic routing fields to session for future routing
-            if session and summarized.was_drafted:
+            if session and drafted.was_drafted:
                 try:
-                    if summarized.context_summary:
-                        session.context_summary = summarized.context_summary
-                    if summarized.expectations is not None:
-                        session.expectations = summarized.expectations
-                    if summarized.context_summary or summarized.expectations is not None:
+                    if drafted.context_summary:
+                        session.context_summary = drafted.context_summary
+                    if drafted.expectations is not None:
+                        session.expectations = drafted.expectations
+                    if drafted.context_summary or drafted.expectations is not None:
                         session.save()
                         logger.debug(
                             f"Persisted routing fields to session "
                             f"{session.session_id}: "
-                            f"context_summary={bool(summarized.context_summary)}, "
-                            f"expectations={bool(summarized.expectations)}"
+                            f"context_summary={bool(drafted.context_summary)}, "
+                            f"expectations={bool(drafted.expectations)}"
                         )
                 except Exception as persist_err:
                     # Non-fatal: routing field persistence should never

@@ -2275,7 +2275,7 @@ async def get_agent_response_sdk(
                 "pipeline internals, or implementation details. "
                 "Speak like a project manager updating a stakeholder.\n"
                 "If you don't call this tool, your return text will be "
-                "automatically summarized and sent (fallback behavior)."
+                "automatically drafted and sent (fallback behavior)."
             )
         else:
             # PM dispatch: orchestrate SDLC work stage-by-stage.
@@ -2334,7 +2334,7 @@ async def get_agent_response_sdk(
                     "pipeline internals, or implementation details. "
                     "Speak like a project manager updating a stakeholder.\n"
                     "If you don't call this tool, your return text will be "
-                    "automatically summarized and sent (fallback behavior)."
+                    "automatically drafted and sent (fallback behavior)."
                 )
             else:
                 # Structured handoff: novel or error-prone task type — full SDLC guidance.
@@ -2402,7 +2402,7 @@ async def get_agent_response_sdk(
                     "pipeline internals, or implementation details. "
                     "Speak like a project manager updating a stakeholder.\n"
                     "If you don't call this tool, your return text will be "
-                    "automatically summarized and sent (fallback behavior)."
+                    "automatically drafted and sent (fallback behavior)."
                 )
     # --- Single-issue scoping (Fix 3) ---
     # Prevent PM from cross-contaminating pipelines by dispatching work for

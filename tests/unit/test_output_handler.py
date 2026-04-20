@@ -376,9 +376,8 @@ class TestDrafterInHandler:
     """
 
     def _make_handler(self, *, drafter_enabled: bool = True):
-        from unittest.mock import MagicMock as MM
-
         import os
+        from unittest.mock import MagicMock
 
         from agent.output_handler import TelegramRelayOutputHandler
 
@@ -391,7 +390,7 @@ class TestDrafterInHandler:
                 os.environ.pop("MESSAGE_DRAFTER_IN_HANDLER", None)
             else:
                 os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = old
-        h._redis = MM()
+        h._redis = MagicMock()
         return h
 
     def test_flag_is_read_at_init_time(self):
@@ -417,7 +416,7 @@ class TestDrafterInHandler:
         mock_draft = AsyncMock(return_value=drafted)
 
         with patch("bridge.message_drafter.draft_message", mock_draft):
-            # Use text that would not hit the short-output early-return: add a ? to force full drafter path.
+            # A '?' forces full drafter path (short-output early-return skips).
             asyncio.run(handler.send("123", "Raw agent output? Maybe ask the human.", 0))
 
         mock_draft.assert_awaited_once()
@@ -446,7 +445,7 @@ class TestDrafterInHandler:
 
     def test_send_includes_file_paths_when_drafter_returns_file(self):
         """If the draft has a full_output_file, the payload carries file_paths."""
-        from pathlib import Path as _P
+        from pathlib import Path
         from unittest.mock import AsyncMock, patch
 
         from bridge.message_drafter import MessageDraft
@@ -454,7 +453,7 @@ class TestDrafterInHandler:
         handler = self._make_handler(drafter_enabled=True)
         drafted = MessageDraft(
             text="short caption",
-            full_output_file=_P("/tmp/valor_full_output_xyz.txt"),
+            full_output_file=Path("/tmp/valor_full_output_xyz.txt"),
             was_drafted=True,
             artifacts={},
         )
