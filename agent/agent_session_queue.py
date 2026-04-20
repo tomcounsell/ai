@@ -176,7 +176,6 @@ _AGENT_SESSION_FIELDS = [
     "claude_session_uuid",
     "parent_agent_session_id",
     "session_type",
-    "role",
     "slug",
     "pm_sent_message_ids",
     "last_heartbeat_at",
