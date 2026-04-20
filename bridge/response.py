@@ -190,14 +190,6 @@ def filter_tool_logs(response: str) -> str:
         r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
     )
 
-    # Delivery-choice prefixes: internal agent control signals that should never
-    # be sent as user-facing text. These are parsed by the stop hook to set
-    # delivery_action on the session, but can leak through the nudge loop's
-    # parallel send path if the stop hook hasn't written to Redis yet.
-    delivery_choice_pattern = re.compile(
-        r"^(REACT:\s*|SEND\s*$|EDIT:\s*|SILENT\s*$|CONTINUE\s*$)", re.IGNORECASE
-    )
-
     for line in lines:
         stripped = line.strip()
 
@@ -206,11 +198,6 @@ def filter_tool_logs(response: str) -> str:
             # Only add blank line if last line wasn't blank
             if filtered and filtered[-1].strip():
                 filtered.append(line)
-            continue
-
-        # Skip delivery-choice control signals (REACT:, SEND, EDIT:, SILENT, CONTINUE)
-        # These are internal protocol between agent and stop hook, never user-facing.
-        if delivery_choice_pattern.match(stripped):
             continue
 
         # Skip lines matching explicit tool log patterns
@@ -441,69 +428,12 @@ async def send_response_with_files(
         except Exception:
             pass  # Fall back to existing session object
 
-    # ── Delivery instruction check ──
-    # If the stop-hook review gate wrote a delivery instruction, execute it
-    # directly instead of running the drafter. The agent already reviewed
-    # and approved the output.
-    if session and getattr(session, "delivery_action", None):
-        delivery_action = session.delivery_action
-
-        if delivery_action == "send":
-            # Agent approved or edited the message — send delivery_text
-            delivery_text = getattr(session, "delivery_text", None) or text
-            # Still send any extracted files first
-            if files:
-                for f in files:
-                    try:
-                        await client.send_file(_chat_id, f, reply_to=_reply_to)
-                    except Exception as e:
-                        logger.error(f"Failed to send file: {e}")
-            if delivery_text:
-                if len(delivery_text) > 4096:
-                    delivery_text = _truncate_at_sentence_boundary(delivery_text, limit=4096)
-                try:
-                    from bridge.markdown import send_markdown
-
-                    return await send_markdown(client, _chat_id, delivery_text, reply_to=_reply_to)
-                except Exception as e:
-                    logger.error(f"Delivery send failed: {e}")
-            return None
-
-        if delivery_action == "react":
-            # Agent chose emoji-only reaction; fall back to SEND if reaction fails
-            delivery_emoji = getattr(session, "delivery_emoji", None) or "👍"
-            reacted = False
-            if _reply_to:
-                reacted = await set_reaction(client, _chat_id, _reply_to, delivery_emoji)
-            if reacted:
-                logger.info(
-                    f"Delivery: react-only ({delivery_emoji}) for "
-                    f"session {getattr(session, 'session_id', 'unknown')}"
-                )
-                return None
-            # Reaction failed — fall back to sending the draft text
-            logger.warning(
-                f"Delivery: react failed, falling back to SEND for "
-                f"session {getattr(session, 'session_id', 'unknown')}"
-            )
-            fallback_text = getattr(session, "delivery_text", None) or text
-            if fallback_text:
-                if len(fallback_text) > 4096:
-                    fallback_text = _truncate_at_sentence_boundary(fallback_text, limit=4096)
-                try:
-                    from bridge.markdown import send_markdown
-
-                    return await send_markdown(client, _chat_id, fallback_text, reply_to=_reply_to)
-                except Exception as e:
-                    logger.error(f"React fallback send also failed: {e}")
-            return None
-
-        if delivery_action == "silent":
-            # Agent chose silence — no text, no emoji
-            logger.info(f"Delivery: silent for session {getattr(session, 'session_id', 'unknown')}")
-            return None
-
-        # Unknown delivery_action → fall through to normal drafter path
+    # NOTE: delivery_action/delivery_text/delivery_emoji session fields are no
+    # longer read here. The stop-hook review gate now steers the agent via a
+    # prepopulated tool_call (tools/send_message.py, tools/react_with_emoji.py)
+    # which delivers directly through the OutputHandler. The schema fields
+    # remain on AgentSession pending a dedicated migration (Tom owns; see the
+    # follow-up chore issue opened from plan #1035 Step 13.5).
 
     # PM self-messaging bypass: if the PM already sent messages via the
     # send_telegram tool during this session (or its parent PM session in
