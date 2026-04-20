@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -238,19 +238,20 @@ No agent integration required — `worker_key` is an internal worker routing sig
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-worker-architecture.md`:
+- [x] Update `docs/features/bridge-worker-architecture.md`:
   - Revise the Decision Table (lines 160-167) to change the `dev` + slug row: `worker_key` column from `chat_id` to `slug`, Behavior note to mention slug-keyed parallelism (e.g., "Parallel-safe across chats AND across slugs in the same chat").
   - Update the "Two Worker Loop Archetypes" section (lines 173-181) to describe three archetypes: project-keyed (PM + slugless dev), chat-keyed (teammate), and slug-keyed (slugged dev).
   - Update the "Why `chat_id` Is Not the Isolation Key" paragraph (lines 169-171) to add: "Similarly, `chat_id` is insufficient for dev sessions — two dev sessions for different work items in the same chat would serialize even though they share no state. Slug is the correct routing key for worktree-isolated dev sessions."
-- [ ] Update `docs/features/pm-dev-session-architecture.md` line 195 (the inline sentence matching the decision table) to reference slug-keyed dev routing.
-- [ ] No new feature doc needed — this is a fix to an existing documented feature, not a new one.
+- [x] Update `docs/features/pm-dev-session-architecture.md` line 195 (the inline sentence matching the decision table) to reference slug-keyed dev routing.
+- [x] Stale reference sweep: `docs/features/session-lifecycle.md:219` updated from "chat_id for teammate/slugged-dev" to "slug for slugged-dev, chat_id for teammate" to match new routing.
+- [x] No new feature doc needed — this is a fix to an existing documented feature, not a new one.
 
 ### External Documentation Site
-- [ ] No external docs site for this repo — skip.
+- [x] No external docs site for this repo — skip.
 
 ### Inline Documentation
-- [ ] Update the `worker_key` property docstring in `models/agent_session.py:267-274` to describe the new precedence (see Technical Approach for the new text).
-- [ ] Add an inline comment at `agent/agent_session_queue.py:362` and `:1110` noting the duplication: `# KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py`.
+- [x] Update the `worker_key` property docstring in `models/agent_session.py:267-274` to describe the new precedence (see Technical Approach for the new text).
+- [x] Add an inline comment at `agent/agent_session_queue.py:362` and `:1110` noting the duplication: `# KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py`.
 
 ## Success Criteria
 
