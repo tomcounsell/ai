@@ -199,13 +199,13 @@ def _inject_prompt_var(file_content: str, var_name: str, new_prompt: str) -> str
 
 
 def extract_summarizer_prompt(file_content: str) -> str:
-    """Extract SUMMARIZER_SYSTEM_PROMPT from summarizer.py content."""
-    return _extract_prompt_var(file_content, "SUMMARIZER_SYSTEM_PROMPT")
+    """Extract DRAFTER_SYSTEM_PROMPT from message_drafter.py content."""
+    return _extract_prompt_var(file_content, "DRAFTER_SYSTEM_PROMPT")
 
 
 def inject_summarizer_prompt(file_content: str, new_prompt: str) -> str:
-    """Inject a new SUMMARIZER_SYSTEM_PROMPT into summarizer.py content."""
-    return _inject_prompt_var(file_content, "SUMMARIZER_SYSTEM_PROMPT", new_prompt)
+    """Inject a new DRAFTER_SYSTEM_PROMPT into message_drafter.py content."""
+    return _inject_prompt_var(file_content, "DRAFTER_SYSTEM_PROMPT", new_prompt)
 
 
 # ---------------------------------------------------------------------------

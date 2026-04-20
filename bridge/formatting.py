@@ -1,6 +1,6 @@
 """Shared formatting utilities for Telegram message composition.
 
-Extracted from bridge/summarizer.py to be reusable by both the summarizer
+Extracted from bridge/message_drafter.py to be reusable by both the summarizer
 and the PM's send_telegram tool (tools/send_telegram.py).
 """
 

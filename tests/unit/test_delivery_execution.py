@@ -121,13 +121,13 @@ class TestDeliveryExecution:
 
         with (
             patch("bridge.markdown.send_markdown", new_callable=AsyncMock, return_value=mock_sent),
-            patch("bridge.summarizer.summarize_response", new_callable=AsyncMock) as mock_sum,
+            patch("bridge.message_drafter.draft_message", new_callable=AsyncMock) as mock_sum,
         ):
             # Ensure summarizer path is attempted for long responses
             mock_sum.return_value = SimpleNamespace(
                 text="summarized",
                 full_output_file=None,
-                was_summarized=True,
+                was_drafted=True,
                 context_summary=None,
                 expectations=None,
             )
@@ -145,12 +145,12 @@ class TestDeliveryExecution:
 
 
 def _make_summarized_response(**kwargs):
-    """Create a SummarizedResponse-like object."""
+    """Create a MessageDraft-like object."""
     defaults = {
         "text": "",
         "full_output_file": None,
-        "was_summarized": False,
-        "needs_self_summary": False,
+        "was_drafted": False,
+        "needs_self_draft": False,
         "artifacts": {},
         "context_summary": None,
         "expectations": None,
@@ -162,20 +162,20 @@ def _make_summarized_response(**kwargs):
 @pytest.mark.asyncio
 class TestSelfSummaryFallback:
     async def test_steering_injected_when_session_available(self):
-        """When needs_self_summary=True and session available, push steering and return sentinel."""
+        """When needs_self_draft=True and session available, push steering and return sentinel."""
         from bridge.response import send_response_with_files
-        from bridge.summarizer import STEERING_DEFERRED
+        from bridge.message_drafter import STEERING_DEFERRED
 
         session = _make_session(session_id="test-123")
         mock_client = AsyncMock()
 
-        summarized = _make_summarized_response(needs_self_summary=True)
+        summarized = _make_summarized_response(needs_self_draft=True)
         mock_push = MagicMock()
         mock_peek = MagicMock(return_value=None)  # No prior steering message
 
         with (
             patch(
-                "bridge.summarizer.summarize_response",
+                "bridge.message_drafter.draft_message",
                 new_callable=AsyncMock,
                 return_value=summarized,
             ),
@@ -198,20 +198,20 @@ class TestSelfSummaryFallback:
         assert call_args[1]["sender"] == "summarizer-fallback"
 
     async def test_no_session_falls_through_to_narration_gate(self):
-        """When needs_self_summary=True but no session, apply narration gate."""
+        """When needs_self_draft=True but no session, apply narration gate."""
         from bridge.response import send_response_with_files
 
         # No session_id on the session
         session = _make_session(session_id=None)
         mock_client = AsyncMock()
 
-        summarized = _make_summarized_response(needs_self_summary=True)
+        summarized = _make_summarized_response(needs_self_draft=True)
         # Must be >= 200 chars to trigger summarizer path
         long_narration = "Let me investigate the configuration. " * 10
 
         with (
             patch(
-                "bridge.summarizer.summarize_response",
+                "bridge.message_drafter.draft_message",
                 new_callable=AsyncMock,
                 return_value=summarized,
             ),
@@ -239,13 +239,13 @@ class TestSelfSummaryFallback:
         session = _make_session(session_id=None)
         mock_client = AsyncMock()
 
-        summarized = _make_summarized_response(needs_self_summary=True)
+        summarized = _make_summarized_response(needs_self_draft=True)
         # Must be >= 200 chars to trigger summarizer path
         narration_text = "Let me check the configuration. " * 10
 
         with (
             patch(
-                "bridge.summarizer.summarize_response",
+                "bridge.message_drafter.draft_message",
                 new_callable=AsyncMock,
                 return_value=summarized,
             ),
@@ -272,14 +272,14 @@ class TestSelfSummaryFallback:
         session = _make_session(session_id="test-loop")
         mock_client = AsyncMock()
 
-        summarized = _make_summarized_response(needs_self_summary=True)
+        summarized = _make_summarized_response(needs_self_draft=True)
         # peek_steering_sender returns "summarizer-fallback" indicating already pending
         mock_peek = MagicMock(return_value="summarizer-fallback")
         mock_push = MagicMock()
 
         with (
             patch(
-                "bridge.summarizer.summarize_response",
+                "bridge.message_drafter.draft_message",
                 new_callable=AsyncMock,
                 return_value=summarized,
             ),
@@ -299,6 +299,6 @@ class TestSelfSummaryFallback:
         # Should NOT have pushed another steering message
         mock_push.assert_not_called()
         # Should NOT have returned STEERING_DEFERRED
-        from bridge.summarizer import STEERING_DEFERRED
+        from bridge.message_drafter import STEERING_DEFERRED
 
         assert result != STEERING_DEFERRED

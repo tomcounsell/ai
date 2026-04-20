@@ -2,7 +2,7 @@
 and implements the delivery review gate for Telegram-triggered sessions.
 
 The review gate gives the agent final say over its output:
-1. First stop -> summarize raw output into a draft, present choices to agent
+1. First stop -> draft raw output into a message, present choices to agent
 2. Agent picks SEND / EDIT / REACT / SILENT / CONTINUE
 3. Second stop -> parse choice, write delivery instruction to AgentSession
 4. Bridge reads delivery instruction and executes accordingly
@@ -88,14 +88,14 @@ def _detect_false_stop(output_tail: str) -> bool:
 
 
 async def _generate_draft(output_tail: str, session_id: str) -> str:
-    """Run the summarizer on agent output to create a draft message."""
+    """Run the drafter on agent output to create a draft message."""
     try:
-        from bridge.summarizer import summarize_response
+        from bridge.message_drafter import draft_message
 
-        result = await summarize_response(output_tail)
+        result = await draft_message(output_tail)
         return result.text if hasattr(result, "text") else str(result)
     except Exception as e:
-        logger.warning(f"[stop_hook] Summarizer failed for {session_id}: {e}")
+        logger.warning(f"[stop_hook] Drafter failed for {session_id}: {e}")
         return output_tail[:500] if len(output_tail) > 500 else output_tail
 
 
@@ -207,7 +207,7 @@ async def stop_hook(
     Implements the delivery review gate for Telegram-triggered sessions.
 
     Review gate flow:
-    1. First stop: generate draft from summarizer, present choices, block
+    1. First stop: generate draft from drafter, present choices, block
     2. Agent responds with SEND/EDIT/REACT/SILENT/CONTINUE
     3. Second stop: parse choice, write to AgentSession, allow completion
     """

@@ -536,13 +536,13 @@ async def send_response_with_files(
     should_summarize = not pm_bypass and text and (is_sdlc or len(text) >= 200)
     if should_summarize:
         try:
-            from bridge.summarizer import summarize_response
+            from bridge.message_drafter import draft_message
 
-            summarized = await summarize_response(text, session=session)
+            summarized = await draft_message(text, session=session)
             text = summarized.text
             if summarized.full_output_file:
                 files.append(summarized.full_output_file)
-            if summarized.was_summarized:
+            if summarized.was_drafted:
                 logger.info(f"Summarized response: {len(response)} -> {len(text)} chars")
 
             # ── Self-summary fallback via session steering ──
@@ -550,7 +550,7 @@ async def send_response_with_files(
             # asking the agent to self-summarize. Send any files immediately
             # (they would be lost if deferred), then return the STEERING_DEFERRED
             # sentinel so the bridge callback knows this is intentional.
-            if summarized.needs_self_summary:
+            if summarized.needs_self_draft:
                 _session_id = getattr(session, "session_id", None) if session else None
                 _should_steer = bool(_session_id)
 
@@ -581,15 +581,15 @@ async def send_response_with_files(
                     # Push the self-summary instruction to the session steering queue
                     try:
                         from agent.steering import push_steering_message
-                        from bridge.summarizer import SELF_SUMMARY_INSTRUCTION
+                        from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
 
                         push_steering_message(
                             _session_id,
-                            SELF_SUMMARY_INSTRUCTION,
+                            SELF_DRAFT_INSTRUCTION,
                             sender="summarizer-fallback",
                         )
                         logger.info(f"Injected self-summary steering for session {_session_id}")
-                        from bridge.summarizer import STEERING_DEFERRED
+                        from bridge.message_drafter import STEERING_DEFERRED
 
                         return STEERING_DEFERRED  # type: ignore[return-value]
                     except Exception as steer_err:
@@ -612,7 +612,7 @@ async def send_response_with_files(
                         logger.info("Narration gate triggered on fallback path")
                     else:
                         # Not narration — truncate as last resort
-                        from bridge.summarizer import SAFETY_TRUNCATE
+                        from bridge.message_drafter import SAFETY_TRUNCATE
 
                         if len(_fallback_text) > SAFETY_TRUNCATE:
                             text = _fallback_text[: SAFETY_TRUNCATE - 3] + "..."
@@ -620,7 +620,7 @@ async def send_response_with_files(
                             text = _fallback_text
                 except Exception:
                     # is_narration_only raised — deliver as-is (non-fatal)
-                    from bridge.summarizer import SAFETY_TRUNCATE
+                    from bridge.message_drafter import SAFETY_TRUNCATE
 
                     if len(response) > SAFETY_TRUNCATE:
                         text = response[: SAFETY_TRUNCATE - 3] + "..."
@@ -628,7 +628,7 @@ async def send_response_with_files(
                         text = response
 
             # Persist semantic routing fields to session for future routing
-            if session and summarized.was_summarized:
+            if session and summarized.was_drafted:
                 try:
                     if summarized.context_summary:
                         session.context_summary = summarized.context_summary

@@ -2194,7 +2194,7 @@ async def main():
                             # Check for steering deferral sentinel — message was
                             # intentionally held back for agent self-summary, not a
                             # send failure. Don't store or log an error.
-                            from bridge.summarizer import STEERING_DEFERRED
+                            from bridge.message_drafter import STEERING_DEFERRED
 
                             if sent == STEERING_DEFERRED:
                                 logger.info(

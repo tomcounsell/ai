@@ -1,7 +1,7 @@
 """
-Response summarization for Telegram delivery.
+Message drafting for user-visible delivery.
 
-Long agent responses are summarized into concise PM-facing messages
+Long agent responses are drafted into concise PM-facing messages
 using Haiku (primary) or OpenRouter (fallback). Key artifacts
 (commit hashes, URLs, PRs) are extracted and preserved.
 
@@ -11,7 +11,7 @@ for attachment.
 Output classification determines whether agent output needs human
 input (question/blocker) or can auto-continue (status/completion).
 
-Anti-fabrication rule: The summarizer must NEVER fabricate questions
+Anti-fabrication rule: The drafter must NEVER fabricate questions
 that are not verbatim present in the raw agent output. Only explicit
 questions (sentences ending in "?" directed at the human) may appear
 in the "?" section or set the expectations field. Declarative statements
@@ -60,7 +60,7 @@ def _safe_float(env_key: str, default: float) -> float:
 # FILE_ATTACH_THRESHOLD: character count above which the full agent response is
 # also sent as a .txt file attachment. Valid range: 500-10000 (default 3000).
 FILE_ATTACH_THRESHOLD = _safe_int("FILE_ATTACH_THRESHOLD", 3000)
-# SAFETY_TRUNCATE: hard ceiling in characters when all summarization backends
+# SAFETY_TRUNCATE: hard ceiling in characters when all drafting backends
 # fail and we must truncate the raw text. Valid range: 1000-8192 (default 4096).
 SAFETY_TRUNCATE = _safe_int("SAFETY_TRUNCATE", 4096)
 
@@ -136,7 +136,7 @@ def _extract_open_questions(text: str) -> list[str]:
 
 
 def _strip_process_narration(text: str) -> str:
-    """Strip process narration lines from agent output before summarization.
+    """Strip process narration lines from agent output before drafting.
 
     Removes lines like "Let me check...", "Now let me read..." that are
     process noise, not meaningful content. Only strips if meaningful content
@@ -191,10 +191,10 @@ class ClassificationResult:
 
 
 @dataclass
-class StructuredSummary:
-    """Structured output from the summarizer's tool_use call.
+class StructuredDraft:
+    """Structured output from the drafter's tool_use call.
 
-    Contains the three routing fields produced by the structured_summary tool:
+    Contains the three routing fields produced by the structured_draft tool:
     - context_summary: one-sentence session topic for routing
     - response: the Telegram-formatted message text
     - expectations: what the agent needs from the human, or None
@@ -205,10 +205,10 @@ class StructuredSummary:
     expectations: str | None
 
 
-# Tool schema for structured summarizer output via tool_use
-STRUCTURED_SUMMARY_TOOL = {
-    "name": "structured_summary",
-    "description": "Produce a structured summary of the developer session output.",
+# Tool schema for structured drafter output via tool_use
+STRUCTURED_DRAFT_TOOL = {
+    "name": "structured_draft",
+    "description": "Produce a structured draft of the developer session output.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -238,13 +238,13 @@ STRUCTURED_SUMMARY_TOOL = {
 
 
 @dataclass
-class SummarizedResponse:
-    """Result of summarizing an agent response."""
+class MessageDraft:
+    """Result of drafting an agent response."""
 
     text: str
     full_output_file: Path | None = None
-    was_summarized: bool = False
-    needs_self_summary: bool = False
+    was_drafted: bool = False
+    needs_self_draft: bool = False
     artifacts: dict[str, list[str]] = field(default_factory=dict)
     context_summary: str | None = None
     expectations: str | None = None
@@ -360,7 +360,7 @@ COMPLETION — The work is done AND evidence is provided, OR the user's question
   Path B — Conversational/Teammate completion (no evidence needed):
   When the user asked a question and the agent answered it with factual, substantive content.
   DOES NOT require test output, numbers, or URLs — the answer itself IS the deliverable.
-  Examples: "The summarizer works by...", "Here's how the routing system handles...", \
+  Examples: "The drafter works by...", "Here's how the routing system handles...", \
 "The bridge uses Telethon to...", "There are 3 main components: ..."
   Key signals: explanatory prose, factual descriptions, architecture explanations, \
 direct answers to "how does X work?" or "what is X?" questions
@@ -411,7 +411,7 @@ writing code directly."}
 
 Few-shot examples of Teammate completions (Path B — no evidence needed):
 
-Input: "The summarizer works by classifying agent output into types (question, status, \
+Input: "The drafter works by classifying agent output into types (question, status, \
 completion, blocker, error) using an LLM call. Status updates are auto-continued while \
 completions and questions are delivered to Telegram. The structured format uses bullet \
 points with stage progress lines for SDLC work."
@@ -457,7 +457,7 @@ Output: {"type": "status", "confidence": 0.95, \
 Show a commit hash, file path, or memory entry — or admit no change was made.", \
 "has_workarounds": false}
 
-Input: "Updated bridge/summarizer.py to reject empty promises. Committed abc1234."
+Input: "Updated bridge/message_drafter.py to reject empty promises. Committed abc1234."
 Output: {"type": "completion", "confidence": 0.90, \
 "reason": "Concrete action taken with evidence — file path and commit hash", \
 "nudge_feedback": null, "has_workarounds": false}"""
@@ -888,7 +888,7 @@ def _linkify_references(text: str, session) -> str:
     actual implementation. This wrapper preserves the existing call signature.
 
     Args:
-        text: The summary text potentially containing PR #N or Issue #N
+        text: The draft text potentially containing PR #N or Issue #N
         session: AgentSession with project_key field
 
     Returns:
@@ -941,12 +941,12 @@ def _get_status_emoji(session, is_completion: bool = True) -> str:
     return "⏳"
 
 
-def _build_summary_prompt(
+def _build_draft_prompt(
     text: str,
     artifacts: dict[str, list[str]],
     session=None,
 ) -> str:
-    """Build the summarization prompt.
+    """Build the drafting prompt.
 
     The system prompt handles format rules. This provides the content,
     extracted artifacts, and optional session context for enrichment.
@@ -991,7 +991,7 @@ def _build_summary_prompt(
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
     return f"""/no_think
-Summarize this developer session output:{artifact_section}{context_section}
+Draft a message from this developer session output:{artifact_section}{context_section}
 
 {text}"""
 
@@ -1004,10 +1004,10 @@ def _write_full_output_file(text: str) -> Path:
     return Path(path)
 
 
-SUMMARIZER_SYSTEM_PROMPT = """\
+DRAFTER_SYSTEM_PROMPT = """\
 You condense a developer's messages into Telegram-length updates for a project manager.
 
-You produce STRUCTURED OUTPUT with three fields via the structured_summary tool:
+You produce STRUCTURED OUTPUT with three fields via the structured_draft tool:
 
 1. **context_summary**: One sentence describing what this session is about. Be specific \
 about the topic and scope (e.g., "Implementing semantic session routing for unthreaded \
@@ -1135,11 +1135,11 @@ stakeholder-friendly language describing the feature or behavior affected."""
 # NOT blockers: code bugs (agent can fix), test failures (agent can debug), implementation
 # decisions (agent should decide), finding the right approach (agent's job).
 
-# Compact self-summary instruction injected via session steering when all summarizer
-# backends fail. Derived from SUMMARIZER_SYSTEM_PROMPT quality rules but kept short
+# Compact self-draft instruction injected via session steering when all drafter
+# backends fail. Derived from DRAFTER_SYSTEM_PROMPT quality rules but kept short
 # to avoid polluting the agent's context window.
-SELF_SUMMARY_INSTRUCTION = (
-    "Your previous output could not be summarized by the automated summarizer. "
+SELF_DRAFT_INSTRUCTION = (
+    "Your previous output could not be drafted by the automated drafter. "
     "Please re-state your output as a concise update for the project manager. "
     "Rules: lead with outcomes, not process. Use 2-4 bullet points starting with "
     '"\\u2022 ". Omit internal code details, line counts, and plans for next steps. '
@@ -1148,24 +1148,24 @@ SELF_SUMMARY_INSTRUCTION = (
     "If your work produced no substantive results, say so plainly."
 )
 
-# Sentinel returned by send_response_with_files when self-summary steering was
-# injected. Distinguishes "message deferred to agent self-summary" from "send
+# Sentinel returned by send_response_with_files when self-draft steering was
+# injected. Distinguishes "message deferred to agent self-draft" from "send
 # failed" so the bridge callback does not log a spurious error.
 STEERING_DEFERRED = "STEERING_DEFERRED"
 
 
-async def _summarize_with_haiku(prompt: str) -> StructuredSummary | None:
-    """Try structured summarization via Anthropic Haiku API using tool_use.
+async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
+    """Try structured drafting via Anthropic Haiku API using tool_use.
 
-    Returns a StructuredSummary with context_summary, response, and expectations
-    fields extracted via the structured_summary tool. Falls back to text-only
-    Haiku if tool_use fails, wrapping the result in a StructuredSummary with
+    Returns a StructuredDraft with context_summary, response, and expectations
+    fields extracted via the structured_draft tool. Falls back to text-only
+    Haiku if tool_use fails, wrapping the result in a StructuredDraft with
     empty routing fields.
     """
     try:
         api_key = get_anthropic_api_key()
         if not api_key:
-            logger.warning("No Anthropic API key found for summarization")
+            logger.warning("No Anthropic API key found for drafting")
             return None
 
         client = anthropic.AsyncAnthropic(api_key=api_key)
@@ -1175,17 +1175,17 @@ async def _summarize_with_haiku(prompt: str) -> StructuredSummary | None:
             response = await client.messages.create(
                 model=MODEL_FAST,
                 max_tokens=1024,
-                system=SUMMARIZER_SYSTEM_PROMPT,
+                system=DRAFTER_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
-                tools=[STRUCTURED_SUMMARY_TOOL],
-                tool_choice={"type": "tool", "name": "structured_summary"},
+                tools=[STRUCTURED_DRAFT_TOOL],
+                tool_choice={"type": "tool", "name": "structured_draft"},
             )
 
             # Parse tool_use response — tool_use returns the input dict directly
             for block in response.content:
-                if block.type == "tool_use" and block.name == "structured_summary":
+                if block.type == "tool_use" and block.name == "structured_draft":
                     tool_input = block.input
-                    return StructuredSummary(
+                    return StructuredDraft(
                         context_summary=tool_input.get("context_summary", ""),
                         response=tool_input.get("response", ""),
                         expectations=tool_input.get("expectations"),
@@ -1199,22 +1199,22 @@ async def _summarize_with_haiku(prompt: str) -> StructuredSummary | None:
         response = await client.messages.create(
             model=MODEL_FAST,
             max_tokens=512,
-            system=SUMMARIZER_SYSTEM_PROMPT,
+            system=DRAFTER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
         text_result = response.content[0].text
-        return StructuredSummary(
+        return StructuredDraft(
             context_summary="",
             response=text_result,
             expectations=None,
         )
     except Exception as e:
-        logger.warning(f"Haiku summarization failed: {e}")
+        logger.warning(f"Haiku drafting failed: {e}")
         return None
 
 
-async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
-    """Fallback: summarize via OpenRouter API (Haiku model).
+async def _draft_with_openrouter(prompt: str) -> StructuredDraft | None:
+    """Fallback: draft via OpenRouter API (Haiku model).
 
     Uses the OpenRouter chat completions endpoint with tool_use for structured
     output. Falls back to text-only if tool_use fails. Requires OPENROUTER_API_KEY
@@ -1222,7 +1222,7 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
     """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        logger.warning("No OPENROUTER_API_KEY found for summarization fallback")
+        logger.warning("No OPENROUTER_API_KEY found for drafting fallback")
         return None
 
     try:
@@ -1230,9 +1230,9 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
         openrouter_tool = {
             "type": "function",
             "function": {
-                "name": STRUCTURED_SUMMARY_TOOL["name"],
-                "description": STRUCTURED_SUMMARY_TOOL["description"],
-                "parameters": STRUCTURED_SUMMARY_TOOL["input_schema"],
+                "name": STRUCTURED_DRAFT_TOOL["name"],
+                "description": STRUCTURED_DRAFT_TOOL["description"],
+                "parameters": STRUCTURED_DRAFT_TOOL["input_schema"],
             },
         }
 
@@ -1246,13 +1246,13 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
             payload = {
                 "model": OPENROUTER_HAIKU,
                 "messages": [
-                    {"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT},
+                    {"role": "system", "content": DRAFTER_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
                 "tools": [openrouter_tool],
                 "tool_choice": {
                     "type": "function",
-                    "function": {"name": "structured_summary"},
+                    "function": {"name": "structured_draft"},
                 },
                 "max_tokens": 1024,
             }
@@ -1266,9 +1266,9 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
             message = data.get("choices", [{}])[0].get("message", {})
             tool_calls = message.get("tool_calls", [])
             for tc in tool_calls:
-                if tc.get("function", {}).get("name") == "structured_summary":
+                if tc.get("function", {}).get("name") == "structured_draft":
                     args = json.loads(tc["function"]["arguments"])
-                    return StructuredSummary(
+                    return StructuredDraft(
                         context_summary=args.get("context_summary", ""),
                         response=args.get("response", ""),
                         expectations=args.get("expectations"),
@@ -1282,7 +1282,7 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
         payload = {
             "model": OPENROUTER_HAIKU,
             "messages": [
-                {"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT},
+                {"role": "system", "content": DRAFTER_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": 512,
@@ -1295,14 +1295,14 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
 
         text_result = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         if text_result:
-            return StructuredSummary(
+            return StructuredDraft(
                 context_summary="",
                 response=text_result,
                 expectations=None,
             )
         return None
     except Exception as e:
-        logger.warning(f"OpenRouter summarization failed: {e}")
+        logger.warning(f"OpenRouter drafting failed: {e}")
         return None
 
 
@@ -1323,10 +1323,10 @@ def _normalize_question_prefix(text: str) -> str:
     return "\n".join(normalized)
 
 
-def _parse_summary_and_questions(
+def _parse_draft_and_questions(
     summary_text: str,
 ) -> tuple[str, str | None]:
-    """Parse LLM summary output into bullets and optional questions.
+    """Parse LLM draft output into bullets and optional questions.
 
     The LLM may produce (using >> prefix, or legacy ? prefix):
         * Bullet 1
@@ -1356,8 +1356,8 @@ def _parse_summary_and_questions(
     return summary_text, None
 
 
-def _compose_structured_summary(summary_text: str, session=None, is_completion: bool = True) -> str:
-    """Compose the full structured summary with emoji, stage line, bullets, questions, and links.
+def _compose_structured_draft(summary_text: str, session=None, is_completion: bool = True) -> str:
+    """Compose the full structured draft with emoji, stage line, bullets, questions, and links.
 
     Two modes:
 
@@ -1387,17 +1387,17 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
             fresh_sessions = list(AgentSession.query.filter(session_id=session.session_id))
             if fresh_sessions:
                 session = fresh_sessions[0]
-                logger.debug(f"Refreshed session {session.session_id} for structured summary")
+                logger.debug(f"Refreshed session {session.session_id} for structured draft")
         except Exception as e:
-            logger.debug(f"Could not refresh session for summary: {e}")
+            logger.debug(f"Could not refresh session for draft: {e}")
 
     # Teammate bypass: return prose directly without emoji prefix, bullet parsing,
-    # or structured template. The LLM summary is already in conversational form.
+    # or structured template. The LLM draft is already in conversational form.
     if session and (getattr(session, "session_mode", None) == PersonaType.TEAMMATE):
         return summary_text.strip()
 
     # Parse questions from LLM output
-    bullets, questions = _parse_summary_and_questions(summary_text)
+    bullets, questions = _parse_draft_and_questions(summary_text)
 
     parts = []
 
@@ -1420,17 +1420,17 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
     return result
 
 
-async def summarize_response(
+async def draft_message(
     raw_response: str,
     session=None,
-) -> SummarizedResponse:
-    """Summarize an agent response for Telegram delivery.
+) -> MessageDraft:
+    """Draft an agent response for Telegram delivery.
 
     Uses structured tool_use output to extract context_summary, response,
     and expectations fields. Fallback chain: Haiku tool_use -> Haiku text ->
     OpenRouter tool_use -> OpenRouter text -> raw truncation.
 
-    - All non-empty responses: summarized via Haiku, then OpenRouter fallback
+    - All non-empty responses: drafted via Haiku, then OpenRouter fallback
     - Very long responses (> FILE_ATTACH_THRESHOLD): full output
       attached as file
     - SDLC sessions: structured template with stage progress + link footer
@@ -1439,15 +1439,15 @@ async def summarize_response(
         raw_response: The raw agent output text.
         session: Optional AgentSession for context enrichment.
 
-    Falls back to safety truncation if all summarization fails.
+    Falls back to safety truncation if all drafting fails.
     """
     if not raw_response or not raw_response.strip():
         # Even with empty response, render SDLC progress if available
         if session:
-            fallback = _compose_structured_summary("", session=session, is_completion=True)
+            fallback = _compose_structured_draft("", session=session, is_completion=True)
             if fallback.strip():
-                return SummarizedResponse(text=fallback, was_summarized=True)
-        return SummarizedResponse(text=raw_response or "", was_summarized=False)
+                return MessageDraft(text=fallback, was_drafted=True)
+        return MessageDraft(text=raw_response or "", was_drafted=False)
 
     artifacts = extract_artifacts(raw_response)
 
@@ -1459,24 +1459,24 @@ async def summarize_response(
         except Exception as e:
             logger.warning(f"Failed to write full output file: {e}")
 
-    # Strip process narration before summarization
+    # Strip process narration before drafting
     cleaned_response = _strip_process_narration(raw_response)
 
     # Build prompt once, try multiple backends
-    prompt = _build_summary_prompt(cleaned_response, artifacts, session=session)
+    prompt = _build_draft_prompt(cleaned_response, artifacts, session=session)
 
     # Try Haiku first, then OpenRouter
-    structured = await _summarize_with_haiku(prompt)
+    structured = await _draft_with_haiku(prompt)
     if structured is None:
-        logger.info("Falling back to OpenRouter for summarization")
-        structured = await _summarize_with_openrouter(prompt)
+        logger.info("Falling back to OpenRouter for drafting")
+        structured = await _draft_with_openrouter(prompt)
 
     if structured is not None:
         summary_text = structured.response
 
-        # Safety: if summary is somehow longer than original, truncate
+        # Safety: if draft is somehow longer than original, truncate
         if len(summary_text) >= len(raw_response):
-            logger.warning("Summary longer than original, using truncated original")
+            logger.warning("Draft longer than original, using truncated original")
             if len(raw_response) > SAFETY_TRUNCATE:
                 summary_text = raw_response[: SAFETY_TRUNCATE - 3] + "..."
             else:
@@ -1498,28 +1498,26 @@ async def summarize_response(
                 )
 
         # Compose structured output with stage progress and links
-        summary_text = _compose_structured_summary(
-            summary_text, session=session, is_completion=True
-        )
+        summary_text = _compose_structured_draft(summary_text, session=session, is_completion=True)
 
-        return SummarizedResponse(
+        return MessageDraft(
             text=summary_text,
             full_output_file=full_output_file,
-            was_summarized=True,
+            was_drafted=True,
             artifacts=artifacts,
             context_summary=structured.context_summary or None,
             expectations=expectations,
         )
 
-    # All backends failed — signal self-summary via session steering instead
+    # All backends failed — signal self-draft via session steering instead
     # of delivering raw truncated text. The caller (send_response_with_files)
-    # will push a steering message and the agent will self-summarize on its
+    # will push a steering message and the agent will self-draft on its
     # next turn. Files and artifacts are preserved for immediate delivery.
-    logger.error("All summarization backends failed, requesting self-summary via steering")
-    return SummarizedResponse(
+    logger.error("All drafting backends failed, requesting self-draft via steering")
+    return MessageDraft(
         text="",
         full_output_file=full_output_file,
-        was_summarized=False,
-        needs_self_summary=True,
+        was_drafted=False,
+        needs_self_draft=True,
         artifacts=artifacts,
     )
