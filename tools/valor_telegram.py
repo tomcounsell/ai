@@ -297,7 +297,7 @@ def _linkify_text(text: str) -> str:
     text if the formatting module is unavailable.
     """
     try:
-        from bridge.formatting import linkify_references
+        from bridge.message_drafter import linkify_references
 
         project_key = os.environ.get("PROJECT_KEY", "ai")
         return linkify_references(text, project_key)

@@ -48,11 +48,11 @@ def _get_redis_connection():
 def _linkify_text(text: str) -> str:
     """Apply PR/Issue linkification to the message text.
 
-    Uses bridge.formatting.linkify_references with a default project key
+    Uses bridge.message_drafter.linkify_references with a default project key
     derived from the environment, falling back to 'ai' (this project).
     """
     try:
-        from bridge.formatting import linkify_references
+        from bridge.message_drafter import linkify_references
 
         # Try to get project key from session context
         project_key = os.environ.get("PROJECT_KEY", "ai")

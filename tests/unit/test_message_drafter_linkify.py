@@ -1,8 +1,8 @@
-"""Tests for bridge/formatting.py -- shared formatting utilities."""
+"""Tests for linkify helpers in bridge/message_drafter.py."""
 
 from unittest.mock import MagicMock, patch
 
-from bridge.formatting import linkify_references, linkify_references_from_session
+from bridge.message_drafter import linkify_references, linkify_references_from_session
 
 
 class TestLinkifyReferences:
@@ -11,7 +11,7 @@ class TestLinkifyReferences:
     def test_linkifies_pr_reference(self):
         """Should convert 'PR #42' to a markdown link."""
         mock_config = {"projects": {"ai": {"github": {"org": "tomcounsell", "repo": "ai"}}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("bridge.routing.load_config", return_value=mock_config):
             result = linkify_references("See PR #42 for details", "ai")
 
         assert "[PR #42](https://github.com/tomcounsell/ai/pull/42)" in result
@@ -19,7 +19,7 @@ class TestLinkifyReferences:
     def test_linkifies_issue_reference(self):
         """Should convert 'Issue #100' to a markdown link."""
         mock_config = {"projects": {"ai": {"github": {"org": "tomcounsell", "repo": "ai"}}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("bridge.routing.load_config", return_value=mock_config):
             result = linkify_references("Fix for Issue #100", "ai")
 
         assert "[Issue #100](https://github.com/tomcounsell/ai/issues/100)" in result
@@ -28,7 +28,7 @@ class TestLinkifyReferences:
         """Should not re-link already-linked references."""
         already_linked = "[PR #42](https://github.com/tomcounsell/ai/pull/42)"
         mock_config = {"projects": {"ai": {"github": {"org": "tomcounsell", "repo": "ai"}}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("bridge.routing.load_config", return_value=mock_config):
             result = linkify_references(already_linked, "ai")
 
         # Should not contain double brackets
@@ -42,7 +42,7 @@ class TestLinkifyReferences:
     def test_returns_text_unchanged_without_github_config(self):
         """Should return text as-is when GitHub config missing."""
         mock_config = {"projects": {"ai": {}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("bridge.routing.load_config", return_value=mock_config):
             result = linkify_references("See PR #42", "ai")
 
         assert result == "See PR #42"
@@ -66,7 +66,7 @@ class TestLinkifyFromSession:
         mock_session = MagicMock()
         mock_session.project_key = "ai"
 
-        with patch("bridge.formatting.linkify_references") as mock_linkify:
+        with patch("bridge.message_drafter.linkify_references") as mock_linkify:
             mock_linkify.return_value = "linked text"
             result = linkify_references_from_session("some text", mock_session)
 

@@ -1821,14 +1821,14 @@ class TestLinkifyReferences:
     def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
         """Set up project config mock for testing.
 
-        Patches bridge.formatting.load_config to return a config with the
+        Patches bridge.routing.load_config to return a config with the
         specified GitHub org/repo, replacing the old register_project_config approach.
         """
         self._project_configs[project_key] = {"github": {"org": org, "repo": repo}}
         mock_config = {"projects": self._project_configs}
         if self._patcher:
             self._patcher.stop()
-        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
+        self._patcher = patch("bridge.routing.load_config", return_value=mock_config)
         self._patcher.start()
 
     def test_pr_reference_linkified(self):
@@ -1881,7 +1881,7 @@ class TestLinkifyReferences:
         mock_config = {"projects": self._project_configs}
         if self._patcher:
             self._patcher.stop()
-        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
+        self._patcher = patch("bridge.routing.load_config", return_value=mock_config)
         self._patcher.start()
         session = self._make_session("no-github")
         result = _linkify_references("PR #323", session)
