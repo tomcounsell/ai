@@ -1420,11 +1420,20 @@ def _compose_structured_draft(summary_text: str, session=None, is_completion: bo
     return result
 
 
+# Short-output early return threshold (D5a): texts shorter than this skip the
+# LLM drafter and return as-is. 200 chars matches the current bridge/response.py
+# threshold and bounds per-message latency on short replies.
+SHORT_OUTPUT_THRESHOLD = 200
+
+
 async def draft_message(
     raw_response: str,
     session=None,
+    *,
+    medium: str = "telegram",
+    persona: str | None = None,
 ) -> MessageDraft:
-    """Draft an agent response for Telegram delivery.
+    """Draft an agent response for user-visible delivery.
 
     Uses structured tool_use output to extract context_summary, response,
     and expectations fields. Fallback chain: Haiku tool_use -> Haiku text ->
@@ -1434,10 +1443,17 @@ async def draft_message(
     - Very long responses (> FILE_ATTACH_THRESHOLD): full output
       attached as file
     - SDLC sessions: structured template with stage progress + link footer
+    - Short non-SDLC outputs (<200 chars): bypass the LLM drafter entirely
 
     Args:
         raw_response: The raw agent output text.
         session: Optional AgentSession for context enrichment.
+        medium: Delivery medium discriminator. Currently "telegram" (default)
+            or "email". Per-medium prompt/validator rules are planned; this
+            parameter is wired through now so output handlers can pass it
+            without further signature changes.
+        persona: Optional persona name (pm/dev/teammate/customer-service) for
+            tone hints. Not used today — medium and persona stay orthogonal.
 
     Falls back to safety truncation if all drafting fails.
     """
@@ -1450,6 +1466,29 @@ async def draft_message(
         return MessageDraft(text=raw_response or "", was_drafted=False)
 
     artifacts = extract_artifacts(raw_response)
+
+    # Short-output early return: skip the LLM call for brief non-SDLC replies
+    # (per Risk 1 + D5a in docs/plans/message-drafter.md — bounds per-message
+    # latency). Skip only when *all* conditions hold:
+    #   - len < 200 chars
+    #   - no SDLC session (SDLC needs stage progress + link footer)
+    #   - no artifacts (commit hashes, PRs, URLs deserve drafter polish)
+    #   - no explicit question to the human (? triggers expectations handling)
+    #   - no fenced code block (preserve formatting)
+    is_sdlc = bool(session and getattr(session, "sdlc_slug", None))
+    has_any_artifacts = any(v for v in artifacts.values())
+    if (
+        len(raw_response) < SHORT_OUTPUT_THRESHOLD
+        and not is_sdlc
+        and not has_any_artifacts
+        and "?" not in raw_response
+        and "```" not in raw_response
+    ):
+        return MessageDraft(
+            text=raw_response,
+            was_drafted=False,
+            artifacts=artifacts,
+        )
 
     # Write full output file for very long responses
     full_output_file = None

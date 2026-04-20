@@ -363,9 +363,7 @@ class TestSummarizeWithSession:
         from bridge.message_drafter import StructuredDraft, draft_message
 
         mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="", response="Done ✅", expectations=None
-            )
+            return_value=StructuredDraft(context_summary="", response="Done ✅", expectations=None)
         )
         with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
             result = await draft_message("Done.", session=None)

@@ -79,9 +79,7 @@ async def test_response_summarizer_wiring():
     ):
         from bridge.message_drafter import MessageDraft
 
-        mock_summarize.return_value = MessageDraft(
-            text="Summarized output", was_drafted=True
-        )
+        mock_summarize.return_value = MessageDraft(text="Summarized output", was_drafted=True)
 
         # Make the session query return our mock
         mock_agent_session_cls.query.filter.return_value = [mock_session]

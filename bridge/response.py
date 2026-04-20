@@ -399,7 +399,7 @@ async def send_response_with_files(
     Callers that only need a truthy/falsy check can still use `if sent:`.
 
     Args:
-        session: Optional AgentSession for summarizer context enrichment.
+        session: Optional AgentSession for drafter context enrichment.
     """
     # Resolve chat_id and reply_to from event or explicit params
     _chat_id = chat_id or (event.chat_id if event else None)
@@ -426,8 +426,8 @@ async def send_response_with_files(
 
     text, files = extract_files_from_response(response)
 
-    # Summarize SDK agent responses for consistent PM-quality output.
-    # SDLC sessions: always summarize (need stage lines + link footers).
+    # Draft SDK agent responses for consistent PM-quality output.
+    # SDLC sessions: always draft (need stage lines + link footers).
     # Non-SDLC short responses (< 200 chars): skip — these are typically
     # programmatic skill output (e.g., /update) that's already formatted.
     # Re-read session from Redis for fresh stage/link data written during execution
@@ -443,7 +443,7 @@ async def send_response_with_files(
 
     # ── Delivery instruction check ──
     # If the stop-hook review gate wrote a delivery instruction, execute it
-    # directly instead of running the summarizer. The agent already reviewed
+    # directly instead of running the drafter. The agent already reviewed
     # and approved the output.
     if session and getattr(session, "delivery_action", None):
         delivery_action = session.delivery_action
@@ -503,12 +503,12 @@ async def send_response_with_files(
             logger.info(f"Delivery: silent for session {getattr(session, 'session_id', 'unknown')}")
             return None
 
-        # Unknown delivery_action → fall through to normal summarizer path
+        # Unknown delivery_action → fall through to normal drafter path
 
     # PM self-messaging bypass: if the PM already sent messages via the
     # send_telegram tool during this session (or its parent PM session in
-    # SDLC flows), skip the summarizer entirely. The PM authored its own
-    # messages — the summarizer would be redundant.
+    # SDLC flows), skip the drafter entirely. The PM authored its own
+    # messages — the drafter would be redundant.
     # Only set emoji reaction (handled by the caller). See issue #497, #571.
     # NOTE: We still send any extracted files (<<FILE:>> markers) before
     # returning, so file attachments are not lost on PM self-message sessions.
@@ -527,7 +527,7 @@ async def send_response_with_files(
         else:
             _bypass_ids = getattr(session, "pm_sent_message_ids", [])
         logger.info(
-            f"Skipping summarizer: PM self-messaged during {pm_bypass_source} "
+            f"Skipping drafter: PM self-messaged during {pm_bypass_source} "
             f"{getattr(session, 'session_id', 'unknown')} "
             f"(pm_sent_message_ids={_bypass_ids})"
         )
@@ -543,11 +543,11 @@ async def send_response_with_files(
             if summarized.full_output_file:
                 files.append(summarized.full_output_file)
             if summarized.was_drafted:
-                logger.info(f"Summarized response: {len(response)} -> {len(text)} chars")
+                logger.info(f"Drafted response: {len(response)} -> {len(text)} chars")
 
-            # ── Self-summary fallback via session steering ──
-            # When all summarizer backends fail, inject a steering message
-            # asking the agent to self-summarize. Send any files immediately
+            # ── Self-draft fallback via session steering ──
+            # When all drafter backends fail, inject a steering message
+            # asking the agent to self-draft. Send any files immediately
             # (they would be lost if deferred), then return the STEERING_DEFERRED
             # sentinel so the bridge callback knows this is intentional.
             if summarized.needs_self_draft:
@@ -556,7 +556,7 @@ async def send_response_with_files(
 
                 # Loop prevention: check if a self-summary steering message was
                 # already pushed for this session (avoids infinite loops if the
-                # agent's self-summary also fails summarization).
+                # agent's self-draft also fails drafting).
                 if _should_steer:
                     try:
                         from agent.steering import peek_steering_sender
@@ -599,7 +599,7 @@ async def send_response_with_files(
                         # Fall through to narration gate below
 
                 # No session available or steering failed — apply narration gate
-                # on the original (pre-summarization) text as last resort
+                # on the original (pre-drafting) text as last resort
                 try:
                     from bridge.message_quality import (
                         NARRATION_FALLBACK_MESSAGE,
@@ -706,7 +706,7 @@ async def send_response_with_files(
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
         finally:
-            # Clean up temp files created by the summarizer
+            # Clean up temp files created by the drafter
             if str(file_path).startswith("/tmp/valor_full_output_"):
                 try:
                     Path(file_path).unlink(missing_ok=True)
@@ -715,9 +715,9 @@ async def send_response_with_files(
                     pass  # Non-fatal: OS will clean /tmp eventually
 
     # PM bypass (dual-personality guard): files have been sent above,
-    # skip text/summarizer output. This prevents sending both PM
-    # self-messages AND a summarized version of the same content.
-    # Guard coverage: pm_bypass blocks summarization AND text sending.
+    # skip text/drafter output. This prevents sending both PM
+    # self-messages AND a drafted version of the same content.
+    # Guard coverage: pm_bypass blocks drafting AND text sending.
     # Return a sentinel truthy value (True casts to int 1 which is truthy) since
     # PM self-messages aren't tracked via the text send path.
     if pm_bypass:

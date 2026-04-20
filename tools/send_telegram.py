@@ -2,7 +2,7 @@
 """Send a Telegram message from the PM session via Redis outbox queue.
 
 This tool is called by the PM session via Bash to compose and send its own
-Telegram messages, bypassing the summarizer. The bridge relay task
+Telegram messages, bypassing the drafter. The bridge relay task
 (bridge/telegram_relay.py) processes the queue and sends via Telethon.
 
 Usage:

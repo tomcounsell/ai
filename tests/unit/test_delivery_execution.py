@@ -163,8 +163,8 @@ def _make_summarized_response(**kwargs):
 class TestSelfSummaryFallback:
     async def test_steering_injected_when_session_available(self):
         """When needs_self_draft=True and session available, push steering and return sentinel."""
-        from bridge.response import send_response_with_files
         from bridge.message_drafter import STEERING_DEFERRED
+        from bridge.response import send_response_with_files
 
         session = _make_session(session_id="test-123")
         mock_client = AsyncMock()

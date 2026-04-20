@@ -273,6 +273,13 @@ class EmailOutputHandler:
     ) -> None:
         """Send agent output as an SMTP reply to the originating email.
 
+        When ``MESSAGE_DRAFTER_IN_HANDLER`` is true (default), the text is
+        routed through ``bridge.message_drafter.draft_message`` with
+        ``medium="email"`` before being wrapped as MIME. This is the same
+        plumbing that the Telegram handler uses — per-medium format rules
+        will eventually live in the drafter (no markdown on the wire for
+        email). See docs/plans/message-drafter.md §Part C.
+
         Args:
             chat_id: The sender's email address (used as the reply-to address).
             text: Agent output text to send.
@@ -289,6 +296,24 @@ class EmailOutputHandler:
             extra = getattr(session, "extra_context", None) or {}
             session_id = getattr(session, "session_id", None)
 
+        # Drafter-at-the-handler (task 7 in plan). Fail open: any exception in
+        # the drafter must not block the email send.
+        drafter_enabled = os.environ.get(
+            "MESSAGE_DRAFTER_IN_HANDLER", "true"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        body_text = text
+        if drafter_enabled:
+            try:
+                from bridge.message_drafter import draft_message
+
+                draft = await draft_message(text, session=session, medium="email")
+                if draft.text:
+                    body_text = draft.text
+            except Exception as e:
+                logger.warning(
+                    "[email] Drafter failed, falling back to raw text: %s", e
+                )
+
         original_message_id = extra.get("email_message_id", "")
         original_subject = extra.get("email_subject", "")
         from_addr = (
@@ -298,7 +323,7 @@ class EmailOutputHandler:
         mime_msg = self._build_reply(
             to_addr=chat_id,
             subject=original_subject,
-            body=text,
+            body=body_text,
             in_reply_to=original_message_id or None,
             references=original_message_id or None,
             from_addr=from_addr,
@@ -310,7 +335,7 @@ class EmailOutputHandler:
             try:
                 await asyncio.to_thread(self._send_smtp, chat_id, mime_msg)
                 logger.info(
-                    f"[email] Sent reply to {chat_id} (session={session_id}, {len(text)} chars)"
+                    f"[email] Sent reply to {chat_id} (session={session_id}, {len(body_text)} chars)"
                 )
 
                 # Store outbound Message-ID for future thread continuation
@@ -346,7 +371,7 @@ class EmailOutputHandler:
                     session_id=session_id,
                     recipient=chat_id,
                     subject=str(mime_msg.get("Subject", "")),
-                    body=text,
+                    body=body_text,
                     headers={
                         "In-Reply-To": str(mime_msg.get("In-Reply-To", "")),
                         "References": str(mime_msg.get("References", "")),

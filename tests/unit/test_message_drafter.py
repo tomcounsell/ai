@@ -17,8 +17,8 @@ from bridge.message_drafter import (
     _parse_classification_response,
     _parse_draft_and_questions,
     classify_output,
-    extract_artifacts,
     draft_message,
+    extract_artifacts,
 )
 from models.agent_session import SDLC_STAGES
 
@@ -99,9 +99,25 @@ class TestDraftMessage:
     """Tests for the main draft_message function."""
 
     @pytest.mark.asyncio
-    async def test_short_response_still_summarized(self):
-        """All non-empty responses are summarized (no threshold)."""
+    async def test_short_response_skips_drafter(self):
+        """Non-SDLC responses under 200 chars bypass the drafter entirely (D5a).
+
+        The short-output early-return bounds per-message latency on brief
+        replies — see docs/plans/message-drafter.md Risk 1 + D5a.
+        """
         short_text = "Done. Committed abc1234."
+        mock_haiku = AsyncMock()  # should not be called
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(short_text)
+        # Raw text returned verbatim; drafter was skipped.
+        assert result.text == short_text
+        assert result.was_drafted is False
+        mock_haiku.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_long_response_still_uses_drafter(self):
+        """Responses >=200 chars trigger the drafter even without SDLC context."""
+        long_text = "Done and committed. " * 30  # 600 chars
         mock_haiku = AsyncMock(
             return_value=StructuredDraft(
                 context_summary="Committed changes",
@@ -110,7 +126,7 @@ class TestDraftMessage:
             )
         )
         with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(short_text)
+            result = await draft_message(long_text)
         assert result.was_drafted is True
         mock_haiku.assert_called_once()
 
