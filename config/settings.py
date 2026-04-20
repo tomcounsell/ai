@@ -176,23 +176,11 @@ class ModelSettings(BaseModel):
 
 
 class FeatureSettings(BaseModel):
-    """Feature-flag configuration for optional behaviours.
+    """Structural placeholder for future feature flags.
 
-    These are startup-config flags (read once at process start), not
-    runtime-toggleable. Default values represent the desired end state;
-    flags exist as a safety net for quick rollback when a feature ships.
+    All flags are startup-config (read once at process start); default values
+    should represent the desired end state, not legacy behavior.
     """
-
-    message_drafter_in_handler: bool = Field(
-        default=True,
-        description=(
-            "Route OutputHandler.send() invocations through "
-            "bridge.message_drafter.draft_message before the payload reaches "
-            "the wire. When True (default), the worker-side send_cb path is "
-            "drafter-compliant on every medium. See docs/plans/message-drafter.md "
-            "§Part C. Flip to False only for emergency rollback."
-        ),
-    )
 
 
 class PathSettings(BaseModel):

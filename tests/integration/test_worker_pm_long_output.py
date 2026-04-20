@@ -14,12 +14,11 @@ This test bypasses the real worker process and tests the output-handler
 boundary directly — the handler is the single funnel all PM/Dev output must
 pass through. We verify:
 
-(a) Drafter enabled (default): 4800 chars → payload.text ≤ 4096 AND
-    payload.file_paths contains the .txt file with the raw content.
-(b) Drafter disabled (MESSAGE_DRAFTER_IN_HANDLER=0 rollback): 4800 chars →
-    payload.text is the raw 4800 chars, proving the flag genuinely disables
-    the drafter (the relay's belt-and-suspenders length guard remains as the
-    last line of defense — covered separately by test_relay_length_guard.py).
+- 4800 chars → payload.text ≤ 4096 AND payload.file_paths contains the
+  .txt file with the raw content.
+- If the drafter itself raises, the handler falls back to raw-text delivery
+  (the relay's belt-and-suspenders length guard remains as the last line of
+  defense — covered separately by test_relay_length_guard.py).
 
 No real worker, no Redis, no LLM — we patch ``_get_redis`` with a dict-like
 fake and patch ``draft_message`` to produce a deterministic short draft.
@@ -80,11 +79,10 @@ def _make_pm_session(session_id: str = "pm-session-worker-bypass"):
 
 
 @pytest.mark.asyncio
-async def test_long_output_gets_drafted_and_full_text_attached(tmp_path, monkeypatch):
-    """Drafter-enabled path: oversize raw text never reaches the outbox.
+async def test_long_output_gets_drafted_and_full_text_attached(tmp_path):
+    """Oversize raw text never reaches the outbox — drafter always runs.
 
     Preconditions:
-      - MESSAGE_DRAFTER_IN_HANDLER default/true
       - draft_message returns a SHORT drafted text + a full-output file path
 
     Expected outcome (the bypass fix):
@@ -92,12 +90,7 @@ async def test_long_output_gets_drafted_and_full_text_attached(tmp_path, monkeyp
       - payload["file_paths"] is present and references the .txt with raw output
       - the referenced file exists on disk and contains the original raw text
     """
-    # Force the flag true so we get the default-enabled behavior regardless of
-    # the ambient env / config used by the test runner.
-    monkeypatch.setenv("MESSAGE_DRAFTER_IN_HANDLER", "1")
-
     handler = TelegramRelayOutputHandler()
-    assert handler._drafter_enabled is True, "precondition: drafter must be enabled when env=1"
 
     # Install the fake redis — avoids a real Redis dependency.
     fake_redis = _FakeRedis()
@@ -165,66 +158,15 @@ async def test_long_output_gets_drafted_and_full_text_attached(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_drafter_disabled_via_env_rolls_back_to_raw_text(tmp_path, monkeypatch):
-    """Rollback path: MESSAGE_DRAFTER_IN_HANDLER=0 → drafter bypassed entirely.
-
-    This confirms the flag's rollback behavior from plan §Part C / Race 3:
-    an operator who sets the env var to 0 and restarts the worker gets the
-    pre-fix behavior back (raw text to outbox). The relay length guard in
-    bridge.telegram_relay remains as the last line of defense; that behavior
-    is covered by tests/unit/test_relay_length_guard.py and is out of scope
-    here.
-    """
-    monkeypatch.setenv("MESSAGE_DRAFTER_IN_HANDLER", "0")
-
-    handler = TelegramRelayOutputHandler()
-    assert handler._drafter_enabled is False, "precondition: drafter must be disabled when env=0"
-
-    fake_redis = _FakeRedis()
-    handler._redis = fake_redis
-
-    raw_text = "Y" * 4800
-    session = _make_pm_session(session_id="pm-session-drafter-disabled")
-
-    # draft_message must NOT be called in this path. Patch it to blow up if
-    # the code ever reaches it — that would indicate the flag is ignored.
-    blow_up = AsyncMock(side_effect=AssertionError("drafter must be skipped when flag=0"))
-
-    with patch("bridge.message_drafter.draft_message", new=blow_up):
-        await handler.send(
-            chat_id="12345",
-            text=raw_text,
-            reply_to_msg_id=42,
-            session=session,
-        )
-
-    blow_up.assert_not_awaited()
-
-    queue_key = f"telegram:outbox:{session.session_id}"
-    entries = fake_redis.store.get(queue_key, [])
-    assert len(entries) == 1
-
-    payload = json.loads(entries[0])
-    # With the drafter disabled, the handler writes raw text straight through.
-    assert payload["text"] == raw_text
-    assert len(payload["text"]) == 4800
-    # No file_paths attached — nothing generated a full-output file.
-    assert "file_paths" not in payload
-
-
-@pytest.mark.asyncio
-async def test_drafter_failure_falls_back_to_raw_text_without_blocking(tmp_path, monkeypatch):
+async def test_drafter_failure_falls_back_to_raw_text_without_blocking(tmp_path):
     """Defense-in-depth: if draft_message itself raises, delivery still happens.
 
-    Per the handler's try/except in output_handler.py:271, drafter failure
+    Per the handler's try/except in output_handler.py, drafter failure
     MUST NOT block delivery. The relay's length guard is the last line of
     defense. This test ensures a raised exception inside draft_message does
     not propagate out of send().
     """
-    monkeypatch.setenv("MESSAGE_DRAFTER_IN_HANDLER", "1")
-
     handler = TelegramRelayOutputHandler()
-    assert handler._drafter_enabled is True
     fake_redis = _FakeRedis()
     handler._redis = fake_redis
 

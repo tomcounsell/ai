@@ -45,23 +45,19 @@ Skipped for: subagent sessions, programmatic sessions, local Claude Code session
 
 Simple heuristic: if the agent's output is short (<500 chars) and contains promise-like patterns ("I started...", "Let me check...", "I'm going to..."), the review prompt suggests CONTINUE. This is a suggestion, not forced — the agent decides.
 
-## Delivery Execution (`bridge/response.py`)
+## Delivery Execution (tool-call path)
 
-Before the drafter runs, `send_response_with_files()` checks `session.delivery_action`:
+Post-#1072, the stop hook no longer writes delivery fields to the AgentSession. Instead, the agent acts on its delivery choice by calling a tool directly during the second stop:
 
-| `delivery_action` | Behavior |
-|-------------------|----------|
-| `"send"` | Send `delivery_text` (or filtered response) via Markdown, skip drafter |
-| `"react"` | Set `delivery_emoji` as reaction on the original message, send no text |
-| `"silent"` | Do nothing — no text, no emoji |
-| `None` | Fall through to existing drafter path (backward compatible) |
+| Agent choice | Action |
+|--------------|--------|
+| `SEND` | Call `tools/send_message.py` with the drafted text — payload flows through `TelegramRelayOutputHandler.send`, which always routes through `bridge.message_drafter.draft_message` before the outbox write |
+| `EDIT: <text>` | Same as `SEND` but with the agent's revised text |
+| `REACT: <emoji>` | Call `tools/react_with_emoji.py` with the chosen emoji — no text is sent |
+| `SILENT` | Do nothing — no tool calls, session completes without output |
+| `CONTINUE` | Resume working; the hook does not stop the agent |
 
-## AgentSession Fields (`models/agent_session.py`)
-
-Three nullable fields store the agent's delivery decision:
-- `delivery_action` — "send", "react", "silent", or None
-- `delivery_text` — final message text (for send/edit path)
-- `delivery_emoji` — emoji for react-only path
+The canonical drafter entry point is `TelegramRelayOutputHandler.send` (for Telegram) and `EmailOutputHandler.send` (for email). Both run the drafter unconditionally, with a `try/except` fallback to raw text on drafter failure. See [message-drafter.md](message-drafter.md) for drafter details.
 
 ## Classification Context (`agent/sdk_client.py`)
 
