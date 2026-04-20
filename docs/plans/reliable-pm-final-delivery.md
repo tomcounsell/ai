@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
 created: 2026-04-21
 tracking: https://github.com/tomcounsell/ai/issues/1058
 last_comment_id:
+revision_applied: true
 ---
 
 # Reliable PM Final-Delivery Protocol
@@ -637,7 +638,9 @@ Integration verification: existing `tests/integration/test_session_finalization_
 
 **Open Questions status:** Reduced from 5 to 2 (#3 non-MERGE terminal paths; #4 shutdown drain timeout). These remain genuine human-judgment calls.
 
-**Next step:** Re-run `/do-plan-critique` against this revised plan. Expected outcome: **READY TO BUILD (with concerns)** or **READY TO BUILD** per the prior verdict's note. If further findings surface, they go through another revision pass using the same inline-Implementation-Note pattern.
+**Third-round verdict:** READY TO BUILD (with concerns) — all 12 findings (B1, B2, C1–C7, N1–N3) embedded inline with Implementation Notes; no new blockers identified. CONCERNs remain acknowledged risks, not defects. Frontmatter `revision_applied: true` set; next SDLC invocation routes to `/do-build`.
+
+**Next step:** Proceed to `/do-build`. Remaining Open Questions (#3, #4) are non-blocking human-judgment calls documented for reviewer visibility; build can land with reasonable defaults (stage=DOCS + no PR heuristic; 15s shutdown drain).
 
 ---
 
