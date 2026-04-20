@@ -250,10 +250,12 @@ class TestSessionRecoveryDrip(unittest.TestCase):
 
         circuit_session = MagicMock()
         circuit_session.session_id = "sess-circuit"
+        circuit_session.agent_session_id = "agent-circuit"
         circuit_session.created_at = 1000.0
 
         paused_session = MagicMock()
         paused_session.session_id = "sess-paused"
+        paused_session.agent_session_id = "agent-paused"
         paused_session.created_at = 900.0  # older, but wrong bucket
 
         def mock_filter(**kwargs):
@@ -290,6 +292,7 @@ class TestSessionRecoveryDrip(unittest.TestCase):
 
         paused_session = MagicMock()
         paused_session.session_id = "sess-paused"
+        paused_session.agent_session_id = "agent-paused"
         paused_session.created_at = 1000.0
 
         def mock_filter(**kwargs):
@@ -373,10 +376,12 @@ class TestSessionRecoveryDrip(unittest.TestCase):
 
         session_older = MagicMock()
         session_older.session_id = "sess-old"
+        session_older.agent_session_id = "agent-old"
         session_older.created_at = 500.0
 
         session_newer = MagicMock()
         session_newer.session_id = "sess-new"
+        session_newer.agent_session_id = "agent-new"
         session_newer.created_at = 1000.0
 
         def mock_filter(**kwargs):
@@ -409,6 +414,9 @@ class TestSessionCountThrottle(unittest.TestCase):
         import time as _time
 
         s = MagicMock()
+        # agent_session_id must be a string for _filter_hydrated_sessions to
+        # treat this test double as hydrated (issue #1069).
+        s.agent_session_id = "agent-test-fake"
         s.started_at = _time.time() + started_at_offset
         return s
 
@@ -507,6 +515,9 @@ class TestFailureLoopDetector(unittest.TestCase):
     def _make_failed_session(self, error_msg: str, session_id: str):
         s = MagicMock()
         s.session_id = session_id
+        # agent_session_id must be a string for _filter_hydrated_sessions to
+        # treat this test double as hydrated (issue #1069).
+        s.agent_session_id = f"agent-{session_id}"
         s.status = "failed"
         s.created_at = 1000.0
         # completed_at as a float timestamp (recent — within 4h window)

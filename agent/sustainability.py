@@ -128,6 +128,7 @@ def session_recovery_drip() -> None:
     Never raises — all exceptions are caught and logged.
     """
     try:
+        from agent.session_health import _filter_hydrated_sessions
         from models.agent_session import AgentSession
         from models.session_lifecycle import transition_status
 
@@ -140,10 +141,14 @@ def session_recovery_drip() -> None:
             logger.debug("[session-recovery-drip] neither recovery flag set — no-op")
             return
 
-        paused_circuit = list(
+        # Phantom guard: drop records whose fields are still Popoto Field descriptors
+        # (orphan $IndexF members).
+        paused_circuit = _filter_hydrated_sessions(
             AgentSession.query.filter(project_key=project_key, status="paused_circuit")
         )
-        paused = list(AgentSession.query.filter(project_key=project_key, status="paused"))
+        paused = _filter_hydrated_sessions(
+            AgentSession.query.filter(project_key=project_key, status="paused")
+        )
 
         if not paused_circuit and not paused:
             r.delete(recovery_key)
@@ -265,6 +270,7 @@ def session_count_throttle() -> None:
     Thresholds are configurable via env vars (defaults: 20 and 40).
     """
     try:
+        from agent.session_health import _filter_hydrated_sessions
         from models.agent_session import AgentSession
 
         r = _get_redis()
@@ -275,7 +281,9 @@ def session_count_throttle() -> None:
         suspended_threshold = int(os.environ.get("SUSTAINABILITY_THROTTLE_SUSPENDED", "40"))
 
         cutoff = time.time() - 3600  # 1 hour ago
-        all_sessions = list(AgentSession.query.filter(project_key=project_key))
+        # Phantom guard: drop records whose fields are still Popoto Field descriptors
+        # (orphan $IndexF members).
+        all_sessions = _filter_hydrated_sessions(AgentSession.query.filter(project_key=project_key))
         from bridge.utc import to_unix_ts
 
         recent = []
@@ -316,6 +324,7 @@ def failure_loop_detector() -> None:
     Skips analysis entirely if the queue is paused (API outage in progress).
     """
     try:
+        from agent.session_health import _filter_hydrated_sessions
         from models.agent_session import AgentSession
 
         r = _get_redis()
@@ -331,7 +340,9 @@ def failure_loop_detector() -> None:
         from bridge.utc import to_unix_ts
 
         cutoff = time.time() - (4 * 3600)  # 4 hours ago
-        all_sessions = list(AgentSession.query.filter(project_key=project_key))
+        # Phantom guard: drop records whose fields are still Popoto Field descriptors
+        # (orphan $IndexF members).
+        all_sessions = _filter_hydrated_sessions(AgentSession.query.filter(project_key=project_key))
         failed_sessions = []
         for s in all_sessions:
             if s.status not in ("failed", "abandoned"):

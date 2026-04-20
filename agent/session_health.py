@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,6 +15,89 @@ from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
+
+
+def _filter_hydrated_sessions(sessions: Iterable) -> list[AgentSession]:
+    """Return only AgentSession instances whose key identity fields are hydrated.
+
+    A "phantom" session is one where attribute access falls through to the
+    class-level Popoto Field descriptor instead of a hydrated string value.
+    Phantoms are produced when ``AgentSession.query.*`` iterates an index set
+    whose members point to hashes that no longer exist (orphan
+    ``$IndexF:AgentSession:*`` members).
+
+    Reading attributes of a phantom, or worse, calling ``.delete()`` on one,
+    can collateral-damage real records whose indexed-field values happen to
+    match. Every caller iterating ``AgentSession.query.*`` results must pass
+    them through this filter BEFORE any attribute read for mutation decisions.
+
+    The canonical hydration check is ``isinstance(s.agent_session_id, str)``.
+    ``agent_session_id`` is Popoto's ``KeyField`` and is the first attribute
+    populated on hydration; if it is still a ``Field`` descriptor, the
+    instance is a phantom. This matches the established pattern at
+    ``session_health.py`` in ``_agent_session_hierarchy_health_check`` and
+    satisfies the acceptance criterion on issue #1069.
+
+    Phantoms are dropped silently (DEBUG log) — they are NOT healed here.
+    Source-level cleanup of orphan ``$IndexF`` members happens via
+    ``AgentSession.repair_indexes()`` in ``cleanup_corrupted_agent_sessions``.
+
+    Anomalous hydration states — where ``agent_session_id`` is absent but
+    other fields (``status``, ``session_id``, ``created_at``) are populated —
+    are logged at WARNING so operators notice if the hydration check itself
+    becomes unreliable (e.g., a Popoto version bump that changes
+    materialization semantics).
+
+    Args:
+        sessions: An iterable of AgentSession instances from ``query.*``.
+
+    Returns:
+        A list containing only hydrated instances.
+    """
+    hydrated: list[AgentSession] = []
+    phantom_count = 0
+    for s in sessions:
+        try:
+            aid = getattr(s, "agent_session_id", None)
+        except Exception as exc:
+            # Unexpected exception on attribute access — treat as phantom, warn
+            # so operators notice.
+            logger.warning(
+                "[phantom-filter] Unexpected exception reading agent_session_id: %s", exc
+            )
+            phantom_count += 1
+            continue
+        if isinstance(aid, str):
+            hydrated.append(s)
+            continue
+        # Phantom: aid is a Popoto Field descriptor (or other non-string).
+        # Surface anomalies where other fields ARE populated — that suggests
+        # the hydration check itself may be miscalibrated.
+        suspicious = False
+        for f in ("status", "session_id", "created_at"):
+            try:
+                if isinstance(getattr(s, f, None), str):
+                    suspicious = True
+                    break
+            except Exception:
+                pass
+        if suspicious:
+            logger.warning(
+                "[phantom-filter] Suspicious phantom: agent_session_id not hydrated "
+                "but other fields present (type(agent_session_id)=%s)",
+                type(aid).__name__,
+            )
+        else:
+            logger.debug(
+                "[phantom-filter] Dropped phantom record (type(agent_session_id)=%s)",
+                type(aid).__name__,
+            )
+        phantom_count += 1
+    if phantom_count:
+        logger.info(
+            "[phantom-filter] Filtered %d phantom record(s) from query result", phantom_count
+        )
+    return hydrated
 
 
 def _ts(val):
@@ -102,7 +186,10 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     Status is an IndexedField, so direct mutation and save is safe.
     Returns the number of recovered bridge sessions (local sessions are not counted).
     """
-    running_sessions = list(AgentSession.query.filter(status="running"))
+    # Phantom guard: drop records whose fields are still Popoto Field descriptors
+    # (orphan $IndexF members). Destructive path — filter MUST run before any
+    # attribute read.
+    running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
     if not running_sessions:
         return 0
 
@@ -472,7 +559,13 @@ async def _agent_session_health_check() -> None:
     workers_started = 0
 
     # === Check RUNNING sessions_list ===
-    running_sessions = list(AgentSession.query.filter(status="running"))
+    # Phantom guard: drop records whose fields are still Popoto Field descriptors
+    # (orphan $IndexF members). MUST run before the terminal-status guard below:
+    # getattr(entry, "status", None) on a phantom returns a Field descriptor,
+    # which would slip past `actual_status in _TERMINAL_STATUSES` (descriptors
+    # are not in the terminal-status set) and reach the destructive recovery
+    # path.
+    running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
     for entry in running_sessions:
         checked += 1
 
@@ -1057,18 +1150,34 @@ def cleanup_corrupted_agent_sessions() -> int:
     These records jam the health check and startup recovery loops with repeated
     errors because they can't be transitioned or finalized through normal ORM ops.
 
-    After deleting corrupted records, rebuilds AgentSession indexes to clean
-    orphaned $IndexF/$KeyF/$SortF entries pointing to deleted objects.
+    Before any iteration, the result of ``AgentSession.query.all()`` is passed
+    through ``_filter_hydrated_sessions`` to drop phantom instances — records
+    whose fields are still Popoto ``Field`` descriptors, produced when
+    orphan ``$IndexF:AgentSession:*`` members reference deleted hashes.
+    Phantoms must never reach the mutation path: attribute access on a
+    phantom returns a descriptor repr (~60 chars), the length check then
+    mis-flags it as "corrupt", and ``.delete()`` damages real records whose
+    indexed-field values happen to match.
+
+    After the mutation pass, ``AgentSession.repair_indexes()`` (NOT the older
+    ``rebuild_indexes()``) is invoked when either real corrupt records were
+    deleted OR phantoms were observed. ``repair_indexes()`` explicitly clears
+    ``$IndexF:AgentSession:*`` members that point to deleted hashes before
+    rebuilding every index from surviving hashes — closing the orphan loop
+    at the source so subsequent ``query.*`` calls stop yielding phantoms.
 
     Called by the reflection scheduler as the 'agent-session-cleanup' reflection.
     Also safe to call from startup recovery or the update script.
 
-    Returns the number of corrupted sessions deleted.
+    Returns the number of corrupted sessions deleted. The phantom count and
+    orphan-cleanup stats are logged at INFO but not returned.
     """
     from popoto.exceptions import ModelException
 
     cleaned = 0
-    all_sessions = list(AgentSession.query.all())
+    raw_sessions = list(AgentSession.query.all())
+    all_sessions = _filter_hydrated_sessions(raw_sessions)
+    phantoms_filtered = len(raw_sessions) - len(all_sessions)
 
     for session in all_sessions:
         session_id_str = str(getattr(session, "id", "") or "")
@@ -1105,39 +1214,30 @@ def cleanup_corrupted_agent_sessions() -> int:
                 session.delete()
                 cleaned += 1
             except Exception as del_err:
+                # ORM-only policy: no raw-Redis fallback. If ORM delete fails,
+                # log and move on — next reflection tick will retry.
                 logger.warning(
-                    "[agent-session-cleanup] ORM delete failed for %s, "
-                    "attempting direct Redis cleanup: %s",
+                    "[agent-session-cleanup] ORM delete failed for %s: %s",
                     session_id_str[:20],
                     del_err,
                 )
-                # Fallback: direct Redis key deletion
-                try:
-                    import redis as _redis
 
-                    r = _redis.Redis()
-                    pattern = f"*{session_id_str}*"
-                    for key in r.scan_iter(match=pattern):
-                        r.delete(key)
-                    cleaned += 1
-                except Exception as redis_err:
-                    logger.error(
-                        "[agent-session-cleanup] Direct Redis cleanup failed for %s: %s",
-                        session_id_str[:20],
-                        redis_err,
-                    )
-
-    # Rebuild indexes to clean any remaining orphaned references
-    if cleaned > 0:
+    # Clean orphan $IndexF members at the source whenever we either deleted
+    # real corrupt records OR observed phantoms (orphans in the index sets).
+    if cleaned > 0 or phantoms_filtered > 0:
         try:
-            AgentSession.rebuild_indexes()
+            stale, rebuilt = AgentSession.repair_indexes()
             logger.info(
-                "[agent-session-cleanup] Rebuilt AgentSession indexes after "
-                "cleaning %d corrupted session(s)",
+                "[agent-session-cleanup] repair_indexes: cleared %d stale index "
+                "pointer(s), rebuilt %d record(s) (cleaned=%d corrupt, "
+                "phantoms_filtered=%d)",
+                stale,
+                rebuilt,
                 cleaned,
+                phantoms_filtered,
             )
         except Exception as idx_err:
-            logger.warning("[agent-session-cleanup] Index rebuild failed: %s", idx_err)
+            logger.warning("[agent-session-cleanup] Index repair failed: %s", idx_err)
     else:
         logger.debug("[agent-session-cleanup] No corrupted sessions found")
 
