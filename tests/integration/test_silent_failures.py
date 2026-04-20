@@ -159,7 +159,10 @@ class TestEnqueueContinuationSessionLookupLogging:
 
         with (
             caplog.at_level(logging.ERROR, logger="agent.agent_session_queue"),
-            patch("agent.agent_session_queue.enqueue_agent_session", new_callable=_AsyncMock),
+            patch(
+                "agent.agent_session_queue.enqueue_agent_session",
+                new_callable=_AsyncMock,
+            ),
         ):
             from agent.agent_session_queue import _enqueue_nudge
 
@@ -183,18 +186,18 @@ class TestLoadCooldownsLogging:
 
     def test_file_read_failure_logs_warning(self, caplog, tmp_path):
         """When cooldown file read fails, a warning is emitted."""
-        import agent.agent_session_queue as jq
-        from agent.agent_session_queue import _load_cooldowns
+        import agent.session_revival as sr
+        from agent.session_revival import _load_cooldowns
 
-        # Save and replace the cooldown file path
-        original = jq._COOLDOWN_FILE
-        jq._COOLDOWN_FILE = tmp_path / "bad_cooldowns.json"
+        # Save and replace the cooldown file path on the canonical module
+        original = sr._COOLDOWN_FILE
+        sr._COOLDOWN_FILE = tmp_path / "bad_cooldowns.json"
 
         # Write invalid JSON
-        jq._COOLDOWN_FILE.write_text("{invalid json content")
+        sr._COOLDOWN_FILE.write_text("{invalid json content")
 
         try:
-            with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            with caplog.at_level(logging.WARNING, logger="agent.session_revival"):
                 result = _load_cooldowns()
 
             # Should return empty dict on failure
@@ -205,7 +208,7 @@ class TestLoadCooldownsLogging:
                 f"Expected warning about cooldowns, got: {[r.message for r in warning_records]}"
             )
         finally:
-            jq._COOLDOWN_FILE = original
+            sr._COOLDOWN_FILE = original
 
 
 class TestSaveCooldownsLogging:
@@ -213,16 +216,16 @@ class TestSaveCooldownsLogging:
 
     def test_file_write_failure_logs_warning(self, caplog):
         """When cooldown file write fails, a warning is emitted."""
-        import agent.agent_session_queue as jq
-        from agent.agent_session_queue import _save_cooldowns
+        import agent.session_revival as sr
+        from agent.session_revival import _save_cooldowns
 
-        original = jq._COOLDOWN_FILE
+        original = sr._COOLDOWN_FILE
         # Point to a path that can't be written (permission denied simulation)
-        jq._COOLDOWN_FILE = MagicMock()
-        jq._COOLDOWN_FILE.parent.mkdir = MagicMock(side_effect=Exception("Permission denied"))
+        sr._COOLDOWN_FILE = MagicMock()
+        sr._COOLDOWN_FILE.parent.mkdir = MagicMock(side_effect=Exception("Permission denied"))
 
         try:
-            with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            with caplog.at_level(logging.WARNING, logger="agent.session_revival"):
                 _save_cooldowns({"test-project": 1234567890.0})
 
             warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -230,7 +233,7 @@ class TestSaveCooldownsLogging:
                 f"Expected warning about cooldowns, got: {[r.message for r in warning_records]}"
             )
         finally:
-            jq._COOLDOWN_FILE = original
+            sr._COOLDOWN_FILE = original
 
 
 class TestCheckRevivalBranchLogging:

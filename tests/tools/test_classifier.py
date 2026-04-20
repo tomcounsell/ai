@@ -4,9 +4,16 @@ Tests the classify_request() function with real-world test cases.
 Validates classifications, confidence scores, and reasoning.
 """
 
+import os
+
 import pytest
 
 from tools.classifier import classify_request
+
+pytestmark = pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"),
+    reason="requires ANTHROPIC_API_KEY",
+)
 
 
 class TestClassifierBasicCases:

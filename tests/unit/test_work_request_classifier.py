@@ -5,6 +5,8 @@ should be routed through SDLC (orchestrator in ai/) or directly to the
 target project (Teammate mode).
 """
 
+import os
+
 import pytest
 
 from bridge.routing import classify_work_request
@@ -101,6 +103,10 @@ class TestFastPathSdlc:
         assert classify_work_request(message) == "sdlc"
 
 
+@pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"),
+    reason="requires ANTHROPIC_API_KEY",
+)
 class TestLlmClassification:
     """Messages that require LLM classification.
 
