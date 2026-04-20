@@ -327,16 +327,21 @@ class TestWorkerStartupSequence:
         )
 
     def test_cleanup_orphaned_in_agent_queue_not_bridge(self):
-        """_cleanup_orphaned_claude_processes must be defined in agent_session_queue, not bridge."""
-        aq_source = (
-            Path(__file__).parent.parent.parent / "agent" / "agent_session_queue.py"
+        """_cleanup_orphaned_claude_processes must live under agent/, not bridge/.
+
+        Post-#1023 the function was moved from agent_session_queue.py to
+        agent/session_health.py. The invariant remains the same: the bridge
+        must not own process cleanup — it's an agent-side concern.
+        """
+        health_source = (
+            Path(__file__).parent.parent.parent / "agent" / "session_health.py"
         ).read_text()
         bridge_source = (
             Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
         ).read_text()
 
-        assert "def _cleanup_orphaned_claude_processes" in aq_source, (
-            "_cleanup_orphaned_claude_processes should be defined in agent/agent_session_queue.py"
+        assert "def _cleanup_orphaned_claude_processes" in health_source, (
+            "_cleanup_orphaned_claude_processes should be defined in agent/session_health.py"
         )
         assert "def _cleanup_orphaned_claude_processes" not in bridge_source, (
             "_cleanup_orphaned_claude_processes must NOT be defined in bridge/telegram_bridge.py"

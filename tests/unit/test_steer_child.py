@@ -25,6 +25,7 @@ def mock_child():
     """Create a mock child Dev session."""
     child = MagicMock()
     child.agent_session_id = "child-001"
+    child.session_id = "child-001"
     child.session_type = "dev"
     child.is_pm = False
     child.is_dev = True
@@ -38,16 +39,18 @@ def mock_child():
 # Patch targets: imports happen inside functions, so patch the source modules
 _AGENT_SESSION = "models.agent_session.AgentSession"
 _PUSH_STEERING = "agent.steering.push_steering_message"
+_STEER_SESSION = "agent.agent_session_queue.steer_session"
 
 
 class TestSteerChild:
     """Tests for the steer command (--session-id + --message)."""
 
-    @patch(_PUSH_STEERING)
+    @patch(_STEER_SESSION)
     @patch(_AGENT_SESSION)
-    def test_valid_steering(self, mock_agent_session_cls, mock_push, mock_child):
+    def test_valid_steering(self, mock_agent_session_cls, mock_steer, mock_child):
         """Successful steering pushes message and exits 0."""
         mock_agent_session_cls.get_by_id.return_value = mock_child
+        mock_steer.return_value = {"success": True, "session_id": "child-001", "error": None}
 
         result = main(
             [
@@ -61,11 +64,9 @@ class TestSteerChild:
         )
 
         assert result == 0
-        mock_push.assert_called_once_with(
+        mock_steer.assert_called_once_with(
             session_id="child-001",
-            text="focus on tests",
-            sender="pm",
-            is_abort=False,
+            message="focus on tests",
         )
 
     @patch(_PUSH_STEERING)
@@ -249,11 +250,12 @@ class TestSteerChild:
 
             assert result == 1
 
-    @patch(_PUSH_STEERING)
+    @patch(_STEER_SESSION)
     @patch(_AGENT_SESSION)
-    def test_parent_id_from_env(self, mock_agent_session_cls, mock_push, mock_child):
+    def test_parent_id_from_env(self, mock_agent_session_cls, mock_steer, mock_child):
         """VALOR_SESSION_ID env var is used when --parent-id not given."""
         mock_agent_session_cls.get_by_id.return_value = mock_child
+        mock_steer.return_value = {"success": True, "session_id": "child-001", "error": None}
 
         with patch.dict("os.environ", {"VALOR_SESSION_ID": "parent-001"}):
             result = main(
@@ -266,7 +268,7 @@ class TestSteerChild:
             )
 
         assert result == 0
-        mock_push.assert_called_once()
+        mock_steer.assert_called_once()
 
     @patch(_AGENT_SESSION)
     def test_session_lookup_exception(self, mock_agent_session_cls):

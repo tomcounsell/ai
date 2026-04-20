@@ -586,6 +586,7 @@ class TestRecoveryExcludesKilled:
         local_session.worker_key = "ai"
         local_session.started_at = time.time() - AGENT_SESSION_HEALTH_MIN_RUNNING - 600
         local_session.message_text = "test"
+        local_session.status = "running"
         local_session.save = MagicMock()
         local_session.delete = MagicMock()
 
@@ -603,8 +604,14 @@ class TestRecoveryExcludesKilled:
         def fake_finalize(entry, status, **kwargs):
             finalize_calls.append((entry, status, kwargs))
 
+        # _recover_interrupted_agent_sessions_startup was moved to
+        # agent.session_health post-#1023; it looks up AgentSession from that
+        # module, so patch the canonical location (not the re-export).
+        # finalize_session / update_session are imported lazily inside the
+        # function body, so patch at their definition site instead.
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_cls,
+            patch("agent.session_health.AgentSession") as mock_cls,
+            patch("agent.session_health._filter_hydrated_sessions", side_effect=lambda x: list(x)),
             patch("models.session_lifecycle.finalize_session", side_effect=fake_finalize),
             patch("models.session_lifecycle.update_session") as mock_update,
         ):
@@ -614,7 +621,9 @@ class TestRecoveryExcludesKilled:
         # Count is 0 — local sessions are abandoned, not recovered
         assert result == 0
         # The function should filter on status="running"
-        assert any(c.get("status") == "running" for c in calls)
+        assert any(c.get("status") == "running" for c in calls), (
+            f"expected filter(status='running') call, got {calls!r}"
+        )
         # No call should filter on status="killed"
         assert not any(c.get("status") == "killed" for c in calls)
         # Local session must be abandoned, not re-queued

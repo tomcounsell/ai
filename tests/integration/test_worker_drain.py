@@ -8,6 +8,7 @@ All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
 
 import asyncio
 import time
+import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -22,14 +23,28 @@ from agent.agent_session_queue import (
 from models.agent_session import AgentSession
 
 
+@pytest.fixture(autouse=True)
+def _force_bridge_mode(monkeypatch):
+    """Ensure _worker_loop runs in bridge mode (DRAIN_TIMEOUT honored) regardless
+    of the developer's shell env. Standalone mode waits indefinitely on event.wait()
+    which would hang every test in this file — the drain timeout is the whole
+    point of these tests."""
+    monkeypatch.delenv("VALOR_WORKER_MODE", raising=False)
+
+
 def _create_test_session(**overrides) -> AgentSession:
-    """Create an AgentSession with sensible defaults for testing."""
+    """Create an AgentSession with sensible defaults for testing.
+
+    Each session gets a unique session_id so transition_status's CAS re-read
+    (which tie-breaks by status='running') can't cross-match records within the
+    same test run.
+    """
     defaults = {
         "project_key": "test",
         "status": "pending",
         "priority": "normal",
         "created_at": time.time(),
-        "session_id": "test_session",
+        "session_id": f"test_session_{uuid.uuid4().hex[:8]}",
         "working_dir": "/tmp/test",
         "message_text": "test message",
         "sender_name": "Test",
