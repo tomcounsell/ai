@@ -66,6 +66,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Local Doctor](local-doctor.md) | Unified health check CLI consolidating environment, service, auth, and resource checks into `python -m tools.doctor` | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, forgetting, and health-checking memories from the Memory model (`status` subcommand: Redis ping, counts, superseded ratio, category breakdown) | Shipped |
+| [Message Drafter](message-drafter.md) | Medium-aware drafting layer that owns wire-format compliance for every user-visible message — Telegram/email orthogonality, drafter-at-the-handler integration, relay length guard, tool-call delivery (planned) | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |
 | [Mid-Session Steering](mid-session-steering.md) | End-to-end steering flow for injecting reply-to messages into running agent sessions | Shipped |
@@ -133,7 +134,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Steering Queue: Historical Spec](steering-implementation-spec.md) | Original Redis list design, watchdog hook, and SDK client registry for mid-execution course correction (historical design spec) | Shipped |
 | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
 | [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, category-weighted recall re-ranking, and nightly LLM-based semantic consolidation (`memory-dedup` reflection) with `superseded_by` tracking and recall filter | Shipped |
-| [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress, markdown links, and self-summary fallback via session steering for Telegram delivery | Shipped |
 | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
 | [sustainable-self-healing.md](sustainable-self-healing.md) | Queue governance: circuit-based pause, drip resume, throttle, failure dedup, daily digest | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |

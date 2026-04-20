@@ -154,15 +154,28 @@ class LoggingOutputHandler:
 
 
 def _read_drafter_in_handler_flag() -> bool:
-    """Read MESSAGE_DRAFTER_IN_HANDLER env var once, defaulting to true.
+    """Read MESSAGE_DRAFTER_IN_HANDLER flag once, defaulting to true.
 
     Per plan docs/plans/message-drafter.md Race 3: the flag is a startup-config,
     not a runtime-config. Reading once at handler __init__ time keeps the flag
     sticky across the lifetime of the handler even if an operator flips it
-    mid-session. Accepts "0", "false", "no" (case-insensitive) as disable.
+    mid-session.
+
+    Resolution order: environment variable (for quick rollback via
+    ``~/Desktop/Valor/.env``), then ``config.settings.FeatureSettings``
+    (canonical default = True). Accepts "0", "false", "no", "off"
+    (case-insensitive) as disable.
     """
-    raw = os.environ.get("MESSAGE_DRAFTER_IN_HANDLER", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    env_val = os.environ.get("MESSAGE_DRAFTER_IN_HANDLER")
+    if env_val is not None:
+        return env_val.strip().lower() not in {"0", "false", "no", "off"}
+    try:
+        from config.settings import Settings
+
+        return bool(Settings().features.message_drafter_in_handler)
+    except Exception:
+        # Settings load failed (e.g. .env missing during tests) — fail safe True.
+        return True
 
 
 class TelegramRelayOutputHandler:

@@ -238,6 +238,15 @@ STRUCTURED_DRAFT_TOOL = {
 
 
 @dataclass
+class Violation:
+    """A wire-format violation surfaced by a per-medium validator."""
+
+    rule: str
+    line: int | None = None
+    snippet: str = ""
+
+
+@dataclass
 class MessageDraft:
     """Result of drafting an agent response."""
 
@@ -248,6 +257,89 @@ class MessageDraft:
     artifacts: dict[str, list[str]] = field(default_factory=dict)
     context_summary: str | None = None
     expectations: str | None = None
+    violations: list[Violation] = field(default_factory=list)
+
+
+_TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+def validate_telegram(text: str) -> list[Violation]:
+    """Validate text against Telegram wire-format rules.
+
+    Current rules:
+    - No markdown tables (the ``| --- | --- |`` separator row).
+
+    Returns a list of Violation entries; empty list == pass. The validator
+    is informational — the caller surfaces violations in the draft
+    presentation so the agent can edit before sending. No server-side
+    rewrites (plan §Part B).
+    """
+    if not text:
+        return []
+    violations: list[Violation] = []
+    for idx, raw_line in enumerate(text.split("\n"), start=1):
+        if _TABLE_SEPARATOR_PATTERN.match(raw_line):
+            violations.append(
+                Violation(
+                    rule="no_markdown_tables",
+                    line=idx,
+                    snippet=raw_line.strip()[:80],
+                )
+            )
+    return violations
+
+
+# Email rules forbid markdown syntax on the wire (recipients may read with
+# clients that render plain text). Match headings, bold/italic/strikethrough
+# markers, fenced/inline code, bullet markdown, hyperlink markdown, and tables.
+_EMAIL_MARKDOWN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("no_fenced_code", re.compile(r"^```", re.MULTILINE)),
+    ("no_inline_code", re.compile(r"`[^`\n]+`")),
+    ("no_markdown_headings", re.compile(r"^#{1,6}\s", re.MULTILINE)),
+    ("no_bold_markdown", re.compile(r"\*\*[^*\n]+\*\*")),
+    ("no_italic_markdown", re.compile(r"(?<![*_])(?:\*|_)[^*_\n]+(?:\*|_)(?![*_])")),
+    ("no_markdown_links", re.compile(r"\[[^\]]+\]\([^\)]+\)")),
+    ("no_markdown_bullets", re.compile(r"^\s*[-*+]\s", re.MULTILINE)),
+]
+
+
+def validate_email(text: str) -> list[Violation]:
+    """Validate text against email wire-format rules (plain prose only).
+
+    Rejects markdown syntax: fenced/inline code, headings, bold/italic,
+    hyperlink markdown, bullet markers, and tables. Returns a list of
+    Violation entries; empty list == pass.
+    """
+    if not text:
+        return []
+    violations: list[Violation] = []
+    for rule, pattern in _EMAIL_MARKDOWN_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            # Line number of the first match
+            prefix = text[: match.start()]
+            line_no = prefix.count("\n") + 1
+            violations.append(
+                Violation(
+                    rule=rule,
+                    line=line_no,
+                    snippet=match.group(0)[:80],
+                )
+            )
+    # Tables: same detection as Telegram
+    violations.extend(validate_telegram(text))
+    return violations
+
+
+def format_violations(violations: list[Violation], medium: str) -> str:
+    """Render violations as a ``⚠️`` note for the review gate presentation."""
+    if not violations:
+        return ""
+    lines = [f"⚠️ {len(violations)} wire-format violation(s) for medium={medium}:"]
+    for v in violations:
+        where = f"line {v.line}" if v.line else ""
+        lines.append(f"  • {v.rule} {where}: {v.snippet!r}")
+    return "\n".join(lines)
 
 
 def extract_artifacts(text: str) -> dict[str, list[str]]:

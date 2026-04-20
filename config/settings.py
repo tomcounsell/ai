@@ -175,6 +175,26 @@ class ModelSettings(BaseModel):
     )
 
 
+class FeatureSettings(BaseModel):
+    """Feature-flag configuration for optional behaviours.
+
+    These are startup-config flags (read once at process start), not
+    runtime-toggleable. Default values represent the desired end state;
+    flags exist as a safety net for quick rollback when a feature ships.
+    """
+
+    message_drafter_in_handler: bool = Field(
+        default=True,
+        description=(
+            "Route OutputHandler.send() invocations through "
+            "bridge.message_drafter.draft_message before the payload reaches "
+            "the wire. When True (default), the worker-side send_cb path is "
+            "drafter-compliant on every medium. See docs/plans/message-drafter.md "
+            "§Part C. Flip to False only for emergency rollback."
+        ),
+    )
+
+
 class PathSettings(BaseModel):
     """Path settings derived from project root. No hardcoded usernames."""
 
@@ -230,6 +250,7 @@ class Settings(BaseSettings):
     google_auth: GoogleAuthSettings = Field(default_factory=GoogleAuthSettings)
     models: ModelSettings = Field(default_factory=ModelSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
+    features: FeatureSettings = Field(default_factory=FeatureSettings)
 
     @field_validator("environment")
     @classmethod

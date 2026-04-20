@@ -298,9 +298,9 @@ class EmailOutputHandler:
 
         # Drafter-at-the-handler (task 7 in plan). Fail open: any exception in
         # the drafter must not block the email send.
-        drafter_enabled = os.environ.get(
-            "MESSAGE_DRAFTER_IN_HANDLER", "true"
-        ).strip().lower() not in {"0", "false", "no", "off"}
+        from agent.output_handler import _read_drafter_in_handler_flag
+
+        drafter_enabled = _read_drafter_in_handler_flag()
         body_text = text
         if drafter_enabled:
             try:
