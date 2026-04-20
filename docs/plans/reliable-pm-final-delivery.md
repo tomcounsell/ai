@@ -138,8 +138,8 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
    - If **false**, steer PM as today (pipeline continues).
    - If **true**, skip the "continue" steer. Instead, spawn a completion-turn runner coroutine.
 3. Completion-turn runner:
-   - Loads the PM's Claude Code UUID from `models/session_lifecycle`.
-   - Calls `get_response_via_harness(message=COMPLETION_PROMPT, prior_uuid=pm_uuid, full_context_message=COMPLETION_PROMPT)` — the fallback `full_context_message` is identical because on UUID failure we can generate the summary from the steer's context.
+   - Loads the PM's Claude Code UUID via `agent.sdk_client._get_prior_session_uuid(parent.session_id)` — the canonical read helper at `agent/sdk_client.py:152` that returns the PM's `AgentSession.claude_session_uuid` field (populated by `_store_claude_session_uuid` after the first harness turn). Returns `str | None`; `None` means "no prior UUID available" and triggers the no-UUID fallback below (same behavior `get_response_via_harness` already uses at L1109).
+   - Calls `get_response_via_harness(message=COMPLETION_PROMPT, working_dir=..., prior_uuid=pm_uuid, session_id=parent.session_id, full_context_message=COMPLETION_PROMPT)` — the fallback `full_context_message` is identical because on UUID failure we can generate the summary from the steer's context. `working_dir` uses the PM's repo root (project_key → repo path) so the harness can access persona config.
    - On success: calls `send_cb(chat_id, summary, telegram_message_id, agent_session)` directly, sets `response_delivered_at`, finalizes the PM session to `"completed"`.
    - On empty/failed harness result: uses the existing outcome summary (what we had in the steer) as the fallback text; still delivers via `send_cb`.
 4. The PM session never re-enters the nudge loop for the final turn — the runner owns the final delivery.
@@ -159,10 +159,11 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 ### Technical Approach
 
 - **New module `agent/pipeline_complete.py`**:
-  - Pure predicate `is_pipeline_complete(parent_session, current_stage, outcome) -> tuple[bool, str]`.
-  - Logic: pipeline is complete iff `current_stage == "MERGE"` AND `outcome == "success"`, OR `current_stage == "DOCS"` AND `outcome == "success"` AND no open PR exists (for issues that legitimately skip MERGE — e.g., docs-only changes, plan PRs that close on merge). MERGE-stage success is the primary path; the DOCS+no-PR branch handles the corner cases already excluded by Rule 5.
-  - Pure function, no I/O beyond reading PR state (via `gh pr list` subprocess, reusing existing utility in `utils/issue_comments.py` or a thin wrapper).
-  - Unit testable without Redis/GitHub mocks (pass in `current_stage`, `outcome`, `pr_open` as args).
+  - Pure predicate `is_pipeline_complete(psm_states: dict[str, str], outcome: str, pr_open: bool | None = None) -> tuple[bool, str]`.
+  - Logic: pipeline is complete iff `psm_states.get("MERGE") == "completed"` AND `outcome == "success"`, OR `psm_states.get("DOCS") == "completed"` AND `outcome == "success"` AND `pr_open is False` (for issues that legitimately skip MERGE — e.g., docs-only changes, plan PRs that close on merge). The key fix vs. the prior draft: we key on `psm.states.get("MERGE") == "completed"` (the persisted stage-complete marker) rather than on `psm.current_stage() == "MERGE"`. After `complete_stage(MERGE)` runs, `current_stage()` returns `None` (it scans `ALL_STAGES` for an `in_progress` entry — see `agent/pipeline_state.py:600-610`), so a predicate keyed on `current_stage` would return `False` precisely when the pipeline just finished. Reading the `states` dict directly avoids this.
+  - Callers pass `psm.states` (a `dict[str, str]` — see `agent/pipeline_state.py:291`) rather than the live `psm` object to keep the predicate a pure function. `_handle_dev_session_completion` already constructs a `PipelineStateMachine` for the parent; pass `psm.states` through.
+  - Pure function, no I/O beyond reading PR state when gated (see C6/`_check_pr_open` gating below).
+  - Unit testable without Redis/GitHub mocks (pass in `psm_states`, `outcome`, `pr_open` as args).
 - **New coroutine `agent/session_completion.py::_deliver_pipeline_completion`**:
   - Takes `(parent_session, pipeline_summary_context) -> None`.
   - Constructs the completion prompt:
@@ -190,10 +191,15 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 - **Fan-out path (`agent/session_health.py`)**:
   - In `_agent_session_hierarchy_health_check` at L1065-1081, replace the `push_steering_message` + `transition_status` pair with a direct call to `_deliver_pipeline_completion(parent, fan_out_summary)`.
   - Keep the failed-parent branch (immediate `_transition_parent(parent, "failed")`) unchanged.
+- **Worker steering-message cleanup (`agent/session_completion.py`)**:
+  - Two live marker-instruction strings remain in worker-constructed steering messages sent to PM sessions. Both must be rewritten in marker-free form:
+    - **L271** (inside `_handle_dev_session_completion`'s continuation-PM message): `"...Do NOT emit [PIPELINE_COMPLETE] until the PR is merged or closed."` → `"...Do NOT signal pipeline completion until the PR is merged or closed."`
+    - **L450** (inside `_handle_dev_session_completion`'s steer message): `"...You MUST invoke /sdlc to dispatch /do-merge before emitting [PIPELINE_COMPLETE]."` → `"...You MUST invoke /sdlc to dispatch /do-merge before signaling pipeline completion."`
+  - Edit the literals only — do not refactor the surrounding try/except logic. These edits are required for the Success Criterion `grep -rn PIPELINE_COMPLETE agent/` = 0 to hold.
 - **Persona cleanup (`config/personas/project-manager.md`)**:
-  - Rewrite Rule 5 (L42-52): "Do not claim pipeline completion while an open PR exists for the current issue. Before exiting, run `gh pr list --search "#{issue_number}" --state open`; if any open PR exists, invoke `/sdlc` to dispatch `/do-merge`. Your final message is delivered automatically when the pipeline reaches a terminal state."
+  - Rewrite Rule 5 (L42-52) to describe the real constraint without naming the marker (C7 finding): the PM is no longer the entity that indicates completion — the worker is. New text: "**Rule 5 — MERGE is Mandatory Before Dev-Session Sign-Off.** If an open PR exists for the current issue, you must dispatch `/do-merge` before declaring the issue done. Your final message to the user is composed automatically by the worker after MERGE succeeds — do not attempt to self-signal pipeline completion. Before exiting, verify: `gh pr list --search "#{issue_number}" --state open` returns empty, OR the next dispatch is `/do-merge`."
   - Remove `[PIPELINE_COMPLETE]` instructions at L44, L49, L384, L487.
-  - Add a note: "You do not need to emit any special marker to trigger final delivery. When the pipeline reaches MERGE success (or a legitimate non-MERGE terminal state), the worker composes the final summary by asking you directly."
+  - Add a note near the top of the pipeline-completion section: "You do not need to emit any special marker to trigger final delivery. When the pipeline reaches MERGE success (or a legitimate non-MERGE terminal state), the worker composes the final summary by asking you directly."
 - **Docs cleanup (`docs/features/pipeline-state-machine.md` L161)**:
   - Update to describe the new protocol: "Final delivery is driven by `_handle_dev_session_completion` detecting pipeline completion and invoking `_deliver_pipeline_completion`, not by a persona-emitted marker."
 
@@ -217,7 +223,8 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 ## Test Impact
 
 - [ ] `tests/unit/test_output_router.py` (all tests referencing `deliver_pipeline_complete` or `PIPELINE_COMPLETE_MARKER`, approximately L85, L151, L158) — UPDATE: remove marker-specific assertions; add assertions that PM/SDLC paths without markers resolve to `nudge_continue` (or `deliver` on `waiting_for_children`). Reference lines from current file: L10, L85, L87, L151, L158 import the marker — these lines become obsolete.
-- [ ] `tests/unit/test_steering_mechanism.py` L161-223 ("Tests for PIPELINE_COMPLETE marker behavior in output router") — DELETE: entire class `TestPipelineCompleteMarker` becomes obsolete. Replaced by new test file `tests/unit/test_pipeline_complete_predicate.py` (create).
+- [ ] `tests/unit/test_steering_mechanism.py` L161-194 (class `TestPipelineCompleteMarker` — "Tests for PIPELINE_COMPLETE marker behavior in output router") — DELETE: entire class becomes obsolete. Replaced by new test file `tests/unit/test_pipeline_complete_predicate.py` (create).
+- [ ] `tests/unit/test_steering_mechanism.py` L195-223 (fan-out / continuation-PM assertions that the steering message literal contains `"[PIPELINE_COMPLETE]"` — specifically L205, L209, L223) — UPDATE: once B2's rewrite lands (marker-free literals in `agent/session_completion.py` L271 and L450), these assertions must check for the new marker-free substring (e.g., `"signal pipeline completion"`). Keep the test's intent (PM is warned about pre-merge completion); only update the asserted literal. This is the actual landing site of the marker-instruction assertion that B2 covers.
 - [ ] `tests/unit/test_session_completion*.py` (if any reference the marker-based steering path in `_handle_dev_session_completion`) — UPDATE: patch assertions to check for `_deliver_pipeline_completion` invocation instead of `push_steering_message` with marker instructions.
 - [ ] `tests/unit/test_health_check_recovery_finalization.py::test_cancelling_handle_task_does_not_cancel_worker_loop` — UPDATE: extend to assert the new "interrupted" message is delivered when CancelledError fires mid-session.
 - [ ] `tests/unit/test_worker_cancel_requeue.py` — UPDATE: new test `test_cancelled_error_delivers_interrupted_message` added; existing tests preserved unchanged.
@@ -245,7 +252,7 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 
 ### Risk 2: `_deliver_pipeline_completion` races with `_finalize_parent_sync`
 **Impact:** If the completion runner is invoked but `_finalize_parent_sync` fires first (another child completing in parallel), the parent transitions to `completed` before the runner delivers the summary — the router's `deliver_already_completed` branch then handles it, but we've now produced two potential messages (the in-flight completion turn and whatever the original session last said).
-**Mitigation:** The completion runner must be the **only** caller that transitions the parent to `completed`. Other paths (health-check, `_finalize_parent_sync`) defer to the runner when `is_pipeline_complete()` returns true. Concretely: add a `pipeline_complete_pending` flag on AgentSession (transient in-memory or Redis-only, not persisted) set by `_handle_dev_session_completion` before spawning the runner. `_finalize_parent_sync` checks this flag and skips finalization if set.
+**Mitigation:** The completion runner must be the **only** caller that transitions the parent to `completed`. Other paths (health-check, `_finalize_parent_sync`) defer to the runner when `is_pipeline_complete()` returns true. Concretely: acquire a **Redis-native advisory lock** `f"pipeline_complete_pending:{parent_id}"` via `POPOTO_REDIS_DB.set(key, "1", nx=True, ex=60)` as the first line of `_deliver_pipeline_completion`. The 60-second TTL makes the lock self-healing: if the runner crashes mid-flight, the lock auto-expires and startup-recovery's re-enqueue can acquire a fresh lock. `_finalize_parent_sync` checks the flag (`POPOTO_REDIS_DB.exists(key)`) and skips finalization if set. This matches the CAS discipline used by the `continuation-pm:{parent_id}` dedup pattern at `agent/session_completion.py:247-256` — reuse the same pattern. **Rationale for Redis over `extra_context`:** a lock is not durable state — it is a transient coordination primitive. Storing it in `extra_context` (a persisted `DictField`) means a worker crash leaves a stale lock on the parent that a future startup-recovery run cannot distinguish from a live lock. A Redis key with TTL self-expires; the ORM field does not.
 
 ### Risk 3: Persona drift re-introduces the marker or expects it
 **Impact:** Existing persona segments, documentation, and future contributors might still expect `[PIPELINE_COMPLETE]` to be meaningful. A PM that emits it would have it delivered literally in a message (which would be jarring).
@@ -255,9 +262,13 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 **Impact:** Worker shutdown wedged waiting for `send_cb("interrupted...")` to complete, preventing clean shutdown.
 **Mitigation:** Wrap the send in `asyncio.wait_for(send_cb(...), timeout=2.0)`. If it times out or raises, swallow and proceed to `raise` — shutdown semantics are preserved at the cost of the interrupted message on rare shutdown-path failures (startup-recovery will still re-queue).
 
+### Risk 6: Flapping worker sends the "interrupted" message repeatedly
+**Impact:** A worker that flaps (deploy loop, OOM-kill cycling, health-check churn) fires the CancelledError handler on every cycle. Without dedup, the user receives N identical "I was interrupted and will resume automatically." messages.
+**Mitigation:** Before emitting the interrupted message, acquire a short-TTL Redis key: `POPOTO_REDIS_DB.set(f"interrupted-sent:{session_id}", "1", nx=True, ex=120)`. Only send on `True` (lock acquired). The 120-second TTL lets genuinely distinct interruptions surface (a real crash 2+ minutes later still produces a user-visible message) while suppressing rapid-fire duplicates. Log at INFO when suppressed. Alternative/fallback: inspect `AgentSession.session_events` for the latest `event_type="delivery"` entry and skip the send if `text` already matches the interrupted message literal — use as a safety net if Redis is unavailable.
+
 ### Risk 5: `is_pipeline_complete` subprocess (`gh pr list`) adds latency or fails in offline tests
-**Impact:** Every dev-session completion now runs a subprocess before deciding whether to invoke the completion turn.
-**Mitigation:** (a) Cache PR state on AgentSession.extra_context under TTL (5s) — same session's subsequent completion checks reuse the result. (b) On subprocess failure, conservatively return `False` (pipeline not complete) so the old nudge-based path still works as a safety net. (c) In tests, inject a mock via dependency-injection — the predicate function takes `pr_open: bool | None` as an optional override argument.
+**Impact:** If every dev-session completion ran `gh pr list`, a 7-stage pipeline would invoke the subprocess 7 times during a typical issue.
+**Mitigation:** **Gate the subprocess on stage** rather than caching per-session. The predicate only calls `_check_pr_open(issue_number)` when `psm_states.get("DOCS") == "completed"` AND `psm_states.get("MERGE") != "completed"` — i.e., the DOCS+no-PR corner case. For the primary MERGE-success path, no PR check is needed (the pipeline's already confirmed completion by reaching MERGE success). For non-terminal stages, the predicate returns `(False, <reason>)` without touching the subprocess at all. Net effect: at most one `gh pr list` invocation per pipeline, only for non-MERGE terminal paths. (a) On subprocess failure, conservatively return `(False, "pr_state_unavailable")` so the old nudge-based path still works as a safety net. (b) In tests, inject a mock via the predicate's `pr_open: bool | None` override argument. **This closes Open Question #2** — no Redis/extra_context caching is needed because the subprocess is no longer called per-dev-session-completion.
 
 ## Race Conditions
 
@@ -266,14 +277,14 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 **Trigger:** Two child sessions complete near-simultaneously; both invoke `_handle_dev_session_completion`. The first detects pipeline completion and spawns the runner. The second sees the parent still `"running"` and invokes `_finalize_parent_sync`, which transitions parent to `"completed"` before the runner's `send_cb` fires. The runner's subsequent `send_cb` delivers a valid message, but the parent is already terminal — the router's `deliver_already_completed` branch handles it (which is actually correct).
 **Data prerequisite:** Parent must NOT be finalized to `"completed"` by any path OTHER than the completion runner.
 **State prerequisite:** A "completion pending" flag set atomically before the runner starts.
-**Mitigation:** Set `pipeline_complete_pending = True` on parent AgentSession's `extra_context` dict at the very start of `_deliver_pipeline_completion` (no schema migration — `extra_context` is an existing `DictField` at `models/agent_session.py:152`). `_finalize_parent_sync` checks this flag; if set, it returns early without transitioning the parent (no new intermediate status is introduced — prior draft incorrectly cited a `"completing"` status that does not exist in `docs/features/session-lifecycle.md` or the `TERMINAL_STATUSES`/`session_lifecycle.py` tables). The runner is the sole transition to `"completed"`. If the flag is unset and the runner never fires (e.g., pipeline not actually complete), existing behavior applies.
+**Mitigation:** Acquire the Redis lock `pipeline_complete_pending:{parent_id}` via `POPOTO_REDIS_DB.set(key, "1", nx=True, ex=60)` as the very first line of `_deliver_pipeline_completion`. On `False` (lock already held), log at INFO and return immediately — another runner owns the delivery. `_finalize_parent_sync` checks `POPOTO_REDIS_DB.exists(f"pipeline_complete_pending:{parent_id}")`; if set, it returns early without transitioning the parent. The runner is the sole transition to `"completed"`. No new intermediate status is introduced (prior draft incorrectly cited a `"completing"` status that does not exist in `docs/features/session-lifecycle.md` or the `TERMINAL_STATUSES`/`session_lifecycle.py` tables). If the lock is never acquired (pipeline not actually complete), existing behavior applies. The 60-second TTL self-heals from runner crashes — startup-recovery's re-enqueue can acquire a fresh lock.
 
 ### Race 2: Concurrent completion runner invocations
-**Location:** `_handle_dev_session_completion` called multiple times for the same parent.
-**Trigger:** Fan-out PM with 3 children all completing within the same health-check tick AND `_handle_dev_session_completion` invocations from each child overlapping.
+**Location:** `_handle_dev_session_completion` AND `_agent_session_hierarchy_health_check` both called for the same parent, potentially concurrently.
+**Trigger:** Fan-out PM with N children all completing within the same health-check tick AND `_handle_dev_session_completion` invocations from each child overlapping AND the hierarchy-health-check tick firing concurrently. Worst case: N+1 potential runner spawns racing for the same parent.
 **Data prerequisite:** Exactly one completion-turn runner per parent.
-**State prerequisite:** Idempotency on runner entry.
-**Mitigation:** Runner entry is guarded by an atomic compare-and-set on `pipeline_complete_pending`: if already True, skip (another invocation owns the runner). Uses the same CAS discipline PR #885 established for nudge-stomp protection.
+**State prerequisite:** Idempotency on runner entry — all entry points share the same CAS.
+**Mitigation:** BOTH entry points (`_handle_dev_session_completion` at `agent/session_completion.py:446` **and** `_agent_session_hierarchy_health_check` at `agent/session_health.py:1065`) call `_deliver_pipeline_completion`, which acquires the Redis lock `pipeline_complete_pending:{parent_id}` via `POPOTO_REDIS_DB.set(key, "1", nx=True, ex=60)` as its first line. Only the single caller whose `set(..., nx=True)` returns `True` proceeds; all others log and return. This is the same CAS discipline used by `continuation-pm:{parent_id}` at `agent/session_completion.py:247-256` — reuse the exact pattern. The idempotency invariant holds: at most one runner spawns per parent, regardless of which entry point fires first.
 
 ### Race 3: Harness call in runner while worker is shutting down
 **Location:** `_deliver_pipeline_completion` invokes `get_response_via_harness` near shutdown.
@@ -292,7 +303,7 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 ## No-Gos (Out of Scope)
 
 - Removing `startup-recovery` — it remains the backstop for unhandled crashes.
-- Adding new ORM fields (beyond the transient in-memory `pipeline_complete_pending` flag if needed, which can live in `extra_context` dict without schema migration).
+- Adding new AgentSession ORM fields. Completion-pending coordination uses a Redis-native key with TTL (`pipeline_complete_pending:{parent_id}`), not ORM storage — a lock is a transient coordination primitive, not durable state.
 - Changing the nudge loop for non-PM sessions (Teammate and Dev sessions untouched).
 - Reworking the `BossMessenger` class.
 - Rewriting the PM persona beyond removing marker references and updating Rule 5.
@@ -408,15 +419,16 @@ Integration verification: existing `tests/integration/test_session_finalization_
 - **Task ID**: build-predicate
 - **Depends On**: none
 - **Validates**: `tests/unit/test_pipeline_complete_predicate.py` (create)
-- **Informed By**: Freshness Check (line refs), Recon Summary (Option B plumbing)
+- **Informed By**: Freshness Check (line refs), Recon Summary (Option B plumbing), Concerns C1 + C6
 - **Assigned To**: predicate-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `agent/pipeline_complete.py` with `is_pipeline_complete(current_stage: str, outcome: str, pr_open: bool | None = None) -> tuple[bool, str]`.
-- Return `(True, "merge_success")` when `current_stage == "MERGE"` AND `outcome == "success"`.
-- Return `(True, "docs_success_no_pr")` when `current_stage == "DOCS"` AND `outcome == "success"` AND `pr_open == False`.
-- Return `(False, <reason>)` otherwise; on `pr_open is None`, conservatively return `(False, "pr_state_unavailable")`.
+- Create `agent/pipeline_complete.py` with `is_pipeline_complete(psm_states: dict[str, str], outcome: str, pr_open: bool | None = None) -> tuple[bool, str]`.
+- Return `(True, "merge_success")` when `psm_states.get("MERGE") == "completed"` AND `outcome == "success"`. (Key on `states.get("MERGE")` rather than `current_stage` because after `complete_stage(MERGE)` fires, `current_stage()` returns `None` — see C1.)
+- Return `(True, "docs_success_no_pr")` when `psm_states.get("DOCS") == "completed"` AND `psm_states.get("MERGE") != "completed"` AND `outcome == "success"` AND `pr_open is False`.
+- Return `(False, <reason>)` otherwise. For the MERGE-success path, `pr_open` is not consulted (the pipeline has already reached MERGE). For the DOCS+no-PR path, if `pr_open is None`, conservatively return `(False, "pr_state_unavailable")`.
 - Add a helper `_check_pr_open(issue_number: int) -> bool | None` that runs `gh pr list --search "#{issue_number}" --state open` via subprocess with a 5-second timeout; returns `True`/`False`/`None` (on error).
+- **Call-site gating:** Callers (`_handle_dev_session_completion`, `_agent_session_hierarchy_health_check`) only invoke `_check_pr_open` when `psm_states.get("DOCS") == "completed"` AND `psm_states.get("MERGE") != "completed"`. For MERGE-completed state, pass `pr_open=None` (not consulted). For all other states (non-terminal), skip the predicate call entirely. This gating keeps subprocess cost at most-once-per-pipeline.
 
 ### 2. Validate predicate
 - **Task ID**: validate-predicate
@@ -430,19 +442,19 @@ Integration verification: existing `tests/integration/test_session_finalization_
 - **Task ID**: build-runner
 - **Depends On**: build-predicate
 - **Validates**: `tests/unit/test_deliver_pipeline_completion.py` (create)
-- **Informed By**: Risks 1-5, Race Conditions 1-4
+- **Informed By**: Risks 1-6, Race Conditions 1-4, Blocker B1
 - **Assigned To**: runner-builder
 - **Agent Type**: async-specialist
 - **Parallel**: false
 - Implement `_deliver_pipeline_completion(parent: AgentSession, summary_context: str, send_cb: Callable, chat_id: str, telegram_message_id: str | None) -> None` in `agent/session_completion.py`.
-- Set `pipeline_complete_pending = True` on parent via `parent.extra_context` CAS before spawning the harness call (handles Race 2).
-- Load PM's Claude Code UUID from session UUID store.
-- Call `get_response_via_harness(message=COMPLETION_PROMPT, prior_uuid=pm_uuid, full_context_message=COMPLETION_PROMPT, session_id=parent.session_id)`.
+- **First line:** acquire the Redis lock `POPOTO_REDIS_DB.set(f"pipeline_complete_pending:{parent.id}", "1", nx=True, ex=60)`. If `False` (lock already held by another caller), log at INFO and return immediately — another runner owns the delivery (handles Race 2, including the hierarchy-health-check concurrent path per C3).
+- Load PM's Claude Code UUID via `_get_prior_session_uuid(parent.session_id)` from `agent/sdk_client.py:152` (B1 fix — canonical read helper; do NOT invent `_get_claude_session_uuid`). Treat `None` as "no prior UUID" and rely on the `full_context_message` fallback in `get_response_via_harness`.
+- Call `get_response_via_harness(message=COMPLETION_PROMPT, prior_uuid=pm_uuid, full_context_message=COMPLETION_PROMPT, session_id=parent.session_id, working_dir=<repo_root_from_project_key>)`.
 - Wrap in `try/except Exception`; on failure, deliver `summary_context` as fallback.
 - On any result (harness or fallback), call `send_cb(chat_id, text, telegram_message_id, parent)`.
-- Set `parent.response_delivered_at = datetime.now(UTC)` and transition parent to `"completed"` via `finalize_session()`.
-- Wrap the entire thing in `try/except asyncio.CancelledError` to catch shutdown-time cancellation: best-effort `asyncio.wait_for(send_cb("I was interrupted and will resume automatically. No action needed."), timeout=2.0)`; re-raise `CancelledError`.
-- In `_handle_dev_session_completion`, after current-stage and outcome are known, call `is_pipeline_complete(current_stage, outcome, _check_pr_open(issue_number))`. If True, invoke `_deliver_pipeline_completion` instead of the existing `_steer_session` call. Preserve the existing re-check guard logic for the non-complete path.
+- Set `parent.response_delivered_at = datetime.now(UTC)` and transition parent to `"completed"` via `finalize_session()`. The runner is the sole transition to `"completed"` per Race 1 mitigation.
+- Wrap the entire thing in `try/except asyncio.CancelledError` to catch shutdown-time cancellation: best-effort `asyncio.wait_for(send_cb("I was interrupted and will resume automatically. No action needed."), timeout=2.0)`; re-raise `CancelledError`. Before sending the interrupted message, check/acquire the dedup lock `POPOTO_REDIS_DB.set(f"interrupted-sent:{parent.session_id}", "1", nx=True, ex=120)` — only send on `True` to suppress flapping-worker duplicates (Risk 6).
+- In `_handle_dev_session_completion`, after current-stage and outcome are known, build the call as: `(is_complete, reason) = is_pipeline_complete(psm.states, outcome, pr_open)` where `pr_open = _check_pr_open(issue_number)` is only computed when `psm.states.get("DOCS") == "completed" and psm.states.get("MERGE") != "completed"`, else `None`. If `is_complete` is True, invoke `_deliver_pipeline_completion` instead of the existing `_steer_session` call. Preserve the existing re-check guard logic for the non-complete path.
 - Schedule the runner as a tracked asyncio.Task (similar to `_pending_extraction_tasks`) and add to worker shutdown-drain set.
 
 ### 4. Validate runner
@@ -458,23 +470,30 @@ Integration verification: existing `tests/integration/test_session_finalization_
 - **Task ID**: build-fanout
 - **Depends On**: build-runner
 - **Validates**: existing fan-out tests in `tests/unit/test_health_check_recovery_finalization.py`
+- **Informed By**: Concern C3 (both entry points share same CAS)
 - **Assigned To**: runner-builder
 - **Agent Type**: async-specialist
 - **Parallel**: false
 - In `agent/session_health.py::_agent_session_hierarchy_health_check` (L1065-1081), replace the `push_steering_message` with marker instructions + `transition_status(parent, "pending", ...)` with a direct `_deliver_pipeline_completion(parent, fan_out_summary, ...)` call.
 - Build `fan_out_summary` from the child outcomes list (existing `child_lines` variable).
+- The runner acquires the same Redis lock `pipeline_complete_pending:{parent_id}` used by the `_handle_dev_session_completion` entry point — no separate lock or code path. If the health-check invocation races with a child-completion invocation, exactly one runner spawns (whichever wins the CAS); the loser logs and returns.
 - Keep failed-parent branch unchanged.
 
-### 6. Simplify router + executor
+### 6. Simplify router + executor + worker steering messages
 - **Task ID**: build-router
 - **Depends On**: build-runner, build-fanout (new path must be live before old path is removed)
-- **Validates**: `tests/unit/test_output_router.py` (updated)
+- **Validates**: `tests/unit/test_output_router.py` (updated), `tests/unit/test_steering_mechanism.py` L195-223 (updated per Test Impact / C5)
+- **Informed By**: Blocker B2
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Remove `PIPELINE_COMPLETE_MARKER` from `agent/output_router.py`.
 - Remove the `deliver_pipeline_complete` action from the return-value union and the marker-inspection branch in `determine_delivery_action`.
 - Remove the `elif action == "deliver_pipeline_complete":` branch from `agent/session_executor.py::send_to_chat` (L850-879).
+- **Rewrite worker-constructed steering-message literals in `agent/session_completion.py` (B2):**
+  - L271 (continuation-PM message): replace `"...Do NOT emit [PIPELINE_COMPLETE] until the PR is merged or closed."` with `"...Do NOT signal pipeline completion until the PR is merged or closed."`
+  - L450 (`_handle_dev_session_completion` steer message): replace `"...You MUST invoke /sdlc to dispatch /do-merge before emitting [PIPELINE_COMPLETE]."` with `"...You MUST invoke /sdlc to dispatch /do-merge before signaling pipeline completion."`
+  - Edit the literals only — do not refactor the surrounding try/except blocks.
 - Update all docstrings mentioning the marker.
 
 ### 7. Update router tests
@@ -491,11 +510,12 @@ Integration verification: existing `tests/integration/test_session_finalization_
 - **Task ID**: build-cancel
 - **Depends On**: none
 - **Validates**: `tests/unit/test_messenger_cancelled_error.py` (create), `tests/unit/test_worker_cancel_requeue.py` (update)
+- **Informed By**: Risk 6 (flapping-worker dedup)
 - **Assigned To**: cancel-builder
 - **Agent Type**: async-specialist
 - **Parallel**: true
 - In `agent/messenger.py::_run_work` (L238), add `except asyncio.CancelledError:` branch before `except Exception`.
-- The handler: best-effort `asyncio.wait_for(self.messenger._send_callback("I was interrupted and will resume automatically. No action needed."), timeout=2.0)` wrapped in its own `try/except (Exception, asyncio.TimeoutError)`; then `raise`.
+- The handler: before sending, acquire the dedup lock `POPOTO_REDIS_DB.set(f"interrupted-sent:{self.session_id}", "1", nx=True, ex=120)`. If `False`, skip the send (log at INFO) and proceed directly to `raise`. If `True`, best-effort `asyncio.wait_for(self.messenger._send_callback("I was interrupted and will resume automatically. No action needed."), timeout=2.0)` wrapped in its own `try/except (Exception, asyncio.TimeoutError)`; then `raise`.
 - Keep existing `except Exception` unchanged for other errors.
 
 ### 9. Validate cancel guard
@@ -504,20 +524,35 @@ Integration verification: existing `tests/integration/test_session_finalization_
 - **Assigned To**: unit-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Create `tests/unit/test_messenger_cancelled_error.py` with tests: CancelledError during coro → interrupted message sent, send_callback raises → swallowed, CancelledError re-raised from handler, TimeoutError on send → swallowed.
+- Create `tests/unit/test_messenger_cancelled_error.py` with tests: CancelledError during coro → interrupted message sent, send_callback raises → swallowed, CancelledError re-raised from handler, TimeoutError on send → swallowed, **second CancelledError within 120s → interrupted message NOT sent again** (Risk 6 / flapping-worker dedup), **CancelledError after 120s TTL expiry → interrupted message sent again** (distinct interruptions still surface).
 - Update `tests/unit/test_worker_cancel_requeue.py` to add `test_cancelled_error_delivers_interrupted_message`.
 
 ### 10. Clean up PM persona
 - **Task ID**: build-persona
 - **Depends On**: none
 - **Validates**: manual grep + persona consistency check
+- **Informed By**: Concern C7 (marker-free Rule 5 wording)
 - **Assigned To**: persona-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - In `config/personas/project-manager.md`: remove `[PIPELINE_COMPLETE]` references at L44, L49, L384, L487.
-- Rewrite Rule 5 (L42-52): preserve the semantic intent (no completion while PR open) without mentioning the marker.
+- Rewrite Rule 5 (L42-52) using the wording from the Technical Approach — explicitly stating that the worker composes the final message. The prior draft's wording ("Do not indicate pipeline completion") is too abstract and leaves the PM guessing; the new wording names the worker as the delivery actor so there is no ambiguity about whose job it is. Target text:
+  ```
+  ### Rule 5 — MERGE is Mandatory Before Dev-Session Sign-Off
+
+  If an open PR exists for the current issue, you must dispatch `/do-merge` before declaring
+  the issue done. Your final message to the user is composed automatically by the worker
+  after MERGE succeeds — do not attempt to self-signal pipeline completion.
+
+  Before exiting, verify: `gh pr list --search "#{issue_number}" --state open` returns empty,
+  OR the next dispatch is `/do-merge`.
+
+  The SDLC pipeline is: ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> **MERGE**.
+  MERGE is the final stage. Completing after DOCS without merging orphans the PR.
+  ```
 - Remove the marker instruction sentence from the fan-out section (L384) and from the Pre-Completion Checklist (L487).
 - Add a new short section or inline note: "Final delivery is automatic. When the pipeline reaches a terminal state, the worker will compose your final summary by asking you directly. Do not emit any special markers."
+- **Validation gate for this task:** `grep -c "composed automatically by the worker" config/personas/project-manager.md` returns exactly `1` AND `grep -c "\[PIPELINE_COMPLETE\]" config/personas/project-manager.md` returns `0`.
 
 ### 11. Integration tests
 - **Task ID**: build-integration
@@ -576,28 +611,44 @@ Integration verification: existing `tests/integration/test_session_finalization_
 
 ## Critique Results
 
-**Verdict:** NEEDS REVISION (recorded `2026-04-20T22:50:22Z`, artifact_hash `sha256:fc4d9e47…0e1bb6a`)
+**First-round verdict:** NEEDS REVISION (recorded `2026-04-20T22:50:22Z`, artifact_hash `sha256:fc4d9e47…0e1bb6a`) — findings not persisted to a retrievable location.
 
-**Finding artifact status:** The `/do-plan-critique` skill ran but did not persist its detailed findings to a retrievable location (no `docs/plans/critiques/1058-*.md` file, no issue comment, no payload on the verdict record). This is a system-level observability gap: the war-room output was emitted as assistant text that was not captured in a session transcript.
+**Second-round verdict:** NEEDS REVISION (recorded `2026-04-20T23:17:44Z`, artifact_hash `sha256:2eca7f32…1bff0d403ea`) — full findings persisted to `docs/critiques/1058-reliable-pm-final-delivery.md` (12 findings: 2 blockers, 7 concerns, 3 nits).
 
-**Verifiable findings applied in this revision:**
-- **F1 (FIXED): fabricated `"completing"` status.** Race 1 mitigation (Risk section) cited `"completing"` as "a new intermediate non-terminal status already documented in `docs/features/session-lifecycle.md`." Verified by `grep` that no such status exists in session-lifecycle.md, nor in `TERMINAL_STATUSES` or any status-value declaration in `models/session_lifecycle.py`. The function parameters `completing_child_id` / `completing_child_status` are unrelated — they describe a child's completion state, not a parent status. Revised Race 1 mitigation to use the `extra_context.pipeline_complete_pending` flag alone (already proposed), with `_finalize_parent_sync` returning early when set. No new status is introduced.
+**Revision pass (this commit)** applies all blocker and concern findings inline in the plan text. Artifact-hash correlation: the plan hash has been changed by this revision pass; re-run `/do-plan-critique` to get a fresh verdict against the revised plan.
 
-**Findings not yet addressed (pending retrieval of the full critique output):**
-- The detailed findings from the war-room agents (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User) are not recoverable from the stored verdict. Re-running `/do-plan-critique` with findings-persistence to `docs/plans/critiques/1058-reliable-pm-final-delivery.md` (or as an issue comment) is required before this plan can advance to `Ready`.
+**Findings applied:**
 
-**Open Questions status:** The 5 Open Questions surfaced in Phase 3 of the original plan remain unresolved. A critique verdict of "NEEDS REVISION" is expected and appropriate while these are open — the plan cannot transition to `Ready` until answers are recorded and folded into Solution / Risks / Technical Approach.
+| Finding | Severity | Revision target | Applied? |
+|---------|----------|-----------------|----------|
+| F1 (prior round) | — | Race 1 cited fabricated `"completing"` status — removed | Applied in prior revision `05e9a805` |
+| B1 | Blocker | Technical Approach → runner (L141, Task 3): replace fabricated `_get_claude_session_uuid` with real `_get_prior_session_uuid` at `agent/sdk_client.py:152` | Applied |
+| B2 | Blocker | Technical Approach → worker-steering-cleanup block + Task 6: rewrite marker-instruction literals at `agent/session_completion.py:271, 450` | Applied |
+| C1 | Concern | Technical Approach → predicate signature, Task 1: predicate now reads `psm.states.get("MERGE")` instead of `current_stage()` | Applied |
+| C2 | Concern | Risk 2 + Race 1 + Task 3: `pipeline_complete_pending` moved from `extra_context` to Redis key with 60s TTL | Applied |
+| C3 | Concern | Race 2 + Task 5: BOTH `_handle_dev_session_completion` and `_agent_session_hierarchy_health_check` share the same Redis-lock CAS | Applied |
+| C4 + Risk 6 | Concern | Risk 6 (new) + Task 8 + Task 9: dedup "interrupted" message with `POPOTO_REDIS_DB.set(..., nx=True, ex=120)` key | Applied |
+| C5 | Concern | Test Impact: explicit entry for `test_steering_mechanism.py` L195-223 (UPDATE, not DELETE) separate from `TestPipelineCompleteMarker` class (DELETE) | Applied |
+| C6 | Concern | Risk 5 + Task 1 call-site gating: `_check_pr_open` gated to DOCS-completed-MERGE-not-completed corner case only (closes Open Q #2) | Applied |
+| C7 | Concern | Technical Approach → persona cleanup + Task 10: Rule 5 rewritten to name the worker as delivery actor, not just "do not indicate" | Applied |
+| N1 | Nit | Open Questions #1: closed (ship current prompt; iteration in Rabbit Holes) | Applied |
+| N2 | Nit | Open Questions #5: closed (remove immediately, no shim — matches Success Criteria) | Applied |
+| N3 | Nit | No-Gos: rewritten to explicitly state Redis-only advisory lock, not ORM storage | Applied |
+
+**Open Questions status:** Reduced from 5 to 2 (#3 non-MERGE terminal paths; #4 shutdown drain timeout). These remain genuine human-judgment calls.
+
+**Next step:** Re-run `/do-plan-critique` against this revised plan. Expected outcome: **READY TO BUILD (with concerns)** or **READY TO BUILD** per the prior verdict's note. If further findings surface, they go through another revision pass using the same inline-Implementation-Note pattern.
 
 ---
 
 ## Open Questions
 
-1. **Completion prompt wording.** The current draft is generic ("Write a 2-3 sentence summary"). Should it be more prescriptive (e.g., "Summary should cover: (1) what was accomplished, (2) any tradeoffs/decisions, (3) next steps or follow-ups")? More structure yields more consistent summaries but reduces flexibility.
+1. **~~Completion prompt wording.~~** (Closed via N1.) Ship the current generic wording. Post-ship iteration on summary quality is listed in Rabbit Holes — we can tighten the prompt based on observed outputs without re-planning.
 
-2. **Caching `_check_pr_open` result.** The predicate is called in `_handle_dev_session_completion`, which can fire multiple times per PM (once per child). Each call currently runs a subprocess. Is a 5-second TTL cache on `extra_context` sufficient, or do we need a more robust cache (Redis-backed)?
+2. **~~Caching `_check_pr_open` result.~~** (Closed via C6.) No cache needed. `_check_pr_open` is now gated to the `DOCS-completed AND MERGE-not-completed` corner case only (see Task 1 call-site gating). Subprocess cost is at most-once-per-pipeline, not per-dev-session.
 
 3. **Non-MERGE terminal paths.** The predicate's "DOCS success + no open PR" branch handles issues where merge happens elsewhere (e.g., plan PRs that close automatically). Should we enumerate the legitimate non-MERGE terminal paths explicitly, or keep the generic "stage=DOCS + no PR" heuristic?
 
 4. **Shutdown drain for completion runners.** How long should the drain timeout be? Memory extraction uses 5 seconds; completion runners need 10-15 seconds to let the harness finish. Does that conflict with our shutdown SLA?
 
-5. **Deprecation period for the marker.** Should we keep `PIPELINE_COMPLETE_MARKER` as a no-op stripped string for one release cycle (to handle any PM session that still emits it from persona memory), or remove it immediately? The issue's Acceptance Criteria allow for a compatibility shim.
+5. **~~Deprecation period for the marker.~~** (Closed via N2.) Remove immediately, no compatibility shim. The Success Criteria at L345 (`grep -c "\[PIPELINE_COMPLETE\]" config/personas/project-manager.md` returns 0) and L337 (`grep -rn PIPELINE_COMPLETE agent/` returns zero) both require full removal. A no-op shim in the router would contradict the success criteria; keeping it in the persona would produce literal marker emission in user-visible messages (the persona-drift attack surface described in Risk 3). Prefer clean cut-over.
