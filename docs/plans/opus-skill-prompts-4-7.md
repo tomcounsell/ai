@@ -6,7 +6,20 @@ owner: Valor Engels
 created: 2026-04-20
 tracking: https://github.com/tomcounsell/ai/issues/1066
 last_comment_id:
+revision_applied: true
+critique_verdict: READY TO BUILD (with concerns)
+critique_recorded_at: 2026-04-20T04:49:20.619877+00:00
 ---
+
+<!--
+REVISION PASS (2026-04-20): /do-plan-critique returned "READY TO BUILD (with concerns)"
+with 0 blockers, 5 concerns (C1-C5), and 3 nits. This revision pass embeds the Implementation
+Notes from each concern inline at the relevant plan section. Concerns remain acknowledged risks
+(not defects); Implementation Notes give the builder unambiguous mid-flight guidance. Nits are
+NOT embedded (out of scope for the revision pass per Row 4b semantics) — they are captured in
+the "Critique Nits (Informational)" section at the bottom of this plan for PR-body reference.
+-->
+
 
 # Opus 4.7 Audit of SDLC Skill Prompts
 
@@ -45,7 +58,10 @@ Each Opus-targeting skill is reviewed against the 4.7 behavioral model, redundan
 
 **Active plans in `docs/plans/` overlapping this area:** none. No other plan touches these four skill prompts.
 
-**Notes:** The `config/personas/project-manager.md:298-302` snippet already dispatches `/do-plan` via `--model opus`. The model dispatch is working correctly; this plan addresses *prompt wording*, not model selection.
+**Notes:** The `config/personas/project-manager.md:133-145` Stage→Model Dispatch Table already dispatches `/do-plan` via `--model opus`. The model dispatch is working correctly; this plan addresses *prompt wording*, not model selection.
+
+<!-- Implementation Note (C1): The canonical dispatch authority for `/do-plan` is the Stage→Model Dispatch Table at `config/personas/project-manager.md:133-145`. Earlier drafts cited `:298-302`, which is an example invocation block for a different issue, not the dispatch table. Builders verifying model routing must grep `Stage→Model Dispatch Table` to find the authoritative location (line 133). -->
+
 
 ## Prior Art
 
@@ -79,7 +95,10 @@ These findings directly shape the Technical Approach section: each skill gets a 
 
 Prompts are Markdown files loaded at skill invocation time and injected into the Opus system/user prompt. The flow:
 
-1. **Entry point**: PM session invokes the skill (e.g., `/do-plan` via dev session dispatched with `--model opus` from `config/personas/project-manager.md:298-302`)
+1. **Entry point**: PM session invokes the skill (e.g., `/do-plan` via dev session dispatched with `--model opus` per the Stage→Model Dispatch Table at `config/personas/project-manager.md:133-145`)
+
+<!-- Implementation Note (C1, continued): The dispatch authority is the Stage→Model Dispatch Table (line 133), NOT the example block at `:298-302`. If a builder needs to verify that PLAN/CRITIQUE/REVIEW route to `opus`, inspect line 133-145 directly. -->
+
 2. **Skill loading**: Claude Code harness reads `.claude/skills/{name}/SKILL.md` and includes it in the context for the model
 3. **Sub-file loading** (conditional): Some skills pull in additional files when needed (`PLAN_TEMPLATE.md`, `CRITICS.md`, `sub-skills/code-review.md`) — these inherit the same Opus behavior
 4. **Model execution**: Opus 4.7 interprets the prompt text and produces output (plan doc, critique findings, PR review, audit report)
@@ -149,7 +168,12 @@ For each of the four skills, apply **only** the edits listed. Do not rewrite who
 - **Critic subagents use `model: "sonnet"`** (confirmed via line 152 of the current SKILL.md). The six-critic parallel spawn is Sonnet, not Opus. The ONLY Opus-executed layer is the orchestrating synthesis (Steps 1, 1.5, 4, 5, 5.5).
 - **Synthesis step (Step 5) output format** — currently uses a structured markdown template. Verify the template is explicit enough that 4.7 will not elide sections under its conciseness default. Specifically:
   - The `## Verdict` section already hard-requires one of four exact strings. No change needed — this is good 4.7 form.
-  - The `## Blockers`, `## Concerns`, `## Nits` section headers are exemplar-driven (use the literal fields shown). Add one sentence above Step 5 asserting: "Emit every field literally. Empty sections must still be emitted as '## Blockers\n\nNone.' — do not omit the header." This prevents 4.7 from silently dropping empty sections.
+  - The `## Blockers`, `## Concerns`, `## Nits` section headers are exemplar-driven (use the literal fields shown). Add one sentence above Step 5 asserting: *"Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header."* This prevents 4.7 from silently dropping empty sections.
+
+<!-- Implementation Note (C2): The exact canonical sentence to add above Step 5 is:
+       "Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header."
+     Use this exact string verbatim in both the Technical Approach B edit (above) AND in Task 3 build-critique (below). The pre/post grep should be able to match this literal string across the edit. Earlier drafts had divergent wordings ("every field literally" vs "every section header literally"); the correct final wording is the section-header version because the example sentence that follows is about section headers (## Blockers), not fields. -->
+
 - **No other changes.** The issue's recon summary explicitly calls this skill "no changes needed documented explicitly" for the conciseness audit — the synthesis step's structured output is already robust. The audit acknowledgement must be recorded in the PR body / plan so reviewers see the skill was inspected, not skipped.
 
 #### C. `/do-pr-review` (`.claude/skills/do-pr-review/SKILL.md`)
@@ -223,7 +247,24 @@ No existing tests need changes. Justification: the constraint "changes must not 
 
 ### Risk 1: An edit accidentally changes a field name or output-format structure
 **Impact:** Downstream consumer (SDLC router, parity test, PR-comment parser) breaks silently.
-**Mitigation:** Before committing, `grep` the four updated files for every structural field name that existed before (e.g., `**File:**`, `**Code:**`, `**Severity:**`, `## Verdict`, `SUMMARY: PASS=`, `READY TO BUILD`, `NEEDS REVISION`, `MAJOR REWORK`, `SEVERITY:`, `LOCATION:`, `FINDING:`, `SUGGESTION:`, `IMPLEMENTATION NOTE:`, `VERIFICATION_PASS:`, `OUTPUT_FORMAT:`, `FINAL_LINE:`). If any grep returns fewer matches post-edit than pre-edit, the edit has deleted a field and must be reverted/corrected.
+**Mitigation:** Before committing, `grep` the four updated files for every structural field name. **Split the grep list into two groups with different invariants** — this prevents the builder from misreading expected "0 → N" transitions as regressions:
+
+**Group A — Pre-existing fields (pre-edit count MUST equal or be less than post-edit count; never decrease):**
+- `**File:**`, `**Code:**`, `**Severity:**`, `**Fix:**`, `**Issue:**`
+- `## Verdict`
+- `SUMMARY: PASS=`
+- `READY TO BUILD`, `NEEDS REVISION`, `MAJOR REWORK`
+- `SEVERITY:`, `LOCATION:`, `FINDING:`, `SUGGESTION:`
+- `IMPLEMENTATION NOTE:` (scope: `do-plan-critique/SKILL.md` only — this field does not exist in `CRITICS.md`; grepping both files will show asymmetric counts that are expected)
+
+**Group B — Newly-introduced fields (pre-edit count is 0, post-edit count MUST be ≥ 1; transition 0 → N is the expected signal, NOT a regression):**
+- `FEATURE_TOPIC:`, `SEED_DOC_PATH:`, `VERIFICATION_PASS:`, `OUTPUT_FORMAT:`, `FINAL_LINE:`
+- Scope: these are introduced only in `daily-integration-audit/SKILL.md` (Technical Approach section D). Grepping any other file will return 0 both before and after — this is expected, not a bug.
+
+Record pre and post counts for both groups in the PR body so a reviewer can verify at a glance. Any Group A decrease is a BLOCKER. Any Group B non-introduction (post-count remains 0) is a BLOCKER.
+
+<!-- Implementation Note (C3): The original Risk 1 list conflated pre-existing and newly-introduced fields. Under the old phrasing, a builder grepping `VERIFICATION_PASS:` pre-edit would correctly find 0 matches, but the "same or greater count" rule reads awkwardly for 0 → 3 transitions (which are *expected*, not regressions). The split above makes both invariants unambiguous: Group A is a conservation check (never delete a field); Group B is an introduction check (new fields must land). Builders MUST record pre/post counts for BOTH groups in the PR body. -->
+
 
 ### Risk 2: The hardening makes prompts too literal and loses nuance Opus 4.5/4.6 provided via inference
 **Impact:** Under older Opus versions (if used for rollback or A/B), output quality regresses.
@@ -265,8 +306,11 @@ Integration validation for the smoke-test (AC #6): after the edit merges, invoke
 This is an internal prompt-text edit. No user-facing feature documentation is needed, but a brief note in the SDLC skill docs captures the audit.
 
 ### Feature Documentation
-- [ ] Add a short note to `docs/features/sdlc-skills-audit.md` (or create if not present) recording: the four skills were audited for Opus 4.7 behavior on 2026-04-20, the three behavioral deltas checked, and the outcome (which skills were edited, which weren't). This gives future readers a pointer when `/do-plan-critique` or `/do-pr-review` is re-audited for a future Opus version.
-- [ ] No update to `docs/features/README.md` index — this is an addendum to an existing feature doc (or a new audit-record doc, which does not need an index entry since it is not a feature).
+- [ ] **Append** a new dated sub-section (`## Opus 4.7 Audit (2026-04-20)`) to the END of `docs/features/sdlc-skills-audit.md` recording: the four skills were audited for Opus 4.7 behavior on 2026-04-20, the three behavioral deltas checked, and the outcome (which skills were edited, which weren't). This gives future readers a pointer when `/do-plan-critique` or `/do-pr-review` is re-audited for a future Opus version. The file **already exists** with prior audit content from 2026-04-18 (#1042 "Five Blind Spots Closed") — do NOT overwrite or edit the existing body; append only.
+- [ ] No update to `docs/features/README.md` index — this is an addendum to an existing feature doc.
+
+<!-- Implementation Note (C5, continued): The Documentation section and Task 9 BOTH say "append to existing file". This is intentional consistency — the file is real, the prior content is real, and the builder must not use a "create if missing" fallback branch. If the builder finds the file missing at build time, they MUST stop and investigate (someone deleted it) before proceeding. -->
+
 
 ### External Documentation Site
 - [ ] N/A — repo does not publish to Sphinx/RTD/MkDocs for this area.
@@ -350,9 +394,12 @@ Default tier-1 types are sufficient: `builder`, `validator`, `documentarian`. No
 - **Assigned To**: skill-edits-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add one sentence above Step 5 asserting: "Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header."
+- Add one sentence above Step 5 asserting — use this exact canonical string verbatim: *"Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header."*
 - Do NOT touch critic prompts in `CRITICS.md` (those run on Sonnet).
 - Record rationale for minimal-change in the PR body.
+
+<!-- Implementation Note (C2, continued): This exact canonical string matches Technical Approach section B above. After editing `do-plan-critique/SKILL.md`, verify with: grep -F "Emit every section header literally; empty categories emit" .claude/skills/do-plan-critique/SKILL.md — should return exit 0 with the inserted line. -->
+
 
 ### 4. Edit `/do-pr-review`
 
@@ -419,8 +466,12 @@ Default tier-1 types are sufficient: `builder`, `validator`, `documentarian`. No
 - **Assigned To**: audit-record-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: true (with validate-smoke, validate-tests)
-- Create or append to `docs/features/sdlc-skills-audit.md` with a short audit-record entry (date, four skills, three deltas checked, which were edited, which weren't, link to this plan and PR).
-- If `docs/features/sdlc-skills-audit.md` does not exist, create it with a minimal header and this as the first entry.
+- **Append** a new dated sub-section titled `## Opus 4.7 Audit (2026-04-20)` to the END of `docs/features/sdlc-skills-audit.md`. The file **already exists** (verified during critique — it contains prior `# SDLC Skills Audit: Five Blind Spots Closed` content from the 2026-04-18 #1042 audit). Do NOT overwrite, re-order, or edit the existing content — it's a permanent historical record.
+- Before appending, confirm the file's terminal state with `sed -n '$p' docs/features/sdlc-skills-audit.md` (should return a non-empty line, confirming the file was not truncated on a prior edit).
+- The new sub-section should include: date, four skills reviewed, three behavioral deltas checked (conciseness shift, proactive tool-checking, reduced clarification), which were edited vs. not, link to this plan, link to the PR.
+
+<!-- Implementation Note (C5): The file `docs/features/sdlc-skills-audit.md` already exists with ~5.8KB of prior audit content from PR #1039 (2026-04-18). The critique confirmed this during its file-existence check. The "Create or create if not present" wording from earlier drafts is a dead branch — the file WILL exist at build time. The builder MUST append, not overwrite. A good guardrail: `cp docs/features/sdlc-skills-audit.md /tmp/sdlc-skills-audit.bak && [edit] && diff /tmp/sdlc-skills-audit.bak docs/features/sdlc-skills-audit.md` — the diff should show only additions at the end of the file, no deletions or modifications of existing lines. -->
+
 
 ### 10. Final validation
 
@@ -446,12 +497,43 @@ Default tier-1 types are sufficient: `builder`, `validator`, `documentarian`. No
 | Field preservation: Audit SUMMARY footer | `grep 'SUMMARY: PASS=' .claude/skills/daily-integration-audit/SKILL.md` | exit code 0 |
 | Opus model routing unchanged | `grep -n 'opus' .claude/skills/sdlc/SKILL.md` | output contains PLAN, CRITIQUE, REVIEW rows |
 | No version-pin accidentally added | `grep 'claude-opus-4-7' .claude/skills/` | exit code 1 (none) |
-| Tool-announcement phrasing removed | `grep -i -E '(first announce you have\|verify you have access to)' .claude/skills/do-plan/SKILL.md .claude/skills/do-plan-critique/SKILL.md .claude/skills/do-pr-review/SKILL.md .claude/skills/daily-integration-audit/SKILL.md` | exit code 1 (none) |
+| Tool-announcement phrasing removed | `grep -i -E '(first announce you have\|verify you have access to)' .claude/skills/do-plan/SKILL.md .claude/skills/do-plan-critique/SKILL.md .claude/skills/do-pr-review/SKILL.md .claude/skills/daily-integration-audit/SKILL.md` | exit code 1 (none) — **BROKEN: see C4 note below, use corrected form** |
+| Tool-announcement phrasing removed (C4-corrected) | `grep -i -E '(first announce you have\|verify you have access to)' .claude/skills/do-plan/SKILL.md .claude/skills/do-plan-critique/SKILL.md .claude/skills/do-pr-review/SKILL.md .claude/skills/daily-integration-audit/SKILL.md` — **USE THIS INSTEAD**: `grep -i -E '(first announce you have|verify you have access to)' .claude/skills/do-plan/SKILL.md .claude/skills/do-plan-critique/SKILL.md .claude/skills/do-pr-review/SKILL.md .claude/skills/daily-integration-audit/SKILL.md` | exit code 1 (none) |
+
+<!-- Implementation Note (C4): The original grep command above has broken regex syntax: `\|` inside `-E` (extended regex) is a literal backslash-pipe-escape, not an OR operator. Under `-E`, pipes are OR by default and must NOT be backslash-escaped. The corrected command uses unescaped pipes: `grep -i -E '(first announce you have|verify you have access to)'`. The builder MUST use the corrected form when verifying AC #5. Pre-edit grep (already run during critique) confirmed zero matches across all four skill files, so AC #5 is trivially satisfied — but the Verification table must still show a syntactically valid command for future re-audits. When the builder applies the edits, they should also physically correct line 449's command to use unescaped pipes and delete the broken row, keeping only the C4-corrected row. -->
+
 | ToolSearch schema loading preserved | `grep 'ToolSearch("select:WebSearch")' .claude/skills/do-plan/SKILL.md` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critiqued:** 2026-04-20T04:49:20Z
+**Verdict:** READY TO BUILD (with concerns)
+**Findings:** 0 blockers, 5 concerns, 3 nits
+**Revision pass applied:** 2026-04-20 (this commit) — `revision_applied: true` set in frontmatter
+
+### Concerns (embedded as Implementation Notes above)
+
+All five concerns have been addressed inline at the relevant plan sections via HTML-commented `<!-- Implementation Note (Cn): ... -->` blocks. Summary:
+
+| # | Concern | Location in plan | Embedded? |
+|---|---------|------------------|-----------|
+| C1 | File:line citation drift — `:298-302` → `:133-145` (Stage→Model Dispatch Table) | Freshness Check (line ~48), Data Flow Step 1 (line ~82) | Yes |
+| C2 | "field" vs "section header" wording contradiction | Technical Approach B + Task 3 build-critique | Yes (canonical string now identical in both places) |
+| C3 | Risk 1 grep list mixes pre-existing and new fields | Risks / Risk 1 mitigation | Yes (split into Group A + Group B with distinct invariants) |
+| C4 | Broken `\|` regex escaping in Verification table | Verification table (line ~449) | Yes (corrected grep row added alongside broken original; builder deletes the broken row) |
+| C5 | Task 9 assumed "create if not present" but file already exists | Documentation section + Task 9 document-audit | Yes (explicit "append only" directives in both places) |
+
+### Nits (Informational — NOT blocking build)
+
+These were flagged at NIT severity and are recorded here for reviewer visibility. They do NOT require plan edits to proceed to build; they can be addressed in the PR body or closed as "acknowledged, no action" at merge time.
+
+- **N1** — Test Impact justification for `test_skills_audit.py` describes a nonexistent keyword-grep test. Disposition (UPDATE NOT REQUIRED) is correct; justification wording is inaccurate. Low priority — can be corrected inline during build or deferred to a follow-up commit.
+- **N2** — Open Question 2's smoke-test skill (`/do-plan-critique`) is self-referential; the current critique invocation serves as smoke test N=0. If a later revision cycle re-invokes `/do-plan-critique`, note in the PR body that the smoke test count should be refreshed.
+- **N3** — Freshness Check pins baseline to `c5c24ee3`. If >48h elapse between plan creation and `/do-build`, the freshness check should be re-run. The plan's narrow scope and low hotspot risk make this low priority.
+
+### Structural Checks
+
+All PASS (Required sections, Task numbering, Dependencies, File paths, Prerequisites, Cross-references).
 
 ---
 
