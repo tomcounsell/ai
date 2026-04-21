@@ -38,7 +38,7 @@ The orchestrator will:
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
-**Newsyslog ACTION REQUIRED:** The orchestrator checks `/etc/newsyslog.d/valor.conf` against the rendered template on every `--full` run. If missing or stale it tries a passwordless `sudo -n` install. When sudo needs a password the run prints `ACTION REQUIRED: ... Run: sudo cp <(sed ...) /etc/newsyslog.d/valor.conf`. **Always surface this line verbatim to the user** — without it, `bridge.error.log` and `worker_error.log` grow unbounded (observed 18+ MB).
+**Log rotation:** The orchestrator installs the user-space log-rotate LaunchAgent on every `--full` run (`com.valor.log-rotate.plist` → `~/Library/LaunchAgents/`). No root/sudo needed; the LaunchAgent runs `scripts/log_rotate.py` every 30 minutes to rotate any `logs/*.log` file over 10 MB. The installer is content-idempotent — if the rendered plist matches the installed file, the bootout/bootstrap cycle is skipped entirely. If a stale `/etc/newsyslog.d/valor.conf` exists from prior releases, the orchestrator attempts `sudo -n rm` (non-interactive) to remove it; if sudo requires a password, the cleanup is skipped with a warning and retried next run.
 
 The orchestrator automatically cleans up sessions as part of Step 5.5:
 - Corrupted sessions (invalid IDs, unsaveable records) are deleted and indexes rebuilt

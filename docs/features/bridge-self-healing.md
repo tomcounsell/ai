@@ -104,7 +104,7 @@ This is distinct from the loop-level crash guard (which marks sessions as `faile
 
 ### 5. Log Rotation
 
-Log rotation uses a dual-mechanism approach: Python-managed rotation for application logs, and shell rotation + newsyslog for launchd-managed stderr/stdout logs.
+Log rotation uses a three-layer approach: Python-managed rotation for application logs, shell rotation at service startup for launchd-managed stderr/stdout logs, and a user-space LaunchAgent for between-restart coverage. See [Log Rotation](log-rotation.md) for the full design.
 
 **Python-managed logs** (auto-rotate on write via `RotatingFileHandler`, 10MB max, 5 backups):
 - `bridge.log` — configured in `bridge/telegram_bridge.py`
@@ -114,7 +114,7 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 **Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
 - `bridge.error.log`, `reflections_error.log`
 
-**newsyslog safety net** (`config/newsyslog.valor.conf`, installed to `/etc/newsyslog.d/valor.conf`): Covers all 5 launchd-managed logs with hourly checks, 10MB max, 5 bzip2-compressed backups. Uses the `N` flag (no signal) because launchd holds file descriptors open. Acts as a backup if the bridge doesn't restart for extended periods.
+**User-space LaunchAgent safety net** (`com.valor.log-rotate.plist` + `scripts/log_rotate.py`): runs every 30 minutes under the user's launchd session and rotates any `logs/*.log` file over 10 MB (3 backups retained). Covers all launchd-managed logs between service restarts — no root needed. Replaces the previous newsyslog config that required `sudo` to install.
 
 ### 6. Startup Redis Key Cleanup (`worker/__main__.py`)
 
