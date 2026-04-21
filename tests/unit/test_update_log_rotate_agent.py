@@ -1,4 +1,7 @@
-"""Tests for install_log_rotate_agent() and remove_newsyslog_config() in scripts/update/service.py."""
+"""Tests for install_log_rotate_agent() and remove_newsyslog_config().
+
+Both functions live in scripts/update/service.py.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ from scripts.update import service
 def _write_plist(project_dir: Path) -> Path:
     plist = project_dir / "com.valor.log-rotate.plist"
     plist.write_text(
-        "<?xml version=\"1.0\"?>\n"
+        '<?xml version="1.0"?>\n'
         "<plist><dict><key>Label</key><string>__SERVICE_LABEL__</string>"
         "<key>Path</key><string>__PROJECT_DIR__</string>"
         "<key>Home</key><string>__HOME_DIR__</string></dict></plist>\n"
@@ -50,7 +53,9 @@ class TestInstallLogRotateAgent:
         result = service.install_log_rotate_agent(tmp_path)
 
         assert result is True
-        installed_plist = fake_home / "Library" / "LaunchAgents" / f"{service.SERVICE_PREFIX}.log-rotate.plist"
+        installed_plist = (
+            fake_home / "Library" / "LaunchAgents" / f"{service.SERVICE_PREFIX}.log-rotate.plist"
+        )
         assert installed_plist.exists()
         # Template substitution should have happened.
         text = installed_plist.read_text()
@@ -103,7 +108,7 @@ class TestInstallLogRotateAgent:
         # Existing installed plist has different content.
         label = f"{service.SERVICE_PREFIX}.log-rotate"
         installed = fake_home / "Library" / "LaunchAgents" / f"{label}.plist"
-        installed.write_text("<?xml version=\"1.0\"?>\n<plist>OLD</plist>\n")
+        installed.write_text('<?xml version="1.0"?>\n<plist>OLD</plist>\n')
 
         launchctl_calls: list[list[str]] = []
 
