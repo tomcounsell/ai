@@ -250,12 +250,14 @@ async def process_outbox() -> int:
         keys = await asyncio.to_thread(r.keys, EMAIL_OUTBOX_KEY_PATTERN)
 
         # Heartbeat every cycle so ``email-status`` can detect a stale relay.
+        # ``ex=`` kwarg is explicit to avoid relying on redis-py's positional
+        # arg ordering staying stable across versions.
         try:
             await asyncio.to_thread(
                 r.set,
                 EMAIL_RELAY_HEARTBEAT_KEY,
                 str(time.time()),
-                EMAIL_RELAY_HEARTBEAT_TTL,
+                ex=EMAIL_RELAY_HEARTBEAT_TTL,
             )
         except Exception as hb_err:
             logger.warning(f"Email relay: heartbeat write failed: {hb_err}")

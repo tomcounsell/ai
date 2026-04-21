@@ -63,7 +63,9 @@ class TestCliSendDrainsViaRelayToSmtp:
 
         assert sent == 1
         assert captured["to"] == "alice@example.com"
-        assert "Hi" in captured["subject"]
+        # New non-reply sends must NOT prepend "Re:" (PR #1094 blocker).
+        # Strict equality catches the previous bug where "Hi" -> "Re: Hi".
+        assert captured["subject"] == "Hi"
         assert captured["body"] == "Body"
 
     @pytest.mark.asyncio

@@ -95,23 +95,12 @@ def _imap_fallback_fetch(limit: int, search: str | None, since_ts: float | None)
     error, returns an empty list and logs to stderr.
     """
     from bridge.email_bridge import _build_imap_sender_query, _get_imap_config, parse_email_message
-    from bridge.routing import (
-        EMAIL_DOMAIN_TO_PROJECT,
-        EMAIL_TO_PROJECT,
-        build_email_to_project_map,
-        get_known_email_search_terms,
-        load_config,
-    )
+    from bridge.routing import ensure_email_routing_loaded, get_known_email_search_terms
 
-    # Populate routing maps once (idempotent — same pattern as run_email_bridge)
-    if not EMAIL_TO_PROJECT and not EMAIL_DOMAIN_TO_PROJECT:
-        try:
-            config = load_config()
-            addr_map, domain_map = build_email_to_project_map(config)
-            EMAIL_TO_PROJECT.update(addr_map)
-            EMAIL_DOMAIN_TO_PROJECT.update(domain_map)
-        except Exception as e:
-            print(f"IMAP fallback: could not load routing config: {e}", file=sys.stderr)
+    # Populate routing maps once (idempotent — single entry point, no direct
+    # mutation of routing module globals from the CLI).
+    if not ensure_email_routing_loaded():
+        print("IMAP fallback: could not load routing config.", file=sys.stderr)
 
     cfg = _get_imap_config()
     if not cfg:

@@ -225,7 +225,10 @@ def _build_reply_mime(
 
     Args:
         to_addr: Recipient email address.
-        subject: Original subject; ``Re:`` is prepended if not already present.
+        subject: Subject line. ``Re:`` is prepended only when ``in_reply_to``
+            is truthy and the subject does not already start with ``re:``;
+            new outbound messages (CLI sends with ``reply_to=None``) keep
+            the subject verbatim.
         body: Plain text body (utf-8).
         in_reply_to: RFC-2822 Message-ID of the message being replied to.
         references: RFC-2822 References chain (typically equal to in_reply_to).
@@ -260,10 +263,17 @@ def _build_reply_mime(
 
     msg["From"] = from_addr
     msg["To"] = to_addr
-    if subject and not subject.lower().startswith("re:"):
-        msg["Subject"] = f"Re: {subject}"
+    # Only prepend "Re: " when this is an actual reply (in_reply_to is truthy).
+    # The worker reply path always passes in_reply_to; the CLI send path passes
+    # None for new outbound messages and must preserve the caller-provided
+    # subject verbatim. See PR #1094 review blocker.
+    if subject:
+        if in_reply_to and not subject.lower().startswith("re:"):
+            msg["Subject"] = f"Re: {subject}"
+        else:
+            msg["Subject"] = subject
     else:
-        msg["Subject"] = subject or "Re: (no subject)"
+        msg["Subject"] = "Re: (no subject)" if in_reply_to else "(no subject)"
     msg["Message-ID"] = email.utils.make_msgid(domain=from_addr.split("@")[-1])
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
@@ -274,7 +284,7 @@ def _build_reply_mime(
 
 
 # =============================================================================
-# History cache writers (Race 1: JSON blob BEFORE ZADD, pipelined for atomicity)
+# History cache writers (Race 1: JSON blob + ZADD in one MULTI/EXEC pipeline)
 # =============================================================================
 
 # Redis key schema for the CLI history cache
@@ -292,9 +302,12 @@ HISTORY_MSG_TTL = 7 * 24 * 3600
 def _record_history(parsed: dict, mailbox: str = "INBOX") -> None:
     """Write a parsed inbound email to the Redis history cache.
 
-    Writes the per-message JSON blob FIRST then ZADDs the sorted set — readers
-    that race with the writer see the set entry only after the blob is present,
-    modulo Redis pipeline atomicity (see Race 1 in the plan).
+    The per-message JSON blob (``SET``) and the sorted-set membership (``ZADD``)
+    are queued into a single ``r.pipeline()``, which defaults to
+    ``transaction=True`` — redis-py emits ``MULTI``/``EXEC`` so both commands
+    are applied atomically server-side. Readers never observe one without the
+    other, so no ordering-on-the-wire framing is needed (see Race 1 in the
+    plan for the original write-order mitigation this supersedes).
 
     After the write, trims the sorted set to ``HISTORY_MAX_ENTRIES`` newest
     entries. Evicted Message-IDs are actively DELed from the per-msg namespace
@@ -324,7 +337,8 @@ def _record_history(parsed: dict, mailbox: str = "INBOX") -> None:
         msg_key = HISTORY_MSG_KEY.format(message_id=message_id)
 
         r = _get_redis()
-        # Phase 1: blob then ZADD in a pipeline (blob committed first on the wire)
+        # Phase 1: blob + ZADD queued inside a MULTI/EXEC pipeline (redis-py
+        # defaults to transaction=True), so both commands land atomically.
         pipe = r.pipeline()
         pipe.set(msg_key, blob, ex=HISTORY_MSG_TTL)
         pipe.zadd(set_key, {message_id: ts})
@@ -364,6 +378,10 @@ def _record_thread(parsed: dict) -> None:
         ts = float(parsed.get("timestamp") or time.time())
         from_addr = parsed.get("from_addr", "") or ""
 
+        # Single connection for this function — cheaper than re-resolving
+        # the pool twice and easier to reason about under monkeypatch.
+        r = _get_redis()
+
         # The root is the message at the end of the chain. Without a full
         # server-side traversal, approximate: if we have an in_reply_to, that's
         # a better root candidate than the current message. Walk one link via
@@ -371,7 +389,6 @@ def _record_thread(parsed: dict) -> None:
         root = in_reply_to or message_id
         if in_reply_to:
             try:
-                r = _get_redis()
                 existing = r.hget(HISTORY_THREADS_KEY, in_reply_to)
                 if existing:
                     try:
@@ -383,7 +400,6 @@ def _record_thread(parsed: dict) -> None:
             except Exception:
                 root = in_reply_to
 
-        r = _get_redis()
         existing_raw = r.hget(HISTORY_THREADS_KEY, root)
         if existing_raw:
             try:
