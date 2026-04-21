@@ -22,9 +22,9 @@ specific reason to exist.
 
 | Layer | Runs | Covers | Defined in |
 |-------|------|--------|------------|
-| **Python `RotatingFileHandler`** | Every write | App logs the Python process opens itself (`bridge.log`, `worker.log`, `watchdog.log`, `reflections.log`) | `bridge/telegram_bridge.py`, `worker/__main__.py`, `monitoring/bridge_watchdog.py`, `scripts/reflections.py` |
+| **Python `RotatingFileHandler`** | Every write | App logs the Python process opens itself with a rotating handler (`bridge.log`, `watchdog.log`) | `bridge/telegram_bridge.py`, `monitoring/bridge_watchdog.py` |
 | **Startup `rotate_log`** | Every service start/restart | launchd-managed stderr files (`*.error.log`) — covers the moment the service restarts (FD closes, rename lands) | `scripts/valor-service.sh:148-179` |
-| **Log-rotate LaunchAgent** | Every 30 min | Every `logs/*.log` file — between-restart coverage for long-running services | `scripts/log_rotate.py` + `com.valor.log-rotate.plist` |
+| **Log-rotate LaunchAgent** | Every 30 min | Every `logs/*.log` file — between-restart coverage for long-running services, and the sole rotator for `worker.log` and `reflections.log` (both written via plain file append / launchd `StandardOutPath`, no in-process rotation) | `scripts/log_rotate.py` + `com.valor.log-rotate.plist` |
 
 The LaunchAgent is the new layer. The other two pre-existed and continue
 to work unchanged.
@@ -33,9 +33,13 @@ to work unchanged.
 
 `RotatingFileHandler` only rotates file descriptors that the Python process
 itself opened. When launchd writes to `StandardOutPath`/`StandardErrorPath`,
-it holds the FD open for the lifetime of the service. Python's handler can
-rename `worker.log` to `worker.log.1` all it wants — launchd keeps writing
-to the old inode.
+it holds the FD open for the lifetime of the service. Even for services
+that do install a Python rotating handler (like the bridge), renaming
+`bridge.log` to `bridge.log.1` does not affect launchd's FD — launchd
+keeps writing to the old inode. And for services that deliberately use a
+plain `FileHandler` (worker) or raw file append (`sdlc_reflection.py`),
+there is no in-process rotation at all; those files rely entirely on the
+LaunchAgent.
 
 The LaunchAgent sidesteps the FD problem the same way the old newsyslog
 config did: it renames the file, creates a fresh empty one, and accepts
