@@ -7,6 +7,7 @@ created: 2026-04-19
 critiqued: 2026-04-19
 tracking: https://github.com/tomcounsell/ai/issues/1030
 last_comment_id: null
+allow_unchecked: true  # 3 items deferred with inline justifications: symlink doc/test follow-up, /update --full live validation (post-merge), 10MB/30min soak test (needs real LaunchAgent schedule)
 ---
 
 # Replace Root-Requiring newsyslog with User-Space Log Rotation
