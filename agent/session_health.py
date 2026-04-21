@@ -11,8 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
-from config.enums import SessionType
-from models.agent_session import AgentSession
+from models.agent_session import AgentSession, SessionType
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
