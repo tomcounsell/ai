@@ -282,7 +282,7 @@ class BackgroundTask:
                             ),
                             timeout=2.0,
                         )
-                    except (Exception, asyncio.TimeoutError) as _send_err:
+                    except (TimeoutError, Exception) as _send_err:
                         logger.warning(
                             "[%s] CancelledError best-effort send failed: %s",
                             self.messenger.session_id,

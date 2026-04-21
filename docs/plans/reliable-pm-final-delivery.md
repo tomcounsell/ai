@@ -223,18 +223,18 @@ Option C is kept in the Rabbit Holes section as a considered alternative.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_output_router.py` (all tests referencing `deliver_pipeline_complete` or `PIPELINE_COMPLETE_MARKER`, approximately L85, L151, L158) — UPDATE: remove marker-specific assertions; add assertions that PM/SDLC paths without markers resolve to `nudge_continue` (or `deliver` on `waiting_for_children`). Reference lines from current file: L10, L85, L87, L151, L158 import the marker — these lines become obsolete.
-- [ ] `tests/unit/test_steering_mechanism.py` L161-194 (class `TestPipelineCompleteMarker` — "Tests for PIPELINE_COMPLETE marker behavior in output router") — DELETE: entire class becomes obsolete. Replaced by new test file `tests/unit/test_pipeline_complete_predicate.py` (create).
-- [ ] `tests/unit/test_steering_mechanism.py` L195-223 (fan-out / continuation-PM assertions that the steering message literal contains `"[PIPELINE_COMPLETE]"` — specifically L205, L209, L223) — UPDATE: once B2's rewrite lands (marker-free literals in `agent/session_completion.py` L271 and L450), these assertions must check for the new marker-free substring (e.g., `"signal pipeline completion"`). Keep the test's intent (PM is warned about pre-merge completion); only update the asserted literal. This is the actual landing site of the marker-instruction assertion that B2 covers.
-- [ ] `tests/unit/test_session_completion*.py` (if any reference the marker-based steering path in `_handle_dev_session_completion`) — UPDATE: patch assertions to check for `_deliver_pipeline_completion` invocation instead of `push_steering_message` with marker instructions.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py::test_cancelling_handle_task_does_not_cancel_worker_loop` — UPDATE: extend to assert the new "interrupted" message is delivered when CancelledError fires mid-session.
-- [ ] `tests/unit/test_worker_cancel_requeue.py` — UPDATE: new test `test_cancelled_error_delivers_interrupted_message` added; existing tests preserved unchanged.
-- [ ] `tests/unit/test_messenger*.py` (if exists) — UPDATE: add CancelledError → `send_cb("interrupted...")` → re-raise assertion. If no file exists, create `tests/unit/test_messenger_cancelled_error.py`.
-- [ ] `tests/integration/test_session_finalization_decoupled.py::test_cancellation_does_not_crash_via_wrapper` — UPDATE: extend to assert the interrupted-message delivery, preserving existing "does not crash" assertion.
-- [ ] `tests/unit/test_qa_nudge_cap.py` (any marker references) — UPDATE: remove marker-based assertions; the Teammate path was never affected by the marker (only PM+SDLC was), so most tests here unchanged.
-- [ ] New test file `tests/unit/test_pipeline_complete_predicate.py` — CREATE: pure-function tests for `is_pipeline_complete` (MERGE success → True, DOCS+no-PR → True, DOCS+open-PR → False, unknown stage → False, PR-state fetch failure → False).
-- [ ] New test file `tests/unit/test_deliver_pipeline_completion.py` — CREATE: tests for the completion-turn runner (success, empty harness, harness raises, no pm_uuid fallback, CancelledError propagation).
-- [ ] New test file `tests/integration/test_pm_final_delivery.py` — CREATE: end-to-end test covering failure mode #1 (marker-free success), failure mode #2 (empty harness → fallback delivered), failure mode #3 (CancelledError → interrupted message delivered within 60s proxy). Uses the existing bridge/worker test harness (see `tests/integration/test_session_finalization_decoupled.py` for patterns).
+- [x] `tests/unit/test_output_router.py` (all tests referencing `deliver_pipeline_complete` or `PIPELINE_COMPLETE_MARKER`, approximately L85, L151, L158) — UPDATE: remove marker-specific assertions; add assertions that PM/SDLC paths without markers resolve to `nudge_continue` (or `deliver` on `waiting_for_children`). Reference lines from current file: L10, L85, L87, L151, L158 import the marker — these lines become obsolete.
+- [x] `tests/unit/test_steering_mechanism.py` L161-194 (class `TestPipelineCompleteMarker` — "Tests for PIPELINE_COMPLETE marker behavior in output router") — DELETE: entire class becomes obsolete. Replaced by new test file `tests/unit/test_pipeline_complete_predicate.py` (create).
+- [x] `tests/unit/test_steering_mechanism.py` L195-223 (fan-out / continuation-PM assertions that the steering message literal contains `"[PIPELINE_COMPLETE]"` — specifically L205, L209, L223) — UPDATE: once B2's rewrite lands (marker-free literals in `agent/session_completion.py` L271 and L450), these assertions must check for the new marker-free substring (e.g., `"signal pipeline completion"`). Keep the test's intent (PM is warned about pre-merge completion); only update the asserted literal. This is the actual landing site of the marker-instruction assertion that B2 covers.
+- [x] `tests/unit/test_session_completion*.py` (if any reference the marker-based steering path in `_handle_dev_session_completion`) — UPDATE: patch assertions to check for `_deliver_pipeline_completion` invocation instead of `push_steering_message` with marker instructions.
+- [x] `tests/unit/test_health_check_recovery_finalization.py::test_cancelling_handle_task_does_not_cancel_worker_loop` — UPDATE: extend to assert the new "interrupted" message is delivered when CancelledError fires mid-session.
+- [x] `tests/unit/test_worker_cancel_requeue.py` — UPDATE: new test `test_cancelled_error_delivers_interrupted_message` added; existing tests preserved unchanged.
+- [x] `tests/unit/test_messenger*.py` (if exists) — UPDATE: add CancelledError → `send_cb("interrupted...")` → re-raise assertion. If no file exists, create `tests/unit/test_messenger_cancelled_error.py`.
+- [x] `tests/integration/test_session_finalization_decoupled.py::test_cancellation_does_not_crash_via_wrapper` — UPDATE: extend to assert the interrupted-message delivery, preserving existing "does not crash" assertion.
+- [x] `tests/unit/test_qa_nudge_cap.py` (any marker references) — UPDATE: remove marker-based assertions; the Teammate path was never affected by the marker (only PM+SDLC was), so most tests here unchanged.
+- [x] New test file `tests/unit/test_pipeline_complete_predicate.py` — CREATE: pure-function tests for `is_pipeline_complete` (MERGE success → True, DOCS+no-PR → True, DOCS+open-PR → False, unknown stage → False, PR-state fetch failure → False).
+- [x] New test file `tests/unit/test_deliver_pipeline_completion.py` — CREATE: tests for the completion-turn runner (success, empty harness, harness raises, no pm_uuid fallback, CancelledError propagation).
+- [x] New test file `tests/integration/test_pm_final_delivery.py` — CREATE: end-to-end test covering failure mode #1 (marker-free success), failure mode #2 (empty harness → fallback delivered), failure mode #3 (CancelledError → interrupted message delivered within 60s proxy). Uses the existing bridge/worker test harness (see `tests/integration/test_session_finalization_decoupled.py` for patterns).
 
 ## Rabbit Holes
 
@@ -327,34 +327,34 @@ Integration verification: existing `tests/integration/test_session_finalization_
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/pm-final-delivery.md` describing the new protocol — what triggers final delivery, the completion-turn mechanism, fallbacks, and the deprecation of `[PIPELINE_COMPLETE]`.
-- [ ] Update `docs/features/README.md` index table to include the new feature doc.
-- [ ] Update `docs/features/pipeline-state-machine.md` L161 — replace the marker-based description with the new mechanism.
-- [ ] Update `docs/features/agent-message-delivery.md` — add a note that the PM's final message uses a dedicated completion turn, not the review-gate path used by Teammate.
-- [ ] Update `docs/features/session-steering.md` — clarify that the marker is deprecated and fan-out completion uses a direct runner invocation, not a steering message with marker instructions.
+- [x] Create `docs/features/pm-final-delivery.md` describing the new protocol — what triggers final delivery, the completion-turn mechanism, fallbacks, and the deprecation of `[PIPELINE_COMPLETE]`.
+- [x] Update `docs/features/README.md` index table to include the new feature doc.
+- [x] Update `docs/features/pipeline-state-machine.md` L161 — replace the marker-based description with the new mechanism.
+- [x] Update `docs/features/agent-message-delivery.md` — add a note that the PM's final message uses a dedicated completion turn, not the review-gate path used by Teammate.
+- [x] Update `docs/features/session-steering.md` — clarify that the marker is deprecated and fan-out completion uses a direct runner invocation, not a steering message with marker instructions.
 
 ### External Documentation Site
-- [ ] No external doc site in this repo; skip.
+- [x] No external doc site in this repo; skip.
 
 ### Inline Documentation
-- [ ] Docstring on `agent/pipeline_complete.py::is_pipeline_complete` explaining the predicate.
-- [ ] Docstring on `agent/session_completion.py::_deliver_pipeline_completion` explaining the runner's contract (idempotent, sole path to `"completed"` for its parent, CancelledError-safe).
-- [ ] Docstring on `agent/messenger.py::_run_work` CancelledError handler explaining the shutdown semantics.
-- [ ] Comment block at the top of `agent/output_router.py` noting the marker-protocol removal and linking to this plan.
-- [ ] Update CLAUDE.md if any architecture diagram references the marker — verified no diagram currently references it.
+- [x] Docstring on `agent/pipeline_complete.py::is_pipeline_complete` explaining the predicate.
+- [x] Docstring on `agent/session_completion.py::_deliver_pipeline_completion` explaining the runner's contract (idempotent, sole path to `"completed"` for its parent, CancelledError-safe).
+- [x] Docstring on `agent/messenger.py::_run_work` CancelledError handler explaining the shutdown semantics.
+- [x] Comment block at the top of `agent/output_router.py` noting the marker-protocol removal and linking to this plan.
+- [x] Update CLAUDE.md if any architecture diagram references the marker — verified no diagram currently references it.
 
 ## Success Criteria
 
-- [ ] Final Telegram message delivered within 60 seconds of pipeline completion in all three scenarios: (a) happy-path MERGE success, (b) empty harness result on the completion turn, (c) `CancelledError` during worker shutdown.
-- [ ] `PIPELINE_COMPLETE_MARKER` is removed from `agent/output_router.py`. `grep -rn PIPELINE_COMPLETE agent/ config/personas/` returns zero matches.
-- [ ] No `in msg` / string-content inspection in the router for delivery decisions. Verified by inspecting `determine_delivery_action` — the only content check is `msg.strip()` for emptiness.
-- [ ] Integration test `tests/integration/test_pm_final_delivery.py` passes for all three failure modes.
-- [ ] `CancelledError` during worker shutdown produces a user-visible "I was interrupted" message. Existing startup-recovery still re-queues the session afterward.
-- [ ] Tests pass (`pytest tests/ -x -q`).
-- [ ] Ruff format clean (`python -m ruff format .`).
-- [ ] Documentation updated (`/do-docs`).
-- [ ] `grep -rn deliver_pipeline_complete agent/ tests/` returns zero matches.
-- [ ] `grep -c PIPELINE_COMPLETE config/personas/project-manager.md` returns 0.
+- [x] Final Telegram message delivered within 60 seconds of pipeline completion in all three scenarios: (a) happy-path MERGE success, (b) empty harness result on the completion turn, (c) `CancelledError` during worker shutdown.
+- [x] `PIPELINE_COMPLETE_MARKER` is removed from `agent/output_router.py`. `grep -rn PIPELINE_COMPLETE agent/ config/personas/` returns zero matches.
+- [x] No `in msg` / string-content inspection in the router for delivery decisions. Verified by inspecting `determine_delivery_action` — the only content check is `msg.strip()` for emptiness.
+- [x] Integration test `tests/integration/test_pm_final_delivery.py` passes for all three failure modes.
+- [x] `CancelledError` during worker shutdown produces a user-visible "I was interrupted" message. Existing startup-recovery still re-queues the session afterward.
+- [x] Tests pass (`pytest tests/ -x -q`).
+- [x] Ruff format clean (`python -m ruff format .`).
+- [x] Documentation updated (`/do-docs`).
+- [x] `grep -rn deliver_pipeline_complete agent/ tests/` returns zero matches.
+- [x] `grep -c PIPELINE_COMPLETE config/personas/project-manager.md` returns 0.
 
 ## Team Orchestration
 

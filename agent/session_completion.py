@@ -566,7 +566,7 @@ async def _send_interrupted_message(
     msg = "I was interrupted and will resume automatically. No action needed."
     try:
         await asyncio.wait_for(send_cb(chat_id, msg, telegram_message_id, parent), timeout=2.0)
-    except (Exception, asyncio.TimeoutError) as send_err:
+    except (TimeoutError, Exception) as send_err:
         logger.warning("[completion-runner] interrupted send failed/timed out: %s", send_err)
 
 
@@ -762,7 +762,10 @@ async def _handle_dev_session_completion(
         # `"completed"`.
         # ------------------------------------------------------------------
         try:
-            from agent.pipeline_complete import _check_pr_open, is_pipeline_complete  # noqa: PLC0415
+            from agent.pipeline_complete import (  # noqa: PLC0415
+                _check_pr_open,
+                is_pipeline_complete,
+            )
 
             psm_states: dict[str, str] = {}
             try:
