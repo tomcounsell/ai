@@ -31,7 +31,7 @@ import anthropic
 import httpx
 
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
-from config.enums import PersonaType, SessionType
+from config.enums import SessionType
 from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
 from utils.api_keys import get_anthropic_api_key
 

@@ -251,6 +251,10 @@ def check_verification_table(checks: list[dict[str, str]]) -> list[dict]:
             if expected.startswith("exit code "):
                 expected_code = int(expected.replace("exit code ", ""))
                 passed = actual_exit == expected_code
+            elif expected.startswith("output contains "):
+                # Substring match (matches agent/verification_parser.py semantics)
+                expected_substring = expected.replace("output contains ", "").strip().strip("`")
+                passed = expected_substring in actual_output
             elif expected.startswith("output "):
                 expected_output = expected.replace("output ", "")
                 passed = actual_output == expected_output

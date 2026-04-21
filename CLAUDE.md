@@ -99,6 +99,21 @@ valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 ```
 
+## Reading Email
+
+Use `valor-email` to read and send email through the bridge. Reads hit the Redis history cache first (populated by the IMAP poll loop), falling back to a read-only IMAP fetch filtered to known senders. Sends always queue via `email:outbox:*` — the email relay (bundled into the email bridge process) drains the queue over SMTP with retry + DLQ.
+
+```bash
+valor-email read --limit 5
+valor-email read --search "deployment" --since "2 hours ago"
+valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
+valor-email send --to alice@example.com --file ./report.pdf "See attached"
+valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
+valor-email threads
+```
+
+To reply to a specific message, first run `valor-email read --json` and copy the `message_id` field — pass it verbatim to `--reply-to` (angle brackets optional; the CLI normalizes). Sends confirm with a queue notice; if delivery seems stuck, check `./scripts/valor-service.sh email-status` (extends to read the relay heartbeat under `email:relay:last_poll_ts`).
+
 ## Quick Commands
 
 | Command | Description |
@@ -112,7 +127,7 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `./scripts/valor-service.sh email-start` | Start the email bridge (IMAP polling) |
 | `./scripts/valor-service.sh email-stop` | Stop the email bridge |
 | `./scripts/valor-service.sh email-restart` | Restart the email bridge |
-| `./scripts/valor-service.sh email-status` | Check email bridge status and last poll age |
+| `./scripts/valor-service.sh email-status` | Check email bridge status, IMAP last-poll age, and SMTP relay heartbeat |
 | `./scripts/valor-service.sh email-dead-letter list` | List failed SMTP sends in dead-letter queue |
 | `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
 | `tail -f logs/bridge.log` | Stream bridge logs |

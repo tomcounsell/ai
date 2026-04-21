@@ -275,6 +275,30 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
         )
     )
 
+    # valor-email — verify CLI is on PATH after `pip install -e .`.
+    # Mirrors the verification line required by docs/plans/valor-email-cli.md.
+    venv_email = project_dir / ".venv" / "bin" / "valor-email"
+    email_found = False
+    email_err = None
+    if venv_email.exists():
+        try:
+            result = run_cmd([str(venv_email), "--help"], timeout=10)
+            email_found = result.returncode == 0
+            if not email_found:
+                email_err = result.stderr.strip() or None
+        except Exception as e:
+            email_err = str(e)
+    else:
+        email_err = "Not in .venv/bin (run `uv sync` or `pip install -e .`)"
+
+    results.append(
+        ToolCheck(
+            name="valor-email",
+            available=email_found,
+            error=email_err if not email_found else None,
+        )
+    )
+
     return results
 
 

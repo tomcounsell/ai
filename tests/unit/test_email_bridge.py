@@ -12,11 +12,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bridge.email_bridge import (
+    HISTORY_MSG_KEY,
+    HISTORY_SET_KEY,
+    HISTORY_THREADS_KEY,
     IMAP_MAX_BATCH,
     EmailOutputHandler,
+    _build_reply_mime,
     _decode_header_value,
     _extract_address,
     _poll_imap,
+    _record_history,
+    _record_thread,
     parse_email_message,
 )
 
@@ -330,11 +336,23 @@ class TestEmailOutputHandlerSend:
 
     @pytest.mark.asyncio
     async def test_send_builds_re_subject(self):
-        """Subject is prefixed with 'Re: ' when not already prefixed."""
+        """Subject is prefixed with 'Re: ' for worker-reply sends.
+
+        Regression for PR #1094: even when the inbound email carried **no**
+        ``Message-ID`` header (so ``email_message_id`` is empty and
+        ``in_reply_to`` becomes ``None``), the worker-reply path must still
+        prepend ``"Re: "`` — this is the legacy contract that pre-dates
+        PR #1094 and the parsed-header regression test guarantees.
+        The ``force_reply_prefix=True`` default on ``_build_reply_mime``
+        preserves this behavior; the relay/CLI path passes ``False`` so
+        new sends are not silently mangled.
+        """
         handler = EmailOutputHandler(smtp_config=self._make_smtp_config())
 
         session = MagicMock()
         session.extra_context = {
+            # Intentionally empty: simulates an inbound email without a
+            # Message-ID header. The Re: prefix must still be applied.
             "email_message_id": "",
             "email_subject": "Original Subject",
         }
@@ -355,7 +373,7 @@ class TestEmailOutputHandlerSend:
 
         assert "msg" in captured_mime
         subject = captured_mime["msg"]["Subject"]
-        assert subject.startswith("Re:")
+        assert subject == "Re: Original Subject"
 
     @pytest.mark.asyncio
     async def test_send_no_smtp_config_raises_in_send_smtp(self):
@@ -519,3 +537,406 @@ class TestMainEnvLoading:
         second_path = mock_load.call_args_list[1][0][0]
         assert "Desktop" in str(second_path) and "Valor" in str(second_path)
         assert str(second_path).endswith(".env")
+
+
+# ---------------------------------------------------------------------------
+# _build_reply_mime() — parsed-header regression test (Risk 2 mitigation)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildReplyMimeHeaderRegression:
+    """The module-level _build_reply_mime with attachments=None must produce
+    a MIME message semantically equivalent to the legacy
+    EmailOutputHandler._build_reply output.
+
+    We compare parsed headers (not raw bytes) because header order, line
+    folding, and default encodings vary by Python minor version. Date and
+    Message-ID are excluded since they embed per-call variance.
+    """
+
+    def test_build_reply_mime_header_regression(self):
+        import email as email_lib
+
+        to_addr = "alice@example.com"
+        subject = "Test subject"
+        body = "Reply body with unicode: café ☕"
+        in_reply_to = "<orig-123@example.com>"
+        references = "<orig-123@example.com>"
+        from_addr = "valor@example.com"
+
+        # Old code path: the instance method (which now delegates internally)
+        handler = EmailOutputHandler(
+            smtp_config={
+                "host": "smtp.example.com",
+                "user": "valor@example.com",
+                "password": "x",
+                "port": 587,
+                "use_tls": True,
+            }
+        )
+        old_mime = handler._build_reply(
+            to_addr=to_addr,
+            subject=subject,
+            body=body,
+            in_reply_to=in_reply_to,
+            references=references,
+            from_addr=from_addr,
+        )
+
+        # New module-level helper with attachments=None
+        new_mime = _build_reply_mime(
+            to_addr=to_addr,
+            subject=subject,
+            body=body,
+            in_reply_to=in_reply_to,
+            references=references,
+            from_addr=from_addr,
+            attachments=None,
+        )
+
+        old_parsed = email_lib.message_from_bytes(old_mime.as_bytes())
+        new_parsed = email_lib.message_from_bytes(new_mime.as_bytes())
+
+        for header in (
+            "From",
+            "To",
+            "Subject",
+            "In-Reply-To",
+            "References",
+            "Content-Type",
+            "Content-Transfer-Encoding",
+        ):
+            assert old_parsed.get(header) == new_parsed.get(header), (
+                f"Header '{header}' drifted: old={old_parsed.get(header)!r} "
+                f"new={new_parsed.get(header)!r}"
+            )
+
+        assert old_parsed.get_payload(decode=True) == new_parsed.get_payload(decode=True)
+
+
+class TestBuildReplyMimeAttachments:
+    """When attachments are supplied, _build_reply_mime returns a multipart
+    message with the body first and each file encoded as base64 with a
+    Content-Disposition header."""
+
+    def test_attachment_included_as_multipart(self, tmp_path):
+        import email.mime.multipart
+
+        f = tmp_path / "report.txt"
+        f.write_text("payload bytes")
+
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Report",
+            body="See attached",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            attachments=[f],
+        )
+        assert isinstance(mime, email.mime.multipart.MIMEMultipart)
+        assert mime.is_multipart()
+
+        parts = list(mime.walk())
+        # Root + body + attachment
+        disp_headers = [p.get("Content-Disposition", "") for p in parts]
+        assert any('filename="report.txt"' in h for h in disp_headers)
+
+    def test_attachments_none_returns_plain_mimetext(self):
+        import email.mime.text
+
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Hi",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            attachments=None,
+        )
+        assert isinstance(mime, email.mime.text.MIMEText)
+        assert not mime.is_multipart()
+
+    def test_empty_attachments_list_returns_plain_mimetext(self):
+        import email.mime.text
+
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Hi",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            attachments=[],
+        )
+        assert isinstance(mime, email.mime.text.MIMEText)
+
+
+class TestBuildReplyMimeSubjectPrefix:
+    """Subject ``Re:`` prefix semantics for ``_build_reply_mime``.
+
+    Two callers have different contracts:
+
+    - Worker reply (``EmailOutputHandler._build_reply``) passes
+      ``force_reply_prefix=True`` so ``"Re:"`` is always prepended — the
+      pre-#1094 behavior, preserved even when the inbound email lacked a
+      ``Message-ID`` header.
+    - Relay / CLI new-send path passes ``force_reply_prefix=False`` so
+      caller-provided subjects are preserved verbatim; ``"Re:"`` is only
+      added when ``in_reply_to`` is truthy.
+    """
+
+    def test_new_send_subject_unchanged(self):
+        # CLI/relay contract: force_reply_prefix=False
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="New meeting",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            force_reply_prefix=False,
+        )
+        assert mime["Subject"] == "New meeting"
+
+    def test_new_send_with_existing_re_prefix_unchanged(self):
+        # User deliberately typed "Re: ..." on a new send — don't touch it.
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Re: existing thread",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            force_reply_prefix=False,
+        )
+        assert mime["Subject"] == "Re: existing thread"
+
+    def test_reply_prepends_re(self):
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Meeting tomorrow",
+            body="ack",
+            in_reply_to="<orig@host>",
+            references="<orig@host>",
+            from_addr="valor@example.com",
+            force_reply_prefix=False,
+        )
+        assert mime["Subject"] == "Re: Meeting tomorrow"
+
+    def test_reply_with_existing_re_prefix_not_doubled(self):
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Re: Meeting tomorrow",
+            body="ack",
+            in_reply_to="<orig@host>",
+            references="<orig@host>",
+            from_addr="valor@example.com",
+            force_reply_prefix=False,
+        )
+        assert mime["Subject"] == "Re: Meeting tomorrow"
+
+    def test_empty_subject_new_send_uses_no_subject_placeholder(self):
+        # CLI/relay contract: force_reply_prefix=False
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            force_reply_prefix=False,
+        )
+        assert mime["Subject"] == "(no subject)"
+
+    def test_empty_subject_reply_uses_re_no_subject(self):
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="",
+            body="Body",
+            in_reply_to="<orig@host>",
+            references="<orig@host>",
+            from_addr="valor@example.com",
+            force_reply_prefix=False,
+        )
+        assert mime["Subject"] == "Re: (no subject)"
+
+    def test_worker_reply_path_always_prepends_re(self):
+        # Worker reply path (default force_reply_prefix=True) always prepends
+        # "Re:" even when in_reply_to is empty — preserves pre-#1094 behavior
+        # for inbound emails that lacked a Message-ID header.
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Meeting tomorrow",
+            body="ack",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            # default force_reply_prefix=True
+        )
+        assert mime["Subject"] == "Re: Meeting tomorrow"
+
+    def test_worker_empty_subject_no_in_reply_to_still_re_no_subject(self):
+        # Worker reply path with empty subject and no in_reply_to still uses
+        # the "Re: (no subject)" placeholder.
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+        )
+        assert mime["Subject"] == "Re: (no subject)"
+
+    def test_worker_existing_re_prefix_not_doubled(self):
+        # Even with force_reply_prefix=True, an existing "Re:" prefix is
+        # not doubled (case-insensitive check).
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Re: Original",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+        )
+        assert mime["Subject"] == "Re: Original"
+
+
+# ---------------------------------------------------------------------------
+# _record_history() and _record_thread() — history cache writers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def history_redis(monkeypatch, redis_test_url):
+    """Pin REDIS_URL to the xdist-aware test db and yield a decoded Redis client."""
+    import redis as _redis
+
+    monkeypatch.setenv("REDIS_URL", redis_test_url)
+    client = _redis.Redis.from_url(redis_test_url, decode_responses=True)
+    yield client
+    client.close()
+
+
+class TestRecordHistory:
+    def test_writes_blob_and_set_entry(self, history_redis):
+        import time
+
+        parsed = {
+            "from_addr": "alice@example.com",
+            "from_raw": "Alice <alice@example.com>",
+            "subject": "Hello",
+            "body": "hi",
+            "timestamp": time.time(),
+            "message_id": "<m1@x>",
+            "in_reply_to": "",
+        }
+        _record_history(parsed)
+
+        msg = history_redis.get(HISTORY_MSG_KEY.format(message_id="<m1@x>"))
+        assert msg is not None
+
+        score = history_redis.zscore(HISTORY_SET_KEY.format(mailbox="INBOX"), "<m1@x>")
+        assert score is not None
+
+    def test_missing_message_id_skipped(self, history_redis):
+        parsed = {
+            "from_addr": "alice@example.com",
+            "subject": "No ID",
+            "body": "hi",
+            "timestamp": 1.0,
+            "message_id": "",
+            "in_reply_to": "",
+        }
+        _record_history(parsed)  # must not raise
+        # Nothing written
+        assert history_redis.zcard(HISTORY_SET_KEY.format(mailbox="INBOX")) == 0
+
+    def test_cap_evicts_oldest_with_blob_cleanup(self, history_redis, monkeypatch):
+        """When the set exceeds HISTORY_MAX_ENTRIES, oldest entries are
+        evicted from both the sorted set AND the per-message blob namespace."""
+        # Temporarily reduce the cap for a fast test
+        monkeypatch.setattr("bridge.email_bridge.HISTORY_MAX_ENTRIES", 3)
+
+        import time
+
+        now = time.time()
+        for i in range(5):
+            parsed = {
+                "from_addr": f"a{i}@x",
+                "subject": f"S{i}",
+                "body": "b",
+                "timestamp": now - (10 - i),  # increasing timestamps
+                "message_id": f"<m{i}@x>",
+                "in_reply_to": "",
+            }
+            _record_history(parsed)
+
+        # After 5 inserts with cap=3, the 3 newest should survive
+        set_key = HISTORY_SET_KEY.format(mailbox="INBOX")
+        size = history_redis.zcard(set_key)
+        assert size == 3
+        # m0 and m1 should be evicted — blobs gone too
+        for evicted in ("<m0@x>", "<m1@x>"):
+            assert history_redis.get(HISTORY_MSG_KEY.format(message_id=evicted)) is None
+        for kept in ("<m2@x>", "<m3@x>", "<m4@x>"):
+            assert history_redis.get(HISTORY_MSG_KEY.format(message_id=kept)) is not None
+
+
+class TestRecordThread:
+    def test_creates_thread_entry(self, history_redis):
+        import time
+
+        parsed = {
+            "from_addr": "alice@x.com",
+            "subject": "New thread",
+            "body": "hi",
+            "timestamp": time.time(),
+            "message_id": "<root@x>",
+            "in_reply_to": "",
+        }
+        _record_thread(parsed)
+
+        raw = history_redis.hget(HISTORY_THREADS_KEY, "<root@x>")
+        assert raw is not None
+        import json as _json
+
+        data = _json.loads(raw)
+        assert data["subject"] == "New thread"
+        assert data["message_count"] == 1
+        assert "alice@x.com" in data["participants"]
+
+    def test_reply_updates_root(self, history_redis):
+        import json as _json
+        import time
+
+        now = time.time()
+        # Seed the root
+        _record_thread(
+            {
+                "from_addr": "alice@x",
+                "subject": "Root",
+                "body": "",
+                "timestamp": now - 100,
+                "message_id": "<root@x>",
+                "in_reply_to": "",
+            }
+        )
+        # Child reply — should attach to <root@x>
+        _record_thread(
+            {
+                "from_addr": "bob@x",
+                "subject": "Re: Root",
+                "body": "",
+                "timestamp": now,
+                "message_id": "<child@x>",
+                "in_reply_to": "<root@x>",
+            }
+        )
+
+        raw = history_redis.hget(HISTORY_THREADS_KEY, "<root@x>")
+        assert raw is not None
+        data = _json.loads(raw)
+        assert data["message_count"] == 2
+        assert set(data["participants"]) == {"alice@x", "bob@x"}

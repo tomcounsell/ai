@@ -14,7 +14,6 @@ import pytest
 
 from agent.pipeline_complete import _check_pr_open, is_pipeline_complete
 
-
 # -----------------------------------------------------------------------------
 # Predicate truth table
 # -----------------------------------------------------------------------------

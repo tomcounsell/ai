@@ -210,6 +210,32 @@ def build_email_to_project_map(config: dict) -> tuple[dict, dict]:
     return email_map, domain_map
 
 
+def ensure_email_routing_loaded() -> bool:
+    """Populate ``EMAIL_TO_PROJECT`` and ``EMAIL_DOMAIN_TO_PROJECT`` on demand.
+
+    Idempotent: a no-op when the maps are already populated (the normal case
+    inside ``run_email_bridge`` after startup). Used by out-of-process callers
+    like ``tools/valor_email.py`` so the CLI does not have to reach into this
+    module's internals to prime routing state for the IMAP read-only fallback.
+
+    Returns ``True`` if the maps are populated (either already or after this
+    call), ``False`` if loading failed. Errors are logged but never raised —
+    the CLI fallback path tolerates an empty routing table by refusing to
+    read INBOX (see ``tools/valor_email.py::_imap_fallback_fetch``).
+    """
+    if EMAIL_TO_PROJECT or EMAIL_DOMAIN_TO_PROJECT:
+        return True
+    try:
+        config = load_config()
+        addr_map, domain_map = build_email_to_project_map(config)
+        EMAIL_TO_PROJECT.update(addr_map)
+        EMAIL_DOMAIN_TO_PROJECT.update(domain_map)
+        return True
+    except Exception as e:
+        logger.warning(f"ensure_email_routing_loaded: failed to load routing config: {e}")
+        return False
+
+
 # =============================================================================
 # Project and Chat Mapping
 # =============================================================================
