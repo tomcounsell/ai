@@ -16,11 +16,11 @@ The session system has 9 mechanisms that can revive, recover, or re-enqueue sess
 |----------|-------|
 | Location | `agent/session_health.py` (re-exported from `agent/agent_session_queue.py`) |
 | Trigger | Worker process startup (`worker/__main__.py`) |
-| What it does | Resets stale `running` bridge sessions to `pending` (orphaned from previous process); abandons stale local CLI sessions |
+| What it does | Resets stale `running` bridge sessions to `pending` (orphaned from previous process); for local CLI sessions, re-queues dev sessions but abandons PM/teammate sessions |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
-| Guard | Query filter (`status="running"`) + timing guard (`AGENT_SESSION_HEALTH_MIN_RUNNING`, 300s) + local session guard |
+| Guard | Query filter (`status="running"`) + timing guard (`AGENT_SESSION_HEALTH_MIN_RUNNING`, 300s) + session_type-aware local session guard |
 | Timing guard | Sessions with `started_at` within the last 300s are skipped -- they were likely started by a worker in the current process, not orphaned from the previous one. Sessions with `started_at=None` are always recovered. Matches the same guard used by the periodic health check (mechanism 2). Added by issue #727 to fix a race where a worker picks up a session before startup recovery fires. |
-| Local session guard | Sessions with `session_id.startswith("local")` are finalized as `"abandoned"` instead of being reset to `"pending"`. The bridge worker cannot deliver output for local CLI sessions; re-queuing them would spawn a second harness (`claude --resume <uuid>`) competing with the interactive CLI that already holds the session UUID — causing garbled transcripts and duplicate tool calls. `session_id` is the reliable discriminator: `create_local()` always sets `session_id=f"local-{uuid}"`. Using `worker_key` would be unreliable (DEV sessions without a slug return `project_key` as `worker_key`). Added by issue #986. |
+| Local session guard | Sessions with `session_id.startswith("local")` are routed by `session_type`. **Dev** local sessions are re-queued to `"pending"` like bridge sessions (issue #1092): the PM spawned them via `valor-session create --role dev`, so there is no interactive CLI holding the same `claude_session_uuid` and the worker can safely resume via `claude --resume <uuid>`. **PM and Teammate** local sessions (plus pre-migration records with `session_type=None`) are finalized as `"abandoned"` — a human CLI may be holding the UUID, and resuming would spawn a second harness competing with the interactive CLI (the issue #986 hijack rationale). The `SessionType.DEV` gate uses explicit equality so any future enum member falls through to the safer abandon path. `session_id` is the reliable prefix discriminator (`create_local()` always sets `session_id=f"local-{uuid}"`). |
 
 ### 2. Health Check (`_agent_session_health_check`)
 
@@ -210,11 +210,15 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 | `test_revival_skips_completed_session_branch` | check_revival | Branches with terminal siblings filtered out |
 | `test_rejects_from_terminal_by_default` | transition_status | Default rejects all 5 terminal->non-terminal |
 | `test_allows_from_terminal_when_explicitly_permitted` | transition_status | Explicit opt-out works |
-| `test_startup_recovery_only_queries_running` | startup recovery | Only queries running, not terminal; local sessions are not re-queued |
-| `test_startup_recovery_does_not_requeue_local_session` | startup recovery | `update_session("pending")` never called for local sessions |
-| `test_startup_recovery_abandons_local_sessions` | startup recovery (local guard) | Local session finalized as "abandoned", count=0 |
+| `test_startup_recovery_only_queries_running` | startup recovery | Only queries running, not terminal |
+| `test_startup_recovery_does_not_requeue_local_pm_session` | startup recovery | `update_session("pending")` never called for local PM sessions |
+| `test_startup_recovery_requeues_local_dev_session` | startup recovery (#1092) | Local dev session re-queued to "pending" with CAS on running |
+| `test_startup_recovery_abandons_local_pm_sessions` | startup recovery (local guard) | Local PM session finalized as "abandoned", count=0 |
+| `test_startup_recovery_abandons_local_teammate_sessions` | startup recovery (local guard) | Local teammate session finalized as "abandoned", count=0 |
+| `test_startup_recovery_recovers_local_dev_sessions` | startup recovery (#1092) | Local dev session re-queued and counted as recovered |
+| `test_startup_recovery_local_dev_session_type_none_defaults_to_abandon` | startup recovery (#1092) | Pre-migration record with session_type=None falls through to abandon |
 | `test_startup_recovery_recovers_bridge_sessions` | startup recovery (local guard) | Bridge session reset to "pending", count=1 |
-| `test_startup_recovery_mixed_local_and_bridge` | startup recovery (local guard) | Mixed set: local→abandoned, bridge→pending, count=1 |
+| `test_startup_recovery_mixed_local_and_bridge` | startup recovery (local guard) | Mixed set: PM→abandoned, dev→pending, bridge→pending, count=2 |
 | `test_recent_session_skipped_by_timing_guard` | startup recovery | Sessions started <300s ago are skipped |
 | `test_old_session_recovered_by_timing_guard` | startup recovery | Sessions started >300s ago are recovered |
 | `test_none_started_at_is_recovered` | startup recovery | Sessions with no started_at are always recovered |
@@ -264,3 +268,4 @@ Additional coverage in `tests/integration/test_session_heartbeat_progress.py` (i
 - Issue #917 -- Health-check recovery finalization gap (fallback else branch)
 - Issue #986 -- Startup recovery local session guard (do not hijack interactive CLI sessions)
 - Issue #1036 -- Two-tier no-progress detector (dual heartbeat + Tier 2 reprieve gates)
+- Issue #1092 -- Session_type-aware local session recovery (local dev sessions survive worker restart; PM/teammate still abandoned)

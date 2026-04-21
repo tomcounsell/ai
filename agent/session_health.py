@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
-from models.agent_session import AgentSession
+from models.agent_session import AgentSession, SessionType
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -174,9 +174,15 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     where a worker transitions a session to running, then startup recovery resets it
     back to pending -- orphaning the already-spawned SDK subprocess.
 
-    Local CLI sessions (session_id starts with "local") are never re-queued. They are
-    marked "abandoned" instead. The worker cannot deliver output for local sessions, so
-    re-queuing them would spawn a second harness competing with the interactive CLI.
+    Local CLI sessions (session_id starts with "local") are handled by session_type:
+    - PM and Teammate local sessions are marked "abandoned". A live human CLI may hold
+      the same claude_session_uuid, so resuming would spawn a second harness competing
+      with the interactive CLI at that UUID (the #986 hijack rationale).
+    - Dev local sessions are re-queued to "pending" like bridge sessions. Dev sessions
+      are worker-owned (spawned via ``valor-session create --role dev`` by the PM) with
+      no human competitor — completion flows via _handle_dev_session_completion, which
+      steers the PM and never uses a user-facing send callback (#1092).
+    - Legacy records with ``session_type=None`` fall through to the safer abandon path.
 
     Note: The timing guard (AGENT_SESSION_HEALTH_MIN_RUNNING) is the primary defense
     against the hook-reactivation race. Hook reactivation transitions running→running
@@ -184,7 +190,9 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     it — but truly stale sessions (>300s old) predate any active typing activity.
 
     Status is an IndexedField, so direct mutation and save is safe.
-    Returns the number of recovered bridge sessions (local sessions are not counted).
+    Returns the combined count of recovered bridge + local-dev sessions.
+    Abandoned local PM/teammate sessions are reported separately in the summary log
+    line but are NOT included in the return value.
     """
     # Phantom guard: drop records whose fields are still Popoto Field descriptors
     # (orphan $IndexF members). Destructive path — filter MUST run before any
@@ -248,27 +256,77 @@ def _recover_interrupted_agent_sessions_startup() -> int:
 
     logger.warning("[startup-recovery] Found %d stale session(s) to process", len(stale_sessions))
 
-    count = 0
+    bridge_count = 0
+    local_dev_count = 0
     abandoned = 0
     for entry in stale_sessions:
         wk = entry.worker_key
         is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator
+        session_type = getattr(entry, "session_type", None)
 
-        if is_local:
-            # Local CLI sessions cannot be resumed by the bridge worker.
-            # Mark abandoned so the originating CLI can reclaim on next turn.
+        # Gate the dev re-queue path on explicit equality with SessionType.DEV so that:
+        # (a) legacy records with session_type=None fall through to the safer abandon path,
+        # (b) any future SessionType member (e.g., REFLECTION, WORKFLOW) also falls through
+        #     to abandon rather than being silently re-queued (#1092 Risk 2).
+        if is_local and session_type == SessionType.DEV:
+            # Local dev sessions are worker-owned — no human CLI is competing for the
+            # claude_session_uuid. Re-queue like a bridge session so the worker resumes
+            # the transcript on next pickup (#1092). CAS on expected_status="running"
+            # protects against a concurrent health-check kill that already transitioned
+            # the record away from running (same pattern as the bridge path below).
+            logger.warning(
+                "[startup-recovery] Recovering interrupted local dev session %s "
+                "(session=%s, worker=%s, msg=%.80r...)",
+                entry.agent_session_id,
+                entry.session_id,
+                wk,
+                entry.message_text or "",
+            )
+            try:
+                from models.session_lifecycle import update_session
+
+                update_session(
+                    entry.session_id,
+                    new_status="pending",
+                    fields={"priority": "high", "started_at": None},
+                    expected_status="running",
+                    reason="startup recovery: local dev session",
+                )
+                logger.info(
+                    "[startup-recovery] Recovered local dev session %s",
+                    entry.agent_session_id,
+                )
+                local_dev_count += 1
+            except Exception as e:
+                logger.warning(
+                    "[startup-recovery] Failed to recover local dev session %s, deleting: %s",
+                    entry.session_id,
+                    e,
+                )
+                try:
+                    entry.delete()
+                except Exception:
+                    pass
+        elif is_local:
+            # Local PM/teammate (or legacy session_type=None) session. A live human CLI
+            # may hold the same claude_session_uuid — resuming would produce a second
+            # harness competing at that UUID (the #986 hijack rationale).
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
 
                 finalize_session(
                     entry,
                     "abandoned",
-                    reason="startup recovery: local session cannot be resumed by worker",
+                    reason=(
+                        "startup recovery: local PM/teammate session cannot be resumed by worker"
+                    ),
                     skip_auto_tag=True,
                 )
                 abandoned += 1
                 logger.info(
-                    "[startup-recovery] Abandoned local session %s (session_id=%s, worker_key=%s)",
+                    "[startup-recovery] Abandoned local %s session %s "
+                    "(session_id=%s, worker_key=%s)",
+                    session_type or "unknown-type",
                     entry.agent_session_id,
                     entry.session_id,
                     wk,
@@ -311,7 +369,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                     reason="startup recovery",
                 )
                 logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
-                count += 1
+                bridge_count += 1
             except Exception as e:
                 logger.warning(
                     "[startup-recovery] Failed to recover session %s, deleting: %s",
@@ -324,11 +382,13 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                     pass
 
     logger.warning(
-        "[startup-recovery] Recovered %d bridge session(s), abandoned %d local session(s)",
-        count,
+        "[startup-recovery] Recovered %d bridge session(s), %d local dev session(s), "
+        "abandoned %d local PM/teammate session(s)",
+        bridge_count,
+        local_dev_count,
         abandoned,
     )
-    return count
+    return bridge_count + local_dev_count
 
 
 # === Agent Session Health Monitor ===
