@@ -262,8 +262,7 @@ class BackgroundTask:
                     if not acquired:
                         _should_send = False
                         logger.info(
-                            "[%s] CancelledError interrupted-message suppressed "
-                            "(dedup key held)",
+                            "[%s] CancelledError interrupted-message suppressed (dedup key held)",
                             self.messenger.session_id,
                         )
                 except Exception as _lock_err:
@@ -279,8 +278,7 @@ class BackgroundTask:
                     try:
                         await asyncio.wait_for(
                             self.messenger._send_callback(
-                                "I was interrupted and will resume automatically. "
-                                "No action needed."
+                                "I was interrupted and will resume automatically. No action needed."
                             ),
                             timeout=2.0,
                         )

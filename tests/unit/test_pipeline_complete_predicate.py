@@ -117,9 +117,7 @@ class TestCheckPrOpen:
         monkeypatch.setattr(
             subprocess,
             "run",
-            lambda *a, **kw: _mk_completed(
-                stdout="", stderr="gh: not authorized", returncode=2
-            ),
+            lambda *a, **kw: _mk_completed(stdout="", stderr="gh: not authorized", returncode=2),
         )
         assert _check_pr_open(1058) is None
 

@@ -407,6 +407,18 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
 
+    # Drain in-flight PM final-delivery completion runners (issue #1058).
+    # Ordering: before extraction drain because the completion runner may
+    # itself schedule extraction, and we want the completion turn to reach
+    # its CancelledError handler (which delivers the "interrupted" message)
+    # while Redis and the transport send_cb are still wired up.
+    try:
+        from agent.session_completion import drain_pending_completions
+
+        await drain_pending_completions(timeout=15.0)
+    except Exception as e:
+        logger.warning(f"Completion drain failed: {e}")
+
     # Drain in-flight post-session extractions (hotfix #1055).
     # Ordering: after worker-task wait (so every extraction that will be scheduled
     # has been scheduled), before health/notify/reflection cancels (so the event

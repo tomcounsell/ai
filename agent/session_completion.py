@@ -399,9 +399,7 @@ async def _deliver_pipeline_completion(
     try:
         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
 
-        acquired = POPOTO_REDIS_DB.set(
-            _pipeline_complete_lock_key(parent_id), "1", nx=True, ex=60
-        )
+        acquired = POPOTO_REDIS_DB.set(_pipeline_complete_lock_key(parent_id), "1", nx=True, ex=60)
         if not acquired:
             logger.info(
                 "[completion-runner] pipeline_complete_pending lock held for %s — "
@@ -491,7 +489,9 @@ async def _deliver_pipeline_completion(
         try:
             from models.session_lifecycle import finalize_session  # noqa: PLC0415
 
-            finalize_session(parent, "completed", reason="pipeline complete: final summary delivered")
+            finalize_session(
+                parent, "completed", reason="pipeline complete: final summary delivered"
+            )
         except Exception as finalize_err:
             logger.error(
                 "[completion-runner] finalize_session(completed) failed for %s: %s",
@@ -504,7 +504,9 @@ async def _deliver_pipeline_completion(
         # flap-dedup (Risk 6), then re-raise to preserve asyncio semantics.
         if send_cb is not None and chat_id and session_id:
             try:
-                await _send_interrupted_message(send_cb, chat_id, telegram_message_id, parent, session_id)
+                await _send_interrupted_message(
+                    send_cb, chat_id, telegram_message_id, parent, session_id
+                )
             except Exception as int_err:  # pragma: no cover - best-effort
                 logger.warning("[completion-runner] interrupted send failed: %s", int_err)
         raise
@@ -545,9 +547,7 @@ async def _send_interrupted_message(
     try:
         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
 
-        acquired = POPOTO_REDIS_DB.set(
-            _interrupted_sent_key(session_id), "1", nx=True, ex=120
-        )
+        acquired = POPOTO_REDIS_DB.set(_interrupted_sent_key(session_id), "1", nx=True, ex=120)
         should_send = bool(acquired)
         if not should_send:
             logger.info(
@@ -565,9 +565,7 @@ async def _send_interrupted_message(
 
     msg = "I was interrupted and will resume automatically. No action needed."
     try:
-        await asyncio.wait_for(
-            send_cb(chat_id, msg, telegram_message_id, parent), timeout=2.0
-        )
+        await asyncio.wait_for(send_cb(chat_id, msg, telegram_message_id, parent), timeout=2.0)
     except (Exception, asyncio.TimeoutError) as send_err:
         logger.warning("[completion-runner] interrupted send failed/timed out: %s", send_err)
 
@@ -803,9 +801,7 @@ async def _handle_dev_session_completion(
             from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
 
             transport = getattr(parent, "transport", None) or None
-            send_cb, _react_cb = _resolve_callbacks(
-                getattr(parent, "project_key", None), transport
-            )
+            send_cb, _react_cb = _resolve_callbacks(getattr(parent, "project_key", None), transport)
             chat_id = getattr(parent, "chat_id", None)
             telegram_message_id = getattr(parent, "telegram_message_id", None)
 

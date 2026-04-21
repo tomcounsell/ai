@@ -71,7 +71,10 @@ class TestLock:
     async def test_lock_acquired_proceeds(self, parent, send_cb):
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_ok()),
-            patch("agent.sdk_client.get_response_via_harness", new=AsyncMock(return_value="final summary text")),
+            patch(
+                "agent.sdk_client.get_response_via_harness",
+                new=AsyncMock(return_value="final summary text"),
+            ),
             patch("agent.sdk_client._get_prior_session_uuid", return_value="uuid-1"),
             patch("models.session_lifecycle.finalize_session") as _fs,
         ):
@@ -103,7 +106,9 @@ class TestHarnessResult:
     async def test_whitespace_harness_delivers_fallback(self, parent, send_cb):
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_ok()),
-            patch("agent.sdk_client.get_response_via_harness", new=AsyncMock(return_value="   \n  ")),
+            patch(
+                "agent.sdk_client.get_response_via_harness", new=AsyncMock(return_value="   \n  ")
+            ),
             patch("agent.sdk_client._get_prior_session_uuid", return_value="uuid-1"),
             patch("models.session_lifecycle.finalize_session"),
         ):
@@ -142,7 +147,10 @@ class TestHarnessResult:
         harness.assert_awaited_once()
         assert harness.await_args.kwargs["prior_uuid"] is None
         # full_context_message should equal the prompt for first-turn fallback.
-        assert harness.await_args.kwargs["full_context_message"] == harness.await_args.kwargs["message"]
+        assert (
+            harness.await_args.kwargs["full_context_message"]
+            == harness.await_args.kwargs["message"]
+        )
 
 
 class TestDelivery:
@@ -260,7 +268,11 @@ class TestScheduler:
     async def test_scheduler_missing_parent_id_returns_none(self, send_cb):
         parent = SimpleNamespace(agent_session_id=None, id=None)
         task = session_completion.schedule_pipeline_completion(
-            parent, "ctx", send_cb, "chat", None  # type: ignore[arg-type]
+            parent,
+            "ctx",
+            send_cb,
+            "chat",
+            None,  # type: ignore[arg-type]
         )
         assert task is None
 

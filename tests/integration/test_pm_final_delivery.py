@@ -43,8 +43,8 @@ def _clear_completion_tasks():
 @pytest.fixture
 def parent():
     p = MagicMock()
-    p.agent_session_id = f"parent-{int(time.time()*1000)}"
-    p.session_id = f"tg_valor_-111_{int(time.time()*1000)}"
+    p.agent_session_id = f"parent-{int(time.time() * 1000)}"
+    p.session_id = f"tg_valor_-111_{int(time.time() * 1000)}"
     p.chat_id = "-111"
     p.telegram_message_id = 42
     p.project_key = "valor"

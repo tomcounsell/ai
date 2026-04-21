@@ -81,6 +81,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
+| [PM Final Delivery](pm-final-delivery.md) | Marker-free PM terminal-turn protocol: predicate detects pipeline completion, dedicated runner composes and delivers final summary via harness `--resume`, CancelledError handler preserves user-visible interrupt line during shutdown | Shipped |
 | [PM Routing: Collaboration](pm-routing-collaboration.md) | Four-way classification at bridge and intent levels (sdlc/collaboration/other/question) enabling PM to handle direct tasks without SDLC dev-session | Shipped |
 | [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
 | [PM Session Child Fan-out](pm-session-child-fanout.md) | Parent PM session detects multi-issue SDLC requests, spawns one child PM session per issue, pauses itself via `wait-for-children` subcommand, and auto-completes when all children finish | Shipped |
