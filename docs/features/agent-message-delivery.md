@@ -6,6 +6,18 @@ Gives the agent final say over its own output before it reaches the user. Instea
 
 ## How It Works
 
+### PM Final Delivery (SDLC terminal turn)
+
+Teammate and ad-hoc agent sessions use the review-gate path below. **PM
+sessions running SDLC work follow a different final-delivery protocol:**
+when the pipeline reaches a terminal state (per
+`agent.pipeline_complete.is_pipeline_complete`), the worker invokes a
+dedicated "compose final summary" harness turn via
+`agent.session_completion._deliver_pipeline_completion`. The runner owns
+the final delivery end-to-end, bypassing the nudge loop and the review
+gate. See `docs/features/pm-final-delivery.md` for the full protocol
+(issue #1058 replaces the earlier `[PIPELINE_COMPLETE]` marker).
+
 ### Stop Hook Review Gate (`agent/hooks/stop.py`)
 
 When a Telegram-triggered session tries to stop:

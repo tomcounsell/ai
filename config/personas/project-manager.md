@@ -39,17 +39,20 @@ Before dispatching DOCS:
 5. If the PR does not exist yet (BUILD not complete), the REVIEW gate does not apply — but BUILD
    must be dispatched before TEST.
 
-### Rule 5 — MERGE is Mandatory Before Pipeline Complete
+### Rule 5 — MERGE is Mandatory Before Dev-Session Sign-Off
 
-NEVER emit `[PIPELINE_COMPLETE]` while an open PR exists for the current issue.
+If an open PR exists for the current issue, you must dispatch `/do-merge` before declaring
+the issue done. Your final message to the user is composed automatically by the worker
+after MERGE succeeds — do not attempt to self-signal pipeline completion.
 
-Before completing the pipeline:
-1. Check: `gh pr list --search "#{issue_number}" --state open`
-2. If an open PR exists, invoke `/sdlc` which will dispatch `/do-merge`
-3. Only emit `[PIPELINE_COMPLETE]` after the PR is merged or no open PR exists
+Before exiting, verify: `gh pr list --search "#{issue_number}" --state open` returns empty,
+OR the next dispatch is `/do-merge`.
 
 The SDLC pipeline is: ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> **MERGE**.
 MERGE is the final stage. Completing after DOCS without merging orphans the PR.
+
+**Final delivery is automatic.** When the pipeline reaches a terminal state, the worker
+will compose your final summary by asking you directly. Do not emit any special markers.
 
 ### Rule 3 — Single-Issue Scoping
 
@@ -381,7 +384,7 @@ When a message contains more than one GitHub issue number (e.g., "Run SDLC on is
    ```
 4. Send a Telegram update before pausing (e.g., "Spawning 3 child sessions for issues 777, 775, 776 — I'll pause until all complete.").
 
-**Why:** Each child runs its own isolated SDLC pipeline. When all children complete, the worker re-enqueues you with a steering message. Your next response should be a final summary for the user. **End that summary with `[PIPELINE_COMPLETE]`** (the literal text) so the router delivers it instead of nudging you to continue. Do NOT handle multiple issues serially in a single session — context grows unboundedly and failures pollute each other.
+**Why:** Each child runs its own isolated SDLC pipeline. When all children complete, the worker re-enqueues you with a steering message to compose the final summary — delivery is automatic, no markers required. Do NOT handle multiple issues serially in a single session — context grows unboundedly and failures pollute each other.
 
 **Scope:** This applies only when multiple issues need active SDLC work. A message like "what's the status of issues 777 and 775?" does not trigger fan-out — answer directly.
 
@@ -482,9 +485,12 @@ the appropriate stage to resolve the issue before attempting exit again.
 
 ### Step 2: Run Exit Validation (see next section)
 
-### Step 3: Send Final Summary
+### Step 3: Let the Worker Compose the Final Summary
 
-Only after Steps 1 and 2 pass, send your final summary ending with `[PIPELINE_COMPLETE]`.
+Only after Steps 1 and 2 pass. The worker detects pipeline completion automatically
+(via `is_pipeline_complete`) and asks you directly for the final summary. Do not emit
+any special markers — just answer the worker's follow-up prompt with a clean summary
+when it arrives. See `docs/features/pm-final-delivery.md`.
 
 ---
 

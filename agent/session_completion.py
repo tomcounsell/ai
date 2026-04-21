@@ -1,8 +1,10 @@
 """Post-execution lifecycle: session finalization, parent transitions, dev completion
 handling, and continuation-PM creation."""
 
+import asyncio
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,6 +12,23 @@ from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
+
+# PM final-delivery protocol (issue #1058).
+#
+# When the pipeline reaches a terminal state, the worker runs a dedicated
+# "compose final summary" turn and delivers the result directly via send_cb,
+# bypassing the nudge loop. See `docs/features/pm-final-delivery.md`.
+_COMPLETION_PROMPT = (
+    "The SDLC pipeline has finished. Context: {context}\n\n"
+    "This is your final turn. Write a 2-3 sentence summary for the user covering "
+    "what was accomplished and any notable outcomes. Do NOT use any special "
+    "markers or format instructions — just write the summary directly."
+)
+
+# Background tasks spawned by `_deliver_pipeline_completion`. Drained by the
+# worker shutdown sequence so in-flight completion turns either finish or are
+# cancelled cleanly.
+_pending_completion_tasks: dict[str, asyncio.Task] = {}
 
 
 async def _complete_agent_session(session: AgentSession, *, failed: bool = False) -> None:
@@ -268,7 +287,7 @@ def _create_continuation_pm(
             f"Resume the SDLC pipeline for {issue_ref}. Assess the current state "
             f"and dispatch the next stage.\n\n"
             f"IMPORTANT: Check for open PRs. If a PR exists and is unmerged, "
-            f"the next stage is MERGE (/do-merge). Do NOT emit [PIPELINE_COMPLETE] "
+            f"the next stage is MERGE (/do-merge). Do NOT signal pipeline completion "
             f"until the PR is merged or closed."
         )
         if issue_number:
@@ -319,6 +338,303 @@ def _create_continuation_pm(
 
     except Exception as e:
         logger.error(f"[harness] _create_continuation_pm failed: {e}", exc_info=True)
+
+
+def _pipeline_complete_lock_key(parent_id: str) -> str:
+    """Redis key for the pipeline-completion CAS lock."""
+    return f"pipeline_complete_pending:{parent_id}"
+
+
+def _interrupted_sent_key(session_id: str) -> str:
+    """Redis key for the interrupted-message dedup lock."""
+    return f"interrupted-sent:{session_id}"
+
+
+async def _deliver_pipeline_completion(
+    parent: AgentSession,
+    summary_context: str,
+    send_cb: Callable[..., Awaitable[Any]] | None,
+    chat_id: str | None,
+    telegram_message_id: int | None,
+) -> None:
+    """Compose and deliver the PM session's final summary to the user.
+
+    Plan #1058. Issued when `is_pipeline_complete()` returns True; owns the
+    final delivery end-to-end so the PM never re-enters the nudge loop for
+    its terminal turn.
+
+    Contract:
+      * Sole caller that transitions the parent to ``"completed"`` on the
+        success path. Other paths (health-check, ``_finalize_parent_sync``)
+        defer via the Redis advisory lock below.
+      * Idempotent via Redis SETNX on
+        ``pipeline_complete_pending:{parent_id}`` (60s TTL). Secondary
+        invocations log at INFO and return.
+      * CancelledError-safe: on shutdown, best-effort deliver an
+        "I was interrupted" line (dedup'd on ``interrupted-sent:{session_id}``)
+        then re-raise to preserve asyncio semantics.
+      * All other exceptions are caught and logged; the session finalization
+        path still runs so the parent never lingers ``"running"`` indefinitely.
+
+    Args:
+        parent: The PM AgentSession whose pipeline has completed.
+        summary_context: Outcome text — used verbatim as the fallback if the
+            harness returns empty/error.
+        send_cb: Transport send callback (from
+            ``agent_session_queue._resolve_callbacks``). None is tolerated —
+            the runner logs and finalizes the session without delivery.
+        chat_id: Target chat id (usually ``parent.chat_id``).
+        telegram_message_id: Reply-to message id, optional.
+    """
+    parent_id = getattr(parent, "agent_session_id", None) or getattr(parent, "id", None)
+    session_id = getattr(parent, "session_id", None)
+    if not parent_id:
+        logger.warning("[completion-runner] Missing parent_id; skipping")
+        return
+
+    # CAS lock — Race 1 (runner vs. _finalize_parent_sync) and Race 2
+    # (concurrent invocations via _handle_dev_session_completion +
+    # _agent_session_hierarchy_health_check). Pattern mirrors the
+    # continuation-pm:{parent_id} lock above.
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+        acquired = POPOTO_REDIS_DB.set(_pipeline_complete_lock_key(parent_id), "1", nx=True, ex=60)
+        if not acquired:
+            logger.info(
+                "[completion-runner] pipeline_complete_pending lock held for %s — "
+                "another runner owns delivery",
+                parent_id,
+            )
+            return
+    except Exception as redis_err:
+        # If Redis is unavailable, proceed. Duplicate delivery is preferable
+        # to silence on a genuine completion.
+        logger.warning(
+            "[completion-runner] Redis lock unavailable (%s); proceeding without dedup",
+            redis_err,
+        )
+
+    # Resolve working_dir from project_config / projects.json for the harness.
+    working_dir = _resolve_working_dir_for_parent(parent)
+
+    # Resolve the PM's prior Claude Code UUID (B1 fix). `None` is OK — the
+    # harness falls back to `full_context_message` via its no-UUID path.
+    try:
+        from agent.sdk_client import _get_prior_session_uuid  # noqa: PLC0415
+
+        pm_uuid = _get_prior_session_uuid(session_id) if session_id else None
+    except Exception as uuid_err:
+        logger.warning("[completion-runner] UUID lookup failed: %s", uuid_err)
+        pm_uuid = None
+
+    prompt = _COMPLETION_PROMPT.format(context=summary_context[:3000])
+
+    try:
+        try:
+            from agent.sdk_client import get_response_via_harness  # noqa: PLC0415
+
+            raw = await get_response_via_harness(
+                message=prompt,
+                working_dir=working_dir,
+                prior_uuid=pm_uuid,
+                session_id=session_id,
+                full_context_message=prompt,
+            )
+            final_text = (raw or "").strip()
+        except Exception as harness_err:
+            logger.warning(
+                "[completion-runner] Harness failed (%s) — delivering fallback summary",
+                harness_err,
+            )
+            final_text = ""
+
+        if not final_text:
+            final_text = summary_context.strip() or (
+                "The pipeline has completed. See session history for details."
+            )
+
+        # Deliver.
+        if send_cb is not None and chat_id:
+            try:
+                await send_cb(chat_id, final_text, telegram_message_id, parent)
+                logger.info(
+                    "[completion-runner] Delivered final summary for %s (%d chars)",
+                    parent_id,
+                    len(final_text),
+                )
+            except Exception as send_err:
+                logger.error(
+                    "[completion-runner] send_cb failed for %s: %s",
+                    parent_id,
+                    send_err,
+                )
+        else:
+            logger.warning(
+                "[completion-runner] No send_cb or chat_id for %s; skipping delivery",
+                parent_id,
+            )
+
+        # Stamp response_delivered_at and transition to completed. Runner owns
+        # this transition (Race 1 / Race 4 mitigation).
+        try:
+            parent.response_delivered_at = datetime.now(UTC)
+            parent.save(update_fields=["response_delivered_at", "updated_at"])
+        except Exception as stamp_err:
+            logger.warning(
+                "[completion-runner] Failed to stamp response_delivered_at: %s",
+                stamp_err,
+            )
+
+        try:
+            from models.session_lifecycle import finalize_session  # noqa: PLC0415
+
+            finalize_session(
+                parent, "completed", reason="pipeline complete: final summary delivered"
+            )
+        except Exception as finalize_err:
+            logger.error(
+                "[completion-runner] finalize_session(completed) failed for %s: %s",
+                parent_id,
+                finalize_err,
+            )
+
+    except asyncio.CancelledError:
+        # Shutdown during runner. Best-effort "interrupted" message with
+        # flap-dedup (Risk 6), then re-raise to preserve asyncio semantics.
+        if send_cb is not None and chat_id and session_id:
+            try:
+                await _send_interrupted_message(
+                    send_cb, chat_id, telegram_message_id, parent, session_id
+                )
+            except Exception as int_err:  # pragma: no cover - best-effort
+                logger.warning("[completion-runner] interrupted send failed: %s", int_err)
+        raise
+
+
+def _resolve_working_dir_for_parent(parent: AgentSession) -> str:
+    """Pick a working directory for the completion-turn harness invocation."""
+    try:
+        pc = getattr(parent, "project_config", None) or {}
+        wd = pc.get("working_directory") if isinstance(pc, dict) else None
+        if wd:
+            return str(wd)
+    except Exception:
+        pass
+    try:
+        from bridge.routing import load_config as _load_projects_config  # noqa: PLC0415
+
+        project_key = getattr(parent, "project_key", None)
+        projects = _load_projects_config().get("projects", {})
+        cfg = projects.get(project_key, {}) if project_key else {}
+        wd = cfg.get("working_directory")
+        if wd:
+            return str(wd)
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+async def _send_interrupted_message(
+    send_cb: Callable[..., Awaitable[Any]],
+    chat_id: str,
+    telegram_message_id: int | None,
+    parent: AgentSession,
+    session_id: str,
+) -> None:
+    """Best-effort 'I was interrupted' delivery with Risk-6 flap-dedup."""
+    should_send = True
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+        acquired = POPOTO_REDIS_DB.set(_interrupted_sent_key(session_id), "1", nx=True, ex=120)
+        should_send = bool(acquired)
+        if not should_send:
+            logger.info(
+                "[completion-runner] interrupted-sent dedup held for %s; skipping",
+                session_id,
+            )
+    except Exception as lock_err:
+        logger.debug(
+            "[completion-runner] interrupted-sent lock unavailable (%s); sending anyway",
+            lock_err,
+        )
+
+    if not should_send:
+        return
+
+    msg = "I was interrupted and will resume automatically. No action needed."
+    try:
+        await asyncio.wait_for(send_cb(chat_id, msg, telegram_message_id, parent), timeout=2.0)
+    except (TimeoutError, Exception) as send_err:
+        logger.warning("[completion-runner] interrupted send failed/timed out: %s", send_err)
+
+
+def schedule_pipeline_completion(
+    parent: AgentSession,
+    summary_context: str,
+    send_cb: Callable[..., Awaitable[Any]] | None,
+    chat_id: str | None,
+    telegram_message_id: int | None,
+) -> asyncio.Task | None:
+    """Fire-and-forget scheduler for `_deliver_pipeline_completion`.
+
+    Tracks the task in `_pending_completion_tasks` keyed by parent id so
+    worker shutdown can drain it. Deduplicates in-process scheduling so two
+    callers in the same worker don't both create tasks (the Redis CAS in
+    the runner handles cross-process dedup separately).
+    """
+    parent_id = getattr(parent, "agent_session_id", None) or getattr(parent, "id", None)
+    if not parent_id:
+        return None
+    existing = _pending_completion_tasks.get(parent_id)
+    if existing is not None and not existing.done():
+        logger.info(
+            "[completion-runner] Completion task already in-flight for %s; skipping duplicate",
+            parent_id,
+        )
+        return existing
+
+    async def _wrapper() -> None:
+        try:
+            await _deliver_pipeline_completion(
+                parent, summary_context, send_cb, chat_id, telegram_message_id
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover - runner wraps its own errors
+            logger.error("[completion-runner] Unhandled error for %s: %s", parent_id, e)
+
+    task = asyncio.create_task(_wrapper(), name=f"pipeline_completion:{parent_id}")
+    _pending_completion_tasks[parent_id] = task
+    task.add_done_callback(lambda t: _pending_completion_tasks.pop(parent_id, None))
+    return task
+
+
+async def drain_pending_completions(timeout: float = 15.0) -> None:
+    """Drain in-flight completion-turn tasks during worker shutdown.
+
+    Allocates more time than extraction drain (15s vs 5s) because the
+    harness call itself is the whole point of the runner — see Open Question #4
+    in the plan. If the timeout fires, CancelledError propagates into the
+    runner's handler, which best-effort delivers the interrupted message.
+    """
+    if not _pending_completion_tasks:
+        return
+    pending = list(_pending_completion_tasks.values())
+    logger.info(
+        "[completion-runner] Draining %d pending completion task(s) (timeout=%.1fs)",
+        len(pending),
+        timeout,
+    )
+    done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    for task in still_pending:
+        task.cancel()
+    if still_pending:
+        logger.warning(
+            "[completion-runner] Cancelled %d completion task(s) past drain timeout",
+            len(still_pending),
+        )
 
 
 async def _handle_dev_session_completion(
@@ -438,6 +754,71 @@ async def _handle_dev_session_completion(
         except Exception as comment_err:
             logger.warning(f"[harness] Stage comment posting failed (non-fatal): {comment_err}")
 
+        # ------------------------------------------------------------------
+        # PM final-delivery protocol (issue #1058).
+        # If the pipeline is complete per `is_pipeline_complete()`, spawn the
+        # completion-turn runner and RETURN before issuing a continuation
+        # steer. The runner owns final delivery and the parent transition to
+        # `"completed"`.
+        # ------------------------------------------------------------------
+        try:
+            from agent.pipeline_complete import (  # noqa: PLC0415
+                _check_pr_open,
+                is_pipeline_complete,
+            )
+
+            psm_states: dict[str, str] = {}
+            try:
+                # `psm` may be unbound if the earlier try/except failed.
+                psm_states = dict(psm.states)  # type: ignore[name-defined]
+            except Exception:
+                psm_states = {}
+
+            # Call-site gating (Risk 5 / C6): _check_pr_open only for
+            # DOCS-completed-MERGE-not-completed corner case. For MERGE-success
+            # or non-terminal stages, skip the subprocess.
+            pr_open: bool | None = None
+            if (
+                psm_states.get("DOCS") == "completed"
+                and psm_states.get("MERGE") != "completed"
+                and issue_number
+            ):
+                pr_open = _check_pr_open(issue_number)
+
+            is_complete, reason = is_pipeline_complete(psm_states, outcome, pr_open=pr_open)
+        except Exception as predicate_err:
+            logger.warning(
+                "[harness] Pipeline-complete predicate failed (non-fatal): %s", predicate_err
+            )
+            is_complete = False
+            reason = "predicate_error"
+
+        if is_complete:
+            # Build a summary context from outcome — used both as the
+            # harness prompt context and the fallback on harness failure.
+            result_preview = result[:500] if result else "(no result)"
+            summary_context = (
+                f"Stage {current_stage or 'UNKNOWN'} completed with outcome={outcome} "
+                f"(reason={reason}). Result preview: {result_preview}"
+            )
+            from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+
+            transport = getattr(parent, "transport", None) or None
+            send_cb, _react_cb = _resolve_callbacks(getattr(parent, "project_key", None), transport)
+            chat_id = getattr(parent, "chat_id", None)
+            telegram_message_id = getattr(parent, "telegram_message_id", None)
+
+            logger.info(
+                "[harness] Pipeline complete for parent %s (reason=%s) — invoking "
+                "completion-turn runner",
+                parent_id,
+                reason,
+            )
+            schedule_pipeline_completion(
+                parent, summary_context, send_cb, chat_id, telegram_message_id
+            )
+            return  # runner owns final delivery + parent transition
+
         # Steer parent PM session with pipeline state update.
         # Check the return value — if steering fails (parent already terminal),
         # create a continuation PM to carry the pipeline forward.
@@ -447,7 +828,7 @@ async def _handle_dev_session_completion(
                 f"Dev session completed. Stage: {current_stage or 'unknown'}. "
                 f"Outcome: {outcome}. Result preview: {result_preview}\n\n"
                 f"IMPORTANT: If an open PR exists for this issue, the pipeline is NOT complete. "
-                f"You MUST invoke /sdlc to dispatch /do-merge before emitting [PIPELINE_COMPLETE]."
+                f"You MUST invoke /sdlc to dispatch /do-merge before signaling pipeline completion."
             )
             from agent.session_executor import steer_session as _steer_session  # noqa: PLC0415
 

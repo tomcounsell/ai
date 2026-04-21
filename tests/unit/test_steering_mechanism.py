@@ -157,24 +157,30 @@ class TestRouteSessionOutput:
         assert action == "deliver"
 
 
-class TestPipelineCompleteMarker:
-    """Tests for PIPELINE_COMPLETE marker behavior in output router."""
+class TestNoMarkerRouting:
+    """Issue #1058: the router no longer special-cases any content marker.
 
-    def test_pm_sdlc_with_pipeline_complete_delivers(self):
-        """PM/SDLC session with [PIPELINE_COMPLETE] marker delivers immediately."""
-        from agent.output_router import PIPELINE_COMPLETE_MARKER, route_session_output
+    `TestPipelineCompleteMarker` used to verify the PM could break the nudge
+    loop by appending `[PIPELINE_COMPLETE]` to its output. That protocol has
+    been replaced by a dedicated completion-turn runner invoked from
+    `_handle_dev_session_completion`. These tests lock in the new behavior:
+    the literal string is ordinary content, and PM+SDLC sessions always
+    nudge_continue regardless of message content.
+    """
+
+    def test_pm_sdlc_with_legacy_marker_string_still_nudges(self):
+        from agent.output_router import route_session_output
 
         action, _cap = route_session_output(
-            msg=f"All stages done. {PIPELINE_COMPLETE_MARKER}",
+            msg="All stages done. [PIPELINE_COMPLETE]",
             stop_reason="end_turn",
             auto_continue_count=5,
             session_type="pm",
             classification_type="sdlc",
         )
-        assert action == "deliver_pipeline_complete"
+        assert action == "nudge_continue"
 
-    def test_pm_sdlc_without_marker_nudges(self):
-        """PM/SDLC session without marker continues nudging."""
+    def test_pm_sdlc_without_marker_still_nudges(self):
         from agent.output_router import route_session_output
 
         action, _cap = route_session_output(
@@ -188,39 +194,49 @@ class TestPipelineCompleteMarker:
 
 
 class TestSteeringMessageMergeReminder:
-    """Tests that steering messages include merge reminder text."""
+    """Tests that steering messages include merge reminder text.
+
+    Issue #1058 B2: the merge-reminder literal no longer mentions
+    `[PIPELINE_COMPLETE]`; it now says "signaling pipeline completion" to
+    preserve the semantic intent without the deprecated marker string.
+    """
 
     def test_steering_message_format_includes_merge_reminder(self):
-        """The steering message built in _handle_dev_session_completion must include
-        a reminder about checking for open PRs before completing the pipeline."""
         current_stage = "DOCS"
         outcome = "success"
         result_preview = "Documentation updated."
 
-        # Reproduce the steering message construction from agent_session_queue.py
+        # Reproduce the steering message construction from
+        # agent/session_completion.py::_handle_dev_session_completion.
         steering_msg = (
             f"Dev session completed. Stage: {current_stage or 'unknown'}. "
             f"Outcome: {outcome}. Result preview: {result_preview}\n\n"
             f"IMPORTANT: If an open PR exists for this issue, the pipeline is NOT complete. "
-            f"You MUST invoke /sdlc to dispatch /do-merge before emitting [PIPELINE_COMPLETE]."
+            f"You MUST invoke /sdlc to dispatch /do-merge before signaling pipeline completion."
         )
         assert "IMPORTANT" in steering_msg
         assert "/do-merge" in steering_msg
-        assert "[PIPELINE_COMPLETE]" in steering_msg
+        assert "signaling pipeline completion" in steering_msg
+        assert "[PIPELINE_COMPLETE]" not in steering_msg
 
 
 class TestPMPersonaMergeRule:
     """Tests that the PM persona contains Rule 5 -- merge-before-complete."""
 
     def test_pm_persona_contains_merge_rule(self):
-        """PM persona must contain Rule 5 about merge being mandatory."""
+        """PM persona must contain Rule 5 about merge being mandatory.
+
+        Issue #1058 C7: Rule 5 no longer references `[PIPELINE_COMPLETE]` —
+        the worker composes the final summary directly.
+        """
         import pathlib
 
         persona_path = pathlib.Path("config/personas/project-manager.md")
         content = persona_path.read_text()
         assert "Rule 5" in content
         assert "MERGE" in content
-        assert "[PIPELINE_COMPLETE]" in content
+        assert "[PIPELINE_COMPLETE]" not in content
+        assert "composed automatically by the worker" in content
 
     def test_pm_persona_merge_rule_mentions_open_pr_check(self):
         """Rule 5 must instruct PM to check for open PRs before completing."""

@@ -7,9 +7,13 @@ import pytest
 
 from agent.output_router import (
     MAX_NUDGE_COUNT,
-    PIPELINE_COMPLETE_MARKER,
     determine_delivery_action,
 )
+
+# Issue #1058: `PIPELINE_COMPLETE_MARKER` was removed. Tests now use the
+# literal string to assert it is treated as ordinary content (no special
+# routing).
+_LEGACY_MARKER = "[PIPELINE_COMPLETE]"
 
 
 class TestWaitingForChildrenGuard:
@@ -81,10 +85,12 @@ class TestWaitingForChildrenGuard:
         )
         assert action == "deliver"
 
-    def test_pm_sdlc_waiting_for_children_with_pipeline_complete_marker(self):
-        """Even with PIPELINE_COMPLETE_MARKER, waiting_for_children guard takes precedence."""
+    def test_pm_sdlc_waiting_for_children_with_legacy_marker_string(self):
+        """Even with the legacy PIPELINE_COMPLETE string in the message,
+        waiting_for_children guard takes precedence and delivers (issue #1058:
+        the router no longer special-cases the string anywhere)."""
         action = determine_delivery_action(
-            msg=f"Done. {PIPELINE_COMPLETE_MARKER}",
+            msg=f"Done. {_LEGACY_MARKER}",
             stop_reason="end_turn",
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
@@ -146,16 +152,19 @@ class TestExistingRouting:
         )
         assert action == "drop"
 
-    def test_pm_sdlc_pipeline_complete_marker(self):
+    def test_pm_sdlc_legacy_marker_string_is_ordinary_content(self):
+        """Issue #1058: the legacy `[PIPELINE_COMPLETE]` string is no longer
+        content-inspected. It routes identically to any other PM+SDLC output —
+        i.e., nudge_continue to keep the pipeline moving."""
         action = determine_delivery_action(
-            msg=f"All done! {PIPELINE_COMPLETE_MARKER}",
+            msg=f"All done! {_LEGACY_MARKER}",
             stop_reason="end_turn",
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
             session_type="pm",
             classification_type="sdlc",
         )
-        assert action == "deliver_pipeline_complete"
+        assert action == "nudge_continue"
 
     def test_pm_sdlc_normal_nudges(self):
         action = determine_delivery_action(

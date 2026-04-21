@@ -158,7 +158,11 @@ When stage_states is unavailable (cold start), the merge gate emits an explicit 
 
 ### Merge-Before-Complete Enforcement
 
-The PM persona includes Rule 5 ("MERGE is Mandatory Before Pipeline Complete") which prevents the PM from emitting `[PIPELINE_COMPLETE]` while an open PR exists. Additionally, the worker's `_handle_dev_session_completion` steering message includes a merge reminder, and continuation PMs carry explicit instructions to check for open PRs before completing. See `config/personas/project-manager.md` Rule 5 and issue #1005.
+The PM persona includes Rule 5 ("MERGE is Mandatory Before Dev-Session Sign-Off") which prevents the PM from declaring the issue done while an open PR exists. Additionally, the worker's `_handle_dev_session_completion` steering message includes a merge reminder (marker-free wording as of issue #1058), and continuation PMs carry explicit instructions to check for open PRs before completing. See `config/personas/project-manager.md` Rule 5 and issue #1005.
+
+### Final Delivery (issue #1058)
+
+Final delivery is driven by `_handle_dev_session_completion` detecting pipeline completion via `agent.pipeline_complete.is_pipeline_complete(psm.states, outcome, pr_open)` and invoking `agent.session_completion._deliver_pipeline_completion`, not by a persona-emitted marker. The runner acquires a Redis CAS lock (`pipeline_complete_pending:{parent_id}`, 60s TTL) to deduplicate across the `_handle_dev_session_completion` and `_agent_session_hierarchy_health_check` entry points, then runs a dedicated harness turn to compose the final summary and delivers it via `send_cb`. See `docs/features/pm-final-delivery.md` for the full protocol.
 
 ## Integration Points
 

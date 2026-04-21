@@ -6,6 +6,16 @@ callback calls route_session_output() and executes the returned action —
 the call site stays inside send_to_chat() to preserve temporal coupling
 with chat_state flag-setting and post-execution cleanup.
 
+PM final-delivery protocol (issue #1058):
+    The router no longer inspects message content for any marker. The
+    previous `[PIPELINE_COMPLETE]` protocol was removed because content-
+    marker routing failed under context overflow, stale UUIDs, and persona
+    drift. Final delivery is driven by `_handle_dev_session_completion`
+    detecting pipeline completion and invoking `_deliver_pipeline_completion`
+    — see `docs/features/pm-final-delivery.md`. PM+SDLC paths here resolve
+    to `nudge_continue` (except for the `waiting_for_children` → `deliver`
+    and terminal-status guards, which are preserved).
+
 Public API:
     determine_delivery_action()  — pure function, returns action string
     route_session_output()       — wraps determine_delivery_action with persona context
@@ -31,11 +41,6 @@ MAX_NUDGE_COUNT = 50
 # Default nudge message sent to the agent for all session types.
 # The PM session owns SDLC intelligence; the bridge just keeps the agent working.
 NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
-
-# Marker the PM includes at the end of a final completion message to break out
-# of the nudge loop and deliver to the user. The router strips this marker
-# before delivery so it never appears in the Telegram message.
-PIPELINE_COMPLETE_MARKER = "[PIPELINE_COMPLETE]"
 
 
 # ---------------------------------------------------------------------------
@@ -79,12 +84,16 @@ def determine_delivery_action(
     Returns one of:
         "deliver"                   — send to Telegram
         "deliver_fallback"          — send fallback message (empty output, cap reached)
-        "deliver_pipeline_complete" — PM included PIPELINE_COMPLETE_MARKER; strip and deliver
         "nudge_rate_limited"        — backoff then nudge (rate limited)
         "nudge_empty"               — nudge (empty output)
         "nudge_continue"            — nudge (PM/SDLC session, continue pipeline)
         "drop"                      — drop output (completion already sent)
         "deliver_already_completed" — deliver without nudge (session already done)
+
+    Note (issue #1058): no content-string inspection happens here. Pipeline
+    completion is detected separately in `_handle_dev_session_completion` via
+    the `is_pipeline_complete` predicate, which invokes a dedicated
+    completion-turn runner that delivers the final message directly.
     """
     from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -108,13 +117,10 @@ def determine_delivery_action(
     # can then acquire the slot.  Issue #1004.
     if session_status == "waiting_for_children":
         return "deliver"
-    # PM sessions running SDLC work should continue through pipeline stages
-    # rather than delivering after the first skill completes.
-    # The PM decides when to stop; the bridge just keeps it working.
-    # Exception: if the PM includes PIPELINE_COMPLETE_MARKER, deliver immediately.
+    # PM sessions running SDLC work continue through pipeline stages via
+    # nudge. Final delivery is handled out-of-band by the completion-turn
+    # runner — see `_deliver_pipeline_completion` in `agent/session_completion.py`.
     if session_type == "pm" and classification_type == "sdlc":
-        if PIPELINE_COMPLETE_MARKER in msg:
-            return "deliver_pipeline_complete"
         return "nudge_continue"
     if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
         return "deliver"
