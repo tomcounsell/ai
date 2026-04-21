@@ -611,8 +611,8 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 | Integration test passes | `pytest tests/integration/test_valor_email.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| CLI installed | `which valor-email` | output contains `valor-email` |
-| CLI help | `valor-email --help 2>&1` | output contains `read send threads` |
+| CLI installed | `which valor-email` | output contains valor-email |
+| CLI help | `valor-email --help 2>&1` | output contains {read,send,threads} |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_valor_email.py tests/unit/test_email_relay.py tests/unit/test_email_history.py` | exit code 1 |
 | Parsed-header regression | `pytest tests/unit/test_email_bridge.py::TestBuildReplyMimeHeaderRegression::test_build_reply_mime_header_regression -x -q` | exit code 0 |
 | Legacy payload compat | `pytest tests/unit/test_email_relay.py::TestProcessOutboxSend::test_drains_legacy_text_payload -x -q` | exit code 0 |
