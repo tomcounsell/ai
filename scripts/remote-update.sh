@@ -74,12 +74,17 @@ trap cleanup_lock EXIT
 # run always executes the pre-pull version of the orchestrator; changes to
 # the update scripts only take effect on the next run.
 # run.py --cron is then called with --no-pull to skip the redundant pull.
+# Capture SHA before pull so we can detect whether code actually changed.
+BEFORE_SHA=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+
 echo "[update] Pulling latest changes..."
 if git -C "$PROJECT_DIR" pull --ff-only 2>&1; then
     echo "[update] Pull complete"
 else
     echo "[update] WARN: git pull failed or had conflicts — continuing with current code"
 fi
+
+AFTER_SHA=$(git -C "$PROJECT_DIR" rev-parse HEAD)
 
 # ── Check for Python venv ────────────────────────────────────────────
 PYTHON="$PROJECT_DIR/.venv/bin/python"
@@ -134,23 +139,42 @@ if launchctl list | grep -q "com.valor.daydream"; then
 fi
 
 # ── Reload worker plist if present ───────────────────────────────────
+# Only restart the worker when the pull actually landed new commits that touch
+# worker-loaded code.  This prevents killing in-flight sessions every 30 minutes
+# when com.valor.update runs on a timer (issue #1091).
 WORKER_PLIST="$PROJECT_DIR/com.valor.worker.plist"
 WORKER_LABEL="${SERVICE_LABEL_PREFIX}.worker"
 WORKER_DST="$HOME/Library/LaunchAgents/${WORKER_LABEL}.plist"
 if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
     sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$WORKER_LABEL|g" "$WORKER_PLIST" > "$WORKER_DST"
+
+    NEED_RESTART=false
+    if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
+        # Check whether the diff touches directories/files the worker loads.
+        if git -C "$PROJECT_DIR" diff "$BEFORE_SHA" "$AFTER_SHA" -- \
+            worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ \
+            pyproject.toml | grep -q . ; then
+            NEED_RESTART=true
+        fi
+    fi
+
     if launchctl list | grep -q "$WORKER_LABEL"; then
-        # Service is loaded — use kickstart -k to atomically kill+restart without
-        # the bootout/bootstrap race condition (bootstrap error 5: label still registered).
-        if ! launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
-            # kickstart failed; fall back to bootout + bootstrap with a brief wait
-            launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
-            sleep 2
-            if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
-                echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+        if $NEED_RESTART; then
+            # Service is loaded — use kickstart -k to atomically kill+restart without
+            # the bootout/bootstrap race condition (bootstrap error 5: label still registered).
+            if ! launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
+                # kickstart failed; fall back to bootout + bootstrap with a brief wait
+                launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
+                sleep 2
+                if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+                    echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+                fi
             fi
+        else
+            echo "[update] No worker-relevant changes detected — skipping restart"
         fi
     else
+        # Service not yet loaded (first install) — always bootstrap.
         if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
             echo "ERROR: Failed to bootstrap $WORKER_LABEL"
         fi
