@@ -235,6 +235,69 @@ class BackgroundTask:
                             _cb_err,
                         )
 
+        except asyncio.CancelledError:
+            # Shutdown-path handler (issue #1058, failure mode #3).
+            #
+            # `asyncio.CancelledError` inherits from `BaseException` and therefore
+            # bypasses the plain `except Exception` below. Worker shutdown used to
+            # leave the session "running" until startup-recovery re-queued it
+            # (~5 minutes of silence on the user side). Here we best-effort
+            # deliver a user-visible "I was interrupted" line and then re-raise
+            # so asyncio shutdown semantics are preserved.
+            #
+            # Flap protection (plan Risk 6): a flapping worker (deploy loop,
+            # OOM-kill cycling, health churn) would otherwise fire this handler
+            # repeatedly. We gate the send on a Redis key
+            # `interrupted-sent:{session_id}` with a 120s TTL via SET NX. Only
+            # the caller that acquires the key sends. The TTL lets genuinely
+            # distinct interruptions surface a fresh message after 2 minutes.
+            self._completed_at = utc_now()
+            try:
+                _should_send = True
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+                    dedup_key = f"interrupted-sent:{self.messenger.session_id}"
+                    acquired = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=120)
+                    if not acquired:
+                        _should_send = False
+                        logger.info(
+                            "[%s] CancelledError interrupted-message suppressed "
+                            "(dedup key held)",
+                            self.messenger.session_id,
+                        )
+                except Exception as _lock_err:
+                    # Redis unavailable: fall through and send (duplicate is
+                    # preferable to silence on a genuine interruption).
+                    logger.debug(
+                        "[%s] interrupted-sent dedup lock failed: %s",
+                        self.messenger.session_id,
+                        _lock_err,
+                    )
+
+                if _should_send:
+                    try:
+                        await asyncio.wait_for(
+                            self.messenger._send_callback(
+                                "I was interrupted and will resume automatically. "
+                                "No action needed."
+                            ),
+                            timeout=2.0,
+                        )
+                    except (Exception, asyncio.TimeoutError) as _send_err:
+                        logger.warning(
+                            "[%s] CancelledError best-effort send failed: %s",
+                            self.messenger.session_id,
+                            _send_err,
+                        )
+            finally:
+                # Cancel watchdog inside the handler so shutdown proceeds even
+                # if the outer `finally` is skipped (shouldn't happen, but
+                # defensive).
+                if self._watchdog_task and not self._watchdog_task.done():
+                    self._watchdog_task.cancel()
+                raise  # preserve asyncio cancellation semantics
+
         except Exception as e:
             self._error = e
             self._completed_at = utc_now()

@@ -1055,29 +1055,43 @@ async def _agent_session_hierarchy_health_check() -> None:
                     new_status,
                 )
                 if new_status == "completed":
-                    # Re-enqueue parent so PM can compose and deliver a final summary.
-                    # The PM must include [PIPELINE_COMPLETE] to break out of nudge loop.
+                    # Fan-out completion (issue #1058): invoke the PM final-delivery
+                    # runner directly instead of pushing a steering message that
+                    # relied on the deprecated [PIPELINE_COMPLETE] marker. The runner
+                    # composes a summary via the harness and delivers through
+                    # send_cb; the Redis CAS lock in _deliver_pipeline_completion
+                    # deduplicates against any concurrent _handle_dev_session_completion
+                    # path that may fire for the same parent.
                     n_ok = sum(1 for c in children if c.status == "completed")
                     n_fail = sum(1 for c in children if c.status == "failed")
                     child_lines = "\n".join(
                         f"  - {getattr(c, 'agent_session_id', '?')}: {c.status}" for c in children
                     )
-                    from agent.output_router import PIPELINE_COMPLETE_MARKER
-                    from agent.steering import push_steering_message
-                    from models.session_lifecycle import transition_status
-
-                    steering_msg = (
+                    fan_out_summary = (
                         f"All {len(children)} child pipeline sessions have completed "
                         f"({n_ok} succeeded, {n_fail} failed).\n"
-                        f"Children:\n{child_lines}\n\n"
-                        f"Compose a final summary for the user covering what was accomplished "
-                        f"across all child pipelines. "
-                        f"End your response with the literal text `{PIPELINE_COMPLETE_MARKER}` "
-                        f"so it is delivered to the user instead of nudged."
+                        f"Children:\n{child_lines}"
                     )
-                    push_steering_message(parent.session_id, steering_msg, sender="worker")
-                    transition_status(
-                        parent, "pending", reason="children completed, sending final summary"
+
+                    from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+                    from agent.session_completion import (  # noqa: PLC0415
+                        schedule_pipeline_completion,
+                    )
+
+                    transport = getattr(parent, "transport", None) or None
+                    send_cb, _react_cb = _resolve_callbacks(
+                        getattr(parent, "project_key", None), transport
+                    )
+                    chat_id = getattr(parent, "chat_id", None)
+                    telegram_message_id = getattr(parent, "telegram_message_id", None)
+
+                    logger.info(
+                        "[session-health] Fan-out complete for parent %s — "
+                        "invoking completion-turn runner",
+                        parent.agent_session_id,
+                    )
+                    schedule_pipeline_completion(
+                        parent, fan_out_summary, send_cb, chat_id, telegram_message_id
                     )
                 else:
                     # Failed parent: finalize immediately (no point composing a summary)

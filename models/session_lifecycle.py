@@ -637,6 +637,30 @@ def _finalize_parent_sync(
         f"{completed_count} completed, {failed_count} failed -> {new_status}"
     )
 
+    # PM final-delivery coordination (issue #1058): if the completion-turn
+    # runner is in flight for this parent, defer finalization. The runner
+    # transitions the parent to "completed" after delivering the summary.
+    # Only applies to the success path — failed parents finalize immediately.
+    if new_status == "completed":
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+            lock_key = f"pipeline_complete_pending:{parent_id}"
+            if POPOTO_REDIS_DB.exists(lock_key):
+                logger.info(
+                    "[session-hierarchy] Completion runner active for %s — "
+                    "deferring finalization to runner",
+                    parent_id,
+                )
+                return
+        except Exception as redis_err:
+            # Redis unavailable: proceed with finalization (old behavior).
+            logger.debug(
+                "[session-hierarchy] pipeline_complete_pending check failed (%s); "
+                "proceeding with finalization",
+                redis_err,
+            )
+
     _transition_parent(parent, new_status)
 
 

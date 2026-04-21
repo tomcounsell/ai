@@ -847,37 +847,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 chat_state.completion_sent = True
                 chat_state.defer_reaction = True
 
-            elif action == "deliver_pipeline_complete":
-                from agent.output_router import PIPELINE_COMPLETE_MARKER
-
-                clean_msg = msg.replace(PIPELINE_COMPLETE_MARKER, "").rstrip()
-                logger.info(
-                    f"[{session.project_key}] PM pipeline complete — delivering final summary "
-                    f"({len(clean_msg)} chars)"
-                )
-                if session.session_id:
-                    try:
-                        from bridge.telegram_relay import get_outbox_length
-
-                        for _drain_i in range(20):
-                            if get_outbox_length(session.session_id) == 0:
-                                break
-                            await asyncio.sleep(0.1)
-                    except Exception as drain_err:
-                        logger.debug(
-                            f"[{session.project_key}] Outbox drain check failed: {drain_err}"
-                        )
-                await send_cb(
-                    session.chat_id, clean_msg, session.telegram_message_id, agent_session
-                )
-                chat_state.completion_sent = True
-                try:
-                    if agent_session is not None:
-                        agent_session.response_delivered_at = datetime.now(UTC)
-                        agent_session.save(update_fields=["response_delivered_at", "updated_at"])
-                except Exception as e:
-                    logger.warning(f"Failed to stamp response_delivered_at: {e}")
-
             elif action == "deliver_fallback":
                 logger.warning(
                     f"[{session.project_key}] Empty output and nudge cap "
