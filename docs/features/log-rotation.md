@@ -22,7 +22,7 @@ specific reason to exist.
 
 | Layer | Runs | Covers | Defined in |
 |-------|------|--------|------------|
-| **Python `RotatingFileHandler`** | Every write | App logs the Python process opens itself with a rotating handler (`bridge.log`, `watchdog.log`) | `bridge/telegram_bridge.py`, `monitoring/bridge_watchdog.py` |
+| **Python `RotatingFileHandler`** | Every write | App logs the Python process opens itself with a rotating handler (`bridge.log`, `watchdog.log`, `worker_watchdog.log`) | `bridge/telegram_bridge.py`, `monitoring/bridge_watchdog.py`, `monitoring/worker_watchdog.py` |
 | **Startup `rotate_log`** | Every service start/restart | launchd-managed stderr files (`*.error.log`) — covers the moment the service restarts (FD closes, rename lands) | `scripts/valor-service.sh:148-179` |
 | **Log-rotate LaunchAgent** | Every 30 min | Every `logs/*.log` file — between-restart coverage for long-running services, and the sole rotator for `worker.log` and `reflections.log` (both written via plain file append / launchd `StandardOutPath`, no in-process rotation) | `scripts/log_rotate.py` + `com.valor.log-rotate.plist` |
 
