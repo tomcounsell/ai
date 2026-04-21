@@ -20,9 +20,12 @@ IMAP inbox (valor@yuda.me)
 
 | File | Role |
 |------|------|
-| `bridge/email_bridge.py` | IMAP polling loop, email parsing, sender filtering, `EmailOutputHandler` |
+| `bridge/email_bridge.py` | IMAP polling loop, email parsing, sender filtering, `EmailOutputHandler`, history cache write-through (`_record_history`, `_record_thread`), module-level `_build_reply_mime` with attachment support |
+| `bridge/email_relay.py` | Async drain of `email:outbox:*` payloads via SMTP; atomic LPOP + requeue-with-counter + DLQ after `MAX_EMAIL_RELAY_RETRIES`; heartbeat key `email:relay:last_poll_ts` for liveness probing. Runs inside `run_email_bridge()` via `asyncio.gather`. |
 | `bridge/email_dead_letter.py` | Dead letter queue for failed SMTP sends |
 | `bridge/routing.py` | `find_project_for_email()`, `build_email_to_project_map()`, `get_known_email_search_terms()` |
+| `tools/valor_email.py` | CLI entry point (`valor-email read / send / threads`) |
+| `tools/email_history/` | Pure-Redis readers for the history cache (`get_recent_emails`, `search_history`, `list_threads`) |
 | `agent/agent_session_queue.py` | Transport-keyed callbacks via `register_callbacks(transport=...)` and `_resolve_callbacks()`; `extra_context_overrides` parameter |
 
 ### Session Identity
@@ -225,6 +228,70 @@ Or via the service script:
 **Per-poll batch cap (`IMAP_MAX_BATCH`).** Each poll cycle fetches at most `IMAP_MAX_BATCH` unseen messages (default 20, configurable via env var). On inboxes with thousands of unread messages, this prevents the poller from hanging indefinitely on a single cycle. The most recent messages are fetched first.
 
 **30-second poll interval.** A balance between responsiveness and IMAP connection overhead. Gmail supports IMAP IDLE for push delivery, but polling is simpler and sufficient for the current load.
+
+## CLI (`valor-email`)
+
+A terminal-friendly surface over the email bridge that mirrors `valor-telegram`:
+
+```
+valor-email read --limit 5
+valor-email read --search "deployment" --since "2 hours ago"
+valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
+valor-email send --to alice@example.com --file ./report.pdf "See attached"
+valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
+valor-email threads
+```
+
+All three subcommands accept `--json` for machine-readable output.
+
+### Read path
+
+`valor-email read` queries the Redis history cache (`email:history:INBOX` sorted set keyed by UNIX timestamp, with per-message JSON blobs under `email:history:msg:{message_id}`, TTL 7 days, capped at 500 entries). The cache is populated by the IMAP poll loop via `_record_history()` / `_record_thread()` write-through calls. Filters:
+
+- `--limit N` (default 10) — ZREVRANGE the N most recent entries.
+- `--since "1 hour ago"` — ZRANGEBYSCORE floor; reuses `parse_since` from `tools.valor_telegram`.
+- `--search "term"` — case-insensitive substring match over subject + body.
+
+On cache miss (e.g. daemon hasn't populated the cache yet), the CLI opens a **read-only** IMAP session filtered by known senders (from `get_known_email_search_terms()`) so cross-machine SEEN semantics are preserved and no messages are leaked from another project's policy boundary.
+
+### Send path — always via the relay
+
+Sends write the **unified outbox payload** to `email:outbox:{session_id}` with a 1-hour TTL:
+
+```json
+{
+  "session_id": "cli-1745200000-12345-a1b2c3d4",
+  "to": "alice@example.com",
+  "subject": "Re: Deploy",
+  "body": "Looks good",
+  "attachments": ["/abs/path/to/report.pdf"],
+  "in_reply_to": "<abc@host>",
+  "references": "<abc@host>",
+  "from_addr": "valor@yuda.me",
+  "timestamp": 1745200000.42
+}
+```
+
+The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` emits the same shape so the relay has a single contract to drain.
+
+The relay (`bridge/email_relay.py`) polls `email:outbox:*` every 100 ms. For each key it performs atomic `LPOP`, builds the MIME message via `_build_reply_mime()` (switching to `MIMEMultipart` when attachments are present), and dispatches over SMTP in `asyncio.to_thread`. On failure it increments `_relay_attempts`, `RPUSH`es back, and DLQs via `bridge.email_dead_letter.write_dead_letter()` after `MAX_EMAIL_RELAY_RETRIES` (default 3) attempts. The relay writes `email:relay:last_poll_ts` once per cycle (5-minute TTL) for operator liveness probes.
+
+**Legacy payload compat.** The relay's `_normalize_payload` accepts the legacy `{session_id, to, text, timestamp}` shape (aliasing `text` → `body`) for one transitional release so in-flight entries from before this change never get stranded.
+
+**`EmailOutputHandler.send()` does NOT write to the outbox** — it sends directly from the worker. The relay and the handler do not race on the same session's output (Risk 3 in the plan).
+
+### Threads
+
+`valor-email threads` reads the `email:threads` hash maintained by `_record_thread()`. Each inbound message contributes to its chain head (approximated by following `In-Reply-To` one link); the hash stores `{root_msgid: {subject, message_count, last_ts, participants}}`. Drift is accepted for v1 — the hash is a best-effort navigation aid, not a source of truth.
+
+### Dead-letter surface
+
+When the relay DLQs a CLI-originated send (after 3 failed SMTP attempts or on malformed payload), the user has no direct feedback path — the CLI already exited after enqueue. Inspect via:
+
+```
+./scripts/valor-service.sh email-dead-letter list
+./scripts/valor-service.sh email-dead-letter replay --all
+```
 
 ## See Also
 
