@@ -302,6 +302,6 @@ class TestDrain:
             # Give the cancel a tick to propagate through the wrapper's handler.
             try:
                 await asyncio.wait_for(task, timeout=1.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
             assert task.done()

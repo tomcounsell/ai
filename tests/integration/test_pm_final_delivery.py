@@ -24,7 +24,6 @@ import pytest
 
 from agent import session_completion
 
-
 # -----------------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------------
@@ -73,7 +72,10 @@ class TestHappyPathMergeSuccess:
         dominant cost; we stub it to <1s and verify the boundary behavior."""
 
         send_cb = AsyncMock(return_value=None)
-        summary = "I built issue #1058. Cleaned up the marker protocol and shipped the dedicated completion-turn runner."
+        summary = (
+            "I built issue #1058. Cleaned up the marker protocol and shipped the "
+            "dedicated completion-turn runner."
+        )
 
         async def _fake_harness(**_kw):
             await asyncio.sleep(0.05)
@@ -190,7 +192,7 @@ class TestCancelledErrorInterrupted:
             await session_completion.drain_pending_completions(timeout=0.2)
             try:
                 await asyncio.wait_for(task, timeout=3.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
 
         # The runner's CancelledError handler best-effort delivers the
@@ -231,7 +233,7 @@ class TestCancelledErrorInterrupted:
             await session_completion.drain_pending_completions(timeout=0.2)
             try:
                 await asyncio.wait_for(first, timeout=3.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
 
             # Simulate a flapping second runner with a fresh parent (different
@@ -254,7 +256,7 @@ class TestCancelledErrorInterrupted:
             await session_completion.drain_pending_completions(timeout=0.2)
             try:
                 await asyncio.wait_for(second, timeout=3.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
 
         interrupted = [

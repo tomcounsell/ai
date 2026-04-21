@@ -18,7 +18,7 @@ import time
 from pydantic import BaseModel
 
 from agent.pipeline_graph import DISPLAY_STAGES
-from config.enums import PersonaType, SessionType
+from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
 
