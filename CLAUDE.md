@@ -158,7 +158,7 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
 | `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session (warns to stderr if no worker is running) |
 | `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation (warns to stderr if no worker is running) |
-| `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed BUILD session (hard-PATCH path) |
+| `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |

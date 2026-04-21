@@ -238,6 +238,8 @@ class TestCmdKillById:
         """kill --id with unknown ID returns 1 and prints stderr."""
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        # _find_session falls back to get_by_id when filter is empty (#1061).
+        mock_cls.get_by_id.return_value = None
 
         with (
             patch("tools.valor_session._load_env"),

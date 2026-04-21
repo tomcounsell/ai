@@ -265,32 +265,69 @@ def cmd_create(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_resume(args: argparse.Namespace) -> int:
-    """Resume a completed BUILD session by re-enqueuing it with a new message.
+def _find_session(id_arg: str) -> "AgentSession | None":  # noqa: F821
+    """Resolve a session by ``session_id`` first, then ``agent_session_id`` (UUID).
 
-    Validates the session is in 'completed' status, transitions it back to
-    'pending', appends the new message to the steering queue, so the worker
-    delivers it as the first message in the resumed conversation.
+    We try ``session_id`` first because it is the canonical routing key used by
+    the worker, bridge, and every existing CLI invocation. If the primary lookup
+    is empty we fall back to :py:meth:`AgentSession.get_by_id`, the canonical
+    UUID helper, so operators can copy the UUID shown as "Session ID" in the
+    Claude Code CLI header and pass it straight to ``valor-session``.
+
+    When multiple ``session_id`` records exist (legitimate -- re-enqueue cycles
+    create multiple AgentSession rows for the same ``session_id``), the newest
+    by ``created_at`` wins. This matches the ``cmd_resume`` convention.
+
+    Assumption: ``session_id`` values never collide with 32-char hex
+    ``agent_session_id`` values. Current session_id formats
+    (``{chat_id}_{message_id}``, ``tg_{project}_{chat_id}_{message_id}``,
+    ``sdlc-local-{issue}``) satisfy this trivially. If a future session_id
+    scheme produces 32-char hex values, the session_id-first ordering still
+    returns the correct record for session_id callers, but a UUID caller
+    could receive the wrong record on collision. Docstring-only guard -- no
+    runtime validation.
+
+    UUID-form lookups pay the cost of one empty
+    ``AgentSession.query.filter(session_id=<uuid>)`` before the ``get_by_id``
+    fallback fires. At operator-initiated CLI invocation rates (a handful per
+    day) this is imperceptible. See issue #1061.
+    """
+    from models.agent_session import AgentSession
+
+    sessions = list(AgentSession.query.filter(session_id=id_arg))
+    if sessions:
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        return sessions[0]
+    return AgentSession.get_by_id(id_arg)
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Resume a completed/killed/failed session by re-enqueuing it with a new message.
+
+    Validates the session is in ``completed``, ``killed``, or ``failed``
+    status and has a stored ``claude_session_uuid``. Transitions the session
+    back to ``pending`` and appends the new message to the steering queue so
+    the worker delivers it as the first message in the resumed conversation.
 
     This enables hard-PATCH resume: the worker picks up the session and calls
-    `claude -p --resume <uuid>` to continue the original BUILD transcript.
+    ``claude -p --resume <uuid>`` to continue the original transcript.
+
+    ``--id`` accepts either ``session_id`` or ``agent_session_id`` (UUID) --
+    see :py:func:`_find_session`. Support for ``killed`` / ``failed`` was added
+    in issue #1061 so operators can recover from manual kills or worker crashes
+    without losing prior context.
     """
     _load_env()
     try:
-        from models.agent_session import AgentSession
         from models.session_lifecycle import transition_status
 
         session_id = args.id
         new_message = args.message
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = _find_session(session_id)
+        if session is None:
             print(f"Error: Session not found: {session_id}", file=sys.stderr)
             return 1
-
-        # Pick the most recent record for this session_id
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-        session = sessions[0]
 
         current_status = getattr(session, "status", None)
         if current_status == "pending":
@@ -305,10 +342,21 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        if current_status != "completed":
+        if current_status not in ("completed", "killed", "failed"):
             print(
                 f"Error: Session {session_id} has status '{current_status}'. "
-                "Only completed sessions can be resumed.",
+                "Only completed/killed/failed sessions can be resumed.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # A session with no stored transcript UUID cannot be resumed -- there
+        # is no Claude Code transcript to replay. This happens when a session
+        # is killed before its first turn completes.
+        if getattr(session, "claude_session_uuid", None) is None:
+            print(
+                "Error: cannot resume: no transcript UUID stored "
+                "(session was killed before first turn completed)",
                 file=sys.stderr,
             )
             return 1
@@ -363,12 +411,27 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 def cmd_steer(args: argparse.Namespace) -> int:
-    """Write a steering message to a session's queued_steering_messages."""
+    """Write a steering message to a session's queued_steering_messages.
+
+    ``--id`` accepts either ``session_id`` or ``agent_session_id`` (UUID); we
+    resolve at the CLI boundary via :py:func:`_find_session` and then call
+    :py:func:`steer_session` with the canonical ``session_id`` so the queue
+    helper's contract stays unchanged.
+    """
     _load_env()
     try:
         from agent.agent_session_queue import steer_session
 
-        result = steer_session(args.id, args.message)
+        session = _find_session(args.id)
+        if session is None:
+            err = f"Session not found: {args.id}"
+            if args.json:
+                print(json.dumps({"success": False, "error": err}))
+            else:
+                print(f"Error: {err}", file=sys.stderr)
+            return 1
+
+        result = steer_session(session.session_id, args.message)
 
         if args.json:
             print(json.dumps(result, indent=2))
@@ -387,17 +450,17 @@ def cmd_steer(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Show status of a session."""
+    """Show status of a session.
+
+    ``--id`` accepts either ``session_id`` or ``agent_session_id`` (UUID); see
+    :py:func:`_find_session`.
+    """
     _load_env()
     try:
-        from models.agent_session import AgentSession
-
-        sessions = list(AgentSession.query.filter(session_id=args.id))
-        if not sessions:
+        session = _find_session(args.id)
+        if session is None:
             print(f"Session not found: {args.id}", file=sys.stderr)
             return 1
-
-        session = sessions[0]
         full_message = getattr(args, "full_message", False)
 
         # Check worker health when session is pending
@@ -476,17 +539,17 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    """Dump all raw fields of a session for debugging."""
+    """Dump all raw fields of a session for debugging.
+
+    ``--id`` accepts either ``session_id`` or ``agent_session_id`` (UUID); see
+    :py:func:`_find_session`.
+    """
     _load_env()
     try:
-        from models.agent_session import AgentSession
-
-        sessions = list(AgentSession.query.filter(session_id=args.id))
-        if not sessions:
+        session = _find_session(args.id)
+        if session is None:
             print(f"Session not found: {args.id}", file=sys.stderr)
             return 1
-
-        session = sessions[0]
 
         # Gather all accessible fields
         data: dict = {}
@@ -683,7 +746,12 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_kill(args: argparse.Namespace) -> int:
-    """Kill a session or all running sessions."""
+    """Kill a session or all running sessions.
+
+    Single-session ``--id`` accepts either ``session_id`` or
+    ``agent_session_id`` (UUID); see :py:func:`_find_session`. The ``--all``
+    path takes no id argument and is unchanged.
+    """
     _load_env()
     try:
         from models.agent_session import AgentSession
@@ -707,12 +775,11 @@ def cmd_kill(args: argparse.Namespace) -> int:
                     pass
         else:
             session_id = args.id
-            sessions = list(AgentSession.query.filter(session_id=session_id))
-            if not sessions:
+            session = _find_session(session_id)
+            if session is None:
                 print(f"Session not found: {session_id}", file=sys.stderr)
                 return 1
 
-            session = sessions[0]
             current_status = getattr(session, "status", None)
             if current_status in TERMINAL_STATUSES:
                 msg = f"Session {session_id} is already in terminal status {current_status!r}"
@@ -723,7 +790,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
                 return 0
 
             finalize_session(session, "killed", reason="valor-session kill")
-            killed.append(session_id)
+            killed.append(session.session_id)
 
         if args.json:
             print(json.dumps({"killed": killed, "errors": errors}, indent=2))

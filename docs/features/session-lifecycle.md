@@ -22,8 +22,8 @@ How sessions transition between states via the consolidated lifecycle module (`m
 | State | Description |
 |-------|-------------|
 | `completed` | Work finished successfully |
-| `failed` | Work failed (error, crash, or watchdog detection) |
-| `killed` | Terminated by user or scheduler |
+| `failed` | Work failed (error, crash, or watchdog detection). Operator-resumable via `valor-session resume` when `claude_session_uuid` is stored (#1061). |
+| `killed` | Terminated by user or scheduler. Operator-resumable via `valor-session resume` when `claude_session_uuid` is stored (#1061). |
 | `abandoned` | Unfinished, auto-detected by watchdog or health check |
 | `cancelled` | Cancelled before execution (pending -> cancelled) |
 

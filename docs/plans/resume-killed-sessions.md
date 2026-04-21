@@ -185,27 +185,29 @@ At plan-write verification time the relevant anchors were: `cmd_resume:268`, err
 
 ### Exception Handling Coverage
 
-- [ ] `_find_session` does not introduce new `except Exception: pass` blocks. `AgentSession.get_by_id()` already logs via `logger.warning` on lookup failure (see `models/agent_session.py:585-591`) — no change needed.
-- [ ] `_get_prior_session_uuid`'s existing `except Exception:` block (logs via `logger.warning` with `exc_info=True`) is untouched; behavior validated by the existing path.
+- [x] `_find_session` does not introduce new `except Exception: pass` blocks. `AgentSession.get_by_id()` already logs via `logger.warning` on lookup failure (see `models/agent_session.py:585-591`) — no change needed.
+- [x] `_get_prior_session_uuid`'s existing `except Exception:` block (logs via `logger.warning` with `exc_info=True`) is untouched; behavior validated by the existing path.
 
 ### Empty/Invalid Input Handling
 
-- [ ] New test: `cmd_resume` with a session whose `claude_session_uuid` is `None` → exits with `"cannot resume: no transcript UUID stored"` on stderr, returns 1.
-- [ ] New test: `_find_session("")` returns `None` (via `get_by_id`'s existing empty-string guard at `models/agent_session.py:581`).
-- [ ] New test: `_find_session("nonexistent-id")` returns `None`.
+- [x] New test: `cmd_resume` with a session whose `claude_session_uuid` is `None` → exits with `"cannot resume: no transcript UUID stored"` on stderr, returns 1.
+- [x] New test: `_find_session("")` returns `None` (via `get_by_id`'s existing empty-string guard at `models/agent_session.py:581`).
+- [x] New test: `_find_session("nonexistent-id")` returns `None`.
 
 ### Error State Rendering
 
-- [ ] `cmd_resume` error messages already print to `sys.stderr` with return code 1 — pattern preserved.
-- [ ] New test asserts the exact error string for the "no transcript UUID" path so future refactors don't silently change operator-facing output.
+- [x] `cmd_resume` error messages already print to `sys.stderr` with return code 1 — pattern preserved.
+- [x] New test asserts the exact error string for the "no transcript UUID" path so future refactors don't silently change operator-facing output.
+
+**Revision note (from CRITIQUE, User/PM):** The two new error strings — `"has status '{current_status}'. Only completed/killed/failed sessions can be resumed."` and `"cannot resume: no transcript UUID stored (session was killed before first turn completed)"` — are operator-facing. Once shipped, operators will grep for these strings in docs, runbooks, and their own shell history. The unit tests MUST assert the exact strings (not regex-match substrings) so a future refactor that "cleans up" the wording fails loudly rather than silently fragmenting the operator vocabulary. Keep the assertion helper tight: `assert captured.err.strip() == expected_message` rather than `expected_message in captured.err`.
 
 **Revision note (from CRITIQUE, User/PM):** The two new error strings — `"has status '{current_status}'. Only completed/killed/failed sessions can be resumed."` and `"cannot resume: no transcript UUID stored (session was killed before first turn completed)"` — are operator-facing. Once shipped, operators will grep for these strings in docs, runbooks, and their own shell history. The unit tests MUST assert the exact strings (not regex-match substrings) so a future refactor that "cleans up" the wording fails loudly rather than silently fragmenting the operator vocabulary. Keep the assertion helper tight: `assert captured.err.strip() == expected_message` rather than `expected_message in captured.err`.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_valor_session.py` (or nearest existing test file for the CLI) — ADD: unit tests for `_find_session` (dual-id resolution), `cmd_resume` with killed/failed status, `cmd_resume` with missing UUID.
-- [ ] `tests/unit/test_sdk_client.py` (or nearest existing test for `_get_prior_session_uuid`) — ADD: unit test confirming `killed` and `failed` statuses return the stored UUID.
-- [ ] Verify `grep -rn "Only completed sessions can be resumed" tests/` returns no matches — the old error string is not hard-coded in any existing test.
+- [x] `tests/unit/test_valor_session.py` (or nearest existing test file for the CLI) — ADD: unit tests for `_find_session` (dual-id resolution), `cmd_resume` with killed/failed status, `cmd_resume` with missing UUID.
+- [x] `tests/unit/test_sdk_client.py` (or nearest existing test for `_get_prior_session_uuid`) — ADD: unit test confirming `killed` and `failed` statuses return the stored UUID.
+- [x] Verify `grep -rn "Only completed sessions can be resumed" tests/` returns no matches — the old error string is not hard-coded in any existing test.
 
 No existing tests are broken by this change. The CLI's existing `session_id` lookup path stays identical on the happy path — the new fallback only fires when the primary lookup returns empty.
 
@@ -269,32 +271,32 @@ No agent integration required — `valor-session` is an operator-facing CLI, not
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/pm-dev-session-architecture.md` — add a short note in the "Resume Semantics" section (if present) or append a paragraph clarifying that killed/failed sessions are now resumable with a stored `claude_session_uuid`.
-- [ ] If a `docs/features/session-lifecycle.md` or similar exists, update the row for `killed`/`failed` states to mention operator-initiated resume.
-- [ ] No new feature doc needed — this is a CLI enhancement, not a new feature.
+- [x] Update `docs/features/pm-dev-session-architecture.md` — add a short note in the "Resume Semantics" section (if present) or append a paragraph clarifying that killed/failed sessions are now resumable with a stored `claude_session_uuid`.
+- [x] If a `docs/features/session-lifecycle.md` or similar exists, update the row for `killed`/`failed` states to mention operator-initiated resume.
+- [x] No new feature doc needed — this is a CLI enhancement, not a new feature.
 
 ### External Documentation Site
 
-- [ ] N/A — this repo does not publish a Sphinx/MkDocs/RtD site.
+- [x] N/A — this repo does not publish a Sphinx/MkDocs/RtD site.
 
 ### Inline Documentation
 
-- [ ] Docstring on new `_find_session` helper documents the session_id-first ordering and the `agent_session_id` fallback.
-- [ ] Updated docstring on `cmd_resume` mentions `killed`/`failed` support.
-- [ ] Updated docstring on `_get_prior_session_uuid` explains why killed/failed are now included (cross-reference this plan + #374).
+- [x] Docstring on new `_find_session` helper documents the session_id-first ordering and the `agent_session_id` fallback.
+- [x] Updated docstring on `cmd_resume` mentions `killed`/`failed` support.
+- [x] Updated docstring on `_get_prior_session_uuid` explains why killed/failed are now included (cross-reference this plan + #374).
 
 ## Success Criteria
 
-- [ ] `valor-session resume --id <killed-session-id> --message "..."` succeeds when `claude_session_uuid` is non-null; worker picks up session and calls `claude -p --resume <uuid>`.
-- [ ] `valor-session resume --id <killed-session-id>` exits 1 with `"cannot resume: no transcript UUID stored (session was killed before first turn completed)"` on stderr when `claude_session_uuid` is None.
-- [ ] `valor-session resume --id <failed-session-id>` succeeds when `claude_session_uuid` is non-null.
-- [ ] `valor-session status --id <agent_session_id>` (UUID form) returns the session correctly.
-- [ ] `valor-session inspect/steer/kill --id <agent_session_id>` (UUID form) work correctly.
-- [ ] Completed-session resume (the existing happy path) is unchanged — no regression.
-- [ ] A resumed killed bridge session (with `chat_id` set) delivers its final output to the correct Telegram thread. Verify by running a smoke test: create a PM session, kill it mid-work, resume it, confirm the resume message and output appear in the right Telegram thread.
-- [ ] `CLAUDE.md` quick-reference table updated.
-- [ ] Tests pass (`pytest tests/unit/test_valor_session.py tests/unit/test_sdk_client.py`, or the nearest test file).
-- [ ] Lint clean (`python -m ruff check . && python -m ruff format --check .`).
+- [x] `valor-session resume --id <killed-session-id> --message "..."` succeeds when `claude_session_uuid` is non-null; worker picks up session and calls `claude -p --resume <uuid>`.
+- [x] `valor-session resume --id <killed-session-id>` exits 1 with `"cannot resume: no transcript UUID stored (session was killed before first turn completed)"` on stderr when `claude_session_uuid` is None.
+- [x] `valor-session resume --id <failed-session-id>` succeeds when `claude_session_uuid` is non-null.
+- [x] `valor-session status --id <agent_session_id>` (UUID form) returns the session correctly.
+- [x] `valor-session inspect/steer/kill --id <agent_session_id>` (UUID form) work correctly.
+- [x] Completed-session resume (the existing happy path) is unchanged — no regression.
+- [x] A resumed killed bridge session (with `chat_id` set) delivers its final output to the correct Telegram thread. Verify by running a smoke test: create a PM session, kill it mid-work, resume it, confirm the resume message and output appear in the right Telegram thread.
+- [x] `CLAUDE.md` quick-reference table updated.
+- [x] Tests pass (`pytest tests/unit/test_valor_session.py tests/unit/test_sdk_client.py`, or the nearest test file).
+- [x] Lint clean (`python -m ruff check . && python -m ruff format --check .`).
 
 ## Team Orchestration
 
