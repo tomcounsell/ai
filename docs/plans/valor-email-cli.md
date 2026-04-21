@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-04-21
+revised: 2026-04-21
 tracking: https://github.com/tomcounsell/ai/issues/1067
 last_comment_id:
+revision_applied: true
 ---
 
 # valor-email CLI
@@ -17,7 +19,7 @@ When working in a terminal (Claude Code or ad-hoc dev session), reading recent e
 **Current behavior:**
 - Reading email requires `gws gmail users messages list --params '{"userId":"me","maxResults":5}'` — verbose JSON args, no Redis cache, no `--since` or `--search` shorthand.
 - Sending email requires either (a) starting the full email bridge, (b) hand-crafting `gws gmail` POSTs, or (c) writing ad-hoc SMTP Python. There is no one-line CLI.
-- No unified CLI mirrors `valor-telegram read / send / chats`. The existing `email:outbox:{session_id}` Redis queue is written to by `tools/send_message.py` (agent-facing), but nothing **drains** it — sends are only dispatched directly from `EmailOutputHandler.send()` inside the worker. The queue is effectively dormant.
+- No unified CLI mirrors `valor-telegram read / send / chats`. The existing `email:outbox:{session_id}` Redis queue is written to by `tools/send_message.py` (agent-facing) using a legacy payload shape `{session_id, to, text, timestamp}`, but nothing **drains** it — sends are only dispatched directly from `EmailOutputHandler.send()` inside the worker. The queue is effectively dormant, so we can freely update the payload contract in the same PR as long as both writers (send_message.py and the new CLI) emit the new shape.
 
 **Desired outcome:**
 - `valor-email read --mailbox INBOX --limit 10` returns recent emails from a Redis history cache, falling back to IMAP on cache miss.
@@ -147,9 +149,9 @@ No prior issue or PR attempted `valor-email`. `gh pr list --state merged --searc
 1. **Entry point (read):** `valor-email read --mailbox INBOX --limit N` calls a new `tools.email_history` helper which reads from `email:history:INBOX` (sorted set keyed by UNIX timestamp).
 2. **Cache layer:** `email:history:{mailbox}` is populated by the IMAP poll loop in `_email_inbox_loop`, via a new `_record_history()` write-through call after `parse_email_message()` succeeds. TTL 7 days, capped at 500 entries (ZREMRANGEBYRANK).
 3. **IMAP fallback:** if the cache returns < `limit` entries (empty-cache bootstrap, or the daemon has been down), `valor-email read` opens a standalone `imaplib.IMAP4_SSL` connection using the same env-var config as the bridge and fetches directly. Results are NOT SEEN-flagged (CLI reads are idempotent — the bridge owns SEEN semantics).
-4. **Entry point (send):** `valor-email send --to X --subject Y Z` builds a payload dict `{to, subject, body, attachments, in_reply_to, references, session_id, timestamp}` and pushes to `email:outbox:{cli-<ts>}`. TTL 1h.
-5. **Relay drain:** `bridge/email_relay.py` (new) polls `email:outbox:*` every 100ms, pops payloads, invokes the shared `_build_reply_mime()` helper (extracted from `EmailOutputHandler`), and dispatches via `smtplib.SMTP`. Retries with exponential backoff (up to 3 attempts), then DLQ via `write_dead_letter()`.
-6. **Direct-SMTP fallback:** if the CLI detects the relay is not running (Redis queue key has no consumer, or `email:last_poll_ts` is stale by >5 minutes), it prints a warning and optionally dispatches via direct SMTP (same `_send_smtp()` helper). Controlled by `--direct` flag (default: queue via Redis only).
+4. **Entry point (send):** `valor-email send --to X --subject Y Z` builds a payload dict with the **unified outbox contract** `{session_id, to, subject, body, attachments, in_reply_to, references, from_addr, timestamp}` and pushes to `email:outbox:{session_id}`. TTL 1h. `tools/send_message.py::_send_via_email` is updated in the same PR to emit the same shape (it currently emits the legacy `{session_id, to, text, timestamp}` — unused by any consumer, so rewriting in place is safe). `subject`, `in_reply_to`, `references`, and `attachments` are optional; the relay supplies defaults on read.
+5. **Relay drain:** `bridge/email_relay.py` (new) polls `email:outbox:*` every 100ms. It mirrors `bridge/telegram_relay.py` exactly: **atomic `LPOP` first**, then attempt SMTP send. On success: done (the LPOP already removed the entry). On failure: increment `_relay_attempts`, `RPUSH` the same payload back onto the key; after 3 failed attempts, DLQ via `write_dead_letter()`. Relay writes its heartbeat to `email:relay:last_poll_ts` once per poll cycle.
+6. **No direct-SMTP fallback.** The CLI always queues via Redis. If the relay is not running, the message sits in the queue until it is (the `email-status` service command is the operator's signal). Rationale: `valor-telegram send` has identical semantics (always via relay, never direct); email should not diverge. See Rabbit Holes.
 7. **Threads listing:** `valor-email threads` reads a new `email:threads` hash maintained by the poll loop — each `Message-ID` → `In-Reply-To` chain collapses into a thread root, stored as `{thread_root_msgid: [child_msgid_1, child_msgid_2, ...]}`.
 8. **Output:** JSON (via `--json`) or human-readable table (default), mirroring `valor-telegram`'s conventions.
 
@@ -159,12 +161,13 @@ No prior issue or PR attempted `valor-email`. `gh pr list --state merged --searc
 - **Interface changes:**
   - `bridge/email_bridge.py::EmailOutputHandler._build_reply()` is refactored to accept `attachments: list[Path] | None = None` and return `MIMEMultipart` when attachments are present, else `MIMEText` (preserves backward compatibility — no call-site signature changes for the worker path).
   - `bridge/email_bridge.py::_email_inbox_loop` gains a new write-through call to `_record_history()`.
-  - **New:** `bridge/email_relay.py` module with `run_email_relay()` async coroutine, mirroring `bridge/telegram_relay.py` structure.
+  - `tools/send_message.py::_send_via_email` is rewritten to emit the unified outbox payload shape (`body` replaces `text`; adds optional `subject`, `in_reply_to`, `references`, `from_addr`, `attachments`). The old shape is unused by any consumer today, so this is a lossless contract upgrade.
+  - **New:** `bridge/email_relay.py` module with `run_email_relay()` async coroutine, mirroring `bridge/telegram_relay.py` structure (atomic `LPOP`, re-push on failure, DLQ on exhaustion, heartbeat key).
   - **New:** `tools/valor_email.py` CLI entry point.
   - **New:** `tools/email_history/` package with `get_recent_emails()`, `search_history()`, `list_threads()` mirroring the `tools/telegram_history/` shape.
 - **Coupling:** No new cross-module coupling. The CLI depends on the bridge config helpers (`_get_imap_config`, `_get_smtp_config`) — these are already module-level pure functions.
 - **Data ownership:** The IMAP poll loop owns `email:history:INBOX`. The CLI and MCP tools are **readers only** for the history cache. The outbox queue is write-by-anyone, drain-by-relay — identical to Telegram's `telegram:outbox:*` model.
-- **Reversibility:** Fully reversible. Removing `tools/valor_email.py`, `bridge/email_relay.py`, and the two write-through calls in `_email_inbox_loop` reverts the system to pre-plan state.
+- **Reversibility:** Fully reversible. Remove `tools/valor_email.py`, `bridge/email_relay.py`, and the two write-through calls in `_email_inbox_loop`; revert `tools/send_message.py::_send_via_email` to the legacy shape; flush `email:history:*`, `email:threads`, `email:outbox:*`, and `email:relay:last_poll_ts` Redis keys. See Update System for the exact rollback sequence.
 
 ## Appetite
 
@@ -194,7 +197,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/valor-email-cl
 ### Key Elements
 
 - **`tools/valor_email.py`** — CLI with `read`, `send`, `threads` subcommands. Structural mirror of `tools/valor_telegram.py`; subcommand names and flags align where semantics match.
-- **`tools/email_history/`** — small package with `get_recent_emails()`, `search_history()`, `list_threads()`, `list_mailboxes()`. Pure Redis reads from `email:history:*` keys.
+- **`tools/email_history/`** — small package with `get_recent_emails()`, `search_history()`, `list_threads()`. Pure Redis reads from `email:history:*` keys. (No `list_mailboxes()` scaffold — YAGNI; multi-mailbox is explicitly a No-Go.)
 - **`bridge/email_relay.py`** — new module. `run_email_relay()` coroutine polls `email:outbox:*` every 100ms, drains payloads, calls the upgraded `_build_reply_mime()` helper, and dispatches via SMTP with retry + DLQ. Registered in the bridge's event loop next to `run_email_bridge()`.
 - **`bridge/email_bridge.py` changes:**
   - Extract `_build_reply_mime(to, subject, body, in_reply_to, references, from_addr, attachments)` as a module-level helper (was `EmailOutputHandler._build_reply`). Accept `attachments: list[Path] | None`.
@@ -214,18 +217,17 @@ $ valor-email read --limit 5
     → hydrate each msgid via r.get("email:history:msg:{msgid}")
   → human-readable table output
 
-CLI send (relay path, default):
+CLI send (always via relay):
 $ valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
   → tools/valor_email.py::cmd_send
-    → build payload {to, subject, body, in_reply_to=None, attachments=[], ...}
-    → r.rpush("email:outbox:cli-{ts}", json.dumps(payload))
-    → "Message queued. Delivery requires the email relay to be running."
+    → build unified payload {session_id, to, subject, body, in_reply_to=None, attachments=[], ...}
+    → r.rpush("email:outbox:{session_id}", json.dumps(payload))
+    → r.expire("email:outbox:{session_id}", 3600)
+    → "Queued. Check delivery via ./scripts/valor-service.sh email-status"
   → bridge/email_relay.py picks up within 100ms
-    → _build_reply_mime(...) → smtp.sendmail(...) → success OR DLQ
-
-CLI send (direct fallback):
-$ valor-email send --to alice@example.com --direct "Quick note"
-  → _send_direct_smtp(...) — same _send_smtp helper, synchronous
+    → r.lpop(key) (atomic)
+    → _build_reply_mime(...) → smtp.sendmail(...)
+    → success: done; failure: increment _relay_attempts, r.rpush back, DLQ after 3
 
 CLI threads:
 $ valor-email threads
@@ -237,15 +239,30 @@ $ valor-email threads
 ### Technical Approach
 
 - **Mirror valor_telegram.py structure**: argparse with three subparsers (`read`, `send`, `threads`), `--json` flag on all, shared helpers (`parse_since`, `format_timestamp`, `_get_redis_connection`) — copy-paste-adapt rather than extract, to keep each CLI tool self-contained. Cross-CLI extraction is a rabbit hole (see Rabbit Holes).
+- **Relay contract (mirror `bridge/telegram_relay.py`):** atomic `LPOP` from each `email:outbox:*` key, then SMTP send in `asyncio.to_thread`. On success: done (entry was already removed by LPOP). On failure: increment `_relay_attempts` in the payload, `RPUSH` back onto the key; after `MAX_EMAIL_RELAY_RETRIES` (default 3), route to `bridge.email_dead_letter.write_dead_letter()`. The heartbeat key `email:relay:last_poll_ts` is `SET` to `time.time()` with a 5-minute TTL once per poll cycle so operators can probe liveness via `GET`. See `bridge/telegram_relay.py:443-572` for the exact pattern to copy — especially lines 464-465 (atomic LPOP) and 528-545 (requeue-with-counter).
+- **Unified outbox payload contract:** both `tools/send_message.py::_send_via_email` and `tools/valor_email.py::cmd_send` emit the same shape:
+  ```json
+  {
+    "session_id": "<string>",
+    "to": "<address>",
+    "subject": "<optional string>",
+    "body": "<string>",
+    "attachments": ["<absolute path>", ...],
+    "in_reply_to": "<optional Message-ID>",
+    "references": "<optional Message-ID>",
+    "from_addr": "<optional override>",
+    "timestamp": <unix seconds float>
+  }
+  ```
+  The relay normalizes on read: missing `subject` → `"(no subject)"`; missing `body` → reject and DLQ (malformed); missing `from_addr` → use `SMTP_USER` env var; missing `attachments` → empty list. Legacy field `text` is treated as a synonym for `body` during a single transitional release to avoid stranding any in-flight entries (harmless since the queue is currently empty).
 - **Cache key schema:**
   - `email:history:INBOX` — sorted set, score = UNIX timestamp, member = `Message-ID` string. Allows `ZREVRANGE` for recent-first, `ZRANGEBYSCORE` for `--since` filters.
   - `email:history:msg:{message_id}` — string key containing JSON blob `{from_addr, subject, body, timestamp, message_id, in_reply_to}`. TTL 7 days.
-  - `email:threads` — hash, field = thread root `Message-ID`, value = JSON `{subject, message_count, last_ts, participants}`.
-  - Cap enforcement: after each write, `ZREMRANGEBYRANK("email:history:INBOX", 0, -501)` trims to 500 newest.
+  - `email:threads` — hash, field = thread root `Message-ID`, value = JSON `{subject, message_count, last_ts, participants}`. Thread roots are recomputed on each new message (follow `in_reply_to` chain); if a newly arrived message reveals an earlier root than we'd stored, we re-key the entry. Drift is acceptable for v1 — the hash is a best-effort navigation aid, not a source of truth.
+  - Cap enforcement: after each ZADD, `ZREMRANGEBYRANK("email:history:INBOX", 0, -501)` trims to 500 newest. To prevent orphan blob leaks, the trim path `ZRANGE 0 -501` first to capture the evicted IDs, then `DEL` each `email:history:msg:{msgid}` key in the same Redis pipeline. (Individual TTLs still bound the leak at 7 days, but active deletion keeps memory pressure tighter under heavy inbound.)
 - **`--since` parsing:** reuse `tools/valor_telegram.parse_since` verbatim by importing it. (Same parser semantics: `"1 hour ago"`, `"2 days ago"`, `"30 minutes ago"`.) This is the one piece of shared code — everything else is copy-paste-adapt.
 - **`--reply-to` semantics:** accepts a Message-ID string (angle-bracketed or not; normalize to `<...>` form). CLI sets both `In-Reply-To` and `References` from the same value. This differs from Telegram's integer `reply_to`; the argparse `type=` differs accordingly.
 - **Attachment payload shape:** payload carries `"attachments": [absolute_path, ...]` — the CLI validates file existence **before** enqueueing (fail fast, mirror valor-telegram). The relay re-validates at drain time and DLQs if the file was deleted.
-- **Direct SMTP fallback:** invoked only when user passes `--direct`. Avoids race conditions with the relay (if both tried to send from the same session_id key, we'd get duplicates). `--direct` bypasses the queue entirely.
 - **Drafter integration:** the CLI does NOT route through `bridge.message_drafter.draft_message(medium="email")`. The drafter is for agent-originated text; CLI text is user-authored and should pass through verbatim. This matches `valor-telegram send` behavior (which only applies `_linkify_text`, not the full drafter).
 
 ## Failure Path Test Strategy
@@ -273,10 +290,11 @@ $ valor-email threads
 - [ ] `tests/unit/test_email_bridge.py::test_build_reply_*` — UPDATE: refactored `_build_reply` signature. Existing assertions still valid for no-attachment path; add new cases for attachment path.
 - [ ] `tests/unit/test_email_bridge.py::TestEmailOutputHandler::test_send_*` — UPDATE: `_build_reply_mime` is now module-level; adjust imports if tests patched the method.
 - [ ] `tests/integration/test_email_bridge.py::test_email_inbox_loop_*` — UPDATE: add assertion that `email:history:INBOX` receives writes after a processed inbound.
+- [ ] `tests/unit/test_send_message.py` — UPDATE: `_send_via_email` now writes the unified payload (`body` not `text`; includes `subject`, `from_addr`, `attachments`, etc.). Existing assertions on the legacy shape must be replaced.
 
 No other existing tests affected. New test files:
 - `tests/unit/test_valor_email.py` — mirror `test_valor_telegram.py` structure; mock Redis/IMAP/SMTP.
-- `tests/unit/test_email_relay.py` — mirror `test_telegram_relay.py` patterns (if it exists; otherwise mirror `test_email_bridge.py` DLQ patterns).
+- `tests/unit/test_email_relay.py` — mirror `tests/unit/test_telegram_relay.py` if it exists; otherwise mirror `test_email_bridge.py` DLQ patterns. Must cover: atomic LPOP, re-push on failure with counter, DLQ after 3 attempts, legacy-text payload compat, heartbeat write.
 - `tests/unit/test_email_history.py` — cache read helpers; Redis fake or patched.
 - `tests/integration/test_valor_email.py` — end-to-end: CLI → Redis → relay → mocked SMTP → received.
 
@@ -288,30 +306,31 @@ No other existing tests affected. New test files:
 - **Don't write a Gmail-API path.** Issue drops this. IMAP only.
 - **Don't implement streaming/tail mode.** `valor-telegram` has no `--follow` flag; `valor-email` doesn't need one either. If needed, IMAP IDLE is a separate issue.
 - **Don't restructure `EmailOutputHandler`.** Promoting `_build_reply` to a module-level helper is the minimal refactor. A full handler class split into separate builder/sender responsibilities is a separate concern — do it only if the MIME refactor forces it, which it won't.
-- **Don't try to unify `email:outbox` payload shape with `telegram:outbox`.** They serve different transports with different header semantics (no `reply_to_msg_id` for email, no `In-Reply-To` for Telegram). A unified shape would be all-optional-fields and lose clarity.
+- **Don't try to unify `email:outbox` payload shape with `telegram:outbox`.** They serve different transports with different header semantics (no `reply_to_msg_id` for email, no `In-Reply-To` for Telegram). A unified *email* outbox shape (across the CLI and send_message.py) is in scope; cross-transport unification is not.
 - **Don't add `--watch` or daemon mode to the CLI.** The relay in `bridge/email_relay.py` is the daemon; the CLI is one-shot. Keep them separate.
+- **Don't add a `--direct` SMTP fallback.** Earlier drafts proposed a `--direct` flag to bypass Redis if the relay was down. Dropped because (a) it duplicates the queue-drain path with a second send site, (b) `valor-telegram send` has no equivalent and we want behavior parity, (c) the relay heartbeat + `email-status` command is a cleaner operator signal than baking fallback into every CLI invocation. If the relay is down, the fix is to start the relay, not to bypass it.
 
 ## Risks
 
-### Risk 1: Duplicate sends if both the relay drains AND `--direct` fires
-**Impact:** Recipient gets two identical emails; thread breaks.
-**Mitigation:** `--direct` bypasses Redis entirely. The relay only drains keys it sees. No collision possible. Additionally, the relay uses `LPOP` (atomic pop-and-delete) so a single queue entry can only be processed once. Document `--direct` in CLI help with a warning.
-
-### Risk 2: History cache fills Redis if IMAP gets a flood of inbound from many senders
+### Risk 1: History cache fills Redis if IMAP gets a flood of inbound from many senders
 **Impact:** Redis memory pressure; eviction of other keys.
-**Mitigation:** Hard cap of 500 entries per mailbox (ZREMRANGEBYRANK after each write). TTL of 7 days on individual message JSON keys. Monitor with existing Redis memory alerting. Document in `docs/features/email-bridge.md`.
+**Mitigation:** Hard cap of 500 entries per mailbox (ZREMRANGEBYRANK after each write, with active DEL of the evicted per-msg blobs in the same pipeline). TTL of 7 days on individual message JSON keys as a secondary bound. Monitor with existing Redis memory alerting. Document in `docs/features/email-bridge.md`.
 
-### Risk 3: `_build_reply_mime` refactor subtly changes existing worker-path behavior
+### Risk 2: `_build_reply_mime` refactor subtly changes existing worker-path behavior
 **Impact:** Agent replies stop threading correctly or get spam-flagged.
-**Mitigation:** Keep `attachments=None` as the default; for no-attachment calls, produce a `MIMEText` object with identical headers to today's output. Add a byte-for-byte regression test that asserts the MIME output of `_build_reply_mime(to, subj, body, inreply, refs, from_addr, attachments=None)` equals the current `_build_reply(...)` output for a known fixture. (Exception: `Message-ID` and `Date` headers vary per call — exclude those from the byte comparison.)
+**Mitigation:** Keep `attachments=None` as the default; for no-attachment calls, produce a `MIMEText` object with identical headers to today's output. Add a **parsed-header regression test** (not a byte-for-byte test — header order, line-folding, and default encodings vary by Python minor version and are semantically irrelevant). The test asserts that for a fixed fixture input, `email.message_from_bytes(new.as_bytes())` and `email.message_from_bytes(old.as_bytes())` have identical values for `From`, `To`, `Subject`, `In-Reply-To`, `References`, `Content-Type`, and `Content-Transfer-Encoding`, and identical `get_payload(decode=True)` bytes. Date and Message-ID are excluded (per-call variance). This approach is robust to MIME library version drift.
 
-### Risk 4: Relay races with `EmailOutputHandler.send()` on the same session_id
+### Risk 3: Relay races with `EmailOutputHandler.send()` on the same session_id
 **Impact:** Two SMTP sends for one agent output.
 **Mitigation:** The worker's `EmailOutputHandler.send()` does NOT push to `email:outbox:*` — it sends directly. The outbox is ONLY used by CLI (and `tools/send_message.py`). The relay has no overlap with `EmailOutputHandler.send()`. Verify with a grep for `email:outbox` in `agent/` and `worker/`: all writes come from `tools/` or `bridge/email_relay.py`. Document this invariant in `bridge/email_relay.py` module docstring.
 
-### Risk 5: Bridge restart is required to pick up `bridge/email_relay.py`
+### Risk 4: Bridge restart is required to pick up `bridge/email_relay.py`
 **Impact:** After merging, if nobody restarts the bridge, CLI `send` will hang messages in Redis.
-**Mitigation:** CLI prints "Note: delivery requires the email relay to be running (./scripts/valor-service.sh email-status)." after enqueue — same pattern as `valor-telegram`. Update `scripts/valor-service.sh` if necessary so `email-start` also starts the relay. Document in plan's Update System section.
+**Mitigation:** CLI prints "Queued. Check delivery via ./scripts/valor-service.sh email-status" after enqueue — same pattern as `valor-telegram`. The `email-status` service command reads `email:relay:last_poll_ts` and prints "relay stale (>5 minutes)" if the heartbeat is old. Update `scripts/valor-service.sh email-status` to include the relay heartbeat check. Document in plan's Update System section.
+
+### Risk 5: Payload-shape migration breaks `tools/send_message.py::_send_via_email`
+**Impact:** Agent sends (triggered by the drafter) fail to deliver after deploy.
+**Mitigation:** The queue has no consumer today; updating both the writer (`_send_via_email`) and the new reader (relay) in the same PR is atomic. The relay's normalization layer accepts legacy `text` as a synonym for `body` for one transitional release (trivial code path, easy to delete in a follow-up). A unit test asserts the relay drains a legacy `{session_id, to, text, timestamp}` payload correctly. No runtime migration needed — in-flight entries (if any) survive.
 
 ## Race Conditions
 
@@ -327,15 +346,15 @@ No other existing tests affected. New test files:
 **Trigger:** Two invocations within the same UNIX second produce identical session_ids.
 **Data prerequisite:** session_ids must be unique per invocation.
 **State prerequisite:** N/A.
-**Mitigation:** Use `f"cli-{int(time.time())}-{os.getpid()}"` or a 4-byte random suffix (`secrets.token_hex(2)`) to disambiguate. Matches `valor-telegram`'s pattern — which also has this bug today; fix both CLIs in this plan, or accept the bug as out-of-scope for Telegram (pick the latter — adding PID+random to the email CLI only is scoped; changing `valor-telegram` is out of scope).
-**Note:** The pid+token_hex fix applies only to `valor_email.py`. Modifying `valor_telegram.py` is out of scope.
+**Mitigation:** Use `f"cli-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"` for the session_id suffix. 4 bytes = 32 bits of randomness, giving ~2^16 = 65k concurrent-per-second invocations before a 50% collision probability (birthday paradox). The scalar collision rate at expected CLI-per-second usage (< 10) is under 10^-8 per call — effectively never. 2-byte tokens (16 bits) were in the prior draft but flagged as insufficient margin; upgraded to 4 bytes.
+**Note:** This fix applies only to `valor_email.py`. Modifying `valor_telegram.py` is out of scope (existing same-second bug there is separately tracked if real; not blocking here).
 
 ### Race 3: Relay drains an outbox entry during bridge restart
-**Location:** `bridge/email_relay.py::_drain_outbox`.
+**Location:** `bridge/email_relay.py::process_outbox`.
 **Trigger:** Bridge restart kills the relay mid-SMTP-send.
 **Data prerequisite:** Payload must not be lost if the SMTP call hasn't completed.
-**State prerequisite:** The outbox key must still exist after `LPOP`.
-**Mitigation:** Use `LPOP` after SMTP success, not before — i.e., peek with `LRANGE 0 0`, attempt SMTP, then `LPOP` only on success. On failure, retry in-place without removing. Mirror `telegram_relay.py`'s `_relay_attempts` counter pattern: re-push with incremented counter on failure, DLQ after 3. The worker retry already does this for the handler path.
+**State prerequisite:** `_relay_attempts` counter must survive a crash so retries don't loop forever.
+**Mitigation:** Use **atomic `LPOP` first**, then attempt SMTP (the `telegram_relay.py:464-465` pattern). On handler failure, increment `_relay_attempts` inside the in-memory payload dict, `RPUSH` it back to the same key, and continue. After `MAX_EMAIL_RELAY_RETRIES` (default 3) failed attempts, route to `bridge.email_dead_letter.write_dead_letter()` and do NOT re-push. Crash-mid-send semantics: the entry has been popped but not yet re-pushed — equivalent to an at-most-once delivery on an SMTP the bridge probably never completed anyway. The SMTP server's own anti-dup (Message-ID uniqueness) prevents duplicates if the crash happened post-send but pre-ack. This is acceptable for email; we accept the occasional at-most-once edge case in exchange for simplicity and consistency with `telegram_relay.py`. A peek-then-LPOP design was considered and rejected because it introduces a race window where two relay instances (or a crashed-and-restarted relay) can both see the same entry and double-send — strictly worse than accepting the rare at-most-once edge.
 
 ## No-Gos (Out of Scope)
 
@@ -348,15 +367,25 @@ No other existing tests affected. New test files:
 - Changes to `valor-telegram` CLI (the `secrets.token_hex` session_id fix applies only to `valor-email`).
 - New MCP server for email (see Agent Integration — bridge already has drafter/handler plumbing).
 - Search of arbitrary IMAP folders (only the history cache + INBOX).
+- `--direct` SMTP fallback flag (see Rabbit Holes for rationale).
+- Short-index `--reply-to` (raw Message-ID only; short-index is a v2 follow-up per spike-3).
 
 ## Update System
 
 The update script (`scripts/remote-update.sh`) must trigger an email-relay start on machines that run the bridge. Specific changes:
 
-- **`scripts/valor-service.sh`**: extend `email-start` to also start the new relay coroutine (or, if the relay is integrated into `run_email_bridge()` via `asyncio.gather`, no script change is needed — the bridge process already carries it).
+- **`scripts/valor-service.sh`**:
+  - `email-start`: no change if the relay runs inside `run_email_bridge()` via `asyncio.gather` (preferred design). If run as a separate process, add a new `email-relay-start` target.
+  - `email-status`: extend output to include the relay heartbeat — `GET email:relay:last_poll_ts`, compute age, print `relay healthy (last poll Xs ago)` or `relay stale (>5 minutes) — restart via email-restart`.
+  - `email-restart`: must cycle both the poll loop and the relay (one process under the preferred design).
 - **New env vars:** none — the CLI reuses existing `IMAP_*` / `SMTP_*` / `REDIS_URL` secrets.
-- **Migration:** no data migration. Existing `email:msgid:*` keys coexist with new `email:history:*` keys. Existing DLQ entries are unchanged.
-- **Rollback:** remove the relay task from the event loop, delete `email:history:*` and `email:threads` keys (optional — they'll expire after 7 days anyway). CLI entry in `pyproject.toml` is removed; `pip install -e .` will no longer expose `valor-email`.
+- **Migration:** no data migration required. Existing `email:msgid:*` keys coexist with new `email:history:*` keys. Existing DLQ entries are unchanged. The `email:outbox:*` queue is dormant today (no consumer), so changing its payload shape is not a breaking change. In-flight entries (none expected, but possible on a loaded host) are handled by the relay's legacy-`text` normalization path (see Unified outbox payload contract in Technical Approach).
+- **Rollback (ordered sequence):**
+  1. Revert the PR via `git revert`. This removes `tools/valor_email.py`, `bridge/email_relay.py`, `tools/email_history/`, the write-through calls in `_email_inbox_loop`, the `_build_reply_mime` refactor, the `send_message.py::_send_via_email` payload rewrite, and the `pyproject.toml` entry.
+  2. Run `pip install -e .` so the `valor-email` script is deregistered from `$PATH`.
+  3. Restart the bridge: `./scripts/valor-service.sh email-restart`. (This also clears the relay asyncio task.)
+  4. Flush the new Redis namespaces (all optional — TTLs bound the leak at 7 days; do this only if you need an immediate clean slate): `redis-cli --scan --pattern 'email:history:*' | xargs redis-cli DEL`; same for `email:threads`, `email:outbox:*`, and `email:relay:last_poll_ts`.
+  5. Verify: `valor-telegram --help` still works; `valor-email` is no longer on `$PATH`; `tests/unit/test_email_bridge.py` passes against the reverted `_build_reply`.
 
 Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) needs one line verifying `valor-email --help` resolves after the dependency sync step, mirroring how `valor-telegram` is verified today.
 
@@ -386,21 +415,27 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 
 ## Success Criteria
 
-- [ ] `valor-email read --limit 5` outputs the 5 most recent emails from the history cache (or falls back to IMAP on cache miss).
+- [ ] `valor-email read --limit 5` outputs the 5 most recent emails from the history cache (or falls back to IMAP on cache miss, with `readonly=True` and sender filter applied).
 - [ ] `valor-email read --search "test"` filters correctly.
 - [ ] `valor-email read --since "2 hours ago"` filters correctly.
-- [ ] `valor-email send --to addr@x --subject "Sub" "Body"` enqueues a message and the relay drains it via mocked SMTP.
+- [ ] `valor-email send --to addr@x --subject "Sub" "Body"` enqueues the unified payload shape and the relay drains it via mocked SMTP.
 - [ ] `valor-email send --to addr --file ./path.txt "Caption"` composes a `MIMEMultipart` with the file attached; mocked SMTP receives the payload with correct `Content-Disposition`.
 - [ ] `valor-email send --reply-to "<abc@host>" "Body"` produces `In-Reply-To: <abc@host>` and `References: <abc@host>` in the mocked SMTP message.
-- [ ] `valor-email send --direct "Body" --to addr` bypasses Redis and sends directly via SMTP (mocked).
 - [ ] `valor-email threads` lists threads from the `email:threads` hash.
 - [ ] `--json` flag works on all three subcommands.
 - [ ] `pyproject.toml` registers `valor-email`; `pip install -e .` makes the CLI available on `$PATH`.
-- [ ] All new and updated tests pass: `pytest tests/unit/test_valor_email.py tests/unit/test_email_relay.py tests/unit/test_email_history.py tests/integration/test_valor_email.py -v`.
+- [ ] Relay atomic-LPOP behavior verified: on SMTP failure, the payload is re-pushed with `_relay_attempts` incremented; after 3 failures, DLQ receives it and the queue is empty.
+- [ ] Relay accepts legacy `{session_id, to, text, timestamp}` payload (text→body normalization test).
+- [ ] `tools/send_message.py::_send_via_email` writes the unified shape (existing tests updated).
+- [ ] `email:relay:last_poll_ts` heartbeat key is written once per poll cycle with 5-minute TTL.
+- [ ] `email:history:*` orphan blobs are actively deleted when ZREMRANGEBYRANK evicts (no leak beyond 7-day TTL).
+- [ ] Session-id suffix uses `secrets.token_hex(4)` (not 2).
+- [ ] All new and updated tests pass: `pytest tests/unit/test_valor_email.py tests/unit/test_email_relay.py tests/unit/test_email_history.py tests/unit/test_send_message.py tests/integration/test_valor_email.py -v`.
 - [ ] Existing email-bridge tests still pass: `pytest tests/unit/test_email_bridge.py tests/integration/test_email_bridge.py -v`.
 - [ ] `docs/features/email-bridge.md` has a CLI section; `docs/features/README.md` updated; `CLAUDE.md` has `valor-email` examples.
 - [ ] `ruff check` and `ruff format --check` pass on all new files.
-- [ ] Byte-regression test asserts `_build_reply_mime(attachments=None, ...)` produces the same MIME output as the old `_build_reply(...)` (excluding Date/Message-ID headers).
+- [ ] Parsed-header regression test asserts `_build_reply_mime(attachments=None, ...)` produces semantically equivalent MIME to the old `_build_reply(...)` (From/To/Subject/In-Reply-To/References/Content-Type/Content-Transfer-Encoding + payload bytes; excludes Date/Message-ID).
+- [ ] Live-environment smoke test passes when SMTP/IMAP/Redis are configured, or is logged as skipped.
 
 ## Team Orchestration
 
@@ -447,30 +482,36 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 ### 1. Refactor `_build_reply` → `_build_reply_mime` with attachment support
 - **Task ID**: build-mime-refactor
 - **Depends On**: none
-- **Validates**: `tests/unit/test_email_bridge.py` (all existing tests still pass); new byte-regression test added
-- **Informed By**: Risk 3 mitigation (byte-regression test)
+- **Validates**: `tests/unit/test_email_bridge.py` (all existing tests still pass); new parsed-header regression test added
+- **Informed By**: Risk 2 mitigation (parsed-header regression, not byte-for-byte)
 - **Assigned To**: relay-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Extract `EmailOutputHandler._build_reply` to a module-level `_build_reply_mime(to, subject, body, in_reply_to, references, from_addr, attachments=None)`.
-- Accept `attachments: list[Path] | None = None`. When None or empty, return `MIMEText` (current behavior, byte-identical except for Date/Message-ID).
+- Accept `attachments: list[Path] | None = None`. When None or empty, return `MIMEText` (current behavior).
 - When attachments provided, return `MIMEMultipart("mixed")` with `MIMEText` body first, then one `MIMEBase` part per attachment with `Content-Disposition: attachment; filename="..."` (use `mimetypes.guess_type` for the MIME type; fallback `application/octet-stream`).
 - Update `EmailOutputHandler.send` to call the module-level helper with `attachments=None`.
-- Add byte-regression test (Risk 3 mitigation) asserting identical output for the no-attachment path.
+- Add **parsed-header regression test** (Risk 2 mitigation): for a fixed input, parse both old `_build_reply(...)` and new `_build_reply_mime(..., attachments=None)` via `email.message_from_bytes(msg.as_bytes())`; assert `From`, `To`, `Subject`, `In-Reply-To`, `References`, `Content-Type`, `Content-Transfer-Encoding` headers match, plus `get_payload(decode=True)` bytes. Exclude `Date` and `Message-ID` from comparison.
 
 ### 2. Create `bridge/email_relay.py`
 - **Task ID**: build-relay
 - **Depends On**: build-mime-refactor
 - **Validates**: `tests/unit/test_email_relay.py` (create)
-- **Informed By**: `bridge/telegram_relay.py` pattern (100ms poll, `_relay_attempts` counter, DLQ on exhaustion)
+- **Informed By**: `bridge/telegram_relay.py:443-572` (atomic LPOP, re-push on failure, DLQ after 3 attempts)
 - **Assigned To**: relay-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `bridge/email_relay.py` with `run_email_relay()` async coroutine.
-- Poll `email:outbox:*` via `r.scan_iter(match="email:outbox:*")` every 100ms.
-- For each key, `LRANGE 0 0` to peek, call `_build_reply_mime(...)`, attempt `smtplib.SMTP` send in `asyncio.to_thread`.
-- On success: `LPOP` the key. On failure: increment `_relay_attempts` field in the payload, re-push. After 3 attempts, route to `bridge.email_dead_letter.write_dead_letter()`.
-- Wire into `bridge/email_bridge.py::run_email_bridge` via `asyncio.gather(run_email_relay(), _email_inbox_loop(...))`.
+- Create `bridge/email_relay.py` with `run_email_relay()` async coroutine and a `process_outbox()` helper mirroring the telegram relay.
+- Poll `email:outbox:*` via `r.keys(OUTBOX_KEY_PATTERN)` every 100ms.
+- For each key, atomically `r.lpop(key)` (wrapped in `asyncio.to_thread`). If nothing returned, move on.
+- Parse JSON. **Normalize** the payload: if `text` is present and `body` is not, rename `text`→`body` (legacy compat); fill defaults (`subject="(no subject)"`, `from_addr=SMTP_USER`, `attachments=[]`).
+- Reject malformed payloads (missing `to` or missing both `text`/`body`) — log and DLQ without retry.
+- Call `_build_reply_mime(...)`, attempt `smtplib.SMTP` send in `asyncio.to_thread`.
+- On success: done (entry already popped).
+- On failure: increment `_relay_attempts` in-memory, `r.rpush(key, json.dumps(message))`. After `MAX_EMAIL_RELAY_RETRIES` (default 3), call `bridge.email_dead_letter.write_dead_letter()` instead of re-pushing.
+- On each poll cycle (regardless of work found), `r.set("email:relay:last_poll_ts", time.time(), ex=300)` — 5-minute TTL heartbeat for liveness probing.
+- Wire into `bridge/email_bridge.py::run_email_bridge` via `asyncio.gather(run_email_relay(...), _email_inbox_loop(...))`.
+- Include a module docstring that states the invariant: `EmailOutputHandler.send()` sends directly and never writes to `email:outbox:*`; the relay and the handler do not race.
 
 ### 3. Add write-through cache to `_email_inbox_loop`
 - **Task ID**: build-cache-write
@@ -496,25 +537,26 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
   - `get_recent_emails(mailbox="INBOX", limit=10) -> dict` — ZREVRANGE + hydrate
   - `search_history(query, mailbox="INBOX", max_results=10, max_age_days=7) -> dict` — scan the sorted set, filter JSON blobs by body/subject substring match
   - `list_threads() -> dict` — HGETALL `email:threads`
-  - `list_mailboxes() -> dict` — currently hardcoded to `["INBOX"]`; scaffold for future
 - All return `{"error": str}` on Redis failure; never raise.
+- **No `list_mailboxes()` scaffold** — YAGNI. Add when multi-mailbox support actually lands (currently a No-Go).
 
-### 5. Create `tools/valor_email.py` CLI
+### 5. Create `tools/valor_email.py` CLI and update `tools/send_message.py` payload
 - **Task ID**: build-cli
 - **Depends On**: build-history-package, build-relay
-- **Validates**: `tests/unit/test_valor_email.py` (create)
-- **Informed By**: `tools/valor_telegram.py` (structural mirror), Race 2 mitigation (session_id with pid+token_hex)
+- **Validates**: `tests/unit/test_valor_email.py` (create); `tests/unit/test_send_message.py` (update existing email-path tests)
+- **Informed By**: `tools/valor_telegram.py` (structural mirror), Race 2 mitigation (session_id with pid + `secrets.token_hex(4)`)
 - **Assigned To**: cli-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `cmd_read`: uses `tools.email_history.get_recent_emails` / `search_history`. On empty cache, falls back to direct `imaplib.IMAP4_SSL` (new helper `_fetch_from_imap`).
-- `cmd_send`: builds payload, pushes to `email:outbox:cli-{ts}-{pid}-{random}` with TTL 1h. `--direct` bypasses queue and calls `_send_direct_smtp()`.
+- `cmd_read`: uses `tools.email_history.get_recent_emails` / `search_history`. On empty cache, falls back to direct `imaplib.IMAP4_SSL` with `readonly=True` AND sender-filter query built from `bridge.routing.get_known_email_search_terms()` (per spike-4 — prevents marking other machines' UNSEEN mail as SEEN and leaking cross-project messages).
+- `cmd_send`: builds the **unified payload** (`{session_id, to, subject, body, attachments, in_reply_to, references, from_addr, timestamp}`), pushes to `email:outbox:cli-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}` with TTL 1h. After enqueue: print `"Queued. Check delivery via ./scripts/valor-service.sh email-status"` and exit 0.
 - `cmd_threads`: uses `tools.email_history.list_threads`.
 - `--json` flag on all three subcommands.
 - `--reply-to`: `type=` validator normalizes to angle-bracketed form.
 - Attachment validation at CLI layer (file exists, readable) before enqueue.
 - Import `parse_since` from `tools.valor_telegram` (the one piece of shared code).
 - Register in `pyproject.toml` `[project.scripts]`: `valor-email = "tools.valor_email:main"`.
+- **Update `tools/send_message.py::_send_via_email`**: rewrite the payload to match the unified contract (`body` replaces `text`; include `subject`, `in_reply_to`, `references`, `from_addr`, `attachments` even if empty). Update existing unit tests to assert the new shape. Note in the docstring that the relay accepts legacy `text` for one transitional release.
 
 ### 6. Integration tests
 - **Task ID**: build-integration-tests
@@ -526,9 +568,10 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 - End-to-end: CLI send → Redis queue → relay drain → mocked SMTP → success.
 - End-to-end: CLI send with `--file` → relay drain → mocked SMTP with attachment verified.
 - End-to-end: `--reply-to "<abc@host>"` → mocked SMTP receives correct `In-Reply-To` / `References` headers.
-- End-to-end: CLI `--direct` bypasses queue (assert no Redis write).
 - End-to-end: poll loop writes to cache → CLI `read` returns cached entries.
-- Failure path: SMTP fails 3 times → DLQ entry written; CLI surfaces "Note: delivery requires the relay..." in stderr.
+- **Legacy-payload compat:** relay unit test pushes a `{session_id, to, text, timestamp}` payload directly and asserts the relay drains it successfully (the text→body normalization path).
+- **Heartbeat probe:** relay unit test asserts `email:relay:last_poll_ts` is written within one poll cycle.
+- Failure path: SMTP fails 3 times → DLQ entry written; relay does NOT re-push after the 3rd failure; operator can see the queue is empty and DLQ has one entry.
 
 ### 7. Validation
 - **Task ID**: validate-all
@@ -536,11 +579,15 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 - **Assigned To**: email-cli-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_email_bridge.py tests/unit/test_email_relay.py tests/unit/test_email_history.py tests/unit/test_valor_email.py tests/integration/test_email_bridge.py tests/integration/test_valor_email.py -v`.
+- Run `pytest tests/unit/test_email_bridge.py tests/unit/test_email_relay.py tests/unit/test_email_history.py tests/unit/test_valor_email.py tests/unit/test_send_message.py tests/integration/test_email_bridge.py tests/integration/test_valor_email.py -v`.
 - Run `ruff check .` and `ruff format --check .`.
-- Confirm byte-regression test passes for `_build_reply_mime(attachments=None)`.
+- Confirm parsed-header regression test passes for `_build_reply_mime(attachments=None)`.
 - Verify `pip install -e .` then `which valor-email` resolves.
 - Confirm `valor-email --help` prints all three subcommands.
+- **Live-environment smoke test** (only runs when `IMAP_HOST`/`SMTP_HOST`/`REDIS_URL` are configured; skipped otherwise with a logged reason):
+  1. `valor-email read --limit 1 --json` — exit 0, output parseable as JSON (may be `[]` if cache empty and IMAP has nothing matching the sender filter).
+  2. `valor-email send --to $SMTP_USER --subject "smoke-test" "test body"` to a self-address — exit 0.
+  3. Within 5 seconds, assert `email:relay:last_poll_ts` exists in Redis AND (the outbox key was drained OR a DLQ entry was created). This is a loopback test against the local dev SMTP/IMAP — safe to run in CI if env is present.
 - Report pass/fail per success criterion.
 
 ### 8. Documentation
@@ -559,6 +606,7 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 | Check | Command | Expected |
 |-------|---------|----------|
 | Unit tests pass | `pytest tests/unit/test_valor_email.py tests/unit/test_email_relay.py tests/unit/test_email_history.py -x -q` | exit code 0 |
+| Send-message tests updated | `pytest tests/unit/test_send_message.py -x -q` | exit code 0 |
 | Email-bridge tests unbroken | `pytest tests/unit/test_email_bridge.py tests/integration/test_email_bridge.py -x -q` | exit code 0 |
 | Integration test passes | `pytest tests/integration/test_valor_email.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
@@ -566,19 +614,37 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 | CLI installed | `which valor-email` | output contains `valor-email` |
 | CLI help | `valor-email --help 2>&1` | output contains `read send threads` |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_valor_email.py tests/unit/test_email_relay.py tests/unit/test_email_history.py` | exit code 1 |
-| Byte regression | `pytest tests/unit/test_email_bridge.py::test_build_reply_mime_byte_regression -x -q` | exit code 0 |
+| Parsed-header regression | `pytest tests/unit/test_email_bridge.py::test_build_reply_mime_header_regression -x -q` | exit code 0 |
+| Legacy payload compat | `pytest tests/unit/test_email_relay.py::test_drains_legacy_text_payload -x -q` | exit code 0 |
+| Heartbeat written | `pytest tests/unit/test_email_relay.py::test_heartbeat_written_each_cycle -x -q` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique is run. -->
+Critique run 2026-04-21. Verdict: NEEDS REVISION (2 blockers, 6 concerns, 3 nits). Revision applied in same commit as this table update. `revision_applied=true`.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| B1 | Archaeologist | Outbox payload schema drift — `send_message.py:154-158` writes legacy `{session_id, to, text, timestamp}`; new CLI writes richer shape. Relay would `KeyError` on existing agent-originated payloads. | Technical Approach §Unified outbox payload contract; Task 5 now rewrites `tools/send_message.py::_send_via_email`; Risk 5 added; integration test for legacy compat | Relay normalizes `text`→`body` on read for one transitional release; both writers updated same-PR; queue has no consumer today so it's lossless. |
+| B2 | Adversary | Non-atomic peek-then-LPOP in relay drain contradicts `telegram_relay.py` mirror directive and is a correctness bug. | Data Flow step 5; Technical Approach §Relay contract; Race 3 rewrite; Task 2 rewrite | Switched to atomic LPOP + re-push on failure + DLQ after 3 attempts, mirroring `telegram_relay.py:464-465`. Accept at-most-once on crash-mid-send; SMTP Message-ID uniqueness prevents duplicate delivery. |
+| C1 | Operator | Relay liveness probe gap — plan references `email:last_poll_ts` stale-check without specifying where it's written. | Technical Approach §Relay contract; Update System §`email-status`; Task 2 step "heartbeat" | Relay writes `email:relay:last_poll_ts` with 5-minute TTL on each poll cycle. `email-status` service command reads it. |
+| C2 | Simplifier | Byte-regression test fragility — excludes Date/Message-ID but still sensitive to Python minor version header order and encoding drift. | Risk 2 rewrite; Task 1 rewrite; Verification table | Replaced byte-for-byte with parsed-header comparison (From/To/Subject/In-Reply-To/References/Content-Type/Content-Transfer-Encoding + payload bytes). |
+| C3 | Skeptic | Unjustified `--direct` flag adds a second send site for no clear benefit. | Data Flow step 6; Technical Approach (flag removed); No-Gos; Rabbit Holes | Dropped `--direct`. CLI always queues via Redis; operator fixes relay via `email-status`/`email-restart`. Parity with `valor-telegram send`. |
+| C4 | Archaeologist | Incomplete rollback sequence — doesn't cover `email:outbox:*`, `email:relay:last_poll_ts`, or `send_message.py` revert. | Update System §Rollback (ordered sequence) | Five-step rollback sequence added covering revert, reinstall, restart, flush (including new heartbeat/outbox keys), and verification. |
+| C5 | Simplifier | `email:threads` drift risk when a later message reveals an earlier root. | Technical Approach §Cache key schema (threads bullet) | Thread root recomputed on each new message; re-key the hash if an earlier root is discovered. Drift accepted for v1 as a best-effort nav aid. |
+| C6 | Operator | History-cache orphan blob leak — `ZREMRANGEBYRANK` evicts IDs from the sorted set but leaves per-msg blobs until 7-day TTL. | Technical Approach §Cache key schema (cap enforcement bullet) | Trim path uses pipeline: `ZRANGE 0 -501` to capture evicted IDs → `DEL email:history:msg:{msgid}` → `ZREMRANGEBYRANK`. Active deletion bounds the leak. |
+| N1 | Adversary | `secrets.token_hex(2)` collision risk — 16 bits is narrow margin. | Race 2 rewrite | Upgraded to `secrets.token_hex(4)` (32 bits of randomness). |
+| N2 | Simplifier | Unused `list_mailboxes()` scaffold violates YAGNI. | Task 4 (removed from scope) | Dropped; added when multi-mailbox feature actually lands. |
+| N3 | Operator | No live-environment verification step. | Task 7 (live smoke test) | Added conditional smoke test that runs when SMTP/IMAP/Redis are configured; skipped-with-reason otherwise. |
 
 ---
 
 ## Open Questions
 
-1. **Relay lifecycle:** Should `bridge/email_relay.py` be started via `asyncio.gather()` inside `bridge/email_bridge.py::run_email_bridge` (one process owns both), or as a separate `./scripts/valor-service.sh email-relay-start` target? The plan assumes the former for simplicity; confirm.
-2. **Direct-SMTP flag default:** The plan defaults to queue-via-Redis (relay path) with `--direct` as the opt-in. Alternative: default to direct SMTP (since the user invoked the CLI synchronously), and `--queue` as the opt-in. Which do you prefer? The rationale for queue-default is consistency with `valor-telegram send`, but email lacks Telegram's session-lock concern, so direct-default is defensible.
-3. **Session ID race in `valor-telegram`:** Race 2 notes that `valor-telegram` has the same same-second collision bug today. Should the `secrets.token_hex` fix be applied to both CLIs in this plan, or kept scoped to `valor-email` only (and filed as a separate Telegram issue)? Plan currently scopes to email only.
-4. **Multi-account future-proofing:** The schema uses `email:history:INBOX` hardcoded. If we later add multi-account support (e.g., `valor@yuda.me` + `tom@yuda.me` on the same bridge), the key becomes `email:history:{account}:INBOX`. Worth designing for that now, or accept the migration pain later? Plan currently accepts the pain.
+All prior questions resolved by critique revision:
+
+- ~~Q1 Relay lifecycle~~ → resolved: `asyncio.gather()` inside `run_email_bridge` (Task 2, Update System §`email-restart`).
+- ~~Q2 Direct-SMTP default~~ → resolved: `--direct` flag dropped entirely per C3 (Rabbit Holes, No-Gos).
+- ~~Q3 `valor-telegram` session_id fix~~ → resolved: kept scoped to `valor-email`; Telegram CLI change is a separate concern if it matters.
+- ~~Q4 Multi-account future-proofing~~ → resolved: accept migration pain later. Single-account is firmly No-Gos, and reshaping a sorted-set key when multi-account arrives is a 30-line script, not architecture.
+
+None remaining.
