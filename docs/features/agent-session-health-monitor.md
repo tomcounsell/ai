@@ -86,13 +86,19 @@ python -m agent.agent_session_queue --flush-session <SESSION_ID>
 
 ### Example `--status` output
 
+Sessions are grouped by `worker_key` (the canonical routing key — `project_key`, `chat_id`, or `slug` depending on session type and whether a slug is set). Each header shows the session's `project_key` followed by the actual `worker_key` in parentheses, so slug-keyed dev sessions are visibly distinct from the project-keyed PM loop.
+
 ```
-=== dm ===
+=== valor (worker: valor) ===
   Worker: alive
   [  running] abc123 (running 5m) - How do I configure...
   [  pending] def456 (queued 2m) - Please review...
 
-Total: 2 jobs (1 pending, 1 running)
+=== valor (worker: worker-key-slug-precedence) ===
+  Worker: alive
+  [  running] xyz789 (running 3m) - Implement worker_key...
+
+Total: 3 sessions (1 pending, 2 running)
 ```
 
 ## Configuration

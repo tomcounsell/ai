@@ -26,7 +26,7 @@ See [Session Lifecycle](session-lifecycle.md) for the full 13-state reference (8
 
 **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
 
-**Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `role` (DataField — "pm", "dev", or null), `slug`
+**Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `role` (DataField — "pm", "dev", or null), `slug` (KeyField — derives branch, plan path, worktree; indexed so the slug-keyed worker-pop filter can find slugged dev sessions — see [Bridge/Worker Architecture §Three Worker Loop Archetypes](bridge-worker-architecture.md#three-worker-loop-archetypes))
 
 All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float/int timestamps are auto-converted via `__setattr__`.
 

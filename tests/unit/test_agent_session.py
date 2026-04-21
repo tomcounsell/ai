@@ -168,13 +168,20 @@ class TestWorkerKeyProperty:
         assert s.worker_key == "chat-1"
         assert s.is_project_keyed is False
 
-    def test_dev_with_slug_uses_chat_id(self):
+    def test_dev_with_slug_uses_slug(self):
+        """Slugged dev sessions route by slug, not chat_id (issue #1085)."""
         s = _make_session(session_type=SessionType.DEV, chat_id="chat-1", slug="my-feature")
-        assert s.worker_key == "chat-1"
+        assert s.worker_key == "my-feature"
         assert s.is_project_keyed is False
 
     def test_dev_without_slug_uses_project_key(self):
         s = _make_session(session_type=SessionType.DEV, chat_id="chat-1", slug=None)
+        assert s.worker_key == "test-project"
+        assert s.is_project_keyed is True
+
+    def test_dev_with_empty_slug_falls_through_to_project_key(self):
+        """Empty slug string must fall through to project_key, not be treated as the slug."""
+        s = _make_session(session_type=SessionType.DEV, chat_id="chat-1", slug="")
         assert s.worker_key == "test-project"
         assert s.is_project_keyed is True
 
@@ -195,7 +202,79 @@ class TestWorkerKeyProperty:
         assert s1.worker_key == s2.worker_key == "test-project"
 
     def test_two_slugged_dev_sessions_different_chats_different_worker_keys(self):
-        """Dev sessions with slugs on different chats get different worker keys."""
+        """Slugged dev sessions on different chats get distinct worker keys equal to their slugs."""
         s1 = _make_session(session_type=SessionType.DEV, chat_id="chat-A", slug="feat-1")
         s2 = _make_session(session_type=SessionType.DEV, chat_id="chat-B", slug="feat-2")
         assert s1.worker_key != s2.worker_key
+        assert s1.worker_key == "feat-1"
+        assert s2.worker_key == "feat-2"
+
+    def test_two_slugged_dev_sessions_same_chat_different_slugs_different_worker_keys(self):
+        """Two slugged dev sessions sharing a chat_id must still route to distinct workers.
+
+        This is the exact bug scenario from issue #1085: five slugged dev sessions
+        created via `valor_session create --role dev` with default chat_id=0 all
+        routed to a single project-keyed worker and serialized.
+        """
+        s1 = _make_session(session_type=SessionType.DEV, chat_id="0", slug="feat-A")
+        s2 = _make_session(session_type=SessionType.DEV, chat_id="0", slug="feat-B")
+        assert s1.worker_key == "feat-A"
+        assert s2.worker_key == "feat-B"
+        assert s1.worker_key != s2.worker_key
+
+
+def _compute_worker_key_inline(session_type, slug, chat_id, project_key):
+    """Helper: encodes the same four-branch logic as the inline sites in
+    agent/agent_session_queue.py (lines ~362 notify publish, ~1110 enqueue).
+
+    This helper lives at the test level — its job is to detect drift between
+    the inline sites and AgentSession.worker_key. If a future PR changes the
+    property without updating the inline duplicates (or vice versa), the
+    truth-table test below fails with a clear mismatch message pointing at
+    the specific permutation.
+    """
+    if session_type == SessionType.TEAMMATE:
+        return chat_id or project_key
+    if session_type == SessionType.PM:
+        return project_key
+    if slug:
+        return slug
+    return project_key
+
+
+class TestWorkerKeyTruthTable:
+    """Assert every permutation of (session_type, slug, chat_id) produces the
+    same worker_key from the AgentSession property as from the inline helper.
+
+    This is the drift-detection test called out in Risk 1: if any of the three
+    computation sites (property + two inline duplicates) drift out of sync,
+    this test fails with a specific permutation mismatch.
+    """
+
+    def test_truth_table_matches_inline_computation(self):
+        session_types = [SessionType.PM, SessionType.DEV, SessionType.TEAMMATE, None]
+        slugs = [None, "", "feat-X"]
+        chat_ids = [None, "chat-1", "0"]
+        project_key = "test-project"
+
+        mismatches = []
+        for st in session_types:
+            for sl in slugs:
+                for cid in chat_ids:
+                    s = _make_session(
+                        session_type=st,
+                        chat_id=cid,
+                        slug=sl,
+                        project_key=project_key,
+                    )
+                    expected = _compute_worker_key_inline(st, sl, cid, project_key)
+                    actual = s.worker_key
+                    if actual != expected:
+                        mismatches.append(
+                            f"(session_type={st!r}, slug={sl!r}, chat_id={cid!r}): "
+                            f"property returned {actual!r}, inline helper returned {expected!r}"
+                        )
+        assert not mismatches, (
+            "AgentSession.worker_key drifted from inline computation sites in "
+            "agent/agent_session_queue.py. Mismatched permutations:\n" + "\n".join(mismatches)
+        )

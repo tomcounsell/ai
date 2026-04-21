@@ -359,13 +359,14 @@ async def _push_agent_session(
     try:
         from popoto.redis_db import POPOTO_REDIS_DB
 
+        # KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py
         # Compute worker_key inline from the same inputs as AgentSession.worker_key
         if session_type == SessionType.TEAMMATE:
             _wk = chat_id or project_key
         elif session_type == SessionType.PM:
             _wk = project_key
         elif slug:
-            _wk = chat_id or project_key
+            _wk = slug
         else:
             _wk = project_key
         payload = json.dumps(
@@ -1107,13 +1108,14 @@ async def enqueue_agent_session(
         project_config=project_config,
         extra_context_overrides=extra_context_overrides,
     )
+    # KEEP IN SYNC with AgentSession.worker_key in models/agent_session.py
     # Compute worker_key from the same inputs the property uses, without re-querying Redis
     if session_type == SessionType.TEAMMATE:
         wk = chat_id or project_key
     elif session_type == SessionType.PM:
         wk = project_key
     elif slug:
-        wk = chat_id or project_key
+        wk = slug
     else:
         wk = project_key
     is_pk = wk == project_key
@@ -1531,19 +1533,19 @@ async def _worker_loop(
 
 
 def _cli_show_status() -> None:
-    """Show current queue state grouped by chat_id, with worker and health info."""
+    """Show current queue state grouped by worker_key, with worker and health info."""
     all_sessions = list(AgentSession.query.all())
     if not all_sessions:
         print("Queue is empty.")
         return
 
-    # Group by chat_id (worker key)
-    by_chat: dict[str, list] = {}
+    # Group by worker_key (the canonical routing key — project_key, chat_id, or slug)
+    by_worker: dict[str, list] = {}
     for entry in all_sessions:
-        key = entry.chat_id or entry.project_key
-        if key not in by_chat:
-            by_chat[key] = []
-        by_chat[key].append(entry)
+        key = entry.worker_key
+        if key not in by_worker:
+            by_worker[key] = []
+        by_worker[key].append(entry)
 
     now_ts = time.time()
 
@@ -1556,10 +1558,10 @@ def _cli_show_status() -> None:
             return float(val)
         return 0.0
 
-    for chat_key, sessions_group in sorted(by_chat.items()):
-        project_key = sessions_group[0].project_key if sessions_group else chat_key
-        print(f"\n=== {project_key} (chat: {chat_key}) ===")
-        worker = _active_workers.get(chat_key)
+    for worker_key, sessions_group in sorted(by_worker.items()):
+        project_key = sessions_group[0].project_key if sessions_group else worker_key
+        print(f"\n=== {project_key} (worker: {worker_key}) ===")
+        worker = _active_workers.get(worker_key)
         worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
         print(f"  Worker: {worker_status}")
 
@@ -1617,14 +1619,14 @@ def _cli_flush_stuck() -> None:
 
     recovered = 0
     for session in running:
-        worker_key = session.chat_id or session.project_key
+        worker_key = session.worker_key
         worker = _active_workers.get(worker_key)
         is_alive = worker and not worker.done()
 
         if not is_alive:
             print(
                 f"Recovering orphaned session {session.agent_session_id} "
-                f"(project={session.project_key}, chat={worker_key})"
+                f"(project={session.project_key}, worker_key={worker_key})"
             )
             _cli_recover_single_agent_session(session)
             recovered += 1
