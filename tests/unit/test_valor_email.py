@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import time
 
@@ -98,9 +97,7 @@ class TestCmdSend:
         assert payload["session_id"].startswith("cli-")
 
     def test_reply_to_propagates_to_both_headers(self, r):
-        rc = cmd_send(
-            self._args(message="ack", reply_to="<abc@host>")
-        )
+        rc = cmd_send(self._args(message="ack", reply_to="<abc@host>"))
         assert rc == 0
         keys = list(r.scan_iter(match="email:outbox:cli-*"))
         assert len(keys) == 1
@@ -109,9 +106,7 @@ class TestCmdSend:
         assert payload["references"] == "<abc@host>"
 
     def test_rejects_missing_file(self, r, tmp_path, capsys):
-        rc = cmd_send(
-            self._args(message="hi", file=str(tmp_path / "not-here.pdf"))
-        )
+        rc = cmd_send(self._args(message="hi", file=str(tmp_path / "not-here.pdf")))
         assert rc == 1
         captured = capsys.readouterr()
         assert "File not found" in captured.err

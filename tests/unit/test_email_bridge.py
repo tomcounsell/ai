@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bridge.email_bridge import (
-    HISTORY_MAX_ENTRIES,
     HISTORY_MSG_KEY,
     HISTORY_SET_KEY,
     HISTORY_THREADS_KEY,

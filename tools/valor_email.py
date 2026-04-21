@@ -95,7 +95,7 @@ def _imap_fallback_fetch(limit: int, search: str | None, since_ts: float | None)
     Returns a list of message dicts shaped like the cache entries. On any
     error, returns an empty list and logs to stderr.
     """
-    from bridge.email_bridge import _get_imap_config, parse_email_message
+    from bridge.email_bridge import _build_imap_sender_query, _get_imap_config, parse_email_message
     from bridge.routing import (
         EMAIL_DOMAIN_TO_PROJECT,
         EMAIL_TO_PROJECT,
@@ -103,7 +103,6 @@ def _imap_fallback_fetch(limit: int, search: str | None, since_ts: float | None)
         get_known_email_search_terms,
         load_config,
     )
-    from bridge.email_bridge import _build_imap_sender_query
 
     # Populate routing maps once (idempotent — same pattern as run_email_bridge)
     if not EMAIL_TO_PROJECT and not EMAIL_DOMAIN_TO_PROJECT:
@@ -298,9 +297,7 @@ def _build_session_id() -> str:
     Format: ``cli-{unix_seconds}-{pid}-{hex8}`` — 32 bits of randomness guards
     against same-second concurrent invocations (Race 2 in the plan).
     """
-    return (
-        f"{_SESSION_ID_PREFIX}-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"
-    )
+    return f"{_SESSION_ID_PREFIX}-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"
 
 
 def cmd_send(args: argparse.Namespace) -> int:
@@ -387,10 +384,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         if attachments:
             parts.append(f"file: {Path(file_path).name}")
         print(f"Queued ({', '.join(parts)}).")
-        print(
-            "Check delivery via ./scripts/valor-service.sh email-status "
-            "(relay heartbeat + DLQ)."
-        )
+        print("Check delivery via ./scripts/valor-service.sh email-status (relay heartbeat + DLQ).")
     return 0
 
 

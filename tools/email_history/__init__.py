@@ -74,10 +74,7 @@ def get_recent_emails(
     """
     if mailbox != "INBOX":
         return {
-            "error": (
-                f"Only INBOX is supported in v1 (got '{mailbox}'); "
-                "multi-mailbox is a No-Go."
-            )
+            "error": (f"Only INBOX is supported in v1 (got '{mailbox}'); multi-mailbox is a No-Go.")
         }
 
     limit = max(1, min(500, int(limit)))
@@ -141,10 +138,7 @@ def search_history(
         return {"error": "Query cannot be empty"}
     if mailbox != "INBOX":
         return {
-            "error": (
-                f"Only INBOX is supported in v1 (got '{mailbox}'); "
-                "multi-mailbox is a No-Go."
-            )
+            "error": (f"Only INBOX is supported in v1 (got '{mailbox}'); multi-mailbox is a No-Go.")
         }
 
     max_results = max(1, min(100, int(max_results)))

@@ -277,10 +277,7 @@ class TestProcessOutboxAttachment:
         assert sent == 1
         msg = captured["msg"]
         assert msg.is_multipart()
-        disp_headers = [
-            part.get("Content-Disposition", "")
-            for part in msg.walk()
-        ]
+        disp_headers = [part.get("Content-Disposition", "") for part in msg.walk()]
         assert any('filename="report.txt"' in h for h in disp_headers)
 
 

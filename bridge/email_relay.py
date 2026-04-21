@@ -219,8 +219,7 @@ async def _process_one(r, key: str, raw: str) -> bool:
         try:
             await asyncio.to_thread(r.rpush, key, json.dumps(message))
             logger.info(
-                "Email relay: re-queued payload in %s "
-                "(attempt %d/%d, last error: %s)",
+                "Email relay: re-queued payload in %s (attempt %d/%d, last error: %s)",
                 key,
                 attempts,
                 MAX_EMAIL_RELAY_RETRIES,

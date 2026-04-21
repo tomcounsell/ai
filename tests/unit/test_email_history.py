@@ -7,7 +7,6 @@ fixture — both flush db=1 between tests, so state is isolated).
 from __future__ import annotations
 
 import json
-import os
 import time
 
 import pytest

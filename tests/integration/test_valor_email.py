@@ -10,7 +10,6 @@ flushes it before each test).
 from __future__ import annotations
 
 import argparse
-import json
 import time
 from unittest.mock import patch
 
