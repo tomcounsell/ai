@@ -254,15 +254,31 @@ async def process_outbox() -> int:
 
         for key in keys:
             processed = 0
+            requeued_this_cycle = False
             while processed < EMAIL_RELAY_BATCH_SIZE:
                 # Atomic LPOP — safe across concurrent relays / restarts.
                 raw = await asyncio.to_thread(r.lpop, key)
                 if not raw:
                     break
                 processed += 1
+                # Track queue length before/after so we can tell if the payload
+                # was requeued (vs. drained/DLQd). If it was requeued, stop
+                # processing this key for the cycle so the retry budget is
+                # spread across poll cycles instead of burning through in one
+                # pass (mirrors the expected semantics of telegram_relay's
+                # batch loop in practice).
+                before_len = await asyncio.to_thread(r.llen, key)
                 ok = await _process_one(r, key, raw)
+                after_len = await asyncio.to_thread(r.llen, key)
                 if ok:
                     sent += 1
+                elif after_len > before_len:
+                    # _process_one requeued the payload — skip the rest of
+                    # this key for this cycle.
+                    requeued_this_cycle = True
+                    break
+            if requeued_this_cycle:
+                continue
     except Exception as e:
         logger.error(f"Email relay: outbox processing error: {e}", exc_info=True)
     return sent
