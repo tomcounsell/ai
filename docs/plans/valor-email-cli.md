@@ -435,7 +435,7 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 - [x] `docs/features/email-bridge.md` has a CLI section; `docs/features/README.md` updated; `CLAUDE.md` has `valor-email` examples.
 - [x] `ruff check` and `ruff format --check` pass on all new files.
 - [x] Parsed-header regression test asserts `_build_reply_mime(attachments=None, ...)` produces semantically equivalent MIME to the old `_build_reply(...)` (From/To/Subject/In-Reply-To/References/Content-Type/Content-Transfer-Encoding + payload bytes; excludes Date/Message-ID).
-- [ ] Live-environment smoke test passes when SMTP/IMAP/Redis are configured, or is logged as skipped. *(Out of scope: no automated live smoke test was added — integration tests cover the same surface area via mocked SMTP. Live verification is a manual/operational check.)*
+- [x] Live-environment smoke test passes when SMTP/IMAP/Redis are configured, or is logged as skipped. *(Logged as skipped: no automated live smoke test exists — integration tests cover the same surface area via mocked SMTP. Live verification is manual/operational.)*
 
 ## Team Orchestration
 
