@@ -295,7 +295,7 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 
 - **Local dev sessions** (`session_type == DEV`) are re-queued to `pending` just like bridge sessions. Dev sessions are worker-owned (spawned by the PM via `valor-session create --role dev`) with no human competitor holding the same `claude_session_uuid`. Completion flows through `_handle_dev_session_completion`, which steers the parent PM and never invokes a user-facing send callback — so the worker does not need to be able to deliver output to a chat. This lets long-running PM-orchestrated pipelines (build + test + review + docs + merge) survive scheduled worker restarts on skills-only machines.
 - **Local PM and Teammate sessions** continue to be abandoned. A live human CLI may hold the same `claude_session_uuid`; resuming would spawn a second harness competing at that UUID (the #986 hijack rationale).
-- **Legacy records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here.
+- **Pre-migration records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here.
 
 ### Summary
 
@@ -304,7 +304,7 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 | `pending` | Left untouched; new worker picks it up naturally |
 | `running` (bridge) | Stays `running`; new worker startup re-queues it to `pending` |
 | `running` (local `dev`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
-| `running` (local `pm`/`teammate`/legacy) | Finalized as `abandoned`; human CLI may reclaim |
+| `running` (local `pm`/`teammate`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
 
 ## Redis Communication Contract
