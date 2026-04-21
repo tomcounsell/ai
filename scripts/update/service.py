@@ -389,6 +389,109 @@ def heal_plist_paths(project_dir: Path) -> list[str]:
     return healed
 
 
+def install_log_rotate_agent(project_dir: Path) -> bool:
+    """Install the user-space log-rotate LaunchAgent.
+
+    Renders ``com.valor.log-rotate.plist`` with local paths substituted,
+    compares the rendered text to the already-installed file, and skips
+    the launchctl bootout/bootstrap cycle entirely when the content has
+    not changed. This is a deliberate improvement over
+    ``install_worker()``, which unconditionally bootouts and bootstraps
+    on every run — an actual (not advertised) content-idempotency.
+
+    Returns True when the agent is installed or already up to date. Returns
+    False only when the source plist is missing or a launchctl command
+    fails outright.
+    """
+    plist_src = project_dir / "com.valor.log-rotate.plist"
+    label = f"{SERVICE_PREFIX}.log-rotate"
+    plist_dst = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+    if not plist_src.exists():
+        return False
+
+    # Render template with local paths.
+    plist_text = plist_src.read_text()
+    plist_text = plist_text.replace("__PROJECT_DIR__", str(project_dir))
+    plist_text = plist_text.replace("__HOME_DIR__", str(Path.home()))
+    plist_text = plist_text.replace("__SERVICE_LABEL__", label)
+
+    # Content-idempotency: if the file on disk matches and the service is
+    # already loaded, there's nothing to do.
+    try:
+        existing_text = plist_dst.read_text() if plist_dst.exists() else None
+    except OSError:
+        existing_text = None
+
+    already_loaded = False
+    try:
+        launchctl_list = run_cmd(["launchctl", "list"]).stdout
+        already_loaded = label in launchctl_list
+    except Exception:
+        pass
+
+    if existing_text == plist_text and already_loaded:
+        # No-op: everything already matches. This is the improvement over
+        # install_worker() — we skip the reload cycle when nothing changed.
+        return True
+
+    # Install/refresh the rendered plist.
+    try:
+        plist_dst.parent.mkdir(parents=True, exist_ok=True)
+        plist_dst.write_text(plist_text)
+    except OSError:
+        return False
+
+    # Bootout + bootstrap to pick up changes. Only when content or load
+    # state differed — otherwise we returned above.
+    try:
+        uid = os.getuid()
+        if already_loaded:
+            run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
+        result = run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
+        if result.returncode != 0:
+            # Bootstrap can fail if the label is still registered from a
+            # previous crash; a best-effort kickstart gets it running.
+            run_cmd(
+                ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+                timeout=10,
+            )
+        # Verify the service appears in launchctl list.
+        verify_list = run_cmd(["launchctl", "list"]).stdout
+        return label in verify_list
+    except Exception:
+        return False
+
+
+def remove_newsyslog_config() -> bool:
+    """Best-effort removal of the stale /etc/newsyslog.d/valor.conf config.
+
+    Prior releases installed a system-level newsyslog config at
+    ``/etc/newsyslog.d/valor.conf``. macOS's newsyslog daemon reads that
+    directory hourly regardless of what this project does, so leaving the
+    file in place produces double-rotation (two different naming schemes:
+    newsyslog's ``.0.bz2`` vs the new LaunchAgent's ``.1``/``.2``).
+
+    This function attempts a non-interactive ``sudo -n rm`` on the file.
+    Never prompts — passing ``-n`` tells sudo to fail fast when a password
+    is required. Returns True when the file is already absent or was
+    successfully removed. Returns False when sudo required a password; the
+    caller logs a warning so the double-rotation doesn't silently persist.
+    """
+    target = Path("/etc/newsyslog.d/valor.conf")
+    if not target.exists():
+        return True
+
+    try:
+        result = run_cmd(["sudo", "-n", "rm", "-f", str(target)], timeout=5)
+    except Exception:
+        return False
+
+    # sudo -n exits non-zero when a password is required; the file stays
+    # in place. Returning False lets the caller surface a one-line warning.
+    return result.returncode == 0 and not target.exists()
+
+
 def install_caffeinate() -> bool:
     """Install caffeinate service. Returns True if successful."""
     label = f"{SERVICE_PREFIX}.caffeinate"
