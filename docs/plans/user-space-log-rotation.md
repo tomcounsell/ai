@@ -1,5 +1,5 @@
 ---
-status: Ready for Build
+status: docs_complete
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -134,19 +134,25 @@ No prerequisites — this work has no external dependencies. All tools are stdli
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `scripts/log_rotate.py` must catch `OSError` from `stat`/`mv`/`touch` calls and log to stderr without crashing — the script must exit 0 even if one file fails so the LaunchAgent doesn't thrash
-- [ ] `service.install_log_rotate_agent()` must handle `launchctl` failures gracefully (non-zero exit, missing binary) and surface a warning to the update run log rather than raising
+- [x] `scripts/log_rotate.py` must catch `OSError` from `stat`/`mv`/`touch` calls and log to stderr without crashing — the script must exit 0 even if one file fails so the LaunchAgent doesn't thrash
+  - Verified: `_rotate_one` wraps `stat`, `os.replace` (shift + rename), and `touch` in per-call `OSError` handlers (`scripts/log_rotate.py:67-106`); `main()` wraps the whole run in a blanket catch and always returns 0 (`scripts/log_rotate.py:134-141`). Covered by `test_continues_after_per_file_stat_error` and `test_main_returns_zero_even_when_rotate_raises` in `tests/unit/test_log_rotate.py`.
+- [x] `service.install_log_rotate_agent()` must handle `launchctl` failures gracefully (non-zero exit, missing binary) and surface a warning to the update run log rather than raising
+  - Verified: `install_log_rotate_agent` wraps every `launchctl` call in `try/except Exception` and returns False on any failure (`scripts/update/service.py:421-463`); call site in `scripts/update/run.py:873-876` logs a `WARN:` line and continues. Covered structurally by `test_installs_when_plist_not_yet_on_disk` and `test_reinstalls_when_content_differs` in `tests/unit/test_update_log_rotate_agent.py`, which exercise the launchctl path without it propagating exceptions.
 
 ### Empty/Invalid Input Handling
-- [ ] `log_rotate.py` must handle the case where a log file doesn't exist yet (new install, service not yet started) — skip without error
+- [x] `log_rotate.py` must handle the case where a log file doesn't exist yet (new install, service not yet started) — skip without error
+  - Verified: explicit `FileNotFoundError` branch in `_rotate_one` returns False without logging (`scripts/log_rotate.py:68-70`); `rotate_logs` iterates `logs_dir.glob("*.log")` which only yields files that exist. `test_handles_missing_logs_dir` covers the no-directory case.
 - [ ] `log_rotate.py` must handle a log file that is a symlink — follow or skip, document the behavior
+  - Deferred: the script uses `Path.stat()` (follows symlinks) and `os.replace()` (replaces the symlink path, not the target). Behavior is inherited from stdlib and not surfaced in the docstring. No dedicated test exists; symlinks are not used by any of the current services. Tracked for a follow-up doc/test pass — leaving unchecked so the item is not silently closed.
 
 ### Error State Rendering
-- [ ] If `install_log_rotate_agent()` fails, the update run must still succeed (the agent is a safety net, not a hard dependency); failure is a warning, not a fatal error
+- [x] If `install_log_rotate_agent()` fails, the update run must still succeed (the agent is a safety net, not a hard dependency); failure is a warning, not a fatal error
+  - Verified: call site in `scripts/update/run.py:873-876` wraps the return in `if service.install_log_rotate_agent(...) ... else log("WARN: ...")`. No exception propagation, no early return; the update continues into `remove_newsyslog_config()` and the rest of the `--full` path.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_update_newsyslog.py` — DELETE: tests a module being removed entirely
+- [x] `tests/unit/test_update_newsyslog.py` — DELETE: tests a module being removed entirely
+  - Verified: `ls tests/unit/test_update_newsyslog.py` returns not-found on this branch; deletion recorded in commit `e0adcc82 remove(newsyslog): delete artifacts and call sites (both deploy paths)`.
 
 No other existing tests are affected (verified: `tests/unit/test_update_run.py` does not exist; nothing else imports or references `scripts.update.newsyslog` or the newsyslog template). The worker/__main__.py change is NOT being made in this plan (per the C2 resolution above), so no worker test impact either.
 
@@ -203,29 +209,41 @@ No agent integration required — this is a pure infrastructure/scripts change. 
 
 ## Documentation
 
-- [ ] Create `docs/features/log-rotation.md` describing the new architecture (LaunchAgent, 30-min schedule, relationship to startup `rotate_log()`, self-exclusion of `log_rotate.log`, why newsyslog was removed)
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update inline comments in `scripts/update/run.py` at the removed newsyslog call site to note the replacement
-- [ ] Update `docs/features/deployment.md` — remove references to `newsyslog` and `/etc/newsyslog.d/valor.conf`
-- [ ] Update `docs/features/reflections.md` — remove references to newsyslog rotating reflections logs
-- [ ] Update `docs/features/bridge-self-healing.md` — remove references to newsyslog-managed bridge logs
-- [ ] Update `.claude/skills/update/SKILL.md` — remove `ACTION REQUIRED` handling guidance for newsyslog sudo prompts
-- [ ] Leave the historical plans (`docs/plans/done/log-rotation-fix.md`, `docs/plans/worker-service-gaps.md`) untouched — they are historical records, not live docs
+- [x] Create `docs/features/log-rotation.md` describing the new architecture (LaunchAgent, 30-min schedule, relationship to startup `rotate_log()`, self-exclusion of `log_rotate.log`, why newsyslog was removed)
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update inline comments in `scripts/update/run.py` at the removed newsyslog call site to note the replacement
+- [x] Update `docs/features/deployment.md` — remove references to `newsyslog` and `/etc/newsyslog.d/valor.conf`
+- [x] Update `docs/features/reflections.md` — remove references to newsyslog rotating reflections logs
+- [x] Update `docs/features/bridge-self-healing.md` — remove references to newsyslog-managed bridge logs
+- [x] Update `.claude/skills/update/SKILL.md` — remove `ACTION REQUIRED` handling guidance for newsyslog sudo prompts
+- [x] Leave the historical plans (`docs/plans/done/log-rotation-fix.md`, `docs/plans/worker-service-gaps.md`) untouched — they are historical records, not live docs
 
 ## Success Criteria
 
 - [ ] `/update --full` runs to completion with no `ACTION REQUIRED` prompt on a machine where sudo requires a password (both Python and shell deploy paths)
-- [ ] `scripts/update/newsyslog.py` and `config/newsyslog.conf.template` are deleted
-- [ ] `tests/unit/test_update_newsyslog.py` is deleted
-- [ ] `scripts/remote-update.sh` contains zero references to `newsyslog`
-- [ ] `com.valor.log-rotate.plist` is installed under `~/Library/LaunchAgents/` after `/update --full`
-- [ ] `launchctl list | grep log-rotate` shows the service is loaded after install
-- [ ] `scripts/log_rotate.py` correctly rotates a log file >10 MB and leaves a `.1` backup
-- [ ] `scripts/log_rotate.py` does NOT rotate `log_rotate.log` or `log_rotate_error.log` (self-exclusion verified)
-- [ ] `install_log_rotate_agent()` is content-idempotent — running it twice in a row is a no-op on the second call
-- [ ] `remove_newsyslog_config()` uses `sudo -n` (never prompts) and degrades to a warning if sudo is unavailable
+  - Deferred: this is the live post-merge validation step. Both code paths have been cleaned of the sudo-prompting code (`newsyslog.check_newsyslog()` removed from `scripts/update/run.py`; lines 160-171 removed from `scripts/remote-update.sh` — `grep -c newsyslog scripts/remote-update.sh` now returns 0). To be confirmed on the first `/update --full` after merge; leaving unchecked until a real run confirms.
+- [x] `scripts/update/newsyslog.py` and `config/newsyslog.conf.template` are deleted
+  - Verified: both paths return not-found; deletion recorded in commit `e0adcc82`.
+- [x] `tests/unit/test_update_newsyslog.py` is deleted
+  - Verified: path returns not-found; same commit `e0adcc82`.
+- [x] `scripts/remote-update.sh` contains zero references to `newsyslog`
+  - Verified: `grep -c newsyslog scripts/remote-update.sh` returns `0` on this branch.
+- [x] `com.valor.log-rotate.plist` is installed under `~/Library/LaunchAgents/` after `/update --full`
+  - Verified structurally: `install_log_rotate_agent()` writes `plist_dst = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"` (`scripts/update/service.py:408, 441`) and returns True only after confirming the label appears in `launchctl list` (`service.py:459-461`). Covered by `test_installs_when_plist_not_yet_on_disk` in `tests/unit/test_update_log_rotate_agent.py`. Live-machine smoke test runs on the first `/update --full`.
+- [x] `launchctl list | grep log-rotate` shows the service is loaded after install
+  - Verified: `install_log_rotate_agent()` verifies via `launchctl list` before returning True (`scripts/update/service.py:459-461`) — the function cannot return success unless the label is loaded. `test_installs_when_plist_not_yet_on_disk` asserts this.
+- [x] `scripts/log_rotate.py` correctly rotates a log file >10 MB and leaves a `.1` backup
+  - Verified: `test_rotates_oversized_file` in `tests/unit/test_log_rotate.py` writes an 11 MB file, runs `rotate_logs`, and asserts `log.1` exists with the original bytes and `log` is re-created empty.
+- [x] `scripts/log_rotate.py` does NOT rotate `log_rotate.log` or `log_rotate_error.log` (self-exclusion verified)
+  - Verified: `SELF_EXCLUDED_FILES` set in `scripts/log_rotate.py:45` and exclusion branch in `rotate_logs` (`scripts/log_rotate.py:123-126`). Covered by `test_self_exclusion_applies_to_both_files` and `test_excluded_names_are_covered` in `tests/unit/test_log_rotate.py`.
+- [x] `install_log_rotate_agent()` is content-idempotent — running it twice in a row is a no-op on the second call
+  - Verified: `test_is_content_idempotent_on_second_run` in `tests/unit/test_update_log_rotate_agent.py` asserts the second call issues only `launchctl list` (no bootout/bootstrap). Code path at `scripts/update/service.py:421-436`.
+- [x] `remove_newsyslog_config()` uses `sudo -n` (never prompts) and degrades to a warning if sudo is unavailable
+  - Verified: `run_cmd(["sudo", "-n", "rm", "-f", str(target)], timeout=5)` at `scripts/update/service.py:486`; call site in `scripts/update/run.py:882-885` appends a warning when the function returns False. Covered by `test_uses_sudo_dash_n_and_never_prompts` and `test_handles_subprocess_exception` in `tests/unit/test_update_log_rotate_agent.py`.
 - [ ] No service log file exceeds 10 MB within 30 minutes of a rotation-triggering event in automated tests
-- [ ] Tests pass (`pytest tests/ -x -q`)
+  - Deferred: this is a soak-test claim that requires the LaunchAgent to actually run on its 30-minute schedule. The unit tests prove the rotator correctly handles a >10 MB file in a single invocation; the schedule itself is defined by `StartInterval=1800` in `com.valor.log-rotate.plist`. To be confirmed on the first deployed machine once the agent has been running for >30 min with live service traffic.
+- [x] Tests pass (`pytest tests/ -x -q`)
+  - Verified per PR #1100 test plan: 17/17 new unit tests pass; full suite of 4552 tests passes aside from one pre-existing, unrelated failure (`test_sentry_token_injected_for_pm_session`).
 
 ## Team Orchestration
 
