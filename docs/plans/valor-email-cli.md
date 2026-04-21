@@ -268,29 +268,29 @@ $ valor-email threads
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `bridge/email_bridge.py::_record_history` — wrap in try/except; failures log `logger.warning` but MUST NOT break the poll loop. Test asserts `caplog` contains warning on Redis down.
-- [ ] `tools/valor_email.py::cmd_send` — Redis push failure prints to stderr with exit code 1; direct-SMTP fallback failure prints error with exit code 1. Tests simulate `redis.ConnectionError` and `smtplib.SMTPException`.
-- [ ] `bridge/email_relay.py::_drain_outbox` — SMTP failure triggers retry with backoff; after 3 attempts, routes to DLQ. Tests assert DLQ write on exhausted retries (mirror `test_email_bridge.py` DLQ pattern).
-- [ ] `tools/email_history/__init__.py::get_recent_emails` — Redis read failure returns `{"error": str}` dict; CLI prints the error with exit code 1.
+- [x] `bridge/email_bridge.py::_record_history` — wrap in try/except; failures log `logger.warning` but MUST NOT break the poll loop. Test asserts `caplog` contains warning on Redis down.
+- [x] `tools/valor_email.py::cmd_send` — Redis push failure prints to stderr with exit code 1; direct-SMTP fallback failure prints error with exit code 1. Tests simulate `redis.ConnectionError` and `smtplib.SMTPException`.
+- [x] `bridge/email_relay.py::_drain_outbox` — SMTP failure triggers retry with backoff; after 3 attempts, routes to DLQ. Tests assert DLQ write on exhausted retries (mirror `test_email_bridge.py` DLQ pattern).
+- [x] `tools/email_history/__init__.py::get_recent_emails` — Redis read failure returns `{"error": str}` dict; CLI prints the error with exit code 1.
 
 ### Empty/Invalid Input Handling
-- [ ] `valor-email send` with no text AND no `--file` → error "Must provide a message or file" (mirror `valor-telegram`).
-- [ ] `valor-email read` with empty cache AND IMAP fallback disabled → prints "No messages found." exit 0.
-- [ ] `valor-email send --reply-to ""` → argparse rejects (min length 1 via custom type validator).
-- [ ] `parse_since("yesterday")` returns None → caller treats as no filter (same as `valor-telegram`).
-- [ ] `cmd_send` with empty body but a file attachment → valid (matches Telegram `--file` without caption pattern).
-- [ ] MIME assembly with empty body AND no attachments → reject at CLI layer before enqueue.
+- [x] `valor-email send` with no text AND no `--file` → error "Must provide a message or file" (mirror `valor-telegram`).
+- [x] `valor-email read` with empty cache AND IMAP fallback disabled → prints "No messages found." exit 0.
+- [x] `valor-email send --reply-to ""` → argparse rejects (min length 1 via custom type validator).
+- [x] `parse_since("yesterday")` returns None → caller treats as no filter (same as `valor-telegram`).
+- [x] `cmd_send` with empty body but a file attachment → valid (matches Telegram `--file` without caption pattern).
+- [x] MIME assembly with empty body AND no attachments → reject at CLI layer before enqueue.
 
 ### Error State Rendering
-- [ ] CLI error output goes to stderr; successful output goes to stdout. `--json` always goes to stdout.
-- [ ] Dead-letter rendering: when the relay DLQs a CLI-originated send, the user has no direct feedback path (the CLI exited after enqueue). Surface this via `./scripts/valor-service.sh email-dead-letter list` — existing surface, no new UX needed. Document in CLI help epilog.
+- [x] CLI error output goes to stderr; successful output goes to stdout. `--json` always goes to stdout.
+- [x] Dead-letter rendering: when the relay DLQs a CLI-originated send, the user has no direct feedback path (the CLI exited after enqueue). Surface this via `./scripts/valor-service.sh email-dead-letter list` — existing surface, no new UX needed. Document in CLI help epilog.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_email_bridge.py::test_build_reply_*` — UPDATE: refactored `_build_reply` signature. Existing assertions still valid for no-attachment path; add new cases for attachment path.
-- [ ] `tests/unit/test_email_bridge.py::TestEmailOutputHandler::test_send_*` — UPDATE: `_build_reply_mime` is now module-level; adjust imports if tests patched the method.
-- [ ] `tests/integration/test_email_bridge.py::test_email_inbox_loop_*` — UPDATE: add assertion that `email:history:INBOX` receives writes after a processed inbound.
-- [ ] `tests/unit/test_send_message.py` — UPDATE: `_send_via_email` now writes the unified payload (`body` not `text`; includes `subject`, `from_addr`, `attachments`, etc.). Existing assertions on the legacy shape must be replaced.
+- [x] `tests/unit/test_email_bridge.py::test_build_reply_*` — UPDATE: refactored `_build_reply` signature. Existing assertions still valid for no-attachment path; add new cases for attachment path.
+- [x] `tests/unit/test_email_bridge.py::TestEmailOutputHandler::test_send_*` — UPDATE: `_build_reply_mime` is now module-level; adjust imports if tests patched the method.
+- [x] `tests/integration/test_email_bridge.py::test_email_inbox_loop_*` — UPDATE: add assertion that `email:history:INBOX` receives writes after a processed inbound.
+- [x] `tests/unit/test_send_message.py` — UPDATE: `_send_via_email` now writes the unified payload (`body` not `text`; includes `subject`, `from_addr`, `attachments`, etc.). Existing assertions on the legacy shape must be replaced.
 
 No other existing tests affected. New test files:
 - `tests/unit/test_valor_email.py` — mirror `test_valor_telegram.py` structure; mock Redis/IMAP/SMTP.
@@ -400,42 +400,42 @@ Update skill (`scripts/remote-update.sh` + `.claude/skills/update/SKILL.md`) nee
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/email-bridge.md` — append a "### CLI (`valor-email`)" section covering read/send/threads usage and the relay architecture. Add the `bridge/email_relay.py` role to the Key Modules table.
-- [ ] Add entry for `valor-email` in `docs/features/README.md` index table under the email-bridge feature row (or create a new row if cleaner).
+- [x] Update `docs/features/email-bridge.md` — append a "### CLI (`valor-email`)" section covering read/send/threads usage and the relay architecture. Add the `bridge/email_relay.py` role to the Key Modules table.
+- [x] Add entry for `valor-email` in `docs/features/README.md` index table under the email-bridge feature row (or create a new row if cleaner).
 
 ### Inline Documentation
-- [ ] Docstrings on `tools/valor_email.py` module, `cmd_read`, `cmd_send`, `cmd_threads`, and `main`.
-- [ ] Docstring on `bridge/email_relay.py` module explaining the drain-retry-DLQ contract and the invariant that `EmailOutputHandler.send()` does NOT write to the outbox.
-- [ ] Docstrings on `tools/email_history/` public helpers.
-- [ ] Inline comment in `_email_inbox_loop` explaining the write-through to the history cache.
+- [x] Docstrings on `tools/valor_email.py` module, `cmd_read`, `cmd_send`, `cmd_threads`, and `main`.
+- [x] Docstring on `bridge/email_relay.py` module explaining the drain-retry-DLQ contract and the invariant that `EmailOutputHandler.send()` does NOT write to the outbox.
+- [x] Docstrings on `tools/email_history/` public helpers.
+- [x] Inline comment in `_email_inbox_loop` explaining the write-through to the history cache.
 
 ### Quick-Reference Tables
-- [ ] Update `CLAUDE.md` "Reading Telegram Messages" section or add a new "Reading Email" section with `valor-email` examples.
-- [ ] Update `CLAUDE.md` Quick Commands table if email-start already lists relay start semantics; otherwise note it runs within the email bridge process.
+- [x] Update `CLAUDE.md` "Reading Telegram Messages" section or add a new "Reading Email" section with `valor-email` examples.
+- [x] Update `CLAUDE.md` Quick Commands table if email-start already lists relay start semantics; otherwise note it runs within the email bridge process.
 
 ## Success Criteria
 
-- [ ] `valor-email read --limit 5` outputs the 5 most recent emails from the history cache (or falls back to IMAP on cache miss, with `readonly=True` and sender filter applied).
-- [ ] `valor-email read --search "test"` filters correctly.
-- [ ] `valor-email read --since "2 hours ago"` filters correctly.
-- [ ] `valor-email send --to addr@x --subject "Sub" "Body"` enqueues the unified payload shape and the relay drains it via mocked SMTP.
-- [ ] `valor-email send --to addr --file ./path.txt "Caption"` composes a `MIMEMultipart` with the file attached; mocked SMTP receives the payload with correct `Content-Disposition`.
-- [ ] `valor-email send --reply-to "<abc@host>" "Body"` produces `In-Reply-To: <abc@host>` and `References: <abc@host>` in the mocked SMTP message.
-- [ ] `valor-email threads` lists threads from the `email:threads` hash.
-- [ ] `--json` flag works on all three subcommands.
-- [ ] `pyproject.toml` registers `valor-email`; `pip install -e .` makes the CLI available on `$PATH`.
-- [ ] Relay atomic-LPOP behavior verified: on SMTP failure, the payload is re-pushed with `_relay_attempts` incremented; after 3 failures, DLQ receives it and the queue is empty.
-- [ ] Relay accepts legacy `{session_id, to, text, timestamp}` payload (text→body normalization test).
-- [ ] `tools/send_message.py::_send_via_email` writes the unified shape (existing tests updated).
-- [ ] `email:relay:last_poll_ts` heartbeat key is written once per poll cycle with 5-minute TTL.
-- [ ] `email:history:*` orphan blobs are actively deleted when ZREMRANGEBYRANK evicts (no leak beyond 7-day TTL).
-- [ ] Session-id suffix uses `secrets.token_hex(4)` (not 2).
-- [ ] All new and updated tests pass: `pytest tests/unit/test_valor_email.py tests/unit/test_email_relay.py tests/unit/test_email_history.py tests/unit/test_send_message.py tests/integration/test_valor_email.py -v`.
-- [ ] Existing email-bridge tests still pass: `pytest tests/unit/test_email_bridge.py tests/integration/test_email_bridge.py -v`.
-- [ ] `docs/features/email-bridge.md` has a CLI section; `docs/features/README.md` updated; `CLAUDE.md` has `valor-email` examples.
-- [ ] `ruff check` and `ruff format --check` pass on all new files.
-- [ ] Parsed-header regression test asserts `_build_reply_mime(attachments=None, ...)` produces semantically equivalent MIME to the old `_build_reply(...)` (From/To/Subject/In-Reply-To/References/Content-Type/Content-Transfer-Encoding + payload bytes; excludes Date/Message-ID).
-- [ ] Live-environment smoke test passes when SMTP/IMAP/Redis are configured, or is logged as skipped.
+- [x] `valor-email read --limit 5` outputs the 5 most recent emails from the history cache (or falls back to IMAP on cache miss, with `readonly=True` and sender filter applied).
+- [x] `valor-email read --search "test"` filters correctly.
+- [x] `valor-email read --since "2 hours ago"` filters correctly.
+- [x] `valor-email send --to addr@x --subject "Sub" "Body"` enqueues the unified payload shape and the relay drains it via mocked SMTP.
+- [x] `valor-email send --to addr --file ./path.txt "Caption"` composes a `MIMEMultipart` with the file attached; mocked SMTP receives the payload with correct `Content-Disposition`.
+- [x] `valor-email send --reply-to "<abc@host>" "Body"` produces `In-Reply-To: <abc@host>` and `References: <abc@host>` in the mocked SMTP message.
+- [x] `valor-email threads` lists threads from the `email:threads` hash.
+- [x] `--json` flag works on all three subcommands.
+- [x] `pyproject.toml` registers `valor-email`; `pip install -e .` makes the CLI available on `$PATH`.
+- [x] Relay atomic-LPOP behavior verified: on SMTP failure, the payload is re-pushed with `_relay_attempts` incremented; after 3 failures, DLQ receives it and the queue is empty.
+- [x] Relay accepts legacy `{session_id, to, text, timestamp}` payload (text→body normalization test).
+- [x] `tools/send_message.py::_send_via_email` writes the unified shape (existing tests updated).
+- [x] `email:relay:last_poll_ts` heartbeat key is written once per poll cycle with 5-minute TTL.
+- [x] `email:history:*` orphan blobs are actively deleted when ZREMRANGEBYRANK evicts (no leak beyond 7-day TTL).
+- [x] Session-id suffix uses `secrets.token_hex(4)` (not 2).
+- [x] All new and updated tests pass: `pytest tests/unit/test_valor_email.py tests/unit/test_email_relay.py tests/unit/test_email_history.py tests/unit/test_send_message.py tests/integration/test_valor_email.py -v`.
+- [x] Existing email-bridge tests still pass: `pytest tests/unit/test_email_bridge.py tests/integration/test_email_bridge.py -v`.
+- [x] `docs/features/email-bridge.md` has a CLI section; `docs/features/README.md` updated; `CLAUDE.md` has `valor-email` examples.
+- [x] `ruff check` and `ruff format --check` pass on all new files.
+- [x] Parsed-header regression test asserts `_build_reply_mime(attachments=None, ...)` produces semantically equivalent MIME to the old `_build_reply(...)` (From/To/Subject/In-Reply-To/References/Content-Type/Content-Transfer-Encoding + payload bytes; excludes Date/Message-ID).
+- [ ] Live-environment smoke test passes when SMTP/IMAP/Redis are configured, or is logged as skipped. *(Out of scope: no automated live smoke test was added — integration tests cover the same surface area via mocked SMTP. Live verification is a manual/operational check.)*
 
 ## Team Orchestration
 
