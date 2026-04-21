@@ -141,7 +141,20 @@ def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
 
 
 def _send_via_email(text: str) -> None:
-    """Route to the email outbox for SMTP delivery."""
+    """Route to the email outbox for SMTP delivery via ``bridge/email_relay.py``.
+
+    Writes the unified outbox payload shape (see ``bridge/email_relay.py``
+    docstring) consumed by the relay. The relay accepts legacy ``text`` as a
+    synonym for ``body`` for one transitional release, but this writer always
+    emits ``body`` so the transitional path is unused.
+
+    Required env:
+        VALOR_SESSION_ID: session ID that originated this send.
+        EMAIL_REPLY_TO:   recipient address (sender of the original inbound).
+        EMAIL_SUBJECT:    optional; defaults to "(no subject)".
+        EMAIL_IN_REPLY_TO: optional RFC-2822 Message-ID for threading.
+        SMTP_USER:        optional from-address override (relay defaults to SMTP_USER).
+    """
     session_id = os.environ.get("VALOR_SESSION_ID")
     reply_to_addr = os.environ.get("EMAIL_REPLY_TO")
     if not session_id:
@@ -151,10 +164,18 @@ def _send_via_email(text: str) -> None:
         print("Error: EMAIL_REPLY_TO not set.", file=sys.stderr)
         sys.exit(1)
 
+    in_reply_to = os.environ.get("EMAIL_IN_REPLY_TO") or None
+    subject = os.environ.get("EMAIL_SUBJECT") or "(no subject)"
+
     payload = {
         "session_id": session_id,
         "to": reply_to_addr,
-        "text": text,
+        "subject": subject,
+        "body": text,
+        "attachments": [],
+        "in_reply_to": in_reply_to,
+        "references": in_reply_to,
+        "from_addr": os.environ.get("SMTP_USER", ""),
         "timestamp": time.time(),
     }
     queue_key = f"email:outbox:{session_id}"

@@ -17,13 +17,19 @@ from __future__ import annotations
 import asyncio
 import email as email_lib
 import email.header
+import email.mime.base
+import email.mime.multipart
 import email.mime.text
 import email.utils
 import imaplib
+import json
 import logging
+import mimetypes
 import os
 import smtplib
 import time
+from email import encoders
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -193,6 +199,215 @@ def parse_email_message(raw_bytes: bytes) -> dict | None:
 
 
 # =============================================================================
+# MIME assembly (module-level helper so the relay and the handler share one path)
+# =============================================================================
+
+
+def _build_reply_mime(
+    to_addr: str,
+    subject: str,
+    body: str,
+    in_reply_to: str | None,
+    references: str | None,
+    from_addr: str,
+    attachments: list[Path] | None = None,
+) -> email.mime.text.MIMEText | email.mime.multipart.MIMEMultipart:
+    """Compose an SMTP reply message, optionally with attachments.
+
+    When ``attachments`` is None or empty, returns a plain ``MIMEText`` object —
+    the exact shape of the pre-CLI ``_build_reply`` method (preserved for
+    backward-compatible worker behavior; see the parsed-header regression test).
+
+    When ``attachments`` are provided, returns a ``MIMEMultipart("mixed")`` with
+    the body as the first part followed by one ``MIMEBase`` part per file.
+    Content-Type is guessed via ``mimetypes.guess_type`` and falls back to
+    ``application/octet-stream``.
+
+    Args:
+        to_addr: Recipient email address.
+        subject: Original subject; ``Re:`` is prepended if not already present.
+        body: Plain text body (utf-8).
+        in_reply_to: RFC-2822 Message-ID of the message being replied to.
+        references: RFC-2822 References chain (typically equal to in_reply_to).
+        from_addr: Sender email address.
+        attachments: Optional list of filesystem paths to attach.
+
+    Returns:
+        MIMEText when no attachments; MIMEMultipart when attachments are present.
+    """
+    text_part = email.mime.text.MIMEText(body, "plain", "utf-8")
+
+    if not attachments:
+        msg: email.mime.text.MIMEText | email.mime.multipart.MIMEMultipart = text_part
+    else:
+        msg = email.mime.multipart.MIMEMultipart("mixed")
+        msg.attach(text_part)
+        for path in attachments:
+            p = Path(path)
+            ctype, encoding = mimetypes.guess_type(str(p))
+            if ctype is None or encoding is not None:
+                ctype = "application/octet-stream"
+            maintype, _, subtype = ctype.partition("/")
+            with p.open("rb") as fh:
+                part = email.mime.base.MIMEBase(maintype, subtype or "octet-stream")
+                part.set_payload(fh.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                f'attachment; filename="{p.name}"',
+            )
+            msg.attach(part)
+
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    if subject and not subject.lower().startswith("re:"):
+        msg["Subject"] = f"Re: {subject}"
+    else:
+        msg["Subject"] = subject or "Re: (no subject)"
+    msg["Message-ID"] = email.utils.make_msgid(domain=from_addr.split("@")[-1])
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
+    msg["Date"] = email.utils.formatdate(localtime=True)
+    return msg
+
+
+# =============================================================================
+# History cache writers (Race 1: JSON blob BEFORE ZADD, pipelined for atomicity)
+# =============================================================================
+
+# Redis key schema for the CLI history cache
+HISTORY_SET_KEY = "email:history:{mailbox}"
+HISTORY_MSG_KEY = "email:history:msg:{message_id}"
+HISTORY_THREADS_KEY = "email:threads"
+
+# Cap on entries per mailbox sorted set (newest retained)
+HISTORY_MAX_ENTRIES = 500
+
+# TTL on individual message JSON blobs (7 days)
+HISTORY_MSG_TTL = 7 * 24 * 3600
+
+
+def _record_history(parsed: dict, mailbox: str = "INBOX") -> None:
+    """Write a parsed inbound email to the Redis history cache.
+
+    Writes the per-message JSON blob FIRST then ZADDs the sorted set — readers
+    that race with the writer see the set entry only after the blob is present,
+    modulo Redis pipeline atomicity (see Race 1 in the plan).
+
+    After the write, trims the sorted set to ``HISTORY_MAX_ENTRIES`` newest
+    entries. Evicted Message-IDs are actively DELed from the per-msg namespace
+    in the same pipeline to bound orphan-blob leaks (C6 in the critique table).
+
+    Failures are logged as warnings and do not propagate — the poll loop must
+    never break because of a cache write error.
+    """
+    try:
+        message_id = parsed.get("message_id") or ""
+        if not message_id:
+            return  # no stable key to hang the blob on
+        ts = float(parsed.get("timestamp") or time.time())
+        blob = json.dumps(
+            {
+                "from_addr": parsed.get("from_addr", ""),
+                "from_raw": parsed.get("from_raw", ""),
+                "subject": parsed.get("subject", ""),
+                "body": parsed.get("body", ""),
+                "timestamp": ts,
+                "message_id": message_id,
+                "in_reply_to": parsed.get("in_reply_to", ""),
+            }
+        )
+
+        set_key = HISTORY_SET_KEY.format(mailbox=mailbox)
+        msg_key = HISTORY_MSG_KEY.format(message_id=message_id)
+
+        r = _get_redis()
+        # Phase 1: blob then ZADD in a pipeline (blob committed first on the wire)
+        pipe = r.pipeline()
+        pipe.set(msg_key, blob, ex=HISTORY_MSG_TTL)
+        pipe.zadd(set_key, {message_id: ts})
+        pipe.execute()
+
+        # Phase 2: if over the cap, capture victims then DEL blobs + trim the set
+        # atomically. ZRANGE 0 -(HISTORY_MAX_ENTRIES+1) selects the oldest over the cap.
+        size = r.zcard(set_key)
+        if size > HISTORY_MAX_ENTRIES:
+            overflow = size - HISTORY_MAX_ENTRIES
+            victims = r.zrange(set_key, 0, overflow - 1)
+            if victims:
+                pipe = r.pipeline()
+                for vmsgid in victims:
+                    pipe.delete(HISTORY_MSG_KEY.format(message_id=vmsgid))
+                pipe.zremrangebyrank(set_key, 0, overflow - 1)
+                pipe.execute()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[email] _record_history failed: {e}")
+
+
+def _record_thread(parsed: dict) -> None:
+    """Update the ``email:threads`` hash for the CLI threads listing.
+
+    Thread root is approximated as the ``in_reply_to`` chain head; when a new
+    message reveals an earlier root than we'd stored, we re-key the entry.
+    Drift is accepted for v1 — the hash is a best-effort navigation aid.
+
+    Failures are logged as warnings.
+    """
+    try:
+        message_id = parsed.get("message_id") or ""
+        if not message_id:
+            return
+        in_reply_to = (parsed.get("in_reply_to") or "").strip()
+        subject = parsed.get("subject", "") or ""
+        ts = float(parsed.get("timestamp") or time.time())
+        from_addr = parsed.get("from_addr", "") or ""
+
+        # The root is the message at the end of the chain. Without a full
+        # server-side traversal, approximate: if we have an in_reply_to, that's
+        # a better root candidate than the current message. Walk one link via
+        # Redis when possible.
+        root = in_reply_to or message_id
+        if in_reply_to:
+            try:
+                r = _get_redis()
+                existing = r.hget(HISTORY_THREADS_KEY, in_reply_to)
+                if existing:
+                    try:
+                        data = json.loads(existing)
+                        candidate = data.get("root") or in_reply_to
+                        root = candidate
+                    except (json.JSONDecodeError, TypeError):
+                        root = in_reply_to
+            except Exception:
+                root = in_reply_to
+
+        r = _get_redis()
+        existing_raw = r.hget(HISTORY_THREADS_KEY, root)
+        if existing_raw:
+            try:
+                data = json.loads(existing_raw)
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+        else:
+            data = {}
+
+        data["root"] = root
+        data["subject"] = data.get("subject") or subject
+        data["message_count"] = int(data.get("message_count") or 0) + 1
+        data["last_ts"] = max(float(data.get("last_ts") or 0.0), ts)
+        participants = set(data.get("participants") or [])
+        if from_addr:
+            participants.add(from_addr)
+        data["participants"] = sorted(participants)
+
+        r.hset(HISTORY_THREADS_KEY, root, json.dumps(data))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[email] _record_thread failed: {e}")
+
+
+# =============================================================================
 # EmailOutputHandler
 # =============================================================================
 
@@ -240,23 +455,28 @@ class EmailOutputHandler:
         references: str | None,
         from_addr: str,
     ) -> email.mime.text.MIMEText:
-        """Compose an SMTP reply message."""
-        msg = email.mime.text.MIMEText(body, "plain", "utf-8")
-        msg["From"] = from_addr
-        msg["To"] = to_addr
-        if subject and not subject.lower().startswith("re:"):
-            msg["Subject"] = f"Re: {subject}"
-        else:
-            msg["Subject"] = subject or "Re: (no subject)"
-        msg["Message-ID"] = email.utils.make_msgid(domain=from_addr.split("@")[-1])
-        if in_reply_to:
-            msg["In-Reply-To"] = in_reply_to
-        if references:
-            msg["References"] = references
-        msg["Date"] = email.utils.formatdate(localtime=True)
-        return msg
+        """Compose an SMTP reply message.
 
-    def _send_smtp(self, to_addr: str, mime_msg: email.mime.text.MIMEText) -> None:
+        Thin wrapper around the module-level ``_build_reply_mime`` helper.
+        Kept as an instance method so existing tests that patch
+        ``EmailOutputHandler._build_reply`` continue to work. Always returns
+        a ``MIMEText`` (no attachments in the worker-reply path).
+        """
+        return _build_reply_mime(
+            to_addr=to_addr,
+            subject=subject,
+            body=body,
+            in_reply_to=in_reply_to,
+            references=references,
+            from_addr=from_addr,
+            attachments=None,
+        )
+
+    def _send_smtp(
+        self,
+        to_addr: str,
+        mime_msg: email.mime.text.MIMEText | email.mime.multipart.MIMEMultipart,
+    ) -> None:
         """Send via SMTP (synchronous, run in thread executor)."""
         cfg = self._smtp_config
         if not cfg:
@@ -613,6 +833,11 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
                     parsed = parse_email_message(raw_bytes)
                     if parsed is None:
                         continue
+                    # Write-through to the history cache BEFORE enqueueing the
+                    # AgentSession so the CLI can observe the message even when
+                    # routing skips session creation. Failures are logged only.
+                    _record_history(parsed)
+                    _record_thread(parsed)
                     try:
                         await _process_inbound_email(parsed, config)
                     except Exception as e:
@@ -688,7 +913,15 @@ async def run_email_bridge() -> None:
         f"domains={len(_routing_module.EMAIL_DOMAIN_TO_PROJECT)}"
     )
 
-    await _email_inbox_loop(imap_config, config)
+    # Run IMAP poll loop and the email outbox relay concurrently. The relay is
+    # a cheap 100 ms polling loop and shares the same event loop so there is no
+    # additional process to supervise. See docs/plans/valor-email-cli.md Task 2.
+    from bridge.email_relay import run_email_relay
+
+    await asyncio.gather(
+        _email_inbox_loop(imap_config, config),
+        run_email_relay(),
+    )
 
 
 def main() -> None:

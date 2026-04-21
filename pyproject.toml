@@ -46,6 +46,7 @@ dev = [
 
 [project.scripts]
 valor-telegram = "tools.valor_telegram:main"
+valor-email = "tools.valor_email:main"
 valor-calendar = "tools.valor_calendar:main"
 valor-image-gen = "tools.image_gen:main"
 valor-selfie = "tools.selfie:main"
