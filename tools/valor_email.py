@@ -63,6 +63,25 @@ def format_timestamp(ts: str | None) -> str:
         return ts[:16] if len(ts) > 16 else ts
 
 
+def _msg_ts(msg: dict) -> float | None:
+    """Extract a unix timestamp from a history-cache message dict.
+
+    Cache blobs render ``timestamp`` as an ISO 8601 string; convert it back to
+    a float for comparison with ``since_ts`` in the CLI filter layer. Returns
+    None when the timestamp is missing or unparseable — such messages are kept
+    rather than dropped, since we cannot prove they violate ``--since``.
+    """
+    ts = msg.get("timestamp")
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 def _normalize_msgid(raw: str) -> str:
     """Normalize a Message-ID to angle-bracketed form.
 
@@ -218,7 +237,12 @@ def cmd_read(args: argparse.Namespace) -> int:
     since_ts = since_dt.timestamp() if since_dt else None
 
     if args.search:
-        # Search mode uses a broader time window by default
+        # search_history's max_age_days is a coarse zrange floor in whole days;
+        # we intentionally widen it to at least 1 day here so any sub-day
+        # --since value (e.g. "2 hours ago") still yields a non-empty candidate
+        # set. The caller-provided --since is then enforced strictly below by
+        # post-filtering against since_ts, so the widened query never leaks
+        # messages older than the user asked for.
         days = 7
         if since_dt:
             age = datetime.now(since_dt.tzinfo) - since_dt
@@ -241,6 +265,12 @@ def cmd_read(args: argparse.Namespace) -> int:
         return 1
 
     messages = result.get("messages") or result.get("results") or []
+
+    # Enforce --since strictly at the CLI layer — search_history's max_age_days
+    # is intentionally coarser than the user's since_ts (see comment above),
+    # so we drop any message older than since_ts before rendering.
+    if since_ts is not None and messages:
+        messages = [m for m in messages if _msg_ts(m) is None or _msg_ts(m) >= since_ts]
 
     # Fallback to IMAP if cache is empty
     if not messages:

@@ -26,6 +26,10 @@ Redis queue contract:
     read for one transitional release. The queue had no consumer before this
     change so in-flight entries are unlikely but tolerated.
 
+    FIXME(#1095): Delete the ``text`` -> ``body`` compat shim (see
+    ``_normalize_payload``) and the associated unit test one release after
+    PR #1094 merges. Tracked in https://github.com/tomcounsell/ai/issues/1095.
+
 Liveness:
     Writes ``email:relay:last_poll_ts = time.time()`` with a 5-minute TTL once
     per poll cycle. Operators probe via ``GET email:relay:last_poll_ts``.
@@ -81,7 +85,8 @@ def _normalize_payload(message: dict) -> dict | None:
     Returns None if the payload is unrecoverable (missing ``to`` or both
     ``body``/``text``). Callers should DLQ such payloads rather than retry.
     """
-    # Legacy compat: text -> body
+    # FIXME(#1095): Legacy text -> body compat shim — delete one release after
+    # PR #1094 merges. https://github.com/tomcounsell/ai/issues/1095
     if "body" not in message and "text" in message:
         message["body"] = message.pop("text")
 
@@ -193,6 +198,9 @@ async def _process_one(r, key: str, raw: str) -> tuple[bool, bool]:
             references=message.get("references"),
             from_addr=message.get("from_addr") or "",
             attachments=attachment_paths or None,
+            # Relay/CLI path: preserve caller-provided subject verbatim.
+            # ``"Re: "`` is only prepended when ``in_reply_to`` is truthy.
+            force_reply_prefix=False,
         )
     except Exception as e:
         logger.error(f"Email relay: MIME build failed: {e}")

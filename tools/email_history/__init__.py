@@ -66,6 +66,31 @@ def _hydrate(r, message_id: str) -> dict | None:
         return None
 
 
+def _hydrate_many(r, message_ids: list[str]) -> dict[str, dict]:
+    """Batch-load per-msg JSON blobs via a single MGET.
+
+    Returns a map of message_id -> parsed dict. Missing or malformed blobs are
+    silently skipped (Race 1 tolerant). Preserves the "fast local path" promise
+    so search stays O(1) round-trips regardless of candidate-set size.
+    """
+    if not message_ids:
+        return {}
+    keys = [HISTORY_MSG_KEY.format(message_id=mid) for mid in message_ids]
+    try:
+        raws = r.mget(keys)
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for mid, raw in zip(message_ids, raws):
+        if not raw:
+            continue
+        try:
+            out[mid] = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return out
+
+
 def get_recent_emails(
     mailbox: str = "INBOX",
     limit: int = 10,
@@ -164,9 +189,14 @@ def search_history(
     except Exception as e:
         return {"error": str(e)}
 
+    # Batch-hydrate all candidate blobs with a single MGET rather than per-id
+    # GETs — keeps the search path O(1) round-trips as the cache grows.
+    msgids = [mid for mid, _ts in ids_with_scores]
+    hydrated = _hydrate_many(r, msgids)
+
     results: list[dict] = []
     for msgid, ts in ids_with_scores:
-        data = _hydrate(r, msgid)
+        data = hydrated.get(msgid)
         if data is None:
             continue
         subject = data.get("subject", "") or ""

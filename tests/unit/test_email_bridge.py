@@ -338,18 +338,22 @@ class TestEmailOutputHandlerSend:
     async def test_send_builds_re_subject(self):
         """Subject is prefixed with 'Re: ' for worker-reply sends.
 
-        A worker reply carries an ``email_message_id`` in ``extra_context``,
-        which becomes the ``in_reply_to`` argument to ``_build_reply_mime``.
-        With ``in_reply_to`` truthy and the original subject lacking a leading
-        ``Re:``, the helper prepends ``Re:`` exactly once. PR #1094 tightened
-        the prefix to gate on ``in_reply_to`` (no silent ``Re:`` on
-        CLI-originated new sends).
+        Regression for PR #1094: even when the inbound email carried **no**
+        ``Message-ID`` header (so ``email_message_id`` is empty and
+        ``in_reply_to`` becomes ``None``), the worker-reply path must still
+        prepend ``"Re: "`` — this is the legacy contract that pre-dates
+        PR #1094 and the parsed-header regression test guarantees.
+        The ``force_reply_prefix=True`` default on ``_build_reply_mime``
+        preserves this behavior; the relay/CLI path passes ``False`` so
+        new sends are not silently mangled.
         """
         handler = EmailOutputHandler(smtp_config=self._make_smtp_config())
 
         session = MagicMock()
         session.extra_context = {
-            "email_message_id": "<inbound-123@example.com>",
+            # Intentionally empty: simulates an inbound email without a
+            # Message-ID header. The Re: prefix must still be applied.
+            "email_message_id": "",
             "email_subject": "Original Subject",
         }
         session.session_id = "test-session"
@@ -669,12 +673,21 @@ class TestBuildReplyMimeAttachments:
 
 
 class TestBuildReplyMimeSubjectPrefix:
-    """``Re:`` must only be prepended when this is an actual reply
-    (``in_reply_to`` is truthy). CLI-originated new sends must keep the
-    subject verbatim. Regression for PR #1094 blocker.
+    """Subject ``Re:`` prefix semantics for ``_build_reply_mime``.
+
+    Two callers have different contracts:
+
+    - Worker reply (``EmailOutputHandler._build_reply``) passes
+      ``force_reply_prefix=True`` so ``"Re:"`` is always prepended — the
+      pre-#1094 behavior, preserved even when the inbound email lacked a
+      ``Message-ID`` header.
+    - Relay / CLI new-send path passes ``force_reply_prefix=False`` so
+      caller-provided subjects are preserved verbatim; ``"Re:"`` is only
+      added when ``in_reply_to`` is truthy.
     """
 
     def test_new_send_subject_unchanged(self):
+        # CLI/relay contract: force_reply_prefix=False
         mime = _build_reply_mime(
             to_addr="alice@example.com",
             subject="New meeting",
@@ -682,6 +695,7 @@ class TestBuildReplyMimeSubjectPrefix:
             in_reply_to=None,
             references=None,
             from_addr="valor@example.com",
+            force_reply_prefix=False,
         )
         assert mime["Subject"] == "New meeting"
 
@@ -694,6 +708,7 @@ class TestBuildReplyMimeSubjectPrefix:
             in_reply_to=None,
             references=None,
             from_addr="valor@example.com",
+            force_reply_prefix=False,
         )
         assert mime["Subject"] == "Re: existing thread"
 
@@ -705,6 +720,7 @@ class TestBuildReplyMimeSubjectPrefix:
             in_reply_to="<orig@host>",
             references="<orig@host>",
             from_addr="valor@example.com",
+            force_reply_prefix=False,
         )
         assert mime["Subject"] == "Re: Meeting tomorrow"
 
@@ -716,10 +732,12 @@ class TestBuildReplyMimeSubjectPrefix:
             in_reply_to="<orig@host>",
             references="<orig@host>",
             from_addr="valor@example.com",
+            force_reply_prefix=False,
         )
         assert mime["Subject"] == "Re: Meeting tomorrow"
 
     def test_empty_subject_new_send_uses_no_subject_placeholder(self):
+        # CLI/relay contract: force_reply_prefix=False
         mime = _build_reply_mime(
             to_addr="alice@example.com",
             subject="",
@@ -727,6 +745,7 @@ class TestBuildReplyMimeSubjectPrefix:
             in_reply_to=None,
             references=None,
             from_addr="valor@example.com",
+            force_reply_prefix=False,
         )
         assert mime["Subject"] == "(no subject)"
 
@@ -738,8 +757,50 @@ class TestBuildReplyMimeSubjectPrefix:
             in_reply_to="<orig@host>",
             references="<orig@host>",
             from_addr="valor@example.com",
+            force_reply_prefix=False,
         )
         assert mime["Subject"] == "Re: (no subject)"
+
+    def test_worker_reply_path_always_prepends_re(self):
+        # Worker reply path (default force_reply_prefix=True) always prepends
+        # "Re:" even when in_reply_to is empty — preserves pre-#1094 behavior
+        # for inbound emails that lacked a Message-ID header.
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Meeting tomorrow",
+            body="ack",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+            # default force_reply_prefix=True
+        )
+        assert mime["Subject"] == "Re: Meeting tomorrow"
+
+    def test_worker_empty_subject_no_in_reply_to_still_re_no_subject(self):
+        # Worker reply path with empty subject and no in_reply_to still uses
+        # the "Re: (no subject)" placeholder.
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+        )
+        assert mime["Subject"] == "Re: (no subject)"
+
+    def test_worker_existing_re_prefix_not_doubled(self):
+        # Even with force_reply_prefix=True, an existing "Re:" prefix is
+        # not doubled (case-insensitive check).
+        mime = _build_reply_mime(
+            to_addr="alice@example.com",
+            subject="Re: Original",
+            body="Body",
+            in_reply_to=None,
+            references=None,
+            from_addr="valor@example.com",
+        )
+        assert mime["Subject"] == "Re: Original"
 
 
 # ---------------------------------------------------------------------------

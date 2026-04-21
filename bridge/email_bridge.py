@@ -211,6 +211,7 @@ def _build_reply_mime(
     references: str | None,
     from_addr: str,
     attachments: list[Path] | None = None,
+    force_reply_prefix: bool = True,
 ) -> email.mime.text.MIMEText | email.mime.multipart.MIMEMultipart:
     """Compose an SMTP reply message, optionally with attachments.
 
@@ -225,15 +226,21 @@ def _build_reply_mime(
 
     Args:
         to_addr: Recipient email address.
-        subject: Subject line. ``Re:`` is prepended only when ``in_reply_to``
-            is truthy and the subject does not already start with ``re:``;
-            new outbound messages (CLI sends with ``reply_to=None``) keep
-            the subject verbatim.
+        subject: Subject line. Whether ``Re:`` is prepended depends on
+            ``force_reply_prefix`` (see below).
         body: Plain text body (utf-8).
         in_reply_to: RFC-2822 Message-ID of the message being replied to.
         references: RFC-2822 References chain (typically equal to in_reply_to).
         from_addr: Sender email address.
         attachments: Optional list of filesystem paths to attach.
+        force_reply_prefix: When ``True`` (default), unconditionally prepend
+            ``"Re: "`` to the subject if it does not already start with
+            ``re:`` — this matches the legacy ``_build_reply`` semantics and
+            preserves the worker agent-reply path even when the inbound email
+            lacked a ``Message-ID`` header (so ``in_reply_to`` is empty).
+            When ``False``, only prepend ``"Re: "`` if ``in_reply_to`` is
+            truthy — this is the relay/CLI new-send path, where caller-provided
+            subjects must be preserved verbatim.
 
     Returns:
         MIMEText when no attachments; MIMEMultipart when attachments are present.
@@ -263,17 +270,22 @@ def _build_reply_mime(
 
     msg["From"] = from_addr
     msg["To"] = to_addr
-    # Only prepend "Re: " when this is an actual reply (in_reply_to is truthy).
-    # The worker reply path always passes in_reply_to; the CLI send path passes
-    # None for new outbound messages and must preserve the caller-provided
-    # subject verbatim. See PR #1094 review blocker.
+    # Subject prefixing depends on the caller:
+    # - Worker reply path (``EmailOutputHandler._build_reply``): passes
+    #   ``force_reply_prefix=True`` so the legacy semantics hold — ``"Re: "``
+    #   is always prepended (if not already present), even when the inbound
+    #   email lacked a ``Message-ID`` header and ``in_reply_to`` is empty.
+    # - Relay / CLI new-send path: passes ``force_reply_prefix=False`` so
+    #   caller-provided subjects are preserved verbatim; ``"Re: "`` is only
+    #   added when ``in_reply_to`` is truthy (a genuine reply).
+    _should_prefix = force_reply_prefix or bool(in_reply_to)
     if subject:
-        if in_reply_to and not subject.lower().startswith("re:"):
+        if _should_prefix and not subject.lower().startswith("re:"):
             msg["Subject"] = f"Re: {subject}"
         else:
             msg["Subject"] = subject
     else:
-        msg["Subject"] = "Re: (no subject)" if in_reply_to else "(no subject)"
+        msg["Subject"] = "Re: (no subject)" if _should_prefix else "(no subject)"
     msg["Message-ID"] = email.utils.make_msgid(domain=from_addr.split("@")[-1])
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
@@ -477,6 +489,11 @@ class EmailOutputHandler:
         Kept as an instance method so existing tests that patch
         ``EmailOutputHandler._build_reply`` continue to work. Always returns
         a ``MIMEText`` (no attachments in the worker-reply path).
+
+        Worker-reply semantics: passes ``force_reply_prefix=True`` so the
+        ``"Re: "`` prefix is added unconditionally (matching pre-#1094
+        behavior) even when the inbound email carried no ``Message-ID``
+        header and ``in_reply_to`` is empty.
         """
         return _build_reply_mime(
             to_addr=to_addr,
@@ -486,6 +503,7 @@ class EmailOutputHandler:
             references=references,
             from_addr=from_addr,
             attachments=None,
+            force_reply_prefix=True,
         )
 
     def _send_smtp(

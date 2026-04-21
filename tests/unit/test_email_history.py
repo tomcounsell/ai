@@ -133,6 +133,34 @@ class TestSearchHistory:
         ids = [m["message_id"] for m in result["results"]]
         assert ids == ["<recent@x>"]
 
+    def test_search_hydrates_via_single_mget(self, r, monkeypatch):
+        """Regression for PR #1094 review: search_history must batch-hydrate
+        via a single MGET rather than one GET per candidate msgid.
+        """
+        from tools.email_history import search_history
+
+        now = time.time()
+        for i in range(5):
+            _seed_message(r, f"<m-{i}@x>", now - i, subject=f"deploy-{i}", body="match")
+
+        # Count the GETs/MGETs executed on this Redis instance.
+        import tools.email_history as eh
+
+        original_mget = eh._hydrate_many
+        mget_calls: list[int] = []
+
+        def counting_mget(client, msgids):
+            mget_calls.append(len(msgids))
+            return original_mget(client, msgids)
+
+        monkeypatch.setattr(eh, "_hydrate_many", counting_mget)
+
+        result = search_history(query="match", max_results=10)
+        # All 5 candidates must be hydrated in exactly one batch.
+        assert len(mget_calls) == 1
+        assert mget_calls[0] == 5
+        assert len(result["results"]) == 5
+
 
 class TestListThreads:
     def test_empty_returns_empty(self, r):
