@@ -139,6 +139,8 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `slug` -- derives branch name, plan path, worktree
 - `issue_url`, `plan_url`, `pr_url` -- SDLC link URLs
 
+**Worker-restart persistence:** Local dev sessions (those with `session_id` starting `local`) persist across worker restarts; PM/teammate local sessions do not (issue #1092). Dev sessions are worker-owned — the PM spawned them via `valor-session create --role dev`, and no human CLI is holding the same `claude_session_uuid`, so startup recovery re-queues them to `pending` like bridge sessions. See the "Local session recovery is `session_type`-aware" section in [`bridge-worker-architecture.md`](bridge-worker-architecture.md) for the full rationale.
+
 ### Session Creation
 Sessions are created via factory methods:
 - `AgentSession.create_pm(...)` -- creates a PM session

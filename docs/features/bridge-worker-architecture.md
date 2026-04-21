@@ -289,12 +289,22 @@ Worker restarts (SIGTERM, crash, or explicit `./scripts/valor-service.sh worker-
 
 When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, step 3 of the startup sequence (`_recover_interrupted_agent_sessions_startup()`) detects stale `running` sessions and transitions them back to `pending` so they are retried by the new worker.
 
+### Local session recovery is `session_type`-aware (#1092)
+
+A session whose `session_id` starts with `local` was spawned from a local Claude Code CLI rather than the Telegram bridge. Startup recovery handles these by `session_type`:
+
+- **Local dev sessions** (`session_type == DEV`) are re-queued to `pending` just like bridge sessions. Dev sessions are worker-owned (spawned by the PM via `valor-session create --role dev`) with no human competitor holding the same `claude_session_uuid`. Completion flows through `_handle_dev_session_completion`, which steers the parent PM and never invokes a user-facing send callback — so the worker does not need to be able to deliver output to a chat. This lets long-running PM-orchestrated pipelines (build + test + review + docs + merge) survive scheduled worker restarts on skills-only machines.
+- **Local PM and Teammate sessions** continue to be abandoned. A live human CLI may hold the same `claude_session_uuid`; resuming would spawn a second harness competing at that UUID (the #986 hijack rationale).
+- **Legacy records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here.
+
 ### Summary
 
 | Session state at restart | What happens |
 |--------------------------|--------------|
 | `pending` | Left untouched; new worker picks it up naturally |
-| `running` | Stays `running`; new worker startup re-queues it to `pending` |
+| `running` (bridge) | Stays `running`; new worker startup re-queues it to `pending` |
+| `running` (local `dev`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
+| `running` (local `pm`/`teammate`/legacy) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
 
 ## Redis Communication Contract
