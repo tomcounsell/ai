@@ -79,6 +79,36 @@ No prior issue or PR attempted `valor-email`. `gh pr list --state merged --searc
 
 **Impact on plan:** The `_build_reply()` helper in `email_bridge.py` must be **refactored** (not replaced) to accept an optional `attachments: list[Path] | None` and switch to `MIMEMultipart` when any are present. Both the existing worker send path and the new CLI send path will use the upgraded helper. The drafter-at-handler integration must still receive the plain-text body, not a MIME object — i.e., text transformation happens **before** MIME assembly.
 
+## Spike Results
+
+### spike-1: `_build_reply` refactor — extend vs. parallel helper
+- **Assumption**: "`EmailOutputHandler._build_reply()` can be refactored in place without risking the existing agent-reply path."
+- **Method**: code-read (`bridge/email_bridge.py:234-258` `_build_reply`; `bridge/email_bridge.py:322-329` call site inside `EmailOutputHandler.send`)
+- **Finding**: `_build_reply` is called from exactly one site (`EmailOutputHandler.send()` at line 322) with fixed positional arguments. Adding an optional `attachments: list[Path] | None = None` keyword is backward compatible; existing callers omit it. The function's output type broadens from `MIMEText` to `MIMEText | MIMEMultipart`, which requires updating the `_send_smtp` signature to accept the union. No other consumers reference `_build_reply` directly.
+- **Confidence**: high
+- **Impact on plan**: Task 2 refactors `_build_reply` in place with the optional kwarg. The relay consumer in `bridge/email_relay.py` imports the same helper. Tests for the no-attachment path remain green; new tests cover the attachment path. Zero risk of drift between the worker-reply and CLI-send MIME assembly.
+
+### spike-2: History cache schema — single-blob vs. split-blob
+- **Assumption**: "The `email:history:msg:{msgid}` split-blob design (separate from the sorted set) is worth the 2-phase write complexity."
+- **Method**: code-read (`bridge/email_bridge.py:157-193` `parse_email_message` output shape) + design tradeoff analysis
+- **Finding**: Split-blob (sorted set of Message-IDs + per-msg string keys) enables independent TTL on individual messages and keeps the sorted set small (strings, not JSON blobs). It also allows `HDEL` on a single message without rewriting the whole set. The cost is two Redis round-trips per read: one `ZREVRANGE` then N `GET` lookups. For `--limit 10`, that's 11 round-trips vs. 1 for a combined-blob design. On localhost Redis (sub-millisecond) this is invisible; on a networked Redis it matters. Current deployment uses localhost Redis, so the split-blob design is acceptable for v1.
+- **Confidence**: high
+- **Impact on plan**: Keep the split-blob schema as written in the Solution section. Race 1 (poll-loop-write vs. CLI-read) is real under this design — the ZADD must happen AFTER the per-msg SET, and the CLI must tolerate a missing per-msg blob for a Message-ID that just appeared in the sorted set (retry once, then skip).
+
+### spike-3: `--reply-to` source UX (raw Message-ID vs. short-index)
+- **Assumption**: "Users need a short/ergonomic way to specify which message they're replying to, since raw RFC-822 Message-IDs like `<abc@host>` are unwieldy to type."
+- **Method**: design decision informed by `valor-telegram` parity and the `email:msgid:*` / `email:history:msg:*` key structure
+- **Finding**: Telegram's `--reply-to <int>` uses a stable, short integer. Email's equivalent is the `<Message-ID>` string. Supporting a short cache-index (e.g., `--reply-to 3` meaning "the 3rd most recent cached message") would introduce stateful CLI behavior that breaks under concurrent terminal sessions and across machines. For v1, accept the raw RFC-822 string only. Users who want the Message-ID run `valor-email read --json --limit 10` and copy the `message_id` field. Short-index support can be a v2 follow-up with a per-terminal state file if real demand emerges.
+- **Confidence**: medium (design call, not technical)
+- **Impact on plan**: `cmd_send` accepts `--reply-to "<Message-ID>"` only. No cache-index lookup. Documented in No-Gos. `CLAUDE.md` section shows a worked example with the Message-ID copied from a prior `read --json` invocation.
+
+### spike-4: Direct-IMAP fallback sender filter policy
+- **Assumption**: "The CLI's direct-IMAP fallback should show all INBOX messages, not just those from known senders, so developers can see mail that the bridge skipped."
+- **Method**: code-read (`bridge/routing.py:244-256` `get_known_email_search_terms` — see the docstring's multi-machine inbox-sharing comment) + `bridge/email_bridge.py:540-580` poll loop
+- **Finding**: The bridge deliberately filters polls by known senders because UNSEEN messages are shared across multiple machines — a message left UNSEEN here is meant for another machine to pick up. If the CLI fallback read were to open INBOX without `readonly=True` and without the FROM filter, it would (a) mark unrelated messages as SEEN and break multi-machine sharing, or (b) leak messages that belong to a different project's policy boundary. The CLI must both open IMAP with `readonly=True` AND filter FROM by `get_known_email_search_terms()`.
+- **Confidence**: high
+- **Impact on plan**: CLI direct-IMAP fallback wraps the IMAP session with `readonly=True` and reuses `_build_imap_sender_query(get_known_email_search_terms())`. A future "show all inbox messages" mode would need a dedicated flag and an explicit machine-ownership boundary; explicitly deferred and called out in No-Gos.
+
 ## Data Flow
 
 ```
