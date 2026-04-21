@@ -666,13 +666,12 @@ class TestBuildReplyMimeAttachments:
 
 
 @pytest.fixture
-def history_redis(monkeypatch):
-    """Pin REDIS_URL to db=1 and yield a decoded Redis client."""
+def history_redis(monkeypatch, redis_test_url):
+    """Pin REDIS_URL to the xdist-aware test db and yield a decoded Redis client."""
     import redis as _redis
 
-    url = "redis://localhost:6379/1"
-    monkeypatch.setenv("REDIS_URL", url)
-    client = _redis.Redis.from_url(url, decode_responses=True)
+    monkeypatch.setenv("REDIS_URL", redis_test_url)
+    client = _redis.Redis.from_url(redis_test_url, decode_responses=True)
     yield client
     client.close()
 

@@ -143,19 +143,27 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
         logger.error(f"Email relay: failed to write dead letter: {e}")
 
 
-async def _process_one(r, key: str, raw: str) -> bool:
-    """Process a single LPOPped payload. Returns True on success."""
+async def _process_one(r, key: str, raw: str) -> tuple[bool, bool]:
+    """Process a single LPOPped payload.
+
+    Returns a ``(ok, requeued)`` tuple where ``ok`` is True on successful SMTP
+    delivery and ``requeued`` is True when the payload was re-pushed onto
+    ``key`` for a later retry. Signalling the requeue explicitly avoids the
+    previous brittle ``llen`` before/after race — a concurrent writer RPUSHing
+    to the same key between the two ``llen`` calls would otherwise be
+    misinterpreted as a requeue.
+    """
     try:
         message = json.loads(raw)
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning(f"Email relay: malformed JSON in {key}: {e}")
-        return False
+        return False, False
 
     normalized = _normalize_payload(message)
     if normalized is None:
         logger.warning(f"Email relay: malformed payload in {key} (missing to/body)")
         await _dead_letter_message(message, "malformed payload (missing to or body)")
-        return False
+        return False, False
 
     message = normalized
 
@@ -173,7 +181,7 @@ async def _process_one(r, key: str, raw: str) -> bool:
             message,
             f"attachment(s) not found at drain time: {missing}",
         )
-        return False
+        return False, False
 
     # Build MIME message
     try:
@@ -189,7 +197,7 @@ async def _process_one(r, key: str, raw: str) -> bool:
     except Exception as e:
         logger.error(f"Email relay: MIME build failed: {e}")
         await _dead_letter_message(message, f"MIME build failed: {e}")
-        return False
+        return False, False
 
     # Attempt SMTP send
     try:
@@ -206,7 +214,7 @@ async def _process_one(r, key: str, raw: str) -> bool:
             len(message.get("body") or ""),
             len(attachment_paths),
         )
-        return True
+        return True, False
     except Exception as e:
         attempts = int(message.get("_relay_attempts") or 0) + 1
         message["_relay_attempts"] = attempts
@@ -215,7 +223,7 @@ async def _process_one(r, key: str, raw: str) -> bool:
                 message,
                 f"max retries ({MAX_EMAIL_RELAY_RETRIES}) exceeded: {e}",
             )
-            return False
+            return False, False
         try:
             await asyncio.to_thread(r.rpush, key, json.dumps(message))
             logger.info(
@@ -225,9 +233,10 @@ async def _process_one(r, key: str, raw: str) -> bool:
                 MAX_EMAIL_RELAY_RETRIES,
                 e,
             )
+            return False, True
         except Exception as re_err:
             logger.error(f"Email relay: requeue failed for {key}: {re_err}")
-        return False
+            return False, False
 
 
 async def process_outbox() -> int:
@@ -260,20 +269,17 @@ async def process_outbox() -> int:
                 if not raw:
                     break
                 processed += 1
-                # Track queue length before/after so we can tell if the payload
-                # was requeued (vs. drained/DLQd). If it was requeued, stop
-                # processing this key for the cycle so the retry budget is
-                # spread across poll cycles instead of burning through in one
-                # pass (mirrors the expected semantics of telegram_relay's
-                # batch loop in practice).
-                before_len = await asyncio.to_thread(r.llen, key)
-                ok = await _process_one(r, key, raw)
-                after_len = await asyncio.to_thread(r.llen, key)
+                # _process_one signals explicitly whether it re-pushed the
+                # payload for a later retry. If so, stop processing this key
+                # for the cycle so the retry budget is spread across poll
+                # cycles instead of burning through in one pass (mirrors the
+                # expected semantics of telegram_relay's batch loop). Using an
+                # explicit return value is race-free — llen deltas can lie if
+                # a concurrent writer RPUSHes to the same key.
+                ok, requeued = await _process_one(r, key, raw)
                 if ok:
                     sent += 1
-                elif after_len > before_len:
-                    # _process_one requeued the payload — skip the rest of
-                    # this key for this cycle.
+                elif requeued:
                     requeued_this_cycle = True
                     break
             if requeued_this_cycle:

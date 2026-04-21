@@ -4,7 +4,8 @@ Covers the unified payload drain path: atomic LPOP, requeue-with-counter on
 failure, DLQ after ``MAX_EMAIL_RELAY_RETRIES`` attempts, legacy ``text``
 field compatibility, and heartbeat writes.
 
-Uses live local Redis on db=1 (shared with the popoto autouse flush).
+Uses live local Redis via the xdist-aware ``redis_test_url`` fixture so
+``pytest -n auto`` is safe (each worker gets its own db number).
 """
 
 from __future__ import annotations
@@ -25,14 +26,13 @@ from bridge.email_relay import (
 
 
 @pytest.fixture
-def r(monkeypatch):
-    """Redis client on db=1 with REDIS_URL pinned so the relay uses the same db."""
-    url = "redis://localhost:6379/1"
-    monkeypatch.setenv("REDIS_URL", url)
+def r(monkeypatch, redis_test_url):
+    """Redis client pinned to the xdist-aware test db so the relay uses the same db."""
+    monkeypatch.setenv("REDIS_URL", redis_test_url)
     monkeypatch.setenv("SMTP_HOST", "smtp.test.local")
     monkeypatch.setenv("SMTP_USER", "valor@test.local")
     monkeypatch.setenv("SMTP_PASSWORD", "x")
-    client = redis.Redis.from_url(url, decode_responses=True)
+    client = redis.Redis.from_url(redis_test_url, decode_responses=True)
     yield client
     client.close()
 

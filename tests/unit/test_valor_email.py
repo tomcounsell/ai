@@ -3,7 +3,8 @@
 Covers CLI argparse, the unified send payload contract, session_id format,
 --reply-to normalization, and read subcommand output paths.
 
-Uses live local Redis on db=1 (shared with the popoto autouse flush).
+Uses live local Redis via the xdist-aware ``redis_test_url`` fixture so
+``pytest -n auto`` is safe (each worker gets its own db number).
 """
 
 from __future__ import annotations
@@ -20,11 +21,10 @@ from tools.valor_email import _build_session_id, _normalize_msgid, cmd_read, cmd
 
 
 @pytest.fixture
-def r(monkeypatch):
-    url = "redis://localhost:6379/1"
-    monkeypatch.setenv("REDIS_URL", url)
+def r(monkeypatch, redis_test_url):
+    monkeypatch.setenv("REDIS_URL", redis_test_url)
     monkeypatch.setenv("SMTP_USER", "valor@test.local")
-    client = redis.Redis.from_url(url, decode_responses=True)
+    client = redis.Redis.from_url(redis_test_url, decode_responses=True)
     yield client
     client.close()
 

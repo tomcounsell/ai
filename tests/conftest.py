@@ -149,6 +149,35 @@ def redis_test_db(request):
 
 
 # ---------------------------------------------------------------------------
+# Shared helper: per-worker Redis URL for tests that need raw Redis clients
+# ---------------------------------------------------------------------------
+# Tests that point a non-popoto Redis client (or set REDIS_URL for code under
+# test) must use the SAME per-worker db that `redis_test_db` picks, otherwise
+# `pytest -n auto` collides across xdist workers. Hardcoding `db=1` breaks
+# parallel runs.
+# ---------------------------------------------------------------------------
+
+
+def _redis_test_db_num(request):
+    """Derive the xdist-aware test db number (matches redis_test_db)."""
+    worker_id = getattr(request.config, "workerinput", {}).get("workerid", "")
+    if worker_id.startswith("gw"):
+        return int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, etc.
+    return 1  # No xdist or master process
+
+
+@pytest.fixture
+def redis_test_url(request):
+    """Return the xdist-aware ``redis://localhost:6379/N`` URL for tests.
+
+    Use this in any fixture that constructs a raw ``redis.Redis`` client or
+    sets ``REDIS_URL`` for code under test. Matches the db number chosen by
+    the autouse ``redis_test_db`` fixture so ``pytest -n auto`` is safe.
+    """
+    return f"redis://localhost:6379/{_redis_test_db_num(request)}"
+
+
+# ---------------------------------------------------------------------------
 # Test helper: create AgentSession with backward-compatible field names
 # ---------------------------------------------------------------------------
 

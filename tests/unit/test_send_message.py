@@ -14,11 +14,10 @@ import redis
 
 
 @pytest.fixture
-def r(monkeypatch):
-    url = "redis://localhost:6379/1"
-    monkeypatch.setenv("REDIS_URL", url)
+def r(monkeypatch, redis_test_url):
+    monkeypatch.setenv("REDIS_URL", redis_test_url)
     monkeypatch.setenv("SMTP_USER", "valor@test.local")
-    client = redis.Redis.from_url(url, decode_responses=True)
+    client = redis.Redis.from_url(redis_test_url, decode_responses=True)
     yield client
     client.close()
 

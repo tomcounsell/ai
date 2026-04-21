@@ -1,7 +1,8 @@
 """Unit tests for ``tools.email_history``.
 
-Uses live local Redis on db=1 (shared with popoto redis_test_db autouse
-fixture — both flush db=1 between tests, so state is isolated).
+Uses live local Redis via the xdist-aware ``redis_test_url`` fixture (shared
+with the popoto ``redis_test_db`` autouse fixture — both use the same
+per-worker db, so ``pytest -n auto`` is safe).
 """
 
 from __future__ import annotations
@@ -16,18 +17,17 @@ from bridge.email_bridge import HISTORY_MSG_KEY, HISTORY_SET_KEY, HISTORY_THREAD
 
 
 @pytest.fixture
-def redis_db1_url(monkeypatch):
-    """Point REDIS_URL at db=1 for the duration of the test."""
-    url = "redis://localhost:6379/1"
-    monkeypatch.setenv("REDIS_URL", url)
-    return url
+def redis_url_env(monkeypatch, redis_test_url):
+    """Point ``REDIS_URL`` at the xdist-aware test db for the duration of the test."""
+    monkeypatch.setenv("REDIS_URL", redis_test_url)
+    return redis_test_url
 
 
 @pytest.fixture
-def r(redis_db1_url):
-    """Return a decoded Redis client on db=1."""
-    client = redis.Redis.from_url(redis_db1_url, decode_responses=True)
-    # The popoto autouse fixture already flushed db=1 at this point, so we
+def r(redis_url_env):
+    """Return a decoded Redis client on the xdist-aware test db."""
+    client = redis.Redis.from_url(redis_url_env, decode_responses=True)
+    # The popoto autouse fixture already flushed this db before the test, so we
     # inherit a clean state.
     yield client
     client.close()

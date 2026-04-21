@@ -3,8 +3,9 @@
 End-to-end: CLI pushes a payload to the Redis outbox, a single call to
 ``process_outbox`` drains it, and a mocked SMTP sees the send.
 
-All tests run against live local Redis on db=1 (the popoto autouse fixture
-flushes it before each test).
+All tests run against live local Redis via the xdist-aware ``redis_test_url``
+fixture (the popoto autouse fixture flushes that db before each test), so
+``pytest -n auto`` is safe.
 """
 
 from __future__ import annotations
@@ -21,13 +22,12 @@ from tools.valor_email import cmd_send
 
 
 @pytest.fixture
-def r(monkeypatch):
-    url = "redis://localhost:6379/1"
-    monkeypatch.setenv("REDIS_URL", url)
+def r(monkeypatch, redis_test_url):
+    monkeypatch.setenv("REDIS_URL", redis_test_url)
     monkeypatch.setenv("SMTP_HOST", "smtp.test.local")
     monkeypatch.setenv("SMTP_USER", "valor@test.local")
     monkeypatch.setenv("SMTP_PASSWORD", "x")
-    client = redis.Redis.from_url(url, decode_responses=True)
+    client = redis.Redis.from_url(redis_test_url, decode_responses=True)
     yield client
     client.close()
 
