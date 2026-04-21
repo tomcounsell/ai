@@ -539,10 +539,7 @@ class TestStartupRecoveryLocalSessionGuard:
         # finalize_session (abandon) MUST be called for legacy records
         mock_finalize.assert_called_once()
         call_args = mock_finalize.call_args
-        assert (
-            call_args[0][1] == "abandoned"
-            or call_args[1].get("status") == "abandoned"
-        )
+        assert call_args[0][1] == "abandoned" or call_args[1].get("status") == "abandoned"
         # update_session must NOT be called for legacy records
         mock_update.assert_not_called()
 

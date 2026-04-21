@@ -318,7 +318,9 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 finalize_session(
                     entry,
                     "abandoned",
-                    reason="startup recovery: local PM/teammate session cannot be resumed by worker",
+                    reason=(
+                        "startup recovery: local PM/teammate session cannot be resumed by worker"
+                    ),
                     skip_auto_tag=True,
                 )
                 abandoned += 1
