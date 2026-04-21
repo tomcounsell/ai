@@ -187,8 +187,10 @@ start_bridge() {
 
     # Rotate oversized log files before starting.
     # All launchd-managed logs (StandardOutPath/StandardErrorPath) are rotated here
-    # because launchd holds file descriptors open — newsyslog alone cannot reliably
-    # rotate actively-written files. This runs on every service start/restart.
+    # because launchd holds file descriptors open. This runs on every service
+    # start/restart; the user-space log-rotate LaunchAgent
+    # (scripts/log_rotate.py) handles between-restart coverage for long-running
+    # services on a 30-minute schedule.
     rotate_log "$LOG_DIR/bridge.error.log"
     rotate_log "$LOG_DIR/bridge.log"
     rotate_log "$LOG_DIR/watchdog.log"
@@ -516,26 +518,11 @@ WATCHDOGEOF
     launchctl bootstrap "gui/$(id -u)" "$WATCHDOG_PLIST_PATH"
     echo "Bridge watchdog installed (runs every 60 seconds)"
 
-    # Install newsyslog config for launchd-managed log rotation.
-    # newsyslog is built into macOS and runs hourly — it provides a safety net
-    # for log files that grow between service restarts. The rotate_log function
-    # in start_bridge() handles rotation on each restart; newsyslog catches
-    # files that grow large during long-running service uptime.
-    echo ""
-    echo "Installing newsyslog log rotation config..."
-    NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.conf.template"
-    NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
-    if [ -f "$NEWSYSLOG_SRC" ]; then
-        # Render template by substituting __PROJECT_DIR__ then install via sudo.
-        # sudo may fail in non-interactive contexts (e.g. launchd, CI) — treat as non-fatal.
-        if sed "s|__PROJECT_DIR__|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1; then
-            echo "newsyslog config installed at $NEWSYSLOG_DST"
-        else
-            echo "WARNING: newsyslog config install skipped (sudo not available in this context)"
-        fi
-    else
-        echo "WARNING: newsyslog template not found at $NEWSYSLOG_SRC"
-    fi
+    # Log rotation is handled by the user-space log-rotate LaunchAgent
+    # (com.valor.log-rotate.plist, scripts/log_rotate.py). Installed by
+    # `scripts/update/service.py::install_log_rotate_agent()` during
+    # `/update --full`. No root/sudo required; between-restart coverage
+    # runs every 30 minutes via launchd.
 
     sleep 2
     status_bridge
