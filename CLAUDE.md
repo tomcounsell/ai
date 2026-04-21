@@ -127,7 +127,7 @@ To reply to a specific message, first run `valor-email read --json` and copy the
 | `./scripts/valor-service.sh email-start` | Start the email bridge (IMAP polling) |
 | `./scripts/valor-service.sh email-stop` | Stop the email bridge |
 | `./scripts/valor-service.sh email-restart` | Restart the email bridge |
-| `./scripts/valor-service.sh email-status` | Check email bridge status and last poll age |
+| `./scripts/valor-service.sh email-status` | Check email bridge status, IMAP last-poll age, and SMTP relay heartbeat |
 | `./scripts/valor-service.sh email-dead-letter list` | List failed SMTP sends in dead-letter queue |
 | `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
 | `tail -f logs/bridge.log` | Stream bridge logs |
@@ -211,8 +211,8 @@ for s in stale: s.delete()
 ## Development Principles
 
 ### 1. NO LEGACY CODE TOLERANCE
-- Never leave traces of stale code or systems
-- Always overwrite, replace, and delete superseded code completely
+- Never leave traces of legacy code or systems
+- Always overwrite, replace, and delete obsolete code completely
 - No commented-out code, no "temporary" bridges, no half-migrations
 
 ### 2. CRITICAL THINKING MANDATORY
@@ -519,7 +519,7 @@ Use these labels consistently when creating or editing issues:
 | `bridge` | Related to the Telegram bridge (`bridge/`) |
 | `testing` | Related to the test suite (`tests/`) |
 
-Avoid the `feature` label — it adds no signal.
+Do NOT use a `feature` label — it adds no signal.
 
 ## Business Context
 

@@ -28,7 +28,6 @@ Read path:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import email as email_lib
 import imaplib
 import json
@@ -264,7 +263,16 @@ def cmd_read(args: argparse.Namespace) -> int:
             )
 
     if args.json:
-        print(json.dumps(messages, indent=2, default=str))
+        # Unified --json envelope across subcommands: always a dict with a
+        # named collection field plus a count, never a bare list.
+        envelope = {
+            "messages": messages,
+            "count": len(messages),
+            "mailbox": "INBOX",
+        }
+        if args.search:
+            envelope["query"] = args.search
+        print(json.dumps(envelope, indent=2, default=str))
         return 0
 
     if not messages:
@@ -502,10 +510,6 @@ def main() -> int:
         parser.print_help()
         return 1
 
-    # Async CLI parity with valor-telegram (none of our handlers are async
-    # today but keep the stub for future uniformity if needed).
-    if asyncio.iscoroutinefunction(handler):
-        return asyncio.run(handler(args))
     return handler(args)
 
 

@@ -819,11 +819,13 @@ status_email() {
         echo "Email Bridge Status: STOPPED"
     fi
 
-    # Check last poll timestamp from Redis
-    local last_poll
-    last_poll=$(cd "$PROJECT_DIR" && "$VENV/bin/python" -c "
+    # Check IMAP poll + relay heartbeat timestamps from Redis
+    local status_out
+    status_out=$(cd "$PROJECT_DIR" && "$VENV/bin/python" -c "
 import os, redis, time
 r = redis.Redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379/0'), decode_responses=True)
+
+# IMAP poll heartbeat (inbound)
 ts = r.get('email:last_poll_ts')
 if ts:
     age = time.time() - float(ts)
@@ -832,8 +834,18 @@ if ts:
         print('WARNING: Last poll was more than 5 minutes ago — bridge may be stuck')
 else:
     print('Last poll: never (bridge not started or no polls completed)')
+
+# SMTP relay heartbeat (outbound)
+rts = r.get('email:relay:last_poll_ts')
+if rts:
+    rage = time.time() - float(rts)
+    print(f'Relay heartbeat: {rage:.0f}s ago')
+    if rage > 300:
+        print('WARNING: relay stale (>5 minutes) — restart via email-restart')
+else:
+    print('Relay heartbeat: never (relay not started or no cycles completed)')
 " 2>/dev/null || echo "Last poll: unknown (Redis unavailable)")
-    echo "$last_poll"
+    echo "$status_out"
 }
 
 email_dead_letter() {

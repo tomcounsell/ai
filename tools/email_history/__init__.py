@@ -16,11 +16,22 @@ import os
 import time
 from datetime import datetime
 
-# Shared key schema with bridge.email_bridge — if the bridge's constants
-# change we update both sites.
-HISTORY_SET_KEY = "email:history:{mailbox}"
-HISTORY_MSG_KEY = "email:history:msg:{message_id}"
-HISTORY_THREADS_KEY = "email:threads"
+# Shared key schema — single source of truth lives in bridge.email_bridge so
+# readers and writers cannot drift. Re-exported here for external callers.
+from bridge.email_bridge import (  # noqa: E402
+    HISTORY_MSG_KEY,
+    HISTORY_SET_KEY,
+    HISTORY_THREADS_KEY,
+)
+
+__all__ = [
+    "HISTORY_MSG_KEY",
+    "HISTORY_SET_KEY",
+    "HISTORY_THREADS_KEY",
+    "get_recent_emails",
+    "list_threads",
+    "search_history",
+]
 
 
 def _get_redis():

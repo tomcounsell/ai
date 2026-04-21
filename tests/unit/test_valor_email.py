@@ -205,8 +205,12 @@ class TestCmdRead:
         assert rc == 0
         out = capsys.readouterr().out
         parsed = json.loads(out)
-        assert isinstance(parsed, list)
-        assert parsed[0]["from_addr"] == "alice@x.com"
+        # --json output is a dict envelope, unified across read/send/threads.
+        assert isinstance(parsed, dict)
+        assert parsed["count"] == 1
+        assert parsed["mailbox"] == "INBOX"
+        assert isinstance(parsed["messages"], list)
+        assert parsed["messages"][0]["from_addr"] == "alice@x.com"
 
 
 class TestCmdThreads:
