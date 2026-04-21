@@ -211,8 +211,8 @@ for s in stale: s.delete()
 ## Development Principles
 
 ### 1. NO LEGACY CODE TOLERANCE
-- Never leave traces of legacy code or systems
-- Always overwrite, replace, and delete obsolete code completely
+- Never leave traces of stale code or systems
+- Always overwrite, replace, and delete superseded code completely
 - No commented-out code, no "temporary" bridges, no half-migrations
 
 ### 2. CRITICAL THINKING MANDATORY
@@ -519,7 +519,7 @@ Use these labels consistently when creating or editing issues:
 | `bridge` | Related to the Telegram bridge (`bridge/`) |
 | `testing` | Related to the test suite (`tests/`) |
 
-Do NOT use a `feature` label — it adds no signal.
+Avoid the `feature` label — it adds no signal.
 
 ## Business Context
 
