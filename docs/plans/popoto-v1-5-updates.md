@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: build_complete
 type: chore
 appetite: Small
 owner: valorengels
@@ -156,21 +156,21 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto-v1-5-up
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_persist_outcome_metadata()` wraps each record in `except Exception: continue` — existing coverage in `test_memory_extraction.py`. The new `"used"` branch sits inside this guard; no additional exception test needed.
-- [ ] `search()` quality probe wrapped in try/except — add assertion in `test_search_assess_quality_returns_quality_key` that the main `"results"` key is present even when `assess_quality=True` fails (simulate by mocking `ContextAssembler.assess` to raise).
+- [x] `_persist_outcome_metadata()` wraps each record in `except Exception: continue` — existing coverage in `test_memory_extraction.py`. The new `"used"` branch sits inside this guard; no additional exception test needed.
+- [x] `search()` quality probe wrapped in try/except — add assertion in `test_search_assess_quality_returns_quality_key` that the main `"results"` key is present even when `assess_quality=True` fails (simulate by mocking `ContextAssembler.assess` to raise).
 
 ### Empty/Invalid Input Handling
-- [ ] `search("", assess_quality=True)` → existing early-return guard already handles empty query; `assess_quality` branch is never reached. Verified by reading `search()` lines 55-57.
-- [ ] `error_summary(Memory, partition=<empty-partition>)` → returns `{"__all__": {count: 0, ...}}` per popoto source; covered by the new test.
+- [x] `search("", assess_quality=True)` → existing early-return guard already handles empty query; `assess_quality` branch is never reached. Verified by reading `search()` lines 55-57.
+- [x] `error_summary(Memory, partition=<empty-partition>)` → returns `{"__all__": {count: 0, ...}}` per popoto source; covered by the new test.
 
 ### Error State Rendering
-- [ ] `"quality"` is only returned when explicitly requested and quality probe succeeds; callers that don't pass `assess_quality=True` see no change. No user-visible error rendering needed.
+- [x] `"quality"` is only returned when explicitly requested and quality probe succeeds; callers that don't pass `assess_quality=True` see no change. No user-visible error rendering needed.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_memory_extraction.py` — UPDATE: add `test_used_outcome_not_remapped`. No existing tests need modification — they don't cover the `"used"` outcome path.
-- [ ] `tests/unit/test_memory_model.py` — UPDATE: add `test_error_summary_empty`. No existing tests removed.
-- [ ] No existing tests break — all changes are additive (new outcome option, new optional param with default `False`).
+- [x] `tests/unit/test_memory_extraction.py` — UPDATE: add `test_used_outcome_not_remapped`. No existing tests need modification — they don't cover the `"used"` outcome path.
+- [x] `tests/unit/test_memory_model.py` — UPDATE: add `test_error_summary_empty`. No existing tests removed.
+- [x] No existing tests break — all changes are additive (new outcome option, new optional param with default `False`).
 
 ## Rabbit Holes
 
@@ -213,20 +213,20 @@ If a future plan wants to expose retrieval quality to the agent, the CLI (`tools
 
 ## Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md` to document the `"used"` outcome semantics and `assess_quality` parameter.
-- [ ] Add a note to the Memory system section describing the three-tier outcome model: `"acted"` (drove response), `"used"` (consumed, no response), `"dismissed"` (ignored).
+- [x] Update `docs/features/subconscious-memory.md` to document the `"used"` outcome semantics and `assess_quality` parameter.
+- [x] Add a note to the Memory system section describing the three-tier outcome model: `"acted"` (drove response), `"used"` (consumed, no response), `"dismissed"` (ignored).
 
 ## Success Criteria
 
-- [ ] `"used"` appears as a valid outcome option in `OUTCOME_JUDGMENT_PROMPT` with a one-line definition.
-- [ ] `_judge_outcomes_llm()` does not remap `"used"` to `"dismissed"`.
-- [ ] `_persist_outcome_metadata()` has a `"used"` branch that leaves `dismissal_count` unchanged.
-- [ ] `search(query, assess_quality=True)` returns a `"quality"` key in the result dict.
-- [ ] `test_used_outcome_not_remapped` passes.
-- [ ] `test_error_summary_empty` passes — `error_summary()` returns `{"__all__": {...}}` with `count=0`.
-- [ ] `test_search_assess_quality_returns_quality_key` passes.
-- [ ] `pytest tests/unit/ -x -q` exits 0.
-- [ ] `python -m ruff check .` exits 0.
+- [x] `"used"` appears as a valid outcome option in `OUTCOME_JUDGMENT_PROMPT` with a one-line definition.
+- [x] `_judge_outcomes_llm()` does not remap `"used"` to `"dismissed"`.
+- [x] `_persist_outcome_metadata()` has a `"used"` branch that leaves `dismissal_count` unchanged.
+- [x] `search(query, assess_quality=True)` returns a `"quality"` key in the result dict.
+- [x] `test_used_outcome_not_remapped` passes.
+- [x] `test_error_summary_empty` passes — `error_summary()` returns `{"__all__": {...}}` with `count=0`.
+- [x] `test_search_assess_quality_returns_quality_key` passes.
+- [x] `pytest tests/unit/ -x -q` exits 0.
+- [x] `python -m ruff check .` exits 0.
 
 ## Team Orchestration
 
