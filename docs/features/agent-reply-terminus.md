@@ -1,7 +1,7 @@
 # Agent Reply Terminus Detection
 
 **Status:** Shipped  
-**Issue:** [#911](https://github.com/tomcounsell/ai/issues/911)
+**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2)
 
 ## Problem
 
@@ -45,7 +45,7 @@ Fast-paths are checked before any LLM call, in this exact order:
    The primary loop-break signal. If the sender is a bot and the message contains no question, it's a loop continuation — silence it immediately.
 
 2. **Acknowledgment token or ≤1 word** → `SILENT`  
-   Checks `_ACKNOWLEDGMENT_TOKENS` set (shared with `classify_needs_response`). Fires **after** the bot check — never before — to avoid silencing human short replies.
+   Checks `_ACKNOWLEDGMENT_TOKENS` set (shared with `classify_needs_response`). Fires **after** the bot check — never before — to avoid silencing human short replies. Also skipped entirely when `thread_messages` contains a question: if Valor's prior message in the thread contained a standalone `?` (per `_STANDALONE_QUESTION_RE`), the ≤1-word check is bypassed so a human short answer like "Yes" / "No" falls through to the LLM (or the RESPOND default). See [#1090](https://github.com/tomcounsell/ai/issues/1090).
 
 3. **Standalone `?` in text** → `RESPOND`  
    Fast exit before any LLM call. Uses regex `(?<![=&\w])\?|(?<![=&])\?(?!\w+=)` to exclude URL query-string parameters like `?q=1`.
@@ -104,6 +104,13 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_ollama_failure_defaults_to_respond` — Ollama + Haiku both fail → RESPOND
 - `test_classify_terminus_empty_text_returns_respond` — empty text → RESPOND
 - `test_classify_terminus_bot_react_collapses_to_silent` — LLM REACT + bot sender → SILENT
+
+**Question-aware Fast-Path 2 tests** (issue [#1090](https://github.com/tomcounsell/ai/issues/1090)):
+
+- `test_classify_terminus_human_short_reply_to_valor_question_returns_respond` — human "Yes" + Valor question in thread → RESPOND
+- `test_classify_terminus_human_short_reply_no_question_still_silent` — human "Yes" + declarative thread → SILENT (regression guard)
+- `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` — bot "Yes" + Valor question → SILENT via Fast-Path 1 (pins fast-path ordering)
+- `test_classify_terminus_url_query_in_thread_not_treated_as_question` — URL `?q=1` in thread_messages → SILENT (URL query strings stay excluded)
 
 ## Related
 
