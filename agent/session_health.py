@@ -1016,6 +1016,8 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                         pending_seconds,
                     )
+                    from agent.agent_session_queue import _ensure_worker  # noqa: PLC0415
+
                     _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
                 workers_started += 1
         except Exception:
