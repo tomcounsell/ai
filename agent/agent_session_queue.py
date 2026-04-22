@@ -89,7 +89,6 @@ from agent.session_health import (  # noqa: F401
     _write_worker_heartbeat,
     cleanup_corrupted_agent_sessions,
     format_duration,
-    recover_orphaned_agent_sessions_all_projects,
 )
 from agent.session_logs import save_session_snapshot
 

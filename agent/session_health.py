@@ -1319,11 +1319,6 @@ def cleanup_corrupted_agent_sessions() -> int:
     return cleaned
 
 
-def recover_orphaned_agent_sessions_all_projects() -> int:
-    """Backward-compat alias for cleanup_corrupted_agent_sessions."""
-    return cleanup_corrupted_agent_sessions()
-
-
 def _cleanup_orphaned_claude_processes() -> int:
     """Kill orphaned Claude Code CLI subprocesses from prior worker/bridge runs.
 
