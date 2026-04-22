@@ -55,6 +55,7 @@ def search(
     category: str | None = None,
     tag: str | None = None,
     min_act_rate: float | None = None,
+    assess_quality: bool = False,
 ) -> dict[str, Any]:
     """Search memories by query string using BM25 + RRF fusion.
 
@@ -65,10 +66,16 @@ def search(
         category: Filter by metadata category (correction, decision, pattern, surprise).
         tag: Filter by metadata tag.
         min_act_rate: Filter to memories with act_rate >= this threshold (0.0-1.0).
+        assess_quality: If True, run a RetrievalQuality probe via ContextAssembler
+            after retrieval and attach the result as a "quality" key in the return dict.
+            This makes one additional Redis read (composite_score). Failure is non-fatal:
+            on error the result dict is returned without the "quality" key.
 
     Returns:
         Dict with "results" list and "error" key (None if no error).
         Each result has: content, score, confidence, source, access_count, memory_id, metadata.
+        If assess_quality=True and the probe succeeds, also includes "quality" key with
+        a RetrievalQuality dict: avg_confidence, score_spread, fok_score, staleness_ratio.
     """
     try:
         if not query or not query.strip():
@@ -152,7 +159,29 @@ def search(
                 }
             )
 
-        return {"results": results, "error": None}
+        result: dict[str, Any] = {"results": results, "error": None}
+
+        # Optional quality probe: RetrievalQuality metacognitive layer (popoto v1.5.0)
+        # Runs one additional Redis read (composite_score); failure is non-fatal.
+        if assess_quality:
+            try:
+                import dataclasses
+
+                from popoto.recipes import ContextAssembler
+
+                assembler = ContextAssembler(
+                    model_class=Memory,
+                    score_weights={"relevance": 0.6, "confidence": 0.3},
+                )
+                quality = assembler.assess({"query": query})
+                result["quality"] = dataclasses.asdict(quality)
+            except Exception as q_err:
+                logger.debug(
+                    f"[memory_search] quality probe failed (non-fatal): "
+                    f"{type(q_err).__name__}: {q_err}"
+                )
+
+        return result
 
     except Exception as e:
         logger.warning(f"[memory_search] search failed (non-fatal): {type(e).__name__}: {e}")
