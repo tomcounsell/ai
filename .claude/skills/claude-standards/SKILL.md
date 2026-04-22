@@ -22,6 +22,12 @@ Audits the five classes of Claude Code assets in this repo against the best-prac
 
 Each `STANDARDS_*.md` file holds the rules. Keep those files as the single source of truth; do not inline rules here.
 
+## References
+
+Cross-cutting reference docs live under `references/` and are loaded only when the task calls for them (progressive disclosure):
+
+- [`references/EVALS.md`](references/EVALS.md) — how to evaluate a prompt systematically. Read when iterating on a prompt that ships inside a skill, subagent, hook, or agent loop. Not part of the audit itself.
+
 ## Arguments
 
 - `skills | commands | subagents | hooks | mcp` — audit only that domain. Default: `all`.
