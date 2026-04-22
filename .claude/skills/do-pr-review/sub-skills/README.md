@@ -9,7 +9,7 @@ into single-responsibility phases. Each sub-skill receives pre-resolved context 
 | File | Type | Responsibility |
 |------|------|----------------|
 | `checkout.md` | Mechanical | Clean git state, checkout PR branch |
-| `code-review.md` | Judgment | Read files, analyze diff, classify findings |
+| `code-review.md` | Judgment | Parse disclosures, load prior reviews, traverse Rubric, classify findings, derive mechanical verdict |
 | `screenshot.md` | Mechanical | Start app, capture UI screenshots |
 | `post-review.md` | Mechanical | Format findings, post review to GitHub |
 
