@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -147,33 +147,33 @@ The new guard lives *inside* Fast-Path 2 (after Fast-Path 1's bot check). A bot 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No new `except` blocks are introduced. The function already has try/except around Ollama and Haiku calls (lines ~585+). Those are unchanged.
-- [ ] If `_STANDALONE_QUESTION_RE.search()` were to raise (it won't on a string input), the exception would propagate up — but `re.search` on a string is total. No new silent failure surface.
+- [x] No new `except` blocks are introduced. The function already has try/except around Ollama and Haiku calls (lines ~585+). Those are unchanged.
+- [x] If `_STANDALONE_QUESTION_RE.search()` were to raise (it won't on a string input), the exception would propagate up — but `re.search` on a string is total. No new silent failure surface.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty `thread_messages` list: `any(...)` over empty iterable returns `False` → `valor_asked_question = False` → original Fast-Path 2 behavior preserved. (Test case: `test_classify_terminus_acknowledgment_token_returns_silent` already covers this and must continue to pass.)
-- [ ] `thread_messages` containing empty string: `if msg` filter skips it → same as empty list above.
-- [ ] `thread_messages` containing `None` (defensive): `if msg` filter skips it → no `re.search(None)` crash.
-- [ ] Empty reply `text`: handled by the existing guard at line 541-542, returns RESPOND. Unchanged.
+- [x] Empty `thread_messages` list: `any(...)` over empty iterable returns `False` → `valor_asked_question = False` → original Fast-Path 2 behavior preserved. (Test case: `test_classify_terminus_acknowledgment_token_returns_silent` already covers this and must continue to pass.)
+- [x] `thread_messages` containing empty string: `if msg` filter skips it → same as empty list above.
+- [x] `thread_messages` containing `None` (defensive): `if msg` filter skips it → no `re.search(None)` crash.
+- [x] Empty reply `text`: handled by the existing guard at line 541-542, returns RESPOND. Unchanged.
 
 ### Error State Rendering
-- [ ] No user-visible output. The function returns a string consumed by `should_respond_async()`. Bridge logs the terminus result at line 1038. No change to logging.
+- [x] No user-visible output. The function returns a string consumed by `should_respond_async()`. Bridge logs the terminus result at line 1038. No change to logging.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_human_short_reply_to_valor_question_returns_respond` — ADD: new test verifying that `text="Yes"`, `thread_messages=["Should I select the Yudame workspace?"]`, `sender_is_bot=False` returns `"RESPOND"` (not `"SILENT"`).
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_human_short_reply_no_question_still_silent` — ADD: regression test verifying that `text="Yes"`, `thread_messages=["Here is the report you asked for."]`, `sender_is_bot=False` returns `"SILENT"` (existing Fast-Path 2 behavior preserved).
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_bot_short_reply_to_valor_question_still_silent` — ADD: regression test verifying that `text="Yes"`, `thread_messages=["Should I do X?"]`, `sender_is_bot=True` returns `"SILENT"` via Fast-Path 1 (the bot loop break must still fire even when Valor asked a question — bots don't answer questions, they loop).
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_url_query_in_thread_not_treated_as_question` — ADD: edge case verifying that `text="Yes"`, `thread_messages=["See https://example.com?q=1"]`, `sender_is_bot=False` returns `"SILENT"` (URL query string `?q=1` must not count as a question, so Fast-Path 2 still fires).
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_acknowledgment_token_returns_silent` (line ~113) — UNCHANGED: must continue to pass. Calls with `thread_messages=[]` so the new guard is a no-op.
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_acknowledgment_fires_after_bot_check` (line ~124) — UNCHANGED: must continue to pass. Bot sender, `thread_messages=[]`, fires via Fast-Path 1.
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_bot_no_question_returns_silent` — UNCHANGED: must continue to pass.
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_human_question_returns_respond` — UNCHANGED: must continue to pass.
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_url_with_query_param_not_respond` — UNCHANGED: must continue to pass.
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_ollama_failure_defaults_to_respond` — UNCHANGED: must continue to pass.
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_empty_text_returns_respond` — UNCHANGED: must continue to pass.
-- [ ] `tests/unit/test_routing.py::test_classify_terminus_bot_react_collapses_to_silent` — UNCHANGED: must continue to pass.
-- [ ] `tests/unit/test_config_driven_routing.py` (terminus mock at line 397) — UNCHANGED: mocks the classifier entirely so it is unaffected.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_human_short_reply_to_valor_question_returns_respond` — ADD: new test verifying that `text="Yes"`, `thread_messages=["Should I select the Yudame workspace?"]`, `sender_is_bot=False` returns `"RESPOND"` (not `"SILENT"`).
+- [x] `tests/unit/test_routing.py::test_classify_terminus_human_short_reply_no_question_still_silent` — ADD: regression test verifying that `text="Yes"`, `thread_messages=["Here is the report you asked for."]`, `sender_is_bot=False` returns `"SILENT"` (existing Fast-Path 2 behavior preserved).
+- [x] `tests/unit/test_routing.py::test_classify_terminus_bot_short_reply_to_valor_question_still_silent` — ADD: regression test verifying that `text="Yes"`, `thread_messages=["Should I do X?"]`, `sender_is_bot=True` returns `"SILENT"` via Fast-Path 1 (the bot loop break must still fire even when Valor asked a question — bots don't answer questions, they loop).
+- [x] `tests/unit/test_routing.py::test_classify_terminus_url_query_in_thread_not_treated_as_question` — ADD: edge case verifying that `text="Yes"`, `thread_messages=["See https://example.com?q=1"]`, `sender_is_bot=False` returns `"SILENT"` (URL query string `?q=1` must not count as a question, so Fast-Path 2 still fires).
+- [x] `tests/unit/test_routing.py::test_classify_terminus_acknowledgment_token_returns_silent` (line ~113) — UNCHANGED: must continue to pass. Calls with `thread_messages=[]` so the new guard is a no-op.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_acknowledgment_fires_after_bot_check` (line ~124) — UNCHANGED: must continue to pass. Bot sender, `thread_messages=[]`, fires via Fast-Path 1.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_bot_no_question_returns_silent` — UNCHANGED: must continue to pass.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_human_question_returns_respond` — UNCHANGED: must continue to pass.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_url_with_query_param_not_respond` — UNCHANGED: must continue to pass.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_ollama_failure_defaults_to_respond` — UNCHANGED: must continue to pass.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_empty_text_returns_respond` — UNCHANGED: must continue to pass.
+- [x] `tests/unit/test_routing.py::test_classify_terminus_bot_react_collapses_to_silent` — UNCHANGED: must continue to pass.
+- [x] `tests/unit/test_config_driven_routing.py` (terminus mock at line 397) — UNCHANGED: mocks the classifier entirely so it is unaffected.
 
 ## Rabbit Holes
 
@@ -227,25 +227,25 @@ No agent integration required — this is a bridge-internal change to the routin
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agent-reply-terminus.md` Fast-Path 2 description (currently says "Fires after the bot check — never before — to avoid silencing human short replies"). Add a sub-bullet noting that Fast-Path 2 is also skipped when the replied-to message contains a question (issue #1090). Link the issue inline.
-- [ ] Verify `docs/features/README.md` index entry for "Agent Reply Terminus Detection" is still accurate (it should be — title and scope are unchanged).
+- [x] Update `docs/features/agent-reply-terminus.md` Fast-Path 2 description (currently says "Fires after the bot check — never before — to avoid silencing human short replies"). Add a sub-bullet noting that Fast-Path 2 is also skipped when the replied-to message contains a question (issue #1090). Link the issue inline.
+- [x] Verify `docs/features/README.md` index entry for "Agent Reply Terminus Detection" is still accurate (it should be — title and scope are unchanged). Verified 2026-04-22 via `/do-docs` cascade — entry unchanged, still accurate.
 
 ### External Documentation Site
 This repo does not use Sphinx/ReadTheDocs/MkDocs. Skip.
 
 ### Inline Documentation
-- [ ] Inline comment on the new guard explaining *why* it exists (1-line reference to issue #1090) — see Solution > Technical Approach for the proposed comment text.
-- [ ] Update the docstring of `classify_conversation_terminus()` (lines 524-539) to add Fast-Path 2 to the fast-path order list with the question-aware caveat. Current docstring lists "2. acknowledgment token or very short (≤1 word) → SILENT" — append "(unless thread_messages contains a question — then fall through)".
+- [x] Inline comment on the new guard explaining *why* it exists (1-line reference to issue #1090) — see Solution > Technical Approach for the proposed comment text.
+- [x] Update the docstring of `classify_conversation_terminus()` (lines 524-539) to add Fast-Path 2 to the fast-path order list with the question-aware caveat. Current docstring lists "2. acknowledgment token or very short (≤1 word) → SILENT" — append "(unless thread_messages contains a question — then fall through)".
 
 ## Success Criteria
 
-- [ ] `classify_conversation_terminus(text="Yes", thread_messages=["Should I select the workspace?"], sender_is_bot=False)` returns `"RESPOND"` (covered by new test).
-- [ ] `classify_conversation_terminus(text="Yes", thread_messages=["Here is the file."], sender_is_bot=False)` returns `"SILENT"` (covered by new test, existing behavior preserved).
-- [ ] `classify_conversation_terminus(text="Yes", thread_messages=["Should I do X?"], sender_is_bot=True)` returns `"SILENT"` (covered by new test — bot loop break still wins via Fast-Path 1).
-- [ ] All 7 existing terminus tests in `tests/unit/test_routing.py` continue to pass.
-- [ ] `docs/features/agent-reply-terminus.md` updated to describe the question-aware guard.
-- [ ] Tests pass (`/do-test` → `pytest tests/unit/test_routing.py -q`).
-- [ ] Lint and format clean (`python -m ruff check bridge/routing.py tests/unit/test_routing.py` and `python -m ruff format bridge/routing.py tests/unit/test_routing.py`).
+- [x] `classify_conversation_terminus(text="Yes", thread_messages=["Should I select the workspace?"], sender_is_bot=False)` returns `"RESPOND"` (covered by new test).
+- [x] `classify_conversation_terminus(text="Yes", thread_messages=["Here is the file."], sender_is_bot=False)` returns `"SILENT"` (covered by new test, existing behavior preserved).
+- [x] `classify_conversation_terminus(text="Yes", thread_messages=["Should I do X?"], sender_is_bot=True)` returns `"SILENT"` (covered by new test — bot loop break still wins via Fast-Path 1).
+- [x] All 7 existing terminus tests in `tests/unit/test_routing.py` continue to pass.
+- [x] `docs/features/agent-reply-terminus.md` updated to describe the question-aware guard.
+- [x] Tests pass (`/do-test` → `pytest tests/unit/test_routing.py -q`).
+- [x] Lint and format clean (`python -m ruff check bridge/routing.py tests/unit/test_routing.py` and `python -m ruff format bridge/routing.py tests/unit/test_routing.py`).
 
 ## Team Orchestration
 
