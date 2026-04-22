@@ -244,7 +244,7 @@ $ valor-email threads
   ```json
   {
     "session_id": "<string>",
-    "to": "<address>",
+    "to": ["<address>", ...],
     "subject": "<optional string>",
     "body": "<string>",
     "attachments": ["<absolute path>", ...],
@@ -254,7 +254,7 @@ $ valor-email threads
     "timestamp": <unix seconds float>
   }
   ```
-  The relay normalizes on read: missing `subject` → `"(no subject)"`; missing `body` → reject and DLQ (malformed); missing `from_addr` → use `SMTP_USER` env var; missing `attachments` → empty list. Legacy field `text` is treated as a synonym for `body` during a single transitional release to avoid stranding any in-flight entries (harmless since the queue is currently empty).
+  `"to"` is always `list[str]`. The relay's `_normalize_payload()` coerces any legacy single-string `"to"` value to `list[str]` for backward compatibility. The relay normalizes on read: missing `subject` → `"(no subject)"`; missing `body` → reject and DLQ (malformed); missing `from_addr` → use `SMTP_USER` env var; missing `attachments` → empty list. Legacy field `text` is treated as a synonym for `body` during a single transitional release to avoid stranding any in-flight entries (harmless since the queue is currently empty).
 - **Cache key schema:**
   - `email:history:INBOX` — sorted set, score = UNIX timestamp, member = `Message-ID` string. Allows `ZREVRANGE` for recent-first, `ZRANGEBYSCORE` for `--since` filters.
   - `email:history:msg:{message_id}` — string key containing JSON blob `{from_addr, subject, body, timestamp, message_id, in_reply_to}`. TTL 7 days.

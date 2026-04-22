@@ -107,12 +107,13 @@ Use `valor-email` to read and send email through the bridge. Reads hit the Redis
 valor-email read --limit 5
 valor-email read --search "deployment" --since "2 hours ago"
 valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
+valor-email send --to alice@example.com --to bob@example.com "Message to both"
 valor-email send --to alice@example.com --file ./report.pdf "See attached"
 valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
 valor-email threads
 ```
 
-To reply to a specific message, first run `valor-email read --json` and copy the `message_id` field — pass it verbatim to `--reply-to` (angle brackets optional; the CLI normalizes). Sends confirm with a queue notice; if delivery seems stuck, check `./scripts/valor-service.sh email-status` (extends to read the relay heartbeat under `email:relay:last_poll_ts`).
+`--to` accepts multiple flags (repeat per recipient) and comma-separated values. To reply to a specific message, first run `valor-email read --json` and copy the `message_id` field — pass it verbatim to `--reply-to` (angle brackets optional; the CLI normalizes). Sends confirm with a queue notice; if delivery seems stuck, check `./scripts/valor-service.sh email-status` (extends to read the relay heartbeat under `email:relay:last_poll_ts`).
 
 ## Quick Commands
 

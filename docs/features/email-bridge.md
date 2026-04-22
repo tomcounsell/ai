@@ -13,14 +13,14 @@ IMAP inbox (valor@yuda.me)
     → enqueue_agent_session()         # transport="email"
       → Worker resolves EmailOutputHandler via (project_key, "email") callback
         → EmailOutputHandler.send()   # bridge/email_bridge.py
-          → SMTP reply with In-Reply-To header
+          → SMTP reply-all: sender + original To/CC recipients, In-Reply-To header
 ```
 
 ### Key Modules
 
 | File | Role |
 |------|------|
-| `bridge/email_bridge.py` | IMAP polling loop, email parsing, sender filtering, `EmailOutputHandler`, history cache write-through (`_record_history`, `_record_thread`), module-level `_build_reply_mime` with attachment support |
+| `bridge/email_bridge.py` | IMAP polling loop, email parsing (`parse_email_message` returns `from_addr`, `to_addrs`, `cc_addrs`, `subject`, `body`, `message_id`, `in_reply_to`), sender filtering, `EmailOutputHandler` (reply-all by default), history cache write-through (`_record_history`, `_record_thread`), module-level `_build_reply_mime` with attachment support |
 | `bridge/email_relay.py` | Async drain of `email:outbox:*` payloads via SMTP; atomic LPOP + requeue-with-counter + DLQ after `MAX_EMAIL_RELAY_RETRIES`; heartbeat key `email:relay:last_poll_ts` for liveness probing. Runs inside `run_email_bridge()` via `asyncio.gather`. |
 | `bridge/email_dead_letter.py` | Dead letter queue for failed SMTP sends |
 | `bridge/routing.py` | `find_project_for_email()`, `build_email_to_project_map()`, `get_known_email_search_terms()` |
@@ -59,6 +59,12 @@ Messages that do match are marked `SEEN` immediately on fetch (before parsing) t
 ### Transport-Keyed Callbacks
 
 `AgentSession` callbacks are keyed by `(project_key, transport)`. The worker resolves the correct `OutputHandler` by looking up `(project_key, "email")` instead of the Telegram default. This keeps email and Telegram sessions fully isolated with no cross-contamination of delivery channels.
+
+### Reply-All Behavior
+
+`EmailOutputHandler.send()` builds the outbound recipient list by combining the original sender address with every address that appeared in the inbound email's `To` and `CC` headers — excluding the system's own `SMTP_USER` address to avoid self-copying. The result is passed as a `list[str]` to `_build_reply_mime()` and on to `_send_smtp()`.
+
+The inbound pipeline stores the raw `To` and `CC` address lists in `extra_context_overrides` as `email_to_addrs` and `email_cc_addrs` (both `list[str]`). `send()` reads these back when composing each reply.
 
 ### Outbound Drafting (medium="email")
 
@@ -237,12 +243,13 @@ A terminal-friendly surface over the email bridge that mirrors `valor-telegram`:
 valor-email read --limit 5
 valor-email read --search "deployment" --since "2 hours ago"
 valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
+valor-email send --to alice@example.com --to bob@example.com "CC both"
 valor-email send --to alice@example.com --file ./report.pdf "See attached"
 valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
 valor-email threads
 ```
 
-All three subcommands accept `--json` for machine-readable output.
+`--to` accepts multiple flags (repeat for each recipient) and comma-separated values (`--to "alice@example.com,bob@example.com"`). All three subcommands accept `--json` for machine-readable output.
 
 ### Read path
 
@@ -261,7 +268,7 @@ Sends write the **unified outbox payload** to `email:outbox:{session_id}` with a
 ```json
 {
   "session_id": "cli-1745200000-12345-a1b2c3d4",
-  "to": "alice@example.com",
+  "to": ["alice@example.com", "bob@example.com"],
   "subject": "Re: Deploy",
   "body": "Looks good",
   "attachments": ["/abs/path/to/report.pdf"],
@@ -272,7 +279,7 @@ Sends write the **unified outbox payload** to `email:outbox:{session_id}` with a
 }
 ```
 
-The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` emits the same shape so the relay has a single contract to drain.
+The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` emits the same shape so the relay has a single contract to drain. The `"to"` field is always `list[str]`; the relay's `_normalize_payload()` coerces any legacy single-string `"to"` value to `list[str]` for backward compatibility.
 
 The relay (`bridge/email_relay.py`) polls `email:outbox:*` every 100 ms. For each key it performs atomic `LPOP`, builds the MIME message via `_build_reply_mime()` (switching to `MIMEMultipart` when attachments are present), and dispatches over SMTP in `asyncio.to_thread`. On failure it increments `_relay_attempts`, `RPUSH`es back, and DLQs via `bridge.email_dead_letter.write_dead_letter()` after `MAX_EMAIL_RELAY_RETRIES` (default 3) attempts. The relay writes `email:relay:last_poll_ts` once per cycle (5-minute TTL) for operator liveness probes.
 
