@@ -45,7 +45,7 @@ After each successful snapshot, the hook scans `backups/{uuid}-*.jsonl.bak`, sor
 - The one before that, in case the most recent is itself corrupted.
 - One safety margin.
 
-Time-based TTL was rejected (see [spike-2 in the plan](../plans/completed/compaction-hardening.md)): backups for crashed sessions are already cleaned up by `cleanup --age 30`, so count-based retention loses no recovery capability. _(Plan link points to the post-merge location; pre-merge the plan lives at `docs/plans/compaction-hardening.md` and is migrated by `/do-merge`.)_
+Time-based TTL was rejected (see [spike-2 in the plan](../plans/compaction-hardening.md)): backups for crashed sessions are already cleaned up by `cleanup --age 30`, so count-based retention loses no recovery capability.
 
 ### 4. 30-second post-compact nudge guard
 
@@ -93,7 +93,7 @@ The hook's top-level contract is **"never raise, always return `{}`"**:
 
 ## Cross-References
 
-- Plan: [`docs/plans/completed/compaction-hardening.md`](../plans/completed/compaction-hardening.md)
+- Plan: [`docs/plans/compaction-hardening.md`](../plans/compaction-hardening.md) (migrated to `docs/plans/completed/` by `/do-merge` post-merge)
 - Issue: [#1127](https://github.com/tomcounsell/ai/issues/1127)
 - Hook: `agent/hooks/pre_compact.py`
 - Router guard: `agent/output_router.py::determine_delivery_action` (`last_compaction_ts` parameter, `"defer_post_compact"` action)

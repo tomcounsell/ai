@@ -177,7 +177,14 @@ class AgentSession(Model):
     pr_url = Field(null=True)
 
     # === Claude Code identity mapping ===
-    claude_session_uuid = Field(null=True)
+    # IndexedField so the PreCompact hook's 3-per-fire lookups
+    # (`AgentSession.query.filter(claude_session_uuid=...)` in
+    # `agent/hooks/pre_compact.py::_check_cooldown`, `_update_session_cooldown`,
+    # and `_increment_skipped_count`) use a stable secondary index rather than
+    # a full-scan. Also eliminates a test-flake path where filter-by-UUID
+    # could miss a just-saved row across partial `save(update_fields=...)`
+    # calls in the same process (#1127 PR #1135 review tech-debt).
+    claude_session_uuid = IndexedField(null=True)
 
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
