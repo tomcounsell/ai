@@ -119,6 +119,7 @@ class UpdateResult:
     caffeinate_status: service.CaffeinateStatus | None = None
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
     env_sync_result: env_sync.EnvSyncResult | None = None
+    reflections_sync_result: env_sync.ReflectionsSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
     migration_result: migrations.MigrationResult | None = None
     officecli_result: officecli.InstallResult | None = None
@@ -392,6 +393,22 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if projects_r.error:
         log(f"WARN: projects.json: {projects_r.error}", v, always=True)
         result.warnings.append(f"projects.json: {projects_r.error}")
+
+    # Step 1.66: Ensure config/reflections.yaml is a symlink to the vault
+    log("Verifying config/reflections.yaml...", v)
+    result.reflections_sync_result = env_sync.sync_reflections_yaml(project_dir)
+    refl_r = result.reflections_sync_result
+    if refl_r.created:
+        log(
+            "config/reflections.yaml symlink created → ~/Desktop/Valor/reflections.yaml",
+            v,
+            always=True,
+        )
+    elif refl_r.skipped:
+        log("config/reflections.yaml: vault not found, using in-repo fallback", v)
+    if refl_r.error:
+        log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
+        result.warnings.append(f"reflections.yaml symlink: {refl_r.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)

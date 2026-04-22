@@ -251,6 +251,9 @@ class PipelineProgress(BaseModel):
     plan_url: str | None = None
     pr_url: str | None = None
 
+    # Claude Code resume
+    claude_session_uuid: str | None = None
+
     @property
     def duration(self) -> float | None:
         """Total duration in seconds from start to completion or now."""
@@ -628,6 +631,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         issue_url=issue_url,
         plan_url=_safe_str(session.plan_url),
         pr_url=pr_url,
+        claude_session_uuid=_safe_str(getattr(session, "claude_session_uuid", None)),
     )
 
 

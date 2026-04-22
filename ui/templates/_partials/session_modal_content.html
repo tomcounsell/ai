@@ -31,6 +31,11 @@
                     {% if pipeline.slug %}
                     <tr><td class="text-secondary">Slug</td><td class="mono">{{ pipeline.slug }}</td></tr>
                     {% endif %}
+                    {% if pipeline.claude_session_uuid %}
+                    <tr><td class="text-secondary">Resume</td><td>
+                        <span class="resume-chip mono" onclick="copyResumeCommand(this)" title="Click to copy" data-uuid="{{ pipeline.claude_session_uuid }}">/resume {{ pipeline.claude_session_uuid }}</span>
+                    </td></tr>
+                    {% endif %}
                     {% if pipeline.session_type %}
                     <tr><td class="text-secondary">Persona</td><td>
                         <span class="badge badge-{{ 'blue' if pipeline.session_type == 'Developer' else ('green' if pipeline.session_type == 'Teammate' else 'purple') }}">{{ pipeline.session_type }}</span>
@@ -126,6 +131,21 @@
         {% endif %}
     </div>
 </div>
+<style>
+.resume-chip {
+    display: inline-block;
+    background: var(--bg-secondary, #1e1e2e);
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: all;
+    transition: background 0.15s;
+}
+.resume-chip:hover { background: var(--bg-hover, #2a2a3e); }
+.resume-chip.copied { color: var(--success, #4caf50); border-color: var(--success, #4caf50); }
+</style>
 <script>
 function copySessionDetails(btn) {
     var text = [
@@ -137,6 +157,15 @@ function copySessionDetails(btn) {
         var orig = btn.textContent;
         btn.textContent = '\u2713';
         setTimeout(function() { btn.textContent = orig; }, 1500);
+    });
+}
+function copyResumeCommand(el) {
+    var cmd = '/resume ' + el.dataset.uuid;
+    navigator.clipboard.writeText(cmd).then(function() {
+        el.classList.add('copied');
+        var orig = el.textContent;
+        el.textContent = '\u2713 copied';
+        setTimeout(function() { el.textContent = orig; el.classList.remove('copied'); }, 1500);
     });
 }
 </script>
