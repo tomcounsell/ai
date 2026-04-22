@@ -6,6 +6,7 @@ owner: Tom Counsell
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1132
 last_comment_id:
+revision_applied: true
 ---
 
 # Scrub monolith-migration annotations from `reflections/` (and the vault `reflections.yaml`)
@@ -130,6 +131,8 @@ Reader opens any `reflections/*.py` file → docstring describes module's purpos
 - **No code-behavior changes.** Function bodies, signatures, decorators, imports — untouched. Any test that was green before remains green after.
 - **Run `python -m ruff format` after editing** (per user global instruction: "do not run linting, only black formatting" — ruff format is the project's formatter equivalent). This catches any docstring quote/indent issues introduced during edits.
 
+> **Implementation Note (concern: re-flow quality, not bare deletion):** Bare deletion is not the standard. After removing migration text from a docstring, the surviving prose must still answer three questions: (a) what does this module/callable do, (b) what is its contract (args, return shape, side effects), (c) what failure modes does it handle. If deletion leaves a docstring that only answers (b) — e.g., just a return-shape line with no purpose statement — re-flow it to add a one-sentence purpose line in present tense ("Reads X from Y and returns Z."). The validator (`scrub-validator`) is instructed to read each edited docstring start-to-finish; an answer of "I removed the migration text" without a coherent surviving description is a fail, not a pass.
+
 ### Per-file edit list (concrete)
 
 | File | Edits |
@@ -138,7 +141,7 @@ Reader opens any `reflections/*.py` file → docstring describes module's purpos
 | `reflections/utils.py` | Replace the "Extracted from scripts/reflections.py (ReflectionRunner class and module-level helpers)" sentence with a short present-tense description: "Shared helpers for all reflection callables. All helpers are pure functions with no shared mutable state." |
 | `reflections/auditing.py` | Drop "Extracted from scripts/reflections.py steps:" and the 6-line step-mapping block in the module docstring. Drop "from monolith module level" tail on line 72. Drop `Maps to monolith step:` lines from `run_log_review` (190), `run_documentation_audit` (300), `run_skills_audit` (351), `run_hooks_audit` (393), `run_feature_docs_audit` (467), `run_pr_review_audit` (574). Keep the "Hotfix (sibling of PR #1056)" prose in `run_log_review`. |
 | `reflections/behavioral_learning.py` | Drop "Extracted from scripts/reflections.py pipeline:" + the step-arrow line in module docstring. Drop "(guard preserved from monolith step_behavioral_learning)" parenthetical on line 11. Drop "Maps to monolith: step_behavioral_learning (which calls step_episode_cycle_close and step_pattern_crystallization in sequence)" from `run` docstring on lines 31-32. |
-| `reflections/daily_report.py` | Drop "Extracted from scripts/reflections.py pipeline:" + step-arrow line in module docstring. Drop "Maps to monolith: step_daily_report_and_notify (which calls step_produce_report ...)" from line 71. |
+| `reflections/daily_report.py` | Drop "Extracted from scripts/reflections.py pipeline:" + step-arrow line in module docstring. **Re-flow the `_collect_reflection_findings` docstring (line 33)**: replace "Reads from the Reflection model (used by the YAML scheduler) rather than ReflectionRun." with a present-tense description that does not name the deleted class — e.g., "Reads from the Reflection model (the YAML scheduler's per-callable state record). Returns a dict of category → list[finding]." Drop "Maps to monolith: step_daily_report_and_notify (which calls step_produce_report ...)" from line 71. |
 | `reflections/maintenance.py` | Drop "Extracted from scripts/reflections.py steps:" + 6-line step-mapping block. Drop `Maps to monolith step:` lines from `run_legacy_code_scan` (35), `run_redis_ttl_cleanup` (79), `run_redis_data_quality` (128), `run_branch_plan_cleanup` (251), `run_disk_space_check` (438), `run_analytics_rollup` (468). |
 | `reflections/memory_management.py` | Replace "New reflections with no monolith equivalent:" with "Reflection callables:" (or similar present-tense enumerator). |
 | `reflections/session_intelligence.py` | Drop "Extracted from scripts/reflections.py pipeline:" + step-arrow line in module docstring; keep "This is a single callable that runs all three sub-steps internally, preserving ordering without depends_on complexity in the YAML scheduler." Drop "Maps to monolith: step_session_intelligence (which calls step_session_analysis, step_llm_reflection, step_auto_fix_bugs in sequence)" from `run` docstring on lines 143-144. |
@@ -188,6 +191,8 @@ No existing tests UPDATE / DELETE / REPLACE — all "VERIFY" because the scrub i
 **Impact:** This PR rebases onto a structure that no longer has these files. The scrub still applies — same annotations would have moved with the files — but as a different set of file paths.
 **Mitigation:** Per issue body, ship this PR promptly to land it before #1028's plan stabilizes. If #1028 lands first, the scrub is even cheaper (fewer call-sites to scrub since some annotations would have been deleted in the move) — re-run the grep guard against the new layout and apply edits to the renamed files.
 
+> **Implementation Note (concern: #1028 rebase strategy):** Builder, before opening the PR, run `gh pr list --search "#1028" --state open --json number,title,headRefName` to confirm #1028 has not landed mid-flight. If it has merged: `git fetch origin main && git rebase origin/main`, expect zero conflicts (the move would have deleted exactly the lines this scrub deletes), then re-run the grep guard against the new `reflections/{group}/<name>.py` layout and re-apply per-file edits to the renamed files. If the rebase produces unexpected conflicts, stop and escalate — the conflict pattern is diagnostic of a third-party edit and warrants human review before continuing.
+
 ### Risk 4: Convention note in `docs/features/reflections.md` provokes scope creep
 **Impact:** Reviewer asks for a broader documentation rewrite.
 **Mitigation:** Keep the convention note to literally one bullet ("Numbered-step references (`step_X`) are historical and should not be reintroduced — reflections are registered by name in `config/reflections.yaml`."). If reviewer pushes for more, defer to #1031/#1032.
@@ -199,6 +204,8 @@ No race conditions identified — all changes are static text edits in source fi
 ## No-Gos (Out of Scope)
 
 1. **Documentation cleanup outside `reflections/`** — `docs/features/popoto-index-hygiene.md`, `bridge-self-healing.md`, `telegram-history.md`, `valor-name-references.md`, `claude-code-feature-swot.md`, `documentation-audit.md`, `session-lifecycle*.md`, `pm-dev-session-architecture.md`, `unified-analytics.md`, `sustainable-self-healing.md`, `reflections.md` (deep edits), `reflections-dashboard.md`. These are tracked by **#1032**. The optional one-line convention note in `docs/features/reflections.md` is the only docs touch this PR allows.
+
+   > **Implementation Note (concern: non-overlap with #1031 and #1032):** Builder, when staging the diff, run `git diff --name-only main` and verify the file list is confined to (a) `reflections/*.py`, (b) at most `docs/features/reflections.md` for the optional convention note, and (c) the plan file itself. Any other path under `docs/features/` indicates accidental scope creep into #1031's or #1032's territory — drop those edits before opening the PR. The PR description should explicitly state "Non-overlapping with #1031 (adding-reflection-tasks rewrite) and #1032 (cascade docs cleanup)."
 2. **Vault file `~/Desktop/Valor/reflections.yaml` scrub** — the issue cited `config/reflections.yaml:58, 141-142` but that file moved to vault on commit `c2af0960`. The vault file is iCloud-managed and outside this repo's tracking. **Recommend filing a follow-up issue** to scrub the vault YAML at next opportunity (not gated on this PR; the YAML drift is pure migration narration and breaks nothing).
 3. **`docs/features/adding-reflection-tasks.md` rewrite** — tracked by **#1031**.
 4. **One-file-per-reflection refactor** — tracked by **#1028**.
@@ -230,6 +237,9 @@ N/A — this repo doesn't publish a docs site for `reflections/`.
 ## Success Criteria
 
 - [ ] `grep -rn 'scripts/reflections.py\|Extracted from\|Maps to monolith\|monolith\|ReflectionRun' reflections/` returns zero matches.
+
+  > **Implementation Note (concern: grep verification scope):** This is the canonical pre-merge guard. Run it exactly as written, against `reflections/` only — do NOT broaden to repo-wide. The patterns intentionally target the five known annotation forms: bare module path (`scripts/reflections.py`), docstring header phrase (`Extracted from`), inline step marker (`Maps to monolith`), bare term (`monolith`), and the deleted class root (`ReflectionRun` — matches both `ReflectionRun` and `ReflectionRunner`). The bare-term `monolith` may collide with prose elsewhere in the repo; that's why scope is `reflections/` only. If the grep returns matches in `tests/unit/test_reflections_multi_repo.py` or `docs/plans/completed/`, those are intentional historical references — out of scope per No-Gos #7.
+
 - [ ] `git diff main -- reflections/` shows only docstring/comment changes — zero changes inside function bodies.
 - [ ] `pytest tests/unit/test_reflections_package.py tests/unit/test_reflection_scheduler.py tests/unit/test_reflections_memory.py tests/unit/test_reflections_scheduling.py tests/unit/test_reflections_multi_repo.py tests/unit/test_reflections_report.py tests/integration/test_reflections_redis.py -x -q` is green.
 - [ ] `python -m ruff format --check reflections/` passes (i.e., black/ruff finds nothing to reformat after edits).
@@ -315,7 +325,17 @@ This is a Small chore. One builder, one validator, one optional documentarian fo
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique runs. -->
+**Verdict:** READY TO BUILD (with concerns)
+
+**Revision applied:** 2026-04-23. The following findings from the war room were addressed in this revision pass:
+
+- **BLOCKER (resolved):** The original per-file edit list for `reflections/daily_report.py` was missing line 33's `ReflectionRun` reference inside the `_collect_reflection_findings` docstring. The grep guard would have failed at validation time and bounced the PR back. **Fix:** the `daily_report.py` row in the per-file edit list now explicitly calls out line 33 with a re-flow recipe.
+- **Concern 1 (acknowledged, embedded):** Coordination with #1028 (one-file-per-reflection refactor). See Risk 3's Implementation Note for the rebase recipe.
+- **Concern 2 (acknowledged, embedded):** Non-overlap with #1031 (adding-reflection-tasks rewrite) and #1032 (cascade docs cleanup). See No-Gos #1's Implementation Note for the diff-staging guard.
+- **Concern 3 (acknowledged, embedded):** Grep verification scope. See Success Criteria's Implementation Note for the canonical pre-merge command and its scoping rationale.
+- **Concern 4 (acknowledged, embedded):** Docstring re-flow quality — bare deletion is insufficient. See Technical Approach's Implementation Note for the three-question coherence test the validator applies.
+
+Concerns are acknowledged risks, not defects. The plan proceeds to build.
 
 ---
 
