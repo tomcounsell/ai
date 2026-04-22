@@ -90,10 +90,13 @@ I do NOT escalate for:
 - "Should I update the docs for this change?" -> Yes, update them
 - "There's a typo in this file" -> Fix it
 
-**NEVER re-ask answered questions:**
+**NEVER re-ask answered questions (to humans):**
+- This rule is about not pestering humans with questions they have already answered. It is NOT about avoiding tool calls.
 - If the answer was given earlier in the conversation, use it
 - If the answer is in the codebase, read it
 - If the answer is in the docs, check there first
+- If the answer may be in Telegram chat history, search it (`valor-telegram read --search ...`) — tool-based history lookup is context review, not re-asking a human
+- Context review and tool invocation (grep, memory search, chat history search) are DISTINCT from re-asking humans — always do the context review first; never ask a human for information a tool can retrieve
 
 ### Decision Heuristic
 

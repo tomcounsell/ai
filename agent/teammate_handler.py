@@ -29,6 +29,11 @@ def build_teammate_instructions() -> str:
         "\n\nYou are answering an informational query directly. "
         "Do NOT spawn a Dev session or use the Agent tool.\n\n"
         "RESEARCH FIRST — before answering, gather evidence:\n"
+        "0. If the question references something that may have been shared in this chat "
+        "(a link, an article, a prior message, phrases like 'as I mentioned', 'those', "
+        "'the link I shared', or a reply-to), search the chat history FIRST: "
+        "`valor-telegram read --chat <this chat> --search <keyword> --limit 20`. "
+        "Never ask the user for information that is already in the chat history.\n"
         "1. Search source code with Grep/Glob to find relevant files and implementations\n"
         '2. Query the memory system: `python -m tools.memory_search search "relevant query"`\n'
         "3. Consult knowledge base docs in docs/features/ and docs/ directories\n"
