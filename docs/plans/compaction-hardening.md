@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor
@@ -392,13 +392,17 @@ No agent integration required. This is worker-internal:
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/compaction-hardening.md` describing: what compaction is, where backups live, the 5-min cooldown contract, the 30s nudge guard, and the recovery procedure (operator copies a `.jsonl.bak` over the live session file and runs `claude --resume`).
-- [ ] Add entry to `docs/features/README.md` index table under a reliability/worker category.
+- [x] Create `docs/features/compaction-hardening.md` describing: what compaction is, where backups live, the 5-min cooldown contract, the 30s nudge guard, and the recovery procedure (operator copies a `.jsonl.bak` over the live session file and runs `claude --resume`).
+- [x] Add entry to `docs/features/README.md` index table under a reliability/worker category.
 
 ### Inline Documentation
-- [ ] `agent/hooks/pre_compact.py`: module docstring updated to describe backup + cooldown; function docstring updated to state the hook's guarantees (never raises, writes a backup on first fire, cools down within 5min).
-- [ ] `agent/output_router.py::determine_delivery_action`: docstring updated to document the new `last_compaction_ts` parameter and the `"defer_post_compact"` return value.
-- [ ] `models/agent_session.py::AgentSession`: docstring / field comments on `last_compaction_ts` and `compaction_count` explaining their writer (pre_compact_hook) and readers (output router, any future dashboard).
+- [x] `agent/hooks/pre_compact.py`: module docstring updated to describe backup + cooldown; function docstring updated to state the hook's guarantees (never raises, writes a backup on first fire, cools down within 5min).
+- [x] `agent/output_router.py::determine_delivery_action`: docstring updated to document the new `last_compaction_ts` parameter and the `"defer_post_compact"` return value.
+- [x] `models/agent_session.py::AgentSession`: docstring / field comments on `last_compaction_ts` and `compaction_count` explaining their writer (pre_compact_hook) and readers (output router, any future dashboard).
+
+### Cascade (do-docs pass)
+- [x] Updated `docs/features/sdk-modernization.md` PreCompact bullet to reflect post-#1127 hook behavior.
+- [x] Updated `docs/features/session-steering.md` Output Router section to document `last_compaction_ts` parameter and `"defer_post_compact"` action.
 
 ### External Documentation Site
 Not applicable — this repo has no external docs site.
