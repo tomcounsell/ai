@@ -131,49 +131,24 @@ Invoke via the Skill tool: `Skill(skill="do-issue", args="...")`.
 
 If `--dry-run`, print the proposed issue title + body instead of creating.
 
-### Track C — Open investigation (raw GitHub issue, `investigation` label)
+### Track C — Open investigation (`investigation` label)
 
 Criteria:
 1. Finding is **suspected but not confirmed** (the audit flagged uncertainty, or the verification pass couldn't prove it)
 2. Finding names a **design question** rather than a bug (e.g., "is the dual-steering-queue split intentional?")
 3. Finding is a **cross-cutting pattern** that deserves discussion before fixing (e.g., "god module with 5000+ lines")
 
-These do NOT need the full `/do-issue` treatment — they are discussion starters, not spec'd work. Create a single raw GitHub issue per audit run that enumerates all investigations as a checklist:
+These do NOT need the full `/do-issue` treatment — they are discussion starters, not spec'd work.
 
-```bash
-gh issue create \
-  --label investigation \
-  --title "Investigations from daily audit: <feature-slug> (<YYYY-MM-DD>)" \
-  --body "$(cat <<'EOF'
-From the daily integration audit of `<feature-slug>` on YYYY-MM-DD.
+Invoke `/do-investigation-issue` for each Track C finding:
 
-Each item below is a question or pattern that needs human judgment before it becomes work.
-
-- [ ] **<short title>** — <one sentence question>. Evidence: `<file:line>`. Audit finding:
-  > <blockquote of finding text>
-
-- [ ] **<short title>** — ...
-
-Audit report summary: PASS N / WARN N / FAIL N
-
-<details>
-<summary>Full audit report</summary>
-
-<paste full audit report>
-
-</details>
-EOF
-)"
+```
+Skill(skill="do-investigation-issue", args="<component> — <brief finding>")
 ```
 
-Ensure the `investigation` label exists first:
+The skill handles label creation, the issue body template, and the label policy (`investigation` only — never `bug` until confirmed). Pass each finding as a separate invocation. The skill's "When to Err on the Side of Filing" section is the triage guide — when in doubt, file it.
 
-```bash
-gh label list --search investigation | grep -q investigation || \
-  gh label create investigation --description "Open question or pattern surfaced by audit; needs discussion before planning" --color FFD700
-```
-
-If `--dry-run`, print the proposed issue body instead.
+If `--dry-run`, print the component + brief description for each finding instead of invoking the skill.
 
 ## Step 4: Log and report
 
