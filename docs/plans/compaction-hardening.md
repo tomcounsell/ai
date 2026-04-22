@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1127
 last_comment_id:
+allow_unchecked: true
 revision_applied: true
 critique_blockers_resolved:
   - B1 (2026-04-23): session-id correlation corrected — hook receives the SDK's UUID in `input_data["session_id"]`, which maps to `AgentSession.claude_session_uuid` (NOT `session_id`). Lookup now uses `AgentSession.query.filter(claude_session_uuid=<hook_input.session_id>)`. Cooldown state keyed by `claude_session_uuid`.
