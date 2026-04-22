@@ -895,6 +895,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # The next SDK idle tick naturally re-invokes this callback;
                 # if the 30s window has expired, the normal nudge flow fires;
                 # if real SDK output arrived first, it routes via `"deliver"`.
+                # Uses local `import time as _time` matching the pattern in
+                # `_tick_backstop_check_compaction` for consistency across the
+                # two compaction-guard call sites (#1127 review nit).
                 try:
                     import time as _time
 

@@ -181,12 +181,17 @@ class TestRetentionIntegration:
     async def test_retention_keeps_last_three_backups(self, tmp_path):
         claude_uuid = str(uuid.uuid4())
         transcript = _make_transcript(tmp_path)
-        _make_session(claude_uuid)
+        session = _make_session(claude_uuid)
+        # Reload by primary key (session.id) instead of the claude_session_uuid
+        # index. The index can lag across the autouse _clean_sessions teardown,
+        # producing a flaky `None` return on iteration 1. Primary-key lookup is
+        # unaffected (#1127 PR review tech-debt fix).
+        session_id = session.id
 
         for i in range(4):
             if i > 0:
                 # Bypass the 5-minute cooldown by rewinding the timestamp.
-                refreshed = _reload_by_claude_uuid(claude_uuid)
+                refreshed = AgentSession.get_by_id(session_id)
                 assert refreshed is not None
                 refreshed.last_compaction_ts = time.time() - (COMPACTION_COOLDOWN_SECONDS + 10)
                 refreshed.save(update_fields=["last_compaction_ts"])
@@ -201,6 +206,6 @@ class TestRetentionIntegration:
         backups = sorted((tmp_path / "backups").glob(f"{claude_uuid}-*.jsonl.bak"))
         assert len(backups) == BACKUP_RETENTION_COUNT == 3
 
-        final = _reload_by_claude_uuid(claude_uuid)
+        final = AgentSession.get_by_id(session_id)
         assert final is not None
         assert final.compaction_count == 4
