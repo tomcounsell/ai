@@ -626,7 +626,6 @@ class TestGetEmbeddingRanked:
         assert result == []
 
     def test_returns_empty_when_no_embeddings_on_disk(self):
-
         from agent.memory_retrieval import get_embedding_ranked
 
         mock_provider = MagicMock()
