@@ -193,6 +193,47 @@ class TestNonSdlcDelivery:
         assert action == "deliver"
 
 
+class TestPostCompactDeferAction:
+    """Issue #1127: defer_post_compact is a new action in the nudge flow.
+
+    See tests/unit/test_output_router_compaction_guard.py for the full matrix
+    of guard conditions. This class just verifies the action is reachable via
+    the same determine_delivery_action() surface the nudge-loop tests use.
+    """
+
+    def test_defer_action_returned_when_compaction_recent(self):
+        import time as _time
+
+        action = determine_delivery_action(
+            msg="some output",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+            last_compaction_ts=_time.time(),
+        )
+        assert action == "defer_post_compact"
+
+    def test_defer_does_not_increment_any_nudge_count(self):
+        """The defer branch is a pure no-op — returning 'defer_post_compact'
+        implies the executor should not increment auto_continue_count.
+        (The counter lives on chat_state, not on the pure function's return;
+        this test just asserts the action string is a distinct value from any
+        nudge_* string so the executor's action-dispatch knows to skip the
+        nudge branches entirely.)"""
+        import time as _time
+
+        action = determine_delivery_action(
+            msg="x",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+            last_compaction_ts=_time.time(),
+        )
+        assert action != "nudge_continue"
+        assert action != "nudge_empty"
+        assert action != "nudge_rate_limited"
+
+
 class TestPmSentMessageIds:
     """Tests for pm_sent_message_ids field preserved in session queue (issue #497)."""
 
