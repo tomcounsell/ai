@@ -119,40 +119,6 @@ class FileOutputHandler:
             pass  # Reactions are best-effort for file output
 
 
-class LoggingOutputHandler:
-    """Simple stderr/logging fallback for output routing.
-
-    Writes all output to the Python logger at INFO level. Useful for
-    development and debugging when file output is not needed.
-    """
-
-    async def send(
-        self,
-        chat_id: str,
-        text: str,
-        reply_to_msg_id: int,
-        session: Any = None,
-    ) -> None:
-        """Log text output via Python logging."""
-        if not text:
-            return
-
-        session_id = getattr(session, "session_id", None) or "unknown"
-        logger.info(
-            f"[worker:{session_id}] Output ({len(text)} chars): "
-            f"{text[:200]}{'...' if len(text) > 200 else ''}"
-        )
-
-    async def react(
-        self,
-        chat_id: str,
-        msg_id: int,
-        emoji: str | None = None,
-    ) -> None:
-        """Log the reaction via Python logging."""
-        logger.info(f"[worker] Reaction: chat={chat_id} msg={msg_id} emoji={emoji}")
-
-
 class TelegramRelayOutputHandler:
     """Route agent output to the Redis outbox for Telegram delivery.
 
