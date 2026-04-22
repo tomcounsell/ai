@@ -6,6 +6,10 @@ owner: Valor
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1127
 last_comment_id:
+critique_blockers_resolved:
+  - B1 (2026-04-23): session-id correlation corrected — hook receives the SDK's UUID in `input_data["session_id"]`, which maps to `AgentSession.claude_session_uuid` (NOT `session_id`). Lookup now uses `AgentSession.query.filter(claude_session_uuid=<hook_input.session_id>)`. Cooldown state keyed by `claude_session_uuid`.
+  - B2 (2026-04-23): `_enqueue_nudge` has no `priority` kwarg (hardcodes `priority="high"` on lines 338, 370). Plan redesigned to use an early-return in `determine_delivery_action` that short-circuits BEFORE `_enqueue_nudge` is reached. No signature change to `_enqueue_nudge`; the `"defer_post_compact"` branch in the executor simply logs + returns without re-enqueue.
+  - B3 (2026-04-23): Spike-1 upgraded from code-read to empirical verification. Added spike-1a (prototype spike, worktree-isolated) that triggers a real compaction, captures the backup, and validates byte-for-byte that the pre-compact JSONL state is fully on disk at PreCompact-hook-fire time. Fallback (explicit fsync + line-count check) added to the plan if the spike reveals partial-write behavior.
 ---
 
 # Compaction Hardening — JSONL Backup, Cooldown, Post-Compact Nudge Guard
@@ -55,6 +59,7 @@ Our worker spawns `claude -p` subprocesses per `AgentSession`, and those subproc
 - **#885 + `lifecycle-cas-authority.md`** — Added CAS guards to `finalize_session()` and `transition_status()` so lifecycle transitions survive stale-object saves. Our cooldown check will use the same `get_authoritative_session` → `transition_status` idiom (see `_enqueue_nudge:300-376`) to avoid introducing a new stale-save hazard when we write `last_compaction_ts`.
 - **#898 / `nudge-stomp-append-event-bypass.md`** — Documents how a Popoto full-state `save()` on a stale local AgentSession can clobber fields written by a concurrent writer. We avoid this by using `save(update_fields=["last_compaction_ts", "compaction_count"])` (Popoto partial-save) inside the hook instead of a full-state `save()`.
 - **agent/hooks/stop.py** — Existing hook already opens `transcript_path` (via `input_data.get("transcript_path", "")`) and reads bytes for memory extraction (lines 122-127, 262-264). Confirms the PreCompact hook will receive the same `transcript_path` field and can reuse this pattern.
+- **agent/sdk_client.py `_get_prior_session_uuid` / `_store_claude_session_uuid` (lines 152-241)** — Canonical mapping code between our bridge session_id and Claude Code's session UUID. `_store_claude_session_uuid(session_id, claude_uuid)` writes `session.claude_session_uuid = claude_uuid` (line 234). The hook does the inverse lookup: given the UUID from `input_data["session_id"]`, find the AgentSession by filtering on `claude_session_uuid`. This is the key correction versus the pre-critique draft, which incorrectly filtered on `session_id`.
 
 ## Research
 
@@ -68,19 +73,31 @@ External research via WebSearch on 2026-04-23 focused on the PreCompact hook's i
 **Key findings:**
 
 - **PreCompact input schema is stable.** Hooks receive `{session_id, transcript_path, cwd, hook_event_name: "PreCompact", trigger: "manual" | "auto", custom_instructions}`. The matcher supports `"manual"` and `"auto"` to distinguish `/compact` from full-context-auto. Source: [Claude Code Hooks reference](https://code.claude.com/docs/en/hooks). This confirms we can cheaply branch on `trigger` if we ever want to apply cooldown only to `auto` compactions (we will — see Open Question 3).
+- **IMPORTANT — the hook's `input_data["session_id"]` is the Claude Code SDK's internal session UUID, NOT our bridge/Telegram `AgentSession.session_id`.** The Claude Code SDK exposes its own UUID (e.g. a uuid4 it generates per subprocess) through hook payloads and `ResultMessage.session_id`. Our bridge uses a DIFFERENT `session_id` (the Telegram-thread-scoped string keyed by chat_id + root_message_id or an SDLC slug). These two namespaces must NOT be conflated. The mapping is written at `agent/sdk_client.py:1735` by `_store_claude_session_uuid(bridge_session_id, claude_uuid)` which sets `AgentSession.claude_session_uuid = claude_uuid` (models/agent_session.py:179). Therefore, the PreCompact hook must query by `claude_session_uuid`, not `session_id`.
 - **Community backup pattern is the straightforward one.** Multiple community hooks (Mike Adolan's SQLite transcript backup, Code Coup's "context recovery hook", mvara-ai/precompact-hook) all follow the same shape: in the PreCompact hook, read `input_data["transcript_path"]`, snapshot the file by byte-copy to a sibling path with a timestamp suffix, and return `{}` quickly. Heavy work goes on a background task, not inline. Sources: [claudefa.st/blog/tools/hooks/context-recovery-hook](https://claudefa.st/blog/tools/hooks/context-recovery-hook), [dev.to/mikeadolan compaction hooks](https://dev.to/mikeadolan/claude-code-compaction-kept-destroying-my-work-i-built-hooks-that-fixed-it-2dgp).
 - **Async file-snapshot primitive is `asyncio.to_thread(shutil.copy2, src, dst)`.** `shutil.copy2` preserves timestamps (handy for backup retention) and runs in a thread so it does not block the SDK's event loop. For a backup file a few MB in size the copy completes in milliseconds. Source: [Python asyncio docs](https://docs.python.org/3/library/asyncio.html). We do NOT need `aiofiles` here because the hook is called once per compaction (low frequency) and a thread-executor copy is simpler than a streamed async read/write.
 
 ## Spike Results
 
-Two short spikes resolved ambiguities left by the issue's Open-for-planner questions.
+Three spikes resolved ambiguities left by the issue's Open-for-planner questions. Spike-1a is a **prerequisite-gating empirical verification** — the plan does NOT ship without a passing spike-1a result.
 
-### spike-1: Verify PreCompact hook delivers `transcript_path` that points to a valid JSONL file we can snapshot
-- **Assumption**: "The SDK's PreCompactHookInput includes `transcript_path`, and by the time the hook fires, the JSONL file on disk is a complete, readable image of the pre-compaction history."
-- **Method**: code-read (walk the SDK's `PreCompactHookInput` type + `agent/hooks/stop.py` for a precedent of reading a transcript in a hook) + external confirmation via the Claude Code hooks reference.
-- **Finding**: Confirmed. `agent/hooks/stop.py:122-127` already does `transcript_path = input_data.get("transcript_path", "")` and opens it with `open(transcript_path, "rb")` in the Stop hook. The PreCompact hook receives the same field per Anthropic's hooks docs. The JSONL is flushed to disk before the hook fires (the hook runs synchronously in the SDK's compaction critical section, so by the time our handler executes, all prior messages are persisted). Conclusion: straight `shutil.copy2(transcript_path, backup_path)` is correct.
+### spike-1: Verify PreCompact hook delivers `transcript_path` that points to a valid JSONL file
+- **Assumption**: "The SDK's PreCompactHookInput includes `transcript_path` and points at a real file."
+- **Method**: code-read.
+- **Finding**: Confirmed. `agent/hooks/stop.py:122-127` already does `transcript_path = input_data.get("transcript_path", "")` and opens it with `open(transcript_path, "rb")` in the Stop hook. The PreCompact hook receives the same field per Anthropic's hooks docs.
 - **Confidence**: high
 - **Impact on plan**: Drove the decision to put backup logic in the Python hook (Valor-side) rather than requesting an SDK feature. Resolves Open Question 1 from the issue.
+
+### spike-1a: **(prerequisite to implementation)** Empirically verify JSONL is fully flushed to disk when PreCompact fires
+- **Assumption**: "By the time the PreCompact hook's Python handler executes, the on-disk JSONL at `transcript_path` is a byte-complete image of the pre-compaction history. Meaning: every message that was in the SDK's in-memory conversation before compaction has been persisted to disk before our handler runs."
+- **Why this needs empirical verification, not code-read**: The Claude Code SDK is a closed-source binary from our perspective. We cannot walk its write-buffering policy by reading our own code. Community hooks (mvara-ai/precompact-hook, Mike Adolan's tool) assume full-flush is true, but none publish a test that proves it. If the SDK flushes asynchronously — even by a single buffered chunk — our backup would capture a torn state and `claude --resume` against the backup would fail with a JSONL parse error on the last line. This is a backup-integrity risk we cannot accept on faith.
+- **Method**: prototype in worktree isolation. Spawn a real `claude -p` subprocess with a prompt that forces a long conversation (e.g. a loop of 50 "echo N" turns to push history past the SDK's compaction threshold). Register a PreCompact hook that, when it fires, does THREE things: (a) records `len(Path(transcript_path).read_bytes())` and the final line of the JSONL, (b) calls `os.fsync()` on the file and re-reads — reports any diff, (c) writes a marker JSON to a side-channel file. After compaction completes and the session exits, walk the POST-compact transcript's `parent_uuid` chain and count how many messages preceded compaction. Compare that count against the line count captured in step (a). Any mismatch means the hook fired before a flush completed.
+- **Time cap**: 5 minutes agent time.
+- **Agent Type**: builder in worktree (prototype isolation — no committed code, report returns yes/no/finding only).
+- **Finding**: `_TO BE FILLED BY SPIKE-1A EXECUTION_`. If the finding is "flush is complete," the backup uses a straight `shutil.copy2`. If the finding is "partial flush possible," the fallback path below activates.
+- **Confidence**: `_TO BE FILLED_` after spike.
+- **Fallback if spike-1a fails (empirical partial-flush observed)**: The hook (a) opens the file with `O_DIRECT`-semantics read (via `os.open(path, os.O_RDONLY)` + explicit `os.fsync` on the source fd is a no-op for a read-only fd, so instead we poll line-count stability: read line count, `time.sleep(0.05)`, read again, repeat until two consecutive reads match OR 500ms elapses), (b) after stability, performs `shutil.copy2`. The 500ms ceiling bounds the PreCompact hook's worst-case latency. Added to the hook implementation as a conditional branch — activated only if spike-1a proves partial flushes can occur.
+- **Impact on plan**: This spike is a **gate on build**. If spike-1a reports partial-flush behavior AND the fallback stability-polling proves fragile in its own prototype, the plan is revised (not shipped as-is) to take a different backup approach (e.g., snapshot the SDK's in-memory state via an SDK API if one exists, or consume the transcript via a tail-the-log side channel). Builder MUST NOT start task `build-pre-compact-hook` before spike-1a passes.
 
 ### spike-2: Pick retention policy — N-backups vs age-based TTL
 - **Assumption**: "Retention by count (last 3) is sufficient; age-based TTL adds complexity without recovery benefit."
@@ -91,18 +108,22 @@ Two short spikes resolved ambiguities left by the issue's Open-for-planner quest
 
 ## Data Flow
 
-Trace from SDK-triggered compaction to a safe nudge-guarded resumption:
+Trace from SDK-triggered compaction to a safe nudge-guarded resumption.
 
-1. **Entry**: The Claude Code SDK subprocess is about to compact its conversation. It fires the `PreCompact` hook with `{session_id, transcript_path, trigger, custom_instructions}`.
-2. **Hook: backup snapshot**: `agent/hooks/pre_compact.py::pre_compact_hook` receives the input. It computes `backup_dir = Path(transcript_path).parent / "backups"`, creates it if missing, then copies `transcript_path` to `backup_dir / f"{session_uuid}-{utc_ts_int}.jsonl.bak"` using `await asyncio.to_thread(shutil.copy2, ...)`. Returns `{}` within a few hundred ms.
-3. **Hook: cooldown write**: Same hook, immediately after the copy completes, looks up the `AgentSession` by the SDK's `session_id` (via the same mapping `agent/sdk_client.py` uses to correlate Claude-Code UUIDs to AgentSession IDs — `_get_prior_session_uuid` / `_store_claude_session_uuid`). Writes `last_compaction_ts = now_utc()` and `compaction_count += 1` with `session.save(update_fields=[...])`. If the lookup fails (hook fires for a session we don't track), the hook logs and still returns `{}` — backup was the critical path, the cooldown is best-effort.
-4. **Hook: cooldown check (second invocation)**: On a subsequent PreCompact fire for the same session within 5 minutes, the hook reads `last_compaction_ts` first; if `now - last_compaction_ts < 300s`, it skips the snapshot and returns `{}` immediately (logs at `info` level). No second backup, no cooldown-timestamp update.
-5. **Hook: retention**: After a successful snapshot write, the hook lists `backup_dir/{session_uuid}-*.jsonl.bak`, sorts by mtime descending, and unlinks all but the top 3. This is a cheap `os.scandir` + `os.stat` + `os.unlink` loop inside the `asyncio.to_thread` call.
+**Terminology note (B1 fix):** The SDK hook's `input_data["session_id"]` is the Claude Code SDK's internal UUID. Our `AgentSession.session_id` is the bridge/Telegram thread identifier. They are NOT the same namespace. The mapping is stored on `AgentSession.claude_session_uuid` (written by `_store_claude_session_uuid` at `agent/sdk_client.py:1735`). Throughout the flow below, `claude_session_uuid` = the SDK's UUID, `bridge_session_id` = our AgentSession.session_id.
+
+1. **Entry**: The Claude Code SDK subprocess is about to compact its conversation. It fires the `PreCompact` hook with `{session_id, transcript_path, trigger, custom_instructions}` — where `input_data["session_id"]` is the **Claude SDK UUID** (=our `claude_session_uuid`).
+2. **Hook: backup snapshot**: `agent/hooks/pre_compact.py::pre_compact_hook` receives the input. It extracts `claude_session_uuid = input_data["session_id"]`. Computes `backup_dir = Path(transcript_path).parent / "backups"`, creates it if missing, then copies `transcript_path` to `backup_dir / f"{claude_session_uuid}-{utc_ts_int}.jsonl.bak"` using `await asyncio.to_thread(shutil.copy2, ...)`. Returns `{}` within a few hundred ms.
+3. **Hook: cooldown write (AgentSession lookup via `claude_session_uuid`)**: After the copy completes, the hook looks up the `AgentSession` by the Claude UUID via `AgentSession.query.filter(claude_session_uuid=claude_session_uuid)`. If found: writes `last_compaction_ts = now_utc()` and `compaction_count += 1` with `session.save(update_fields=["last_compaction_ts", "compaction_count"])`. If NOT found (hook fires before `_store_claude_session_uuid` persisted the mapping, or for a session we don't track): the hook logs at `info` level and still returns `{}` — backup was the critical path, the cooldown write is best-effort. **Redis key format: cooldown data lives on the AgentSession record itself; no separate Redis key is needed. The logical correlation key is `claude_session_uuid`, not `session_id`.**
+4. **Hook: cooldown check (second invocation)**: On a subsequent PreCompact fire for the same Claude UUID within 5 minutes, the hook re-looks up the AgentSession by `claude_session_uuid` and reads `last_compaction_ts`; if `now - last_compaction_ts < 300s`, it skips the snapshot and returns `{}` immediately (logs at `info` level). No second backup, no cooldown-timestamp update.
+5. **Hook: retention**: After a successful snapshot write, the hook lists `backup_dir/{claude_session_uuid}-*.jsonl.bak`, sorts by basename-embedded timestamp descending, and unlinks all but the top 3. This is a cheap `os.scandir` + `os.stat` + `os.unlink` loop inside the `asyncio.to_thread` call.
 6. **SDK finishes compaction**: The SDK proceeds with compaction, writes the compacted transcript, and returns the session to idle.
-7. **Session idle, nudge evaluated**: The session executor's output-callback path calls `route_session_output()` → `determine_delivery_action()`. The session that just idled after a compaction passes through this code.
-8. **30s guard**: `determine_delivery_action()` now accepts a new `last_compaction_ts: float | None` parameter. If `last_compaction_ts` is set and `now - last_compaction_ts < 30s`, it returns the new action `"defer_post_compact"` instead of `"nudge_continue"` / `"nudge_empty"` / `"nudge_rate_limited"`.
-9. **Defer enforcement**: In `agent/session_executor.py`'s action dispatch (near lines 798-848), the new `"defer_post_compact"` branch schedules a short re-evaluation: `await asyncio.sleep(1)` then re-pops the session and re-evaluates, OR simpler — re-enqueues the session with `priority="low"` and returns. No `_enqueue_nudge` call is made this tick.
+7. **Session idle, nudge evaluated**: The session executor's output-callback path calls `route_session_output()` → `determine_delivery_action()`. The session that just idled after a compaction passes through this code. The executor has access to the `AgentSession` (keyed by `bridge_session_id`) and therefore to its `last_compaction_ts` field directly — no UUID-to-bridge-ID translation is needed here because the executor is already on the bridge-session side of the mapping.
+8. **30s guard (B2 fix)**: `determine_delivery_action()` now accepts a new `last_compaction_ts: float | None` parameter. If `last_compaction_ts` is set and `now - last_compaction_ts < 30s`, it returns the new action `"defer_post_compact"` instead of `"nudge_continue"` / `"nudge_empty"` / `"nudge_rate_limited"`. **This early-return in the pure decision function is what suppresses the nudge** — no changes to `_enqueue_nudge`'s signature are required, because when the decision function returns `"defer_post_compact"`, the executor's action-dispatch branch for that action does NOT call `_enqueue_nudge` at all.
+9. **Defer enforcement (B2 fix)**: In `agent/session_executor.py`'s action dispatch (near lines 798-848), the new `"defer_post_compact"` branch does three things: (a) logs at `info` level with the session's `last_compaction_ts` age, (b) does NOT call `_enqueue_nudge` — the session is simply left in its current state, (c) does NOT set `chat_state.completion_sent = True`. Because the output-callback loop is driven by the SDK's own idle ticks, another tick will arrive within seconds; on that subsequent tick, `determine_delivery_action` is re-evaluated. If 30s has now passed, the normal nudge path fires; if real SDK output has arrived in the meantime, it routes through `"deliver"`.
 10. **Output**: Either (a) the 30s window expires on a subsequent tick and the nudge fires normally, or (b) the SDK completes compaction and produces real output that routes through `"deliver"` before the 30s expires — in which case the guard correctly never nudged.
+
+**Why this design avoids the `_enqueue_nudge` signature change:** The original draft wanted `_enqueue_nudge(..., priority="low")`, but `_enqueue_nudge` has no `priority` kwarg (it hardcodes `session.priority = "high"` on lines 338 and 370 of `agent/session_executor.py`). Adding a `priority` kwarg would require changing every existing call site and reasoning through the interaction with `transition_status(... "pending")`, which is out of scope. The simpler alternative — return early from `determine_delivery_action`, and skip the nudge call entirely in the executor's dispatch branch — achieves the same suppression with zero signature churn on a hot-path function.
 
 ## Why Previous Fixes Failed
 
@@ -116,7 +137,7 @@ No prior fixes attempted. Issues #1102 and #1103 were both untested risk finding
   - `AgentSession` gains two new fields: `last_compaction_ts: float | None` and `compaction_count: int = 0`. Both are non-indexed IntField / FloatField additions (no schema migration — Popoto is schema-on-write).
   - `pre_compact_hook` gains real behavior but its signature (`input_data, tool_use_id, context → dict`) is unchanged.
   - A new action string `"defer_post_compact"` is added to the contract documented in `determine_delivery_action`'s docstring.
-- **Coupling**: Increases slightly. The PreCompact hook now reads/writes `AgentSession` (previously the hook was model-agnostic). The decision to couple the hook to our model is deliberate: the cooldown state must live somewhere durable across compactions, and `AgentSession` is the one record keyed by a stable UUID that the SDK hook can correlate via the existing `_get_prior_session_uuid` helper.
+- **Coupling**: Increases slightly. The PreCompact hook now reads/writes `AgentSession` (previously the hook was model-agnostic). The decision to couple the hook to our model is deliberate: the cooldown state must live somewhere durable across compactions, and `AgentSession` is the one record where the correlation key `claude_session_uuid` is already stored (written by `_store_claude_session_uuid` at `sdk_client.py:1735`). The hook does the inverse lookup — given the Claude UUID from `input_data["session_id"]`, `AgentSession.query.filter(claude_session_uuid=<uuid>)` returns the row.
 - **Data ownership**: The `AgentSession.last_compaction_ts` field is owned by the PreCompact hook (sole writer). Readers (`determine_delivery_action`) are pure and don't mutate.
 - **Reversibility**: High. Reverting = delete backup logic from the hook (returns to no-op logger), drop the two new model fields (Popoto discards unknown fields), delete the defer branch from output_router. No data migration needed.
 
@@ -140,37 +161,46 @@ No prerequisites — this work touches only in-repo Python files, uses existing 
 
 ### Key Elements
 
-- **Backup snapshot**: The PreCompact hook copies `transcript_path` to a sibling `backups/` directory with a timestamped name before compaction proceeds.
-- **Cooldown field pair**: Two new fields on `AgentSession` (`last_compaction_ts`, `compaction_count`) provide durable per-session state so the cooldown survives process restarts and cross-worker coordination.
-- **5-minute debounce**: The hook itself enforces the cooldown — a second PreCompact fire inside 300s is a fast return-no-op.
-- **Retention**: The hook prunes to the last 3 backups per session UUID after each successful snapshot.
-- **30s post-compact nudge guard**: `determine_delivery_action` gains a `last_compaction_ts` parameter and a new `"defer_post_compact"` return value. The session executor handles the new action by re-enqueueing the session at low priority rather than firing `_enqueue_nudge`.
+- **Backup snapshot**: The PreCompact hook copies `transcript_path` to a sibling `backups/` directory with a timestamped name before compaction proceeds. Backup filenames are keyed by `claude_session_uuid` (the hook's `input_data["session_id"]`), which is unambiguous even for non-Valor sessions.
+- **Cooldown field pair**: Two new fields on `AgentSession` (`last_compaction_ts`, `compaction_count`) provide durable per-session state. **These are keyed via `claude_session_uuid`, not `session_id`** — the hook looks up the AgentSession row with `AgentSession.query.filter(claude_session_uuid=<hook_input.session_id>)` (B1 fix).
+- **5-minute debounce**: The hook itself enforces the cooldown — a second PreCompact fire inside 300s for the same `claude_session_uuid` is a fast return-no-op.
+- **Retention**: The hook prunes to the last 3 backups per `claude_session_uuid` after each successful snapshot.
+- **30s post-compact nudge guard (B2 fix)**: `determine_delivery_action` gains a `last_compaction_ts` parameter and a new `"defer_post_compact"` return value. The session executor handles the new action by **skipping the nudge call entirely for that tick** — no re-enqueue, no priority change, no `_enqueue_nudge` call. The next SDK idle tick re-evaluates the decision function and either defers again (still in the window) or nudges normally (window expired). This avoids any change to `_enqueue_nudge`'s signature.
 
 ### Flow
 
-**SDK signals compaction imminent** → PreCompact hook fires → **Hook snapshots JSONL to backups/ + writes `last_compaction_ts`** → SDK compacts → **Session returns to idle** → Output router reads `last_compaction_ts` → **If within 30s: action=`defer_post_compact`, executor re-enqueues low-priority, no nudge** → (30s passes) → **Next output-callback fires, `last_compaction_ts` now stale, normal nudge flow resumes**
+**SDK signals compaction imminent** → PreCompact hook fires (receives `claude_session_uuid` in `input_data["session_id"]`) → **Hook snapshots JSONL to `backups/{claude_session_uuid}-{ts}.jsonl.bak` + looks up AgentSession via `filter(claude_session_uuid=...)` + writes `last_compaction_ts` on that row** → SDK compacts → **Session returns to idle** → Output router reads `session.last_compaction_ts` (from the AgentSession, already keyed by `bridge_session_id`) → **If within 30s: action=`defer_post_compact`, executor SKIPS nudge call entirely for this tick (no _enqueue_nudge, no re-enqueue)** → (SDK fires next idle tick within seconds) → **Guard re-evaluates; if 30s expired, normal nudge flow resumes; if not, defers again**
 
 ### Technical Approach
 
 - **Hook lives in `agent/hooks/pre_compact.py`**, not in a new module. It is the natural home — the current hook is already wired into `build_hooks_config()` (`agent/hooks/__init__.py:35`), so no wiring change is needed.
-- **Session-UUID → AgentSession correlation uses the existing machinery**. `agent/sdk_client.py` already maintains a Claude-UUID ↔ AgentSession-session_id mapping via `_get_prior_session_uuid` / `_store_claude_session_uuid`. The hook extracts `session_id` from `input_data`, looks up the AgentSession via `AgentSession.query.filter(session_id=session_id)`, and operates on the first match. Non-matches (e.g., a non-Valor Claude session running in the same cwd) are tolerated — the hook logs and still snapshots the JSONL (backup has value even if we can't correlate to a session row).
+- **Session-UUID → AgentSession correlation uses `claude_session_uuid`, NOT `session_id` (B1 fix)**. `agent/sdk_client.py` maintains the mapping via `_store_claude_session_uuid(bridge_session_id, claude_uuid)` which writes `AgentSession.claude_session_uuid = claude_uuid` (line 234). The SDK's hook input gives us the claude_uuid side; the hook does the inverse lookup via `AgentSession.query.filter(claude_session_uuid=input_data["session_id"])`. The first match (sorted by `created_at` desc, for defense against hypothetical duplicate-uuid rows that shouldn't exist) is the target AgentSession. Non-matches (e.g., a non-Valor Claude session, or a session where `_store_claude_session_uuid` hasn't run yet because the first ResultMessage hasn't been processed) are tolerated — the hook logs at `info` and still snapshots the JSONL (backup has value even if we can't correlate to a session row). Cooldown state lives on the AgentSession record itself under `last_compaction_ts`; there is no separate `compaction:cooldown:*` Redis key — Popoto persists it as part of the AgentSession hash.
 - **Cooldown write uses `save(update_fields=[...])`**, not a full-state save. This avoids the stale-save hazard documented in `nudge-stomp-append-event-bypass.md` — even if some other writer has an older AgentSession in memory, Popoto's partial-save only overwrites the two named fields.
-- **Backup filename format**: `{claude_session_uuid}-{int(utc_ts)}.jsonl.bak` under `~/.claude/projects/{slug}/sessions/backups/`. Using the Claude UUID (which the hook already has from `input_data["session_id"]`) avoids needing to look up the AgentSession just for the filename. The `int(utc_ts)` suffix gives 1-second resolution, which is more than enough given the 5-minute cooldown.
-- **Retention**: After write, scan the backups directory for files matching `{uuid}-*.jsonl.bak`, sort by basename-timestamp descending, unlink index 3 onward. O(N) in the number of backups per session (N ≤ 4 in steady state).
-- **Nudge guard decision point**: Add parameter `last_compaction_ts: float | None` to `determine_delivery_action()`. If the parameter is set and `now - last_compaction_ts < 30`, return `"defer_post_compact"` before any other classification logic runs (earliest possible branch). `route_session_output()` looks up `session.last_compaction_ts` from the AgentSession and forwards it.
-- **Defer enforcement in the executor**: Add a single `elif action == "defer_post_compact":` branch in `agent/session_executor.py` alongside the existing `nudge_*` branches. The branch increments no counters, logs at info level, and calls `await _enqueue_nudge(..., nudge_feedback=NUDGE_MESSAGE, priority="low")` — except the re-enqueue sets the session back to `pending` with `priority="low"` so the next tick is delayed behind any higher-priority work. `chat_state.completion_sent` is NOT set, so if output later arrives from the SDK it still routes normally.
+- **Backup filename format**: `{claude_session_uuid}-{int(utc_ts)}.jsonl.bak` under `~/.claude/projects/{slug}/sessions/backups/`. Using the Claude UUID (which the hook receives directly from `input_data["session_id"]`) avoids needing any AgentSession lookup to construct the filename. The `int(utc_ts)` suffix gives 1-second resolution, which is more than enough given the 5-minute cooldown. This intentionally keeps backup filenames decoupled from our bridge namespace — a non-Valor session will still get a usefully-named backup.
+- **Retention**: After write, scan the backups directory for files matching `{claude_session_uuid}-*.jsonl.bak`, sort by basename-timestamp descending, unlink index 3 onward. O(N) in the number of backups per session (N ≤ 4 in steady state).
+- **Nudge guard decision point (B2 fix)**: Add parameter `last_compaction_ts: float | None` to `determine_delivery_action()`. If the parameter is set and `now - last_compaction_ts < 30`, return `"defer_post_compact"` before any other classification logic runs (earliest possible branch). `route_session_output()` looks up `session.last_compaction_ts` from the AgentSession (keyed by `bridge_session_id`, which is what the executor naturally has in hand) and forwards it.
+- **Defer enforcement in the executor (B2 fix)**: Add a single `elif action == "defer_post_compact":` branch in `agent/session_executor.py` alongside the existing `nudge_*` branches (near lines 798-848). The branch:
+  - Logs at `info` level the session's `last_compaction_ts` age
+  - Does NOT call `_enqueue_nudge` (that's the whole point — the nudge is suppressed, not re-enqueued)
+  - Does NOT set `chat_state.completion_sent = True`
+  - Increments no counters
+  - Returns from the output-callback invocation
+  The next SDK idle tick naturally re-invokes `route_session_output` a few seconds later; at that point `determine_delivery_action` is re-evaluated and either (a) returns `"defer_post_compact"` again if still inside the 30s window, or (b) falls through to normal nudge classification if the window has expired. No `_enqueue_nudge` signature change is needed. No new `priority` kwarg is introduced.
+- **Why not add a `priority` kwarg to `_enqueue_nudge`**: `_enqueue_nudge` hardcodes `session.priority = "high"` on lines 338 and 370 unconditionally. Adding a kwarg would mean (a) refactoring that hardcode, (b) propagating the kwarg through the existing 5 call sites, (c) reasoning through the interaction with `transition_status(..., "pending")` for the low-priority case. That's a separate refactor, out of scope for this plan. The early-return approach in `determine_delivery_action` achieves the same suppression — the nudge is simply not called at all for that tick — with zero signature churn.
 
 Alternative considered and rejected: an `await asyncio.sleep(30)` inline in the defer branch. Rejected because it holds the session executor coroutine for 30s on each post-compact fire, which starves concurrent sessions and couples the wait time to a single process's event loop.
+
+Alternative considered and rejected: a `priority="low"` re-enqueue via a newly-added kwarg on `_enqueue_nudge`. Rejected because it requires a hot-path refactor (see above). The simple early-return achieves correct suppression without touching `_enqueue_nudge`.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `pre_compact.py`'s hook body currently has zero exception handlers. This plan will wrap (a) the `shutil.copy2` call and (b) the `AgentSession.save(update_fields=...)` call in `try/except Exception:` + `logger.warning(...)` blocks. Backup failure must NOT raise — raising out of a hook crashes the SDK session. Test: mock `shutil.copy2` to raise `OSError("disk full")`, call `pre_compact_hook`, assert it returns `{}` and a warning was logged.
-- [ ] `_enqueue_nudge` already has `_TERMINAL_STATUSES` guards; the new `"defer_post_compact"` path must preserve them. Test: session in `completed` status + recent `last_compaction_ts` → executor logs and returns early, does not re-enqueue.
+- [ ] `pre_compact.py`'s hook body currently has zero exception handlers. This plan will wrap (a) the `shutil.copy2` call, (b) the `AgentSession.query.filter(claude_session_uuid=...)` call, and (c) the `AgentSession.save(update_fields=...)` call in `try/except Exception:` + `logger.warning(...)` blocks. Backup failure must NOT raise — raising out of a hook crashes the SDK session. Test: mock `shutil.copy2` to raise `OSError("disk full")`, call `pre_compact_hook`, assert it returns `{}` and a warning was logged.
+- [ ] AgentSession lookup failure (Redis down, model unavailable) must not propagate. Test: mock `AgentSession.query.filter` to raise `ConnectionError`, assert the hook still completes the snapshot (copy already succeeded) and returns `{}`.
 
 ### Empty/Invalid Input Handling
-- [ ] `transcript_path` empty string or missing file → hook logs `warning`, skips snapshot, still attempts cooldown write. Test: pass `input_data={"session_id": "x", "transcript_path": ""}`, assert no copy attempted, no exception raised.
-- [ ] `session_id` missing or unknown to AgentSession query → hook skips cooldown write, but the snapshot still ran if `transcript_path` was valid. Test: pass unknown session_id, assert snapshot file exists, assert no AgentSession mutation.
+- [ ] `transcript_path` empty string or missing file → hook logs `warning`, skips snapshot, does NOT attempt cooldown write (cooldown is only meaningful after a successful backup). Test: pass `input_data={"session_id": "x", "transcript_path": ""}`, assert no copy attempted, no AgentSession mutation, no exception raised.
+- [ ] `session_id` in hook input (the Claude UUID) is missing or unknown to AgentSession query → hook skips cooldown write, but the snapshot still ran if `transcript_path` was valid. Test: pass `input_data["session_id"]` that matches no AgentSession row, assert snapshot file exists, assert no AgentSession mutation, assert info-level log line recorded the miss.
 - [ ] `last_compaction_ts` is `None` (first compaction of a session's life) → `determine_delivery_action` does NOT return `"defer_post_compact"`, falls through to existing logic. Test: assert action == `"nudge_continue"` when `last_compaction_ts=None` with all other nudge-continue conditions met.
 - [ ] `last_compaction_ts` is exactly `now - 30.0s` → action is NOT deferred (boundary test). Test: `monkeypatch` `time.time()` to freeze, assert action != `"defer_post_compact"` when age is exactly 30s.
 
@@ -180,11 +210,12 @@ Alternative considered and rejected: an `await asyncio.sleep(30)` inline in the 
 ## Test Impact
 
 - [ ] `tests/unit/test_nudge_loop.py` — UPDATE: add test cases for the new `"defer_post_compact"` action. Existing nudge tests still pass (new param is optional, defaults to None).
-- [ ] `tests/unit/test_session_executor_extraction_decoupling.py` — UPDATE: add a test that exercises the defer branch in the action-dispatch switch, asserting `_enqueue_nudge` is called with `priority="low"` and `chat_state.completion_sent` remains False.
+- [ ] `tests/unit/test_session_executor_extraction_decoupling.py` — UPDATE: add a test that exercises the defer branch in the action-dispatch switch, asserting that `_enqueue_nudge` is NOT called (B2 fix — the defer branch skips the nudge call; it does not re-enqueue at low priority) and `chat_state.completion_sent` remains False.
 - [ ] `tests/unit/test_agent_session_queue.py` — No change expected; the cooldown fields are additive and don't affect the existing create/read paths.
-- [ ] NEW: `tests/unit/hooks/test_pre_compact_hook.py` — CREATE. Covers: snapshot happy path, snapshot with missing transcript, cooldown skip within 5min, retention pruning, exception swallowing.
+- [ ] NEW: `tests/unit/hooks/test_pre_compact_hook.py` — CREATE. Covers: snapshot happy path (keyed by `claude_session_uuid` in filename), snapshot with missing transcript, AgentSession lookup via `claude_session_uuid` (B1 fix — NOT via `session_id`), cooldown skip within 5min, retention pruning keyed by `claude_session_uuid`, exception swallowing on copy/query/save failure, graceful no-op when `claude_session_uuid` matches no AgentSession.
 - [ ] NEW: `tests/unit/test_output_router_compaction_guard.py` — CREATE. Covers all `last_compaction_ts` branches in `determine_delivery_action` (None, stale, fresh, boundary).
-- [ ] NEW: `tests/integration/test_compaction_hardening.py` — CREATE. End-to-end: simulate a PreCompact hook invocation on a temp JSONL file, assert a backup appears in `backups/`, fire a second PreCompact within 5min and assert no second backup appears, send an output through `route_session_output` within 30s of the hook and assert it defers.
+- [ ] NEW: `tests/integration/test_compaction_hardening.py` — CREATE. End-to-end: simulate a PreCompact hook invocation on a temp JSONL file with a known `claude_session_uuid`, assert a backup appears in `backups/` with that UUID in the filename, assert the AgentSession row (pre-populated with the same `claude_session_uuid`) has `last_compaction_ts` written, fire a second PreCompact within 5min and assert no second backup appears, send an output through `route_session_output` within 30s of the hook and assert it returns `"defer_post_compact"` AND that `_enqueue_nudge` is never called (B2).
+- [ ] NEW: `tests/integration/test_compaction_spike1a.py` — CREATE (run as prerequisite to implementation tasks). Empirically validates spike-1a: spawns a real `claude -p` subprocess with a long conversation, triggers compaction, and asserts the PreCompact-hook's captured backup is byte-complete relative to the pre-compact conversation state. This test is marked `@pytest.mark.slow` and `@pytest.mark.integration`. If it fails, the build blocks until the fallback flush-stability-polling path is added to the hook.
 
 ## Rabbit Holes
 
@@ -205,8 +236,12 @@ Alternative considered and rejected: an `await asyncio.sleep(30)` inline in the 
 **Mitigation:** Accept it. The race window is sub-second and the worst outcome is an extra backup file (which gets pruned next round) and a count that is off by one. We do not need a distributed lock for this. Documented explicitly in the hook's docstring.
 
 ### Risk 3: `last_compaction_ts` never set because AgentSession lookup fails
-**Impact:** If the hook's `AgentSession.query.filter(session_id=sid)` returns empty (hook fires for a session we don't track, or there's a race between session creation and the first compaction), we never write `last_compaction_ts`. The 30s nudge guard silently does nothing for that session — but that session's nudge path is the pre-fix behavior anyway, so it's no worse than today.
-**Mitigation:** Hook logs at `info` level when the lookup misses, so we can see the miss rate in production logs. The snapshot still runs.
+**Impact:** If the hook's `AgentSession.query.filter(claude_session_uuid=<uuid>)` returns empty (possible causes: hook fires for a non-Valor Claude session, OR hook fires for a Valor session BEFORE `_store_claude_session_uuid` has persisted the mapping — the first `ResultMessage.session_id` write at `sdk_client.py:1735` must land before the hook can find the row), we never write `last_compaction_ts`. The 30s nudge guard silently does nothing for that session — but that session's nudge path is the pre-fix behavior anyway, so it's no worse than today.
+**Mitigation:** Hook logs at `info` level when the lookup misses, so we can see the miss rate in production logs. The snapshot still runs. If the miss rate is materially > 0% in production (e.g. compaction happens before the first `ResultMessage` for long-running first turns), a follow-up can either (a) write `claude_session_uuid` earlier in the flow (from the SDK's `SystemMessage`, for example) or (b) route the hook to accept a `bridge_session_id` via env var, via the `cwd` field, or via the SDK's custom hook-input extension mechanism if one exists. Out of scope for v1.
+
+### Risk 5: Spike-1a (empirical JSONL flush verification) fails
+**Impact:** If the SDK does not fully flush the JSONL before firing PreCompact, our backup would capture a torn state and `claude --resume` against the backup would fail at parse time.
+**Mitigation:** Spike-1a is run as a prerequisite to the `build-pre-compact-hook` task. If it fails, the plan's fallback path (stability-polling on line count before copy, up to a 500ms ceiling) activates. If the fallback also proves fragile in its own prototype, the plan is revised — we do not ship a backup that could be silently torn.
 
 ### Risk 4: Backup directory fills disk over months
 **Impact:** If retention-pruning ever fails silently, we could accumulate backups indefinitely. Given ~1 KB per JSONL turn and sessions that compact every few hours, even 10,000 orphaned backups is under 100 MB — negligible by modern standards. But left unchecked over months, a pathological session (compacting every 5 minutes for a week) could accumulate tens of thousands of backups if the hook keeps failing retention.
@@ -228,12 +263,12 @@ Alternative considered and rejected: an `await asyncio.sleep(30)` inline in the 
 **State prerequisite:** The PreCompact hook's cooldown write has completed before the idle output is evaluated. Empirically, the SDK serializes the PreCompact hook before the compaction body and before the subsequent idle tick, so this is the expected ordering.
 **Mitigation:** The hook's cooldown write is synchronous from the SDK's perspective (it `await`s the hook return). By the time the session returns to idle and the output callback fires, `last_compaction_ts` is already persisted. No explicit lock needed. `route_session_output` re-reads the session from Redis anyway.
 
-### Race 3: Defer-branch re-enqueue collides with `_enqueue_nudge`'s CAS guards
-**Location:** `agent/session_executor.py::_enqueue_nudge` and the new `"defer_post_compact"` branch
-**Trigger:** The defer branch is implemented as a call into `_enqueue_nudge` with `priority="low"`. If the session is concurrently being finalized by another path, `_enqueue_nudge`'s `_TERMINAL_STATUSES` guard at line 278 should catch it.
-**Data prerequisite:** The session's status must be readable and accurate.
-**State prerequisite:** `_enqueue_nudge`'s existing re-read + CAS machinery (`get_authoritative_session` + `transition_status`) correctly handles late-arriving terminal transitions.
-**Mitigation:** Reuse `_enqueue_nudge` as-is. Its guards were specifically designed for this. The defer branch does not bypass any existing lifecycle protection.
+### Race 3: Defer branch vs session finalization
+**Location:** `agent/session_executor.py` — the new `"defer_post_compact"` dispatch branch
+**Trigger:** The defer branch fires for a session that another code path has just finalized (terminal status). Because the defer branch is now a pure no-op (B2 fix — no `_enqueue_nudge` call, no state mutation), there is no collision with lifecycle transitions at all.
+**Data prerequisite:** None — the defer branch does not read or write any shared state.
+**State prerequisite:** None.
+**Mitigation:** By design. The pure-no-op defer branch (B2 fix) is strictly simpler than the original re-enqueue approach and cannot collide with finalization, because it performs no mutations. `chat_state.completion_sent` is not touched, `session.status` is not touched, `priority` is not touched. If the session happens to transition to terminal in the window between the PreCompact hook firing and the next idle tick, the next tick's normal terminal-status handling takes over with zero interference from us.
 
 ## No-Gos (Out of Scope)
 
@@ -277,13 +312,15 @@ Not applicable — this repo has no external docs site.
 
 ## Success Criteria
 
-- [ ] A PreCompact hook invocation creates a `.jsonl.bak` file in `backups/` next to the transcript, within ~200ms of the hook firing.
-- [ ] A second PreCompact invocation for the same session within 5 minutes creates no new backup (log line at `info` confirms skip).
-- [ ] `AgentSession.last_compaction_ts` is set after the first compaction for a tracked session; `compaction_count` increments.
-- [ ] When `last_compaction_ts` is within 30s of `now`, `determine_delivery_action` returns `"defer_post_compact"` instead of any nudge action.
-- [ ] The defer branch in `session_executor.py` re-enqueues the session at `priority="low"` without calling `chat_state.completion_sent = True`, preserving the ability for real SDK output to route normally if it arrives.
-- [ ] Retention: after 4 compactions for one session (across multiple days if needed — simulated in tests), exactly 3 backups remain.
-- [ ] Hook exception safety: injecting `OSError` into `shutil.copy2` does not propagate out of the hook and does not prevent the AgentSession cooldown write.
+- [ ] Spike-1a passes (empirical flush verification) OR the stability-polling fallback is implemented and its own prototype passes.
+- [ ] A PreCompact hook invocation creates a `.jsonl.bak` file in `backups/{claude_session_uuid}-{ts}.jsonl.bak` next to the transcript, within ~200ms of the hook firing (or within ~700ms if the stability-polling fallback is active).
+- [ ] A second PreCompact invocation for the same `claude_session_uuid` within 5 minutes creates no new backup (log line at `info` confirms skip).
+- [ ] `AgentSession.last_compaction_ts` is set after the first compaction for a tracked session (looked up via `claude_session_uuid`, not `session_id`); `compaction_count` increments.
+- [ ] When `session.last_compaction_ts` is within 30s of `now`, `determine_delivery_action` returns `"defer_post_compact"` instead of any nudge action.
+- [ ] The defer branch in `session_executor.py` does NOT call `_enqueue_nudge` and does NOT set `chat_state.completion_sent = True`, preserving the ability for real SDK output to route normally if it arrives. `_enqueue_nudge`'s signature is unchanged by this plan (no `priority` kwarg added).
+- [ ] Retention: after 4 compactions for one session (across multiple days if needed — simulated in tests), exactly 3 backups remain, all keyed by the same `claude_session_uuid`.
+- [ ] Hook exception safety: injecting `OSError` into `shutil.copy2` does not propagate out of the hook and does not prevent the AgentSession cooldown write. Injecting a `ConnectionError` into the `AgentSession.query.filter` call does not propagate either — the snapshot still lands.
+- [ ] AgentSession lookup key: `grep -n 'claude_session_uuid' agent/hooks/pre_compact.py` returns a match on the `AgentSession.query.filter(...)` line. `grep -n 'filter(session_id=' agent/hooks/pre_compact.py` returns zero matches (B1 regression guard).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] `grep -n 'last_compaction_ts' agent/output_router.py agent/session_executor.py agent/hooks/pre_compact.py models/agent_session.py` returns a match in each of the 4 files.
@@ -327,6 +364,21 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Step by Step Tasks
 
+### 0. Run spike-1a (prerequisite to implementation)
+- **Task ID**: spike-1a-empirical-flush
+- **Depends On**: none
+- **Validates**: `tests/integration/test_compaction_spike1a.py` (create)
+- **Informed By**: B3 (unverified flush timing)
+- **Assigned To**: hook-builder
+- **Agent Type**: builder (worktree isolation — prototype only)
+- **Parallel**: true
+- Implement the empirical-flush integration test in a temporary worktree.
+- Run the test: spawn real `claude -p`, force compaction via a long conversation, register a PreCompact hook that captures line count + final line of the transcript at hook-fire time.
+- Compare captured count to the POST-compact transcript's `parent_uuid`-chain length.
+- Report: PASS if flush is complete, FAIL with a diff if not.
+- Move the test into the main codebase (marked `@pytest.mark.slow`) on PASS.
+- If FAIL: STOP, write findings to `docs/plans/compaction-hardening.md` Spike Results section, and add the stability-polling fallback to the hook plan before proceeding to task 2.
+
 ### 1. Add AgentSession cooldown fields
 - **Task ID**: build-model-fields
 - **Depends On**: none
@@ -336,20 +388,22 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `last_compaction_ts = FloatField(default=None)` and `compaction_count = IntField(default=0)` to `AgentSession` in `models/agent_session.py`.
-- Update docstring to describe writer (pre_compact_hook) and readers (output router).
+- Update docstring to describe writer (pre_compact_hook keyed on `claude_session_uuid`) and readers (output router keyed on `session_id`).
 
 ### 2. Implement pre_compact hook
 - **Task ID**: build-pre-compact-hook
-- **Depends On**: build-model-fields
+- **Depends On**: build-model-fields, spike-1a-empirical-flush (**MUST pass**)
 - **Validates**: `tests/unit/hooks/test_pre_compact_hook.py` (create)
-- **Informed By**: spike-1 (hook receives transcript_path, byte-copy is correct)
+- **Informed By**: spike-1 (hook receives transcript_path), spike-1a (flush is complete OR fallback activated), B1 (session correlation via `claude_session_uuid`)
 - **Assigned To**: hook-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement JSONL snapshot via `asyncio.to_thread(shutil.copy2, src, dst)` into `{transcript_parent}/backups/{session_uuid}-{int(ts)}.jsonl.bak`.
-- Look up AgentSession by `session_id` from `input_data`; write `last_compaction_ts` and bump `compaction_count` with `save(update_fields=[...])`.
-- Cooldown check: if existing `last_compaction_ts` within 300s, skip snapshot + save, log and return `{}`.
-- Retention: after successful write, keep last 3 backups per `session_uuid`, unlink older.
+- Extract `claude_session_uuid = input_data["session_id"]` at the top of the hook.
+- Implement JSONL snapshot via `asyncio.to_thread(shutil.copy2, src, dst)` into `{transcript_parent}/backups/{claude_session_uuid}-{int(ts)}.jsonl.bak`.
+- **If spike-1a reported partial-flush**: add stability-polling before the copy (re-read line count every 50ms until two consecutive reads match OR 500ms elapsed, whichever comes first).
+- Look up AgentSession via `AgentSession.query.filter(claude_session_uuid=claude_session_uuid)` (B1 fix — NOT `filter(session_id=...)`); sort by `created_at` desc, take the first match. Write `last_compaction_ts` and bump `compaction_count` with `save(update_fields=["last_compaction_ts", "compaction_count"])`.
+- Cooldown check: if the looked-up AgentSession's `last_compaction_ts` is within 300s, skip snapshot + save, log at info, and return `{}`.
+- Retention: after successful write, keep last 3 backups per `claude_session_uuid`, unlink older.
 - All side effects wrapped in `try/except Exception: logger.warning(...)`; hook always returns `{}`.
 
 ### 3. Add `last_compaction_ts` to output router
@@ -362,19 +416,23 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: true
 - Add `last_compaction_ts: float | None = None` kwarg to `determine_delivery_action()` and `route_session_output()`.
 - Early-return `"defer_post_compact"` when `last_compaction_ts is not None` and `now - last_compaction_ts < 30`.
+- In `route_session_output()`, read `session.last_compaction_ts` from the AgentSession (which the route function already has in scope, keyed by `bridge_session_id`) and forward it to `determine_delivery_action`.
 - Update the docstring's action list to document the new return value.
 
 ### 4. Wire defer branch into session executor
 - **Task ID**: build-executor-defer
 - **Depends On**: build-router-guard
 - **Validates**: `tests/unit/test_session_executor_extraction_decoupling.py` (update + new test case)
-- **Informed By**: Prior Art (`_enqueue_nudge` has existing CAS + terminal-status guards we can reuse)
+- **Informed By**: B2 (the defer branch is a pure no-op, no `_enqueue_nudge` signature change)
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - In `agent/session_executor.py` action-dispatch block (near lines 798-848), add `elif action == "defer_post_compact":` branch.
-- Branch logs at info, calls `_enqueue_nudge(..., priority="low")`, does NOT set `chat_state.completion_sent = True`.
-- Ensure the route_session_output caller site reads `session.last_compaction_ts` and forwards it.
+- Branch logs at info level the `last_compaction_ts` age, then returns from the output-callback invocation.
+- **Branch does NOT call `_enqueue_nudge`** (B2 fix — the whole point is to suppress the nudge for this tick).
+- **Branch does NOT set `chat_state.completion_sent = True`** (preserves the ability for real SDK output to route normally).
+- Branch increments no counters.
+- Do NOT add any `priority` kwarg to `_enqueue_nudge` — it has none and this plan does not add one.
 
 ### 5. Test suite
 - **Task ID**: build-tests
@@ -430,6 +488,10 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Router has defer branch | `grep -n 'defer_post_compact' agent/output_router.py` | output > 0 |
 | Executor handles defer | `grep -n 'defer_post_compact' agent/session_executor.py` | output > 0 |
 | Model has cooldown field | `grep -n 'last_compaction_ts' models/agent_session.py` | output > 0 |
+| B1 regression guard — hook uses claude_session_uuid | `grep -n 'claude_session_uuid' agent/hooks/pre_compact.py` | output > 0 |
+| B1 regression guard — hook does NOT use session_id for lookup | `grep -n 'filter(session_id=' agent/hooks/pre_compact.py` | output == 0 |
+| B2 regression guard — no priority kwarg added to _enqueue_nudge | `grep -n 'priority=' agent/session_executor.py \| grep -i 'defer\|nudge'` | no new `priority=` on `_enqueue_nudge` call sites beyond the existing 2 hardcodes |
+| Spike-1a test exists | `test -f tests/integration/test_compaction_spike1a.py` | exit code 0 |
 | Feature doc exists | `test -f docs/features/compaction-hardening.md` | exit code 0 |
 
 ## Critique Results
