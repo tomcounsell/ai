@@ -5,7 +5,7 @@ appetite: Small
 owner: Tom Counsell
 created: 2026-04-22
 tracking: https://github.com/tomcounsell/ai/issues/1098
-last_comment_id:
+last_comment_id: 4291256483
 ---
 
 # Worker Kickstart Race — Fix False "System Degraded" Alarm
@@ -60,6 +60,7 @@ The orchestrator waits long enough for the worker to fully start before declarin
 
 - **Issue #999 (closed 2026-04-16)**: "update orchestrator silently leaves worker stopped when launchd fails to restart within 30s". Added the 30s poll + kickstart fallback that this plan is now tuning. Different failure mode: #999 was about silent failure (no error escalation); #1098 is about false-positive escalation when worker is actually healthy.
 - **PR #1003 (merged 2026-04-16)**: "fix(#999): worker restart kickstart fallback + resume hydration field name". Introduced the current 30s + 15s window and the `result.success = False` escalation. No tests exist for this path — the PR noted "greenfield coverage" but didn't add any, deferring that as out of scope.
+- **Issue #1098 comment (@romanobichi, 2026-04-21)**: Suggested "extend the orchestrator's health-check window (e.g., 15–20s) after kickstart -k so the worker has enough time to fully start". This plan extends that idea: we increase BOTH windows (60s initial + 30s retry), ADD a 12s throttle-aware sleep between kickstart and retry polling, AND downgrade the final escalation from error to warning. The commenter's direction is correct; the details account for launchd ThrottleInterval stacking that the comment didn't surface.
 
 ## Research
 
