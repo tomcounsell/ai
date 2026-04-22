@@ -5,7 +5,10 @@ appetite: Small
 owner: Tom Counsell
 created: 2026-04-22
 tracking: https://github.com/tomcounsell/ai/issues/1098
-last_comment_id: 4291256483
+last_comment_id: IC_kwDOEYGa087_x2Cj
+revision_applied: true
+revised_at: 2026-04-22
+revision_notes: Tightened scope (keep error escalation for genuine failures), corrected watchdog HEARTBEAT_THRESHOLD (600s not 360s), strengthened throttle-sleep justification, populated Critique Results. Synced issue comment IC_kwDOEYGa087_x2Cj (external suggestion to extend window 15–20s) — already covered by the planned 60s + 30s windows.
 ---
 
 # Worker Kickstart Race — Fix False "System Degraded" Alarm
@@ -60,7 +63,7 @@ The orchestrator waits long enough for the worker to fully start before declarin
 
 - **Issue #999 (closed 2026-04-16)**: "update orchestrator silently leaves worker stopped when launchd fails to restart within 30s". Added the 30s poll + kickstart fallback that this plan is now tuning. Different failure mode: #999 was about silent failure (no error escalation); #1098 is about false-positive escalation when worker is actually healthy.
 - **PR #1003 (merged 2026-04-16)**: "fix(#999): worker restart kickstart fallback + resume hydration field name". Introduced the current 30s + 15s window and the `result.success = False` escalation. No tests exist for this path — the PR noted "greenfield coverage" but didn't add any, deferring that as out of scope.
-- **Issue #1098 comment (@romanobichi, 2026-04-21)**: Suggested "extend the orchestrator's health-check window (e.g., 15–20s) after kickstart -k so the worker has enough time to fully start". This plan extends that idea: we increase BOTH windows (60s initial + 30s retry), ADD a 12s throttle-aware sleep between kickstart and retry polling, AND downgrade the final escalation from error to warning. The commenter's direction is correct; the details account for launchd ThrottleInterval stacking that the comment didn't surface.
+- **Issue #1098 comment from `romanobichi` (2026-04-21)**: External suggestion to extend the orchestrator's health-check window 15–20s after `kickstart -k` so the worker has enough time to fully start. The current plan already addresses this with a more aggressive solution (60s first window + 12s throttle-sleep + 30s retry, derived from launchd `ThrottleInterval: 10` empirics). No plan change required — the comment confirms the diagnosis and lands within the same direction the plan already takes.
 
 ## Research
 
@@ -143,9 +146,9 @@ No prerequisites — this work has no external dependencies beyond what `/update
 
 ### Key Elements
 
-- **Extended first-window poll**: Expand the 30s initial window to 60s to absorb launchd `ThrottleInterval` stacking on slow machines.
-- **Throttle-aware kickstart retry**: Sleep 12 seconds after the `kickstart -k` call (past the 10s throttle) before starting the retry poll, and extend retry window from 16s to 30s.
-- **Graceful escalation**: Downgrade the final "system degraded" escalation from `result.success = False` to a warning. The worker watchdog (`monitoring/worker_watchdog.py`) and launchd's `KeepAlive=true` will bring the worker up eventually; the next `/update` or health check will verify. Failing the whole update because a 60-second window expired is disproportionate.
+- **Extended first-window poll**: Expand the 30s initial window to 60s to absorb launchd `ThrottleInterval` stacking on slow machines. This alone is expected to eliminate the false positive in the overwhelming majority of cases (Spike-1 measured healthy-path end-to-end startup under 3 seconds; the remaining delay is launchd's 10-second throttle).
+- **Throttle-aware kickstart retry**: Sleep 12 seconds after the `kickstart -k` call (past the 10s `ThrottleInterval`) before starting the retry poll, and extend the retry window from 16s to 30s. The 12-second value is `ThrottleInterval (10)` + 2s slack for clock skew and subprocess dispatch latency; this is the minimum safe wait and is directly derivable from the plist. If operators later report throttle-stacking failures we will revisit; for now we are NOT making this a tunable because the plist value is itself fixed.
+- **Error escalation behavior: unchanged.** `result.success = False` and the ERROR log line stay as-is for the final failure path. Downgrading the escalation is out of scope for this bug — the issue is that we declare failure TOO EARLY, not that the failure signal is too loud. PR #1003 deliberately added this escalation to fix #999 (silent worker death during /update). Reverting it would re-open that bug. The worker watchdog only kills hung workers to let launchd restart them; it does NOT notify the operator (verified: `monitoring/worker_watchdog.py:105–128` logs + `os.kill`, no Telegram/alert path). Losing the `/update` error signal would mean a genuinely dead worker could persist across multiple updates unnoticed.
 
 ### Flow
 
@@ -157,20 +160,20 @@ No prerequisites — this work has no external dependencies beyond what `/update
       OR timeout
   → If worker PID exists but heartbeat stale → warn, done (existing behavior, unchanged)
   → If no worker PID → kickstart -k fallback
-      → sleep 12s (past launchd throttle)
+      → sleep 12s (past launchd ThrottleInterval)
       → Retry poll (30s, 15 iterations × 2s)
           → heartbeat appears, success
           OR still missing
-  → On final failure: warn (not error), do NOT set result.success = False
+  → On final failure: log ERROR, append warning, set result.success = False (UNCHANGED)
 ```
 
 ### Technical Approach
 
-1. **In `scripts/update/run.py` around line 800**: change `range(15)` to `range(30)` (60s window). This is the simplest absorption of throttle stacking.
-2. **After the kickstart at line 836**: add a `_time.sleep(12)` before entering the retry poll, to allow launchd's throttle window to expire before we start checking.
-3. **Retry poll at line 840**: change `range(8)` to `range(15)` (30s window).
-4. **At line 867**: remove `result.success = False`. Keep the ERROR log and warning append so operators still see the signal, but don't fail the entire update. The worker watchdog + launchd `KeepAlive` will recover automatically.
-5. **Rename log message** from "ERROR: Worker not running after kickstart retry — system degraded" to "WARN: Worker not running within startup window — launchd will retry; check `worker-status`" to reflect that this is no longer a hard failure.
+1. **In `scripts/update/run.py` line 800**: change `range(15)` to `range(30)` (60s first window). This is the primary fix — absorbs launchd throttle + bootstrap latency without touching the failure path.
+2. **After the kickstart try/except at line 836–838**: add `_time.sleep(12)` before entering the retry poll, to let launchd's `ThrottleInterval: 10` (verified at `com.valor.worker.plist:32–33`) expire before we check again. The 12s = 10s throttle + 2s slack.
+3. **Retry poll at line 840**: change `range(8)` to `range(15)` (30s retry window).
+4. **Lines 859–867: unchanged.** Keep the ERROR log text, the warning append, and `result.success = False`. Extending the windows means the ERROR now fires only when the worker genuinely failed to start within 60s + 12s + 30s = 102 seconds — which is a real problem worth flagging, not a false positive.
+5. **Inline comments updated** at lines 792–794 (clarify heartbeat is written after full startup), line 800 (`# 60s window`), line 839 (`# Sleep past launchd ThrottleInterval, then re-poll for 30s`).
 
 No shell script changes, no env var, no configuration file changes. Pure Python orchestrator tweak.
 
