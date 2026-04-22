@@ -119,7 +119,10 @@ class TestDetectOutcomes:
         memory_key = "test-memory-used-123"
         # Simulate _judge_outcomes_llm returning "used" for the memory
         mock_llm_result = {
-            memory_key: {"outcome": "used", "reasoning": "Agent read the memory but did not use it to drive the response"}
+            memory_key: {
+                "outcome": "used",
+                "reasoning": "Agent read the memory but did not use it to drive the response",
+            }
         }
 
         with patch(

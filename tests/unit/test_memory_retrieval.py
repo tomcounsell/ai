@@ -927,7 +927,7 @@ class TestSearchAssessQuality:
 
     def test_assess_quality_false_no_quality_key(self):
         """search() without assess_quality must NOT include 'quality' key (backward compat)."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from tools.memory_search import search
 
@@ -983,7 +983,7 @@ class TestSearchAssessQuality:
         assert result["quality"] is not None
 
     def test_assess_quality_true_failure_path_returns_results(self):
-        """When ContextAssembler.assess() raises, search() still returns 'results' without crashing."""
+        """When ContextAssembler.assess() raises, search() returns 'results' without crashing."""
         from unittest.mock import MagicMock, patch
 
         from tools.memory_search import search
