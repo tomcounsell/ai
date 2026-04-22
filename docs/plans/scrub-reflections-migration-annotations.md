@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Small
 owner: Tom Counsell
