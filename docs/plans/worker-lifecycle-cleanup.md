@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1131
 last_comment_id:
+revision_applied: true
 ---
 
 # Worker Lifecycle Cleanup: Dead Alias, Dead Handler, Starting-Workers Leak Edge Case
@@ -57,7 +58,8 @@ Three leftover items from the worker-lifecycle audit (#1019) remain in the codeb
 
 - **#1019 — Worker lifecycle audit: open investigations** (closed 2026-04-22): umbrella issue enumerating W1-W12 and I1-I6. W5 was closed by PR #1086. W9/W10/I4 were deferred to this issue. No prior closed attempt to delete W9 or W10 or to harden I4.
 - **#1017 — Worker lifecycle audit follow-up: kill command gaps, heartbeat constant drift, state machine doc accuracy** (closed 2026-04-19, plan `docs/plans/worker_lifecycle_cleanup.md` status Shipped): ran the parallel track for kill-command and doc-drift issues in the same #1019 investigation. Completely disjoint mechanical scope (`tools/agent_session_scheduler.py`, `ui/app.py`, `docs/features/session-lifecycle.md`), so no code conflict.
-- **PR #801 — fix(queue): prevent duplicate worker spawns per chat_id via `_starting_workers` guard (#785)** (merged 2026-04-07): introduced `_starting_workers`. Its body promised `except`-block protection against `create_task()` failure — delivered correctly. The `add_done_callback()` failure window was not considered in that PR. This plan fills that gap.
+- **PR #801 — fix(queue): prevent duplicate worker spawns per chat_id via `_starting_workers` guard (#785)** (merged 2026-04-07): introduced `_starting_workers`. Its body promised `except`-block protection against `create_task()` failure — delivered correctly. The post-create failure window (any statement after `create_task` but before the task is published) was not considered in that PR. This plan fills that gap.
+- **PR #1051 — refactor(agent): modularise `agent/agent_session_queue.py`** (merged; referenced in `docs/plans/refactor-agent-session-queue.md:227, 547`): explicitly preserved `recover_orphaned_agent_sessions_all_projects` in the re-export list as a compatibility surface. This plan **retracts that compatibility promise**: grep across the repository, scripts, `.claude/`, launchd plists, and tests now confirms zero external callers, so the preserved re-export is no longer justified. The retraction is noted in the Task 1 commit message.
 - **PR #905 — fix: close nudge-stomp append_event save bypass (#898)** (merged 2026-04-11): unrelated scope; mentioned only as recent queue-area work to confirm no refactor landed between PR #801 and this plan that would supersede the `_starting_workers` design.
 - **PR #877 — Add RECOVERY_OWNERSHIP registry for session recovery coverage** (merged 2026-04-10): added the recovery-ownership mechanism but did not touch `_ensure_worker` or the `_starting_workers` set.
 
@@ -114,7 +116,7 @@ Not applicable — this is internal cleanup with no user-facing flow.
 3. In `docs/features/pm-dev-session-architecture.md` line 465, rewrite the table row to drop `LoggingOutputHandler` — the live set is `FileOutputHandler` and `TelegramRelayOutputHandler`.
 4. In `docs/features/worker-service.md` line 47, delete the `LoggingOutputHandler` row from the table.
 
-**I4 — harden `_ensure_worker`.** Rewrite the function body from the current four-statement `try/except/raise` into a `try/finally` that guarantees `_starting_workers.discard(worker_key)` runs on every exit and cancels any orphan task if callback registration fails:
+**I4 — harden `_ensure_worker`.** Rewrite the function body from the current four-statement `try/except/raise` into a `try/finally` that guarantees `_starting_workers.discard(worker_key)` runs on every exit and cancels any orphan task if a post-create statement fails:
 
 ```python
 def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
@@ -133,9 +135,9 @@ def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
        once the task is live — startup-race guard.
 
     Leak-safety guarantee: _starting_workers.discard() runs in `finally`, so no exit
-    path (including a pathological add_done_callback failure) can leave the key in
-    the set. If callback registration fails, the newly-created task is cancelled
-    and NOT stored in _active_workers, so no orphan runs.
+    path can leave the key in the set. If any statement after create_task() raises
+    (e.g., a pathological dict assignment or logger failure), the newly-created
+    task is cancelled and NOT stored in _active_workers, so no orphan runs.
     """
     existing = _active_workers.get(worker_key)
     if existing and not existing.done():
@@ -149,27 +151,110 @@ def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
         event = asyncio.Event()
         _active_events[worker_key] = event
         task = asyncio.create_task(_worker_loop(worker_key, event, is_project_keyed))
-        # Register the done_callback BEFORE publishing the task to _active_workers,
-        # so either (a) registration succeeds and the task is fully wired up, or
-        # (b) registration raises and we cancel the orphan without leaking it.
-        task.add_done_callback(lambda _: _starting_workers.discard(worker_key))
         _active_workers[worker_key] = task
         logger.info(f"[worker:{worker_key}] Started session queue worker")
     except Exception:
         # If the task was created but not published, cancel it so no orphan runs.
         if task is not None and worker_key not in _active_workers:
             task.cancel()
+            logger.exception(
+                f"[worker:{worker_key}] _ensure_worker post-create failure; cancelled orphan task"
+            )
         raise
     finally:
         _starting_workers.discard(worker_key)
 ```
 
 Three changes from the current version:
-1. `task.add_done_callback` moves **before** `_active_workers[worker_key] = task`. Either registration succeeds and the task is fully wired up, or it raises before the task is visible to other queue code.
-2. `_starting_workers.discard(worker_key)` moves into `finally`, so it runs on every exit path — success, `create_task` exception, or `add_done_callback` exception.
-3. The `except` block now cancels the task if it was created but not yet published. Combined with the callback-before-publish ordering, this means a post-create registration failure cannot leave an orphan task running.
+1. The `add_done_callback(lambda _: _starting_workers.discard(...))` registration is **removed**. The `finally` block already clears the set synchronously on every exit, so the callback was dead code (it would always fire against an empty set). This matches the repo's "NO LEGACY CODE TOLERANCE" principle — a second cleanup mechanism that never does work is pure coupling overhead.
+2. `_starting_workers.discard(worker_key)` moves into `finally`, so it runs on every exit path — success, `create_task` exception, or any post-create statement failure.
+3. The `except` block now cancels the task if it was created but not yet published (detected by `worker_key not in _active_workers`). Logging via `logger.exception` gives operators I4-specific context if the hazard ever fires in production. Combined, this means a post-create failure cannot leave an orphan task running or a key lingering in `_starting_workers`.
 
 This addresses the issue's "either success or any exception path always clears the entry" requirement, plus the implicit task-orphan hazard.
+
+**I4 test approach (resolves B1, C2).** The hazard we want to demonstrate is: "a statement after `asyncio.create_task(...)` raises, and we leave neither an orphan task in `_active_workers` nor a key in `_starting_workers`." Because there is no `add_done_callback` call left to patch, we inject the failure via a lightweight `create_task` wrapper installed with `monkeypatch`. The wrapper calls the real `create_task` to produce a genuine `asyncio.Task`, then replaces a post-create attribute so the next assignment (`_active_workers[worker_key] = task`) fails deterministically. The cleanest injection point is to patch `_active_workers` itself with a `dict` subclass whose `__setitem__` raises for the test's `worker_key`.
+
+```python
+@pytest.mark.asyncio
+async def test_starting_workers_cleared_when_post_create_fails(monkeypatch):
+    """B1/C1/C2 — simulate a post-create failure and assert no leak and no orphan.
+
+    We replace _active_workers with a dict subclass whose __setitem__ raises for
+    our test key. _ensure_worker creates a real asyncio.Task via create_task,
+    then hits the raising __setitem__. The except branch must cancel the task,
+    finally must clear _starting_workers.
+    """
+    from agent import agent_session_queue as q
+
+    worker_key = "race-test-postcreate"
+
+    class RaisingActiveWorkers(dict):
+        def __setitem__(self, key, value):
+            if key == worker_key:
+                raise RuntimeError("simulated _active_workers publish failure")
+            super().__setitem__(key, value)
+
+    monkeypatch.setattr(q, "_active_workers", RaisingActiveWorkers())
+    # _starting_workers is module-level; reset it for a clean assertion window.
+    q._starting_workers.discard(worker_key)
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        q._ensure_worker(worker_key, is_project_keyed=False)
+
+    # Event-loop yield: task.cancel() schedules cancellation; the coroutine must
+    # run for one turn before task.cancelled() becomes True.
+    await asyncio.sleep(0)
+
+    assert worker_key not in q._starting_workers, "finally block must clear _starting_workers"
+    assert worker_key not in q._active_workers, "orphan task must not be published"
+    # Locate the orphan via the event — _active_events was assigned before the
+    # raise, so we can find the task via the wrapper's closure. Simpler: scan
+    # all tasks for one whose coro name matches _worker_loop and whose key is
+    # ours. For asserting cancellation on the task created by _ensure_worker,
+    # we capture it through the create_task wrapper (next block).
+```
+
+Because capturing the created task through a monkeypatched `_active_workers` dict is clumsy, the actual test uses a `create_task` wrapper to hold a reference:
+
+```python
+@pytest.mark.asyncio
+async def test_starting_workers_cleared_when_post_create_fails(monkeypatch):
+    from agent import agent_session_queue as q
+
+    worker_key = "race-test-postcreate"
+    created_tasks: list[asyncio.Task] = []
+    original_create_task = asyncio.create_task
+
+    def wrapped_create_task(coro, *a, **kw):
+        task = original_create_task(coro, *a, **kw)
+        created_tasks.append(task)
+        return task
+
+    class RaisingActiveWorkers(dict):
+        def __setitem__(self, key, value):
+            if key == worker_key:
+                raise RuntimeError("simulated _active_workers publish failure")
+            super().__setitem__(key, value)
+
+    monkeypatch.setattr(q.asyncio, "create_task", wrapped_create_task)
+    monkeypatch.setattr(q, "_active_workers", RaisingActiveWorkers())
+    q._starting_workers.discard(worker_key)
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        q._ensure_worker(worker_key, is_project_keyed=False)
+
+    await asyncio.sleep(0)  # C2: yield so CancelledError propagates
+
+    assert worker_key not in q._starting_workers
+    assert worker_key not in q._active_workers
+    assert len(created_tasks) == 1, "exactly one task created"
+    assert created_tasks[0].cancelled(), "orphan task must be cancelled"
+```
+
+Notes on the chosen mechanism:
+- `monkeypatch.setattr(q.asyncio, "create_task", ...)` patches the `asyncio` binding that `agent.agent_session_queue` actually uses (`q.asyncio.create_task`). This avoids global side-effects on other coroutines in the event loop.
+- Patching `_active_workers` with a subclass is safe because the test runs in its own pytest function scope and `monkeypatch` auto-reverts on teardown.
+- The `await asyncio.sleep(0)` yield is essential (C2). Without it, `task.cancelled()` may return False even though `cancel()` was called, because the coroutine has not yet processed the cancellation.
 
 ## Failure Path Test Strategy
 
@@ -196,7 +281,7 @@ This addresses the issue's "either success or any exception path always clears t
 - [ ] `tests/unit/test_output_handler.py` module docstring — UPDATE: remove "`LoggingOutputHandler`," from the list of tested implementations.
 - [ ] `tests/integration/test_agent_session_queue_race.py::TestEnsureWorkerDeduplication::test_double_call_creates_only_one_worker` — UPDATE (light): the assertion `chat_id not in _starting_workers` post-return still holds under the new implementation, so no behavioural change. Re-run to confirm no regression.
 - [ ] `tests/integration/test_agent_session_queue_race.py::TestEnsureWorkerDeduplication::test_starting_workers_cleared_after_task_creation` — UPDATE (light): same; the `finally` guarantees this test continues to pass.
-- [ ] `tests/integration/test_agent_session_queue_race.py::TestEnsureWorkerDeduplication` — REPLACE (additive): add `test_starting_workers_cleared_when_add_done_callback_fails` — monkeypatches `asyncio.Task.add_done_callback` (via `unittest.mock.patch.object` on the task) to raise, calls `_ensure_worker`, catches the exception, asserts `_starting_workers` is empty, asserts `_active_workers` does not contain the key, and asserts the orphan task was cancelled.
+- [ ] `tests/integration/test_agent_session_queue_race.py::TestEnsureWorkerDeduplication` — REPLACE (additive): add `test_starting_workers_cleared_when_post_create_fails` (async, `@pytest.mark.asyncio`) — monkeypatches `agent.agent_session_queue.asyncio.create_task` with a wrapper that captures the created task, monkeypatches `agent.agent_session_queue._active_workers` with a `dict` subclass whose `__setitem__` raises `RuntimeError` for the test key, calls `_ensure_worker`, catches the `RuntimeError`, awaits `asyncio.sleep(0)` to let cancellation propagate, and asserts: `_starting_workers` is empty for the key, `_active_workers` does not contain the key, the captured orphan task is `cancelled()`.
 - [ ] `tests/integration/test_worker_concurrency.py` (existing usages of `_ensure_worker`, `_starting_workers`) — no change needed; those tests work at the set-level and do not depend on the internal ordering of `discard` vs. `add_done_callback`.
 
 No tests reference `recover_orphaned_agent_sessions_all_projects` — grep-confirmed zero matches in `tests/`.
@@ -219,9 +304,9 @@ No tests reference `recover_orphaned_agent_sessions_all_projects` — grep-confi
 **Impact:** If an operator had been manually constructing a `LoggingOutputHandler` in a debug session or one-off script, the import breaks after this ships.
 **Mitigation:** Grep across the entire repository (including `scripts/`, `tests/`, `.claude/`, and `docs/`) returned only test and doc references — no operator or script use. Documentation mentions are updated in the same PR. If a genuine debug use emerges post-merge, the class can be restored with a 2-line docstring (git revert on the deletion commit). The 30-day observation window between merge and the start of Q3 is generous.
 
-### Risk 3: `add_done_callback` failure is hypothetical and not reproducible in CPython
-**Impact:** The new `test_starting_workers_cleared_when_add_done_callback_fails` test uses `unittest.mock.patch.object` to force a failure that does not occur naturally. A future Python upgrade could change mock-patching semantics and make the test flake or hard-crash.
-**Mitigation:** Use `patch.object(task, 'add_done_callback', side_effect=RuntimeError("simulated"))` — patching an instance method of a live `Task` object is a standard, well-supported mock pattern. The test asserts state, not mock-call-count, so it is robust to future refactors. If CPython ever removes `add_done_callback` the test fails loudly, which is the correct signal.
+### Risk 3: Post-create failure is hypothetical and not reproducible in CPython
+**Impact:** The new `test_starting_workers_cleared_when_post_create_fails` test uses `monkeypatch` to force a failure (a raising `_active_workers.__setitem__`) that does not occur naturally. A future refactor could move the assignment or change the set of post-create statements, and the injection point could drift.
+**Mitigation:** The test patches the module-local binding `q.asyncio.create_task` and the module-local dict `q._active_workers`, not global Python state. `monkeypatch` auto-reverts on test teardown, so side-effects are contained. The test asserts *observable behaviour* (set empty, key not published, task cancelled), not mock-call-count, so it remains robust if the exact injection point shifts. If a future refactor eliminates the `_active_workers` assignment (e.g., by inlining the dict into another structure), the test will fail loudly with a clear message — the correct signal to update the test alongside the refactor.
 
 ## Race Conditions
 
@@ -232,12 +317,10 @@ No tests reference `recover_orphaned_agent_sessions_all_projects` — grep-confi
 **State prerequisite:** Concurrent coroutine running in the same event loop.
 **Mitigation:** `_ensure_worker()` is synchronous (no `await` between these statements). Python's single-threaded event-loop semantics guarantee no other coroutine can observe intermediate state. The existing `_starting_workers` guard already protects against the parallel-spawn race within this function. Confirmed by code read: no `await` statement exists between `create_task` and the dict assignment in either the current or revised body.
 
-### Race 2: `add_done_callback` fires between the `discard` in `try` and the `discard` in `finally`
-**Location:** `agent/agent_session_queue.py:_ensure_worker` finally block and done_callback lambda.
-**Trigger:** Task completes instantaneously after `create_task` (e.g., `_worker_loop` returns immediately due to shutdown).
-**Data prerequisite:** None.
-**State prerequisite:** The lambda `_starting_workers.discard(worker_key)` and the `finally` block's `_starting_workers.discard(worker_key)` both operate on the same set.
-**Mitigation:** `set.discard()` is idempotent — calling it twice for the same key is a no-op on the second call. Both calls land on the same object, the set ends empty, no race.
+### Race 2: (resolved by C1) `add_done_callback` double-discard is no longer applicable
+**Location:** Historical — previous revision kept a `task.add_done_callback(lambda _: _starting_workers.discard(...))` alongside the `finally` discard.
+**Status:** The C1 revision **removes** the `add_done_callback` registration entirely. Cleanup happens exclusively in the `finally` block, which runs synchronously before `_ensure_worker` returns. There is no callback lambda to fire against the set, so the "double discard" race window has been eliminated by design rather than mitigated.
+**Leftover concern:** None — the `finally` clears the set in the same synchronous function frame as the `create_task` that produced the task. No coroutine can observe a dangling key after `_ensure_worker` returns.
 
 ## No-Gos (Out of Scope)
 
@@ -316,6 +399,7 @@ Standard Tier 1 roster. No Tier 2 specialist needed — this is a straightforwar
 - Edit `agent/session_health.py`: delete lines 1322-1324 (the `recover_orphaned_agent_sessions_all_projects` definition and its preceding blank line).
 - Edit `agent/agent_session_queue.py`: remove the line `    recover_orphaned_agent_sessions_all_projects,` from the `from agent.session_health import (...)` block.
 - Run `python -m ruff format agent/` afterward.
+- **Commit message note (N2)**: Include a one-sentence line in the commit body: "PR #1051 preserved `recover_orphaned_agent_sessions_all_projects` as a compatibility re-export; grep now confirms zero external callers, so this commit retracts that promise."
 
 ### 2. Delete W10 handler, tests, and doc mentions
 - **Task ID**: build-w10-delete
@@ -331,20 +415,22 @@ Standard Tier 1 roster. No Tier 2 specialist needed — this is a straightforwar
 - Edit `docs/features/worker-service.md`: delete the `LoggingOutputHandler` row at line 47.
 - Run `python -m ruff format agent/ tests/`.
 
-### 3. Fix I4 `_ensure_worker` leak edge case
+### 3. Fix I4 `_ensure_worker` leak edge case + feature-doc note
 - **Task ID**: build-i4-fix
 - **Depends On**: none
-- **Validates**: `pytest tests/integration/test_agent_session_queue_race.py -v` passes all existing tests plus the new `test_starting_workers_cleared_when_add_done_callback_fails`; `pytest tests/integration/test_worker_concurrency.py -v` passes unchanged.
-- **Informed By**: Issue body I4 description; PR #801 as the origin of `_starting_workers`.
+- **Validates**: `pytest tests/integration/test_agent_session_queue_race.py -v` passes all existing tests plus the new `test_starting_workers_cleared_when_post_create_fails`; `pytest tests/integration/test_worker_concurrency.py -v` passes unchanged.
+- **Informed By**: Issue body I4 description; PR #801 as the origin of `_starting_workers`; critique B1/C1/C2 (test mechanism, callback deletion, event-loop yield).
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Replace the body of `_ensure_worker` in `agent/agent_session_queue.py` with the `try/finally`-based version shown in the Technical Approach section. Keep the existing guard checks at the top unchanged.
+- Replace the body of `_ensure_worker` in `agent/agent_session_queue.py` with the `try/finally`-based version shown in the Technical Approach section. Keep the existing guard checks at the top unchanged. **Specifically: delete the `task.add_done_callback(lambda _: _starting_workers.discard(worker_key))` line** — the `finally` block covers cleanup and the callback is dead code.
+- Add `logger.exception(...)` with I4 context inside the `except` block before `raise` (see Technical Approach code block and N1 resolution).
 - Update the function's docstring to describe the leak-safety guarantee.
-- Add `test_starting_workers_cleared_when_add_done_callback_fails` to `tests/integration/test_agent_session_queue_race.py::TestEnsureWorkerDeduplication`. The test patches `asyncio.Task.add_done_callback` on the instance via `unittest.mock.patch.object`, wraps the call in `pytest.raises(RuntimeError)`, and asserts:
+- Add `test_starting_workers_cleared_when_post_create_fails` (async, `@pytest.mark.asyncio`) to `tests/integration/test_agent_session_queue_race.py::TestEnsureWorkerDeduplication`. The test monkeypatches `agent.agent_session_queue.asyncio.create_task` with a wrapper that captures the created task, monkeypatches `agent.agent_session_queue._active_workers` with a `dict` subclass whose `__setitem__` raises `RuntimeError` for the test key, wraps the call in `pytest.raises(RuntimeError)`, **awaits `asyncio.sleep(0)` to let cancellation propagate (C2)**, then asserts:
   - `worker_key not in _starting_workers` (the `finally` cleared it)
   - `worker_key not in _active_workers` (the orphan was not published)
-  - The orphan task is cancelled (`task.cancelled()` is True after one event-loop turn)
+  - The captured orphan task is cancelled (`task.cancelled()` is True after the event-loop yield)
+- **Fold-in of old Task 5 (N3)**: add the one-sentence leak-safety note to `docs/features/bridge-worker-architecture.md` in the "Chat Serialization and Worker Deduplication" section, immediately under the existing dual-guard paragraph. Target: one sentence describing that `_starting_workers.discard(worker_key)` runs in `finally`, guaranteeing the guard clears on every exit path.
 - Run `python -m ruff format agent/ tests/`.
 
 ### 4. Validate all three cleanup tasks
@@ -361,25 +447,17 @@ Standard Tier 1 roster. No Tier 2 specialist needed — this is a straightforwar
 - Spot-check `_ensure_worker` body: confirm `_starting_workers.discard(worker_key)` appears inside a `finally:` block.
 - Spot-check the feature docs: confirm `LoggingOutputHandler` is no longer listed.
 
-### 5. Update feature documentation
-- **Task ID**: document-feature
-- **Depends On**: validate-all
-- **Assigned To**: cleanup-builder (acting as documentarian for this small scope)
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Confirm the doc edits from build-w10-delete are in place (already applied inline with that task).
-- Add the one-sentence leak-safety note to `docs/features/bridge-worker-architecture.md` in the "Chat Serialization and Worker Deduplication" section, immediately under the existing dual-guard paragraph.
-- No new feature doc needed — this is a cleanup plan, not a new feature.
-
-### 6. Final validation
+### 5. Final validation
 - **Task ID**: final-validate
-- **Depends On**: document-feature
+- **Depends On**: validate-all
 - **Assigned To**: cleanup-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the full success-criteria checklist.
 - Run `pytest tests/unit/ -q` and `pytest tests/integration/test_agent_session_queue_race.py tests/integration/test_worker_concurrency.py tests/unit/test_output_handler.py -q` to confirm no incidental regressions.
 - Generate a final PR-ready summary.
+
+**(Note: The old Task 5 "Update feature documentation" was folded into Task 3 per critique nit N3 — its only new action was a single-sentence doc edit, now handled inline with the I4 fix. The `LoggingOutputHandler` doc edits live in Task 2 as before.)**
 
 ## Verification
 
@@ -399,7 +477,103 @@ Standard Tier 1 roster. No Tier 2 specialist needed — this is a straightforwar
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict**: NEEDS REVISION (1 blocker, 2 concerns, 2 nits)
+**Date**: 2026-04-23
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor
+
+### Blocker
+
+**B1 — I4 test strategy is under-specified (patch target ambiguous)**
+- *Location*: Technical Approach (test description for `test_starting_workers_cleared_when_add_done_callback_fails`); Task 3 (line 344); Risk 3 (line 222).
+- *Finding*: The plan says "patch `asyncio.Task.add_done_callback` on the instance via `unittest.mock.patch.object`," but the task instance is created inside `_ensure_worker`, so the test has no handle to patch before the call. Class-level patching would affect every Task in the event loop. The builder will stop to ask or guess.
+- *Implementation Note (resolution)*: Use a `create_task` wrapper via `monkeypatch`:
+  ```python
+  original_create_task = asyncio.create_task
+  def wrap(coro, *a, **kw):
+      task = original_create_task(coro, *a, **kw)
+      def raising(*_, **__):
+          raise RuntimeError("simulated add_done_callback failure")
+      task.add_done_callback = raising
+      return task
+  monkeypatch.setattr("agent.agent_session_queue.asyncio.create_task", wrap)
+  ```
+  Test must be `async def` with `@pytest.mark.asyncio`. After the `pytest.raises(RuntimeError)` block, `await asyncio.sleep(0)` before any `task.cancelled()` assertion.
+
+### Concerns
+
+**C1 — Vestigial `add_done_callback` lambda after `finally` covers cleanup** (Skeptic + Simplifier)
+- *Location*: Technical Approach code block, lines 120-165.
+- *Finding*: The proposed body keeps `task.add_done_callback(lambda _: _starting_workers.discard(worker_key))` but `finally` runs synchronously and clears the set before return. The callback always fires against an empty set. This is dead code and contradicts the repo's "NO LEGACY CODE TOLERANCE" principle.
+- *Implementation Note (resolution)*: **Delete the callback**. The `finally` block covers every exit path. Final body:
+  ```python
+  _starting_workers.add(worker_key)
+  task: asyncio.Task | None = None
+  try:
+      event = asyncio.Event()
+      _active_events[worker_key] = event
+      task = asyncio.create_task(_worker_loop(worker_key, event, is_project_keyed))
+      _active_workers[worker_key] = task
+      logger.info(f"[worker:{worker_key}] Started session queue worker")
+  except Exception:
+      if task is not None and worker_key not in _active_workers:
+          task.cancel()
+      raise
+  finally:
+      _starting_workers.discard(worker_key)
+  ```
+  Coupling note: if the callback is deleted, there is no `add_done_callback` registration window to test; B1's test then targets whatever post-create statement is retained (e.g., a simulated `_active_workers` assignment failure, or simulated `logger.info` side effect). The revision pass must either (a) delete callback + retarget the test, or (b) keep callback with inline rationale comment + test as-specified. Pick one before build.
+
+**C2 — New test missing explicit event-loop yield before `task.cancelled()`** (Adversary)
+- *Location*: Test Impact line 199; Task 3 lines 344-347.
+- *Finding*: `task.cancel()` only schedules cancellation. `task.cancelled()` returns True only after the coroutine runs and raises `CancelledError`. Without `await asyncio.sleep(0)`, the assertion is flaky.
+- *Implementation Note (resolution)*: After the `pytest.raises` block, insert `await asyncio.sleep(0)` before asserting `task.cancelled()`. Alternative: use `task.cancelling()` (Python 3.11+) which returns the pending-cancel count immediately.
+
+### Nits
+
+**N1 — I4 exception path does not log hazard context** (Operator)
+- *Location*: Technical Approach `except` block (lines 158-162).
+- *Finding*: The `except` re-raises without logging. If the hazard ever fires in prod, the operator sees a generic traceback without I4 context.
+- *Suggestion*: Before `raise`, add `logger.exception(f"[worker:{worker_key}] _ensure_worker post-create failure; cancelled orphan task")`.
+
+**N2 — PR #1051 compatibility retraction not called out** (Archaeologist)
+- *Location*: Prior Art section; commit message for Task 1.
+- *Finding*: PR #1051 (`docs/plans/refactor-agent-session-queue.md:227, 547`) explicitly preserved `recover_orphaned_agent_sessions_all_projects` in the re-export list. This plan removes what that refactor chose to keep.
+- *Suggestion*: One sentence in the Task 1 commit message or Prior Art: "PR #1051 preserved this symbol as a compatibility re-export; grep now confirms zero external callers, so this plan retracts that promise."
+
+**N3 — Task 5 is one-sentence work** (Simplifier)
+- *Location*: Task 5, lines 364-372.
+- *Finding*: Task 5's only new action is a single-sentence doc edit; the other items are no-ops.
+- *Suggestion*: Fold the `bridge-worker-architecture.md` edit into Task 3 and delete Task 5.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present |
+| Task numbering | PASS | Tasks 1-6 sequential |
+| Dependencies valid | PASS | No cycles |
+| File paths exist | PASS | All 10 referenced files verified at stated line numbers |
+| Prerequisites met | PASS | None declared |
+| Cross-references | PASS | No-Gos, Rabbit Holes, Solution internally consistent |
+
+### Next Action
+
+Revision pass via `/do-plan` to resolve B1 (specify test patch mechanism), C1 (decide callback-delete vs keep-with-comment and retarget the test accordingly), and C2 (add event-loop yield). Embed the Implementation Notes above into the Technical Approach and Task 3. Optionally address N1-N3 during the pass.
+
+### Revision Applied (2026-04-23)
+
+Second pass addressed every finding before re-critique:
+
+| Finding | Status | Resolution |
+|---------|--------|------------|
+| B1 (test patch mechanism) | Resolved | Technical Approach now shows the full `async def` test body with `monkeypatch.setattr(q.asyncio, "create_task", wrapped_create_task)` + raising `_active_workers` subclass. Test renamed `test_starting_workers_cleared_when_post_create_fails`. |
+| C1 (vestigial `add_done_callback`) | Resolved — option (a) chosen | Callback registration **deleted** from the `_ensure_worker` body. `finally` is the sole cleanup mechanism. Technical Approach updated, Test Impact updated, Race 2 updated to "resolved by design." |
+| C2 (event-loop yield) | Resolved | Test body includes `await asyncio.sleep(0)` between `pytest.raises` and `task.cancelled()`. Task 3 validation steps call out the yield explicitly. |
+| N1 (operator logging) | Addressed | `except` block now includes `logger.exception(f"[worker:{worker_key}] _ensure_worker post-create failure; cancelled orphan task")` before `raise`. |
+| N2 (PR #1051 retraction) | Addressed | Prior Art bullet added for PR #1051 with explicit retraction. Task 1 commit-message guidance includes the one-sentence retraction. |
+| N3 (fold Task 5) | Addressed | Task 5 ("Update feature documentation") deleted. Its `bridge-worker-architecture.md` edit is now a bullet in Task 3. Old Task 6 ("Final validation") renumbered to Task 5. |
+
+The plan's `revision_applied: true` frontmatter flag is set so the SDLC router dispatches to `/do-build` on the next `/sdlc` invocation rather than re-running `/do-plan-critique` on an unchanged plan.
 
 ---
 
