@@ -43,6 +43,8 @@ reflections:
 | `enabled` | bool | Whether this reflection is active (default: true) |
 | `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
 
+**Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are historical and should not be reintroduced into source, comments, or docs.
+
 ### Registry Location (Vault-First)
 
 The scheduler resolves `config/reflections.yaml` via a three-level fallback:

@@ -1,10 +1,6 @@
 """
 reflections/task_management.py — Task management reflection callables.
 
-Extracted from scripts/reflections.py steps:
-  - step_clean_tasks         → run_task_management
-  - step_principal_staleness → run_principal_staleness
-
 All functions accept no arguments and return:
   {"status": "ok"|"error", "findings": [...], "summary": str}
 """
@@ -21,10 +17,7 @@ logger = logging.getLogger("reflections.task_management")
 
 
 def run_task_management() -> dict:
-    """Clean up task management: check open bugs per project, local TODOs.
-
-    Maps to monolith step: step_clean_tasks
-    """
+    """Clean up task management: check open bugs per project, local TODOs."""
     projects = load_local_projects()
     findings: list[str] = []
     total_findings = 0
@@ -85,7 +78,6 @@ def run_task_management() -> dict:
 async def run_principal_staleness() -> dict:
     """Check if PRINCIPAL.md is stale (>90 days since last modification).
 
-    Maps to monolith step: step_principal_staleness
     PRINCIPAL.md encodes the supervisor's strategic context. If it hasn't
     been updated in 90+ days, flag it for review since priorities may
     have shifted.

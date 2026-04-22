@@ -1,14 +1,11 @@
 """
 reflections/behavioral_learning.py — Behavioral learning pipeline callable.
 
-Extracted from scripts/reflections.py pipeline:
-  step_episode_cycle_close → step_pattern_crystallization
+Pipeline: Episode Cycle-Close → Pattern Crystallization. This is a single
+callable that runs both sub-steps internally, preserving ordering without
+depends_on complexity in the YAML scheduler.
 
-This is a single callable that runs both sub-steps internally,
-preserving ordering without depends_on complexity in the YAML scheduler.
-
-Skips gracefully if models.cyclic_episode is not available (guard preserved
-from monolith step_behavioral_learning).
+Skips gracefully if models.cyclic_episode is not available.
 
 Returns:
   {"status": "ok"|"error", "findings": [...], "summary": str}
@@ -27,9 +24,6 @@ async def run() -> dict:
     """Run the behavioral learning pipeline.
 
     Pipeline: Episode Cycle-Close → Pattern Crystallization
-
-    Maps to monolith: step_behavioral_learning (which calls step_episode_cycle_close
-    and step_pattern_crystallization in sequence)
 
     Skips gracefully if models.cyclic_episode is not available.
     Raises exceptions on sub-step failure (propagates to scheduler).
