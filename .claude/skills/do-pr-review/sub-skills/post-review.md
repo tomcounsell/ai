@@ -9,7 +9,8 @@ Mechanical work: format findings and post the review to GitHub.
 
 ## Prerequisites
 
-Code review findings must be available from the code-review sub-skill.
+Code review findings must be available from the code-review sub-skill — UNLESS
+the mergeability preflight short-circuited (see §2b and §2c below).
 
 ## Steps
 
@@ -155,15 +156,78 @@ _Idempotent: prior review on HEAD {head_sha:0:7} / body hash {body_hash:0:7} is 
 <!-- REVIEW_CONTEXT head_sha=<HEAD_SHA> pr_body_hash=<PR_BODY_HASH> -->
 ```
 
+### 2b. Preflight Short-Circuit: BLOCKED_ON_CONFLICT
+
+When the mergeability preflight (`checkout.md` → "Mergeability Preflight")
+detected `mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`, the skill MUST
+NOT read the diff, run code review, or post an approval. Instead, post this
+comment and emit the terminal OUTCOME block. The comment MUST explicitly cite
+the `mergeStateStatus` value so the author knows why review was skipped.
+
+Template:
+```
+## Review: Blocked on Conflict
+
+This PR cannot be reviewed until it merges cleanly against its base branch.
+
+- **mergeable:** `{PR_MERGEABLE}` (e.g. `CONFLICTING`)
+- **mergeStateStatus:** `{PR_MERGE_STATUS}` (e.g. `DIRTY`)
+
+### Required action
+
+Please rebase onto the current base (or merge base into your branch) and
+resolve the conflicts, then push. Re-run `/do-pr-review` after the branch is
+mergeable.
+
+> No code review was performed. The mechanical mergeability gate runs before
+> any diff reading — if the branch cannot merge, no amount of code review
+> can make the PR mergeable.
+```
+
+**Posting (always `gh pr comment` — do NOT use `gh pr review --request-changes`
+for the short-circuit path; the preflight is orthogonal to the code-review
+verdict):**
+```bash
+gh pr comment "$PR_NUMBER" --body "$REVIEW_BODY"
+```
+
+### 2c. Preflight Short-Circuit: PR_CLOSED
+
+When the mergeability preflight detected `state != OPEN` (CLOSED or MERGED),
+post a short note and exit. No full review body, no code analysis.
+
+Template:
+```
+## Review: PR Closed
+
+This PR is no longer open (`state={PR_STATE}`); review skipped.
+
+If the PR was closed in error, reopen it and re-run `/do-pr-review`. If it was
+already merged, no review is needed.
+```
+
+**Posting:**
+```bash
+gh pr comment "$PR_NUMBER" --body "$REVIEW_BODY"
+```
+
+Note: `gh pr review` requires the PR to be open, so the short-circuit paths
+always use `gh pr comment`, even on non-self-authored PRs.
+
 ### 3. Post the Review
 
-**Three-tier decision (apply in order):**
-1. **Blockers found** → `--request-changes`
-2. **No blockers, but tech_debt or nits** → `--request-changes`
-3. **Zero findings** → `--approve`
+**Decision tree (apply in order, first match wins):**
+1. **Preflight: `PR_CLOSED`** → post §2c comment via `gh pr comment`.
+2. **Preflight: `BLOCKED_ON_CONFLICT`** → post §2b comment via `gh pr comment`.
+3. **Blockers found** → `--request-changes` (or `gh pr comment` for self-authored).
+4. **No blockers, but tech_debt or nits** → `--request-changes` (or `gh pr comment`).
+5. **Zero findings** → `--approve` (or `gh pr comment`).
 
 ```bash
-if [ "$SELF_AUTHORED" = "true" ]; then
+if [ "$PREFLIGHT_VERDICT" = "PR_CLOSED" ] || [ "$PREFLIGHT_VERDICT" = "BLOCKED_ON_CONFLICT" ]; then
+  # Preflight short-circuit — always post as a plain comment.
+  gh pr comment "$PR_NUMBER" --body "$REVIEW_BODY"
+elif [ "$SELF_AUTHORED" = "true" ]; then
   gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
 elif [ "$HAS_ANY_FINDINGS" = "true" ]; then
   # Blockers, tech_debt, or nits — all require changes
@@ -205,8 +269,15 @@ python -m tools.sdlc_stage_marker --stage REVIEW --status completed --issue-numb
 
 ## Completion
 
-Return the review URL and the outcome contract block:
+Return the review URL and the outcome contract block. The verdict field
+distinguishes between the normal code-review verdicts (`APPROVED`,
+`CHANGES_REQUESTED`) and the preflight short-circuit verdicts
+(`BLOCKED_ON_CONFLICT`, `PR_CLOSED`):
 
 ```
-<!-- OUTCOME {"status":"success|partial|fail","stage":"REVIEW","artifacts":{"review_url":"...","blockers":N,"tech_debt":N,"nits":N},"notes":"...","next_skill":"/do-docs|/do-patch"} -->
+<!-- OUTCOME {"status":"success|partial|fail","stage":"REVIEW","verdict":"APPROVED|CHANGES_REQUESTED|BLOCKED_ON_CONFLICT|PR_CLOSED","artifacts":{"review_url":"...","blockers":N,"tech_debt":N,"nits":N},"notes":"...","next_skill":"/do-docs|/do-patch|null"} -->
 ```
+
+See the SKILL.md "Outcome Contract" section for the full verdict taxonomy and
+examples for each variant. For `BLOCKED_ON_CONFLICT` and `PR_CLOSED`, use
+`next_skill: null` so the pipeline does not auto-advance.

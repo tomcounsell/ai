@@ -43,7 +43,7 @@ Fall back to manual resolution if the env var is unset.
 ## Sub-Skills
 
 This skill is decomposed into focused sub-skills in `sub-skills/`:
-- `checkout.md` — Mechanical: clean git state, checkout PR branch
+- `checkout.md` — Mechanical: **mergeability preflight (runs first)**, clean git state, checkout PR branch
 - `code-review.md` — Judgment: parse PR-body disclosures, read prior reviews, traverse the 10-item Rubric, evaluate the 12-item Pre-Verdict Checklist, classify findings, derive the verdict mechanically
 - `screenshot.md` — Mechanical: start app, capture UI screenshots
 - `post-review.md` — Mechanical: format findings, post review to GitHub
@@ -51,6 +51,26 @@ This skill is decomposed into focused sub-skills in `sub-skills/`:
 Each sub-skill has a single responsibility and receives pre-resolved context.
 
 **Determinism note:** `code-review.md` includes a disclosure parser (pre-finding), a prior-review context loader (idempotency on unchanged HEAD SHA + body), an explicit 10-item Rubric with pass/fail/acknowledged/n/a per item, a Miscellaneous bucket for issues outside the rubric, and mechanical verdict derivation. These were introduced in issue #1045 to address non-deterministic verdicts across repeated runs on the same PR.
+
+## Mergeability Preflight (first action, before anything else)
+
+Before reading the diff, loading the plan, or running any code review, run the
+mergeability preflight (see `sub-skills/checkout.md` → "Mergeability Preflight").
+It is cheap (one `gh pr view` API call) and catches objective blockers that
+make any subjective code review meaningless:
+
+- If `state != OPEN` → emit `PR_CLOSED` verdict and stop.
+- If `mergeable == CONFLICTING` or `mergeStateStatus == DIRTY` → emit
+  `BLOCKED_ON_CONFLICT` verdict, cite the `mergeStateStatus`, ask for a rebase,
+  and stop.
+- If `mergeStateStatus == BEHIND` → note it and proceed (branch needs update
+  but has no conflicts).
+- Otherwise → proceed with full code review.
+
+This preflight is complementary to the subjective rubric added by #1045: #1045
+catches reviews that APPROVED a PR without the reviewer actually evaluating
+acceptance criteria; this preflight (#1112) catches reviews that APPROVED a PR
+that mechanically cannot merge.
 
 ## Stage Marker
 
@@ -101,6 +121,36 @@ if [ -z "$PLAN_PATH" ] && [ -n "$SLUG" ]; then
   PLAN_PATH="docs/plans/${SLUG}.md"
 fi
 ```
+
+**Run the mergeability preflight FIRST** (see `sub-skills/checkout.md` →
+"Mergeability Preflight" for the decision table and short-circuit behavior):
+
+```bash
+PREFLIGHT_JSON=$(gh pr view "$PR_NUMBER" --json mergeable,mergeStateStatus,state)
+PR_STATE=$(echo "$PREFLIGHT_JSON" | jq -r '.state')
+PR_MERGEABLE=$(echo "$PREFLIGHT_JSON" | jq -r '.mergeable')
+PR_MERGE_STATUS=$(echo "$PREFLIGHT_JSON" | jq -r '.mergeStateStatus')
+
+# Retry once if GitHub has not finished computing mergeability
+if [ "$PR_MERGEABLE" = "UNKNOWN" ]; then
+  sleep 2
+  PREFLIGHT_JSON=$(gh pr view "$PR_NUMBER" --json mergeable,mergeStateStatus,state)
+  PR_STATE=$(echo "$PREFLIGHT_JSON" | jq -r '.state')
+  PR_MERGEABLE=$(echo "$PREFLIGHT_JSON" | jq -r '.mergeable')
+  PR_MERGE_STATUS=$(echo "$PREFLIGHT_JSON" | jq -r '.mergeStateStatus')
+fi
+```
+
+Apply the decision table from `sub-skills/checkout.md`:
+- `state != OPEN` → post `PR_CLOSED` comment, emit `status:"fail"` OUTCOME with
+  `verdict:"PR_CLOSED"`, exit immediately. Do NOT checkout, read diff, or
+  produce a code review body.
+- `mergeable == CONFLICTING` OR `mergeStateStatus == DIRTY` → post
+  `BLOCKED_ON_CONFLICT` comment citing the `mergeStateStatus`, emit
+  `status:"fail"` OUTCOME with `verdict:"BLOCKED_ON_CONFLICT"`, exit
+  immediately.
+- Otherwise (including `BEHIND`, `UNSTABLE`, `HAS_HOOKS`, `CLEAN`, unresolved
+  `UNKNOWN`) → proceed to the checkout and full review below.
 
 **Fetch PR details:**
 ```bash
@@ -422,22 +472,41 @@ Save this URL as `{review_url}` for the output summary.
 
 After posting the review and verifying it was posted (Steps 6-6.5), emit a typed outcome as the **very last line** of output.
 
-**Success (no blockers, no tech_debt, no nits):**
+**Verdict taxonomy:**
+
+| Verdict | When | OUTCOME status |
+|---------|------|----------------|
+| `APPROVED` | Preflight clean + zero findings + pre-verdict checklist all PASS/N/A | `success` |
+| `CHANGES_REQUESTED` | Preflight clean but findings (blockers, tech_debt, or nits) exist | `partial` (tech_debt/nits only) or `fail` (blockers) |
+| `BLOCKED_ON_CONFLICT` | Preflight detected `mergeable=CONFLICTING` or `mergeStateStatus=DIRTY` — short-circuited, no code review performed | `fail` |
+| `PR_CLOSED` | Preflight detected `state != OPEN` — short-circuited, no code review performed | `fail` |
+
+**Success (APPROVED — no blockers, no tech_debt, no nits):**
 ```
-<!-- OUTCOME {"status":"success","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":0,"nits":0},"notes":"Approved with no findings.","next_skill":"/do-docs"} -->
+<!-- OUTCOME {"status":"success","stage":"REVIEW","verdict":"APPROVED","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":0,"nits":0},"notes":"Approved with no findings.","next_skill":"/do-docs"} -->
 ```
 
-**Partial (no blockers, but has tech_debt and/or nits that need patching):**
+**Partial (CHANGES_REQUESTED — no blockers, but has tech_debt and/or nits that need patching):**
 ```
-<!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1},"notes":"Changes requested: 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
-```
-
-**Fail (blockers found):**
-```
-<!-- OUTCOME {"status":"fail","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":2,"tech_debt":1,"nits":0},"notes":"Changes requested: 2 blockers found.","failure_reason":"2 blockers must be fixed before merge","next_skill":"/do-patch"} -->
+<!-- OUTCOME {"status":"partial","stage":"REVIEW","verdict":"CHANGES_REQUESTED","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1},"notes":"Changes requested: 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
 ```
 
-**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`.
+**Fail (CHANGES_REQUESTED — blockers found):**
+```
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"CHANGES_REQUESTED","artifacts":{"review_url":"{review_url}","blockers":2,"tech_debt":1,"nits":0},"notes":"Changes requested: 2 blockers found.","failure_reason":"2 blockers must be fixed before merge","next_skill":"/do-patch"} -->
+```
+
+**Fail (BLOCKED_ON_CONFLICT — preflight short-circuit):**
+```
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"BLOCKED_ON_CONFLICT","artifacts":{"review_url":"{comment_url}","mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"},"notes":"Branch has merge conflicts; rebase required before review.","failure_reason":"mergeStateStatus=DIRTY — author must rebase/resolve conflicts before review can proceed","next_skill":null} -->
+```
+
+**Fail (PR_CLOSED — preflight short-circuit):**
+```
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"PR_CLOSED","artifacts":{"review_url":"{comment_url}","state":"CLOSED"},"notes":"PR is not open; review skipped.","failure_reason":"state=CLOSED — no review performed on a closed PR","next_skill":null} -->
+```
+
+**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`. For `BLOCKED_ON_CONFLICT` and `PR_CLOSED`, `next_skill` is `null` — the pipeline should NOT auto-advance; the author must rebase or the PM must handle the closed-PR case manually.
 
 ### Record the verdict (mandatory)
 
@@ -451,6 +520,16 @@ python -m tools.sdlc_verdict record --stage REVIEW \
 # For reviews with findings (OUTCOME status=partial or fail):
 python -m tools.sdlc_verdict record --stage REVIEW \
   --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
+  --issue-number $ISSUE_NUMBER
+
+# For preflight short-circuit (branch cannot merge):
+python -m tools.sdlc_verdict record --stage REVIEW \
+  --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 \
+  --issue-number $ISSUE_NUMBER
+
+# For preflight short-circuit (PR not open):
+python -m tools.sdlc_verdict record --stage REVIEW \
+  --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 \
   --issue-number $ISSUE_NUMBER
 ```
 
