@@ -211,6 +211,15 @@ def _extract_issue_number(session: Any, agent_session: Any) -> int | None:
 # Maximum continuation PM depth — prevents runaway chains of continuation sessions.
 _CONTINUATION_PM_MAX_DEPTH = 3
 
+# Maximum characters of dev-result content to embed into a continuation PM's
+# message_text. The prior cap of 500 chars (issue #1109) truncated enriched
+# PM-dev payloads after the routing headers (PROJECT/FROM/SESSION_ID/TASK_SCOPE/
+# SCOPE ≈ 500 chars), leaving the dev session with gutted instructions. Raised
+# to 10_000 so full task content is preserved across the PM→dev handoff.
+# Large enough to cover realistic dev-result payloads while still providing
+# a defensive upper bound against unbounded message_text growth in Redis.
+_DEV_RESULT_PREVIEW_MAX_CHARS = 10_000
+
 
 def _create_continuation_pm(
     *,
@@ -240,7 +249,11 @@ def _create_continuation_pm(
         issue_number: The GitHub issue number (may be None).
         stage: The SDLC stage that just completed (may be None).
         outcome: "success" or "fail".
-        result_preview: First 500 chars of the dev session result.
+        result_preview: Truncated dev session result, capped at
+            ``_DEV_RESULT_PREVIEW_MAX_CHARS`` (10_000) by the caller.
+            Preserves full enriched PM→dev payloads; the prior 500-char cap
+            silently truncated task content after the routing headers
+            (see issue #1109).
     """
     try:
         from models.agent_session import AgentSession as _AgentSession
@@ -796,7 +809,7 @@ async def _handle_dev_session_completion(
         if is_complete:
             # Build a summary context from outcome — used both as the
             # harness prompt context and the fallback on harness failure.
-            result_preview = result[:500] if result else "(no result)"
+            result_preview = result[:_DEV_RESULT_PREVIEW_MAX_CHARS] if result else "(no result)"
             summary_context = (
                 f"Stage {current_stage or 'UNKNOWN'} completed with outcome={outcome} "
                 f"(reason={reason}). Result preview: {result_preview}"
@@ -823,7 +836,7 @@ async def _handle_dev_session_completion(
         # Check the return value — if steering fails (parent already terminal),
         # create a continuation PM to carry the pipeline forward.
         try:
-            result_preview = result[:500] if result else "(no result)"
+            result_preview = result[:_DEV_RESULT_PREVIEW_MAX_CHARS] if result else "(no result)"
             steering_msg = (
                 f"Dev session completed. Stage: {current_stage or 'unknown'}. "
                 f"Outcome: {outcome}. Result preview: {result_preview}\n\n"
@@ -900,7 +913,7 @@ async def _handle_dev_session_completion(
                 f"— creating continuation PM"
             )
             try:
-                result_preview = result[:500] if result else "(no result)"
+                result_preview = result[:_DEV_RESULT_PREVIEW_MAX_CHARS] if result else "(no result)"
                 _create_continuation_pm(
                     parent=parent,
                     agent_session=agent_session,
