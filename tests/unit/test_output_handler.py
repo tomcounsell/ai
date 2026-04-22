@@ -367,7 +367,8 @@ class TestTelegramRelayOutputHandler:
 
 
 class TestDrafterInHandler:
-    """Tests for task 7 in docs/plans/message-drafter.md — the drafter-at-the-handler fix.
+    """Tests for the drafter-at-the-handler fix (originally in the message
+    drafter plan, now always-on).
 
     TelegramRelayOutputHandler.send must route its text through draft_message
     before writing to Redis. This closes the worker-bypass gap where worker-
@@ -375,38 +376,22 @@ class TestDrafterInHandler:
     outbox and triggered MessageTooLongError at the relay.
     """
 
-    def _make_handler(self, *, drafter_enabled: bool = True):
-        import os
+    def _make_handler(self):
         from unittest.mock import MagicMock
 
         from agent.output_handler import TelegramRelayOutputHandler
 
-        old = os.environ.get("MESSAGE_DRAFTER_IN_HANDLER")
-        os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = "true" if drafter_enabled else "false"
-        try:
-            h = TelegramRelayOutputHandler()
-        finally:
-            if old is None:
-                os.environ.pop("MESSAGE_DRAFTER_IN_HANDLER", None)
-            else:
-                os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = old
+        h = TelegramRelayOutputHandler()
         h._redis = MagicMock()
         return h
 
-    def test_flag_is_read_at_init_time(self):
-        """Per Race 3 in the plan: flag is read once at __init__, not per-send."""
-        handler_on = self._make_handler(drafter_enabled=True)
-        handler_off = self._make_handler(drafter_enabled=False)
-        assert handler_on._drafter_enabled is True
-        assert handler_off._drafter_enabled is False
-
-    def test_send_invokes_draft_message_when_enabled(self):
-        """With drafter enabled, send() must call bridge.message_drafter.draft_message."""
+    def test_send_invokes_draft_message(self):
+        """send() must call bridge.message_drafter.draft_message unconditionally."""
         from unittest.mock import AsyncMock, patch
 
         from bridge.message_drafter import MessageDraft
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         drafted = MessageDraft(
             text="drafted version",
             full_output_file=None,
@@ -426,23 +411,6 @@ class TestDrafterInHandler:
         payload = json.loads(args[1])
         assert payload["text"] == "drafted version"
 
-    def test_send_bypasses_draft_message_when_disabled(self):
-        """With flag off, send() must NOT invoke draft_message (raw text to outbox)."""
-        from unittest.mock import AsyncMock, patch
-
-        handler = self._make_handler(drafter_enabled=False)
-        mock_draft = AsyncMock()
-
-        with patch("bridge.message_drafter.draft_message", mock_draft):
-            asyncio.run(handler.send("123", "Raw text passes through.", 0))
-
-        mock_draft.assert_not_awaited()
-        # Redis still got the raw text
-        handler._redis.rpush.assert_called_once()
-        args, _ = handler._redis.rpush.call_args
-        payload = json.loads(args[1])
-        assert payload["text"] == "Raw text passes through."
-
     def test_send_includes_file_paths_when_drafter_returns_file(self):
         """If the draft has a full_output_file, the payload carries file_paths."""
         from pathlib import Path
@@ -450,7 +418,7 @@ class TestDrafterInHandler:
 
         from bridge.message_drafter import MessageDraft
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         drafted = MessageDraft(
             text="short caption",
             full_output_file=Path("/tmp/valor_full_output_xyz.txt"),
@@ -471,7 +439,7 @@ class TestDrafterInHandler:
         """Drafter exception must NOT block delivery — fall back to raw text."""
         from unittest.mock import AsyncMock, patch
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         mock_draft = AsyncMock(side_effect=RuntimeError("drafter broken"))
 
         with patch("bridge.message_drafter.draft_message", mock_draft):
@@ -497,21 +465,12 @@ class TestDrafterFailureRecovery:
     4. Persistence of ``context_summary`` / ``expectations`` on success.
     """
 
-    def _make_handler(self, *, drafter_enabled: bool = True):
-        import os
+    def _make_handler(self):
         from unittest.mock import MagicMock
 
         from agent.output_handler import TelegramRelayOutputHandler
 
-        old = os.environ.get("MESSAGE_DRAFTER_IN_HANDLER")
-        os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = "true" if drafter_enabled else "false"
-        try:
-            h = TelegramRelayOutputHandler()
-        finally:
-            if old is None:
-                os.environ.pop("MESSAGE_DRAFTER_IN_HANDLER", None)
-            else:
-                os.environ["MESSAGE_DRAFTER_IN_HANDLER"] = old
+        h = TelegramRelayOutputHandler()
         h._redis = MagicMock()
         return h
 
@@ -524,7 +483,7 @@ class TestDrafterFailureRecovery:
 
         from bridge.message_drafter import MessageDraft
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-self-draft"
 
@@ -563,7 +522,7 @@ class TestDrafterFailureRecovery:
 
         from bridge.message_drafter import MessageDraft
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-loop-guard"
 
@@ -606,7 +565,7 @@ class TestDrafterFailureRecovery:
         from bridge.message_drafter import MessageDraft
         from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-narration"
 
@@ -645,7 +604,7 @@ class TestDrafterFailureRecovery:
         from bridge.message_drafter import MessageDraft
         from bridge.message_quality import NARRATION_FALLBACK_MESSAGE
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-substance"
 
@@ -682,7 +641,7 @@ class TestDrafterFailureRecovery:
 
         from bridge.message_drafter import MessageDraft
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
 
         # Build a session that records field assignments.
         session = MagicMock()
@@ -712,7 +671,7 @@ class TestDrafterFailureRecovery:
 
         from bridge.message_drafter import MessageDraft
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-no-persist"
         # Clear the auto-generated attributes to detect writes.
@@ -741,7 +700,7 @@ class TestDrafterFailureRecovery:
 
         from bridge.message_drafter import MessageDraft
 
-        handler = self._make_handler(drafter_enabled=True)
+        handler = self._make_handler()
         session = MagicMock()
         session.session_id = "sess-save-fails"
         session.save.side_effect = RuntimeError("redis write failed")

@@ -78,7 +78,7 @@ The goal is to bound per-message latency on brief replies. See Risk 1 in `docs/p
 
 ## Drafter-at-the-handler (the critical fix)
 
-`agent/output_handler.py::TelegramRelayOutputHandler.send` reads the `MESSAGE_DRAFTER_IN_HANDLER` env var once at `__init__` (default `true`; accepts `0`/`false`/`no`/`off` to disable). When enabled:
+`agent/output_handler.py::TelegramRelayOutputHandler.send` always routes text through the drafter. On every call:
 
 1. Before writing to Redis, the handler calls `await draft_message(text, session=session, medium="telegram")`.
 2. If the draft has `full_output_file`, the outbox payload grows a `file_paths=[…]` entry — the relay already handles file sends.
@@ -108,14 +108,6 @@ This is **defense-in-depth**. The primary fix is the drafter-at-the-handler wiri
 - **No persona-specific drafter skips.** Medium and persona stay orthogonal.
 - **No retry loops on drafter failure.** One attempt, one fallback path.
 - **No Telegraph (telegra.ph) integration.** `.txt` attachment is the long-form delivery mechanism.
-
-## Feature flag: `MESSAGE_DRAFTER_IN_HANDLER`
-
-Default: `true`. Read once at handler `__init__` (not per-send) per Race 3 in the plan.
-
-**Rollback**: set `MESSAGE_DRAFTER_IN_HANDLER=false` in `~/Desktop/Valor/.env`, restart bridge + worker (`./scripts/valor-service.sh restart`). Output handlers revert to the raw-text pass-through behavior. The relay length guard still applies.
-
-The flag is a temporary safety net. It will be removed two weeks post-merge if no rollbacks occur (tracked in the file-chore follow-up issue).
 
 ## Format rules by medium
 

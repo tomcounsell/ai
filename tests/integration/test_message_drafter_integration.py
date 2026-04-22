@@ -42,8 +42,8 @@ async def test_response_summarizer_wiring():
     """Verify that TelegramRelayOutputHandler.send invokes draft_message for all text.
 
     Post-#1074 consolidation: send_response_with_files is gone. The canonical
-    drafter entry point is TelegramRelayOutputHandler.send, which unconditionally
-    runs the drafter when MESSAGE_DRAFTER_IN_HANDLER is enabled (default True).
+    drafter entry point is TelegramRelayOutputHandler.send, which always
+    routes text through draft_message before writing to the outbox.
     """
     from agent.output_handler import TelegramRelayOutputHandler
 

@@ -35,11 +35,10 @@ The worker uses `TelegramRelayOutputHandler` to deliver session output to Telegr
 ### Output Handler Chain
 
 ```
-Stop hook fires (agent/hooks/stop.py)
-    ↓ writes delivery_action, delivery_text, delivery_emoji to AgentSession
-send_to_chat() (agent_session_queue.py)
-    ↓ reads delivery fields, formats message, calls send_cb()
+Agent calls tools/send_message.py or tools/react_with_emoji.py
+    ↓ invokes OutputHandler.send() / OutputHandler.react()
 TelegramRelayOutputHandler.send() (agent/output_handler.py)
+    ↓ runs bridge.message_drafter.draft_message (per-medium formatting, length guard)
     ↓ writes JSON payload to Redis
     ↓ also writes to FileOutputHandler (dual-write for audit/fallback)
 Redis key: telegram:outbox:{session_id}

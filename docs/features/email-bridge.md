@@ -70,7 +70,7 @@ Per-medium rules for email today:
 - **No HTML / multipart bodies.** `text/plain` MIME only — see the drafter's No-Gos.
 - **Reactions are no-ops.** `EmailOutputHandler.react()` returns early (there is no emoji-reaction analog for SMTP).
 
-**Feature flag: `MESSAGE_DRAFTER_IN_HANDLER`** (default `true`). Set to `false` in `~/Desktop/Valor/.env` and restart the worker to revert to raw-text pass-through; the drafter is skipped and the agent's text is wrapped as MIME verbatim. The flag is a temporary rollback safety net and is read once at handler `__init__` (not per-send).
+The drafter runs on every email send — there is no feature flag.
 
 **Fail-open.** If `draft_message` raises, the handler falls back to the raw text — email delivery is never blocked by a drafter failure.
 
