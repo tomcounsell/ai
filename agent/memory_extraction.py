@@ -60,6 +60,13 @@ async def _llm_call(
       * ``timeout=_EXTRACTION_SDK_TIMEOUT`` SDK kwarg so the SDK raises a
         typed ``APITimeoutError`` first for cleaner logs.
 
+    Also gated by the shared ``agent.anthropic_client.semaphore_slot()``
+    (#1111) so memory-extraction fan-out counts against the process-wide
+    concurrency budget. The semaphore slot wraps the whole call, including
+    ``async with anthropic.AsyncAnthropic(...)`` and
+    ``asyncio.wait_for(...)``, so the slot is held for the entire
+    in-flight API request.
+
     Constants are read at call time (not captured) so test monkeypatching of
     ``_EXTRACTION_SDK_TIMEOUT`` / ``_EXTRACTION_HARD_TIMEOUT`` works (see
     ``test_real_asyncio_wait_for_fires_with_tightened_constants``).
@@ -70,20 +77,22 @@ async def _llm_call(
     """
     import anthropic
 
+    from agent.anthropic_client import semaphore_slot
     from utils.api_keys import get_anthropic_api_key
 
-    async with anthropic.AsyncAnthropic(
-        api_key=get_anthropic_api_key(), timeout=_EXTRACTION_SDK_TIMEOUT
-    ) as client:
-        message = await asyncio.wait_for(
-            client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                messages=messages,
-                timeout=_EXTRACTION_SDK_TIMEOUT,
-            ),
-            timeout=_EXTRACTION_HARD_TIMEOUT,
-        )
+    async with semaphore_slot():
+        async with anthropic.AsyncAnthropic(
+            api_key=get_anthropic_api_key(), timeout=_EXTRACTION_SDK_TIMEOUT
+        ) as client:
+            message = await asyncio.wait_for(
+                client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    messages=messages,
+                    timeout=_EXTRACTION_SDK_TIMEOUT,
+                ),
+                timeout=_EXTRACTION_HARD_TIMEOUT,
+            )
     return message.content[0].text.strip()
 
 

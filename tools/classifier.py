@@ -33,6 +33,7 @@ import logging
 
 import anthropic
 
+from agent.anthropic_client import anthropic_slot
 from config.models import MODEL_FAST
 from utils.api_keys import get_anthropic_api_key
 
@@ -175,13 +176,13 @@ async def classify_request_async(message: str, context: str = "") -> dict:
             context=context if context else "(none provided)",
         )
 
-        # Call Haiku
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        response = await client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # Call Haiku via shared semaphore-gated client (#1111)
+        async with anthropic_slot() as client:
+            response = await client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
         # Extract and parse JSON response
         content = response.content[0].text.strip()
@@ -408,12 +409,13 @@ async def classify_message_intent_async(
             session_status=session_status if session_status else "(unknown)",
         )
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        response = await client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # Shared semaphore-gated client (#1111)
+        async with anthropic_slot() as client:
+            response = await client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
         content = response.content[0].text.strip()
         result = _parse_json_response(content)

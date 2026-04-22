@@ -866,7 +866,7 @@ class TestClassifyOutput:
 
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Should I use approach A or B?")
 
@@ -885,7 +885,7 @@ class TestClassifyOutput:
 
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Some ambiguous output")
 
@@ -899,7 +899,7 @@ class TestClassifyOutput:
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
             patch(
-                "bridge.message_drafter.anthropic.AsyncAnthropic",
+                "agent.anthropic_client.anthropic.AsyncAnthropic",
                 side_effect=Exception("API error"),
             ),
         ):
@@ -926,7 +926,7 @@ class TestClassifyOutput:
 
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Done. Committed abc1234.")
 
@@ -946,7 +946,7 @@ class TestClassifyOutput:
 
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(long_text)
 
@@ -973,7 +973,7 @@ class TestClassifyOutput:
 
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("I think the bug is fixed now. Should work.")
 
@@ -997,7 +997,7 @@ class TestClassifyOutput:
 
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("All tests pass. Task complete.")
 
@@ -1021,7 +1021,7 @@ class TestClassifyOutput:
 
         with (
             patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.message_drafter.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(
                 "All 42 tests passed. Committed abc1234. PR: https://github.com/org/repo/pull/99"

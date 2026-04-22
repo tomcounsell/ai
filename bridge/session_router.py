@@ -12,8 +12,7 @@ Always-on (no feature flag). Confidence threshold: >= 0.80 for auto-routing.
 import json
 import logging
 
-import anthropic
-
+from agent.anthropic_client import anthropic_slot
 from config.models import MODEL_FAST
 from utils.api_keys import get_anthropic_api_key
 
@@ -121,12 +120,13 @@ Rules:
             logger.warning("No API key for semantic routing, skipping")
             return (None, 0.0)
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        response = await client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=256,
-            messages=[{"role": "user", "content": classifier_prompt}],
-        )
+        # Shared semaphore-gated client (#1111)
+        async with anthropic_slot() as client:
+            response = await client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=256,
+                messages=[{"role": "user", "content": classifier_prompt}],
+            )
 
         raw = response.content[0].text.strip()
 
