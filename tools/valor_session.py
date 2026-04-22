@@ -37,10 +37,35 @@ session lifecycle without requiring bridge access.
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+# Issue reference matcher (#1109): "issue #N" or "issue N" (case-insensitive).
+# Bounded lookbehind via (?:^|\W) so we don't false-positive on "tissue123".
+_ISSUE_REF_RE = re.compile(r"(?:^|\W)issue\s*#?\s*(\d+)", re.IGNORECASE)
+
+
+def _derive_slug_from_message(message: str) -> str | None:
+    """Extract the first issue number from ``message`` and return ``sdlc-{N}``.
+
+    Returns None if no issue reference is present. Used by ``cmd_create`` to
+    auto-provision a worktree for PM-role sessions targeting a specific issue.
+
+    Examples:
+        "handle issue #1109"       -> "sdlc-1109"
+        "Start the pipeline for issue 735" -> "sdlc-735"
+        "do something generic"     -> None
+    """
+    if not message:
+        return None
+    match = _ISSUE_REF_RE.search(message)
+    if not match:
+        return None
+    return f"sdlc-{match.group(1)}"
+
 
 # Bootstrap path so this runs as a standalone script from any directory
 _repo_root = Path(__file__).parent.parent
@@ -193,8 +218,30 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         working_dir = args.working_dir or str(_repo_root)
 
-        # If --slug is provided, validate and provision worktree (issue #887)
+        # If --slug is provided, validate and provision worktree (issue #887).
+        # For PM-role sessions without --slug, auto-derive slug from "issue #N"
+        # in the message (issue #1109). This prevents PM sessions from inheriting
+        # the worker's current branch/worktree state. PM sessions with no issue
+        # reference and no --slug are refused with a clear error.
         slug = getattr(args, "slug", None)
+        if not slug and role == "pm":
+            derived = _derive_slug_from_message(message)
+            if derived:
+                slug = derived
+                print(
+                    f"  Auto-derived slug: {slug} (from 'issue #N' in message)",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Error: PM sessions must be created with --slug <slug> or include "
+                    "'issue #N' in the message so a worktree can be provisioned. "
+                    "Without a slug the PM would inherit the worker's current branch "
+                    "state (see issue #1109).",
+                    file=sys.stderr,
+                )
+                return 1
+
         if slug:
             from agent.worktree_manager import _validate_slug, get_or_create_worktree
 
