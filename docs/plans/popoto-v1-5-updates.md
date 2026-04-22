@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: valorengels
 created: 2026-04-22
 tracking: https://github.com/valorengels/ai/issues/1110
 last_comment_id:
+revision_applied: true
 ---
 
 # Popoto v1.5.0 Integration: `"used"` Outcome, `RetrievalQuality`, and `error_summary`
@@ -17,7 +18,7 @@ The ai repo integrates Popoto as its Redis ORM for the subconscious memory syste
 **Current behavior:**
 - `_judge_outcomes_llm()` in `agent/memory_extraction.py:547` accepts only `"acted"` and `"dismissed"`, silently coercing any other string (including the new `"used"` outcome) to `"dismissed"`. Memories that were consumed but didn't drive a decision receive incorrect negative confidence updates.
 - `OUTCOME_JUDGMENT_PROMPT` (line 440) does not offer `"used"` as an option, so the LLM cannot produce it even if it would be the correct classification.
-- `_update_memory_metadata()` has no `"used"` branch; `dismissal_count` is incorrectly incremented for consumed memories.
+- `_persist_outcome_metadata()` has no `"used"` branch; `dismissal_count` is incorrectly incremented for consumed memories.
 - `tools/memory_search.search()` has no `assess_quality` path — the `RetrievalQuality` metacognitive layer is entirely untapped.
 - `Memory.error_summary()` (via `PredictionLedgerMixin`) is untested; the v1.5.0 bugfix for the `group_by=None` edge case has no coverage.
 
@@ -36,7 +37,7 @@ The ai repo integrates Popoto as its Redis ORM for the subconscious memory syste
 **File:line references re-verified:**
 - `agent/memory_extraction.py:440-449` — `OUTCOME_JUDGMENT_PROMPT` offers only `"acted"`, `"echoed"`, `"dismissed"` — still holds
 - `agent/memory_extraction.py:547` — `elif outcome not in ("acted", "dismissed"): outcome = "dismissed"` — still holds
-- `agent/memory_extraction.py:633,649` — only `"dismissed"` and `"acted"` branches in `_update_memory_metadata()` — still holds
+- `agent/memory_extraction.py:633,649` — only `"dismissed"` and `"acted"` branches in `_persist_outcome_metadata()` — still holds
 - `tools/memory_search/__init__.py:51` — `search()` signature has no `assess_quality` param — still holds
 - `tests/unit/test_memory_model.py` — no `error_summary` or `PredictionLedgerMixin` coverage — still holds
 
@@ -68,7 +69,7 @@ No prior attempts to add `"used"` or `assess_quality`. All changes are net-new.
 - Popoto v1.5.0 is available on PyPI (`pip index versions popoto` confirms). Web search returned no changelog detail, but the local popoto source at `/Users/valorengels/src/popoto/` (which matches the published package) was read directly.
 - `VALID_OUTCOMES` in `popoto/fields/observation.py` is `{"acted", "dismissed", "deferred", "contradicted", "used"}`. `on_context_used()` raises `ValueError` for any string not in this set — so our coercion to `"dismissed"` is currently safe, but adding `"used"` to our pipeline is straightforward.
 - `_apply_used()` confirms staged reads (AccessTrackerMixin) and calls `PredictionLedgerMixin.auto_resolve(instance, "used")`. It does NOT touch `ConfidenceField`, `CyclicDecayField`, or `DecayingSortedField`. This is exactly the semantics we want: consumed but not acted on.
-- `ContextAssembler(model_class=Memory, score_weights={"relevance": 0.6, "confidence": 0.3})` is the minimal constructor; `assess({"query": text})` returns a `RetrievalQuality` dataclass with `avg_confidence`, `score_spread`, `fok_score`, `staleness_ratio`.
+- `ContextAssembler(model_class=Memory, score_weights={"relevance": 0.6, "confidence": 0.3})` is the minimal constructor; `assess({"query": text})` returns a `RetrievalQuality` dataclass with `avg_confidence`, `score_spread`, `fok_score`, `staleness_ratio`. Note: `assess()` calls `query.composite_score()` internally — a real Redis read — so it is not a zero-cost probe. The call is wrapped in try/except so a Redis failure returns results without `"quality"` rather than crashing.
 - `PredictionLedgerMixin.error_summary(Memory, partition="default")` returns `{"__all__": stats_dict}` with `count=0` when the error set is empty; does not raise.
 
 ## Data Flow
@@ -79,14 +80,14 @@ No prior attempts to add `"used"` or `assess_quality`. All changes are net-new.
 2. **Coercion guard** (line 547): guard now allows `"acted" | "used" | "dismissed"` (echoed still maps to dismissed).
 3. **`detect_outcomes_async`** → collects `{memory_key: "used"}` in `outcome_map`.
 4. **`ObservationProtocol.on_context_used(memories, outcome_map)`**: popoto's `_apply_used()` confirms staged reads and auto-resolves PredictionLedger with moderate error (0.3). No confidence/cycle effects.
-5. **`_update_memory_metadata(memories, outcome_map)`**: new `"used"` branch appends to `outcome_history`, sets `last_outcome = "used"`, leaves `dismissal_count` unchanged.
+5. **`_persist_outcome_metadata(memories, outcome_map)`**: new `"used"` branch appends to `outcome_history`, sets `last_outcome = "used"`, leaves `dismissal_count` unchanged.
 6. **Persisted** to Redis via `m.save()`.
 
 **`assess_quality` through the search path:**
 
 1. **Caller**: `search("deploy pipeline", assess_quality=True)`
 2. **`search()`**: runs existing BM25+RRF retrieval as before.
-3. **Post-retrieval**: if `assess_quality=True`, instantiate `ContextAssembler(Memory, score_weights)` and call `assembler.assess({"query": query})`.
+3. **Post-retrieval**: if `assess_quality=True`, instantiate `ContextAssembler(Memory, score_weights)` and call `assembler.assess({"query": query})`. This executes a real Redis read (`composite_score()`), wrapped in try/except so failures return results without `"quality"`.
 4. **Return dict**: `{"results": [...], "error": None, "quality": {"avg_confidence": ..., "score_spread": ..., ...}}`
 
 ## Architectural Impact
@@ -120,7 +121,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto-v1-5-up
 ### Key Elements
 
 - **Version bump**: `pyproject.toml` → `popoto>=1.5.0`; re-lock with `uv lock`.
-- **Outcome pipeline**: `OUTCOME_JUDGMENT_PROMPT` + coercion guard + `_update_memory_metadata()` all recognize `"used"`.
+- **Outcome pipeline**: `OUTCOME_JUDGMENT_PROMPT` + coercion guard + `_persist_outcome_metadata()` all recognize `"used"`.
 - **Quality probe**: `search(assess_quality=True)` calls `ContextAssembler.assess()` and attaches result as `"quality"` in return dict.
 - **Test coverage**: three new unit tests covering `"used"` pipeline, `error_summary()`, and `assess_quality`.
 
@@ -128,7 +129,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto-v1-5-up
 
 `search(query, assess_quality=True)` → BM25+RRF retrieval (unchanged) → `ContextAssembler.assess({"query": query})` → `{"results": [...], "quality": RetrievalQuality.__dict__}`
 
-`LLM judge` → `"used"` in JSON → coercion guard passes it through → `ObservationProtocol.on_context_used(memories, {"key": "used"})` → `_apply_used()` (confirm reads, moderate PredictionLedger error) → `_update_memory_metadata()` (`last_outcome="used"`, `dismissal_count` unchanged)
+`LLM judge` → `"used"` in JSON → coercion guard passes it through → `ObservationProtocol.on_context_used(memories, {"key": "used"})` → `_apply_used()` (confirm reads, moderate PredictionLedger error) → `_persist_outcome_metadata()` (`last_outcome="used"`, `dismissal_count` unchanged)
 
 ### Technical Approach
 
@@ -137,8 +138,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto-v1-5-up
 2. **`agent/memory_extraction.py`**:
    - `OUTCOME_JUDGMENT_PROMPT`: add `"used"` option with definition: `"used" — agent consumed the memory (read + reasoned) but it did not drive the response`. Update the JSON schema line to include `"used"` alongside `"acted"`, `"echoed"`, `"dismissed"`.
    - Coercion guard (line ~547): change `elif outcome not in ("acted", "dismissed"):` to `elif outcome not in ("acted", "used", "dismissed"):`. Keep the `"echoed"` → `"dismissed"` mapping above it unchanged.
-   - `_update_memory_metadata()`: add `elif outcome == "used":` branch after the `"dismissed"` block — set `meta["last_outcome"] = "used"`, leave `dismissal_count` untouched. Add inline comments at each branch explaining the semantics.
-   - Docstring for `_update_memory_metadata()`: update `outcome_map` type to `"acted"|"used"|"dismissed"`.
+   - `_persist_outcome_metadata()`: add `elif outcome == "used":` branch after the `"dismissed"` block — set `meta["last_outcome"] = "used"`, leave `dismissal_count` untouched. Add inline comments at each branch explaining the semantics.
+   - Docstring for `_persist_outcome_metadata()`: update `outcome_map` type to `"acted"|"used"|"dismissed"`.
+   - Log counter at line ~748: change `dismissed = len(redis_outcome_map) - acted` to explicitly count all three outcomes: `used = sum(1 for v in redis_outcome_map.values() if v == "used")`, `dismissed = len(redis_outcome_map) - acted - used`. Update the log message to emit all three counts.
 
 3. **`tools/memory_search/__init__.py`**:
    - Add `assess_quality: bool = False` to `search()` signature and docstring.
@@ -154,7 +156,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto-v1-5-up
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_update_memory_metadata()` wraps each record in `except Exception: continue` — existing coverage in `test_memory_extraction.py`. The new `"used"` branch sits inside this guard; no additional exception test needed.
+- [ ] `_persist_outcome_metadata()` wraps each record in `except Exception: continue` — existing coverage in `test_memory_extraction.py`. The new `"used"` branch sits inside this guard; no additional exception test needed.
 - [ ] `search()` quality probe wrapped in try/except — add assertion in `test_search_assess_quality_returns_quality_key` that the main `"results"` key is present even when `assess_quality=True` fails (simulate by mocking `ContextAssembler.assess` to raise).
 
 ### Empty/Invalid Input Handling
@@ -189,7 +191,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/popoto-v1-5-up
 
 ## Race Conditions
 
-No race conditions identified — `_update_memory_metadata()` runs per-record with synchronous Redis saves; `search()` with `assess_quality=True` is a read-only probe (no writes).
+No race conditions identified — `_persist_outcome_metadata()` runs per-record with synchronous Redis saves; `search()` with `assess_quality=True` makes a single Redis read per call (the `composite_score()` probe inside `ContextAssembler.assess()`), wrapped in try/except so failures are non-fatal.
 
 ## No-Gos (Out of Scope)
 
@@ -205,9 +207,9 @@ No race conditions identified — `_update_memory_metadata()` runs per-record wi
 
 ## Agent Integration
 
-The `search()` function is already exposed to the agent via `mcp_servers/memory_server.py`. The `assess_quality` parameter is optional with `default=False`; the agent's existing MCP tool signature is unchanged. No `.mcp.json` changes required.
+The `search()` function is exposed to the agent via the CLI entry point `python -m tools.memory_search search` — there is no `mcp_servers/memory_server.py`. The agent invokes this as a Bash tool call, as documented in `agent/sdk_client.py` and `agent/hooks/pre_tool_use.py`. The `assess_quality` parameter is not surfaced through the CLI today; this plan does not change the CLI signature, so no agent-facing change is needed.
 
-If a future plan wants to expose retrieval quality to the agent, the MCP tool signature can be extended independently.
+If a future plan wants to expose retrieval quality to the agent, the CLI (`tools/memory_search/cli.py`) can be extended with an `--assess-quality` flag independently.
 
 ## Documentation
 
@@ -218,7 +220,7 @@ If a future plan wants to expose retrieval quality to the agent, the MCP tool si
 
 - [ ] `"used"` appears as a valid outcome option in `OUTCOME_JUDGMENT_PROMPT` with a one-line definition.
 - [ ] `_judge_outcomes_llm()` does not remap `"used"` to `"dismissed"`.
-- [ ] `_update_memory_metadata()` has a `"used"` branch that leaves `dismissal_count` unchanged.
+- [ ] `_persist_outcome_metadata()` has a `"used"` branch that leaves `dismissal_count` unchanged.
 - [ ] `search(query, assess_quality=True)` returns a `"quality"` key in the result dict.
 - [ ] `test_used_outcome_not_remapped` passes.
 - [ ] `test_error_summary_empty` passes — `error_summary()` returns `{"__all__": {...}}` with `count=0`.
@@ -270,9 +272,10 @@ If a future plan wants to expose retrieval quality to the agent, the MCP tool si
 - In `agent/memory_extraction.py`:
   - Add `"used"` to `OUTCOME_JUDGMENT_PROMPT` (after `"echoed"` line, before the closing); update the JSON schema hint to include `"used"`.
   - Update coercion guard: `elif outcome not in ("acted", "used", "dismissed"):` (keep `"echoed"` → `"dismissed"` mapping above).
-  - Add `elif outcome == "used":` branch in `_update_memory_metadata()`: set `meta["last_outcome"] = "used"`, leave `dismissal_count` unchanged, append to `outcome_history` (already done by common block above).
+  - Add `elif outcome == "used":` branch in `_persist_outcome_metadata()`: set `meta["last_outcome"] = "used"`, leave `dismissal_count` unchanged, append to `outcome_history` (already done by common block above).
   - Add inline comments at each outcome branch explaining semantics.
-  - Update `_update_memory_metadata()` docstring: `outcome_map` type → `"acted"|"used"|"dismissed"`.
+  - Update `_persist_outcome_metadata()` docstring: `outcome_map` type → `"acted"|"used"|"dismissed"`.
+  - Fix log counter at line ~748 in `detect_outcomes_async`: add `used_count = sum(1 for v in redis_outcome_map.values() if v == "used")`, change `dismissed = len(redis_outcome_map) - acted` to `dismissed = len(redis_outcome_map) - acted - used_count`, update log message to emit all three counts.
 
 ### 2. Implement `assess_quality` in `search()`
 - **Task ID**: build-assess-quality
@@ -318,9 +321,13 @@ If a future plan wants to expose retrieval quality to the agent, the MCP tool si
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist | `_update_memory_metadata()` does not exist — actual name is `_persist_outcome_metadata()` (10 occurrences in plan) | Revision pass | All 10 occurrences corrected throughout plan |
+| CONCERN | Operator | `detect_outcomes_async` log counter `dismissed = len(map) - acted` will miscount `"used"` outcomes as dismissed | Revision pass | Task 1 now includes explicit `used_count` fix to the log counter |
+| CONCERN | Skeptic | `mcp_servers/memory_server.py` cited in Agent Integration does not exist | Revision pass | Agent Integration section rewritten: search is exposed via CLI (`python -m tools.memory_search`), not an MCP server |
+| CONCERN | Skeptic | `ContextAssembler.assess()` described as having "no extra Redis round-trips" but it calls `composite_score()` — a real Redis read | Revision pass | Claim softened throughout: now states "a real Redis read, safely wrapped in try/except" |
+| NIT | Operator | `compute_act_rate` semantic degradation from `"used"` growing denominator should be explicit in No-Gos | Pre-existing | Already listed in No-Gos; no change needed |
 
 ---
 
