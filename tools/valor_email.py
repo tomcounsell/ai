@@ -369,9 +369,13 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     session_id = _build_session_id()
     smtp_user = os.environ.get("SMTP_USER", "")
+    # args.to is a list (action="append") — flatten comma-separated entries too
+    to_addrs = []
+    for entry in args.to:
+        to_addrs.extend(a.strip() for a in entry.split(",") if a.strip())
     payload: dict = {
         "session_id": session_id,
-        "to": args.to,
+        "to": to_addrs,
         "subject": args.subject or "(no subject)",
         "body": body,
         "attachments": attachments,
@@ -400,7 +404,7 @@ def cmd_send(args: argparse.Namespace) -> int:
                 {
                     "queued": True,
                     "session_id": session_id,
-                    "to": args.to,
+                    "to": to_addrs,
                     "subject": payload["subject"],
                     "attachments": attachments,
                 }
@@ -489,7 +493,14 @@ def main() -> int:
 
     # send
     send_parser = subparsers.add_parser("send", help="Send an email via the relay")
-    send_parser.add_argument("--to", required=True, help="Recipient email address")
+    send_parser.add_argument(
+        "--to",
+        required=True,
+        action="append",
+        dest="to",
+        metavar="ADDRESS",
+        help="Recipient email address (repeat for multiple)",
+    )
     send_parser.add_argument(
         "--subject",
         default=None,

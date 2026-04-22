@@ -90,9 +90,13 @@ def _normalize_payload(message: dict) -> dict | None:
     if "body" not in message and "text" in message:
         message["body"] = message.pop("text")
 
-    to_addr = message.get("to") or ""
+    to_field = message.get("to") or ""
+    # Normalize to list — CLI may send a single string or a list
+    if isinstance(to_field, str):
+        to_field = [a.strip() for a in to_field.split(",") if a.strip()]
+    message["to"] = to_field
     body = message.get("body")
-    if not to_addr or body is None:
+    if not to_field or body is None:
         return None
 
     message.setdefault("subject", "(no subject)")
@@ -106,7 +110,7 @@ def _normalize_payload(message: dict) -> dict | None:
 
 
 def _send_smtp_sync(
-    to_addr: str,
+    to_addrs: list[str],
     mime_msg,
     from_addr: str,
 ) -> None:
@@ -119,7 +123,7 @@ def _send_smtp_sync(
         if cfg.get("use_tls", True):
             smtp.starttls()
         smtp.login(cfg["user"], cfg["password"])
-        smtp.sendmail(from_addr or cfg["user"], [to_addr], mime_msg.as_string())
+        smtp.sendmail(from_addr or cfg["user"], to_addrs, mime_msg.as_string())
 
 
 async def _dead_letter_message(message: dict, reason: str) -> None:
@@ -127,10 +131,12 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
     try:
         from bridge.email_dead_letter import write_dead_letter
 
+        to_val = message.get("to", "")
+        recipient_str = ", ".join(to_val) if isinstance(to_val, list) else str(to_val)
         await asyncio.to_thread(
             write_dead_letter,
             session_id=message.get("session_id", "unknown"),
-            recipient=message.get("to", ""),
+            recipient=recipient_str,
             subject=message.get("subject", ""),
             body=message.get("body", ""),
             headers={
@@ -141,7 +147,7 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
         )
         logger.warning(
             "Email relay: dead-lettered payload for %s (%s)",
-            message.get("to"),
+            recipient_str,
             reason,
         )
     except Exception as e:
@@ -189,9 +195,10 @@ async def _process_one(r, key: str, raw: str) -> tuple[bool, bool]:
         return False, False
 
     # Build MIME message
+    to_addrs: list[str] = message["to"]  # normalized to list by _normalize_payload
     try:
         mime_msg = _build_reply_mime(
-            to_addr=message["to"],
+            to_addrs=to_addrs,
             subject=message.get("subject") or "(no subject)",
             body=message.get("body") or "",
             in_reply_to=message.get("in_reply_to"),
@@ -211,13 +218,13 @@ async def _process_one(r, key: str, raw: str) -> tuple[bool, bool]:
     try:
         await asyncio.to_thread(
             _send_smtp_sync,
-            message["to"],
+            to_addrs,
             mime_msg,
             message.get("from_addr") or "",
         )
         logger.info(
             "Email relay: sent to %s (session=%s, body=%d chars, attach=%d)",
-            message["to"],
+            to_addrs,
             message.get("session_id"),
             len(message.get("body") or ""),
             len(attachment_paths),

@@ -124,6 +124,13 @@ def _extract_address(raw: str | None) -> str:
     return addr.lower().strip()
 
 
+def _extract_addresses(raw: str | None) -> list[str]:
+    """Extract all plain email addresses from a To/CC header value."""
+    if not raw:
+        return []
+    return [addr.lower().strip() for _, addr in email.utils.getaddresses([raw]) if addr.strip()]
+
+
 def _extract_body(msg: email_lib.message.Message) -> str:
     """Extract plain text body from an email message.
 
@@ -163,8 +170,9 @@ def _extract_body(msg: email_lib.message.Message) -> str:
 def parse_email_message(raw_bytes: bytes) -> dict | None:
     """Parse raw email bytes into a structured dict.
 
-    Returns a dict with keys: from_addr, subject, body, message_id, in_reply_to.
-    Returns None if the email cannot be parsed or has no usable body.
+    Returns a dict with keys: from_addr, to_addrs, cc_addrs, subject, body,
+    message_id, in_reply_to.  Returns None if the email cannot be parsed or
+    has no usable body.
     """
     try:
         msg = email_lib.message_from_bytes(raw_bytes)
@@ -187,10 +195,14 @@ def parse_email_message(raw_bytes: bytes) -> dict | None:
 
     message_id = msg.get("Message-ID", "").strip()
     in_reply_to = msg.get("In-Reply-To", "").strip()
+    to_addrs = _extract_addresses(msg.get("To", ""))
+    cc_addrs = _extract_addresses(msg.get("CC", ""))
 
     return {
         "from_addr": from_addr,
         "from_raw": from_raw,
+        "to_addrs": to_addrs,
+        "cc_addrs": cc_addrs,
         "subject": subject,
         "body": body.strip(),
         "message_id": message_id,
@@ -204,7 +216,7 @@ def parse_email_message(raw_bytes: bytes) -> dict | None:
 
 
 def _build_reply_mime(
-    to_addr: str,
+    to_addrs: list[str] | str,
     subject: str,
     body: str,
     in_reply_to: str | None,
@@ -225,7 +237,8 @@ def _build_reply_mime(
     ``application/octet-stream``.
 
     Args:
-        to_addr: Recipient email address.
+        to_addrs: Recipient address(es). Accepts a single string or a list;
+            multiple addresses are joined with ", " in the To header.
         subject: Subject line. Whether ``Re:`` is prepended depends on
             ``force_reply_prefix`` (see below).
         body: Plain text body (utf-8).
@@ -245,6 +258,8 @@ def _build_reply_mime(
     Returns:
         MIMEText when no attachments; MIMEMultipart when attachments are present.
     """
+    if isinstance(to_addrs, str):
+        to_addrs = [to_addrs]
     text_part = email.mime.text.MIMEText(body, "plain", "utf-8")
 
     if not attachments:
@@ -269,7 +284,7 @@ def _build_reply_mime(
             msg.attach(part)
 
     msg["From"] = from_addr
-    msg["To"] = to_addr
+    msg["To"] = ", ".join(to_addrs)
     # Subject prefixing depends on the caller:
     # - Worker reply path (``EmailOutputHandler._build_reply``): passes
     #   ``force_reply_prefix=True`` so the legacy semantics hold — ``"Re: "``
@@ -472,7 +487,7 @@ class EmailOutputHandler:
 
     def _build_reply(
         self,
-        to_addr: str,
+        to_addrs: list[str] | str,
         subject: str,
         body: str,
         in_reply_to: str | None,
@@ -492,7 +507,7 @@ class EmailOutputHandler:
         header and ``in_reply_to`` is empty.
         """
         return _build_reply_mime(
-            to_addr=to_addr,
+            to_addrs=to_addrs,
             subject=subject,
             body=body,
             in_reply_to=in_reply_to,
@@ -504,7 +519,7 @@ class EmailOutputHandler:
 
     def _send_smtp(
         self,
-        to_addr: str,
+        to_addrs: list[str],
         mime_msg: email.mime.text.MIMEText | email.mime.multipart.MIMEMultipart,
     ) -> None:
         """Send via SMTP (synchronous, run in thread executor)."""
@@ -516,7 +531,7 @@ class EmailOutputHandler:
             if cfg.get("use_tls", True):
                 smtp.starttls()
             smtp.login(cfg["user"], cfg["password"])
-            smtp.sendmail(cfg["user"], [to_addr], mime_msg.as_string())
+            smtp.sendmail(cfg["user"], to_addrs, mime_msg.as_string())
 
     async def send(
         self,
@@ -567,8 +582,19 @@ class EmailOutputHandler:
             self._smtp_config["user"] if self._smtp_config else os.environ.get("SMTP_USER", "")
         )
 
+        # Build reply-all recipient list: original sender + everyone in To/CC
+        # except ourselves.
+        own_addr = from_addr.lower()
+        original_to = extra.get("email_to_addrs") or []
+        original_cc = extra.get("email_cc_addrs") or []
+        reply_all_addrs = [chat_id] + [
+            a
+            for a in (original_to + original_cc)
+            if a.lower() != own_addr and a.lower() != chat_id.lower()
+        ]
+
         mime_msg = self._build_reply(
-            to_addr=chat_id,
+            to_addrs=reply_all_addrs,
             subject=original_subject,
             body=body_text,
             in_reply_to=original_message_id or None,
@@ -580,10 +606,10 @@ class EmailOutputHandler:
         last_error = None
         for attempt in range(SMTP_MAX_RETRIES):
             try:
-                await asyncio.to_thread(self._send_smtp, chat_id, mime_msg)
+                await asyncio.to_thread(self._send_smtp, reply_all_addrs, mime_msg)
                 logger.info(
                     "[email] Sent reply to %s (session=%s, %d chars)",
-                    chat_id,
+                    reply_all_addrs,
                     session_id,
                     len(body_text),
                 )
@@ -604,7 +630,7 @@ class EmailOutputHandler:
                 backoff = 2**attempt
                 logger.warning(
                     f"[email] SMTP send attempt {attempt + 1}/{SMTP_MAX_RETRIES} "
-                    f"failed for {chat_id}: {e}. Retrying in {backoff}s..."
+                    f"failed for {reply_all_addrs}: {e}. Retrying in {backoff}s..."
                 )
                 await asyncio.sleep(backoff)
 
@@ -735,6 +761,8 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
                 "transport": "email",
                 "email_message_id": message_id,
                 "email_from": from_addr,
+                "email_to_addrs": parsed.get("to_addrs", []),
+                "email_cc_addrs": parsed.get("cc_addrs", []),
                 "email_subject": subject,
             },
         )
