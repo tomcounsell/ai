@@ -441,12 +441,13 @@ OUTCOME_JUDGMENT_PROMPT = (
     "You are evaluating whether injected memory thoughts influenced an agent's response.\n"
     "For each thought below, classify its relationship to the response as:\n"
     '  "acted" — the response was meaningfully influenced by this memory\n'
+    '  "used" — agent consumed the memory (read + reasoned) but it did not drive the response\n'
     '  "echoed" — keywords overlap but no causal link (coincidental)\n'
     '  "dismissed" — no relationship between memory and response\n'
     "\n"
     "Return a JSON array with one object per thought, each with:\n"
     '  "index": the 0-based index of the thought\n'
-    '  "outcome": "acted", "echoed", or "dismissed"\n'
+    '  "outcome": "acted", "used", "echoed", or "dismissed"\n'
     '  "reasoning": one sentence explaining your judgment\n'
     "\n"
     "Example:\n"
@@ -541,10 +542,11 @@ async def _judge_outcomes_llm(
             outcome = item.get("outcome", "dismissed")
             reasoning = item.get("reasoning", "")
 
-            # Map "echoed" to "dismissed" for ObservationProtocol compatibility
+            # "echoed" → "dismissed": keyword overlap without causal influence is noise, not signal
             if outcome == "echoed":
                 outcome = "dismissed"
-            elif outcome not in ("acted", "dismissed"):
+            # "used" is now first-class: consumed but did not drive the response (popoto v1.5.0)
+            elif outcome not in ("acted", "used", "dismissed"):
                 outcome = "dismissed"
 
             memory_key = capped_thoughts[idx][0]
@@ -579,15 +581,21 @@ def _persist_outcome_metadata(
     outcome_map: dict[str, str],
     reasoning_map: dict[str, str] | None = None,
 ) -> None:
-    """Persist dismissal/acted outcome data in Memory metadata.
+    """Persist dismissal/acted/used outcome data in Memory metadata.
 
     Updates dismissal_count, last_outcome, and outcome_history in each
     memory's metadata dict. When dismissal_count reaches the threshold,
     decays importance. Resets dismissal_count on "acted" outcomes.
 
+    Outcome semantics:
+      "acted"    — memory drove the response; resets dismissal_count (positive signal)
+      "used"     — consumed and reasoned about but did not drive the response;
+                   leaves dismissal_count unchanged (popoto v1.5.0, neutral signal)
+      "dismissed" — no relationship to the response; increments dismissal_count
+
     Args:
         memories: List of Memory instances to update.
-        outcome_map: Dict of {memory_id: "acted"|"dismissed"}.
+        outcome_map: Dict of {memory_id: "acted"|"used"|"dismissed"}.
         reasoning_map: Optional dict of {memory_id: reasoning_string}
             from LLM judge. If absent, reasoning defaults to empty string.
 
@@ -631,6 +639,7 @@ def _persist_outcome_metadata(
             meta["outcome_history"] = history
 
             if outcome == "dismissed":
+                # Ignored: increments dismissal_count, may trigger importance decay
                 meta["dismissal_count"] = meta.get("dismissal_count", 0) + 1
                 meta["last_outcome"] = "dismissed"
                 # Check threshold for importance decay
@@ -646,7 +655,12 @@ def _persist_outcome_metadata(
                         f"[memory_extraction] Decayed importance for {mid}: "
                         f"{current_importance} -> {new_importance}"
                     )
+            elif outcome == "used":
+                # Consumed but did not drive the response (popoto v1.5.0 neutral signal):
+                # leave dismissal_count unchanged, record last_outcome for history
+                meta["last_outcome"] = "used"
             elif outcome == "acted":
+                # Drove the response: positive signal, reset dismissal_count
                 meta["dismissal_count"] = 0  # reset on positive signal
                 meta["last_outcome"] = "acted"
 
@@ -679,7 +693,7 @@ async def detect_outcomes_async(
 
     Feeds results into ObservationProtocol.on_context_used().
 
-    Returns dict of {memory_key: "acted"|"dismissed"}.
+    Returns dict of {memory_key: "acted"|"used"|"dismissed"}.
     """
     if not injected_thoughts or not response_text:
         return {}
@@ -745,10 +759,11 @@ async def detect_outcomes_async(
                 if redis_outcome_map:
                     ObservationProtocol.on_context_used(memories, redis_outcome_map)
                     acted = sum(1 for v in redis_outcome_map.values() if v == "acted")
-                    dismissed = len(redis_outcome_map) - acted
+                    used_count = sum(1 for v in redis_outcome_map.values() if v == "used")
+                    dismissed = len(redis_outcome_map) - acted - used_count
                     logger.info(
                         f"[memory_extraction] Outcome detection: "
-                        f"{acted} acted, {dismissed} dismissed"
+                        f"{acted} acted, {used_count} used, {dismissed} dismissed"
                     )
 
                 # Persist dismissal/acted data in metadata (with reasoning)
