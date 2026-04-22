@@ -187,6 +187,30 @@ class TestMemoryModel:
         m.superseded_by = "some-other-memory-id-12345"
         assert m.superseded_by == "some-other-memory-id-12345"
 
+    def test_error_summary_empty(self):
+        """PredictionLedgerMixin.error_summary() with no predictions returns expected empty shape.
+
+        Guards the popoto v1.5.0 bugfix for the group_by=None edge case on empty
+        error sets. An empty partition must return {"__all__": stats_dict} with count=0,
+        not raise or return None.
+        """
+        from uuid import uuid4
+
+        from popoto import PredictionLedgerMixin
+
+        from models.memory import Memory
+
+        # Use a unique partition to guarantee no prior data
+        result = PredictionLedgerMixin.error_summary(Memory, partition=f"test-empty-{uuid4()}")
+
+        assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        assert "__all__" in result, f"Expected '__all__' key, got keys: {list(result.keys())}"
+        all_stats = result["__all__"]
+        assert isinstance(all_stats, dict), f"Expected dict for '__all__', got {type(all_stats)}"
+        assert all_stats.get("count") == 0, (
+            f"Expected count=0 for empty partition, got: {all_stats.get('count')}"
+        )
+
     def test_superseded_by_rationale_accepts_rationale_string(self):
         """superseded_by_rationale accepts a one-sentence rationale string."""
         from models.memory import Memory

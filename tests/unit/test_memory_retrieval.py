@@ -626,7 +626,6 @@ class TestGetEmbeddingRanked:
         assert result == []
 
     def test_returns_empty_when_no_embeddings_on_disk(self):
-
         from agent.memory_retrieval import get_embedding_ranked
 
         mock_provider = MagicMock()
@@ -906,3 +905,105 @@ class TestParaphraseRecall:
         # The embedding signal alone should surface the memory
         assert len(result) == 1
         assert result[0].memory_id == "terse-memory"
+
+
+class TestSearchAssessQuality:
+    """Tests for tools/memory_search search() assess_quality parameter (popoto v1.5.0)."""
+
+    def _make_mock_record(self):
+        """Build a minimal Memory mock for search() serialization."""
+        from unittest.mock import MagicMock
+
+        mock_record = MagicMock()
+        mock_record.memory_id = "mem-1"
+        mock_record.content = "deployment strategy"
+        mock_record.score = 0.9
+        mock_record.confidence = 0.7
+        mock_record.source = "agent"
+        mock_record.access_count = 2
+        mock_record.metadata = {}
+        return mock_record
+
+    def test_assess_quality_false_no_quality_key(self):
+        """search() without assess_quality must NOT include 'quality' key (backward compat)."""
+        from unittest.mock import patch
+
+        from tools.memory_search import search
+
+        mock_record = self._make_mock_record()
+
+        # retrieve_memories is imported inside search() so patch its module directly
+        with (
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
+            patch("models.memory.Memory._meta") as mock_meta,
+        ):
+            mock_meta.fields = {}  # no bloom field → skip bloom check
+            with patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]):
+                result = search("deploy", assess_quality=False)
+
+        assert "quality" not in result, (
+            f"assess_quality=False must not include 'quality' key; got: {list(result.keys())}"
+        )
+        assert "results" in result
+
+    def test_assess_quality_true_returns_quality_key(self):
+        """search(assess_quality=True) returns a 'quality' key when ContextAssembler succeeds."""
+        import dataclasses
+        from unittest.mock import MagicMock, patch
+
+        from tools.memory_search import search
+
+        mock_record = self._make_mock_record()
+
+        # Build a fake RetrievalQuality dataclass for the mock
+        @dataclasses.dataclass
+        class FakeRetrievalQuality:
+            avg_confidence: float = 0.75
+            score_spread: float = 0.15
+            fok_score: float = 0.60
+            staleness_ratio: float = 0.05
+
+        mock_assembler = MagicMock()
+        mock_assembler.assess.return_value = FakeRetrievalQuality()
+
+        mock_assembler_cls = MagicMock(return_value=mock_assembler)
+
+        with (
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
+            patch("models.memory.Memory._meta") as mock_meta,
+            patch("popoto.recipes.ContextAssembler", mock_assembler_cls),
+        ):
+            mock_meta.fields = {}  # no bloom field
+            result = search("deploy", assess_quality=True)
+
+        assert "quality" in result, (
+            f"assess_quality=True must include 'quality' key; got: {list(result.keys())}"
+        )
+        assert result["quality"] is not None
+
+    def test_assess_quality_true_failure_path_returns_results(self):
+        """When ContextAssembler.assess() raises, search() returns 'results' without crashing."""
+        from unittest.mock import MagicMock, patch
+
+        from tools.memory_search import search
+
+        mock_record = self._make_mock_record()
+
+        mock_assembler = MagicMock()
+        mock_assembler.assess.side_effect = RuntimeError("Redis connection refused")
+        mock_assembler_cls = MagicMock(return_value=mock_assembler)
+
+        with (
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
+            patch("models.memory.Memory._meta") as mock_meta,
+            patch("popoto.recipes.ContextAssembler", mock_assembler_cls),
+        ):
+            mock_meta.fields = {}  # no bloom field
+            result = search("deploy", assess_quality=True)
+
+        # Must not crash; must still return results
+        assert "results" in result, "search() must return 'results' even when quality probe fails"
+        # quality key must be absent on failure (non-fatal)
+        assert "quality" not in result, (
+            "quality key must be absent when ContextAssembler.assess() raises"
+        )

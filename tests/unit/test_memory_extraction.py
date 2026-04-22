@@ -104,6 +104,39 @@ class TestDetectOutcomes:
         result = await detect_outcomes_async([("", "")], "test")
         assert isinstance(result, dict)
 
+    @pytest.mark.asyncio
+    async def test_used_outcome_not_remapped(self):
+        """'used' outcome from LLM judge must survive coercion guard unchanged.
+
+        Tests that the popoto v1.5.0 'used' outcome (consumed but did not drive
+        the response) passes through detect_outcomes_async without being coerced
+        to 'dismissed'.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import detect_outcomes_async
+
+        memory_key = "test-memory-used-123"
+        # Simulate _judge_outcomes_llm returning "used" for the memory
+        mock_llm_result = {
+            memory_key: {
+                "outcome": "used",
+                "reasoning": "Agent read the memory but did not use it to drive the response",
+            }
+        }
+
+        with patch(
+            "agent.memory_extraction._judge_outcomes_llm",
+            new=AsyncMock(return_value=mock_llm_result),
+        ):
+            thoughts = [(memory_key, "deployment pipeline red-green canary strategy")]
+            result = await detect_outcomes_async(thoughts, "The weather is nice today.")
+
+        # "used" must not be coerced to "dismissed"
+        assert result.get(memory_key) == "used", (
+            f"Expected 'used' outcome to survive coercion guard, got: {result.get(memory_key)!r}"
+        )
+
 
 class TestRunPostSessionExtraction:
     """Test agent/memory_extraction.py run_post_session_extraction()."""
