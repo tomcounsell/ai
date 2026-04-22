@@ -7,11 +7,13 @@ _recover_interrupted_agent_sessions_startup, and the drain guard in _worker_loop
 All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
 """
 
+import asyncio
 import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from agent import agent_session_queue as _queue_mod
 from agent.agent_session_queue import (
     DRAIN_TIMEOUT,
     _active_workers,
@@ -468,3 +470,53 @@ class TestEnsureWorkerDeduplication:
         ), "Expected warning for blocked duplicate spawn was not logged"
         # Clean up manual injection
         _starting_workers.discard(chat_id)
+
+    @pytest.mark.asyncio
+    async def test_starting_workers_cleared_when_post_create_fails(self, monkeypatch):
+        """I4 hardening: simulate a post-create failure and assert no leak and no orphan.
+
+        Replaces _active_workers with a dict subclass whose __setitem__ raises for
+        the test key. _ensure_worker creates a real asyncio.Task via create_task,
+        then hits the raising __setitem__. The except branch must cancel the task;
+        the finally must clear _starting_workers.
+        """
+        worker_key = "race-test-postcreate"
+        created_tasks: list[asyncio.Task] = []
+        original_create_task = asyncio.create_task
+
+        def wrapped_create_task(coro, *a, **kw):
+            task = original_create_task(coro, *a, **kw)
+            created_tasks.append(task)
+            return task
+
+        class RaisingActiveWorkers(dict):
+            def __setitem__(self, key, value):
+                if key == worker_key:
+                    raise RuntimeError("simulated _active_workers publish failure")
+                super().__setitem__(key, value)
+
+        monkeypatch.setattr(_queue_mod.asyncio, "create_task", wrapped_create_task)
+        monkeypatch.setattr(_queue_mod, "_active_workers", RaisingActiveWorkers())
+        _starting_workers.discard(worker_key)
+
+        try:
+            with pytest.raises(RuntimeError, match="simulated"):
+                _ensure_worker(worker_key, is_project_keyed=False)
+
+            # Yield so task.cancel() → CancelledError propagates before assert.
+            await asyncio.sleep(0)
+
+            assert worker_key not in _starting_workers, (
+                "finally block must clear _starting_workers"
+            )
+            assert worker_key not in _queue_mod._active_workers, (
+                "orphan task must not be published"
+            )
+            assert len(created_tasks) == 1, "exactly one task created"
+            assert created_tasks[0].cancelled(), "orphan task must be cancelled"
+        finally:
+            # Cleanup: cancel any still-pending tasks and clear guard state.
+            for t in created_tasks:
+                if not t.done():
+                    t.cancel()
+            _starting_workers.discard(worker_key)
