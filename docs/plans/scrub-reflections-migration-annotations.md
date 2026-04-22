@@ -152,19 +152,19 @@ Line numbers above are approximate (pre-edit) and provided as anchors. The build
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No exception handlers are added or modified by this work — handlers in scope are unchanged. Existing tests that cover the handlers continue to apply.
+- [x] No exception handlers are added or modified by this work — handlers in scope are unchanged. Existing tests that cover the handlers continue to apply.
 
 ### Empty/Invalid Input Handling
-- [ ] No function signatures, parameters, or input validation are touched. No new edge cases are introduced.
+- [x] No function signatures, parameters, or input validation are touched. No new edge cases are introduced.
 
 ### Error State Rendering
-- [ ] No user-visible output paths are touched. Reflection scheduler tests already cover error propagation (`tests/unit/test_reflection_scheduler.py`).
+- [x] No user-visible output paths are touched. Reflection scheduler tests already cover error propagation (`tests/unit/test_reflection_scheduler.py`).
 
 ## Test Impact
 
-- [ ] `tests/unit/test_reflections_package.py` — VERIFY: imports each `reflections/*` module by dotted path. After scrub, re-import must still succeed (this is the primary regression guard for "I deleted text and accidentally broke a docstring or import"). No code changes expected; success means the test is green without modification.
-- [ ] `tests/unit/test_reflection_scheduler.py` — VERIFY: scheduler resolves callables via `importlib`. Unchanged behavior, no edit needed.
-- [ ] `tests/unit/test_reflections_memory.py`, `test_reflections_scheduling.py`, `test_reflections_multi_repo.py`, `test_reflections_report.py`, `tests/integration/test_reflections_redis.py` — VERIFY: all green without changes. Pure docstring edits should not perturb any test.
+- [x] `tests/unit/test_reflections_package.py` — VERIFY: imports each `reflections/*` module by dotted path. After scrub, re-import must still succeed (this is the primary regression guard for "I deleted text and accidentally broke a docstring or import"). No code changes expected; success means the test is green without modification.
+- [x] `tests/unit/test_reflection_scheduler.py` — VERIFY: scheduler resolves callables via `importlib`. Unchanged behavior, no edit needed.
+- [x] `tests/unit/test_reflections_memory.py`, `test_reflections_scheduling.py`, `test_reflections_multi_repo.py`, `test_reflections_report.py`, `tests/integration/test_reflections_redis.py` — VERIFY: all green without changes. Pure docstring edits should not perturb any test.
 
 No existing tests UPDATE / DELETE / REPLACE — all "VERIFY" because the scrub is text-only inside docstrings/comments. If any test fails after the scrub, that is a bug in the scrub (an accidentally-removed code line), not a planned test churn.
 
@@ -224,7 +224,7 @@ No agent integration required. Reflections are dispatched by the scheduler (`age
 ## Documentation
 
 ### Feature Documentation
-- [ ] **Optional, single-line addition**: append a "Convention" bullet to `docs/features/reflections.md` (or, if no natural home there, to the "Development Principles" block in `CLAUDE.md`) stating: "Numbered-step references (`step_X`) are historical and should not be reintroduced — reflections are addressed by name in `config/reflections.yaml`." If a clean insertion point cannot be found within 2 minutes of looking, skip — the convention is implicit in the now-clean source.
+- [x] **Optional, single-line addition**: append a "Convention" bullet to `docs/features/reflections.md` (or, if no natural home there, to the "Development Principles" block in `CLAUDE.md`) stating: "Numbered-step references (`step_X`) are historical and should not be reintroduced — reflections are addressed by name in `config/reflections.yaml`." If a clean insertion point cannot be found within 2 minutes of looking, skip — the convention is implicit in the now-clean source.
 
 No other documentation changes. The deeper docs cascade is **#1032**'s scope.
 
@@ -232,20 +232,20 @@ No other documentation changes. The deeper docs cascade is **#1032**'s scope.
 N/A — this repo doesn't publish a docs site for `reflections/`.
 
 ### Inline Documentation
-- [ ] Confirm each edited docstring still describes what the module/callable does (the whole point of the scrub is preserving useful inline docs while removing migration narration).
+- [x] Confirm each edited docstring still describes what the module/callable does (the whole point of the scrub is preserving useful inline docs while removing migration narration).
 
 ## Success Criteria
 
-- [ ] `grep -rn 'scripts/reflections.py\|Extracted from\|Maps to monolith\|monolith\|ReflectionRun' reflections/` returns zero matches.
+- [x] `grep -rn 'scripts/reflections.py\|Extracted from\|Maps to monolith\|monolith\|ReflectionRun' reflections/` returns zero matches.
 
   > **Implementation Note (concern: grep verification scope):** This is the canonical pre-merge guard. Run it exactly as written, against `reflections/` only — do NOT broaden to repo-wide. The patterns intentionally target the five known annotation forms: bare module path (`scripts/reflections.py`), docstring header phrase (`Extracted from`), inline step marker (`Maps to monolith`), bare term (`monolith`), and the deleted class root (`ReflectionRun` — matches both `ReflectionRun` and `ReflectionRunner`). The bare-term `monolith` may collide with prose elsewhere in the repo; that's why scope is `reflections/` only. If the grep returns matches in `tests/unit/test_reflections_multi_repo.py` or `docs/plans/completed/`, those are intentional historical references — out of scope per No-Gos #7.
 
-- [ ] `git diff main -- reflections/` shows only docstring/comment changes — zero changes inside function bodies.
-- [ ] `pytest tests/unit/test_reflections_package.py tests/unit/test_reflection_scheduler.py tests/unit/test_reflections_memory.py tests/unit/test_reflections_scheduling.py tests/unit/test_reflections_multi_repo.py tests/unit/test_reflections_report.py tests/integration/test_reflections_redis.py -x -q` is green.
-- [ ] `python -m ruff format --check reflections/` passes (i.e., black/ruff finds nothing to reformat after edits).
-- [ ] Each edited module's docstring reads as a complete, present-tense description of what the module does — no orphaned sentence fragments, no comparative framing against a deleted system.
-- [ ] (If the convention note ships) `docs/features/reflections.md` contains a one-line guard against reintroducing `step_X` references.
-- [ ] PR description links #1132 with `Closes #1132`.
+- [x] `git diff main -- reflections/` shows only docstring/comment changes — zero changes inside function bodies.
+- [x] `pytest tests/unit/test_reflections_package.py tests/unit/test_reflection_scheduler.py tests/unit/test_reflections_memory.py tests/unit/test_reflections_scheduling.py tests/unit/test_reflections_multi_repo.py tests/unit/test_reflections_report.py tests/integration/test_reflections_redis.py -x -q` is green.
+- [x] `python -m ruff format --check reflections/` passes (i.e., black/ruff finds nothing to reformat after edits).
+- [x] Each edited module's docstring reads as a complete, present-tense description of what the module does — no orphaned sentence fragments, no comparative framing against a deleted system.
+- [x] (If the convention note ships) `docs/features/reflections.md` contains a one-line guard against reintroducing `step_X` references.
+- [x] PR description links #1132 with `Closes #1132`.
 
 ## Team Orchestration
 
