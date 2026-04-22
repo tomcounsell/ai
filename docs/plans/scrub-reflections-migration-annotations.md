@@ -7,6 +7,7 @@ created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1132
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 ---
 
 # Scrub monolith-migration annotations from `reflections/` (and the vault `reflections.yaml`)
