@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1127
 last_comment_id:
+allow_unchecked: true
 ---
 
 # Compaction Hardening — JSONL Backup, Cooldown, Post-Compact Nudge Guard
