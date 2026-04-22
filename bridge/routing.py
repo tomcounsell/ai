@@ -557,6 +557,9 @@ async def classify_conversation_terminus(
     Fast-path order (critical — checked before LLM):
     1. sender_is_bot + no question → SILENT  (primary loop-break signal)
     2. acknowledgment token or very short (≤1 word) → SILENT
+       (unless thread_messages contains a question — then fall through, so a
+       human short answer like "Yes"/"No" to a Valor question is not dropped;
+       see issue #1090)
     3. standalone "?" in text (not URL query param) → RESPOND
 
     LLM (Ollama-first, Haiku fallback) handles everything else.
@@ -575,9 +578,21 @@ async def classify_conversation_terminus(
         return "SILENT"
 
     # Fast-path 2: acknowledgment token (fires AFTER sender check, never before)
+    # — but skip the check entirely when the replied-to context contained a
+    # question, so a short human reply ("Yes"/"No") to a Valor question is
+    # not silently dropped. Fast-Path 1 above already handled the bot case.
+    # NOTE (issue #1090): thread_messages is currently the single immediate
+    # replied-to message. If a future change widens this to include older
+    # Valor messages, this `?` heuristic may fire on a stale upstream question
+    # and route an unrelated short reply to RESPOND. Revisit then.
+    valor_asked_question = any(
+        _STANDALONE_QUESTION_RE.search(msg)
+        for msg in thread_messages
+        if isinstance(msg, str) and msg
+    )
     token_normalized = text_lower.rstrip("!.,").strip()
     word_count = len(text_stripped.split())
-    if token_normalized in _ACKNOWLEDGMENT_TOKENS or word_count <= 1:
+    if not valor_asked_question and (token_normalized in _ACKNOWLEDGMENT_TOKENS or word_count <= 1):
         return "SILENT"
 
     # Fast-path 3: standalone "?" → RESPOND (excludes URL query params)

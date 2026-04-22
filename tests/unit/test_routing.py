@@ -191,3 +191,69 @@ async def test_classify_terminus_bot_react_collapses_to_silent(monkeypatch):
         sender_is_bot=True,
     )
     assert result == "SILENT"  # REACT must collapse to SILENT for bots
+
+
+# =============================================================================
+# Question-aware Fast-Path 2 tests (issue #1090)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_human_short_reply_to_valor_question_returns_respond(
+    monkeypatch,
+):
+    """Human "Yes" replying to a Valor question must NOT be silenced (issue #1090).
+
+    Fast-Path 2 should skip its ≤1-word check because the replied-to Valor
+    message contained a standalone ``?``. The message falls through to the LLM
+    fallback; with both Ollama and Haiku mocked unavailable, the classifier's
+    conservative default of RESPOND is returned.
+    """
+    # Force both LLM paths to fail so we hit the conservative default.
+    monkeypatch.setattr(routing, "OLLAMA_LOCAL_MODEL", "nonexistent-model-xyz")
+    monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
+
+    result = await classify_conversation_terminus(
+        text="Yes",
+        thread_messages=["Should I select the Yudame workspace?"],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_human_short_reply_no_question_still_silent():
+    """Regression: when the replied-to message is NOT a question, Fast-Path 2
+    still fires and a 1-word human reply is SILENT (existing behavior)."""
+    result = await classify_conversation_terminus(
+        text="Yes",
+        thread_messages=["Here is the report you asked for."],
+        sender_is_bot=False,
+    )
+    assert result == "SILENT"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_bot_short_reply_to_valor_question_still_silent():
+    """Bot-loop suppression: a bot "Yes" reply to a Valor question is still
+    silenced via Fast-Path 1, because the reply text contains no ``?``. This
+    test pins the Fast-Path 1 → Fast-Path 2 ordering — if reordered, it fails.
+    """
+    result = await classify_conversation_terminus(
+        text="Yes",
+        thread_messages=["Should I do X?"],
+        sender_is_bot=True,
+    )
+    assert result == "SILENT"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_url_query_in_thread_not_treated_as_question():
+    """URL query-string ``?`` in thread_messages must NOT count as a question.
+    Fast-Path 2 should still fire and SILENT the short reply."""
+    result = await classify_conversation_terminus(
+        text="Yes",
+        thread_messages=["See https://example.com?q=1"],
+        sender_is_bot=False,
+    )
+    assert result == "SILENT"

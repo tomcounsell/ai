@@ -45,7 +45,7 @@ Fast-paths are checked before any LLM call, in this exact order:
    The primary loop-break signal. If the sender is a bot and the message contains no question, it's a loop continuation — silence it immediately.
 
 2. **Acknowledgment token or ≤1 word** → `SILENT`  
-   Checks `_ACKNOWLEDGMENT_TOKENS` set (shared with `classify_needs_response`). Fires **after** the bot check — never before — to avoid silencing human short replies.
+   Checks `_ACKNOWLEDGMENT_TOKENS` set (shared with `classify_needs_response`). Fires **after** the bot check — never before — to avoid silencing human short replies. Also skipped entirely when `thread_messages` contains a question: if Valor's prior message in the thread contained a standalone `?` (per `_STANDALONE_QUESTION_RE`), the ≤1-word check is bypassed so a human short answer like "Yes" / "No" falls through to the LLM (or the RESPOND default). See [#1090](https://github.com/tomcounsell/ai/issues/1090).
 
 3. **Standalone `?` in text** → `RESPOND`  
    Fast exit before any LLM call. Uses regex `(?<![=&\w])\?|(?<![=&])\?(?!\w+=)` to exclude URL query-string parameters like `?q=1`.
