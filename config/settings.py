@@ -176,11 +176,26 @@ class ModelSettings(BaseModel):
 
 
 class FeatureSettings(BaseModel):
-    """Structural placeholder for future feature flags.
+    """Feature-flag configuration for optional behaviours.
 
     All flags are startup-config (read once at process start); default values
     should represent the desired end state, not legacy behavior.
     """
+
+    anthropic_concurrency: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description=(
+            "Maximum concurrent AsyncAnthropic API calls across all call sites "
+            "in bridge/, tools/, and agent/. Enforced by a shared asyncio.Semaphore "
+            "in agent/anthropic_client.py. Conservative default of 5 covers all "
+            "migrated sites fanning out at once without breaching Anthropic's "
+            "per-minute request limits on a solo-dev account. Override via "
+            "FEATURES__ANTHROPIC_CONCURRENCY env var (pydantic-settings nested "
+            "delimiter). See issue #1111."
+        ),
+    )
 
 
 class PathSettings(BaseModel):

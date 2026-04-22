@@ -27,9 +27,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-import anthropic
 import httpx
 
+from agent.anthropic_client import anthropic_slot
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 from config.enums import SessionType
 from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
@@ -895,20 +895,20 @@ async def classify_output(text: str) -> ClassificationResult:
             _write_classification_audit(text, result, source="heuristic")
             return result
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-
         # Truncate very long text to save tokens — classification
         # only needs the beginning and end of the output
         classify_text = text
         if len(text) > 2000:
             classify_text = text[:1000] + "\n\n[...truncated...]\n\n" + text[-1000:]
 
-        response = await client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=256,
-            system=CLASSIFIER_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": classify_text}],
-        )
+        # Shared semaphore-gated client (#1111)
+        async with anthropic_slot() as client:
+            response = await client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=256,
+                system=CLASSIFIER_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": classify_text}],
+            )
 
         raw_response = response.content[0].text.strip()
         result = _parse_classification_response(raw_response)
@@ -1361,18 +1361,17 @@ async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
             logger.warning("No Anthropic API key found for drafting")
             return None
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-
-        # Try tool_use for structured output
+        # Try tool_use for structured output (shared semaphore-gated client, #1111)
         try:
-            response = await client.messages.create(
-                model=MODEL_FAST,
-                max_tokens=1024,
-                system=DRAFTER_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-                tools=[STRUCTURED_DRAFT_TOOL],
-                tool_choice={"type": "tool", "name": "structured_draft"},
-            )
+            async with anthropic_slot() as client:
+                response = await client.messages.create(
+                    model=MODEL_FAST,
+                    max_tokens=1024,
+                    system=DRAFTER_SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": prompt}],
+                    tools=[STRUCTURED_DRAFT_TOOL],
+                    tool_choice={"type": "tool", "name": "structured_draft"},
+                )
 
             # Parse tool_use response — tool_use returns the input dict directly
             for block in response.content:
@@ -1388,13 +1387,15 @@ async def _draft_with_haiku(prompt: str) -> StructuredDraft | None:
         except Exception as e:
             logger.warning(f"Haiku tool_use failed, falling back to text-only: {e}")
 
-        # Fallback: text-only Haiku (no structured routing fields)
-        response = await client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=512,
-            system=DRAFTER_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # Fallback: text-only Haiku (no structured routing fields). Reacquire
+        # a semaphore slot for the second API call (#1111).
+        async with anthropic_slot() as client:
+            response = await client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=512,
+                system=DRAFTER_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
         text_result = response.content[0].text
         return StructuredDraft(
             context_summary="",

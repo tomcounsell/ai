@@ -353,7 +353,7 @@ async def _judge_health(activity: str, session_context: str = "") -> dict[str, A
         activity: Formatted tool call activity summary.
         session_context: Optional session context preamble (session_type + task).
     """
-    import anthropic
+    from agent.anthropic_client import anthropic_slot
 
     api_key = _get_api_key()
     if not api_key:
@@ -366,12 +366,13 @@ async def _judge_health(activity: str, session_context: str = "") -> dict[str, A
         session_context=session_context,
     )
 
-    client = anthropic.AsyncAnthropic(api_key=api_key)
-    response = await client.messages.create(
-        model=MODEL_FAST,
-        max_tokens=150,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    # Shared semaphore-gated client (#1111)
+    async with anthropic_slot() as client:
+        response = await client.messages.create(
+            model=MODEL_FAST,
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+        )
 
     text = response.content[0].text if response.content else ""
 
