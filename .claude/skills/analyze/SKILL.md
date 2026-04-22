@@ -147,7 +147,9 @@ Keep your review under 200 words. Be direct.
 
 ## Step 4: Synthesis
 
-One agent receives everything: the original question, all 5 analyses (de-anonymized), and all 5 cross-examination reviews. Its job is to produce the final strategic assessment.
+Spawn a synthesis sub-agent that receives everything: the original question, all 5 analyses (de-anonymized), and all 5 cross-examination reviews. Its job is to produce the final strategic assessment. Return the synthesis output to the main agent as a string.
+
+Keeping synthesis in a sub-agent prevents the main agent's context from filling with analysis work that's tangential to the conversation it's managing.
 
 **Structure:**
 
