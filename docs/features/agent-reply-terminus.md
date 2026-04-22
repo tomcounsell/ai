@@ -1,7 +1,7 @@
 # Agent Reply Terminus Detection
 
 **Status:** Shipped  
-**Issue:** [#911](https://github.com/tomcounsell/ai/issues/911)
+**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2)
 
 ## Problem
 
@@ -104,6 +104,13 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_ollama_failure_defaults_to_respond` — Ollama + Haiku both fail → RESPOND
 - `test_classify_terminus_empty_text_returns_respond` — empty text → RESPOND
 - `test_classify_terminus_bot_react_collapses_to_silent` — LLM REACT + bot sender → SILENT
+
+**Question-aware Fast-Path 2 tests** (issue [#1090](https://github.com/tomcounsell/ai/issues/1090)):
+
+- `test_classify_terminus_human_short_reply_to_valor_question_returns_respond` — human "Yes" + Valor question in thread → RESPOND
+- `test_classify_terminus_human_short_reply_no_question_still_silent` — human "Yes" + declarative thread → SILENT (regression guard)
+- `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` — bot "Yes" + Valor question → SILENT via Fast-Path 1 (pins fast-path ordering)
+- `test_classify_terminus_url_query_in_thread_not_treated_as_question` — URL `?q=1` in thread_messages → SILENT (URL query strings stay excluded)
 
 ## Related
 
