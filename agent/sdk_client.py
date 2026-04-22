@@ -70,6 +70,14 @@ _session_stop_reasons: dict[str, str] = {}
 # In-memory only — reset on crash/reboot (new sessions start fresh).
 _updated_at_timestamps: dict[str, float] = {}
 
+# === Turn Count Tracking (issue #1127) ===
+# Tracks the most recent `ResultMessage.num_turns` observed per session. Used
+# by the SDK-tick backstop in `agent/session_executor.py` to detect compaction
+# events where the PreCompact hook was skipped — a drop in num_turns across
+# consecutive ResultMessages is the SDK's observable signature of a compaction
+# that rewrote conversation history. In-memory only; reset on process restart.
+_session_turn_counts: dict[str, int] = {}
+
 # Configurable inactivity threshold (seconds). Sessions idle longer than this
 # are considered stalled. Active sessions producing tool calls/logs are never
 # interrupted regardless of total runtime.
@@ -147,6 +155,33 @@ def get_session_updated_at(session_id: str) -> float | None:
 def clear_session_activity(session_id: str) -> None:
     """Remove activity tracking for a completed/abandoned session."""
     _updated_at_timestamps.pop(session_id, None)
+
+
+def get_turn_count(session_id: str) -> int | None:
+    """Return the most recent ResultMessage.num_turns observed for a session.
+
+    Used by the SDK-tick backstop in the executor's output-callback path to
+    detect compaction-induced turn-count drops. Returns None if no
+    ResultMessage has been observed yet for this session. See issue #1127.
+    """
+    return _session_turn_counts.get(session_id)
+
+
+def record_turn_count(session_id: str, num_turns: int) -> None:
+    """Record the observed ResultMessage.num_turns for a session.
+
+    Called by the SDK query loop when a ResultMessage arrives. In-memory only.
+    """
+    if session_id and num_turns is not None:
+        try:
+            _session_turn_counts[session_id] = int(num_turns)
+        except (TypeError, ValueError):
+            pass
+
+
+def clear_turn_count(session_id: str) -> None:
+    """Remove turn-count tracking for a completed/abandoned session."""
+    _session_turn_counts.pop(session_id, None)
 
 
 def _get_prior_session_uuid(session_id: str) -> str | None:
@@ -1230,6 +1265,13 @@ class ValorAgent:
                                         session_id,
                                     )
 
+                                # Record turn count for SDK-tick backstop
+                                # (issue #1127). Tracked per-session in an
+                                # in-memory registry, consulted by the
+                                # executor's output-callback.
+                                if session_id and msg.num_turns is not None:
+                                    record_turn_count(session_id, msg.num_turns)
+
                                 if msg.total_cost_usd is not None:
                                     cost = msg.total_cost_usd
                                     turns = msg.num_turns
@@ -1378,6 +1420,8 @@ class ValorAgent:
                 _active_clients.pop(session_id, None)
                 # Clean up activity tracking — session is done
                 clear_session_activity(session_id)
+                # Clean up turn-count tracking (issue #1127) — session is done
+                clear_turn_count(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
                 # by get_stop_reason() in session_queue after query returns. The pop()
                 # in get_stop_reason() handles cleanup. If the nudge loop never runs

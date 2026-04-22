@@ -29,6 +29,83 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
+
+def _tick_backstop_check_compaction(
+    session: AgentSession,
+    agent_session: AgentSession | None,
+) -> None:
+    """SDK-tick backstop for missed PreCompact hook events (issue #1127).
+
+    The primary compaction signal is the PreCompact hook
+    (``agent/hooks/pre_compact.py``), which writes
+    ``AgentSession.last_compaction_ts``. But hooks can fail: the SDK may skip
+    a hook under internal error conditions, a hook may be deregistered by an
+    unrelated code path, or a PreCompact event may fire so close to subprocess
+    termination that the hook's async task never completes.
+
+    This backstop detects compaction from the executor side by watching for a
+    *drop* in ``ResultMessage.num_turns`` across consecutive ticks. A turn-
+    count drop is the SDK's observable signature of a compaction that rewrote
+    the conversation history. On detection, we arm the 30s nudge guard by
+    writing ``last_compaction_ts`` + bumping ``compaction_skipped_count`` via
+    a partial save. We do NOT attempt a recovery-path JSONL snapshot — the
+    hook is the only place snapshots are taken.
+
+    All failures are swallowed. The backstop MUST NOT crash the executor.
+    """
+    try:
+        import time as _time
+
+        from agent.sdk_client import get_turn_count
+
+        if not session or not getattr(session, "session_id", None):
+            return
+        current_count = get_turn_count(session.session_id)
+        if current_count is None:
+            return  # No ResultMessage seen yet for this session — nothing to compare
+        prior_count = getattr(session, "_last_observed_message_count", None)
+        # Always update the tracker before early-returning so the next tick
+        # has a baseline to compare against.
+        session._last_observed_message_count = current_count
+        if prior_count is None or current_count >= prior_count:
+            return  # Steady or increasing — no compaction detected
+        # Drop observed — backstop-detected compaction.
+        if agent_session is None:
+            logger.warning(
+                "pre_compact hook appears to have missed a compaction for %s — "
+                "backstop detected num_turns drop %s -> %s but no AgentSession "
+                "available to arm the guard",
+                session.session_id,
+                prior_count,
+                current_count,
+            )
+            return
+        try:
+            agent_session.last_compaction_ts = _time.time()
+            current_skipped = int(getattr(agent_session, "compaction_skipped_count", 0) or 0)
+            agent_session.compaction_skipped_count = current_skipped + 1
+            agent_session.save(update_fields=["last_compaction_ts", "compaction_skipped_count"])
+            logger.warning(
+                "pre_compact hook appears to have missed a compaction for %s "
+                "(num_turns %s -> %s) — backstop armed nudge guard",
+                session.session_id,
+                prior_count,
+                current_count,
+            )
+        except Exception as exc:  # noqa: BLE001 - backstop must never crash executor
+            logger.warning(
+                "pre_compact backstop: AgentSession save failed for %s: %s",
+                session.session_id,
+                exc,
+            )
+    except Exception as exc:  # noqa: BLE001 - outer guard for any unexpected failure
+        logger.warning(
+            "pre_compact backstop: unexpected failure for %s: %s",
+            getattr(session, "session_id", "<unknown>"),
+            exc,
+        )
+
+
 # -----------------------------------------------------------------------------
 # Post-session memory extraction scheduling (hotfix #1055)
 # -----------------------------------------------------------------------------
@@ -757,12 +834,25 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"unhealthy: {unhealthy_reason}"
                 )
 
+            # SDK-tick backstop for missed PreCompact hooks (issue #1127).
+            # Runs BEFORE the delivery-action decision so a backstop-detected
+            # compaction arms `last_compaction_ts` and the subsequent
+            # `determine_delivery_action` call sees the freshly-armed guard.
+            _tick_backstop_check_compaction(session, agent_session)
+
             # Resolve session type and classification for PM auto-continue
             _session_type = getattr(agent_session, "session_type", None) if agent_session else None
             _classification = getattr(session, "classification_type", None)
             _is_teammate = (
                 agent_session is not None
                 and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE
+            )
+
+            # Read last_compaction_ts for the post-compact nudge guard (#1127).
+            _last_compaction_ts = (
+                getattr(agent_session, "last_compaction_ts", None)
+                if agent_session is not None
+                else None
             )
 
             # Delegate routing decision to output_router (call site preserved here)
@@ -778,6 +868,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 session_type=_session_type,
                 classification_type=_classification,
                 is_teammate=_is_teammate,
+                last_compaction_ts=_last_compaction_ts,
             )
 
             if action == "deliver_already_completed":
@@ -794,6 +885,46 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"(completion sent or nudged) "
                     f"({len(msg)} chars): {msg[:100]!r}"
                 )
+
+            elif action == "defer_post_compact":
+                # Post-compaction nudge guard (issue #1127). A compaction
+                # landed less than 30s ago — skip this tick entirely to let
+                # the SDK finish writing the compacted transcript and return
+                # cleanly to idle. Pure no-op: no `_enqueue_nudge` call, no
+                # `completion_sent` flip, no counter on `auto_continue_count`.
+                # The next SDK idle tick naturally re-invokes this callback;
+                # if the 30s window has expired, the normal nudge flow fires;
+                # if real SDK output arrived first, it routes via `"deliver"`.
+                try:
+                    import time as _time
+
+                    _age = (
+                        _time.time() - float(_last_compaction_ts)
+                        if _last_compaction_ts is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    _age = None
+                logger.info(
+                    "[%s] Post-compaction nudge guard active (%s) — deferring nudge for this tick",
+                    session.project_key,
+                    f"last_compaction_ts age={_age:.1f}s" if _age is not None else "age unknown",
+                )
+                # Bump `nudge_deferred_count` for observability (C4). Best-
+                # effort partial save; swallow any failure.
+                if agent_session is not None:
+                    try:
+                        _current_deferred = int(
+                            getattr(agent_session, "nudge_deferred_count", 0) or 0
+                        )
+                        agent_session.nudge_deferred_count = _current_deferred + 1
+                        agent_session.save(update_fields=["nudge_deferred_count"])
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.warning(
+                            "[%s] Failed to bump nudge_deferred_count: %s",
+                            session.project_key,
+                            _exc,
+                        )
 
             elif action == "nudge_rate_limited":
                 chat_state.auto_continue_count += 1
