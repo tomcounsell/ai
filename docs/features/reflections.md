@@ -165,7 +165,7 @@ All log files have rotation configured to prevent unbounded growth. Two mechanis
 
 **Python-rotated files** use `RotatingFileHandler` which rotates automatically during writes. No service restart needed. Services using `config/settings.py:configure_logging()` also get rotation automatically via `RotatingFileHandler` with configurable `max_file_size` and `backup_count`.
 
-**Shell-rotated files** are rotated by the `rotate_log` function in `scripts/valor-service.sh` on every service start/restart. A `newsyslog` config (`config/newsyslog.valor.conf`) provides a safety net for long-running services -- macOS runs newsyslog hourly via launchd.
+**Shell-rotated files** are rotated by the `rotate_log` function in `scripts/valor-service.sh` on every service start/restart. A user-space LaunchAgent (`com.valor.log-rotate`) runs `scripts/log_rotate.py` every 30 minutes to cover long-running services between restarts — no root required. See [Log Rotation](log-rotation.md) for the full three-layer design.
 
 ### Bridge Watchdog (External)
 

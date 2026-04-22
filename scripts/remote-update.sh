@@ -181,15 +181,7 @@ if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
     fi
 fi
 
-# ── Sync newsyslog log rotation config if changed ────────────────────
-NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.conf.template"
-NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
-if [ -f "$NEWSYSLOG_SRC" ]; then
-    # Render template by substituting __PROJECT_DIR__
-    NEWSYSLOG_RENDERED=$(sed "s|__PROJECT_DIR__|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC")
-    if [ ! -f "$NEWSYSLOG_DST" ] || [ "$(cat "$NEWSYSLOG_DST")" != "$NEWSYSLOG_RENDERED" ]; then
-        echo "$NEWSYSLOG_RENDERED" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1 && \
-            echo "newsyslog config updated at $NEWSYSLOG_DST" || \
-            echo "WARNING: Could not install newsyslog config (sudo required)"
-    fi
-fi
+# Log rotation is handled by the user-space log-rotate LaunchAgent
+# (see scripts/log_rotate.py and com.valor.log-rotate.plist). The Python
+# update pipeline installs it via service.install_log_rotate_agent() —
+# no root/sudo required.

@@ -208,22 +208,26 @@ See [Email Bridge](email-bridge.md) for full architecture and configuration deta
 
 See [Worker Service](worker-service.md) for full details.
 
-### Log Rotation (newsyslog)
+### Log Rotation
 
-`config/newsyslog.conf.template` is a template — install scripts substitute
-`__PROJECT_DIR__` and write the rendered output to
-`config/newsyslog.rendered.conf` (gitignored). macOS `newsyslog` is root-only
-and only reads `/etc/newsyslog.d/*.conf`, so installing the rendered config
-requires sudo:
+Log rotation runs in user space via a LaunchAgent — no root needed. See
+[Log Rotation](log-rotation.md) for the full design.
 
-```bash
-./scripts/install_reflections.sh   # renders the template
-sudo cp config/newsyslog.rendered.conf /etc/newsyslog.d/valor.conf
-```
+`/update --full` installs `com.valor.log-rotate.plist` to
+`~/Library/LaunchAgents/` via `scripts/update/service.py::install_log_rotate_agent()`.
+The agent runs `scripts/log_rotate.py` every 30 minutes, globbing `logs/*.log`
+and rotating any file over 10 MB (keeping 3 backups). Startup rotation in
+`scripts/valor-service.sh::rotate_log()` handles event-driven rotation on
+every service restart.
 
-`valor-service.sh install` will attempt the `sudo cp` automatically; in
-non-interactive contexts (launchd, CI) it falls back to printing a warning
-and the operator must run the copy manually.
+The installer is content-idempotent — it skips `launchctl bootout`/`bootstrap`
+when the rendered plist already matches the installed file, so running
+`/update --full` twice in a row is a no-op the second time.
+
+Machines updated before this migration had `/etc/newsyslog.d/valor.conf`
+installed. `remove_newsyslog_config()` removes it via `sudo -n rm` during
+`/update --full`; when sudo isn't cached the cleanup is skipped with a
+warning and retried on the next update.
 
 ## See Also
 

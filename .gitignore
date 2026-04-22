@@ -5,7 +5,6 @@ intelligenttrading-datastore.json
 .idea/
 *credentials.json
 config/projects.json
-config/newsyslog.rendered.conf
 config/reflections.yaml
 
 # Created by .ignore support plugin (hsz.mobi)

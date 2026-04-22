@@ -29,7 +29,6 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     migrations,
-    newsyslog,
     npm_tools,
     officecli,
     rodney,
@@ -885,16 +884,23 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 result.warnings.append("Worker plist install failed")
 
-        # Check newsyslog log rotation config — bridge/worker stderr logs bypass
-        # Python's RotatingFileHandler, so newsyslog is the only rotator for them.
-        # Install attempts a passwordless sudo; when that fails, surface an
-        # actionable one-liner so the user knows exactly what to run manually.
-        ns_status = newsyslog.check_newsyslog(project_dir)
-        if ns_status.installed:
-            log(f"newsyslog config installed at {newsyslog.NEWSYSLOG_DST}", v, always=True)
-        elif ns_status.needs_sudo:
-            log(f"ACTION REQUIRED: {ns_status.action_message}", v, always=True)
-            result.warnings.append(ns_status.action_message)
+        # Install the user-space log-rotate LaunchAgent — replaces the prior
+        # root-requiring newsyslog install. Runs every 30 minutes via launchd
+        # under the user account, so `/update --full` never prompts for sudo.
+        if service.install_log_rotate_agent(project_dir):
+            log("Log-rotate LaunchAgent installed", v)
+        else:
+            log("WARN: Log-rotate LaunchAgent install failed", v, always=True)
+            result.warnings.append("Log-rotate LaunchAgent install failed")
+
+        # Best-effort cleanup of the stale /etc/newsyslog.d/valor.conf from
+        # machines updated before this migration. Uses sudo -n so it never
+        # prompts; a warning is logged if sudo isn't cached.
+        if not service.remove_newsyslog_config():
+            result.warnings.append(
+                "Stale /etc/newsyslog.d/valor.conf still present — will cause "
+                "double-rotation until manually removed"
+            )
 
     elif result.git_result and result.git_result.commit_count > 0:
         # Cron mode: set restart flag instead of restarting
