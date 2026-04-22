@@ -442,6 +442,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     project_key = args.project or _get_env_context()["project_key"]
 
     try:
+        from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
+
         pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))
         running = list(AgentSession.query.filter(project_key=project_key, status="running"))
         completed = list(AgentSession.query.filter(project_key=project_key, status="completed"))
@@ -449,6 +451,15 @@ def cmd_status(args: argparse.Namespace) -> int:
             AgentSession.query.filter(project_key=project_key, status="waiting_for_children")
         )
         killed = list(AgentSession.query.filter(project_key=project_key, status="killed"))
+
+        # Zombie-index guard (#1113, mirrors #1006 running-index pattern): filter
+        # out sessions whose actual hash status is terminal, even if they still
+        # appear in the pending/running IndexedField set. Without this, a killed
+        # session that remained in the pending index would inflate pending_count
+        # and let the worker re-pick it up.
+        pending = [p for p in pending if getattr(p, "status", None) not in _TERMINAL_STATUSES]
+        running = [r for r in running if getattr(r, "status", None) not in _TERMINAL_STATUSES]
+        waiting = [w for w in waiting if getattr(w, "status", None) not in _TERMINAL_STATUSES]
 
         # Sort pending by priority then FIFO
         from agent.agent_session_queue import PRIORITY_RANK
@@ -822,12 +833,14 @@ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
 
     Returns a dict with kill result details.
     """
-    from models.session_lifecycle import finalize_session
+    from models.agent_session import AgentSession
+    from models.session_lifecycle import TERMINAL_STATUSES, finalize_session
 
     result = {
         "agent_session_id": target.agent_session_id,
         "session_id": target.session_id,
         "previous_status": target.status,
+        "cascaded_children": [],
     }
 
     # Kill subprocess if running
@@ -851,6 +864,51 @@ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
         f"Killed session {result['agent_session_id']} (session={result['session_id']}, "
         f"previous_status={result['previous_status']})"
     )
+
+    # Cascade-kill: any non-terminal dev children of this session are orphans
+    # without their parent and must be killed too (#1113). Without this, the
+    # worker keeps picking up a dev child after the PM is gone, which then
+    # re-drives the PM lifecycle and produces a zombie session.
+    try:
+        parent_id = target.agent_session_id
+        if parent_id:
+            children = list(AgentSession.query.filter(parent_agent_session_id=parent_id))
+            for child in children:
+                child_status = getattr(child, "status", None)
+                if child_status in TERMINAL_STATUSES:
+                    continue  # already done, leave alone
+                # Kill child subprocess if it's running
+                child_process_result = None
+                if child_status == "running":
+                    child_pid = _find_process_by_session_id(child.session_id)
+                    if child_pid:
+                        child_process_result = _kill_process(child_pid)
+                try:
+                    finalize_session(
+                        child,
+                        "killed",
+                        reason=f"parent {parent_id} killed: cascade",
+                        skip_auto_tag=True,
+                        skip_checkpoint=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"Cascade-kill of child {child.agent_session_id} failed: {e}")
+                    continue
+                child_entry = {
+                    "agent_session_id": child.agent_session_id,
+                    "session_id": child.session_id,
+                    "previous_status": child_status,
+                    "status": "killed",
+                }
+                if child_process_result is not None:
+                    child_entry["process"] = child_process_result
+                result["cascaded_children"].append(child_entry)
+                logger.info(
+                    f"Cascade-killed child {child.agent_session_id} "
+                    f"(session={child.session_id}, parent={parent_id})"
+                )
+    except Exception as e:
+        logger.warning(f"Cascade-kill lookup failed for {target.agent_session_id}: {e}")
 
     return result
 

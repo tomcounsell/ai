@@ -66,20 +66,40 @@ def main():
                     if matches:
                         agent_session = matches[0]
                         # Use lifecycle module for consistent transition logging
-                        from models.session_lifecycle import transition_status
-
-                        agent_session.updated_at = time.time()
-                        agent_session.completed_at = None
-                        transition_status(
-                            agent_session,
-                            "running",
-                            reason="subsequent prompt reactivated local session",
-                            reject_from_terminal=False,
+                        from models.session_lifecycle import (
+                            TERMINAL_STATUSES,
+                            transition_status,
                         )
-                        # If transition was idempotent (already running), field
-                        # changes above were not saved. Ensure they persist.
-                        if agent_session.status == "running":
-                            agent_session.save(update_fields=["updated_at", "completed_at"])
+
+                        # Guard: do NOT re-activate sessions already in a terminal
+                        # state (killed/completed/failed/abandoned/cancelled).
+                        # Without this check, a killed PM session would resurrect
+                        # every time a new prompt hit the hook — the #1113 zombie
+                        # revival bug. Terminal sessions are operator-resumable
+                        # only via explicit `valor-session resume`.
+                        current_status = getattr(agent_session, "status", None)
+                        if current_status in TERMINAL_STATUSES:
+                            import logging
+
+                            logging.getLogger(__name__).warning(
+                                "[user_prompt_submit] Refusing to re-activate "
+                                "terminal session %s (status=%s). Use "
+                                "`valor-session resume` to resume intentionally.",
+                                getattr(agent_session, "agent_session_id", "?"),
+                                current_status,
+                            )
+                        else:
+                            agent_session.updated_at = time.time()
+                            agent_session.completed_at = None
+                            transition_status(
+                                agent_session,
+                                "running",
+                                reason="subsequent prompt reactivated local session",
+                            )
+                            # If transition was idempotent (already running), field
+                            # changes above were not saved. Ensure they persist.
+                            if agent_session.status == "running":
+                                agent_session.save(update_fields=["updated_at", "completed_at"])
                 except Exception:
                     pass  # Non-fatal
             else:
