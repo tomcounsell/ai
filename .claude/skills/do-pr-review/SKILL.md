@@ -44,11 +44,13 @@ Fall back to manual resolution if the env var is unset.
 
 This skill is decomposed into focused sub-skills in `sub-skills/`:
 - `checkout.md` — Mechanical: clean git state, checkout PR branch
-- `code-review.md` — Judgment: read files, analyze diff, classify findings
+- `code-review.md` — Judgment: parse PR-body disclosures, read prior reviews, traverse the 10-item Rubric, evaluate the 12-item Pre-Verdict Checklist, classify findings, derive the verdict mechanically
 - `screenshot.md` — Mechanical: start app, capture UI screenshots
 - `post-review.md` — Mechanical: format findings, post review to GitHub
 
 Each sub-skill has a single responsibility and receives pre-resolved context.
+
+**Determinism note:** `code-review.md` includes a disclosure parser (pre-finding), a prior-review context loader (idempotency on unchanged HEAD SHA + body), an explicit 10-item Rubric with pass/fail/acknowledged/n/a per item, a Miscellaneous bucket for issues outside the rubric, and mechanical verdict derivation. These were introduced in issue #1045 to address non-deterministic verdicts across repeated runs on the same PR.
 
 ## Stage Marker
 

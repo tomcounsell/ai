@@ -27,11 +27,19 @@ Use `gh pr comment` as fallback.
 
 ### 2. Format Review Body
 
+Every review body MUST include (in this order): the mechanical Rubric, the Pre-Verdict Checklist, all finding sections with empty-markers where applicable, the Acknowledged Deferrals (verified) section, the Miscellaneous bucket, the Review Delta (if a prior review existed on a different HEAD SHA), and the `<!-- REVIEW_CONTEXT ... -->` marker before the OUTCOME block. These are produced by the code-review sub-skill.
+
 **If blockers found:**
 ```
 ## Review: Changes Requested
 
 [summary of blockers]
+
+## Rubric
+[10-item Rubric with pass/fail/acknowledged/n/a per item]
+
+## Pre-Verdict Checklist
+[12-item Pre-Verdict Checklist]
 
 ### Blockers
 - [ ] **`file.py:42`** — `actual_code()` — [description]
@@ -39,11 +47,25 @@ Use `gh pr comment` as fallback.
 ### Tech Debt
 - **`file.py:15`** — `code()` — [description]
 
+### Nits
+- None
+
+### Miscellaneous
+- None
+
+### Acknowledged Deferrals (verified)
+- **[disclosure text]** — tracked by #N (OPEN)
+
+### Review Delta (vs prior review on HEAD {prior_sha})
+[optional — only if a prior review existed on a different HEAD SHA]
+
 ### Verification Results
 [output from verification checks if available]
 
 ### Screenshots
 [screenshot references if captured]
+
+<!-- REVIEW_CONTEXT head_sha=<HEAD_SHA> pr_body_hash=<PR_BODY_HASH> -->
 ```
 
 **If no blockers but has tech_debt or nits:**
@@ -52,10 +74,19 @@ Use `gh pr comment` as fallback.
 
 [summary — no blockers, but outstanding tech debt/nits must be resolved before merge]
 
+## Rubric
+[10-item Rubric]
+
+## Pre-Verdict Checklist
+[12-item Pre-Verdict Checklist]
+
 ### Verified
 - [x] Code correctness
 - [x] Security (no vulnerabilities found)
 - [x] Plan requirements met
+
+### Blockers
+- None
 
 ### Tech Debt
 - [ ] **`file.py:15`** — `code()` — [description]
@@ -63,15 +94,29 @@ Use `gh pr comment` as fallback.
 ### Nits
 - [ ] **`file.py:30`** — `code()` — [description]
 
+### Miscellaneous
+- None
+
+### Acknowledged Deferrals (verified)
+- None
+
 ### Screenshots
 [screenshot references if captured]
+
+<!-- REVIEW_CONTEXT head_sha=<HEAD_SHA> pr_body_hash=<PR_BODY_HASH> -->
 ```
 
-**If zero findings (no blockers, no tech_debt, no nits):**
+**If zero findings (no blockers, no tech_debt, no nits, empty Miscellaneous):**
 ```
 ## Review: Approved
 
 [summary of review]
+
+## Rubric
+[10-item Rubric — all pass/acknowledged/n/a]
+
+## Pre-Verdict Checklist
+[12-item Pre-Verdict Checklist]
 
 ### Verified
 - [x] Code correctness
@@ -79,8 +124,35 @@ Use `gh pr comment` as fallback.
 - [x] Security (no vulnerabilities found)
 - [x] Plan requirements met
 
+### Blockers
+- None
+
+### Tech Debt
+- None
+
+### Nits
+- None
+
+### Miscellaneous
+- None
+
+### Acknowledged Deferrals (verified)
+- [bullets if any, else "- None"]
+
 ### Screenshots
 [screenshot references if captured]
+
+<!-- REVIEW_CONTEXT head_sha=<HEAD_SHA> pr_body_hash=<PR_BODY_HASH> -->
+```
+
+**Idempotent replay:** If the code-review sub-skill's Prior Review Context fired (same HEAD SHA, same PR body hash), emit the prior verdict unchanged with a short idempotency note:
+
+```
+## Review: [prior verdict]
+
+_Idempotent: prior review on HEAD {head_sha:0:7} / body hash {body_hash:0:7} is still valid — returning prior verdict without regenerating findings._
+
+<!-- REVIEW_CONTEXT head_sha=<HEAD_SHA> pr_body_hash=<PR_BODY_HASH> -->
 ```
 
 ### 3. Post the Review
