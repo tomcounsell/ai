@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-22
 tracking: https://github.com/tomcounsell/ai/issues/1090
 last_comment_id:
+revision_applied: true
 ---
 
 # Terminus Question-Aware Short-Reply Fix
@@ -121,6 +122,27 @@ Notes:
 - The `if msg` filter inside the generator avoids `re.search(None)` if `thread_messages` ever contains `None` defensively. Current callers pass strings, but the cost of the guard is zero and it future-proofs the call site.
 - `token_normalized` and `word_count` move *inside* the `if not valor_asked_question:` block since they are only consumed there. (Functional equivalent if left at module scope; this is a micro-clarity choice. Builder may keep them outside if they prefer to minimize the diff.)
 - Fast-Path 1 (bot + no question in *reply text*) is unchanged and continues to fire first. A bot replying "yes" still gets caught by Fast-Path 1 before Fast-Path 2 is reached.
+
+**Implementation Note — single-message `thread_messages` assumption (concern from critique):**
+The new guard treats every entry in `thread_messages` as immediate replied-to context. Today the call site at `bridge/routing.py:1021-1025` constructs `thread_messages=[replied_msg.message or ""]` — exactly one element, the direct reply target. The guard must include an inline code comment along these lines so any future widening is a tripwire:
+
+```python
+# NOTE (issue #1090): thread_messages is currently the single immediate
+# replied-to message. If a future change widens this to include older
+# Valor messages, this `?` heuristic may fire on a stale upstream question
+# and route an unrelated short reply to RESPOND. Revisit then.
+valor_asked_question = any(
+    _STANDALONE_QUESTION_RE.search(msg) for msg in thread_messages if msg
+)
+```
+
+This satisfies the Critique Results table entries for **Archaeologist (single-element assumption)** and provides the discoverability hook for any future maintainer.
+
+**Implementation Note — false-positive on rhetorical / embedded `?` (concerns from critique):**
+The chosen detector is `_STANDALONE_QUESTION_RE.search(msg)` (defined at `bridge/routing.py:516`), NOT a literal `"?" in msg` substring check. The regex requires the `?` to be a sentence-terminating standalone token, which already excludes URL query strings (e.g. `https://example.com?q=1`) and most code-embedded cases (e.g. `git status?` mid-sentence with no whitespace boundary). Rhetorical questions like `"WTF?"` or quoted dialogue like `"'Should I?' he asked."` will still trip the guard and route a short reply to RESPOND — this is the conservative default per the classifier's design principle (line 538). See **Risks > Risk 1** for the explicit acceptance of this trade-off.
+
+**Implementation Note — Fast-Path 1 ordering must be preserved (concern from critique):**
+The new guard lives *inside* Fast-Path 2 (after Fast-Path 1's bot check). A bot replying `"Yes"` to a Valor question is suppressed by Fast-Path 1 — `sender_is_bot and not _STANDALONE_QUESTION_RE.search(text_stripped)` — before Fast-Path 2 is ever reached, because `"Yes"` has no `?` in the *reply text*. The new test `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` (see Test Impact) is a hard assertion against this ordering. If a future refactor reorders the fast-paths, that test fails at CI.
 
 ## Failure Path Test Strategy
 
@@ -261,9 +283,10 @@ Standard tier-1 agents (`builder`, `validator`) are sufficient. No specialists r
 
 Edit `bridge/routing.py`:
 - Around lines 551-555, replace the current Fast-Path 2 block with the question-aware version from Solution > Technical Approach. Use `_STANDALONE_QUESTION_RE.search(msg)` (not literal `"?" in msg`).
-- Add an inline comment referencing issue #1090.
+- Add an inline comment referencing issue #1090. Use the comment text from Solution > Technical Approach > "Implementation Note — single-message `thread_messages` assumption" — the comment is a tripwire for future maintainers who widen the `thread_messages` parameter.
 - Update the `classify_conversation_terminus` docstring (lines 531-534) to note that Fast-Path 2 is skipped when `thread_messages` contains a question.
-- Do NOT modify Fast-Path 1, Fast-Path 3, the LLM call, or any other function in the file.
+- Do NOT modify Fast-Path 1, Fast-Path 3, the LLM call, or any other function in the file. The Fast-Path 1 → Fast-Path 2 ordering is load-bearing — bot-reply suppression depends on Fast-Path 1 firing first. The new test `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` will fail if Fast-Path 1 is reordered.
+- Builder discretion: `token_normalized` and `word_count` may be left at their current scope (outside the new `if not valor_asked_question:` block) to minimize the diff. Either placement is functionally equivalent.
 
 ### 2. Add the four new tests
 
@@ -325,11 +348,18 @@ Edit `docs/features/agent-reply-terminus.md`:
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Verdict: **READY TO BUILD (with concerns)**. -->
+<!-- Critique verdict artifact hash: sha256:a7f8db1ff0cf0425ebf18e67492d368d86cd637b7e714e1277f0ea62887390ef -->
+<!-- Revision pass applied 2026-04-22. Each concern is either resolved inline in the plan body or acknowledged as residual risk per the Implementation Note column. Concerns are NOT reclassified as blockers. -->
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| Concern | Archaeologist | `thread_messages` is assumed to contain only the single immediate replied-to Valor message. Future callers may widen it (e.g., passing more thread history), which would cause the `?` heuristic to fire on a stale upstream question and silently change behavior. | Risks > Risk 2 + inline code comment added to the guard (see Solution > Technical Approach and Step 1). | Residual assumption. Mitigation: inline comment referencing issue #1090 + the plan-level Risk 2 entry. Reviewers widening `thread_messages` must revisit this guard. No code change needed beyond the comment. |
+| Concern | Skeptic | Question-mark detection is structural — a Valor message like `"I tried git status? and got nothing back"` contains a `?` but is not a user-addressed question. A short human reply would now route to RESPOND instead of SILENT. | Risks > Risk 1 + reuse of `_STANDALONE_QUESTION_RE` (which already excludes URL query strings). The regex requires the `?` to be a standalone sentence terminator, not embedded mid-sentence with no whitespace boundary. | Residual false-positive risk. Mitigation: RESPOND is the conservative default per the classifier's own design principle (line 538). The worst outcome is a small uptick in agent-routed messages, not data loss. Explicitly acknowledged in Risk 1. |
+| Concern | Adversary | A Valor message that ends with `?` but is rhetorical or quoted (e.g. `"WTF?"`, `"'Should I?' he asked."`, code blocks) would trip the new guard and route a short reply to RESPOND even though Valor wasn't actually asking the human. | Reuse of `_STANDALONE_QUESTION_RE` + Risks > Risk 1. The regex (`bridge/routing.py:516`) matches on standalone `?` as a sentence terminator, filtering out most code/URL cases. Rhetorical `?` still falls through — conservatively routed to RESPOND. | Residual edge case. Mitigation: conservative RESPOND default is intentional. Not reclassified as a blocker because the symptom (slightly more messages reach the LLM/agent) is strictly safer than the bug it replaces (lost human answers). |
+| Concern | Operator | Fast-Path priority ordering must be preserved: Fast-Path 1 (bot + no question in reply text → SILENT) must continue to fire *before* the new Fast-Path 2 guard, otherwise a bot replying `"Yes"` to a Valor question would leak through. | Solution > Flow (step 1 explicitly lists Fast-Path 1 unchanged) + new test `test_classify_terminus_bot_short_reply_to_valor_question_still_silent` in Test Impact. Step 1 task instructions forbid modifying Fast-Path 1. | Behavior-locked by dedicated test. The bot-loop suppression regression test is a hard assertion — if Fast-Path 1 is ever reordered after the new guard, this test fails at CI. No additional code change needed. |
+| Concern | Simplifier | The `if msg` defensive filter in the `any(...)` generator is a micro-complexity added for a hypothetical future caller that passes `None`. Current callers only pass strings. | Solution > Technical Approach notes the filter is intentional defense with zero runtime cost. | Residual micro-complexity accepted as future-proofing. The cost is one token in the generator; the benefit is no `TypeError` surprise if a future caller's `thread_messages` accumulates `None` entries. Non-blocking. |
+| Concern | User | Builder may miss that `token_normalized` / `word_count` can be left at their current scope (outside the new `if`) for a minimal diff — plan text suggests moving them inside, which slightly increases diff size and risks an unnecessary refactor. | Solution > Technical Approach explicitly says "Builder may keep them outside if they prefer to minimize the diff." | Builder discretion. Either placement is functionally equivalent. Clarified in Step 1 task note. |
 
 ---
 
