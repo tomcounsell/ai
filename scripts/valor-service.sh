@@ -673,7 +673,9 @@ restart_worker() {
 
     if is_worker_launchd_loaded; then
         launchctl kickstart -k "gui/$(id -u)/$WORKER_PLIST_NAME"
-        sleep 2
+        # Worker startup (imports, Redis, Popoto index rebuild, recovery) takes
+        # ~5s under normal conditions; wait that long before probing. See #1098.
+        sleep 5
         if is_worker_running; then
             local pid=$(get_worker_pid)
             echo "Worker restarted (PID: $pid)"

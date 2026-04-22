@@ -853,8 +853,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                             )
                         except Exception as e:
                             log(f"launchctl kickstart failed: {e}", v, always=True)
-                        # Re-poll for 15 more seconds
-                        for _ in range(8):
+                        # Re-poll up to 30s for worker heartbeat after kickstart.
+                        # Worker startup (module imports, Redis connect, Popoto index
+                        # rebuild, session recovery, orphan cleanup, claude binary
+                        # smoke test) can take 10–20s on a loaded system; the previous
+                        # 16s retry window would race and falsely report system
+                        # degraded on every /update run. 15 iterations × 2s = 30s
+                        # ceiling provides realistic headroom while keeping a 2s
+                        # poll cadence for responsiveness when the worker comes up
+                        # quickly. See issue #1098.
+                        for _ in range(15):
                             _time.sleep(2)
                             if service.is_worker_running():
                                 worker_pid = service.get_worker_pid()
@@ -874,12 +882,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                     pass
                         if not worker_healthy:
                             log(
-                                "ERROR: Worker not running after kickstart retry — system degraded",
+                                "ERROR: Worker not running after 30s kickstart retry window — "
+                                "system degraded",
                                 v,
                                 always=True,
                             )
                             result.warnings.append(
-                                "Worker not running after install and kickstart retry"
+                                "Worker not running after install and kickstart retry (30s window)"
                             )
                             result.success = False
             else:
