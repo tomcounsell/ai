@@ -82,9 +82,14 @@ After a session completes, extraction is scheduled from `agent/session_executor.
 2. Inside the task wrapper, `run_post_session_extraction()` runs extract_observations → detect_outcomes → cleanup in sequence.
 3. Haiku extracts novel observations as structured JSON (category, observation text, file_paths, tags), with a line-based fallback parser for robustness
 4. Each observation is saved as Memory with categorized importance (corrections/decisions at 4.0, patterns/surprises at 1.0) and structured metadata attached via `DictField`
-5. Outcome detection uses LLM judgment (Haiku) to classify each injected thought as `"acted"` (response was influenced), `"echoed"` (keyword overlap but no causal link), or `"dismissed"` (no relationship). `"echoed"` maps to `"dismissed"` for scoring. Bigram overlap is retained as a zero-cost fallback when the Haiku call fails or is rate-limited.
-6. `ObservationProtocol.on_context_used()` strengthens acted-on memories and weakens dismissed ones
-7. `_persist_outcome_metadata()` runs after ObservationProtocol, updating `dismissal_count`, `last_outcome`, and `outcome_history` in each memory's metadata. Each history entry includes `outcome`, `reasoning` (one-sentence LLM explanation), and `ts` (unix timestamp), capped at 10 entries. When a memory reaches the dismissal threshold (3 consecutive dismissals), its importance is decayed by 0.7x (floor: 0.2). Acting on a memory resets the dismissal counter
+5. Outcome detection uses LLM judgment (Haiku) to classify each injected thought using a three-tier outcome model (popoto v1.5.0):
+   - `"acted"` — response was meaningfully influenced by this memory (positive signal)
+   - `"used"` — agent consumed the memory (read + reasoned about it) but it did not drive the response (neutral signal, popoto v1.5.0)
+   - `"dismissed"` — no relationship between memory and response (negative signal)
+   - `"echoed"` — keywords overlap but no causal link (coincidental); maps to `"dismissed"` for scoring
+   Bigram overlap is retained as a zero-cost fallback when the Haiku call fails or is rate-limited.
+6. `ObservationProtocol.on_context_used()` applies popoto's confidence and prediction-ledger adjustments per outcome type
+7. `_persist_outcome_metadata()` runs after ObservationProtocol, updating `dismissal_count`, `last_outcome`, and `outcome_history` in each memory's metadata. Each history entry includes `outcome`, `reasoning` (one-sentence LLM explanation), and `ts` (unix timestamp), capped at 10 entries. When a memory reaches the dismissal threshold (3 consecutive dismissals), its importance is decayed by 0.7x (floor: 0.2). Acting on a memory resets the dismissal counter. `"used"` outcomes leave `dismissal_count` unchanged.
 
 #### Event-Loop Safety (hotfix #1055)
 
@@ -209,7 +214,7 @@ Memory records carry an optional `metadata` DictField with structured data from 
 | `tags` | `list[str]` | Extraction | Domain tags (1-3 short keywords) |
 | `tool_names` | `list[str]` | Extraction | Tool names from the session context |
 | `dismissal_count` | `int` | Outcome tracking | Consecutive dismissals before last reset |
-| `last_outcome` | `str` | Outcome tracking | `"acted"` or `"dismissed"` |
+| `last_outcome` | `str` | Outcome tracking | `"acted"`, `"used"`, or `"dismissed"` |
 | `outcome_history` | `list[dict]` | Outcome tracking | Last 10 outcome entries with `outcome`, `reasoning`, `ts` |
 
 Additionally, the Memory model has a top-level `reference` StringField (not inside metadata) for actionable pointers. Knowledge-sourced memories use this to store a JSON tool call pointing to the source file. See [Knowledge Document Integration](knowledge-document-integration.md).
@@ -225,16 +230,38 @@ python -m tools.memory_search inspect --stats  # aggregate outcome statistics
 
 Metadata filtering happens after retrieval returns results. The `inspect` command displays outcome history (date, outcome, reasoning) and computed act rate when present. The `stats` subcommand shows aggregate outcome statistics: total memories with history, average act rate, and top 5 most-acted-on memories.
 
+**RetrievalQuality probe (`assess_quality`, popoto v1.5.0):** The `search()` function accepts an optional `assess_quality: bool = False` parameter. When `True`, a `ContextAssembler` probe runs after BM25+RRF retrieval and attaches a `"quality"` key to the result dict:
+
+```python
+from tools.memory_search import search
+
+result = search("deploy pipeline", assess_quality=True)
+if "quality" in result:
+    q = result["quality"]
+    print(f"avg_confidence={q['avg_confidence']:.2f}  fok_score={q['fok_score']:.2f}")
+```
+
+The `"quality"` dict contains: `avg_confidence`, `score_spread`, `fok_score` (feeling-of-knowing), and `staleness_ratio`. The probe makes one additional Redis read (`composite_score()`). Failure is non-fatal: on error the result is returned without the `"quality"` key. Default is `False` — existing callers are unaffected.
+
 ## Dismissal Tracking
 
 Chronically dismissed memories have their importance decayed to reduce noise. This supplements the confidence-based ObservationProtocol adjustment with a direct importance penalty.
 
+**Three-tier outcome model (popoto v1.5.0):**
+
+| Outcome | Semantics | `dismissal_count` effect |
+|---------|-----------|--------------------------|
+| `"acted"` | Memory drove the response | Resets to 0 (positive signal) |
+| `"used"` | Consumed + reasoned about, did not drive response | Unchanged (neutral signal) |
+| `"dismissed"` | No relationship to response | Increments (negative signal) |
+
 **Mechanism:**
 1. After each session, `_persist_outcome_metadata()` runs (after ObservationProtocol to avoid conflicting saves)
-2. For "dismissed" outcomes: `dismissal_count` increments in metadata
+2. For `"dismissed"` outcomes: `dismissal_count` increments in metadata
 3. When `dismissal_count` reaches `DISMISSAL_DECAY_THRESHOLD` (3): importance is multiplied by `DISMISSAL_IMPORTANCE_DECAY` (0.7), and the counter resets
-4. For "acted" outcomes: `dismissal_count` resets to 0
-5. Importance never drops below `MIN_IMPORTANCE_FLOOR` (0.2)
+4. For `"used"` outcomes: `dismissal_count` is left unchanged; only `last_outcome` is updated
+5. For `"acted"` outcomes: `dismissal_count` resets to 0
+6. Importance never drops below `MIN_IMPORTANCE_FLOOR` (0.2)
 
 Outcome detection naturally backfills metadata on pre-existing records as a side effect -- this is intentional and distinct from explicit bulk backfill (which is not done).
 
