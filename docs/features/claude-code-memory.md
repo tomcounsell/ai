@@ -89,7 +89,7 @@ The `stop.py` hook calls `memory_bridge.extract()` after backing up the session 
 2. Truncates to 8000 characters for the Haiku API call
 3. Runs `extract_observations_async()` to save categorized observations (corrections, decisions, patterns, surprises)
 4. Reads injected thought IDs from the sidecar file
-5. Runs `detect_outcomes_async()` to strengthen/weaken memories based on bigram overlap with the transcript
+5. Runs `detect_outcomes_async()` to classify each injected memory as `"acted"` (drove response), `"used"` (consumed but did not drive response), or `"dismissed"` (no relationship). LLM judgment (Haiku) is primary; bigram overlap is the fallback when the LLM call fails
 6. Cleans up all sidecar files for the session
 
 The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2-3 seconds.

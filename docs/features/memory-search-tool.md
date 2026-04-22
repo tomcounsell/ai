@@ -26,18 +26,24 @@ result = status(deep=True)
 
 Returns `{"healthy": False, "error": "Redis unreachable: ..."}` when Redis is down.
 
-### `search(query, project_key=None, limit=10)`
+### `search(query, project_key=None, limit=10, ..., assess_quality=False)`
 
-Search memories using ContextAssembler with bloom pre-check.
+Search memories using BM25 + RRF fusion with bloom pre-check. Optionally run a `RetrievalQuality` probe after retrieval.
 
 ```python
 from tools.memory_search import search
 
 result = search("deploy patterns", project_key="dm", limit=5)
 # {"results": [{"content": "...", "score": 0.8, "confidence": 0.5, ...}], "error": None}
+
+# With quality probe (popoto v1.5.0):
+result = search("deploy patterns", assess_quality=True)
+# {"results": [...], "error": None, "quality": {"avg_confidence": 0.72, "fok_score": 0.58, ...}}
 ```
 
 Returns a dict with `results` list and `error` key. Each result contains: content, score, confidence, source, access_count, memory_id.
+
+When `assess_quality=True`, a `"quality"` key is added with `avg_confidence`, `score_spread`, `fok_score`, and `staleness_ratio` from `ContextAssembler.assess()`. The probe makes one additional Redis read and is non-fatal — on error the result is returned without `"quality"`. Default is `False` (backward-compatible).
 
 ### `save(content, importance=None, project_key=None, source="human")`
 
