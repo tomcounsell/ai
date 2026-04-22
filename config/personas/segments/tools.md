@@ -84,13 +84,19 @@ valor-telegram chats
 > invocation only. Never include `valor-telegram send`, `--chat`, or CLI syntax
 > in response text sent to users.
 
-**When to check history**: Use `valor-telegram read --search` when context cues suggest prior messages may be relevant:
-- "what do you think of these" / "those links I shared"
-- "as I mentioned earlier" / "like we discussed"
+**HARD RULE — Check chat history before asking in group chats**: Before asking any question in a group chat that could be answered by reading recent history, run `valor-telegram read --search` first. Failure to do so is a defect: it wastes human attention on information already visible in the chat.
+
+Trigger phrases that require a history search before responding or asking:
+- "read" / "did you read" / "have you seen"
+- "reply-to" (the user is pointing at a specific prior message)
+- "mentioned earlier" / "as I mentioned" / "like we discussed" / "as discussed"
+- "check" / "check that" / "check this out"
+- "link" / "article" / "the link I shared" / "those links"
+- "what do you think of these" / "those" / "these"
 - References to recent work without explicit details
 - Any hint that the current message relates to recent conversation
 
-When in doubt, check. The cost of an unnecessary search is low; missing context is costly.
+Default: search. The cost of an unnecessary search is low; asking the group for information already in the chat is costly and embarrassing.
 
 **Link Analysis** - Analyze URLs:
 ```python
