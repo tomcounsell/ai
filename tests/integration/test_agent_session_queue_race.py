@@ -506,12 +506,8 @@ class TestEnsureWorkerDeduplication:
             # Yield so task.cancel() → CancelledError propagates before assert.
             await asyncio.sleep(0)
 
-            assert worker_key not in _starting_workers, (
-                "finally block must clear _starting_workers"
-            )
-            assert worker_key not in _queue_mod._active_workers, (
-                "orphan task must not be published"
-            )
+            assert worker_key not in _starting_workers, "finally block must clear _starting_workers"
+            assert worker_key not in _queue_mod._active_workers, "orphan task must not be published"
             assert len(created_tasks) == 1, "exactly one task created"
             assert created_tasks[0].cancelled(), "orphan task must be cancelled"
         finally:
