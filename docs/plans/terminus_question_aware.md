@@ -227,15 +227,15 @@ No agent integration required — this is a bridge-internal change to the routin
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agent-reply-terminus.md` Fast-Path 2 description (currently says "Fires after the bot check — never before — to avoid silencing human short replies"). Add a sub-bullet noting that Fast-Path 2 is also skipped when the replied-to message contains a question (issue #1090). Link the issue inline.
-- [ ] Verify `docs/features/README.md` index entry for "Agent Reply Terminus Detection" is still accurate (it should be — title and scope are unchanged).
+- [x] Update `docs/features/agent-reply-terminus.md` Fast-Path 2 description (currently says "Fires after the bot check — never before — to avoid silencing human short replies"). Add a sub-bullet noting that Fast-Path 2 is also skipped when the replied-to message contains a question (issue #1090). Link the issue inline.
+- [x] Verify `docs/features/README.md` index entry for "Agent Reply Terminus Detection" is still accurate (it should be — title and scope are unchanged). Verified 2026-04-22 via `/do-docs` cascade — entry unchanged, still accurate.
 
 ### External Documentation Site
 This repo does not use Sphinx/ReadTheDocs/MkDocs. Skip.
 
 ### Inline Documentation
-- [ ] Inline comment on the new guard explaining *why* it exists (1-line reference to issue #1090) — see Solution > Technical Approach for the proposed comment text.
-- [ ] Update the docstring of `classify_conversation_terminus()` (lines 524-539) to add Fast-Path 2 to the fast-path order list with the question-aware caveat. Current docstring lists "2. acknowledgment token or very short (≤1 word) → SILENT" — append "(unless thread_messages contains a question — then fall through)".
+- [x] Inline comment on the new guard explaining *why* it exists (1-line reference to issue #1090) — see Solution > Technical Approach for the proposed comment text.
+- [x] Update the docstring of `classify_conversation_terminus()` (lines 524-539) to add Fast-Path 2 to the fast-path order list with the question-aware caveat. Current docstring lists "2. acknowledgment token or very short (≤1 word) → SILENT" — append "(unless thread_messages contains a question — then fall through)".
 
 ## Success Criteria
 
