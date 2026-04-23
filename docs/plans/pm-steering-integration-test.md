@@ -391,7 +391,7 @@ Built on `builder` and `validator` — no specialists needed for this narrow sco
 | No production code changes | `git diff --name-only main...HEAD -- agent/ models/ bridge/ worker/ tools/ mcp_servers/` | exit code 0 with empty output |
 | Format clean | `python -m ruff format --check tests/integration/test_session_finalization_decoupled.py` | exit code 0 |
 | Recognizable project_key | `grep -c 'test-1057-' tests/integration/test_session_finalization_decoupled.py` | output > 0 |
-| Explicit session cleanup | `grep -c 'session.delete()\|pm.delete()\|dev.delete()' tests/integration/test_session_finalization_decoupled.py` | output > 0 |
+| Explicit session cleanup | `grep -cE '\.delete\(\)' tests/integration/test_session_finalization_decoupled.py` | output > 0 |
 
 ## Critique Results
 
