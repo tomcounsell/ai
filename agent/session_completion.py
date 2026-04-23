@@ -499,8 +499,11 @@ async def _deliver_pipeline_completion(
     # - Both passes pin model="opus" regardless of PM session's model.
     # - Ollama fallback for Anthropic-down path is deferred to #1137; until
     #   then, Pass 1 failure → visible degraded-fallback message.
+    # Sentinel init — must be overwritten by every path below (refined text,
+    # Pass 1 draft, or degraded fallback). D6(c) "never return empty" — any
+    # code path that reaches send_cb with this value is a bug.
     delivery_attempted = False
-    final_text = ""
+    final_text: str = "[completion-runner internal error — no final_text assigned]"
     cancelled = False
     try:
         from agent.session_executor import (  # noqa: PLC0415
