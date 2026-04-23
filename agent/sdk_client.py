@@ -245,6 +245,158 @@ def _has_prior_session(session_id: str) -> bool:
     return _get_prior_session_uuid(session_id) is not None
 
 
+def _env_flag_enabled(var_name: str, default: bool = True) -> bool:
+    """Return True unless the env var is explicitly set to a falsy string.
+
+    Used by watchdog-hardening feature gates (issue #1128). Falsy values
+    (case-insensitive): "0", "false", "no". Any other value — including
+    unset — means the flag is enabled.
+    """
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no"}
+
+
+def _usage_field(usage, name: str) -> int:
+    """Safely read a numeric field from a `usage` container.
+
+    Handles both SDK-style attribute access (dataclass-like objects) and
+    harness-style dict access on the same field name. Missing or None
+    values default to 0. Non-integer values default to 0 as well.
+
+    Accepted shapes:
+      * `None` → 0
+      * dict (harness `data["usage"]`)   → `.get(name, 0) or 0`
+      * object with attribute (SDK `msg.usage`) → `getattr(..., name, 0) or 0`
+    """
+    if usage is None:
+        return 0
+    raw: object
+    if isinstance(usage, dict):
+        raw = usage.get(name, 0)
+    else:
+        raw = getattr(usage, name, 0)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def accumulate_session_tokens(
+    session_id: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_read_tokens: int | None,
+    cost_usd: float | None,
+) -> None:
+    """Add per-turn token + cost counts to an AgentSession record.
+
+    Called as a side effect from BOTH execution paths so token accounting
+    works uniformly for every session type:
+
+      * SDK path: `ClaudeSDKClient` returns `ResultMessage.usage` + `.total_cost_usd`
+        inside the query loop (see the `ResultMessage` handler below).
+      * Harness path: `claude -p stream-json` emits `usage` + `total_cost_usd`
+        on the `result` event; `_run_harness_subprocess` extracts them and
+        threads them back to `get_response_via_harness`, which calls this
+        helper before returning (mirroring `_store_claude_session_uuid`).
+
+    Without the harness-path call, production PM/Dev/Teammate sessions —
+    which always use the harness — would report 0 tokens forever (the
+    critique B3 blocker).
+
+    Persistence: Popoto `save(update_fields=[...])` with explicit field list
+    so a concurrent write to other fields (e.g. `status`, `updated_at`) does
+    not clobber this update. Fail-quiet on any exception — token accounting
+    must never raise into the SDK / harness return path.
+
+    Gate: `WATCHDOG_TOKEN_TRACKING_ENABLED` (default on). Disabling is an
+    operator-only escape hatch for debugging or if a downstream issue is
+    traced to this helper.
+
+    Args:
+        session_id: Bridge/Telegram session_id. No-op when None.
+        input_tokens: Input token count for this turn (fallback 0 on None).
+        output_tokens: Output token count for this turn (fallback 0 on None).
+        cache_read_tokens: Cache-read input tokens for this turn (fallback 0).
+        cost_usd: Dollar cost for this turn, taken verbatim from the SDK/CLI.
+            Never recomputed. Fallback 0.0 on None.
+    """
+    if not session_id:
+        return
+    if not _env_flag_enabled("WATCHDOG_TOKEN_TRACKING_ENABLED"):
+        return
+
+    # Defensive coercion: SDK / harness occasionally omit fields on error
+    # paths or older CLI versions.
+    try:
+        in_delta = int(input_tokens or 0)
+        out_delta = int(output_tokens or 0)
+        cache_delta = int(cache_read_tokens or 0)
+        cost_delta = float(cost_usd or 0.0)
+    except (TypeError, ValueError):
+        logger.warning(
+            "accumulate_session_tokens: non-numeric inputs for session %s "
+            "(in=%r out=%r cache=%r cost=%r) — skipping",
+            session_id,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cost_usd,
+        )
+        return
+
+    # No-op when there is nothing to add (saves a Redis round-trip).
+    if in_delta == 0 and out_delta == 0 and cache_delta == 0 and cost_delta == 0.0:
+        return
+
+    try:
+        from popoto.exceptions import ModelException
+
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            logger.debug(
+                "accumulate_session_tokens: no AgentSession for session_id=%s — skipping",
+                session_id,
+            )
+            return
+        # Newest record wins — matches the pattern used by
+        # `_store_claude_session_uuid`.
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        session = sessions[0]
+        try:
+            session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
+            session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
+            session.total_cache_read_tokens = (
+                session.total_cache_read_tokens or 0
+            ) + cache_delta
+            session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta
+            session.save(
+                update_fields=[
+                    "total_input_tokens",
+                    "total_output_tokens",
+                    "total_cache_read_tokens",
+                    "total_cost_usd",
+                ]
+            )
+        except ModelException as e:
+            logger.warning(
+                "accumulate_session_tokens: ModelException on save for session %s: %s",
+                session_id,
+                e,
+            )
+    except Exception as e:
+        logger.warning(
+            "accumulate_session_tokens(%s) failed: %s",
+            session_id,
+            e,
+            exc_info=False,
+        )
+
+
 def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
     """Store the Claude Code session UUID on the AgentSession.
 
@@ -1295,6 +1447,21 @@ class ValorAgent:
                                             record_metric("session.turns", float(turns), dims)
                                     except Exception:
                                         pass
+
+                                # Per-session token accumulation (issue #1128 —
+                                # SDK path). Harness path extracts the same
+                                # fields off the `result` event inside
+                                # `_run_harness_subprocess`; both call the
+                                # same `accumulate_session_tokens` helper.
+                                if session_id:
+                                    usage_obj = getattr(msg, "usage", None)
+                                    accumulate_session_tokens(
+                                        session_id,
+                                        _usage_field(usage_obj, "input_tokens"),
+                                        _usage_field(usage_obj, "output_tokens"),
+                                        _usage_field(usage_obj, "cache_read_input_tokens"),
+                                        msg.total_cost_usd,
+                                    )
                                 if msg.is_error and retries < max_retries:
                                     retries += 1
                                     error_text = msg.result or "(empty)"
@@ -1705,12 +1872,14 @@ async def get_response_via_harness(
     else:
         cmd = harness_cmd + [message]
 
-    result_text, session_id_from_harness, returncode = await _run_harness_subprocess(
-        cmd,
-        working_dir,
-        proc_env,
-        on_sdk_started=on_sdk_started,
-        on_stdout_event=on_stdout_event,
+    result_text, session_id_from_harness, returncode, usage, cost_usd = (
+        await _run_harness_subprocess(
+            cmd,
+            working_dir,
+            proc_env,
+            on_sdk_started=on_sdk_started,
+            on_stdout_event=on_stdout_event,
+        )
     )
 
     # Image-dimension sentinel: Claude Code returns the image-dimension error with
@@ -1725,12 +1894,14 @@ async def get_response_via_harness(
         if full_context_message is not None:
             fallback_msg = _apply_context_budget(full_context_message)
             fallback_cmd = harness_cmd + [fallback_msg]
-            result_text, session_id_from_harness, _ = await _run_harness_subprocess(
-                fallback_cmd,
-                working_dir,
-                proc_env,
-                on_sdk_started=on_sdk_started,
-                on_stdout_event=on_stdout_event,
+            result_text, session_id_from_harness, _, usage, cost_usd = (
+                await _run_harness_subprocess(
+                    fallback_cmd,
+                    working_dir,
+                    proc_env,
+                    on_sdk_started=on_sdk_started,
+                    on_stdout_event=on_stdout_event,
+                )
             )
         else:
             logger.error(
@@ -1760,12 +1931,14 @@ async def get_response_via_harness(
                     f"[harness] Fallback budget: {original_len} → {len(fallback_msg)} chars"
                 )
             fallback_cmd = harness_cmd + [fallback_msg]
-            result_text, session_id_from_harness, _ = await _run_harness_subprocess(
-                fallback_cmd,
-                working_dir,
-                proc_env,
-                on_sdk_started=on_sdk_started,
-                on_stdout_event=on_stdout_event,
+            result_text, session_id_from_harness, _, usage, cost_usd = (
+                await _run_harness_subprocess(
+                    fallback_cmd,
+                    working_dir,
+                    proc_env,
+                    on_sdk_started=on_sdk_started,
+                    on_stdout_event=on_stdout_event,
+                )
             )
         else:
             logger.error(
@@ -1777,6 +1950,21 @@ async def get_response_via_harness(
     # Store the Claude Code UUID for next-turn --resume (#976)
     if session_id and session_id_from_harness:
         _store_claude_session_uuid(session_id, session_id_from_harness)
+
+    # Accumulate tokens + cost on the AgentSession (issue #1128). Mirrors
+    # the SDK path's in-handler call in `get_response_via_sdk`. Invoked
+    # here as a side effect so the public signature stays `-> str` and
+    # no caller of `get_response_via_harness` has to change. `usage` /
+    # `cost_usd` may be None on harness error paths or older CLI
+    # versions — the helper treats missing fields as 0.
+    if session_id and (usage is not None or cost_usd is not None):
+        accumulate_session_tokens(
+            session_id,
+            _usage_field(usage, "input_tokens"),
+            _usage_field(usage, "output_tokens"),
+            _usage_field(usage, "cache_read_input_tokens"),
+            cost_usd,
+        )
 
     if result_text is not None:
         return result_text
@@ -1790,13 +1978,29 @@ async def _run_harness_subprocess(
     *,
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
-) -> tuple[str | None, str | None, int | None]:
+) -> tuple[str | None, str | None, int | None, dict | None, float | None]:
     """Execute a harness subprocess and parse stream-json output.
 
-    Returns (result_text, session_id_from_harness, returncode). On binary-not-found,
-    returncode is None and result_text carries the error message. On stream-parse
-    success, result_text is the parsed result and returncode is the process exit
-    code (0 on success, non-zero on failure).
+    Returns `(result_text, session_id_from_harness, returncode, usage, cost_usd)`.
+
+    * `result_text`: parsed result string from the final `result` event, or
+      accumulated text from stream events when no result event fires, or
+      `None` when neither is available.
+    * `session_id_from_harness`: Claude Code UUID for next-turn `--resume`.
+    * `returncode`: process exit code (0 on success, non-zero on failure, or
+      `None` on binary-not-found).
+    * `usage`: dict from the `result` event's `usage` field (keys include
+      `input_tokens`, `output_tokens`, `cache_read_input_tokens`,
+      `cache_creation_input_tokens`). `None` when no `result` event fired or
+      the event omitted it. Consumed by `accumulate_session_tokens` in
+      `get_response_via_harness` — this is the harness-side half of the
+      two-path token tracker introduced for issue #1128.
+    * `cost_usd`: raw `total_cost_usd` from the `result` event, taken
+      verbatim and never recomputed locally so the value tracks upstream
+      Anthropic pricing automatically.
+
+    On binary-not-found, returncode is None and result_text carries the
+    error message (usage and cost_usd are both None).
 
     Optional callbacks (issue #1036):
         on_sdk_started(pid): fires once, immediately after the subprocess is
@@ -1820,7 +2024,7 @@ async def _run_harness_subprocess(
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
-        return (f"Error: CLI harness not found — {e}", None, None)
+        return (f"Error: CLI harness not found — {e}", None, None, None, None)
 
     # Fire SDK-started callback once the pid is known (#1036).
     if on_sdk_started is not None and proc.pid is not None:
@@ -1832,6 +2036,11 @@ async def _run_harness_subprocess(
     full_text = ""
     result_text = None
     session_id_from_harness = None
+    # Token + cost fields extracted off the `result` event (issue #1128).
+    # Mirrors the SDK path's `ResultMessage.usage` / `.total_cost_usd`
+    # so `accumulate_session_tokens` can be fed from either path.
+    usage: dict | None = None
+    cost_usd: float | None = None
 
     async for raw_line in proc.stdout:
         line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1857,6 +2066,20 @@ async def _run_harness_subprocess(
         if event_type == "result":
             result_text = data.get("result", "")
             session_id_from_harness = data.get("session_id")
+            # Extract per-turn token + cost counts (issue #1128). These
+            # are the harness-side counterpart of `ResultMessage.usage`
+            # and `ResultMessage.total_cost_usd` from the SDK path. The
+            # `claude -p stream-json` protocol emits them on the same
+            # `result` event. `usage` is a dict; missing fields default
+            # to 0 inside `accumulate_session_tokens`. `total_cost_usd`
+            # is taken verbatim so it tracks upstream Anthropic pricing
+            # without a local price table.
+            raw_usage = data.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = raw_usage
+            raw_cost = data.get("total_cost_usd")
+            if isinstance(raw_cost, (int, float)):
+                cost_usd = float(raw_cost)
             if session_id_from_harness:
                 logger.debug(f"Harness session_id for resume: {session_id_from_harness}")
             break
@@ -1880,15 +2103,15 @@ async def _run_harness_subprocess(
         logger.warning(f"Harness exited with code {returncode}: {stderr_text[:500]}")
 
     if result_text is not None:
-        return (result_text, session_id_from_harness, returncode)
+        return (result_text, session_id_from_harness, returncode, usage, cost_usd)
     if full_text:
         logger.warning(
             "Harness exited without result event, returning %d chars of accumulated text",
             len(full_text),
         )
-        return (full_text, session_id_from_harness, returncode)
+        return (full_text, session_id_from_harness, returncode, usage, cost_usd)
     logger.error("Harness exited without a result event and no accumulated text")
-    return (None, session_id_from_harness, returncode)
+    return (None, session_id_from_harness, returncode, usage, cost_usd)
 
 
 async def verify_harness_health(harness_name: str) -> bool:
