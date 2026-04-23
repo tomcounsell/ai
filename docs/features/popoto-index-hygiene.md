@@ -26,13 +26,9 @@ When AgentSession records expire (via TTL), crash, or are deleted without proper
 
 Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebuild indexes for **all** Popoto models (not just AgentSession). This runs as Step 1 of the startup sequence, before corrupted session cleanup and recovery. The total time is logged for monitoring.
 
-### Cleanup Reflection (Scheduler)
+### Cleanup Reflection
 
-`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` (bridge-hosted) dispatches this daily when the bridge is running.
-
-### Cleanup Reflection (Runner)
-
-`ReflectionRunner` in `scripts/reflections.py` includes a `step_popoto_index_cleanup` step that calls `run_cleanup()` as a standalone safety net. This step runs after `redis_ttl_cleanup` (which deletes expired records) to clean up any orphaned index entries left behind. The runner executes via launchd regardless of bridge status.
+`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` (worker-embedded in `python -m worker`) dispatches this daily while the worker process runs.
 
 ### How `run_cleanup()` Works
 
@@ -43,13 +39,12 @@ Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebu
 
 Each model is processed independently -- one model failure does not abort the sweep. The SCAN-based `rebuild_indexes()` is safe to run concurrently with normal operations.
 
-### Three Cleanup Paths
+### Cleanup Paths
 
 | Path | Trigger | Scope |
 |------|---------|-------|
 | Worker startup | `python -m worker` | All models via `run_cleanup()` |
-| ReflectionScheduler | Bridge tick (daily) | All models via `run_cleanup()` |
-| ReflectionRunner | `python scripts/reflections.py` (launchd) | All models via `step_popoto_index_cleanup` → `run_cleanup()` |
+| ReflectionScheduler | Worker scheduler tick (daily) | All models via `run_cleanup()` |
 
 ## Concurrency Safety
 
@@ -65,7 +60,6 @@ Each model is processed independently -- one model failure does not abort the sw
 | `agent/agent_session_queue.py` | Refactored diagnostic fallback |
 | `worker/__main__.py` | Worker startup using `run_cleanup()` for all-model rebuild (step 1) |
 | `scripts/popoto_index_cleanup.py` | Cleanup function (`run_cleanup()`) and model discovery (`_get_all_models()`) |
-| `scripts/reflections.py` | `ReflectionRunner.step_popoto_index_cleanup` standalone safety net |
 | `config/reflections.yaml` | Reflection registry entry for `ReflectionScheduler` |
 
 ## Inline Orphan Prevention (Defensive srem)

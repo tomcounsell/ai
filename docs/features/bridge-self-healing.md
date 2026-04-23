@@ -8,7 +8,7 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 
 **Solution**: The `_parse_api_id()` helper in `bridge/telegram_bridge.py` wraps the `int()` conversion and returns `0` on any invalid or missing input, logging a warning to stderr. Module import now always succeeds regardless of env contents. The existing runtime credential check (`if not API_ID or not API_HASH`) remains the authoritative "fail loudly and exit" path once the bridge actually tries to connect.
 
-The same defensive `try/except ValueError` pattern was applied to `tools/valor_telegram.py` and `scripts/reflections.py` where lazy `int(os.environ.get(...))` calls existed inside functions.
+The same defensive `try/except ValueError` pattern was applied to `tools/valor_telegram.py` where lazy `int(os.environ.get(...))` calls existed inside functions.
 
 ## Components
 
@@ -109,7 +109,6 @@ Log rotation uses a three-layer approach: Python-managed rotation for applicatio
 **Python-managed logs** (auto-rotate on write via `RotatingFileHandler`, 10MB max, 5 backups):
 - `bridge.log` — configured in `bridge/telegram_bridge.py`
 - `watchdog.log` — configured in `monitoring/bridge_watchdog.py`
-- `reflections.log` — configured in `scripts/reflections.py`
 
 **Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
 - `bridge.error.log`, `reflections_error.log`
