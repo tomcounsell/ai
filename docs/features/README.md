@@ -82,6 +82,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Pipeline Graph](pipeline-graph.md) | Canonical directed graph for SDLC stage routing with cycle support for test-failure and review-feedback loops | Shipped |
 | [Pipeline State Machine](pipeline-state-machine.md) | Programmatic stage tracking replacing inference-based detection with direct state recording at transition points | Shipped |
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
+| [Post-Compact Re-Grounding](post-compact-regrounding.md) | Short re-grounding nudge delivered after context compaction: re-read plan, check SDLC stage progress, review PROGRESS.md scratchpad, check TodoWrite task list; degrades gracefully to minimal nudge when no AgentSession context exists | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
 | [PM Final Delivery](pm-final-delivery.md) | Marker-free PM terminal-turn protocol: predicate detects pipeline completion, dedicated runner composes and delivers final summary via harness `--resume`, CancelledError handler preserves user-visible interrupt line during shutdown | Shipped |
