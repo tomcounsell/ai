@@ -6,6 +6,7 @@ owner: Tom Counsell
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1095
 last_comment_id: none
+revision_applied: true
 ---
 
 # Remove email_relay legacy text -> body compat shim
@@ -200,8 +201,15 @@ Single commit:
      178-200) with `test_text_payload_dlqd_as_malformed`: same setup
      (payload with `text` not `body`), same `process_outbox()` invocation,
      but patches `bridge.email_dead_letter.write_dead_letter` and asserts
-     DLQ was called once — matching the existing
-     `test_malformed_payload_dlqd_without_retry` (line 202) pattern.
+     DLQ was called exactly once, queue is empty (LPOPped, not re-pushed),
+     AND that the DLQ record's `body == ""`. The `body == ""` assertion is
+     load-bearing: `_dead_letter_message` reads `message.get("body", "")`,
+     so once the shim is removed the `text` field's content is *dropped*
+     rather than preserved on the DLQ record. Pinning `body == ""`
+     documents this specific regression mode — if a future change
+     reintroduces `text` aliasing at the DLQ boundary, this assertion
+     fails. Matches the existing `test_malformed_payload_dlqd_without_retry`
+     (line 202) pattern but with the stricter body-content check.
   4. Strip "legacy `text` field compatibility, and" from the module
      docstring (line 4-5) so it reads: "failure, DLQ after
      `MAX_EMAIL_RELAY_RETRIES` attempts, and heartbeat writes."
@@ -223,7 +231,9 @@ Single commit:
 - [x] Invalid input (`text` without `body`) is the new behavior this plan
   adds coverage for: `test_text_payload_dlqd_as_malformed` asserts that
   `process_outbox` routes the payload to the DLQ without retry, rather than
-  silently accepting it.
+  silently accepting it, and pins `body == ""` on the DLQ record to
+  document that the `text` content is lost at the DLQ boundary (not
+  aliased to `body` anymore).
 - [x] No agent output processing involved — this is a bridge-internal
   cleanup with no agent-facing surface.
 
@@ -235,7 +245,7 @@ Single commit:
 
 - [ ] `tests/unit/test_email_relay.py::TestNormalizePayload::test_text_aliases_to_body` — DELETE: the behavior being asserted is being removed.
 - [ ] `tests/unit/test_email_relay.py::TestNormalizePayload::test_missing_body_and_text_rejected` — UPDATE: rename to `test_missing_body_rejected`. The assertion remains valid (missing `to` -> `None`); only the name changes.
-- [ ] `tests/unit/test_email_relay.py::TestProcessOutbox::test_drains_legacy_text_payload` — REPLACE: replaced by `test_text_payload_dlqd_as_malformed`, which asserts the new (strict) behavior — a `text`-only payload is DLQ'd rather than silently accepted.
+- [ ] `tests/unit/test_email_relay.py::TestProcessOutbox::test_drains_legacy_text_payload` — REPLACE: replaced by `test_text_payload_dlqd_as_malformed`, which asserts the new (strict) behavior — a `text`-only payload is DLQ'd rather than silently accepted, the queue is empty after, and the DLQ record's `body == ""` (the `text` content is dropped at the DLQ boundary because `_dead_letter_message` looks up `body`, not `text`).
 - [ ] `tests/unit/test_email_relay.py` module docstring — UPDATE: strip the "legacy `text` field compatibility" phrase from the summary (lines 4-5).
 
 No other tests affected — scanned `tests/unit/test_email_bridge.py`,
@@ -310,9 +320,19 @@ No `.mcp.json` or `mcp_servers/` changes. No bridge import changes.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Check `docs/features/email-bridge.md` (or equivalent) for any mention
-  of the `text` payload key. If present, strip the mention. If no feature
-  doc mentions it, skip — the shim was never documented as a public surface.
+- [ ] Delete the "Transitional payload compat" paragraph in
+  `docs/features/email-bridge.md` (line 286 on baseline `61a11980`, between
+  the paragraph ending `... for operator liveness probes.` and the paragraph
+  beginning `**\`EmailOutputHandler.send()\` does NOT write to the outbox**`).
+  The exact paragraph to remove is:
+  > **Transitional payload compat.** The relay's `_normalize_payload` accepts
+  > the prior `{session_id, to, text, timestamp}` shape (aliasing `text` →
+  > `body`) for one transitional release so in-flight entries from before
+  > this change never get stranded.
+  Remove the paragraph and the blank line that precedes it so the surrounding
+  flow reads cleanly. No other edits to `email-bridge.md` are required; the
+  payload contract documented above that paragraph already names `body` as
+  the canonical key.
 
 ### External Documentation Site
 Not applicable — this repo does not publish an external docs site.
@@ -322,11 +342,12 @@ Not applicable — this repo does not publish an external docs site.
   source edits in the Technical Approach section.
 
 ### Justification for Minimal Docs
-Most feature docs never mentioned the `text` key because it was an
-undocumented transitional tolerance. The only authoritative mention is in
-the `bridge/email_relay.py` source itself, which is being edited directly.
-A grep pass during build confirms no `docs/features/*.md` references the
-legacy key.
+The only two authoritative mentions of the `text` payload key are (1) the
+`bridge/email_relay.py` source itself and (2) the single "Transitional
+payload compat" paragraph in `docs/features/email-bridge.md` flagged above.
+Both are edited directly by this plan. A `grep -rn '"text"' docs/features/`
+pass during validation confirms no other feature doc references the legacy
+key.
 
 ## Success Criteria
 
@@ -382,7 +403,7 @@ Uses Tier 1: `builder`, `validator`.
 - In `tests/unit/test_email_relay.py`:
   - Delete `TestNormalizePayload::test_text_aliases_to_body` (lines 41-45).
   - Rename `test_missing_body_and_text_rejected` to `test_missing_body_rejected` (line 51-53).
-  - Replace `TestProcessOutbox::test_drains_legacy_text_payload` (lines 178-200) with a new test `test_text_payload_dlqd_as_malformed` that pushes a `text`-only payload and asserts DLQ is called once, no send occurs, and the queue is empty (LPOPped, not re-pushed). Model it on `test_malformed_payload_dlqd_without_retry`.
+  - Replace `TestProcessOutbox::test_drains_legacy_text_payload` (lines 178-200) with a new test `test_text_payload_dlqd_as_malformed` that pushes a `text`-only payload and asserts: (a) DLQ is called exactly once, (b) no send occurs, (c) the queue is empty (LPOPped, not re-pushed), and (d) the DLQ record's `body == ""` — the text content is dropped because `_dead_letter_message` reads `message.get("body", "")` and the removed shim no longer aliases `text` → `body` before the DLQ path runs. Model the structure on `test_malformed_payload_dlqd_without_retry`; the `body == ""` assertion is the extra pin that documents the content-loss behavior.
   - Strip "legacy `text` field compatibility, and" from the module docstring (lines 4-5).
 - Run `pytest tests/unit/test_email_relay.py -x -q`.
 - Run `python -m ruff format bridge/email_relay.py tests/unit/test_email_relay.py`.
@@ -432,7 +453,36 @@ Uses Tier 1: `builder`, `validator`.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — 2 concerns resolved via plan
+revision (Row 4b path). `revision_applied: true` set in frontmatter.
+
+### Concern 1 — Documentation section too conditional
+The original Documentation section only said "Check ... for any mention" of
+the `text` payload key, leaving the editor to re-derive whether a doc edit
+was needed. A concrete paragraph exists at `docs/features/email-bridge.md`
+line 286 ("**Transitional payload compat.** The relay's `_normalize_payload`
+accepts the prior `{session_id, to, text, timestamp}` shape ...") and must
+be deleted alongside the source shim — otherwise the docs would still
+advertise the compat behavior after the shim is gone.
+
+**Resolution:** Documentation section rewritten to specify the exact
+paragraph to remove, quoted verbatim, with the baseline line number
+(286 @ `61a11980`). The task is now a concrete edit, not a grep.
+
+### Concern 2 — DLQ assertion didn't pin content-loss behavior
+The replacement test `test_text_payload_dlqd_as_malformed` originally asserted
+only that DLQ was called once and the queue was empty. But
+`_dead_letter_message` (line 141) reads `message.get("body", "")`, and the
+removed shim means `body` is never populated from `text`. The `text` content
+is silently dropped at the DLQ boundary. Without an assertion that pins this
+behavior, a future regression that reintroduces `text` aliasing at the DLQ
+layer (e.g., someone "helpfully" adding a compat branch inside
+`_dead_letter_message`) would not be caught.
+
+**Resolution:** Test now asserts `body == ""` on the DLQ record, documenting
+the content-loss behavior as part of the contract. Technical Approach,
+Step-by-step task, Test Impact, and Failure Path Test Strategy sections all
+updated to call out the stricter assertion.
 
 ---
 
