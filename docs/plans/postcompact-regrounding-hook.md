@@ -159,19 +159,19 @@ The hook is a standalone Python script, following the same pattern as `.claude/h
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Identify `except Exception` blocks in the new hook — each must log a warning (no silent pass). The outer bail-out should log at warning level with context. Inner Redis/save calls follow the pre_compact.py pattern (swallow, log).
-- [ ] Test: when AgentSession lookup raises, `_build_regrounding_nudge` is still called with `plan_url=None, issue_url=None, stage_states_json=None, cwd=...` and a partial nudge is emitted.
+- [x] Identify `except Exception` blocks in the new hook — each must log a warning (no silent pass). The outer bail-out should log at warning level with context. Inner Redis/save calls follow the pre_compact.py pattern (swallow, log).
+- [x] Test: when AgentSession lookup raises, `_build_regrounding_nudge` is still called with `plan_url=None, issue_url=None, stage_states_json=None, cwd=...` and a partial nudge is emitted.
 
 ### Empty/Invalid Input Handling
-- [ ] `session_id` missing from hook input → no-op, exit 0, nothing written to stdout.
-- [ ] `cwd` missing → nudge built without PROGRESS.md check.
-- [ ] AgentSession found but `plan_url` is None → nudge omits plan item.
-- [ ] AgentSession found but `stage_states` is None → nudge omits stage item.
-- [ ] No AgentSession row found → nudge still emitted with only the always-present items (context compacted + TodoWrite reminder).
+- [x] `session_id` missing from hook input → no-op, exit 0, nothing written to stdout.
+- [x] `cwd` missing → nudge built without PROGRESS.md check.
+- [x] AgentSession found but `plan_url` is None → nudge omits plan item.
+- [x] AgentSession found but `stage_states` is None → nudge omits stage item.
+- [x] No AgentSession row found → nudge still emitted with only the always-present items (context compacted + TodoWrite reminder).
 
 ### Error State Rendering
-- [ ] Hook script exits 0 in all paths — never exit 1 or 2 (which would show stderr to user or block the session).
-- [ ] Test: subprocess invocation with malformed stdin produces empty stdout (no Python traceback escapes).
+- [x] Hook script exits 0 in all paths — never exit 1 or 2 (which would show stderr to user or block the session).
+- [x] Test: subprocess invocation with malformed stdin produces empty stdout (no Python traceback escapes).
 
 ## Test Impact
 
@@ -221,21 +221,21 @@ No agent integration required — this is a Claude Code CLI hook. It fires via t
 
 ## Documentation
 
-- [ ] Create `docs/features/post-compact-regrounding.md` describing the hook behavior, nudge content, degradation behavior, and relationship to compaction-hardening.
-- [ ] Add entry to `docs/features/README.md` index table (alphabetically near "compaction-hardening").
-- [ ] Add inline docstring to `.claude/hooks/post_compact.py` explaining the hook contract, input fields, and bail-out guarantee.
+- [x] Create `docs/features/post-compact-regrounding.md` describing the hook behavior, nudge content, degradation behavior, and relationship to compaction-hardening.
+- [x] Add entry to `docs/features/README.md` index table (alphabetically near "compaction-hardening").
+- [x] Add inline docstring to `.claude/hooks/post_compact.py` explaining the hook contract, input fields, and bail-out guarantee.
 
 ## Success Criteria
 
-- [ ] `.claude/hooks/post_compact.py` exists and passes all unit tests.
-- [ ] `.claude/settings.json` has a PostCompact entry pointing to `post_compact.py`.
-- [ ] Hook emits the full 4-item nudge when AgentSession has `plan_url` + `stage_states` + `PROGRESS.md` present.
-- [ ] Hook emits a minimal nudge (header + TodoWrite item) when no AgentSession row exists.
-- [ ] Hook never raises — subprocess always exits 0.
-- [ ] Nudge text is < 300 tokens in all code paths.
-- [ ] Tests pass (`pytest tests/unit/hooks/test_post_compact_hook.py -v`).
-- [ ] Linting clean (`python -m ruff check .`).
-- [ ] Documentation created (`docs/features/post-compact-regrounding.md`).
+- [x] `.claude/hooks/post_compact.py` exists and passes all unit tests.
+- [x] `.claude/settings.json` has a PostCompact entry pointing to `post_compact.py`.
+- [x] Hook emits the full 4-item nudge when AgentSession has `plan_url` + `stage_states` + `PROGRESS.md` present.
+- [x] Hook emits a minimal nudge (header + TodoWrite item) when no AgentSession row exists.
+- [x] Hook never raises — subprocess always exits 0.
+- [x] Nudge text is < 300 tokens in all code paths.
+- [x] Tests pass (`pytest tests/unit/hooks/test_post_compact_hook.py -v`).
+- [x] Linting clean (`python -m ruff check .`).
+- [x] Documentation created (`docs/features/post-compact-regrounding.md`).
 
 ## Team Orchestration
 
