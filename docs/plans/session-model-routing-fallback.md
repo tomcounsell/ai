@@ -34,14 +34,18 @@ Additionally — per Tom's 2026-04-23 scope expansion on Q6 — the **PM-to-CEO 
 **Issue filed at:** 2026-04-22T17:00:24Z (scope updated 2026-04-23T02:45:25Z, Q&A answers encoded 2026-04-23T~18:00Z)
 **Disposition:** Minor drift
 
-**File:line references re-verified:**
-- `agent/session_executor.py:1110-1180` (harness invocation path) — still holds. The `from agent.sdk_client import ... get_response_via_harness` import is at line 1110-1114; the `get_response_via_harness(...)` call is at line 1177-1189. No `--model` anywhere in this region.
-- `agent/sdk_client.py:1549` (`_HARNESS_COMMANDS`) — still holds at line 1549-1561. Two entries (`claude-cli`, `opencode`), neither contains `--model`.
-- `agent/sdk_client.py:1405` (`_is_auth_error`) — still holds, but **OUT OF SCOPE** for this plan (deferred to #1137). Noted only.
+**File:line references re-verified (re-baselined 2026-04-23 post-critique):**
+- `agent/session_executor.py:1244-1323` (harness invocation path) — `from agent.sdk_client import ... get_response_via_harness` import at line 1244-1248; `get_response_via_harness(...)` call at line 1311. No `--model` in this region.
+- `agent/sdk_client.py:1593-1605` (`_HARNESS_COMMANDS`) — `_HARNESS_COMMANDS: dict[str, list[str]] = {` at line 1593. Two entries (`claude-cli`, `opencode`), neither contains `--model`.
+- `agent/sdk_client.py:1625-1673` (`get_response_via_harness` signature + docstring). `harness_cmd = list(_HARNESS_COMMANDS["claude-cli"])` at line 1682. First argv assembly at line 1704 (`cmd = harness_cmd + [--resume, prior_uuid, message]`).
+- `agent/sdk_client.py:1779` (`_store_claude_session_uuid(session_id, session_id_from_harness)` writeback side-effect — relevant for Pass 2 UUID handling in completion-runner).
+- `agent/sdk_client.py:1405` (`_is_auth_error`) — **OUT OF SCOPE** for this plan (deferred to #1137). Noted only.
 - `models/agent_session.py:217` (`model = Field(null=True)`) — still holds.
 - `tools/valor_session.py:1040-1046` (`--model` flag on `create`) — still holds.
-- `agent/session_completion.py:448-456` (PM final-delivery `get_response_via_harness` call) — still holds; currently passes no `model` kwarg and has a silent-fallback path (`final_text = ""` → summary_context fallback) that this plan tightens.
+- `agent/session_completion.py:446-468` (PM final-delivery `get_response_via_harness` call + silent-fallback path) — still holds; this plan rewrites this block.
 - `config/settings.py:169-175` (`ModelSettings`) — still holds, only `ollama_vision_model` today.
+
+**Symbol-anchored guidance:** Edits below reference **symbol names** where possible (e.g., `the harness_cmd assignment inside get_response_via_harness`, `the block following prompt = _COMPLETION_PROMPT.format(...)`). Line numbers are for orientation only and may drift between the plan and implementation; builder should grep-verify before applying edits.
 
 **Cited sibling issues/PRs re-checked:**
 - **#1106** — closed 2026-04-22T17:01:24Z as superseded by #1129. Expected.
@@ -127,19 +131,21 @@ The PM-to-CEO final-delivery drafter at `agent/session_completion.py:450` is har
 **(b) 2-Pass Drafter (Self-Review/Refine).** A PM would typically read and edit their message a couple of times before sending. Implement as two sequential harness calls:
 
 - **Pass 1 — Draft.** Existing prompt generates the first-draft message. Output captured as `draft_text`.
-- **Pass 2 — Self-Review/Refine.** A second harness call with a review prompt. The prompt hands the draft back and asks for refinement against Tom's quality vision:
+- **Pass 2 — Self-Review/Refine.** A second harness call with a review prompt that **concatenates** (not formats) Pass 1's output. The prompt asks for refinement against Tom's quality vision:
   - short and sweet
   - high density of information
   - thoughtfully worded
   Output is the refined, final message. This is a **code review of the message content**, not prompt engineering. The review prompt stays tight (< 200 tokens of instruction).
-- Both passes use `--model opus`, same session/UUID context (continues the PM session so Pass 2 sees Pass 1's draft as prior context).
+- Both passes use `--model opus`.
+- **UUID isolation**: Pass 2 MUST pass `prior_uuid=None` and omit `session_id`. Reason: Pass 1 writes back its Claude Code UUID via `_store_claude_session_uuid` (`agent/sdk_client.py:1779`). If Pass 2 reused `pm_uuid`, it would (a) resume from a now-stale UUID, and (b) advance the PM's stored UUID a second time, polluting the PM session's history with drafter + review turns. The review prompt is self-contained (Pass 1's draft is embedded verbatim in the prompt body), so Pass 2 does not need continuity with the PM session.
+- **String concatenation, not `.format()`**: the draft may contain literal `{`/`}` tokens (code snippets, JSON). Building the review prompt via `REVIEW_PROMPT_PREFIX + draft_text` avoids KeyError / IndexError crashes from `str.format`.
 
 **(c) No-Silent-Fail Contract.** Tom: "it is critical that messages are sent (no silent fail)."
 
 - If Pass 1 returns empty/None → **raise loudly** (`RuntimeError` with context). No fallback to `summary_context`. Log at ERROR level.
 - If Pass 2 returns empty/None → **fall back to Pass 1's draft** (not empty-string). That still satisfies "a message is sent" and preserves the Pass 1 content.
-- Any harness exception → log at ERROR level and re-raise. The existing silent `final_text = ""` path at `session_completion.py:463` is **removed**.
-- Delivery must happen: if `send_cb` raises, the error surfaces to the worker (not swallowed into a warning log). Current behavior already logs and continues — we keep log-and-continue for `send_cb` because the raised error upstream is covered by (b/c), but the log level rises from `error` to `error` with a more specific message.
+- Any harness exception (Pass 1 or Pass 2) → log at ERROR level and re-raise. The existing silent `final_text = ""` path at `session_completion.py:463` is **removed**.
+- **`send_cb` failure policy**: `send_cb` exceptions remain log-and-continue (status quo). Re-raising from inside the completion-runner background task would strand the session in an indeterminate state (no upstream retry ladder exists for `_deliver_pipeline_completion`). The ERROR log line for `send_cb` failure already exists at `session_completion.py:479-484` and is sufficient. The "no silent fail" contract is enforced at the drafter layer (Pass 1/Pass 2), not at the Telegram/email delivery layer — drafter correctness is the scope of this plan; delivery retry is an orthogonal concern tracked separately.
 
 **(d) Ollama Fallback — Deferred to #1137.**
 
@@ -240,13 +246,35 @@ Five edits in live code, one in settings, one in `.env.example`.
 
 **Edit 1 — `agent/sdk_client.py:get_response_via_harness`** (~20 lines)
 - Add `model: str | None = None` as a keyword-only parameter.
-- After `harness_cmd = list(_HARNESS_COMMANDS["claude-cli"])` (~line 1637-1638), if `model` is truthy, append `["--model", model]` to `harness_cmd` *before* the positional `message` assembly. Argv order: `harness_cmd + [--resume, uuid, message]` or `harness_cmd + [message]`; `--model` must live in `harness_cmd` so it precedes positional `message`.
+- After the `if harness_cmd is None: harness_cmd = list(_HARNESS_COMMANDS["claude-cli"])` block (~line 1681-1682), if `model` is truthy, append `["--model", model]` to `harness_cmd` *before* positional `message` assembly.
+  - **S1 defensive copy**: if `harness_cmd` was passed in by the caller (non-None), take a local copy before mutation: `harness_cmd = list(harness_cmd)`. This prevents accidentally mutating a caller-owned list (e.g., test fixtures sharing a constant). The existing `list(_HARNESS_COMMANDS[...])` already returns a fresh list in the None case.
+  - Argv order: `harness_cmd + [--resume, uuid, message]` or `harness_cmd + [message]`. `--model` must live in `harness_cmd` so it precedes positional `message`.
 - Log at INFO on first-turn path: `logger.info(f"[harness] Using --model {model} for session_id={session_id}")`.
 - Docstring `Args:` entry updated.
 
 **Edit 2 — `agent/session_executor.py`** (~10 lines)
-- Add `_resolve_session_model(session) -> str | None` helper (module-level). Returns `session.model or settings.models.session_default_model or None`. Documents the D1 cascade in the docstring.
-- At the harness branch around line 1109: `effective_model = _resolve_session_model(agent_session)`. Pass `model=effective_model` into the `get_response_via_harness(...)` call at line 1177-1189.
+- Add `_resolve_session_model(session: AgentSession | None) -> str | None` helper (module-level). Implementation:
+  ```python
+  def _resolve_session_model(session) -> str | None:
+      """D1 precedence cascade for session model.
+
+      Order (closest to LLM call wins):
+        1. session.model (explicit per-session, via `valor-session create --model`)
+        2. settings.models.session_default_model (machine-local override)
+        3. codebase default "opus" (set on the pydantic Field)
+
+      Returns the resolved string, or None if the cascade resolves to empty
+      (operator-misconfigured settings default to ""). None is treated by
+      get_response_via_harness() as "omit --model, use CLI default."
+      """
+      explicit = getattr(session, "model", None) if session else None
+      if explicit:
+          return explicit
+      fallback = settings.models.session_default_model
+      return fallback or None
+  ```
+  - **O2**: the `if session else None` guard defends against `session=None` being passed (unlikely on the harness call site but cheap).
+- At the harness branch (inside `_execute_agent_session`'s harness subprocess path, just before `async def do_work():`): `_effective_model = _resolve_session_model(agent_session)`. Pass `model=_effective_model` into the `get_response_via_harness(...)` call at line 1311.
 - Inline comment referencing D1.
 
 **Edit 3 — `config/settings.py`** (~10 lines)
@@ -284,9 +312,9 @@ Five edits in live code, one in settings, one in `.env.example`.
 
 Introduce the 2-pass drafter + no-silent-fail contract.
 
-- Add a module-level constant near `_COMPLETION_PROMPT`:
+- Add a module-level constant near `_COMPLETION_PROMPT`. **Note the trailing `"DRAFT:\n"` — the actual draft is concatenated at call site, not `.format()`-substituted, to survive literal `{`/`}` in the draft body (ADV1):**
   ```python
-  _COMPLETION_REVIEW_PROMPT = (
+  _COMPLETION_REVIEW_PROMPT_PREFIX = (
       "Below is a draft final-delivery message for the user. Review it against "
       "these criteria and return a refined version:\n\n"
       "1. SHORT — no wasted words. Cut anything that isn't load-bearing.\n"
@@ -294,22 +322,25 @@ Introduce the 2-pass drafter + no-silent-fail contract.
       "3. THOUGHTFUL — phrase like a colleague writing with care, not a template.\n\n"
       "Return ONLY the refined message. No preamble, no meta-commentary, no "
       "markdown headers. Just the message as it should be sent.\n\n"
-      "DRAFT:\n{draft}"
+      "DRAFT:\n"
   )
   ```
+  Callers build the full prompt as `_COMPLETION_REVIEW_PROMPT_PREFIX + draft_text`.
 
-- Replace the current single-call block at line 446-468 with a two-pass sequence:
-  1. **Pass 1**: call `get_response_via_harness(message=prompt, model="opus", ...)`. Strip result.
-     - If empty/None → `raise RuntimeError(f"[completion-runner] Pass 1 (draft) returned empty for parent_id={parent_id}")`. Log ERROR before raise.
-  2. **Pass 2**: call `get_response_via_harness(message=_COMPLETION_REVIEW_PROMPT.format(draft=draft_text), model="opus", prior_uuid=pm_uuid, session_id=session_id, ...)`. Strip result.
-     - If empty/None → log WARNING, use `draft_text` as `final_text` (fall back to Pass 1 rather than raise — (c)'s fallback branch).
+- Replace the current single-call block (the try/except around `get_response_via_harness` in `_deliver_pipeline_completion`; currently at lines 446-468) with a two-pass sequence:
+  1. **Pass 1 — Draft**: call `get_response_via_harness(message=prompt, working_dir=..., prior_uuid=pm_uuid, session_id=session_id, full_context_message=prompt, model="opus")`. Strip result → `draft_text`.
+     - If empty/None → log ERROR + `raise RuntimeError(f"[completion-runner] Pass 1 (draft) returned empty for parent_id={parent_id}")`.
+     - If exception → log ERROR and re-raise (no swallow).
+  2. **Pass 2 — Self-Review/Refine**: call `get_response_via_harness(message=_COMPLETION_REVIEW_PROMPT_PREFIX + draft_text, working_dir=..., prior_uuid=None, session_id=None, full_context_message=None, model="opus")`. Strip result → `refined_text`.
+     - **Critical (ADV2)**: `prior_uuid=None` and `session_id=None` to avoid (a) resuming from the now-advanced PM UUID and (b) polluting the PM session history with drafter/review turns. The review prompt is self-contained (Pass 1 draft embedded verbatim).
+     - If empty/None → log WARNING, use `draft_text` as `final_text` (fall back to Pass 1 per D6(c)).
+     - If exception → log ERROR and re-raise.
      - Else → `final_text = refined_text`.
-  3. **Existing delivery** (`send_cb` call) proceeds with `final_text`, which is guaranteed non-empty at this point.
+  3. **Existing delivery** (`send_cb` call) proceeds with `final_text`, which is guaranteed non-empty. `send_cb` failures keep their current log-and-continue behavior per D6(c).
 
-- **Remove the silent-fail path** at line 458-468 (the current `except Exception: final_text = ""` → `if not final_text: final_text = summary_context.strip() or "..."` fallback). Replace with:
-  - On any harness exception → log at ERROR and re-raise (do not swallow). The background task's outer exception handler will record it; the user sees a loud failure instead of a bland summary. This aligns with D6(c): "no silent fail."
+- **Remove the silent-fail path** (the current `except Exception: final_text = ""` → `if not final_text: final_text = summary_context.strip() or "..."` fallback at approximately lines 458-468). Exceptions re-raise out of the 2-pass block per above.
 
-- The existing `response_delivered_at` stamping at line 494-499 moves after the successful `send_cb` — it must NOT fire if delivery raises. Current code already puts this after the send block; confirm placement during build.
+- `response_delivered_at` stamping stays after the successful `send_cb`. Pre-existing placement is correct; confirm during build.
 
 **Edit 6 — `docs/features/agent-session-model.md`** (docs correction; done in DOCS stage)
 - Rewrite "Per-Session Model Selection" section (lines 184-195) to describe the harness-CLI live path + the D1 precedence cascade.
@@ -372,7 +403,10 @@ Introduce the 2-pass drafter + no-silent-fail contract.
   - Pass 1 empty → RuntimeError, no delivery.
   - Pass 2 empty → WARNING log + Pass 1 delivered as fallback.
   - Pass 1 exception → re-raised.
+  - Pass 2 exception → re-raised.
   - Both passes use `model="opus"`.
+  - **Pass 2 UUID isolation (ADV2)**: Pass 2 is called with `prior_uuid=None` and `session_id=None`, regardless of what was passed to Pass 1.
+  - **`.format()` safety (ADV1)**: Pass 1 output containing literal `{`/`}` (e.g. a JSON snippet or `"dict = {'k': 'v'}"`) does NOT crash Pass 2's prompt construction. Assert via a fixture whose Pass 1 draft contains braces.
 
 **NOT affected:** memory system, PostToolUse hooks, subagent tests (`.claude/agents/*.md` mechanism), Popoto model tests, task list isolation tests. The change is surgical.
 
@@ -650,10 +684,25 @@ Small appetite, one builder + one validator.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Run 1: 2026-04-23 — NEEDS REVISION (2 blockers, 6 concerns, 5 nits)**
+
+### Blockers addressed
+- **ADV1** (crash on `.format(draft=...)` when draft contains literal braces): FIXED in Edit 5 — prompt renamed to `_COMPLETION_REVIEW_PROMPT_PREFIX` and built via string concatenation. Test case added to Test Impact (literal `{`/`}` in draft does not crash).
+- **ADV2** (Pass 2 reusing `pm_uuid` would resume from stale state + pollute PM history): FIXED in D6(b) and Edit 5 — Pass 2 uses `prior_uuid=None`, `session_id=None`. Test case added (Pass 2 UUID isolation).
+
+### Concerns addressed
+- **O1** (stale line numbers): FIXED — Freshness Check section re-baselined with current line numbers (sdk_client.py: `_HARNESS_COMMANDS` at 1593, `harness_cmd = list(...)` at 1682, `_store_claude_session_uuid` at 1779; session_executor.py: harness region 1244-1323, call at 1311). Edits now reference symbols in addition to line numbers.
+- **O2** (`_resolve_session_model(None)` handling): FIXED — Edit 2 helper guards with `if session else None`.
+- **ADV3** (contradictory `send_cb` re-raise vs. log-and-continue): FIXED in D6(c) — explicit policy is log-and-continue on `send_cb` failure (status quo). No-silent-fail contract is scoped to the drafter layer only.
+- **SIM1** (2-pass may be over-engineered / needs off-ramp): **NOT ADDED** — Tom explicitly chose 2-pass in Q6 answer. Adding a feature flag would hedge against a directly-stated product decision. Reversion path is revert-this-PR if the 2-pass flow proves problematic. Keeping the scope tight.
+- **U1** (user-visible regression — loud-fail replaces bland filler): **ACCEPTED AS DESIGNED** per Tom's Q6 answer ("raises loudly... Tom can manually retry or draft"). Documented as Risk 6. #1137 closes the gap when it lands.
+- **S1** (`harness_cmd.extend` mutation of caller-owned lists): FIXED in Edit 1 — defensive `list(harness_cmd)` copy when the caller passed one in.
+
+### Nits
+Nit-level items (5) noted by critique left as-is; builder/reviewer will catch at code review.
 
 ---
 
 ## Open Questions
 
-All resolved — see **Decisions (D1–D6)** section above. No open questions remain. Plan is ready for `/do-plan-critique`.
+All resolved — see **Decisions (D1–D6)** section above. No open questions remain. Plan has completed one critique revision pass and is ready for build.
