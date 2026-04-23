@@ -1041,6 +1041,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 if tool.name not in optional_tools:
                     result.warnings.append(f"{tool.name}: {tool.error}")
 
+        # Report valor tool checks (env-completeness, etc.)
+        for tool in result.verification.valor_tools:
+            if not tool.available and tool.error:
+                log(f"  WARN: {tool.name}: {tool.error}", v, always=True)
+                result.warnings.append(f"{tool.name}: {tool.error}")
+
         # Migrate legacy Desktop/claude_code paths in settings.json
         log("Migrating settings.json paths...", v)
         settings_migration = verify.migrate_settings_json_paths()
