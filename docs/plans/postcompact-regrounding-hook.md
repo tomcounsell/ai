@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1139
 last_comment_id:
+revision_applied: true
 ---
 
 # PostCompact Re-Grounding Hook
@@ -151,7 +152,7 @@ The hook is a standalone Python script, following the same pattern as `.claude/h
 
 **Token budget**: The nudge text runs ~80-120 tokens for the full 4-item case. Well under the 300-token ceiling.
 
-**PROGRESS.md detection**: `os.path.exists(os.path.join(cwd, "PROGRESS.md"))` — uses `cwd` from hook input (not hardcoded). If `cwd` is absent from input, skip the PROGRESS.md item. No traversal up the tree.
+**PROGRESS.md detection**: Use `cwd = hook_input.get("cwd") or ""`, then `if cwd and os.path.exists(os.path.join(cwd, "PROGRESS.md")):` — the `or ""` guard handles both missing-key and empty-string cases (since `os.path.join("", "PROGRESS.md")` returns a relative path checked against the subprocess's cwd rather than the project root). If `cwd` is absent or empty, skip the PROGRESS.md item. No traversal up the tree.
 
 **Issue number extraction**: When `plan_url` is set (e.g., `https://github.com/X/Y/blob/main/docs/plans/foo.md`), the issue number is not directly in the URL. Use `AgentSession.issue_url` instead (e.g., `https://github.com/.../issues/1139`) — extract the trailing integer with a regex.
 
@@ -159,7 +160,7 @@ The hook is a standalone Python script, following the same pattern as `.claude/h
 
 ### Exception Handling Coverage
 - [ ] Identify `except Exception` blocks in the new hook — each must log a warning (no silent pass). The outer bail-out should log at warning level with context. Inner Redis/save calls follow the pre_compact.py pattern (swallow, log).
-- [ ] Test: when AgentSession lookup raises, `_build_regrounding_nudge` is still called with `plan_url=None, stage_states_json=None, cwd=...` and a partial nudge is emitted.
+- [ ] Test: when AgentSession lookup raises, `_build_regrounding_nudge` is still called with `plan_url=None, issue_url=None, stage_states_json=None, cwd=...` and a partial nudge is emitted.
 
 ### Empty/Invalid Input Handling
 - [ ] `session_id` missing from hook input → no-op, exit 0, nothing written to stdout.
@@ -191,11 +192,11 @@ No existing tests affected — this is a greenfield hook with no prior coverage.
 
 ### Risk 2: PostCompact hook blocks or delays the session
 **Impact:** If the hook exceeds its timeout (10s), the CLI may cancel it. Redis lookup on a cold connection could be slow.
-**Mitigation:** Set timeout=10 in settings.json (same as user_prompt_submit). Use `asyncio.to_thread` if needed for Redis sync calls. Never raise from the hook.
+**Mitigation:** Set timeout=10 in settings.json (same as user_prompt_submit). The `|| true` in the command string ensures the CLI is never blocked — no additional async handling needed. Call Popoto/Redis synchronously, identical to `.claude/hooks/user_prompt_submit.py` and `.claude/hooks/stop.py` (both fully synchronous). Do NOT import or use `asyncio` — this hook has no event loop. Never raise from the hook.
 
 ### Risk 3: Nudge appears as a stray message in non-SDLC CLI sessions
 **Impact:** Developers running one-off Claude Code sessions see a "re-ground on your plan" message that is irrelevant.
-**Mitigation:** When `plan_url` and `stage_states` are absent (no AgentSession row), the nudge degrades to only: "Context was just compacted. Re-read your current TodoWrite task list." This is universally useful and not confusing.
+**Mitigation:** When `plan_url` and `stage_states` are absent (no AgentSession row), the nudge degrades to a minimal nudge (header + TodoWrite item): "Context was just compacted. Re-read your current TodoWrite task list." This is universally useful and not confusing.
 
 ## Race Conditions
 
@@ -229,7 +230,7 @@ No agent integration required — this is a Claude Code CLI hook. It fires via t
 - [ ] `.claude/hooks/post_compact.py` exists and passes all unit tests.
 - [ ] `.claude/settings.json` has a PostCompact entry pointing to `post_compact.py`.
 - [ ] Hook emits the full 4-item nudge when AgentSession has `plan_url` + `stage_states` + `PROGRESS.md` present.
-- [ ] Hook emits a 1-item nudge (TodoWrite only) when no AgentSession row exists.
+- [ ] Hook emits a minimal nudge (header + TodoWrite item) when no AgentSession row exists.
 - [ ] Hook never raises — subprocess always exits 0.
 - [ ] Nudge text is < 300 tokens in all code paths.
 - [ ] Tests pass (`pytest tests/unit/hooks/test_post_compact_hook.py -v`).
@@ -283,7 +284,7 @@ See plan template for full list. Using: builder, validator, documentarian.
   - Add `"PostCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post_compact.py || true", "timeout": 10}]}]`
 - Write `tests/unit/hooks/test_post_compact_hook.py`:
   - `test_full_nudge_with_all_context`: mock AgentSession with plan_url, issue_url, stage_states; tmp PROGRESS.md in cwd; assert all 4 items in nudge.
-  - `test_partial_nudge_no_session`: no AgentSession row; assert nudge contains only header and TodoWrite item.
+  - `test_partial_nudge_no_session`: no AgentSession row; assert nudge is the minimal nudge (header + TodoWrite item only).
   - `test_partial_nudge_no_plan`: AgentSession found but plan_url=None; assert plan item absent.
   - `test_partial_nudge_no_progress_md`: AgentSession found, plan_url set, no PROGRESS.md; assert PROGRESS.md item absent.
   - `test_nudge_under_token_budget`: full nudge; assert word count < 300 (proxy for token count).
@@ -300,8 +301,9 @@ See plan template for full list. Using: builder, validator, documentarian.
 - Run `pytest tests/unit/hooks/test_post_compact_hook.py -v` — all 8 tests must pass.
 - Verify `.claude/hooks/post_compact.py` exists on disk.
 - Verify `.claude/settings.json` contains `PostCompact` key.
-- Check nudge text for the full-context case: count tokens (words × 1.3); must be < 300.
+- Check nudge text for the full-context case: count tokens (words × 1.3); must be < 300. Run the Verification table's "Nudge under budget" command: `python3 -c "import sys; sys.path.insert(0, '.claude/hooks'); from post_compact import _build_regrounding_nudge; n=_build_regrounding_nudge(None,None,None,'/tmp'); assert len(n.split()) < 250"` — must exit 0.
 - Verify hook file is standalone (no `from agent.` imports — only `from models.` and `from hook_utils.`).
+- Verify hook does NOT import `asyncio` — the hook is fully synchronous (same as `user_prompt_submit.py` and `stop.py`).
 - Run `python -m ruff check .claude/hooks/post_compact.py` — must be clean.
 
 ### 3. Documentation
@@ -342,13 +344,17 @@ See plan template for full list. Using: builder, validator, documentarian.
 | Hook file exists | `test -f .claude/hooks/post_compact.py` | exit code 0 |
 | PostCompact registered | `python3 -c "import json; d=json.load(open('.claude/settings.json')); assert 'PostCompact' in d.get('hooks',{})"` | exit code 0 |
 | Feature doc exists | `test -f docs/features/post-compact-regrounding.md` | exit code 0 |
-| Nudge under budget | `python3 -c "from .claude.hooks.post_compact import _build_regrounding_nudge; n=_build_regrounding_nudge(None,None,None,'/tmp'); assert len(n.split()) < 250"` | exit code 0 |
+| Nudge under budget | `python3 -c "import sys; sys.path.insert(0, '.claude/hooks'); from post_compact import _build_regrounding_nudge; n=_build_regrounding_nudge(None,None,None,'/tmp'); assert len(n.split()) < 250"` | exit code 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| CONCERN | Operator, Skeptic | C1: `asyncio.to_thread` guidance in Risk 2 is inapplicable — hook is a sync CLI subprocess with no event loop; builder could add unnecessary async machinery | Risk 2 rewritten; validate-hook task adds asyncio-import guard | Hook must NOT import or use `asyncio`; correct pattern is identical to `user_prompt_submit.py` and `stop.py` (fully sync) |
+| CONCERN | Adversary, Skeptic | C2: Verification table "Nudge under budget" command uses `from .claude.hooks.post_compact import ...` — broken due to dot-prefixed directory not being a valid Python package | Fixed to `sys.path.insert(0, '.claude/hooks'); from post_compact import ...`; validate-hook task now explicitly runs the command | Use `python3 -c "import sys; sys.path.insert(0, '.claude/hooks'); from post_compact import _build_regrounding_nudge; ..."` |
+| NIT | Adversary | N1: `cwd` empty-string guard not specified — `hook_input.get("cwd", "")` and `os.path.join("", "PROGRESS.md")` resolves to a relative path | Technical Approach updated with explicit `cwd = hook_input.get("cwd") or ""` guard | Use `if cwd and os.path.exists(os.path.join(cwd, "PROGRESS.md")):` |
+| NIT | Consistency Auditor | N2: Failure Path description of lookup-raises path omits `issue_url=None` from the 3-tuple | Failure Path updated to include `issue_url=None` | `_lookup_session` returns `(plan_url, issue_url, stage_states_json)` — all three are None on exception |
+| NIT | Consistency Auditor | N3: "1-item nudge (TodoWrite only)" vs "header + TodoWrite item" inconsistency across Success Criteria, test description, Risk 3 | All three locations standardized to "minimal nudge (header + TodoWrite item)" | Test asserts exactly two things: the "Context was just compacted." header line and the TodoWrite item |
 
 ---
 
