@@ -1,14 +1,6 @@
 """
 reflections/maintenance.py — System maintenance reflection callables.
 
-Extracted from scripts/reflections.py steps:
-  - step_clean_legacy        → run_legacy_code_scan
-  - step_redis_cleanup       → run_redis_ttl_cleanup
-  - step_redis_data_quality  → run_redis_data_quality
-  - step_branch_plan_cleanup → run_branch_plan_cleanup
-  - step_disk_space_check    → run_disk_space_check
-  - step_analytics_rollup    → run_analytics_rollup
-
 All functions accept no arguments and return:
   {"status": "ok"|"error", "findings": [...], "summary": str}
 """
@@ -30,10 +22,7 @@ logger = logging.getLogger("reflections.maintenance")
 
 
 def run_legacy_code_scan() -> dict:
-    """Scan for legacy code patterns: TODO comments, deprecated typing imports.
-
-    Maps to monolith step: step_clean_legacy
-    """
+    """Scan for legacy code patterns: TODO comments, deprecated typing imports."""
     findings = []
 
     try:
@@ -76,7 +65,6 @@ def run_legacy_code_scan() -> dict:
 async def run_redis_ttl_cleanup() -> dict:
     """Run TTL cleanup on all Redis models to remove expired records.
 
-    Maps to monolith step: step_redis_cleanup
     Cleans up: TelegramMessage, Link, Chat, AgentSession (90-day),
     BridgeEvent (7-day), ReflectionIgnore (expired).
     """
@@ -123,10 +111,7 @@ async def run_redis_ttl_cleanup() -> dict:
 
 
 async def run_redis_data_quality() -> dict:
-    """Run Redis data quality checks: unsummarized links, dead channels, error patterns.
-
-    Maps to monolith step: step_redis_data_quality
-    """
+    """Run Redis data quality checks: unsummarized links, dead channels, error patterns."""
     findings: list[str] = []
 
     try:
@@ -248,7 +233,6 @@ async def run_redis_data_quality() -> dict:
 async def run_branch_plan_cleanup() -> dict:
     """Clean up stale git branches and audit plan files.
 
-    Maps to monolith step: step_branch_plan_cleanup
     - Deletes local branches merged into main
     - Audits docs/plans/ for complete/orphaned/stale-issue plans
     """
@@ -435,7 +419,6 @@ async def run_branch_plan_cleanup() -> dict:
 async def run_disk_space_check() -> dict:
     """Check available disk space on the project volume.
 
-    Maps to monolith step: step_disk_space_check
     Records a finding when free space drops below 10 GB.
     """
     findings: list[str] = []
@@ -463,10 +446,7 @@ async def run_disk_space_check() -> dict:
 
 
 async def run_analytics_rollup() -> dict:
-    """Run analytics daily rollup: aggregate metrics and purge old data.
-
-    Maps to monolith step: step_analytics_rollup
-    """
+    """Run analytics daily rollup: aggregate metrics and purge old data."""
     try:
         from analytics.rollup import rollup_daily
 

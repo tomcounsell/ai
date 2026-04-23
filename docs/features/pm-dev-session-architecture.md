@@ -462,7 +462,7 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 | `agent/session_health.py` | Health monitor, startup recovery, orphan cleanup |
 | `agent/session_pickup.py` | Pop locking, steering drain, session selection |
 | `agent/session_state.py` | Shared globals: `_active_sessions`, `_global_session_semaphore`, `SessionHandle` |
-| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery), `FileOutputHandler` (logs to `logs/worker/`), and `LoggingOutputHandler` implementations |
+| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery) and `FileOutputHandler` (logs to `logs/worker/`) implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
 | `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |
 | `agent/sdk_client.py` | SDK client; uses `project_key` identity checks for cross-repo detection |

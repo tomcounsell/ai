@@ -24,7 +24,7 @@ Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent defini
 - **PreToolUse**: blocks writes to sensitive files (.env, credentials)
 - **PostToolUse**: existing watchdog (health check + steering)
 - **Stop**: logs session completion
-- **PreCompact**: logs context compaction events
+- **PreCompact**: logs context compaction events. Since issue #1127 the hook also snapshots the JSONL transcript, enforces a 5-minute per-session cooldown, retains the last 3 backups per session, and arms the 30-second post-compact nudge guard — see [Compaction Hardening](compaction-hardening.md). The hook never raises.
 - All hooks use proper SDK type annotations
 - A `SubagentStop` hook was originally registered here as well; it was stripped to logging-only in the Phase 5 harness migration and then deleted entirely in issue #1024 once the SDK execution path was confirmed unreachable.
 

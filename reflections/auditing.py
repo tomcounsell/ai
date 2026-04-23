@@ -1,14 +1,6 @@
 """
 reflections/auditing.py — Auditing reflection callables.
 
-Extracted from scripts/reflections.py steps:
-  - step_review_logs         → run_log_review
-  - step_audit_docs          → run_documentation_audit
-  - step_skills_audit        → run_skills_audit
-  - step_hooks_audit         → run_hooks_audit
-  - step_feature_docs_audit  → run_feature_docs_audit
-  - step_pr_review_audit     → run_pr_review_audit
-
 All functions accept no arguments and return:
   {"status": "ok"|"error", "findings": [...], "summary": str}
 """
@@ -69,7 +61,7 @@ def _read_log_tail_lines(log_file: Path, n: int = 1000) -> list[str]:
     return lines[-n:]
 
 
-# PR Review audit helper patterns (from monolith module level)
+# PR Review audit helper patterns
 _FINDING_SEVERITY_RE = re.compile(r"\*\*Severity:\*\*\s*(blocker|tech_debt|nit)", re.IGNORECASE)
 _FINDING_FILE_RE = re.compile(r"\*\*File:\*\*\s*`?([^\n`]+)`?")
 _FINDING_CODE_RE = re.compile(r"\*\*Code:\*\*\s*`?([^\n`]+)`?")
@@ -187,8 +179,6 @@ def _format_audit_issue_body(
 def run_log_review() -> dict:
     """Review previous day's logs per project.
 
-    Maps to monolith step: step_review_logs.
-
     Hotfix (sibling of PR #1056): this used to be ``async def`` but did
     synchronous file I/O (``open(...).read()``) on potentially unbounded
     log files. That froze the reflection-scheduler event loop for the full
@@ -297,7 +287,6 @@ def run_log_review() -> dict:
 async def run_documentation_audit() -> dict:
     """Audit documentation against codebase.
 
-    Maps to monolith step: step_audit_docs
     Delegates to DocsAuditor for intelligent audit.
     """
     import asyncio
@@ -346,10 +335,7 @@ async def run_documentation_audit() -> dict:
 
 
 def run_skills_audit() -> dict:
-    """Run skills audit to validate all SKILL.md files.
-
-    Maps to monolith step: step_skills_audit
-    """
+    """Run skills audit to validate all SKILL.md files."""
     audit_script = (
         PROJECT_ROOT / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
     )
@@ -390,7 +376,6 @@ def run_skills_audit() -> dict:
 def run_hooks_audit() -> dict:
     """Audit Claude Code hooks for safety and configuration issues.
 
-    Maps to monolith step: step_hooks_audit.
     Checks: hooks.log for recent errors, settings.json hook configuration.
 
     Hotfix (sibling of PR #1056): converted from ``async def`` to plain
@@ -464,7 +449,6 @@ def run_hooks_audit() -> dict:
 def run_feature_docs_audit() -> dict:
     """Audit feature documentation for staleness and accuracy.
 
-    Maps to monolith step: step_feature_docs_audit.
     Checks: stale references, README index, stub docs, dead code refs.
 
     Hotfix (sibling of PR #1056): converted from ``async def`` to plain
@@ -571,7 +555,6 @@ def run_feature_docs_audit() -> dict:
 def run_pr_review_audit() -> dict:
     """Audit merged PRs for unaddressed review findings.
 
-    Maps to monolith step: step_pr_review_audit
     Runs in dry_run=True mode by default to avoid spurious issue creation.
     """
     from bridge.utc import utc_now

@@ -1,11 +1,9 @@
 """
 reflections/session_intelligence.py — Session intelligence pipeline callable.
 
-Extracted from scripts/reflections.py pipeline:
-  step_session_analysis → step_llm_reflection → step_auto_fix_bugs
-
-This is a single callable that runs all three sub-steps internally,
-preserving ordering without depends_on complexity in the YAML scheduler.
+Pipeline: Session Analysis → LLM Reflection → Auto-Fix Bugs. This is a single
+callable that runs all three sub-steps internally, preserving ordering without
+depends_on complexity in the YAML scheduler.
 
 Returns:
   {"status": "ok"|"error", "findings": [...], "summary": str}
@@ -139,9 +137,6 @@ def run() -> dict:
     """Run the full session intelligence pipeline.
 
     Pipeline: Session Analysis → LLM Reflection → Bug Issue Filing
-
-    Maps to monolith: step_session_intelligence (which calls step_session_analysis,
-    step_llm_reflection, step_auto_fix_bugs in sequence)
 
     Raises exceptions on sub-step failure (propagates to scheduler for
     last_status=error tracking).

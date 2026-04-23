@@ -41,11 +41,11 @@ if steering_msgs:
 
 `agent/output_router.py` contains the extracted routing logic:
 
-- `determine_delivery_action()` — pure function, returns action string
-- `route_session_output()` — wraps above with persona-aware nudge cap
+- `determine_delivery_action()` — pure function, returns action string. Accepts an optional `last_compaction_ts: float | None`; when set and within `POST_COMPACT_NUDGE_GUARD_SECONDS = 30` of now, short-circuits to the `"defer_post_compact"` action. See [Compaction Hardening](compaction-hardening.md) (issue #1127).
+- `route_session_output()` — wraps above with persona-aware nudge cap; forwards `last_compaction_ts` through to the pure function.
 - `MAX_NUDGE_COUNT`, `NUDGE_MESSAGE`, `SendToChatResult` — constants and dataclass
 
-The `send_to_chat()` callback in the executor calls `route_session_output()` and executes the returned action. The call site stays inside `send_to_chat()` to preserve temporal coupling with `chat_state` flag-setting and post-execution cleanup.
+The `send_to_chat()` callback in the executor calls `route_session_output()` and executes the returned action. The call site stays inside `send_to_chat()` to preserve temporal coupling with `chat_state` flag-setting and post-execution cleanup. The `"defer_post_compact"` branch is a pure no-op — no nudge enqueue, no `completion_sent` flip, no `auto_continue_count` bump — so the next SDK tick naturally re-evaluates routing.
 
 ### Public Steering API
 

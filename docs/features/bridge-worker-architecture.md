@@ -197,9 +197,7 @@ Because `_ensure_worker()` is a plain synchronous function (no `await`), the che
 **Lifecycle of `_starting_workers`:**
 
 1. Added immediately before `asyncio.create_task()`.
-2. Removed synchronously right after the task is registered in `_active_workers` (fast path — clears it before any re-entrant call can see it).
-3. Also removed via a `done_callback` as a safety net in case the task finishes before the synchronous removal runs (degenerate edge case).
-4. Cleared in the `except` block if `create_task()` itself raises, so the set never leaks.
+2. Cleared unconditionally in the enclosing `try/finally` block, so `_starting_workers.discard(worker_key)` runs on every exit path — success, `create_task()` failure, or any post-create statement failure — guaranteeing the guard never leaks. If a post-create statement raises after the task exists but before it is published to `_active_workers`, the task is cancelled in the `except` branch so no orphan runs.
 
 The `_worker_loop` removes itself from `_active_workers` in its `finally` block. After it exits, the next call to `_ensure_worker()` (triggered by the next enqueue or the health check) starts a fresh task.
 
