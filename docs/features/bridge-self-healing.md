@@ -373,6 +373,59 @@ tail -f logs/worker_watchdog.log
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 
+## Idle SDK Teardown (issue #1128)
+
+The Claude Agent SDK's persistent `ClaudeSDKClient` connections die
+silently after roughly 48 hours of idle (fleet-ops research, #1104). A
+dormant session waiting 2+ days on a human reply may be non-functional
+when resumed. The worker runs an idle sweeper
+(`worker/idle_sweeper.py::run_idle_sweep`) that proactively tears down
+those clients well inside the silent-death window, then rebuilds them
+from the stored `claude_session_uuid` via `--resume` on the next query.
+
+### Why this lives in the worker, not the watchdog
+
+The `_active_clients` registry in `agent/sdk_client.py:58` is
+**process-local** to the worker. The session-watchdog process
+(`monitoring/session_watchdog.py`) cannot reach it. So the sweeper must
+run INSIDE the worker process, alongside the registry it inspects. The
+watchdog process remains responsible for repetition / error-cascade /
+token-alert detection but never touches the registry.
+
+### Sweep loop
+
+- **Interval**: `WATCHDOG_IDLE_SWEEP_INTERVAL` (default 1800s = 30 min).
+- **Status filter**: `{dormant, paused, paused_circuit}`. Explicitly
+  excludes `running`, `pending`, `waiting_for_children`, `superseded`,
+  and all terminal states.
+- **Dormancy age**: `WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS` (default
+  86400s = 24h). Uses `AgentSession.updated_at` as the clock, falling
+  back to `started_at` then `created_at`.
+- **Teardown**: iterate a `list(...)` snapshot of `_active_clients`,
+  `await client.close()` (idempotent), `_active_clients.pop(session_id,
+  None)`, then set `AgentSession.sdk_connection_torn_down_at = now` via
+  `save(update_fields=["sdk_connection_torn_down_at"])`.
+- **Resume semantics**: on next query, `get_response_via_sdk` enters
+  its `async with ClaudeSDKClient(...)` block, repopulates
+  `_active_clients`, and re-establishes context from
+  `claude_session_uuid` via the existing `--resume` plumbing.
+
+### Harness path is a no-op
+
+Production PM / Dev / Teammate sessions use
+`agent/sdk_client.py::get_response_via_harness`, which spawns a
+short-lived `claude -p stream-json` subprocess per turn. No persistent
+connection lives in `_active_clients`; the sweeper finds nothing to tear
+down.
+
+### Feature gate
+
+`WATCHDOG_IDLE_TEARDOWN_ENABLED=false` disables the sweep loop entirely
+(early-return inside `_sweep_once`). The worker still starts the task —
+it just skips its work every tick. Enable again without worker restart
+by unsetting the env var and sending SIGHUP (not implemented today; a
+worker restart is the documented path).
+
 ## Two-tier no-progress detector
 
 The periodic `_agent_session_health_check` (every 5 minutes) decides whether a

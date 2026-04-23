@@ -5,14 +5,25 @@ Monitors active agent sessions for signs of distress:
 - Looping behavior (repeated identical tool calls)
 - Error cascades (high error rate in recent activity)
 - Excessively long sessions
+- Cumulative per-session token spend crossing a soft threshold (issue #1128)
 
 When issues are detected, the watchdog FIXES them automatically:
 - Retries stalled sessions with exponential backoff (up to MAX_STALL_RETRIES)
 - Marks stuck sessions as abandoned after retries exhausted
 - Creates GitHub issues for problems that can't be auto-fixed
 - Notifies human via Telegram after max retries exhausted
+- For looping / error-cascade / token-alert conditions (issue #1128):
+  AUTOMATICALLY enqueues a steering message via `_inject_watchdog_steer`.
+  Per-reason atomic Redis cooldowns (SET NX EX) prevent floods. No longer
+  "detected but logged only" — detections now drive actuation.
 
 NO ALERTS ARE SENT for recoverable stalls. Either retry, fix, or create an issue.
+
+**Process topology (issue #1128)**: This watchdog runs as a SEPARATE process
+from the worker. Idle SDK-client teardown is NOT implemented here because
+the `_active_clients` registry in `agent/sdk_client.py` is worker-process-
+local. Idle teardown lives in `worker/idle_sweeper.py`, co-located with
+the registry. The watchdog process must never import `_active_clients`.
 """
 
 import asyncio
@@ -74,6 +85,21 @@ STALL_THRESHOLDS = {
     "running": STALL_THRESHOLD_RUNNING,
     "active": STALL_THRESHOLD_ACTIVE,
 }
+
+# === Loop-break + token-alert steering (issue #1128) ===
+# Soft-threshold on cumulative tokens (sum of input + output) for the
+# token-alert steer. Default 5,000,000 ≈ $75 at Sonnet rates. Taken from
+# AgentSession.total_input_tokens + total_output_tokens (written by
+# agent/sdk_client.py::accumulate_session_tokens — this file only READS).
+TOKEN_ALERT_THRESHOLD = int(os.environ.get("WATCHDOG_TOKEN_ALERT_THRESHOLD", "5000000"))
+# Cooldown TTL for the token-alert steer (per session). 3600s = one alert
+# per hour per session — generous enough for a human to respond between
+# repeats, aggressive enough to avoid silent runaway.
+TOKEN_ALERT_COOLDOWN = int(os.environ.get("WATCHDOG_TOKEN_ALERT_COOLDOWN", "3600"))
+# Cooldown TTL for repetition + error-cascade steers (per session per
+# reason). 900s = 3 watchdog ticks; gives the agent room to respond to a
+# steer before the next one fires.
+STEER_COOLDOWN = int(os.environ.get("WATCHDOG_STEER_COOLDOWN", "900"))
 
 
 # Transcript liveness: if transcript.txt was modified within this many minutes,
@@ -361,6 +387,117 @@ def check_stalled_sessions() -> list[dict]:
     return stalled
 
 
+def _env_flag_enabled(var_name: str, default: bool = True) -> bool:
+    """Return True unless the env var is explicitly set to a falsy string.
+
+    Watchdog-hardening feature gates (issue #1128). Falsy (case-insensitive):
+    "0", "false", "no". Anything else — including unset — means enabled.
+    """
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no"}
+
+
+def _inject_watchdog_steer(
+    session_id: str,
+    reason: str,
+    message: str,
+    cooldown_seconds: int = STEER_COOLDOWN,
+) -> bool:
+    """Enqueue a watchdog-authored steering message, guarded by a per-reason cooldown.
+
+    This is the single actuator for all three watchdog steering triggers
+    introduced in issue #1128:
+
+      * ``repetition`` — `detect_repetition` fired on the recent tool-call log.
+      * ``error_cascade`` — `detect_error_cascade` fired on the recent log.
+      * ``token_alert`` — cumulative tokens crossed `TOKEN_ALERT_THRESHOLD`.
+
+    Each reason gets its OWN cooldown key
+    (``watchdog:steer_cooldown:<reason>:<session_id>``) so a repetition
+    steer does NOT suppress a parallel error-cascade or token-alert steer.
+
+    Cooldown is enforced with a single atomic Redis ``SET NX EX`` — truthy
+    return means the slot was open and we may proceed; falsy means the key
+    exists and we back off. This is the full contract — never sequence a
+    separate GET then SET, which would race under concurrent watchdog ticks.
+
+    Delivery: `agent/steering.py::push_steering_message` with
+    ``sender="watchdog"`` (mandatory — downstream consumers distinguish
+    watchdog steers from human steers by this tag). The message is drained
+    at the next tool-call boundary by the existing PostToolUse hook and
+    the PM session's turn-boundary drain; it does NOT interrupt mid-tool
+    execution. Operators should expect a one-tool-call delay between
+    detection and correction.
+
+    Feature gate: ``WATCHDOG_AUTO_STEER_ENABLED`` (default on). When
+    disabled, the detection is still logged at WARNING upstream but no
+    steer is pushed.
+
+    Args:
+        session_id: The AgentSession.session_id to steer. Must be the
+            bridge/Telegram session id (not agent_session_id).
+        reason: One of ``"repetition"``, ``"error_cascade"``,
+            ``"token_alert"``. Used as part of the cooldown key.
+        message: The steering text to push. Composed by the caller so the
+            wording can vary per trigger reason.
+        cooldown_seconds: Cooldown TTL in seconds. Callers pass
+            ``STEER_COOLDOWN`` for loop-break reasons and
+            ``TOKEN_ALERT_COOLDOWN`` for token alerts.
+
+    Returns:
+        True when a steer was pushed. False when the cooldown slot was
+        closed, the feature flag was off, or any exception was caught
+        (fail-quiet so the watchdog loop never crashes on steer errors).
+    """
+    if not _env_flag_enabled("WATCHDOG_AUTO_STEER_ENABLED"):
+        logger.debug(
+            "[watchdog] auto-steer disabled via env; skipping %s steer for %s",
+            reason,
+            session_id,
+        )
+        return False
+
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        cooldown_key = f"watchdog:steer_cooldown:{reason}:{session_id}"
+        # Atomic set-if-not-exists with TTL — single Redis command,
+        # eliminates the read-then-write race entirely.
+        cooldown_slot_open = POPOTO_REDIS_DB.set(
+            cooldown_key,
+            "1",
+            nx=True,
+            ex=cooldown_seconds,
+        )
+        if not cooldown_slot_open:
+            logger.debug(
+                "[watchdog] %s steer for %s suppressed — cooldown active",
+                reason,
+                session_id,
+            )
+            return False
+
+        from agent.steering import push_steering_message
+
+        push_steering_message(session_id, message, sender="watchdog")
+        logger.warning(
+            "[watchdog] Loop-break steer injected for %s: reason=%s",
+            session_id,
+            reason,
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            "[watchdog] Failed to inject %s steer for %s: %s",
+            reason,
+            session_id,
+            e,
+        )
+        return False
+
+
 def assess_session_health(session: AgentSession) -> dict[str, Any]:
     """Assess the health of a single session.
 
@@ -403,6 +540,21 @@ def assess_session_health(session: AgentSession) -> dict[str, Any]:
             is_looping, repeated_tool, count = detect_repetition(tool_calls)
             if is_looping:
                 issues.append(f"Looping: {repeated_tool} called {count} times consecutively")
+                # Actuate: push a loop-break steering message (issue #1128).
+                # The cooldown key includes reason='repetition', so a parallel
+                # error-cascade or token-alert steer is not suppressed.
+                if repeated_tool:
+                    _inject_watchdog_steer(
+                        session.session_id,
+                        "repetition",
+                        (
+                            f"Stop and re-check the task — you appear to be "
+                            f"repeating the same tool call ({repeated_tool}) "
+                            f"{count} times. Summarize what you've tried, "
+                            "then try a different approach."
+                        ),
+                        cooldown_seconds=STEER_COOLDOWN,
+                    )
 
             # Check for error cascade
             is_cascading, error_count = detect_error_cascade(tool_calls)
@@ -410,9 +562,57 @@ def assess_session_health(session: AgentSession) -> dict[str, Any]:
                 issues.append(
                     f"Error cascade: {error_count} errors in last {ERROR_CASCADE_WINDOW} calls"
                 )
+                # Actuate: push an error-cascade steer with an independent
+                # cooldown key (issue #1128).
+                _inject_watchdog_steer(
+                    session.session_id,
+                    "error_cascade",
+                    (
+                        f"Stop — you've hit {error_count} errors in the last "
+                        f"{ERROR_CASCADE_WINDOW} operations. Summarize the "
+                        "failure pattern and pause for human input rather "
+                        "than continuing blind."
+                    ),
+                    cooldown_seconds=STEER_COOLDOWN,
+                )
     except Exception as e:
         logger.debug(
             "[watchdog] Could not analyze tool calls for session %s: %s",
+            session.session_id,
+            e,
+        )
+
+    # Token-spend alert (issue #1128). Watchdog READS
+    # `AgentSession.total_input_tokens + total_output_tokens` only — it
+    # never writes those fields (writers are the SDK ResultMessage handler
+    # and `get_response_via_harness`, both worker-process). Only triggers
+    # for `running` sessions so a completed session that happened to rack
+    # up tokens doesn't get a steer sent into an empty queue.
+    try:
+        status_val = getattr(session, "status", None)
+        if status_val == "running":
+            in_tokens = int(getattr(session, "total_input_tokens", 0) or 0)
+            out_tokens = int(getattr(session, "total_output_tokens", 0) or 0)
+            total_tokens = in_tokens + out_tokens
+            if total_tokens >= TOKEN_ALERT_THRESHOLD:
+                issues.append(
+                    f"Token budget: {total_tokens:,} tokens, "
+                    f"${float(getattr(session, 'total_cost_usd', 0.0) or 0.0):.2f}"
+                )
+                cost_usd = float(getattr(session, "total_cost_usd", 0.0) or 0.0)
+                _inject_watchdog_steer(
+                    session.session_id,
+                    "token_alert",
+                    (
+                        f"Token budget exceeded: ${cost_usd:.2f} / "
+                        f"{total_tokens:,} tokens spent this session. Stop "
+                        "and summarize what you've done."
+                    ),
+                    cooldown_seconds=TOKEN_ALERT_COOLDOWN,
+                )
+    except Exception as e:
+        logger.debug(
+            "[watchdog] Token alert check failed for %s: %s",
             session.session_id,
             e,
         )

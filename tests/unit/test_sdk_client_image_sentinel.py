@@ -6,6 +6,11 @@ The sentinel (IMAGE_DIMENSION_SENTINEL) detects Claude Code's exit-code-0 error:
 
 These tests mock _run_harness_subprocess so they run instantly without a real
 claude CLI binary, API key, or network.
+
+Note (issue #1128): `_run_harness_subprocess` now returns a 5-tuple
+`(result_text, session_id, returncode, usage, cost_usd)`. The existing
+tests below were updated to match; the extra None / None trailing pair
+stands in for "no usage emitted on this simulated turn".
 """
 
 import pytest
@@ -26,9 +31,11 @@ async def test_sentinel_fires_full_context_message(monkeypatch):
                 f"An image in the conversation {IMAGE_DIMENSION_SENTINEL} (2000px).",
                 None,
                 0,
+                None,
+                None,
             )
         # Second call (fallback): normal response
-        return ("Fallback response from full context", "new-session-uuid", 0)
+        return ("Fallback response from full context", "new-session-uuid", 0, None, None)
 
     monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
@@ -57,6 +64,8 @@ async def test_sentinel_no_full_context_message(monkeypatch):
             f"An image in the conversation {IMAGE_DIMENSION_SENTINEL} (2000px).",
             None,
             0,
+            None,
+            None,
         )
 
     monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
@@ -90,7 +99,7 @@ async def test_sentinel_does_not_fire_on_first_turn(monkeypatch):
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
         nonlocal call_count
         call_count += 1
-        return (sentinel_text, None, 0)
+        return (sentinel_text, None, 0, None, None)
 
     monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
@@ -115,7 +124,7 @@ async def test_sentinel_does_not_fire_on_empty_result(monkeypatch):
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
         nonlocal call_count
         call_count += 1
-        return ("", None, 0)
+        return ("", None, 0, None, None)
 
     monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
@@ -141,7 +150,7 @@ async def test_sentinel_does_not_fire_on_normal_resume(monkeypatch):
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
         nonlocal call_count
         call_count += 1
-        return (normal_response, "new-uuid", 0)
+        return (normal_response, "new-uuid", 0, None, None)
 
     monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)

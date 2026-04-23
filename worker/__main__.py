@@ -379,6 +379,27 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     notify_task.add_done_callback(_notify_task_done)
 
+    # Start idle SDK-client sweeper (issue #1128). Worker-internal because
+    # `_active_clients` is process-local — the session-watchdog (separate
+    # process) cannot reach the registry. See `worker/idle_sweeper.py`.
+    idle_sweep_task = None
+    try:
+        from worker.idle_sweeper import run_idle_sweep
+
+        idle_sweep_task = asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
+
+        def _idle_sweep_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Idle sweeper exited unexpectedly: %s", exc)
+
+        idle_sweep_task.add_done_callback(_idle_sweep_done)
+        logger.info("Idle SDK-client sweeper started")
+    except Exception as e:
+        logger.warning("Failed to start idle sweeper: %s", e)
+
     # Set up graceful shutdown
     shutdown_event = asyncio.Event()
 
@@ -449,6 +470,14 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         reflection_task.cancel()
         try:
             await reflection_task
+        except asyncio.CancelledError:
+            pass
+
+    # Cancel idle-sweeper (issue #1128)
+    if idle_sweep_task is not None:
+        idle_sweep_task.cancel()
+        try:
+            await idle_sweep_task
         except asyncio.CancelledError:
             pass
 

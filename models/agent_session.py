@@ -290,6 +290,30 @@ class AgentSession(Model):
     # branch. Lets us measure how often the guard actually fires.
     nudge_deferred_count = IntField(default=0)
 
+    # === Per-session token + cost accounting (issue #1128) ===
+    # Cumulative counts aggregated from SDK ResultMessage.usage and from the
+    # harness `result` event payload (both paths write here via
+    # `agent/sdk_client.py::accumulate_session_tokens`). Readers: dashboard
+    # (`/dashboard.json`) and the session watchdog token-threshold alert.
+    # Writers: worker process only. Default 0 (never None) for forward-compat
+    # with existing JSON consumers.
+    total_input_tokens = IntField(default=0)
+    total_output_tokens = IntField(default=0)
+    total_cache_read_tokens = IntField(default=0)
+    # `total_cost_usd` is taken verbatim from `msg.total_cost_usd` (SDK) or
+    # `data.get("total_cost_usd")` (harness). Never recomputed from token
+    # counts — this tracks upstream pricing automatically.
+    total_cost_usd = FloatField(default=0.0)
+
+    # Set by the worker's idle sweeper (`worker/idle_sweeper.py`) when a
+    # dormant SDK-path session's persistent `ClaudeSDKClient` is proactively
+    # torn down before the ~48h Anthropic idle-kill window. On resume, a
+    # fresh client is rebuilt via `--resume` + stored UUID. Informational
+    # only — the sweeper pops the client from `_active_clients` as part of
+    # the teardown, so the field's presence (vs. None) is what operators
+    # use to audit how often teardown fires.
+    sdk_connection_torn_down_at = DatetimeField(null=True)
+
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 
@@ -337,6 +361,8 @@ class AgentSession(Model):
         "last_heartbeat_at",
         "last_sdk_heartbeat_at",
         "last_stdout_at",
+        # Worker idle-sweeper teardown marker (issue #1128)
+        "sdk_connection_torn_down_at",
     }
 
     def __init__(self, **kwargs):
