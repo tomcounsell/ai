@@ -107,6 +107,7 @@ The hook's top-level contract is **"never raise, always return `{}`"**:
 
 ## Related Features
 
+- **[Post-Compact Re-Grounding](post-compact-regrounding.md)** — the after-compaction complement: a CLI PostCompact hook that emits a short re-grounding nudge directing the agent to re-read the plan, check SDLC stage progress, and review PROGRESS.md. Shipped as issue #1139.
 - **[Bridge Self-Healing](bridge-self-healing.md)** — the watchdog escalation path is the recovery layer above this hook. Compaction hardening reduces the frequency of escalations by preserving session state across SDK crashes.
 - **[Stop Hook JSONL Backup](agent-message-delivery.md)** — sibling pattern: the Stop hook also opens `transcript_path` and reads the JSONL. The PreCompact hook borrowed the same approach for snapshots.
 - **[Externalized Session Steering](session-steering.md)** — the `output_router.py` extraction (issue #743) made the 30s guard possible by turning `determine_delivery_action` into a pure function.

@@ -189,7 +189,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/long-task-chec
 
 - **Hard-fail the build if PROGRESS.md is missing.** Tempting as "rigor" but creates a new failure mode (builds abort on sessions where the agent simply forgot to create the file) without actually fixing working-state drift. The soft-check is strictly better: it nudges without introducing a new red light. If six months of data shows adoption is catastrophically low, revisit.
 - **A dedicated `tools/progress_md.py` helper.** Tempting as "structured writing" but the whole point of PROGRESS.md is that it is a plain markdown file the agent writes to directly. Adding a tool introduces a new API surface and an indirection the agent has to remember to use. Direct Write/Edit is the right call.
-- **Auto-injection of "re-read PROGRESS.md" after compaction via a PostCompact hook.** This overlaps with compaction-hardening territory (#1127 owns that hook). Leaving it in-prompt makes the instruction part of the agent's baseline behavior; injecting via a hook creates timing coupling with the nudge loop. Deferred explicitly — see Open Questions.
+- **Auto-injection of "re-read PROGRESS.md" after compaction via a PostCompact hook.** Shipped as issue #1139 / PR #1150 (see [Post-Compact Re-Grounding](../features/post-compact-regrounding.md)). The hook includes PROGRESS.md as item 3 when the file exists in the session's `cwd`. This plan remains prompt-only; the hook is the hook-based complement.
 - **Extending PROGRESS.md with YAML frontmatter (status, owner, created_at).** Violates the "simple file the agent writes freely" principle. Adds maintenance burden for near-zero benefit. Deferred.
 - **Multi-worktree PROGRESS.md aggregation** (e.g., a `docs/PROGRESS.md` that tracks all worktrees). Out of scope; solves a different problem (fleet visibility).
 
@@ -404,9 +404,7 @@ These architectural decisions need Tom's input before /do-plan-critique or /do-b
    - **Your call:** commit (default) or gitignore?
 
 3. **Scope overlap with compaction-hardening: should the post-compaction "re-read PROGRESS.md" nudge be a prompt instruction or a PostCompact hook?**
-   - **Default:** Prompt instruction only (this plan). Keeps the behavior as an intrinsic part of the dev agent's baseline — the agent does it because the prompt says so, not because a hook fires. Consistent with the "intelligence over rigid patterns" principle in CLAUDE.md.
-   - **Alternative:** Add a PostCompact hook that auto-injects a "re-read PROGRESS.md" reminder into the agent's context immediately after compaction finishes. Lands in #1127's territory; would need a separate issue.
-   - **Your call:** prompt-only (default) or also open a follow-up for a PostCompact hook?
+   - **Resolved:** Both. This plan ships the prompt instruction. Issue #1139 (PR #1150) shipped a PostCompact CLI hook ([Post-Compact Re-Grounding](../features/post-compact-regrounding.md)) that also includes the PROGRESS.md re-read nudge when the file exists in `cwd`. The two are complementary and independent.
 
 4. **Should the developer persona overlay (`~/Desktop/Valor/personas/developer.md`) also be edited, or is builder.md + do-build SKILL.md sufficient?**
    - **Default:** Do NOT edit the persona overlay. The builder prompt covers sub-agents spawned by the team-lead `/do-build`; the do-build SKILL.md covers the orchestrator. Top-level dev sessions use the developer persona, but the work orchestrated by /do-build spawns builders that DO load builder.md. The typical long-task case is under /do-build, so builder.md is where the guidance belongs.
