@@ -140,12 +140,27 @@ The PM-to-CEO final-delivery drafter at `agent/session_completion.py:450` is har
 - **UUID isolation**: Pass 2 MUST pass `prior_uuid=None` and omit `session_id`. Reason: Pass 1 writes back its Claude Code UUID via `_store_claude_session_uuid` (`agent/sdk_client.py:1779`). If Pass 2 reused `pm_uuid`, it would (a) resume from a now-stale UUID, and (b) advance the PM's stored UUID a second time, polluting the PM session's history with drafter + review turns. The review prompt is self-contained (Pass 1's draft is embedded verbatim in the prompt body), so Pass 2 does not need continuity with the PM session.
 - **String concatenation, not `.format()`**: the draft may contain literal `{`/`}` tokens (code snippets, JSON). Building the review prompt via `REVIEW_PROMPT_PREFIX + draft_text` avoids KeyError / IndexError crashes from `str.format`.
 
-**(c) No-Silent-Fail Contract.** Tom: "it is critical that messages are sent (no silent fail)."
+**(c) No-Silent-Fail Contract.** Tom: "it is critical that messages are sent (no silent fail). … Log + alert paths must exist. Never return empty."
 
-- If Pass 1 returns empty/None → **raise loudly** (`RuntimeError` with context). No fallback to `summary_context`. Log at ERROR level.
-- If Pass 2 returns empty/None → **fall back to Pass 1's draft** (not empty-string). That still satisfies "a message is sent" and preserves the Pass 1 content.
-- Any harness exception (Pass 1 or Pass 2) → log at ERROR level and re-raise. The existing silent `final_text = ""` path at `session_completion.py:463` is **removed**.
-- **`send_cb` failure policy**: `send_cb` exceptions remain log-and-continue (status quo). Re-raising from inside the completion-runner background task would strand the session in an indeterminate state (no upstream retry ladder exists for `_deliver_pipeline_completion`). The ERROR log line for `send_cb` failure already exists at `session_completion.py:479-484` and is sufficient. The "no silent fail" contract is enforced at the drafter layer (Pass 1/Pass 2), not at the Telegram/email delivery layer — drafter correctness is the scope of this plan; delivery retry is an orthogonal concern tracked separately.
+Interpreting Tom's three requirements together:
+- "messages are sent" — a user-visible delivery must land, even on drafter failure.
+- "no silent fail" — drafter failures must produce loud ERROR logs + an observable signal in the delivered message.
+- "Never return empty" — the final_text must always be non-empty before `send_cb`.
+
+These requirements are NOT satisfied by a Python `raise`. The `_wrapper` at `session_completion.py:611-619` catches and logs exceptions from `_deliver_pipeline_completion` silently (at `logger.error` but with no user-visible alert and no re-raise) AND `finalize_session` at line 502-513 lives inside the main try-block, so an early raise leaves the PM session stranded in `running` until the hierarchy health-check reaps it. A `raise` here would violate all three of Tom's requirements.
+
+**Policy (fixed v2):**
+
+- **Pass 1 empty / None output** → log at ERROR, compose a **degraded fallback message** (`_DEGRADED_FALLBACK` const: a short, visible "[drafter unavailable — pipeline completed, see session history for details]" style message built from `summary_context`), deliver via `send_cb`. Do NOT raise.
+- **Pass 1 exception** → log at ERROR, compose the same degraded fallback, deliver via `send_cb`. Do NOT re-raise.
+- **Pass 1 returns `_HARNESS_NOT_FOUND_PREFIX` sentinel** (CLI harness missing) → log at ERROR, deliver degraded fallback. Do NOT try to "refine" an error sentinel in Pass 2.
+- **Pass 2 empty / None output** → log at WARNING, fall back to `draft_text` (Pass 1's output). Deliver via `send_cb`.
+- **Pass 2 exception** → log at WARNING, fall back to `draft_text`. Deliver via `send_cb`. (Downgraded from "re-raise" in v1 per same silent-swallow logic as Pass 1.)
+- **Pass 2 returns `_HARNESS_NOT_FOUND_PREFIX` sentinel** → log at ERROR, fall back to `draft_text`. Do NOT deliver the error sentinel as a "refined message."
+- **`send_cb` failure policy**: `send_cb` exceptions remain log-and-continue (status quo at `session_completion.py:479-484`). Re-raising from the completion-runner background task would strand the session; no upstream retry ladder exists. The "no silent fail" contract is enforced at the drafter layer, not the Telegram/email delivery layer — delivery retry is orthogonal.
+- **`finalize_session` runs unconditionally** — wrap the `response_delivered_at` stamp + `finalize_session` in a `try/finally` pattern so the session always transitions to `completed` even when drafter / delivery misbehave. Status-quo behavior *almost* does this but depends on no exception between lines 446 and 502; the new 2-pass flow must not regress the finalization guarantee.
+
+The existing silent `final_text = ""` path at `session_completion.py:463-468` is **removed**; `final_text` is guaranteed non-empty when `send_cb` is called.
 
 **(d) Ollama Fallback — Deferred to #1137.**
 
@@ -308,11 +323,11 @@ Five edits in live code, one in settings, one in `.env.example`.
   # MODELS__SESSION_DEFAULT_MODEL=opus
   ```
 
-**Edit 5 — `agent/session_completion.py`** (~60 lines — the bulk of the D6 scope expansion)
+**Edit 5 — `agent/session_completion.py`** (~80 lines — the bulk of the D6 scope expansion)
 
-Introduce the 2-pass drafter + no-silent-fail contract.
+Introduce the 2-pass drafter + no-silent-fail contract + degraded-fallback delivery + always-run finalize.
 
-- Add a module-level constant near `_COMPLETION_PROMPT`. **Note the trailing `"DRAFT:\n"` — the actual draft is concatenated at call site, not `.format()`-substituted, to survive literal `{`/`}` in the draft body (ADV1):**
+- Add module-level constants near `_COMPLETION_PROMPT`. **Note the trailing `"DRAFT:\n"` on the review prefix — the actual draft is concatenated at call site, not `.format()`-substituted, to survive literal `{`/`}` in the draft body (ADV1):**
   ```python
   _COMPLETION_REVIEW_PROMPT_PREFIX = (
       "Below is a draft final-delivery message for the user. Review it against "
@@ -324,23 +339,64 @@ Introduce the 2-pass drafter + no-silent-fail contract.
       "markdown headers. Just the message as it should be sent.\n\n"
       "DRAFT:\n"
   )
+
+  def _build_degraded_fallback(summary_context: str) -> str:
+      """Compose a visible-but-explicit fallback when the drafter fails.
+
+      Satisfies Tom's D6(c) requirements simultaneously: (a) non-empty,
+      (b) visibly loud (operator can see this was degraded), (c) preserves
+      whatever context the pipeline did gather. Used when Pass 1 fails or
+      returns the _HARNESS_NOT_FOUND_PREFIX sentinel. See #1137 for the
+      Ollama-backed recovery that will eventually replace this fallback.
+      """
+      context = (summary_context or "").strip()
+      if context:
+          return (
+              "[drafter unavailable — pipeline completed] "
+              f"{context[:1500]}"
+          )
+      return "[drafter unavailable — pipeline completed, see session history for details]"
   ```
-  Callers build the full prompt as `_COMPLETION_REVIEW_PROMPT_PREFIX + draft_text`.
+  Callers build the full review prompt as `_COMPLETION_REVIEW_PROMPT_PREFIX + draft_text`.
 
-- Replace the current single-call block (the try/except around `get_response_via_harness` in `_deliver_pipeline_completion`; currently at lines 446-468) with a two-pass sequence:
+- Replace the current single-call block (the try/except around `get_response_via_harness` in `_deliver_pipeline_completion`; currently at lines 446-468) with a two-pass sequence that satisfies D6(c):
   1. **Pass 1 — Draft**: call `get_response_via_harness(message=prompt, working_dir=..., prior_uuid=pm_uuid, session_id=session_id, full_context_message=prompt, model="opus")`. Strip result → `draft_text`.
-     - If empty/None → log ERROR + `raise RuntimeError(f"[completion-runner] Pass 1 (draft) returned empty for parent_id={parent_id}")`.
-     - If exception → log ERROR and re-raise (no swallow).
-  2. **Pass 2 — Self-Review/Refine**: call `get_response_via_harness(message=_COMPLETION_REVIEW_PROMPT_PREFIX + draft_text, working_dir=..., prior_uuid=None, session_id=None, full_context_message=None, model="opus")`. Strip result → `refined_text`.
+     - If `draft_text.startswith(_HARNESS_NOT_FOUND_PREFIX)` (imported from `agent.session_executor`) → log ERROR, set `final_text = _build_degraded_fallback(summary_context)`, **skip Pass 2**.
+     - If empty/None → log ERROR, set `final_text = _build_degraded_fallback(summary_context)`, **skip Pass 2**.
+     - If the harness call raises → log ERROR with exception info, set `final_text = _build_degraded_fallback(summary_context)`, **skip Pass 2**.
+  2. **Pass 2 — Self-Review/Refine** (only reached when Pass 1 produced a real draft): call `get_response_via_harness(message=_COMPLETION_REVIEW_PROMPT_PREFIX + draft_text, working_dir=..., prior_uuid=None, session_id=None, full_context_message=None, model="opus")`. Strip result → `refined_text`.
      - **Critical (ADV2)**: `prior_uuid=None` and `session_id=None` to avoid (a) resuming from the now-advanced PM UUID and (b) polluting the PM session history with drafter/review turns. The review prompt is self-contained (Pass 1 draft embedded verbatim).
-     - If empty/None → log WARNING, use `draft_text` as `final_text` (fall back to Pass 1 per D6(c)).
-     - If exception → log ERROR and re-raise.
+     - If `refined_text.startswith(_HARNESS_NOT_FOUND_PREFIX)` → log ERROR, fall back to `draft_text` (Pass 1 stands).
+     - If empty/None → log WARNING, fall back to `draft_text`.
+     - If the harness call raises → log WARNING with exception info, fall back to `draft_text`.
      - Else → `final_text = refined_text`.
-  3. **Existing delivery** (`send_cb` call) proceeds with `final_text`, which is guaranteed non-empty. `send_cb` failures keep their current log-and-continue behavior per D6(c).
+  3. **Existing delivery** (`send_cb` call) proceeds with `final_text`, which is now guaranteed non-empty in every branch. `send_cb` failures keep their current log-and-continue behavior per D6(c).
 
-- **Remove the silent-fail path** (the current `except Exception: final_text = ""` → `if not final_text: final_text = summary_context.strip() or "..."` fallback at approximately lines 458-468). Exceptions re-raise out of the 2-pass block per above.
+- **Remove the silent-fail path** (the current `except Exception: final_text = ""` → `if not final_text: final_text = summary_context.strip() or "..."` fallback at approximately lines 458-468). Its role is replaced by the explicit degraded-fallback above.
 
-- `response_delivered_at` stamping stays after the successful `send_cb`. Pre-existing placement is correct; confirm during build.
+- **Wrap `response_delivered_at` stamp + `finalize_session` in `try/finally`**: restructure the delivery block so `finalize_session(parent, "completed", ...)` runs unconditionally. Current placement (lines 502-513) already runs on the normal path; we enforce the same on the degraded path. This prevents PM-session-stranded-in-`running` when a drafter or delivery step misbehaves.
+  ```python
+  try:
+      # Pass 1, Pass 2, build final_text (always non-empty post-revision).
+      ...
+      # send_cb delivery — log-and-continue on failure (status quo).
+      ...
+  finally:
+      # Stamp response_delivered_at + finalize_session ALWAYS, so the
+      # PM session transitions to completed even if drafter or send_cb
+      # hit unexpected state. D6(c) guarantee.
+      try:
+          parent.response_delivered_at = datetime.now(UTC)
+          parent.save(update_fields=["response_delivered_at", "updated_at"])
+      except Exception as stamp_err:
+          logger.warning(...)
+      try:
+          from models.session_lifecycle import finalize_session
+          finalize_session(parent, "completed", reason="pipeline complete: final summary delivered")
+      except Exception as finalize_err:
+          logger.error(...)
+  ```
+  The `asyncio.CancelledError` branch (lines 515+) stays outside the new try/finally — cancellation during drafter execution should not stamp `response_delivered_at` (there was no delivery).
 
 **Edit 6 — `docs/features/agent-session-model.md`** (docs correction; done in DOCS stage)
 - Rewrite "Per-Session Model Selection" section (lines 184-195) to describe the harness-CLI live path + the D1 precedence cascade.
@@ -399,14 +455,18 @@ Introduce the 2-pass drafter + no-silent-fail contract.
   - (g) INFO log line fires with the resolved value.
   - (h) `_resolve_session_model` cascade — each level covered independently.
 - [ ] **NEW**: `tests/unit/test_completion_runner_two_pass.py` — CREATE: focused module for D6(b)+(c):
-  - Happy path: both passes succeed, Pass 2 output delivered.
-  - Pass 1 empty → RuntimeError, no delivery.
-  - Pass 2 empty → WARNING log + Pass 1 delivered as fallback.
-  - Pass 1 exception → re-raised.
-  - Pass 2 exception → re-raised.
+  - Happy path: both passes succeed, Pass 2 output delivered via `send_cb`.
+  - **Pass 1 empty → ERROR log + degraded fallback delivered** (`send_cb` called with `_build_degraded_fallback(summary_context)`). No Python `raise`. No call to Pass 2.
+  - **Pass 1 exception → ERROR log + degraded fallback delivered**. No `raise` escapes `_deliver_pipeline_completion`.
+  - **Pass 1 returns `_HARNESS_NOT_FOUND_PREFIX` sentinel → ERROR log + degraded fallback delivered**. Sentinel never reaches `send_cb`.
+  - Pass 2 empty → WARNING log + Pass 1 draft delivered as fallback.
+  - Pass 2 exception → WARNING log + Pass 1 draft delivered as fallback.
+  - **Pass 2 returns `_HARNESS_NOT_FOUND_PREFIX` sentinel → ERROR log + Pass 1 draft delivered**.
   - Both passes use `model="opus"`.
   - **Pass 2 UUID isolation (ADV2)**: Pass 2 is called with `prior_uuid=None` and `session_id=None`, regardless of what was passed to Pass 1.
   - **`.format()` safety (ADV1)**: Pass 1 output containing literal `{`/`}` (e.g. a JSON snippet or `"dict = {'k': 'v'}"`) does NOT crash Pass 2's prompt construction. Assert via a fixture whose Pass 1 draft contains braces.
+  - **Always-finalize**: even when Pass 1 raises (simulated), `finalize_session(parent, "completed", ...)` is invoked (spy on `finalize_session` or assert `parent.status == "completed"` after the runner returns).
+  - **`send_cb` failure**: if `send_cb` itself raises, the runner logs ERROR and proceeds to `finalize_session` (does not re-raise).
 
 **NOT affected:** memory system, PostToolUse hooks, subagent tests (`.claude/agents/*.md` mechanism), Popoto model tests, task list isolation tests. The change is surgical.
 
@@ -441,12 +501,12 @@ Introduce the 2-pass drafter + no-silent-fail contract.
 **Mitigation:** Docs correction (Edit 6) is non-negotiable. Add a TODO in `_create_options()` noting that the live path is the harness CLI and this wiring is retained for test fixtures. Follow-up cleanup issue optional.
 
 ### Risk 5: Completion-runner 2-pass doubles PM-final-delivery latency
-**Impact:** Two sequential harness calls roughly double the wall-clock time for final delivery (from ~X seconds to ~2X seconds).
-**Mitigation:** Acceptable per Tom's quality-over-cost stance for this specific call. The final-delivery is async background work; user-visible latency is bounded by `send_cb` → Telegram, not the harness turns. If latency becomes a problem, Pass 2 could degrade to a client-side length-trim heuristic, but that's a follow-up.
+**Impact:** Two sequential Opus harness calls roughly double the wall-clock time for final delivery. A single Opus harness turn is typically 5-15s for a short completion summary; 2-pass lifts this to ~10-30s. **This is user-visible silent time** between the pipeline transitioning to terminal state and the user seeing the final message — the `send_cb` step (Telegram/email) is fast (sub-second) and does NOT dominate. The harness turns dominate.
+**Mitigation:** Acceptable per Tom's quality-over-cost stance for this specific call. The user was already waiting 30s-minutes for the full pipeline; an additional ~10s for a higher-quality final message is marginal. If latency becomes a problem, Pass 2 could degrade to a client-side length-trim heuristic or drop to Haiku, but that's a follow-up tuning pass.
 
-### Risk 6: No-silent-fail contract surfaces failures that were previously hidden
-**Impact:** Until #1137 ships, Anthropic outages that would have silently returned `summary_context` now raise and may leave users without *any* final-delivery message.
-**Mitigation:** Per D6(c) + D6(d) — this is the desired behavior. "Loud failure" is better than "bland filler message that obscures a real outage." Ops will see the error in logs and can manually retry. Once #1137 ships, Ollama absorbs the outage.
+### Risk 6: Degraded-fallback message is visibly "ugly" on Anthropic outage
+**Impact:** On drafter failure (empty / exception / `_HARNESS_NOT_FOUND_PREFIX`), the user receives a message prefixed with `[drafter unavailable — pipeline completed]` followed by a truncated summary_context. This is uglier than the status-quo "bland filler" (which silently delivered `summary_context` or a generic "pipeline completed" string), but it is intentionally loud.
+**Mitigation:** This IS the desired behavior per D6(c): messages are always sent (never silent fail) AND failures are visibly marked. Ops will see the ERROR log and can manually retry. Once #1137 ships, the Ollama fallback will produce a proper drafted message instead of the degraded fallback — removing Risk 6 entirely.
 
 ### Risk 7: Pass 2 review LLM introduces hallucination in the final message
 **Impact:** Pass 2 is a Claude-Opus refinement of Pass 1's draft. The review prompt says "return a refined version," but an LLM could invent facts or change meaning.
@@ -524,7 +584,9 @@ Integration tests verifying end-to-end agent behavior: `tests/integration/test_s
 - [ ] PM persona Stage→Model Dispatch Table remains functional — Sonnet overrides written by the PM still flow to argv (no regression in existing stage routing); if anything, they now take effect where they previously didn't.
 - [ ] **Completion-runner: always Opus** — both harness calls in `_deliver_pipeline_completion` use `model="opus"` regardless of PM session model (unit test).
 - [ ] **Completion-runner: 2-pass drafter** — Pass 1 produces a draft, Pass 2 refines; both calls observable in test (unit test + integration test).
-- [ ] **Completion-runner: no-silent-fail** — Pass 1 empty raises `RuntimeError`; Pass 1 exception re-raises; Pass 2 empty logs WARNING and falls back to Pass 1 (three unit tests).
+- [ ] **Completion-runner: no-silent-fail** — Pass 1 empty or exception → ERROR log + visible degraded-fallback message delivered via `send_cb` (NOT a Python `raise`); Pass 2 empty or exception → WARNING log + Pass 1 draft delivered. Five unit tests covering each branch.
+- [ ] **Completion-runner: `_HARNESS_NOT_FOUND_PREFIX` guards** — neither pass delivers the CLI-missing sentinel as a user-facing message. Pass 1 sentinel → degraded fallback; Pass 2 sentinel → Pass 1 draft (with ERROR log).
+- [ ] **Completion-runner: always-finalize** — `finalize_session(parent, "completed")` runs even when the drafter or delivery step fails. Unit test forces Pass 1 to raise and asserts `finalize_session` still fires (or status transitions to `completed`).
 - [ ] **Completion-runner: Ollama-fallback-pending-#1137 note** — code comment near the Pass 1 call references #1137 as the issue that will add Ollama failover on Anthropic outage.
 - [ ] Tests pass (`pytest tests/ -x -q`).
 - [ ] Format clean (`python -m ruff format .`).
@@ -701,8 +763,19 @@ Small appetite, one builder + one validator.
 ### Nits
 Nit-level items (5) noted by critique left as-is; builder/reviewer will catch at code review.
 
+**Run 2: 2026-04-23 — NEEDS REVISION (1 blocker, 4 concerns, 4 nits)**
+
+### Blocker addressed
+- **`_wrapper` silent-swallow + stranded-session** (`session_completion.py:611-619`): Round-1's "Pass 1 empty → raise RuntimeError" would be silently logged by `_wrapper` AND leave PM stranded in `running` (because `finalize_session` runs inside the main try-block at line 502-513). FIXED: D6(c) rewritten in v2 to deliver a **visible degraded-fallback message** via `send_cb` instead of raising, and to wrap `finalize_session` in `try/finally` so it always runs. Now satisfies Tom's three co-stated requirements — "messages are sent" + "no silent fail" + "never return empty" — simultaneously, which a Python `raise` cannot.
+
+### Concerns addressed
+- **Pass 2 `_HARNESS_NOT_FOUND_PREFIX` sentinel would be falsely delivered as a refined draft**: FIXED — D6(c) and Edit 5 add explicit sentinel guards on both passes. Pass 1 sentinel → degraded fallback; Pass 2 sentinel → Pass 1 draft. Test cases added.
+- **Pass 1 `session_id=session_id` writeback**: EXPLICIT DECISION — keep status-quo (Pass 1 writes the drafter's UUID onto the PM session). Rationale: PM is at pipeline terminal state; the writeback is functionally inert because the PM session will not be resumed after `completed`. Changing this is scope creep; documented and moved on. Pass 2 explicitly does NOT write back (ADV2 isolation).
+- **Success Criteria "Pass 1 exception re-raises" contradiction**: FIXED — criterion rewritten to "ERROR log + visible degraded-fallback delivered via `send_cb` (NOT a Python raise)."
+- **Risk 5 latency misidentification (send_cb vs. harness)**: FIXED — Risk 5 prose now correctly identifies Opus harness calls as the ~10-30s user-visible bottleneck; `send_cb` is sub-second and does not dominate.
+
 ---
 
 ## Open Questions
 
-All resolved — see **Decisions (D1–D6)** section above. No open questions remain. Plan has completed one critique revision pass and is ready for build.
+All resolved — see **Decisions (D1–D6)** section above. No open questions remain. Plan has completed two critique revision passes (Round 1: 2 blockers + 6 concerns; Round 2: 1 blocker + 4 concerns; both fully addressed). Ready for build.
