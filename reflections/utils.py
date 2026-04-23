@@ -1,8 +1,7 @@
 """
 reflections/utils.py — Shared helpers for all reflection callables.
 
-Extracted from scripts/reflections.py (ReflectionRunner class and module-level
-helpers). All helpers are pure functions with no shared mutable state.
+All helpers are pure functions with no shared mutable state.
 """
 
 from __future__ import annotations

@@ -34,6 +34,7 @@ from popoto import (
     DatetimeField,
     DictField,
     Field,
+    FloatField,
     IndexedField,
     IntField,
     KeyField,
@@ -176,7 +177,14 @@ class AgentSession(Model):
     pr_url = Field(null=True)
 
     # === Claude Code identity mapping ===
-    claude_session_uuid = Field(null=True)
+    # IndexedField so the PreCompact hook's 3-per-fire lookups
+    # (`AgentSession.query.filter(claude_session_uuid=...)` in
+    # `agent/hooks/pre_compact.py::_check_cooldown`, `_update_session_cooldown`,
+    # and `_increment_skipped_count`) use a stable secondary index rather than
+    # a full-scan. Also eliminates a test-flake path where filter-by-UUID
+    # could miss a just-saved row across partial `save(update_fields=...)`
+    # calls in the same process (#1127 PR #1135 review tech-debt).
+    claude_session_uuid = IndexedField(null=True)
 
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
@@ -250,6 +258,30 @@ class AgentSession(Model):
     recovery_attempts = IntField(default=0)
     # Count of Tier 2 reprieves (activity-positive saves) for post-hoc analysis.
     reprieve_count = IntField(default=0)
+
+    # === Compaction hardening fields (issue #1127) ===
+    # Unix timestamp of the most recent successful JSONL backup captured by
+    # `pre_compact_hook`. Read by `agent/output_router.py::determine_delivery_action`
+    # to enforce the 30-second post-compaction nudge guard. Read by the
+    # PreCompact hook itself to enforce the 5-minute cooldown between backups.
+    # Writer: `agent/hooks/pre_compact.py::pre_compact_hook` via partial save
+    # `save(update_fields=["last_compaction_ts", "compaction_count"])`. Also
+    # written by the SDK-tick backstop in `agent/session_executor.py` when a
+    # message-count drop implies the hook missed a compaction.
+    last_compaction_ts = FloatField(default=None)
+    # Total number of successful JSONL backups written for this session. Bumped
+    # by `pre_compact_hook` on each successful snapshot. Readers: dashboard /
+    # post-hoc analysis only — the output router does NOT read this.
+    compaction_count = IntField(default=0)
+    # Total PreCompact events suppressed by the 5-minute cooldown (cooldown-hit
+    # path in `pre_compact_hook`) OR by the SDK-tick backstop in the executor
+    # when the hook was skipped. Used for production observability of compaction
+    # frequency and hook-miss rate.
+    compaction_skipped_count = IntField(default=0)
+    # Total nudge ticks suppressed by the 30-second post-compact guard in
+    # `agent/session_executor.py`'s `"defer_post_compact"` action dispatch
+    # branch. Lets us measure how often the guard actually fires.
+    nudge_deferred_count = IntField(default=0)
 
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions

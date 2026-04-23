@@ -1,11 +1,9 @@
 """
 reflections/daily_report.py — Daily report pipeline callable.
 
-Extracted from scripts/reflections.py pipeline:
-  step_produce_report → step_create_github_issue
-
-This is a single callable that runs both sub-steps internally,
-preserving ordering without depends_on complexity in the YAML scheduler.
+Pipeline: Produce Report → Create GitHub Issue. This is a single callable
+that runs both sub-steps internally, preserving ordering without depends_on
+complexity in the YAML scheduler.
 
 The daily report aggregates findings from all other reflections that ran today
 via their Redis Reflection state records, then posts to GitHub and Telegram.
@@ -29,8 +27,8 @@ REFLECTIONS_DIR = PROJECT_ROOT / "logs" / "reflections"
 def _collect_reflection_findings() -> dict[str, list[str]]:
     """Collect findings from all Reflection records that ran today.
 
-    Reads from the Reflection model (used by the YAML scheduler) rather than
-    ReflectionRun. Returns a dict of category → list[finding].
+    Reads from the Reflection model (the YAML scheduler's per-callable state
+    record). Returns a dict of category → list[finding].
     """
     findings: dict[str, list[str]] = {}
 
@@ -67,9 +65,6 @@ async def run() -> dict:
     """Run the daily report pipeline.
 
     Pipeline: Produce Report → Create GitHub Issue
-
-    Maps to monolith: step_daily_report_and_notify (which calls step_produce_report
-    and step_create_github_issue in sequence)
 
     Note: The "must run after all other reflections" constraint cannot be
     mechanically enforced by the current scheduler (no DAG). This callable

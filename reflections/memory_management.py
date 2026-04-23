@@ -1,7 +1,7 @@
 """
 reflections/memory_management.py — Memory management reflection callables.
 
-New reflections with no monolith equivalent:
+Reflection callables:
   - run_memory_decay_prune    — Delete below-threshold memories (dry_run default)
   - run_memory_quality_audit  — Flag zero-access + dismissed memories
   - run_knowledge_reindex     — Re-index work-vault docs into KnowledgeDocument
