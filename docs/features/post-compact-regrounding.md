@@ -34,7 +34,8 @@ The nudge always includes the header ("Context was just compacted. Re-ground:") 
 | AgentSession with plan_url + stage_states + PROGRESS.md | Full 4-item nudge |
 | AgentSession with plan_url only | Header + plan item + TodoWrite |
 | AgentSession with no plan_url or stage_states | Header + TodoWrite (minimal nudge) |
-| No AgentSession row (bare CLI session, no session_id) | Nothing emitted |
+| session_id present, no matching AgentSession row | Header + TodoWrite (minimal nudge) |
+| No session_id in hook input | Nothing emitted |
 
 The minimal nudge (header + TodoWrite) is universally useful — even in one-off Claude Code sessions with no SDLC context, reminding the agent to check its task list is sound.
 
