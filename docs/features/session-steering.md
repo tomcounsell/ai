@@ -124,6 +124,38 @@ When both drafter backends (Haiku and OpenRouter) fail, `send_response_with_file
 
 See [Message Drafter](message-drafter.md) for the current feature doc covering the drafter module. (The previous pointer to `summarizer-format.md` is gone — content migrated into `message-drafter.md`.)
 
+## Watchdog-Authored Steering (issue #1128)
+
+The session watchdog (`monitoring/session_watchdog.py`) is now an active
+steering-message **sender** alongside humans, the PM session, and the
+drafter fallback. When one of three conditions fires, the watchdog
+enqueues a targeted message via
+`_inject_watchdog_steer(session_id, reason, message)`, which calls
+`push_steering_message(..., sender="watchdog")`:
+
+| Reason | Trigger | Message template |
+|--------|---------|-------------------|
+| `repetition` | `detect_repetition` returns True | "Stop and re-check the task — you appear to be repeating the same tool call..." |
+| `error_cascade` | `detect_error_cascade` returns True | "Stop — you've hit N errors in the last 20 operations..." |
+| `token_alert` | cumulative `input+output` tokens ≥ `TOKEN_ALERT_THRESHOLD` on a `running` session | "Token budget exceeded: $X / Y tokens spent this session..." |
+
+**Sender='watchdog'** lets downstream consumers distinguish automated
+nudges from human steers:
+
+- `valor-session status --id <id>` renders the sender on each queued entry.
+- The dashboard JSON includes `sender` on queued-steering entries.
+- `agent/session_executor.py`'s steering-drain loop logs `[steering]
+  received from sender=watchdog` so operators can trace which ticks
+  corresponded to a watchdog-driven correction.
+
+**Per-reason atomic cooldown.** Redis `SET key "1" NX EX <ttl>` with a
+reason-scoped key (`watchdog:steer_cooldown:<reason>:<session_id>`)
+eliminates the read-then-write race entirely. A `repetition` steer does
+not suppress a parallel `error_cascade` or `token_alert` steer.
+
+**Feature gate.** `WATCHDOG_AUTO_STEER_ENABLED=false` disables the push
+without disabling the detection (still logged at WARNING).
+
 ## Parent-Child Steering (PM session to Dev session)
 
 In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering** where a PM session (PM persona) pushes steering messages to its spawned Dev sessions.

@@ -103,6 +103,7 @@ The worker's startup sequence is deterministic:
 | 5 | `_ensure_worker(worker_key)` for each pending session | Kick per-worker-key loops for queued sessions |
 | 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
+| 8 | `run_idle_sweep()` | Background task: proactively tears down idle persistent Claude SDK clients on dormant/paused sessions before the ~48h Anthropic silent-death window (issue #1128). See [Worker-Internal Idle Sweeper](#worker-internal-idle-sweeper-issue-1128). |
 
 ### Execution Harness Routing
 
@@ -151,6 +152,56 @@ _handle_dev_session_completion()  [dev sessions only, called AFTER complete_tran
 PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
+
+### Worker-Internal Idle Sweeper (issue #1128)
+
+The **worker process** owns the `_active_clients` registry at
+`agent/sdk_client.py:58`, which maps `session_id → ClaudeSDKClient` for
+interactive chat sessions (the SDK-path). These persistent SDK
+connections die silently after ~48h of idle (fleet-ops finding #1104),
+so the worker spawns an idle-sweeper background task
+(`worker/idle_sweeper.py::run_idle_sweep`) to proactively tear down
+clients well before that window.
+
+```
+worker/__main__.py startup
+    |
+    v
+asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
+    |
+    v
+loop every IDLE_SWEEP_INTERVAL seconds:
+    _sweep_once()
+      |
+      |-- snapshot = list(_active_clients.items())
+      |-- for (session_id, client) in snapshot:
+      |     load AgentSession.filter(session_id=session_id)
+      |     if status in {dormant, paused, paused_circuit}
+      |        AND updated_at age > IDLE_TEARDOWN_THRESHOLD:
+      |          await client.close()    -- idempotent
+      |          _active_clients.pop(session_id, None)
+      |          AgentSession.sdk_connection_torn_down_at = now
+      |          save(update_fields=["sdk_connection_torn_down_at"])
+      v
+cancel on worker SIGTERM shutdown
+```
+
+**Process locality** is the load-bearing design choice: the
+session-watchdog process (`monitoring/session_watchdog.py`) does NOT
+share memory with the worker, so it cannot reach `_active_clients`. The
+teardown MUST run inside the worker process. The watchdog remains
+responsible for repetition / error-cascade / token-alert detection and
+steering (see [Session Watchdog](session-watchdog.md)) but does not
+touch the SDK-client registry.
+
+**Harness-path sessions** (all production PM / Dev / Teammate work) are
+unaffected — `_run_harness_subprocess` spawns a short-lived `claude -p`
+subprocess per turn, leaving nothing in `_active_clients` to go stale.
+The sweeper is a no-op for harness-path sessions.
+
+**Configuration.** Defaults are generous (sweep every 30 min, tear down
+at 24h dormant); tune via env vars — see the [Session Watchdog env-var
+table](session-watchdog.md#configuration).
 
 ## Worker Key Routing (issues #831, #1085)
 

@@ -86,6 +86,43 @@ Alerts are sent as Telegram messages to the chat where the session originated. E
 
 **Fallback**: If the Telegram client is unavailable or the send fails, the alert is logged at WARNING level and the watchdog continues.
 
+## Automatic Loop-Break Steering (issue #1128)
+
+When `detect_repetition` or `detect_error_cascade` fires, the watchdog no
+longer just logs the finding — it automatically enqueues a targeted
+steering message via `agent/steering.py::push_steering_message` tagged
+`sender="watchdog"`. The message is drained at the next tool-call
+boundary by the existing PostToolUse hook, so the agent receives the
+correction before its next repetition of the stuck tool. A token-spend
+soft-threshold alert uses the same helper to nudge sessions whose
+cumulative `total_input_tokens + total_output_tokens` crosses
+`TOKEN_ALERT_THRESHOLD` (default 5M) while `status == "running"`.
+
+**Atomic per-reason cooldown.** Each trigger reason has its own Redis
+cooldown key (`watchdog:steer_cooldown:<reason>:<session_id>`). The
+cooldown is enforced with a single atomic `SET key "1" NX EX <ttl>` —
+never a separate GET/SET — so concurrent ticks cannot double-fire.
+Because the keys are reason-scoped, a repetition steer does not
+suppress a parallel error-cascade or token-alert steer.
+
+| Reason | Cooldown env var | Default TTL |
+|--------|------------------|-------------|
+| `repetition` | `WATCHDOG_STEER_COOLDOWN` | 900s (3 ticks) |
+| `error_cascade` | `WATCHDOG_STEER_COOLDOWN` | 900s (3 ticks) |
+| `token_alert` | `WATCHDOG_TOKEN_ALERT_COOLDOWN` | 3600s (1 hour) |
+
+**Sender attribution.** Every watchdog-authored steer passes
+`sender="watchdog"` so the dashboard, `valor-session status`, and the PM
+steering-drain log can distinguish automated nudges from human steers.
+
+**Delivery timing.** Steers drain at tool-call boundaries via the
+existing PostToolUse hook. Operators should expect a one-tool-call delay
+between detection and correction; this is acceptable because stuck
+loops emit many tool calls per minute.
+
+**Feature gate.** `WATCHDOG_AUTO_STEER_ENABLED=false` disables loop-break
+steering without disabling detection (still logged at WARNING).
+
 ## Configuration
 
 All thresholds are module-level constants in `monitoring/session_watchdog.py`:
@@ -100,8 +137,27 @@ All thresholds are module-level constants in `monitoring/session_watchdog.py`:
 | `DURATION_THRESHOLD` | 7200 (2 hr) | Session age before duration alert |
 | `ALERT_COOLDOWN` | 1800 (30 min) | Minimum gap between alerts per session |
 | `TRANSCRIPT_STALE_THRESHOLD_MIN` | 15 | Minutes before transcript is considered stale |
+| `STEER_COOLDOWN` | 900 (15 min) | Per-reason cooldown for repetition/cascade steers |
+| `TOKEN_ALERT_THRESHOLD` | 5,000,000 | Soft-threshold on `input + output` tokens |
+| `TOKEN_ALERT_COOLDOWN` | 3600 (1 hr) | Cooldown for token-alert steers |
 
-No runtime configuration — edit constants directly. Intentionally static to keep the watchdog simple.
+**Environment variables (issue #1128):** every constant above that
+participates in loop-break / token-alert behavior is env-tunable and the
+behavior itself is toggleable:
+
+| Env var | Purpose | Default |
+|---------|---------|---------|
+| `WATCHDOG_AUTO_STEER_ENABLED` | Toggle auto-steer on/off | on |
+| `WATCHDOG_TOKEN_TRACKING_ENABLED` | Toggle per-session token accumulation | on |
+| `WATCHDOG_IDLE_TEARDOWN_ENABLED` | Toggle worker idle-sweeper | on |
+| `WATCHDOG_TOKEN_ALERT_THRESHOLD` | Soft-threshold tokens | 5000000 |
+| `WATCHDOG_TOKEN_ALERT_COOLDOWN` | Token-alert cooldown (s) | 3600 |
+| `WATCHDOG_STEER_COOLDOWN` | Repetition/cascade cooldown (s) | 900 |
+| `WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS` | Dormancy age to trigger SDK teardown | 86400 |
+| `WATCHDOG_IDLE_SWEEP_INTERVAL` | Seconds between sweeper ticks | 1800 |
+
+Falsy values (case-insensitive `"0"`, `"false"`, `"no"`) disable the
+gated feature. Any other value — including unset — means enabled.
 
 ## Integration
 
@@ -123,17 +179,48 @@ The session watchdog is complementary — it catches sessions that go *silent* (
 
 **Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active with no recent activity). For active sessions, stall detection is activity-based: the watchdog checks both the Redis `updated_at` field and in-memory timestamps from `sdk_client.get_session_last_activity()`, using whichever is more recent. Sessions producing tool calls or log output are never interrupted regardless of total runtime. See [Session Watchdog Reliability](session-watchdog-reliability.md) for the activity-based detection system and [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for logging details.
 
+## Process-Locality Contract (issue #1128)
+
+The session-watchdog process (`monitoring/session_watchdog.py`) and the
+**worker-internal idle sweeper** (`worker/idle_sweeper.py`) are two
+separate actuators that share nothing but `AgentSession` records and the
+steering queue — both Redis-backed.
+
+- **Watchdog process**: owns repetition / error-cascade / token-threshold
+  detection AND their steering actuation. Reads `AgentSession` tokens
+  (never writes them). Never imports `agent.sdk_client._active_clients`
+  — the registry is worker-process-local.
+- **Worker process**: owns the `_active_clients` registry and the idle
+  sweeper. The sweeper proactively tears down persistent SDK clients on
+  dormant / paused / paused_circuit sessions whose `updated_at` age
+  exceeds `WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS` (default 24h), well
+  inside the ~48h Anthropic silent-death window.
+
+See `worker/idle_sweeper.py` docstring and
+[bridge-worker-architecture.md](bridge-worker-architecture.md) for the
+full topology.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `monitoring/session_watchdog.py` | Watchdog implementation (all detection + alerting) |
+| `monitoring/session_watchdog.py` | Watchdog implementation (detection + loop-break steer + token alert) |
 | `monitoring/__init__.py` | Module exports |
 | `agent/health_check.py` | PostToolUse health check with watchdog_unhealthy flag and additionalContext injection |
 | `agent/agent_session_queue.py` | Nudge loop checks `is_session_unhealthy()` before auto-continuing |
-| `models/agent_session.py` | `watchdog_unhealthy` field on AgentSession |
+| `agent/sdk_client.py` | `accumulate_session_tokens` helper (SDK + harness path writers) |
+| `agent/steering.py` | `push_steering_message` with `sender="watchdog"` attribution |
+| `worker/idle_sweeper.py` | Worker-internal idle SDK client teardown (issue #1128) |
+| `worker/__main__.py` | Starts the idle sweeper alongside reflection + notify tasks |
+| `models/agent_session.py` | `watchdog_unhealthy`, token fields, `sdk_connection_torn_down_at` |
 | `bridge/telegram_bridge.py` | Integration point (launches watchdog task) |
-| `tests/unit/test_session_watchdog.py` | 30 unit tests |
-| `tests/unit/test_health_check.py` | 30 unit tests for PostToolUse health check |
-| `tests/unit/test_transcript_liveness.py` | 12 unit tests for transcript mtime check |
+| `tests/unit/test_session_watchdog.py` | Detection + steer-actuator assertions |
+| `tests/unit/test_watchdog_loop_break_steer.py` | `_inject_watchdog_steer` cooldown + sender attribution |
+| `tests/unit/test_watchdog_token_alert.py` | Token threshold → steer wiring |
+| `tests/unit/test_session_token_accumulator.py` | `accumulate_session_tokens` end-to-end |
+| `tests/unit/test_harness_token_capture.py` | Harness-path B3 fix (usage + cost from `result` event) |
+| `tests/unit/test_worker_idle_sweeper.py` | Worker-internal idle teardown |
+| `tests/unit/test_health_check.py` | PostToolUse health check |
+| `tests/unit/test_transcript_liveness.py` | Transcript mtime check |
 | `docs/plans/session-watchdog.md` | Original plan document |
+| `docs/plans/watchdog-hardening.md` | issue #1128 plan |
