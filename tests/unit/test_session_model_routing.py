@@ -242,9 +242,7 @@ class TestHarnessModelArgvInjection:
             argv = list(mock_exec.call_args.args)
             model_idx = argv.index("--model")
             resume_idx = argv.index("--resume")
-            assert model_idx < resume_idx, (
-                f"--model must precede --resume: {argv}"
-            )
+            assert model_idx < resume_idx, f"--model must precede --resume: {argv}"
 
     @pytest.mark.asyncio
     async def test_defensive_copy_of_caller_harness_cmd(self):

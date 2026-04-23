@@ -97,6 +97,5 @@ def test_all_harness_call_sites_pass_model_kwarg() -> None:
     violations = _find_violations()
     assert not violations, (
         "get_response_via_harness must receive a model= kwarg at every call "
-        "site (plan #1129 A-1 regression guard):\n  "
-        + "\n  ".join(violations)
+        "site (plan #1129 A-1 regression guard):\n  " + "\n  ".join(violations)
     )

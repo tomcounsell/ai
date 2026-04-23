@@ -69,6 +69,7 @@ def _build_degraded_fallback(summary_context: str) -> str:
         return f"[drafter unavailable — pipeline completed] {context[:1500]}"
     return "[drafter unavailable — pipeline completed, see session history for details]"
 
+
 # Background tasks spawned by `_deliver_pipeline_completion`. Drained by the
 # worker shutdown sequence so in-flight completion turns either finish or are
 # cancelled cleanly.
@@ -541,8 +542,7 @@ async def _deliver_pipeline_completion(
             pass1_failed = True
             pass1_failure_mode = "exception"
             logger.error(
-                "[completion-runner][DEGRADED] Pass 1 failure mode=exception "
-                "session_id=%s err=%s",
+                "[completion-runner][DEGRADED] Pass 1 failure mode=exception session_id=%s err=%s",
                 session_id,
                 harness_err,
                 exc_info=True,

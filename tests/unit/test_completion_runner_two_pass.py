@@ -189,9 +189,7 @@ class TestPass1Failures:
             )
 
         send_cb.assert_awaited_once()
-        assert send_cb.await_args.args[1].startswith(
-            "[drafter unavailable — pipeline completed]"
-        )
+        assert send_cb.await_args.args[1].startswith("[drafter unavailable — pipeline completed]")
         _fs.assert_called_once()
 
     async def test_pass1_sentinel_delivers_degraded_fallback(self, parent, send_cb):
@@ -229,9 +227,9 @@ class TestPass1Failures:
 
         # Counter key should be hit.
         incr_keys = [call.args[0] for call in redis_db.incr.call_args_list]
-        assert any(
-            k.startswith("completion_runner:degraded_fallback:daily:") for k in incr_keys
-        ), f"No degraded_fallback counter key incremented; keys: {incr_keys}"
+        assert any(k.startswith("completion_runner:degraded_fallback:daily:") for k in incr_keys), (
+            f"No degraded_fallback counter key incremented; keys: {incr_keys}"
+        )
 
 
 # ---------------------------------------------------------------------------
