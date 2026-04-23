@@ -85,19 +85,16 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 
 | File | Service Labels |
 |------|---------------|
-| `com.valor.reflections.plist` | `com.valor.reflections` |
 | `scripts/valor-service.sh` | `com.valor.bridge`, `com.valor.update`, `com.valor.bridge-watchdog` |
-| `scripts/update/service.py` | `com.valor.reflections`, `com.valor.daydream` (old), `com.valor.caffeinate` |
+| `scripts/update/service.py` | `com.valor.reflections` (removed service), `com.valor.daydream` (old), `com.valor.caffeinate` |
 | `monitoring/bridge_watchdog.py` | `com.valor.bridge` |
-| `scripts/install_reflections.sh` | `com.valor.reflections`, `com.valor.daydream` |
-| `scripts/remote-update.sh` | `com.valor.reflections`, `com.valor.daydream` |
+| `scripts/remote-update.sh` | `com.valor.reflections` (removed service), `com.valor.daydream` |
 
 ### B4. Data Paths
 
 | Path | Used By |
 |------|---------|
 | `~/.valor/test_results/` | `tools/test_scheduler/__init__.py` |
-| `data/valor.session` | `scripts/reflections.py` (Telegram session) |
 
 ### B5. Scripts (branded filenames & strings)
 
@@ -108,7 +105,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | `scripts/calendar_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
 | `scripts/calendar_prompt_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
 | `scripts/update/verify.py` | `valor-calendar` path checks |
-| `scripts/update/run.py` | `com.valor.reflections.plist` |
+| `scripts/update/run.py` | `com.valor.reflections.plist` (removed service) |
 | `scripts/update/__init__.py` | `"Modular update system for Valor"` |
 | `scripts/telegram_login.py` | `valor-service.sh` reference |
 
