@@ -5,7 +5,7 @@
 **See also:**
 - [Mid-Session Steering](mid-session-steering.md) — Telegram reply-thread flow (user-facing)
 - [Steering Queue: Historical Spec](steering-implementation-spec.md) — Original Redis list design and bridge coalescing
-- [PM Final Delivery](pm-final-delivery.md) — SDLC terminal-turn protocol. Fan-out completion invokes the completion-turn runner directly; it no longer goes through the steering inbox. The `[PIPELINE_COMPLETE]` content marker referenced in earlier docs is deprecated (issue #1058).
+- [PM Final Delivery](pm-final-delivery.md) — SDLC terminal-turn protocol. Fan-out completion invokes the completion-turn runner directly; it does not go through the steering inbox. The `[PIPELINE_COMPLETE]` content marker historically referenced in earlier docs was retired in issue #1058.
 
 External steering for `AgentSession` via `queued_steering_messages`. Any process — the PM, a CLI user, another agent — can write messages to a running session's inbox. The worker injects them at the next turn boundary.
 
