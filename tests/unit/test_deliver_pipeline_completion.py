@@ -90,10 +90,12 @@ class TestLock:
 
 
 class TestHarnessResult:
-    async def test_empty_harness_delivers_fallback(self, parent, send_cb):
+    async def test_empty_pass1_delivers_degraded_fallback(self, parent, send_cb):
+        """Pass 1 empty → degraded fallback, Pass 2 skipped (D6(c) v2)."""
+        harness = AsyncMock(return_value="")
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_ok()),
-            patch("agent.sdk_client.get_response_via_harness", new=AsyncMock(return_value="")),
+            patch("agent.sdk_client.get_response_via_harness", new=harness),
             patch("agent.sdk_client._get_prior_session_uuid", return_value="uuid-1"),
             patch("models.session_lifecycle.finalize_session"),
         ):
@@ -101,9 +103,13 @@ class TestHarnessResult:
                 parent, "fallback summary context", send_cb, parent.chat_id, None
             )
         send_cb.assert_awaited_once()
-        assert send_cb.await_args.args[1] == "fallback summary context"
+        assert send_cb.await_args.args[1] == (
+            "[drafter unavailable — pipeline completed] fallback summary context"
+        )
+        # Pass 2 must be skipped when Pass 1 fails.
+        assert harness.await_count == 1
 
-    async def test_whitespace_harness_delivers_fallback(self, parent, send_cb):
+    async def test_whitespace_pass1_delivers_degraded_fallback(self, parent, send_cb):
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_ok()),
             patch(
@@ -115,9 +121,13 @@ class TestHarnessResult:
             await session_completion._deliver_pipeline_completion(
                 parent, "ctx fallback", send_cb, parent.chat_id, None
             )
-        assert send_cb.await_args.args[1] == "ctx fallback"
+        assert send_cb.await_args.args[1] == (
+            "[drafter unavailable — pipeline completed] ctx fallback"
+        )
 
-    async def test_harness_raises_delivers_fallback(self, parent, send_cb):
+    async def test_pass1_raises_delivers_degraded_fallback(self, parent, send_cb):
+        """Pass 1 exception → ERROR log + degraded fallback; no raise escapes."""
+
         async def _raise(**_kw):
             raise RuntimeError("harness boom")
 
@@ -127,12 +137,16 @@ class TestHarnessResult:
             patch("agent.sdk_client._get_prior_session_uuid", return_value="uuid-1"),
             patch("models.session_lifecycle.finalize_session"),
         ):
+            # Must NOT raise — degraded fallback is delivered instead.
             await session_completion._deliver_pipeline_completion(
                 parent, "ctx after harness fail", send_cb, parent.chat_id, None
             )
-        assert send_cb.await_args.args[1] == "ctx after harness fail"
+        assert send_cb.await_args.args[1] == (
+            "[drafter unavailable — pipeline completed] ctx after harness fail"
+        )
 
     async def test_missing_uuid_still_invokes_harness(self, parent, send_cb):
+        # Return real text so Pass 2 kicks in (to verify both still run).
         harness = AsyncMock(return_value="ok")
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_ok()),
@@ -143,14 +157,13 @@ class TestHarnessResult:
             await session_completion._deliver_pipeline_completion(
                 parent, "ctx", send_cb, parent.chat_id, None
             )
-        # Verify prior_uuid was None (no UUID fallback path).
-        harness.assert_awaited_once()
-        assert harness.await_args.kwargs["prior_uuid"] is None
-        # full_context_message should equal the prompt for first-turn fallback.
-        assert (
-            harness.await_args.kwargs["full_context_message"]
-            == harness.await_args.kwargs["message"]
-        )
+        # Pass 1 and Pass 2 both fire.
+        assert harness.await_count == 2
+        # Pass 1's prior_uuid is None (no UUID to resume from).
+        pass1_call = harness.await_args_list[0]
+        assert pass1_call.kwargs["prior_uuid"] is None
+        # Pass 1 uses session_id=None (S-1 UUID isolation).
+        assert pass1_call.kwargs["session_id"] is None
 
 
 class TestDelivery:

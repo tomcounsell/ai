@@ -411,22 +411,13 @@ Operational (ready)          Configured (needs_setup)
 | Bridge | `com.valor.bridge` | `scripts/start_bridge.sh` | Always on |
 | Watchdog | `com.valor.bridge-watchdog` | `monitoring/bridge_watchdog.py` | Every 60s |
 | Issue Poller | `com.valor.issue-poller` | Issue polling script | Every 5min |
-| Reflections | `com.valor.reflections` | `scripts/reflections.py` | Scheduled |
 | AutoExperiment | `com.valor.autoexperiment` | `scripts/autoexperiment.py` | Nightly |
 
-**Code example — reflections maintenance:**
-```bash
-# Run reflections with dry-run
-python scripts/reflections.py --dry-run
+Reflections no longer run via launchd; the scheduler is embedded in the worker (`python -m worker`). See [Reflections](../features/reflections.md) for details.
 
-# Tasks performed:
-# 1. Legacy code cleanup scan
-# 2. Log review and error pattern detection  
-# 3. Sentry error monitoring
-# 4. Task management cleanup
-# 5. Documentation staleness check
-# 6. Daily report generation
-```
+**Code example — reflections maintenance:**
+
+Reflections are declared in `config/reflections.yaml` (a vault-symlinked registry). Each entry maps to a callable in the `reflections/` package (e.g., `reflections.maintenance.run_redis_ttl_cleanup`). The `ReflectionScheduler` in `agent/reflection_scheduler.py` — run as an asyncio task inside the standalone worker — enqueues due reflections at their declared intervals. There is no direct CLI invocation.
 
 **Remote triggers (via /schedule skill):**
 ```bash

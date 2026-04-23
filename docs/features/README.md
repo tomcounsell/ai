@@ -48,6 +48,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Emoji Embedding Reactions](emoji-embedding-reactions.md) | Embedding-based emoji reaction selection with standard and Premium custom emoji support, EmojiResult type, send_telegram --react and --emoji flags, and graceful degradation | Shipped |
 | [Enforce REVIEW/DOCS Stages](enforce-review-docs-stages.md) | Hard delivery gates in Observer preventing SDLC pipeline from skipping REVIEW and DOCS stages | Shipped |
 | [Enhanced Planning](enhanced-planning.md) | Spike Resolution (Phase 1.5), RFC Review (Phase 2.8), Infrastructure Documentation, and task validation fields for /do-plan | Shipped |
+| [Env Completeness Validation](env-completeness-validation.md) | Detects missing environment variables during `--verify` runs by diffing `.env` against `.env.example`; surfaces `WARN: env-completeness:` lines listing missing keys with descriptions | Shipped |
 | [Features README Sort Check](features-readme-sort-check.md) | PostToolUse hook enforcing alphabetical sort order in the feature index table with auto-fix | Shipped |
 | [Git State Guard](git-state-guard.md) | Detects and resolves dirty git state (merges, rebases, cherry-picks) before SDLC branch operations | Shipped |
 | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
