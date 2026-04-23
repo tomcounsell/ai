@@ -1631,6 +1631,7 @@ async def get_response_via_harness(
     prior_uuid: str | None = None,
     session_id: str | None = None,
     full_context_message: str | None = None,
+    model: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
 ) -> str:
@@ -1670,6 +1671,12 @@ async def get_response_via_harness(
         prior_uuid: Claude Code session UUID from a prior turn (enables --resume).
         session_id: Bridge/Telegram session ID for UUID storage after the turn.
         full_context_message: Full-context first-turn message for stale-UUID fallback.
+        model: Short alias (``opus``/``sonnet``/``haiku``) or full Claude model
+            name to pin this turn to. When truthy, ``--model <value>`` is
+            injected into ``harness_cmd`` so the Claude CLI honors the choice.
+            When None/empty, the CLI uses its own default. Part of the per-
+            session model routing cascade (see
+            ``agent/session_executor.py::_resolve_session_model``).
     """
     # Validate prior_uuid format; treat empty or invalid as None
     if prior_uuid and not _UUID_PATTERN.match(prior_uuid):
@@ -1680,6 +1687,18 @@ async def get_response_via_harness(
 
     if harness_cmd is None:
         harness_cmd = list(_HARNESS_COMMANDS["claude-cli"])
+    else:
+        # Defensive copy — callers may hand us a shared constant (e.g. test
+        # fixtures sharing a module-level list). We must not mutate their
+        # list when appending --model below.
+        harness_cmd = list(harness_cmd)
+
+    # Inject per-session model when caller supplied one. --model must live
+    # inside harness_cmd so it precedes the positional message (and any
+    # --resume <uuid>) in the final argv assembly below.
+    if model:
+        harness_cmd.extend(["--model", model])
+        logger.info(f"[harness] Using --model {model} for session_id={session_id}")
 
     # Build subprocess env: inherit current env, merge extras, strip API key
     proc_env = dict(os.environ)

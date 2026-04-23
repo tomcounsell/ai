@@ -13,17 +13,62 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-# PM final-delivery protocol (issue #1058).
+# PM final-delivery protocol (issue #1058 + D6 hardening from #1129).
 #
 # When the pipeline reaches a terminal state, the worker runs a dedicated
 # "compose final summary" turn and delivers the result directly via send_cb,
 # bypassing the nudge loop. See `docs/features/pm-final-delivery.md`.
-_COMPLETION_PROMPT = (
-    "The SDLC pipeline has finished. Context: {context}\n\n"
+#
+# D6 contract (from plan docs/plans/session-model-routing-fallback.md):
+#   - Always Opus on both passes (quality trumps cost for this one call).
+#   - 2-pass drafter: Pass 1 drafts, Pass 2 self-reviews / refines.
+#   - No-silent-fail: drafter failures log at ERROR + deliver a visible
+#     degraded fallback; Pass 2 failures log at WARNING + fall back to
+#     Pass 1's draft. The final_text is guaranteed non-empty before send_cb.
+#   - Always-finalize: `finalize_session(parent, "completed", ...)` runs in
+#     a `finally` block so the PM session reaches terminal state even when
+#     the drafter or delivery step misbehaves.
+#   - Ollama fallback: deferred to #1137. Until that ships, Anthropic-down
+#     manifests as a visible degraded-fallback message + ERROR log.
+#
+# Both prompts use a PREFIX + concatenation pattern (not `.format()`) so that
+# literal ``{`` / ``}`` characters in the embedded context or draft (e.g. a
+# dict repr or JSON snippet from a Dev session summary) do not crash the
+# prompt construction (ADV-1 fix).
+_COMPLETION_PROMPT_PREFIX = (
+    "The SDLC pipeline has finished. "
     "This is your final turn. Write a 2-3 sentence summary for the user covering "
     "what was accomplished and any notable outcomes. Do NOT use any special "
-    "markers or format instructions — just write the summary directly."
+    "markers or format instructions — just write the summary directly.\n\n"
+    "CONTEXT:\n"
 )
+
+_COMPLETION_REVIEW_PROMPT_PREFIX = (
+    "Below is a draft final-delivery message for the user. Review it against "
+    "these criteria and return a refined version:\n\n"
+    "1. SHORT — no wasted words. Cut anything that isn't load-bearing.\n"
+    "2. DENSE — maximum information per word. Preserve concrete outcomes.\n"
+    "3. THOUGHTFUL — phrase like a colleague writing with care, not a template.\n\n"
+    "Return ONLY the refined message. No preamble, no meta-commentary, no "
+    "markdown headers. Just the message as it should be sent.\n\n"
+    "DRAFT:\n"
+)
+
+
+def _build_degraded_fallback(summary_context: str) -> str:
+    """Compose a visible-but-explicit fallback when the drafter fails.
+
+    Satisfies D6(c) simultaneously: (a) non-empty, (b) visibly loud (operator
+    can see this was a degraded delivery), (c) preserves whatever context the
+    pipeline did gather. Used when Pass 1 fails, returns empty, or returns
+    the ``_HARNESS_NOT_FOUND_PREFIX`` sentinel. See #1137 for the Ollama-
+    backed recovery that will eventually replace this fallback.
+    """
+    context = (summary_context or "").strip()
+    if context:
+        return f"[drafter unavailable — pipeline completed] {context[:1500]}"
+    return "[drafter unavailable — pipeline completed, see session history for details]"
+
 
 # Background tasks spawned by `_deliver_pipeline_completion`. Drained by the
 # worker shutdown sequence so in-flight completion turns either finish or are
@@ -441,34 +486,153 @@ async def _deliver_pipeline_completion(
         logger.warning("[completion-runner] UUID lookup failed: %s", uuid_err)
         pm_uuid = None
 
-    prompt = _COMPLETION_PROMPT.format(context=summary_context[:3000])
+    # Build the Pass 1 prompt via concat (not .format()) so literal ``{`` / ``}``
+    # in summary_context (e.g. JSON snippets, dict reprs) cannot crash us (ADV-1).
+    prompt = _COMPLETION_PROMPT_PREFIX + (summary_context or "")[:3000]
+
+    # D6 v2: 2-pass drafter + no-silent-fail + always-finalize.
+    # - Pass 1 uses session_id=None (S-1): do NOT write the drafter's UUID
+    #   over the PM's claude_session_uuid. Drafter UUID is discarded.
+    # - Pass 2 uses prior_uuid=None, session_id=None (ADV-2): review prompt is
+    #   self-contained (Pass 1 draft embedded); resuming the PM session here
+    #   would pollute PM history with drafter + review turns.
+    # - Both passes pin model="opus" regardless of PM session's model.
+    # - Ollama fallback for Anthropic-down path is deferred to #1137; until
+    #   then, Pass 1 failure → visible degraded-fallback message.
+    # Sentinel init — must be overwritten by every path below (refined text,
+    # Pass 1 draft, or degraded fallback). D6(c) "never return empty" — any
+    # code path that reaches send_cb with this value is a bug.
+    delivery_attempted = False
+    final_text: str = "[completion-runner internal error — no final_text assigned]"
+    cancelled = False
+    try:
+        from agent.session_executor import (  # noqa: PLC0415
+            _HARNESS_NOT_FOUND_PREFIX,
+        )
+    except Exception:
+        # Defence in depth: fall back to the known literal if the import
+        # fails (e.g. during partial reloads in tests).
+        _HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"
 
     try:
-        try:
-            from agent.sdk_client import get_response_via_harness  # noqa: PLC0415
+        from agent.sdk_client import get_response_via_harness  # noqa: PLC0415
 
-            raw = await get_response_via_harness(
+        # --- Pass 1: Draft ---
+        draft_text: str = ""
+        pass1_failed = False
+        pass1_failure_mode = ""
+        try:
+            raw1 = await get_response_via_harness(
                 message=prompt,
                 working_dir=working_dir,
                 prior_uuid=pm_uuid,
-                session_id=session_id,
+                session_id=None,  # S-1: discard drafter UUID; don't pollute PM record
                 full_context_message=prompt,
+                model="opus",  # D6(a): always Opus on final-delivery drafter
+                # NOTE: When #1137 lands (Ollama credit-exhaust fallback for the
+                # harness), this call site is the priority consumer. On
+                # Anthropic-down, Ollama will back-fill instead of triggering
+                # the degraded-fallback branch below.
             )
-            final_text = (raw or "").strip()
+            draft_text = (raw1 or "").strip()
+            if not draft_text:
+                pass1_failed = True
+                pass1_failure_mode = "empty"
+            elif draft_text.startswith(_HARNESS_NOT_FOUND_PREFIX):
+                pass1_failed = True
+                pass1_failure_mode = "sentinel"
         except Exception as harness_err:
-            logger.warning(
-                "[completion-runner] Harness failed (%s) — delivering fallback summary",
+            pass1_failed = True
+            pass1_failure_mode = "exception"
+            logger.error(
+                "[completion-runner][DEGRADED] Pass 1 failure mode=exception session_id=%s err=%s",
+                session_id,
                 harness_err,
-            )
-            final_text = ""
-
-        if not final_text:
-            final_text = summary_context.strip() or (
-                "The pipeline has completed. See session history for details."
+                exc_info=True,
             )
 
-        # Deliver.
+        if pass1_failed:
+            if pass1_failure_mode != "exception":
+                logger.error(
+                    "[completion-runner][DEGRADED] Pass 1 failure mode=%s session_id=%s",
+                    pass1_failure_mode,
+                    session_id,
+                )
+            # Best-effort metric: bump a daily counter so operators can detect
+            # a spike in degraded deliveries (e.g. when Anthropic is down).
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+                counter_key = (
+                    f"completion_runner:degraded_fallback:daily:"
+                    f"{datetime.now(UTC).strftime('%Y%m%d')}"
+                )
+                POPOTO_REDIS_DB.incr(counter_key)
+                POPOTO_REDIS_DB.expire(counter_key, 604800)  # 7-day TTL
+            except Exception as metric_err:
+                logger.warning(
+                    "[completion-runner] Degraded-fallback metric emit failed: %s",
+                    metric_err,
+                )
+            final_text = _build_degraded_fallback(summary_context)
+        else:
+            # --- Pass 2: Self-Review / Refine ---
+            # Embed Pass 1's draft by concatenation (not .format()) so literal
+            # {/} in the draft (code snippets, JSON) don't crash us (ADV-1).
+            review_prompt = _COMPLETION_REVIEW_PROMPT_PREFIX + draft_text
+            refined_text: str = ""
+            pass2_failed = False
+            pass2_failure_mode = ""
+            try:
+                raw2 = await get_response_via_harness(
+                    message=review_prompt,
+                    working_dir=working_dir,
+                    prior_uuid=None,  # ADV-2: isolate from PM session history
+                    session_id=None,  # ADV-2: no UUID writeback
+                    full_context_message=None,
+                    model="opus",
+                )
+                refined_text = (raw2 or "").strip()
+                if not refined_text:
+                    pass2_failed = True
+                    pass2_failure_mode = "empty"
+                elif refined_text.startswith(_HARNESS_NOT_FOUND_PREFIX):
+                    pass2_failed = True
+                    pass2_failure_mode = "sentinel"
+            except Exception as refine_err:
+                pass2_failed = True
+                pass2_failure_mode = "exception"
+                logger.warning(
+                    "[completion-runner] Pass 2 exception session_id=%s err=%s — "
+                    "falling back to Pass 1 draft",
+                    session_id,
+                    refine_err,
+                    exc_info=True,
+                )
+
+            if pass2_failed:
+                if pass2_failure_mode == "sentinel":
+                    logger.error(
+                        "[completion-runner] Pass 2 returned _HARNESS_NOT_FOUND_PREFIX "
+                        "sentinel session_id=%s — falling back to Pass 1 draft",
+                        session_id,
+                    )
+                elif pass2_failure_mode == "empty":
+                    logger.warning(
+                        "[completion-runner] Pass 2 empty session_id=%s — "
+                        "falling back to Pass 1 draft",
+                        session_id,
+                    )
+                final_text = draft_text
+            else:
+                final_text = refined_text
+
+        # final_text is guaranteed non-empty at this point (either refined,
+        # Pass 1 draft, or degraded fallback). D6(c) "never return empty".
+
+        # --- Deliver ---
         if send_cb is not None and chat_id:
+            delivery_attempted = True
             try:
                 await send_cb(chat_id, final_text, telegram_message_id, parent)
                 logger.info(
@@ -477,6 +641,10 @@ async def _deliver_pipeline_completion(
                     len(final_text),
                 )
             except Exception as send_err:
+                # D6(c) v2: send_cb failure stays log-and-continue (no re-raise).
+                # Upstream retry ladder does not exist; re-raising would strand
+                # the session mid-flight. The "no silent fail" contract is
+                # enforced at the drafter layer, not the transport layer.
                 logger.error(
                     "[completion-runner] send_cb failed for %s: %s",
                     parent_id,
@@ -487,34 +655,13 @@ async def _deliver_pipeline_completion(
                 "[completion-runner] No send_cb or chat_id for %s; skipping delivery",
                 parent_id,
             )
-
-        # Stamp response_delivered_at and transition to completed. Runner owns
-        # this transition (Race 1 / Race 4 mitigation).
-        try:
-            parent.response_delivered_at = datetime.now(UTC)
-            parent.save(update_fields=["response_delivered_at", "updated_at"])
-        except Exception as stamp_err:
-            logger.warning(
-                "[completion-runner] Failed to stamp response_delivered_at: %s",
-                stamp_err,
-            )
-
-        try:
-            from models.session_lifecycle import finalize_session  # noqa: PLC0415
-
-            finalize_session(
-                parent, "completed", reason="pipeline complete: final summary delivered"
-            )
-        except Exception as finalize_err:
-            logger.error(
-                "[completion-runner] finalize_session(completed) failed for %s: %s",
-                parent_id,
-                finalize_err,
-            )
-
     except asyncio.CancelledError:
         # Shutdown during runner. Best-effort "interrupted" message with
         # flap-dedup (Risk 6), then re-raise to preserve asyncio semantics.
+        # Set `cancelled=True` so the finally block below skips both the
+        # response_delivered_at stamp (nothing was delivered) and
+        # finalize_session (the shutdown path owns that transition).
+        cancelled = True
         if send_cb is not None and chat_id and session_id:
             try:
                 await _send_interrupted_message(
@@ -523,6 +670,41 @@ async def _deliver_pipeline_completion(
             except Exception as int_err:  # pragma: no cover - best-effort
                 logger.warning("[completion-runner] interrupted send failed: %s", int_err)
         raise
+    finally:
+        # On cancellation, the except branch above has already emitted an
+        # "interrupted" message and is about to re-raise. Skip both stamping
+        # and finalization — the shutdown path owns those.
+        if not cancelled:
+            # ADV-2 gate: only stamp response_delivered_at when we actually
+            # tried to deliver. Preserves the existing "time the user
+            # received the final message" contract; a no-send_cb path
+            # leaves it unset.
+            if delivery_attempted:
+                try:
+                    parent.response_delivered_at = datetime.now(UTC)
+                    parent.save(update_fields=["response_delivered_at", "updated_at"])
+                except Exception as stamp_err:
+                    logger.warning(
+                        "[completion-runner] Failed to stamp response_delivered_at: %s",
+                        stamp_err,
+                    )
+
+            # D6(c) always-finalize: run regardless of drafter / delivery
+            # outcome so the PM session reaches a terminal state. Previously
+            # this lived inside the main try-block and silently got skipped
+            # when an earlier exception escaped.
+            try:
+                from models.session_lifecycle import finalize_session  # noqa: PLC0415
+
+                finalize_session(
+                    parent, "completed", reason="pipeline complete: final summary delivered"
+                )
+            except Exception as finalize_err:
+                logger.error(
+                    "[completion-runner] finalize_session(completed) failed for %s: %s",
+                    parent_id,
+                    finalize_err,
+                )
 
 
 def _resolve_working_dir_for_parent(parent: AgentSession) -> str:

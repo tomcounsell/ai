@@ -110,12 +110,21 @@ class TestHappyPathMergeSuccess:
 
 
 # -----------------------------------------------------------------------------
-# Empty harness → fallback summary delivered
+# Empty / failing harness → degraded-fallback message delivered (D6 v2)
 # -----------------------------------------------------------------------------
 
 
-class TestEmptyHarnessFallback:
-    async def test_empty_harness_result_delivers_fallback(self, parent):
+class TestDegradedFallbackDelivery:
+    """Under the D6(c) v2 contract from plan #1129:
+    - Drafter failures (empty / exception / _HARNESS_NOT_FOUND_PREFIX) MUST
+      still deliver a user-visible message (no silent fail, never return
+      empty).
+    - That message is the `_build_degraded_fallback` output — visibly
+      prefixed so operators can see the drafter was unavailable.
+    - Session still finalizes to 'completed'.
+    """
+
+    async def test_empty_harness_delivers_degraded_fallback(self, parent):
         send_cb = AsyncMock(return_value=None)
         fallback_ctx = "Stage MERGE completed with outcome=success. Result preview: tests green."
 
@@ -132,11 +141,14 @@ class TestEmptyHarnessFallback:
             await asyncio.wait_for(task, timeout=10.0)
 
         send_cb.assert_awaited_once()
-        # Runner must have delivered the fallback context verbatim (stripped).
-        assert send_cb.await_args.args[1] == fallback_ctx
+        delivered = send_cb.await_args.args[1]
+        # D6 v2 contract: degraded-fallback prefix + truncated context.
+        assert delivered.startswith("[drafter unavailable — pipeline completed]")
+        assert fallback_ctx in delivered
         _fs.assert_called_once()
+        assert _fs.call_args.args[1] == "completed"
 
-    async def test_harness_exception_also_delivers_fallback(self, parent):
+    async def test_harness_exception_delivers_degraded_fallback(self, parent):
         send_cb = AsyncMock(return_value=None)
 
         async def _boom(**_kw):
@@ -156,8 +168,43 @@ class TestEmptyHarnessFallback:
             await asyncio.wait_for(task, timeout=10.0)
 
         send_cb.assert_awaited_once()
-        assert send_cb.await_args.args[1] == fallback_ctx
+        delivered = send_cb.await_args.args[1]
+        assert delivered.startswith("[drafter unavailable — pipeline completed]")
+        assert fallback_ctx in delivered
         _fs.assert_called_once()
+
+
+# -----------------------------------------------------------------------------
+# Two-pass flow: both passes fire, both pinned to model=opus
+# -----------------------------------------------------------------------------
+
+
+class TestTwoPassFlow:
+    async def test_two_passes_both_use_opus(self, parent):
+        send_cb = AsyncMock(return_value=None)
+        captured_models: list = []
+
+        async def _capture(**kw):
+            captured_models.append(kw.get("model"))
+            return "draft" if len(captured_models) == 1 else "refined"
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_ok()),
+            patch("agent.sdk_client.get_response_via_harness", new=_capture),
+            patch("agent.sdk_client._get_prior_session_uuid", return_value="pm-uuid"),
+            patch("models.session_lifecycle.finalize_session"),
+        ):
+            task = session_completion.schedule_pipeline_completion(
+                parent, "ctx", send_cb, parent.chat_id, None
+            )
+            assert task is not None
+            await asyncio.wait_for(task, timeout=10.0)
+
+        # Both passes fired and both pinned model="opus".
+        assert len(captured_models) == 2, f"Expected 2 harness calls, got {captured_models}"
+        assert captured_models == ["opus", "opus"]
+        # Refined text wins.
+        assert send_cb.await_args.args[1] == "refined"
 
 
 # -----------------------------------------------------------------------------
