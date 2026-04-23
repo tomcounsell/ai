@@ -108,8 +108,9 @@ Three tightly-scoped code changes plus test coverage plus a one-line SKILL.md co
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Redis reachable | `python -c "from popoto import Redis; Redis().ping()"` | Session ORM persistence |
+| Redis reachable | `python -c "from popoto.redis_db import POPOTO_REDIS_DB; POPOTO_REDIS_DB.ping()"` | Session ORM persistence (popoto 5.x does not export `Redis` at package level) |
 | AgentSession model importable | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'query')"` | Used by ensure/find functions |
+| `finalize_session` helper importable | `python -c "from models.session_lifecycle import finalize_session"` | Required by `--kill-orphans` for terminal status transitions |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/sdlc-session-ensure-dedup.md`
 
@@ -119,7 +120,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/sdlc-session-e
 
 - **Env-var short-circuit** in `ensure_session()`: when `VALOR_SESSION_ID` or `AGENT_SESSION_ID` is set and resolves to a real session, return it and skip create.
 - **Message-text fallback** in `find_session_by_issue()`: after the existing `issue_url` match, try `message_text` against a case-insensitive regex `\bissue\s*#?\s*{N}\b`. Catches Telegram-originated PM sessions that have no URL.
-- **Orphan killer CLI path** on `sdlc_session_ensure`: new `--kill-orphans` mode lists/transitions zombie sessions (`status="running"`, `session_id.startswith("sdlc-local-")`, `last_heartbeat_at is None`, `created_at` older than 10 minutes). `--dry-run` lists without modifying.
+- **Orphan killer CLI path** on `sdlc_session_ensure`: new `--kill-orphans` mode lists/finalizes zombie sessions (`status="running"`, `session_id.startswith("sdlc-local-")`, `last_heartbeat_at is None`, `created_at` older than 10 minutes). `--dry-run` lists without modifying. Uses `finalize_session()` (not `transition_status`) because `"killed"` is a terminal status and `transition_status()` raises `ValueError` on terminal targets.
 - **SKILL.md correction**: update the Step 1.5 comment in `.claude/skills/sdlc/SKILL.md` so the documentation matches behavior once the short-circuit lands.
 
 ### Flow
@@ -131,15 +132,16 @@ Telegram message → Worker creates `tg_...` PM AgentSession → spawns Claude C
 Developer runs `/sdlc` from Claude Code locally (no `VALOR_SESSION_ID`) → Step 1.5 runs `sdlc_session_ensure` → env short-circuit is a no-op → `find_session_by_issue` scans `issue_url` (miss) then `message_text` (miss, because no AgentSession exists yet) → creates `sdlc-local-{N}` → returns it.
 
 **Zombie-cleanup path:**
-Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` → tool scans AgentSession for zombie pattern → prints JSON list of candidates → operator reviews → reruns without `--dry-run` → tool transitions each via `models.session_lifecycle.transition_status(s, "killed", "zombie sdlc-local session cleanup")` → dashboard count drops.
+Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` → tool scans AgentSession for zombie pattern → prints JSON list of candidates → operator reviews → reruns without `--dry-run` → tool finalizes each via `models.session_lifecycle.finalize_session(s, "killed", reason="zombie sdlc-local session cleanup", skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)` → dashboard count drops. `transition_status()` must NOT be used here — it rejects terminal statuses by design (see `models/session_lifecycle.py:264–269`).
 
 ### Technical Approach
 
 1. **`ensure_session()` env short-circuit** (edit `tools/sdlc_session_ensure.py` near line 48, before the existing `find_session_by_issue` call):
    - Read `env_session_id = os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")`.
-   - If set, call the existing `find_session(session_id=env_session_id)` (import from `tools._sdlc_utils`) to confirm the session actually exists in Redis.
-   - If `find_session` returns a truthy session object, return `{"session_id": env_session_id, "created": False}` immediately — do NOT fall through to issue-number lookup or create.
-   - If env var is set but resolves to None (stale env from a killed session), fall through to the existing issue-number path so the local fallback still works in degraded conditions.
+   - If set (non-empty string), call the existing `find_session(session_id=env_session_id)` (import from `tools._sdlc_utils`) to confirm the session actually exists in Redis.
+   - **Gate on `session_type == "pm"`**: after finding the session, check `getattr(resolved, "session_type", None) == "pm"`. If the env points to a Dev or Teammate session (e.g., during cross-role debugging), DO NOT short-circuit — fall through to the legacy path so PM stage_states do not end up written to a non-PM session.
+   - If `find_session` returns a truthy PM session, return `{"session_id": env_session_id, "created": False}` immediately — do NOT fall through to issue-number lookup or create.
+   - If env var is unset, empty, resolves to None (stale env from a killed session), or resolves to a non-PM session, fall through to the existing issue-number path so the local fallback still works in degraded conditions.
 
 2. **`find_session_by_issue()` message_text fallback** (edit `tools/_sdlc_utils.py:20`):
    - After the existing `issue_url.endswith(target_suffix)` loop completes with no match, run a second pass over the same `pm_sessions` list.
@@ -149,9 +151,10 @@ Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` →
 
 3. **`--kill-orphans` CLI** (extend `tools/sdlc_session_ensure.py:main`):
    - Add mutually-exclusive `--kill-orphans` flag (cannot be combined with `--issue-number`; if user provides only `--kill-orphans`, make `--issue-number` not-required).
-   - Implement `_iter_orphan_sessions()` helper that runs `AgentSession.query.filter(session_type="pm", status="running")`, iterates, keeps those whose `session_id.startswith("sdlc-local-")` AND `last_heartbeat_at is None` AND `(now_utc - created_at).total_seconds() >= 600`.
-   - With `--dry-run`: print JSON `{"orphans": [{"session_id": ..., "created_at": ..., "issue_url": ...}], "count": N, "killed": false}`.
-   - Without `--dry-run`: iterate and call `transition_status(session, "killed", "zombie sdlc-local session cleanup")`. Track failures in a list. Print JSON with `killed: true`, per-session results, and failure list.
+   - Implement `_iter_orphan_sessions()` helper that runs `AgentSession.query.filter(session_type="pm", status="running")`, iterates, keeps those whose `session_id.startswith("sdlc-local-")` AND `last_heartbeat_at is None` AND `(now_utc - created_at).total_seconds() >= ORPHAN_AGE_SECONDS`.
+   - With `--dry-run`: print JSON `{"orphans": [{"session_id": ..., "created_at": ..., "issue_url": ...}], "count": N, "killed": false}` and exit 0.
+   - Without `--dry-run`: iterate and call `finalize_session(session, "killed", reason="zombie sdlc-local session cleanup", skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)`. Track per-session results: `{"session_id": ..., "result": "killed"}` on success, `{"session_id": ..., "result": "failed", "error": str(e)}` on exception. Print JSON with `killed: true`, `count`, per-session results list, and `failures` count. Exit code is always 0 — per-session failures are reported in the payload, never raised (matches module docstring contract).
+   - **Critical**: do NOT call `transition_status(session, "killed", ...)` — `transition_status()` raises `ValueError` on terminal statuses (see `models/session_lifecycle.py:264–269`). The correct helper is `finalize_session()`. The `skip_auto_tag=True, skip_checkpoint=True, skip_parent=True` flags are required because zombie sessions have no meaningful work to tag, no branch to checkpoint, and no parent to notify.
 
 4. **SKILL.md comment fix** (edit `.claude/skills/sdlc/SKILL.md` around Step 1.5):
    - Current text: `This is idempotent -- running it multiple times for the same issue reuses the same session.`
@@ -173,13 +176,23 @@ Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` →
 - [ ] `message_text` containing `"issue 1147"` as a substring of a larger word (e.g., `"tissue 1147"`) must NOT match. The `\b` word boundaries in the regex handle this. Test: add regression assertion.
 
 ### Error State Rendering
-- [ ] CLI always prints valid JSON on stdout and exits 0 (documented contract). Add a test that runs `--kill-orphans --dry-run` and asserts `json.loads(stdout)` succeeds.
+- [ ] CLI always prints valid JSON on stdout and exits 0 (documented contract). Add a test that runs `--kill-orphans --dry-run` and asserts `json.loads(stdout)` succeeds. Add a second test for the real `--kill-orphans` path (no `--dry-run`) verifying exit 0 even when `finalize_session` is mocked to raise — the failure must appear in the per-session result list, not as a non-zero exit.
 - [ ] If the env short-circuit branch returns a session ID, the caller (SDLC skill) must observe `created: False`. Add a test that patches env, provides a mock PM session, and asserts the result dict.
+- [ ] Non-PM env-resolved session MUST fall through (C2): patch env to point at a session whose `session_type="dev"` and confirm the result is NOT the env session ID — create path runs instead. Guards against cross-role state contamination.
+
+### Orphan Age Boundary Coverage (C4)
+- [ ] Session exactly at `ORPHAN_AGE_SECONDS` boundary is listed as orphan: `created_at = now - 600s` must be `>=` threshold. Test: freeze time, create a mock session at precisely the boundary, assert it appears in orphan list.
+- [ ] Session at `ORPHAN_AGE_SECONDS - 1s` is NOT listed. Test: boundary - 1 second, assert absent from list.
+- [ ] Session at `ORPHAN_AGE_SECONDS + 1s` IS listed. Test: boundary + 1 second, assert present in list.
+- [ ] Session with `last_heartbeat_at` set (any non-None value) is NEVER listed even if older than threshold. Test: boundary + 1 hour but `last_heartbeat_at = now`, assert absent.
+- [ ] Session whose `session_id` does not start with `sdlc-local-` is NEVER listed even if all other criteria match. Test: session_id="tg_valor_123", `last_heartbeat_at=None`, created 2h ago — assert absent (bridge sessions are out of scope for this cleanup).
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: keep all six existing tests (they exercise the fallback paths that remain). Add new tests listed in Step 5 below.
-- [ ] No other test files touch this code path. `grep -rn "sdlc_session_ensure\|find_session_by_issue\|sdlc-local-" tests/` returns only the one file.
+- [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: keep all existing tests (they exercise the fallback paths that remain). Add `TestBridgeShortCircuit`, `TestMessageTextFallback` (where applicable), and `TestKillOrphans` classes as described in Step by Step Task 3.
+- [ ] `tests/unit/test_sdlc_utils.py` — UPDATE: this file owns the `find_session_by_issue` tests. The existing `test_returns_none_when_no_match` test asserts the current `issue_url`-only match behavior. Add `TestMessageTextFallback` class covering: (a) match on `message_text="SDLC issue 1147"`, (b) match on `"issue #1147"`, (c) no match on `"tissue 1147"` (word boundary), (d) no match when `message_text` is None/empty, (e) fallback does not trigger when `issue_url` already matches (preserves priority).
+- [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — NEW: integration test that drives the headline dashboard claim. Given a simulated bridge AgentSession (real Popoto Redis write, `session_type="pm"`, `message_text="SDLC issue 1147"`, `issue_url=None`), invoke `ensure_session(1147)` with `VALOR_SESSION_ID=<bridge_session_id>` in env, then assert exactly one PM session exists for that issue in Redis (`len(AgentSession.query.filter(session_type="pm")) == 1` scoped to the test's `project_key`). Clean up via `instance.delete()` in teardown per CLAUDE.md manual testing hygiene.
+- [ ] `grep -rn "sdlc_session_ensure\|find_session_by_issue\|sdlc-local-" tests/` returns only these three files after the change. No other test files touch this code path.
 
 ## Rabbit Holes
 
@@ -249,12 +262,16 @@ No agent integration required — `sdlc_session_ensure` is not exposed as an MCP
 
 - [ ] `ensure_session(1140)` called with `VALOR_SESSION_ID=tg_valor_-1003449100931_691` in env AND a live PM session matching that ID returns `{"session_id": "tg_valor_-1003449100931_691", "created": false}`. No new session created.
 - [ ] `ensure_session(1140)` called with `VALOR_SESSION_ID=stale_id` where no session exists falls through to the legacy path and creates `sdlc-local-1140` (preserves degraded-mode behavior).
+- [ ] `ensure_session(1140)` called with `VALOR_SESSION_ID` pointing at a Dev session (`session_type="dev"`) falls through to the legacy path — no PM stage_states written to a non-PM session (C2).
 - [ ] `find_session_by_issue(1140)` returns a Telegram PM session whose `message_text="SDLC issue 1140"` and `issue_url is None`.
 - [ ] `find_session_by_issue(1147)` does NOT match a session whose `message_text` contains `"tissue 1147"` (word-boundary regression).
-- [ ] Running SDLC on a bridge-initiated session produces exactly one PM session on the dashboard (curl `/dashboard.json`, count `pm` sessions for this issue). Zero `sdlc-local-{N}` duplicates.
+- [ ] Integration test in `tests/integration/test_sdlc_session_ensure_integration.py` proves that running `ensure_session()` with a real bridge-style PM session in Redis produces exactly ONE PM session for the issue (the original bridge session) — zero `sdlc-local-{N}` duplicates created.
+- [ ] Running SDLC on a real bridge-initiated session produces exactly one PM session on the dashboard (curl `/dashboard.json`, count `pm` sessions for this issue). Zero `sdlc-local-{N}` duplicates. This is the headline manual-verification criterion.
 - [ ] `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` lists existing zombies without modifying them. Output is valid JSON, exit 0.
-- [ ] `python -m tools.sdlc_session_ensure --kill-orphans` transitions zombie sessions to `killed` and reports per-session results in JSON.
-- [ ] Tests in `tests/unit/test_sdlc_session_ensure.py` cover: bridge short-circuit (happy path), stale env fallback, message_text fallback match, message_text word-boundary negative case, orphan listing, orphan killing, transition failure handling in orphan killer.
+- [ ] `python -m tools.sdlc_session_ensure --kill-orphans` finalizes zombie sessions to `killed` via `finalize_session()` (NOT `transition_status()`) and reports per-session results in JSON. Exit code 0 even when some transitions fail.
+- [ ] Orphan detection respects the `>=` boundary at `ORPHAN_AGE_SECONDS`: sessions exactly at threshold ARE listed, one second under are NOT.
+- [ ] Orphan detection ignores sessions whose `session_id` does not start with `sdlc-local-` (bridge sessions stay out of scope).
+- [ ] Tests in `tests/unit/test_sdlc_session_ensure.py`, `tests/unit/test_sdlc_utils.py`, and `tests/integration/test_sdlc_session_ensure_integration.py` cover: bridge short-circuit (happy path), stale env fallback, non-PM env fallback, message_text fallback match, message_text word-boundary negative case, message_text None/empty handling, issue_url priority preserved, orphan listing, orphan killing via `finalize_session`, `finalize_session` failure handling, orphan-age boundary cases (at/under/over), non-`sdlc-local-` skip.
 - [ ] `.claude/skills/sdlc/SKILL.md` Step 1.5 comment reads accurately.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
@@ -298,13 +315,14 @@ Tier 1 Core as listed in PLAN_TEMPLATE.md.
 ### 1. Build the env short-circuit and message_text fallback
 - **Task ID**: build-core
 - **Depends On**: none
-- **Validates**: `tests/unit/test_sdlc_session_ensure.py`
+- **Validates**: `tests/unit/test_sdlc_session_ensure.py`, `tests/unit/test_sdlc_utils.py`
 - **Assigned To**: session-ensure-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - In `tools/sdlc_session_ensure.py`, add env-var short-circuit at the top of `ensure_session()` (before the `find_session_by_issue` call). Use `tools._sdlc_utils.find_session` to confirm the env-resolved session exists in Redis before returning it.
+- **Gate the short-circuit on `session_type == "pm"`**: if the resolved session's `session_type` is anything other than `"pm"` (e.g., `"dev"`, `"teammate"`), fall through to the legacy path. Do NOT write PM stage_states to a non-PM session.
 - On stale env (env var set, session not found), fall through to the existing path.
-- In `tools/_sdlc_utils.py`, extend `find_session_by_issue()` with a second pass over the same `pm_sessions` list matching on `message_text` via a case-insensitive regex with word boundaries. Import `re`.
+- In `tools/_sdlc_utils.py`, extend `find_session_by_issue()` with a second pass over the same `pm_sessions` list matching on `message_text` via a case-insensitive regex with word boundaries (`re.compile(rf"\bissue\s*#?\s*{issue_number}\b", re.IGNORECASE)`). Import `re`.
 - Update both docstrings to describe the new behavior.
 
 ### 2. Build the `--kill-orphans` CLI
@@ -314,20 +332,21 @@ Tier 1 Core as listed in PLAN_TEMPLATE.md.
 - **Assigned To**: session-ensure-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `tools/sdlc_session_ensure.py`, add module-level `ORPHAN_AGE_SECONDS = 600` and a helper `_iter_orphan_sessions()` that yields zombie sessions.
+- In `tools/sdlc_session_ensure.py`, add module-level `ORPHAN_AGE_SECONDS = 600` and a helper `_iter_orphan_sessions()` that yields zombie sessions (`session_type="pm"`, `status="running"`, `session_id.startswith("sdlc-local-")`, `last_heartbeat_at is None`, `(now_utc - created_at).total_seconds() >= ORPHAN_AGE_SECONDS`).
 - Extend `main()` with `--kill-orphans` and `--dry-run` flags. Make `--issue-number` optional when `--kill-orphans` is set; mutually exclusive otherwise.
-- On `--dry-run`, print JSON listing orphans. On real run, iterate and call `transition_status(..., "killed", ...)` guarded by per-session try/except. Output JSON with results.
+- On `--dry-run`, print JSON listing orphans and exit 0. On real run, iterate and call `finalize_session(session, "killed", reason="zombie sdlc-local session cleanup", skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)` (imported from `models.session_lifecycle`) guarded by per-session try/except. **Do NOT use `transition_status()`** — it raises `ValueError` on terminal statuses. Output JSON with per-session result entries (`{"session_id": ..., "result": "killed"}` or `{"session_id": ..., "result": "failed", "error": ...}`), total `count`, `failures` count, and `killed: true` marker. Exit code is always 0 regardless of per-session failures (matches the module docstring's "always exit 0" contract).
 
 ### 3. Extend tests
 - **Task ID**: build-tests
 - **Depends On**: build-core, build-kill-orphans
-- **Validates**: `pytest tests/unit/test_sdlc_session_ensure.py -v`
+- **Validates**: `pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_utils.py tests/integration/test_sdlc_session_ensure_integration.py -v`
 - **Assigned To**: session-ensure-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add `TestBridgeShortCircuit` class with: (a) env var set + live session returns it without create, (b) env var set + no live session falls through to legacy path, (c) empty env var string does not trigger short-circuit.
-- Add `TestMessageTextFallback` class with: (a) match on "SDLC issue 1147", (b) match on "issue #1147", (c) no match on "tissue 1147" (word boundary), (d) no match when `message_text` is None.
-- Add `TestKillOrphans` class with: (a) `--dry-run` lists orphans without modifying, (b) real run transitions orphans to killed, (c) transition failure does not crash CLI and is reported in output, (d) sessions newer than 10 minutes are NOT listed as orphans, (e) sessions with heartbeats are NOT listed even if old.
+- In `tests/unit/test_sdlc_session_ensure.py`, add `TestBridgeShortCircuit` class with: (a) env var set + live PM session returns it without create, (b) env var set + no live session falls through to legacy path, (c) empty env var string does not trigger short-circuit, (d) env var set + resolved session has `session_type="dev"` — short-circuit must NOT activate (C2 regression).
+- In `tests/unit/test_sdlc_utils.py`, add `TestMessageTextFallback` class with: (a) match on "SDLC issue 1147", (b) match on "issue #1147", (c) no match on "tissue 1147" (word boundary), (d) no match when `message_text` is None, (e) no match when `message_text=""`, (f) priority test — when both `issue_url` and `message_text` could match, `issue_url` match wins (existing behavior preserved).
+- In `tests/unit/test_sdlc_session_ensure.py`, add `TestKillOrphans` class with: (a) `--dry-run` lists orphans without modifying, (b) real run finalizes orphans to killed via `finalize_session`, (c) `finalize_session` failure does not crash CLI (exit code 0) and is reported in output `failures` list, (d) sessions newer than `ORPHAN_AGE_SECONDS` are NOT listed as orphans, (e) sessions with heartbeats are NOT listed even if old, (f) boundary test at exactly `ORPHAN_AGE_SECONDS` (IS listed, `>=` threshold), (g) boundary test at `ORPHAN_AGE_SECONDS - 1s` (NOT listed), (h) boundary test at `ORPHAN_AGE_SECONDS + 1s` (IS listed), (i) session_id not starting with `sdlc-local-` is never listed even when all other criteria match, (j) mock `finalize_session` to assert it was called with `skip_auto_tag=True, skip_checkpoint=True, skip_parent=True, reason="zombie sdlc-local session cleanup"` and NOT called as `transition_status`.
+- Create `tests/integration/test_sdlc_session_ensure_integration.py` with one integration test: create a real bridge-style PM `AgentSession` via Popoto (`session_type="pm"`, `message_text="SDLC issue 9999"`, `issue_url=None`, `project_key="test-sdlc-ensure-int"`), set `VALOR_SESSION_ID` env var, invoke `ensure_session(9999)`, assert result equals `{"session_id": <bridge_id>, "created": False}`, then scan `AgentSession.query.filter(session_type="pm")` and assert no `sdlc-local-9999` was created. Teardown deletes all sessions with `project_key="test-sdlc-ensure-int"` via `instance.delete()` per CLAUDE.md hygiene.
 
 ### 4. Update documentation
 - **Task ID**: build-docs
@@ -345,9 +364,10 @@ Tier 1 Core as listed in PLAN_TEMPLATE.md.
 - **Assigned To**: session-ensure-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_sdlc_session_ensure.py -v` and verify all tests pass.
-- Run `python -m ruff format .` and `python -m ruff check tools/sdlc_session_ensure.py tools/_sdlc_utils.py`.
-- Run `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` against the live dev Redis; confirm valid JSON output.
+- Run `pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_utils.py tests/integration/test_sdlc_session_ensure_integration.py -v` and verify all tests pass.
+- Run `python -m ruff format .` (formatting only per repo convention — no `ruff check`).
+- Run `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` against the live dev Redis; confirm valid JSON output and exit code 0.
+- Grep the codebase to confirm NO remaining `transition_status(..., "killed"` references in the new code (`grep -rn 'transition_status.*killed' tools/sdlc_session_ensure.py` returns nothing).
 - Verify the SKILL.md comment reads accurately.
 - Verify all Success Criteria items are checked.
 
@@ -355,15 +375,33 @@ Tier 1 Core as listed in PLAN_TEMPLATE.md.
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_sdlc_session_ensure.py -v` | exit code 0 |
+| Unit tests pass | `pytest tests/unit/test_sdlc_session_ensure.py tests/unit/test_sdlc_utils.py -v` | exit code 0 |
+| Integration test passes | `pytest tests/integration/test_sdlc_session_ensure_integration.py -v` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/sdlc_session_ensure.py tools/_sdlc_utils.py` | exit code 0 |
 | Dry-run CLI works | `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` | exit code 0, stdout parses as JSON |
+| Real CLI uses `finalize_session` | `grep -c "finalize_session" tools/sdlc_session_ensure.py` | output > 0 |
+| No `transition_status` for killed | `grep -c "transition_status.*killed" tools/sdlc_session_ensure.py` | output = 0 |
 | SKILL.md updated | `grep -c "no-op" .claude/skills/sdlc/SKILL.md` | output > 0 |
 | Feature doc updated | `grep -c "VALOR_SESSION_ID\|bridge-initiated" docs/features/sdlc-pipeline-state.md` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. -->
+Critique run (2026-04-24): 10 findings (2 blockers, 5 concerns, 3 nits). Verdict: **NEEDS REVISION**. All 2 blockers and 5 concerns addressed in this revision pass:
+
+**Blockers (resolved):**
+- **B1** — `transition_status(session, "killed", ...)` would raise `ValueError` because `"killed"` is a terminal status (see `models/session_lifecycle.py:264–269`). **Fix:** Solution, Technical Approach step 3, Step-by-step task 2, Success Criteria, and Verification table all now reference `finalize_session(session, "killed", reason=..., skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)` as the correct helper. Grep verification added to validator task.
+- **B2** — Prerequisite check `python -c "from popoto import Redis; Redis().ping()"` fails because popoto 5.x does not export `Redis` at package level. **Fix:** Replaced with `from popoto.redis_db import POPOTO_REDIS_DB; POPOTO_REDIS_DB.ping()` (verified working against live Redis). Added a third prerequisite row for `finalize_session` importability.
+
+**Concerns (resolved):**
+- **C1** — Test Impact wrongly claimed only `test_sdlc_session_ensure.py` was affected. **Fix:** `tests/unit/test_sdlc_utils.py` now listed as UPDATE with the specific `TestMessageTextFallback` scenarios the file owns (including priority preservation for `issue_url` matches).
+- **C2** — Env-var short-circuit did not verify `session_type == "pm"`. **Fix:** Technical Approach step 1 now explicitly gates on `session_type == "pm"`; Step-by-step task 1 repeats the gate requirement; Test Impact adds a regression test for the Dev-session-in-env case; Success Criteria adds an explicit acceptance item.
+- **C3** — Headline dashboard claim had no integration test. **Fix:** New `tests/integration/test_sdlc_session_ensure_integration.py` described in Test Impact and Step-by-step task 3, exercising real Popoto writes with a simulated bridge session and asserting zero `sdlc-local-{N}` creation.
+- **C4** — Orphan-age boundary cases were not covered. **Fix:** "Orphan Age Boundary Coverage" subsection added to Failure Path Test Strategy with five explicit boundary tests (at threshold, -1s, +1s, with heartbeat, non-`sdlc-local-` id). Step-by-step task 3 lists them as required test cases.
+- **C5** — `--kill-orphans` exit-code contract conflicted with module-level "always exit 0" docstring. **Fix:** Technical Approach step 3, Step-by-step task 2, and Failure Path Test Strategy now explicitly state exit code 0 is invariant even when per-session `finalize_session` calls fail — failures surface only in the JSON `failures` list.
+
+**Nits:** Not addressed in this revision pass (NITs do not block READY TO BUILD per `do-plan-critique` contract). They will be considered during `/do-build` if the builder has spare cycles.
+
+Revision applied: 2026-04-24. Plan is now expected to pass critique and route to `/do-build`.
 
 ---
 
