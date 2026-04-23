@@ -22,14 +22,6 @@ Redis queue contract:
             "_relay_attempts": int (optional)  # managed by the relay
         }
 
-    Legacy compat: payloads with ``text`` instead of ``body`` are normalized on
-    read for one transitional release. The queue had no consumer before this
-    change so in-flight entries are unlikely but tolerated.
-
-    FIXME(#1095): Delete the ``text`` -> ``body`` compat shim (see
-    ``_normalize_payload``) and the associated unit test one release after
-    PR #1094 merges. Tracked in https://github.com/tomcounsell/ai/issues/1095.
-
 Liveness:
     Writes ``email:relay:last_poll_ts = time.time()`` with a 5-minute TTL once
     per poll cycle. Operators probe via ``GET email:relay:last_poll_ts``.
@@ -82,14 +74,9 @@ def _get_redis_connection():
 def _normalize_payload(message: dict) -> dict | None:
     """Normalize incoming payload to the unified shape.
 
-    Returns None if the payload is unrecoverable (missing ``to`` or both
-    ``body``/``text``). Callers should DLQ such payloads rather than retry.
+    Returns None if the payload is unrecoverable (missing ``to`` or ``body``).
+    Callers should DLQ such payloads rather than retry.
     """
-    # FIXME(#1095): Legacy text -> body compat shim — delete one release after
-    # PR #1094 merges. https://github.com/tomcounsell/ai/issues/1095
-    if "body" not in message and "text" in message:
-        message["body"] = message.pop("text")
-
     to_field = message.get("to") or ""
     # Normalize to list — CLI may send a single string or a list
     if isinstance(to_field, str):
