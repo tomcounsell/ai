@@ -6,11 +6,10 @@ success/failure/no-session paths, stdout output format, and bail-out guarantee.
 
 from __future__ import annotations
 
-import os
 import sys
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -19,12 +18,12 @@ HOOKS_DIR = Path(__file__).resolve().parent.parent.parent.parent / ".claude" / "
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
-from post_compact import (
+from models.agent_session import AgentSession  # noqa: E402, I001
+from post_compact import (  # noqa: E402, I001
     _build_regrounding_nudge,
     _extract_issue_number,
     _lookup_session,
 )
-from models.agent_session import AgentSession
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +31,9 @@ from models.agent_session import AgentSession
 # ---------------------------------------------------------------------------
 
 
-def _make_session(claude_uuid: str, plan_url=None, issue_url=None, stage_states=None) -> AgentSession:
+def _make_session(
+    claude_uuid: str, plan_url=None, issue_url=None, stage_states=None
+) -> AgentSession:
     """Create a minimal AgentSession for testing."""
     session = AgentSession(
         session_id=f"test-{claude_uuid[:8]}",
@@ -272,14 +273,6 @@ class TestMainFunction:
 class TestNoAsyncio:
     def test_does_not_import_asyncio(self):
         """Hook must not import asyncio -- it is fully synchronous."""
-        import importlib
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "_post_compact_check",
-            HOOKS_DIR / "post_compact.py",
-        )
-        mod = importlib.util.module_from_spec(spec)
         # Do NOT exec the module to avoid side effects -- just check source
         src = (HOOKS_DIR / "post_compact.py").read_text()
         assert "import asyncio" not in src, "Hook must not import asyncio"
