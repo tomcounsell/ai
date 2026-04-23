@@ -89,7 +89,6 @@ from agent.session_health import (  # noqa: F401
     _write_worker_heartbeat,
     cleanup_corrupted_agent_sessions,
     format_duration,
-    recover_orphaned_agent_sessions_all_projects,
 )
 from agent.session_logs import save_session_snapshot
 
@@ -1148,6 +1147,12 @@ def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
     1. _active_workers[worker_key]: task exists and is not done — steady-state guard.
     2. _starting_workers: worker_key was added here before create_task() and removed
        once the task is live — startup-race guard.
+
+    Leak-safety guarantee: _starting_workers.discard() runs in ``finally``, so no
+    exit path can leave the key in the set. If any statement after create_task()
+    raises (e.g., a pathological dict assignment or logger failure), the newly-
+    created task is cancelled and NOT stored in _active_workers, so no orphan
+    runs.
     """
     existing = _active_workers.get(worker_key)
     if existing and not existing.done():
@@ -1156,17 +1161,23 @@ def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
         logger.warning(f"[worker:{worker_key}] Duplicate worker spawn blocked — in-flight")
         return
     _starting_workers.add(worker_key)
+    task: asyncio.Task | None = None
     try:
         event = asyncio.Event()
         _active_events[worker_key] = event
         task = asyncio.create_task(_worker_loop(worker_key, event, is_project_keyed))
         _active_workers[worker_key] = task
-        _starting_workers.discard(worker_key)
-        task.add_done_callback(lambda _: _starting_workers.discard(worker_key))
         logger.info(f"[worker:{worker_key}] Started session queue worker")
     except Exception:
-        _starting_workers.discard(worker_key)
+        # If the task was created but not published, cancel it so no orphan runs.
+        if task is not None and worker_key not in _active_workers:
+            task.cancel()
+            logger.exception(
+                f"[worker:{worker_key}] _ensure_worker post-create failure; cancelled orphan task"
+            )
         raise
+    finally:
+        _starting_workers.discard(worker_key)
 
 
 async def _worker_loop(
