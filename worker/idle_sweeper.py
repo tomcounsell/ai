@@ -41,9 +41,7 @@ logger = logging.getLogger(__name__)
 # Dormancy age (seconds) required before we tear down an SDK client. Default
 # 86400 (24h) sits comfortably inside the ~48h silent-death window with
 # plenty of safety margin.
-IDLE_TEARDOWN_THRESHOLD = int(
-    os.environ.get("WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS", "86400")
-)
+IDLE_TEARDOWN_THRESHOLD = int(os.environ.get("WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS", "86400"))
 # Sweep interval (seconds). Default 1800 (30 min) — idle teardown does not
 # need to be real-time; the only deadline is the 48h Anthropic kill.
 IDLE_SWEEP_INTERVAL = int(os.environ.get("WATCHDOG_IDLE_SWEEP_INTERVAL", "1800"))

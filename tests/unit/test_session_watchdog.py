@@ -330,6 +330,114 @@ class TestAssessSessionHealth:
 
 
 # ===================================================================
+# assess_session_health → steering actuator (issue #1128)
+# ===================================================================
+
+
+class TestAssessSessionHealthTriggersSteer:
+    """After issue #1128, detections drive actuation: repetition / cascade
+    / token threshold fire a steering message via `_inject_watchdog_steer`.
+    """
+
+    def _patch_common(self, monkeypatch):
+        """Reset cooldown keys + return the push-captured messages list."""
+        import popoto.redis_db as _rdb
+
+        for key in _rdb.POPOTO_REDIS_DB.scan_iter("watchdog:steer_cooldown:*"):
+            _rdb.POPOTO_REDIS_DB.delete(key)
+
+    def test_repetition_triggers_steer(self, monkeypatch, session_log_dir):
+        """Repeated identical tool calls → one steering message."""
+        sid, log_dir = session_log_dir
+        self._patch_common(monkeypatch)
+
+        # Write 5 identical pre_tool_use events
+        log_file = log_dir / "tool_use.jsonl"
+        with open(log_file, "w") as f:
+            for _ in range(6):
+                f.write(
+                    json.dumps(
+                        {
+                            "event": "pre_tool_use",
+                            "tool_name": "Bash",
+                            "tool_input": {"command": "ls"},
+                        }
+                    )
+                    + "\n"
+                )
+
+        session = _make_session(session_id=sid)
+        result = assess_session_health(session)
+        assert any("Looping" in issue for issue in result["issues"])
+
+        from agent.steering import pop_all_steering_messages
+
+        msgs = pop_all_steering_messages(sid)
+        assert len(msgs) == 1
+        assert msgs[0]["sender"] == "watchdog"
+        assert "repeating the same tool call" in msgs[0]["text"]
+
+    def test_error_cascade_triggers_independent_steer(self, monkeypatch, session_log_dir):
+        """Error cascade gets its own cooldown key (independent from repetition)."""
+        sid, log_dir = session_log_dir
+        self._patch_common(monkeypatch)
+
+        log_file = log_dir / "tool_use.jsonl"
+        with open(log_file, "w") as f:
+            for _ in range(10):
+                f.write(
+                    json.dumps(
+                        {
+                            "event": "post_tool_use",
+                            "tool_name": "Bash",
+                            "tool_output_preview": "Error: something bad happened",
+                        }
+                    )
+                    + "\n"
+                )
+
+        session = _make_session(session_id=sid)
+        result = assess_session_health(session)
+        assert any("Error cascade" in issue for issue in result["issues"])
+
+        from agent.steering import pop_all_steering_messages
+
+        msgs = pop_all_steering_messages(sid)
+        assert len(msgs) == 1
+        assert msgs[0]["sender"] == "watchdog"
+        assert "hit" in msgs[0]["text"] and "errors" in msgs[0]["text"]
+
+    def test_auto_steer_disabled_suppresses_push(self, monkeypatch, session_log_dir):
+        """WATCHDOG_AUTO_STEER_ENABLED=false → detection still fires, no steer pushed."""
+        sid, log_dir = session_log_dir
+        self._patch_common(monkeypatch)
+        monkeypatch.setenv("WATCHDOG_AUTO_STEER_ENABLED", "false")
+
+        log_file = log_dir / "tool_use.jsonl"
+        with open(log_file, "w") as f:
+            for _ in range(6):
+                f.write(
+                    json.dumps(
+                        {
+                            "event": "pre_tool_use",
+                            "tool_name": "Bash",
+                            "tool_input": {"command": "ls"},
+                        }
+                    )
+                    + "\n"
+                )
+
+        session = _make_session(session_id=sid)
+        result = assess_session_health(session)
+        assert any("Looping" in issue for issue in result["issues"])
+
+        from agent.steering import pop_all_steering_messages
+
+        msgs = pop_all_steering_messages(sid)
+        assert msgs == []
+
+
+# ===================================================================
 # check_all_sessions - ModelException handling
 # ===================================================================
 

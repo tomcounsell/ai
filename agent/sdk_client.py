@@ -370,9 +370,7 @@ def accumulate_session_tokens(
         try:
             session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
             session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
-            session.total_cache_read_tokens = (
-                session.total_cache_read_tokens or 0
-            ) + cache_delta
+            session.total_cache_read_tokens = (session.total_cache_read_tokens or 0) + cache_delta
             session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta
             session.save(
                 update_fields=[
@@ -1872,14 +1870,18 @@ async def get_response_via_harness(
     else:
         cmd = harness_cmd + [message]
 
-    result_text, session_id_from_harness, returncode, usage, cost_usd = (
-        await _run_harness_subprocess(
-            cmd,
-            working_dir,
-            proc_env,
-            on_sdk_started=on_sdk_started,
-            on_stdout_event=on_stdout_event,
-        )
+    (
+        result_text,
+        session_id_from_harness,
+        returncode,
+        usage,
+        cost_usd,
+    ) = await _run_harness_subprocess(
+        cmd,
+        working_dir,
+        proc_env,
+        on_sdk_started=on_sdk_started,
+        on_stdout_event=on_stdout_event,
     )
 
     # Image-dimension sentinel: Claude Code returns the image-dimension error with
@@ -1894,14 +1896,18 @@ async def get_response_via_harness(
         if full_context_message is not None:
             fallback_msg = _apply_context_budget(full_context_message)
             fallback_cmd = harness_cmd + [fallback_msg]
-            result_text, session_id_from_harness, _, usage, cost_usd = (
-                await _run_harness_subprocess(
-                    fallback_cmd,
-                    working_dir,
-                    proc_env,
-                    on_sdk_started=on_sdk_started,
-                    on_stdout_event=on_stdout_event,
-                )
+            (
+                result_text,
+                session_id_from_harness,
+                _,
+                usage,
+                cost_usd,
+            ) = await _run_harness_subprocess(
+                fallback_cmd,
+                working_dir,
+                proc_env,
+                on_sdk_started=on_sdk_started,
+                on_stdout_event=on_stdout_event,
             )
         else:
             logger.error(
@@ -1931,14 +1937,18 @@ async def get_response_via_harness(
                     f"[harness] Fallback budget: {original_len} → {len(fallback_msg)} chars"
                 )
             fallback_cmd = harness_cmd + [fallback_msg]
-            result_text, session_id_from_harness, _, usage, cost_usd = (
-                await _run_harness_subprocess(
-                    fallback_cmd,
-                    working_dir,
-                    proc_env,
-                    on_sdk_started=on_sdk_started,
-                    on_stdout_event=on_stdout_event,
-                )
+            (
+                result_text,
+                session_id_from_harness,
+                _,
+                usage,
+                cost_usd,
+            ) = await _run_harness_subprocess(
+                fallback_cmd,
+                working_dir,
+                proc_env,
+                on_sdk_started=on_sdk_started,
+                on_stdout_event=on_stdout_event,
             )
         else:
             logger.error(
