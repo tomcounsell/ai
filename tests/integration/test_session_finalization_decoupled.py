@@ -6,11 +6,15 @@ while extraction is still pending, even if extraction would stall indefinitely.
 
 NOTE (PR #1056 review nit): the plan's Test Impact section called for a
 Popoto-backed assertion that the PM's ``queued_steering_messages`` grew by
-exactly 1 after extraction was deferred. This test instead uses a simpler
-``asyncio.Event`` to signal the PM nudge, because spinning up a real Popoto
-+ pyrogram + harness-subprocess stack was judged too heavy for the scheduler-
-boundary contract being verified here. A follow-up issue (#1057) tracks
-adding the full Popoto-backed test that exercises the PM inbox end-to-end.
+exactly 1 after extraction was deferred. The ``TestSessionFinalizationDecoupled``
+class below uses a simpler ``asyncio.Event`` to signal the PM nudge, because
+spinning up a real Popoto + pyrogram + harness-subprocess stack was judged
+too heavy for the scheduler-boundary contract being verified there. The
+follow-up test class ``TestPMSteeringPopotoIntegration`` below (issue #1057)
+now provides the Popoto-backed coverage end-to-end — real ``AgentSession``
+pair, real ``steer_session``, real ``push_steering_message``, real Redis
+partial-save — asserting the PM's ``queued_steering_messages`` list grew by
+exactly 1 within the 5-second SLO.
 
 The full ``_execute_agent_session`` flow requires substantial Redis/Popoto
 infrastructure (AgentSession creation, pyrogram bridge, harness subprocess,
@@ -211,3 +215,210 @@ class TestSessionFinalizationDecoupled:
         # shutdown drainage ambiguous.
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class TestPMSteeringPopotoIntegration:
+    """Popoto-backed end-to-end steering test (issue #1057, follow-up to hotfix #1055).
+
+    Exercises the post-finalization slice of ``_execute_agent_session``:
+    ``_schedule_post_session_extraction`` → ``_handle_dev_session_completion``
+    against a real Popoto ``AgentSession`` pair (PM + Dev) with NO patches on
+    ``steer_session``, ``push_steering_message``, or ``AgentSession``. Asserts
+    that after a dev session completes and extraction is deferred, the PM's
+    ``queued_steering_messages`` list on the Popoto record grew by **exactly 1**
+    within the 5-second SLO window — the contract the shipped
+    ``TestSessionFinalizationDecoupled`` class deferred to this follow-up.
+    """
+
+    @pytest.mark.asyncio
+    async def test_pm_queued_steering_messages_grew_by_exactly_one_within_5s(self, redis_test_db):
+        """PM's ``queued_steering_messages`` grows by exactly 1 within the 5s SLO.
+
+        Real Popoto PM + Dev sessions. Real ``steer_session``. Real
+        ``push_steering_message``. Extraction is stubbed to stall past the 5s SLO
+        so the test proves the PM inbox write happens ahead of extraction
+        completion. No patches on the steering chain itself — only on side-effect
+        helpers (``_extract_issue_number`` to skip ``gh`` subprocess,
+        ``_call_ensure_worker`` to suppress worker-ping, and the defensive
+        harness stub for parity with sibling tests).
+        """
+        # Canonical import path (plan C2 note): import via the agent_session_queue
+        # re-export, NOT from agent.session_completion where the function is
+        # defined. Matches production call sites (agent/session_executor.py:16).
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.agent_session_queue import _handle_dev_session_completion
+        from agent.pipeline_state import PipelineStateMachine
+        from agent.session_executor import (
+            _pending_extraction_tasks,
+            _schedule_post_session_extraction,
+        )
+        from models.agent_session import AgentSession
+
+        # ------------------------------------------------------------------
+        # Fixture setup: real PM + Dev AgentSession pair.
+        # ------------------------------------------------------------------
+        now = datetime.now(tz=UTC)
+        pm = AgentSession.create(
+            session_id=f"pm-1057-{time.time_ns()}",
+            session_type="pm",
+            project_key="test-1057-popoto",
+            status="active",
+            chat_id="1057",
+            sender_name="TestUser",
+            message_text="BUILD issue #1057",
+            created_at=now,
+            started_at=now,
+            updated_at=now,
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        # Advance PM to BUILD (non-terminal) so is_pipeline_complete() returns
+        # False and _handle_dev_session_completion reaches the steer_session
+        # branch (not the pipeline-complete branch). Mirrors the pattern in
+        # tests/integration/test_parent_child_round_trip.py:158-167.
+        sm = PipelineStateMachine(pm)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+        sm.complete_stage("PLAN")
+        sm.start_stage("CRITIQUE")
+        sm.complete_stage("CRITIQUE")
+        sm.start_stage("BUILD")
+
+        # Reload PM so subsequent reads see the updated stage_states AND any
+        # queued_steering_messages writes made during the test.
+        pm = next(iter(AgentSession.query.filter(session_id=pm.session_id)))
+        assert PipelineStateMachine(pm).current_stage() == "BUILD", (
+            "PM must be at non-terminal BUILD stage so steering branch is taken "
+            "(not is_pipeline_complete's completion branch)"
+        )
+
+        dev = AgentSession.create(
+            session_id=f"dev-1057-{time.time_ns()}",
+            session_type="dev",
+            project_key="test-1057-popoto",
+            status="active",
+            chat_id="1057",
+            sender_name="TestUser",
+            message_text="Stage: BUILD",
+            parent_agent_session_id=pm.agent_session_id,
+            created_at=now,
+            started_at=now,
+            updated_at=now,
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        try:
+            # --------------------------------------------------------------
+            # Patches: stall extraction, short-circuit side effects.
+            # Deliberately NOT patched: steer_session, push_steering_message,
+            # AgentSession.* (these are the code under test).
+            # --------------------------------------------------------------
+            async def _slow_extract(session_id, response_text, project_key=None):
+                await asyncio.sleep(10)  # Longer than the 5s SLO — task stays pending.
+
+            baseline = pm.queued_steering_messages or []
+            baseline_len = len(baseline)
+            assert baseline_len == 0, (
+                f"Fresh PM fixture must start with empty queue; got {baseline_len}"
+            )
+
+            result = "PR created at https://github.com/test/repo/pull/42. BUILD complete."
+
+            with (
+                patch(
+                    "agent.memory_extraction.run_post_session_extraction",
+                    side_effect=_slow_extract,
+                ),
+                patch(
+                    "agent.session_completion._extract_issue_number",
+                    return_value=None,
+                ),
+                patch(
+                    "agent.session_executor._call_ensure_worker",
+                    MagicMock(),
+                ),
+                patch(
+                    "agent.sdk_client.get_response_via_harness",
+                    AsyncMock(return_value=result),
+                ),
+            ):
+                # Exact call-shape from agent/session_executor.py:1478-1507:
+                # synchronous schedule (no await), then await the dev-completion
+                # handler. No complete_transcript call — deliberate omission per
+                # plan (C1 note): this test's scope is the post-finalization slice
+                # only. The #987 transcript-ordering invariant has direct coverage
+                # in sibling tests (test_parent_child_round_trip.py, session-
+                # executor unit tests).
+                t0 = time.monotonic()
+                _schedule_post_session_extraction(dev.session_id, result)
+                await _handle_dev_session_completion(
+                    session=dev,
+                    agent_session=dev,
+                    result=result,
+                )
+                elapsed = time.monotonic() - t0
+
+            # --------------------------------------------------------------
+            # Assertions: the PM inbox grew by exactly 1 within the SLO window,
+            # and the extraction task is still pending.
+            # --------------------------------------------------------------
+            pm_reloaded = next(iter(AgentSession.query.filter(session_id=pm.session_id)))
+            new_queue = pm_reloaded.queued_steering_messages or []
+            new_len = len(new_queue)
+
+            assert new_len == baseline_len + 1 == 1, (
+                f"PM queued_steering_messages must grow by exactly 1: "
+                f"baseline={baseline_len}, after={new_len}, "
+                f"delta={new_len - baseline_len}, elapsed={elapsed:.3f}s"
+            )
+
+            assert elapsed < 5.0, (
+                f"_schedule_post_session_extraction + _handle_dev_session_completion "
+                f"took {elapsed:.3f}s — violates the 5s SLO from hotfix #1055"
+            )
+
+            last_msg = new_queue[-1]
+            assert "Dev session completed" in last_msg, (
+                f"Steering message must include the completion preamble; got: {last_msg!r}"
+            )
+            assert "BUILD" in last_msg, (
+                f"Steering message must include the stage label; got: {last_msg!r}"
+            )
+
+            # Prove the extraction stall did not delay the inbox write — the
+            # task is still pending in the registry at assertion time.
+            assert dev.session_id in _pending_extraction_tasks, (
+                "Extraction task must still be registered after _handle_dev_session_completion"
+            )
+            extraction_task = _pending_extraction_tasks[dev.session_id]
+            assert extraction_task.done() is False, (
+                "Extraction task must still be pending — proves steering ran ahead of extraction"
+            )
+
+        finally:
+            # --------------------------------------------------------------
+            # Cleanup: cancel any lingering extraction task (autouse fixture
+            # also does this), and delete both sessions via Popoto ORM
+            # (respects CLAUDE.md Manual Testing Hygiene despite redis_test_db
+            # flushdb on teardown).
+            # --------------------------------------------------------------
+            task = _pending_extraction_tasks.get(dev.session_id)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                dev.delete()
+            except Exception:
+                pass
+            try:
+                pm.delete()
+            except Exception:
+                pass
