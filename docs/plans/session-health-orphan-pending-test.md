@@ -6,6 +6,7 @@ owner: Tom Counsell
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1126
 last_comment_id:
+revision_applied: true
 ---
 
 # Session Health: Orphan-PENDING Recovery Regression Test
@@ -223,6 +224,34 @@ Explicit statement for the hook: **No documentation changes needed.** This test-
 - [ ] Tests pass (`/do-test`).
 - [ ] No documentation updates needed (confirmed in Documentation section).
 
+## Concerns Addressed (Revision Pass)
+
+The `/do-plan-critique` run returned **READY TO BUILD (with concerns)** with four concerns. These are **not blockers** — they are acknowledged risks whose mitigations are now inline below so the builder can apply them directly while writing the test. Each concern maps 1:1 to the correspondingly numbered item in the Risks section above; this section adds a concrete **Implementation Note** the builder must follow.
+
+### C1: Spy resolution path (maps to Risk 1)
+
+- **Concern:** Monkeypatching the wrong name would let the test silently pass on the pre-fix tree.
+- **Implementation Note:** In the test, use `monkeypatch.setattr("agent.agent_session_queue._ensure_worker", spy)` — the module-attribute form on the source module, NOT on `agent.session_health`. Do this BEFORE calling `await _agent_session_health_check()`. The production code at `agent/session_health.py:1019` does a function-local `from agent.agent_session_queue import _ensure_worker`, which re-resolves the name from the source module on every invocation, so the module-attribute monkeypatch is the only form that intercepts. A comment at the monkeypatch line must name this fact explicitly (one-line comment; the builder is instructed to copy the rationale, not paraphrase): `# Patch on the source module — session_health re-imports _ensure_worker locally on each call (agent/session_health.py:1019).`
+
+### C2: Non-local `worker_key` guard (maps to Risk 2)
+
+- **Concern:** If helper defaults produce a `"local"`-prefixed `worker_key`, the health check takes the abandoned-local branch at `agent/session_health.py:994` and never reaches the `_ensure_worker` call site.
+- **Implementation Note:** After seeding, the test MUST assert `assert not seeded_session.worker_key.startswith("local"), f"topology drift: worker_key={seeded_session.worker_key!r} — this test exercises the non-local orphan-PENDING branch"`. This assertion fires BEFORE `_agent_session_health_check()` is invoked. If a future change to `_create_test_session` defaults makes the key `"local"`-prefixed, the test fails loudly at setup with a self-explanatory message instead of silently exiting via the wrong branch.
+
+### C3: Derived `worker_key`, not hard-coded (maps to Risk 3)
+
+- **Concern:** `_create_test_session` defaults could produce either a `chat_id`-keyed or a `project_key`-keyed session depending on `session_type`; hard-coding an expected string in the assertion would make the test brittle.
+- **Implementation Note:** The spy-invocation assertion MUST derive both arguments from the seeded session rather than hard-coding: `assert spy_calls == [(seeded_session.worker_key, seeded_session.is_project_keyed)], f"spy calls: {spy_calls!r}"`. Do NOT write `assert spy_calls == [("789", False)]` — if the helper defaults change, the derived form still exercises the orphan-PENDING branch correctly, while the hard-coded form fails for the wrong reason.
+
+### C4: `_active_workers` pre-flight cleanup (maps to Risk 4)
+
+- **Concern:** A prior test's leaked task in `_active_workers` for the same `worker_key` would make `worker_alive=True` at `agent/session_health.py:977`, causing the health check to skip the orphan-PENDING branch. The class-level autouse `_cleanup_workers` fixture cleans AFTER each test, but nothing guarantees a clean slate BEFORE this one runs.
+- **Implementation Note:** The test MUST explicitly pop the seeded key before invoking the health check: `from agent.agent_session_queue import _active_workers; _active_workers.pop(seeded_session.worker_key, None)`. Place this call AFTER seeding and the topology assertions, and BEFORE the monkeypatch and the `await`. Mirror the pattern already used by `test_recovers_job_with_no_worker` at `tests/integration/test_agent_session_health_monitor.py:200`.
+
+### Revision Note
+
+All four concerns have been addressed by inline Implementation Notes in this section and by corresponding bullets in Step 1 of "Step by Step Tasks" below. No scope expansion. No new production code changes. The test remains strictly additive.
+
 ## Team Orchestration
 
 ### Team Members
@@ -251,12 +280,15 @@ Explicit statement for the hook: **No documentation changes needed.** This test-
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Add `test_recovers_orphan_pending_with_no_running_sessions` method inside `TestJobHealthCheck` in `tests/integration/test_agent_session_health_monitor.py`.
-- Seed one PENDING `AgentSession` with `chat_id="789"`, `created_at=time.time() - (AGENT_SESSION_HEALTH_MIN_RUNNING + 60)`, `session_id="orphan_pending_session"`.
-- Pre-assert: `AgentSession.query.filter(project_key="test", status="running")` is empty; `seeded_session.worker_key` does NOT start with `"local"`; `_active_workers.get(seeded_session.worker_key)` is None.
-- Monkeypatch `agent.agent_session_queue._ensure_worker` to a spy that records `(worker_key, is_project_keyed)` tuples on a captured list (use `pytest`'s `monkeypatch` fixture).
+- Seed one PENDING `AgentSession` with `chat_id="789"`, `created_at=time.time() - (AGENT_SESSION_HEALTH_MIN_RUNNING + 60)`, `session_id="orphan_pending_session"`. Save the returned object as `seeded_session`.
+- **Pre-assertion block (covers C2 + C4):**
+  - Assert `AgentSession.query.filter(project_key="test", status="running")` is empty.
+  - Assert `not seeded_session.worker_key.startswith("local")` with a message naming the drift (C2 Implementation Note).
+  - `from agent.agent_session_queue import _active_workers; _active_workers.pop(seeded_session.worker_key, None)` — explicit pre-flight cleanup (C4 Implementation Note). Mirrors the pattern at `tests/integration/test_agent_session_health_monitor.py:200`.
+- **Monkeypatch (covers C1):** `monkeypatch.setattr("agent.agent_session_queue._ensure_worker", spy)` where `spy` is a plain callable that appends `(worker_key, is_project_keyed)` tuples to a list captured in the test's local scope. Include a one-line comment above the monkeypatch explaining WHY the source-module form is required: `# Patch on the source module — session_health re-imports _ensure_worker locally on each call (agent/session_health.py:1019).`
 - `await _agent_session_health_check()`.
-- Assert spy was called exactly once with `(seeded_session.worker_key, seeded_session.is_project_keyed)`.
-- Assert `caplog.records` contains no record whose message matches `UnboundLocalError` or `cannot access local variable '_ensure_worker'` (use `caplog` fixture at `WARNING` level).
+- **Spy-call assertion (covers C3):** Assert `spy_calls == [(seeded_session.worker_key, seeded_session.is_project_keyed)]`. Do NOT hard-code the tuple — derive both elements from `seeded_session` so the test remains robust if helper defaults change the `worker_key` or `is_project_keyed` value.
+- Assert `caplog.records` contains no record whose message matches `UnboundLocalError` or `cannot access local variable '_ensure_worker'` (use `caplog` fixture at `WARNING` level). This is the belt-and-braces check for the case where the bug returns AND its log is silently swallowed.
 - Run `python -m ruff format tests/integration/test_agent_session_health_monitor.py`.
 
 ### 2. Verify the test catches the original bug
