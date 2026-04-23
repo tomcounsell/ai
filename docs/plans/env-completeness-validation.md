@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Planning
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -250,19 +250,19 @@ No agent integration required — this is an update-system internal change. The 
 
 ## Documentation
 
-- [x] Update `docs/features/env-completeness-validation.md` — new feature doc describing the completeness check behavior, how to interpret warnings, and the `.env.example` comment convention
-- [x] Add entry to `docs/features/README.md` index table for the new feature doc
+- [ ] Update `docs/features/env-completeness-validation.md` — new feature doc describing the completeness check behavior, how to interpret warnings, and the `.env.example` comment convention
+- [ ] Add entry to `docs/features/README.md` index table for the new feature doc
 
 ## Success Criteria
 
-- [x] Every variable in `.env.example` has at least one descriptive comment line above it
-- [x] `scripts/update/verify.py::check_env_completeness()` exists and parses `.env.example` for declared keys
-- [x] Running `python scripts/update/run.py --verify` with a `.env` missing a declared key surfaces `WARN: env-completeness: 1 missing: KEY_NAME (description)` in the output
-- [x] Blank values in `.env` (`KEY=`) are treated as present — no false warning
-- [x] `.env` not found returns a skipped result (no exception)
-- [x] `tests/unit/test_env_completeness.py` passes covering: missing key detection, blank-value tolerance, unreadable-file graceful skip
-- [x] Tests pass (`pytest tests/unit/test_env_completeness.py`)
-- [x] Lint/format clean (`python -m ruff check . && python -m ruff format --check .`)
+- [ ] Every variable in `.env.example` has at least one descriptive comment line above it
+- [ ] `scripts/update/verify.py::check_env_completeness()` exists and parses `.env.example` for declared keys
+- [ ] Running `python scripts/update/run.py --verify` with a `.env` missing a declared key surfaces `WARN: env-completeness: 1 missing: KEY_NAME (description)` in the output
+- [ ] Blank values in `.env` (`KEY=`) are treated as present — no false warning
+- [ ] `.env` not found returns a skipped result (no exception)
+- [ ] `tests/unit/test_env_completeness.py` passes covering: missing key detection, blank-value tolerance, unreadable-file graceful skip
+- [ ] Tests pass (`pytest tests/unit/test_env_completeness.py`)
+- [ ] Lint/format clean (`python -m ruff check . && python -m ruff format --check .`)
 
 ## Team Orchestration
 
