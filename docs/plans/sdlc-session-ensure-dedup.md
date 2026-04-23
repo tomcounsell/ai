@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1147
 last_comment_id:
+revision_applied: true
 ---
 
 # SDLC Session Ensure — Dedup Against Bridge Sessions
@@ -120,6 +121,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/sdlc-session-e
 
 - **Env-var short-circuit** in `ensure_session()`: when `VALOR_SESSION_ID` or `AGENT_SESSION_ID` is set and resolves to a real session, return it and skip create.
 - **Message-text fallback** in `find_session_by_issue()`: after the existing `issue_url` match, try `message_text` against a case-insensitive regex `\bissue\s*#?\s*{N}\b`. Catches Telegram-originated PM sessions that have no URL.
+  - **Implementation Note (SIM1) — why this fallback is kept, not dropped**: The env short-circuit handles the common bridge-initiated case. The `message_text` fallback handles a narrower but real degraded scenario: `VALOR_SESSION_ID` is NOT injected or is empty in the subprocess environment. This can happen if (a) the SDK client env injection silently fails (e.g., a future refactor of `agent/sdk_client.py` drops the export), (b) a subprocess is spawned without inheriting the parent env (e.g., `subprocess.Popen(..., env={...})` with an explicit minimal dict), or (c) the `/sdlc` skill runs in a harness variant that doesn't carry bridge env vars. In each case, the bridge session exists in Redis with `issue_url=None` and `message_text="SDLC issue {N}"`, and a plain `find_session_by_issue` call would miss it — creating a zombie. The fallback lets `ensure_session` recover by pattern-matching the issue number in `message_text`. This is a defense-in-depth layer, not a redundancy: it activates precisely when the primary short-circuit cannot, and the cost is ~5 test scenarios plus a single `re` import plus a second linear scan of at most ~100 PM sessions. The builder should keep both paths; dropping the fallback re-opens the zombie class for env-injection failures.
 - **Orphan killer CLI path** on `sdlc_session_ensure`: new `--kill-orphans` mode lists/finalizes zombie sessions (`status="running"`, `session_id.startswith("sdlc-local-")`, `last_heartbeat_at is None`, `created_at` older than 10 minutes). `--dry-run` lists without modifying. Uses `finalize_session()` (not `transition_status`) because `"killed"` is a terminal status and `transition_status()` raises `ValueError` on terminal targets.
 - **SKILL.md correction**: update the Step 1.5 comment in `.claude/skills/sdlc/SKILL.md` so the documentation matches behavior once the short-circuit lands.
 
@@ -140,8 +142,10 @@ Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` →
    - Read `env_session_id = os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")`.
    - If set (non-empty string), call the existing `find_session(session_id=env_session_id)` (import from `tools._sdlc_utils`) to confirm the session actually exists in Redis.
    - **Gate on `session_type == "pm"`**: after finding the session, check `getattr(resolved, "session_type", None) == "pm"`. If the env points to a Dev or Teammate session (e.g., during cross-role debugging), DO NOT short-circuit — fall through to the legacy path so PM stage_states do not end up written to a non-PM session.
-   - If `find_session` returns a truthy PM session, return `{"session_id": env_session_id, "created": False}` immediately — do NOT fall through to issue-number lookup or create.
-   - If env var is unset, empty, resolves to None (stale env from a killed session), or resolves to a non-PM session, fall through to the existing issue-number path so the local fallback still works in degraded conditions.
+   - **Gate on non-terminal status (AD1)**: after the `session_type` check, also require `getattr(resolved, "status", None) not in TERMINAL_STATUSES`. Import `TERMINAL_STATUSES` from `models.session_lifecycle`. If the resolved session has a terminal status (completed, killed, abandoned, failed, superseded), treat it as missing and fall through to the legacy path. This closes the terminal-race window where the bridge session finalized between `VALOR_SESSION_ID` injection and `ensure_session` execution — returning a terminal session would cause stage markers to be written to a dead record.
+   - If `find_session` returns a truthy PM session with a non-terminal status, return `{"session_id": env_session_id, "created": False}` immediately — do NOT fall through to issue-number lookup or create.
+   - If env var is unset, empty, resolves to None (stale env from a killed session), resolves to a non-PM session, or resolves to a terminal-status session, fall through to the existing issue-number path so the local fallback still works in degraded conditions.
+   - **Implementation Note (AD1)**: The gate is a simple membership check — `from models.session_lifecycle import TERMINAL_STATUSES; status = getattr(resolved, "status", None); if status in TERMINAL_STATUSES: resolved = None` — then continue through the existing `session_type` gate. Add a regression test parallel to the non-PM test: env var points at a `session_type="pm"` session whose `status="completed"` (or any terminal value), confirm the short-circuit does NOT activate and the legacy path runs instead.
 
 2. **`find_session_by_issue()` message_text fallback** (edit `tools/_sdlc_utils.py:20`):
    - After the existing `issue_url.endswith(target_suffix)` loop completes with no match, run a second pass over the same `pm_sessions` list.
@@ -155,6 +159,7 @@ Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` →
    - With `--dry-run`: print JSON `{"orphans": [{"session_id": ..., "created_at": ..., "issue_url": ...}], "count": N, "killed": false}` and exit 0.
    - Without `--dry-run`: iterate and call `finalize_session(session, "killed", reason="zombie sdlc-local session cleanup", skip_auto_tag=True, skip_checkpoint=True, skip_parent=True)`. Track per-session results: `{"session_id": ..., "result": "killed"}` on success, `{"session_id": ..., "result": "failed", "error": str(e)}` on exception. Print JSON with `killed: true`, `count`, per-session results list, and `failures` count. Exit code is always 0 — per-session failures are reported in the payload, never raised (matches module docstring contract).
    - **Critical**: do NOT call `transition_status(session, "killed", ...)` — `transition_status()` raises `ValueError` on terminal statuses (see `models/session_lifecycle.py:264–269`). The correct helper is `finalize_session()`. The `skip_auto_tag=True, skip_checkpoint=True, skip_parent=True` flags are required because zombie sessions have no meaningful work to tag, no branch to checkpoint, and no parent to notify.
+   - **Implementation Note (O1) — observability signal for zombie accumulation**: When `_iter_orphan_sessions()` finds a non-zero count, emit a single stderr log line: `print(f"[sdlc_session_ensure] found {count} zombie sdlc-local session(s)", file=sys.stderr)` before printing the JSON payload to stdout. This surfaces the count to operators running `--kill-orphans --dry-run` as part of routine health checks (the existing operator workflow) without polluting the JSON contract (stdout stays parseable). On zero count, emit nothing to stderr. This is the minimum-cost closed-loop signal — no dashboard field, no metric emission, no scheduler changes. The existing dashboard's "running PM sessions" view continues to serve as the primary visibility path; the stderr line exists so that scheduled cleanup runs log evidence of any regression in the short-circuit. Do NOT add a periodic job or reflection entry; those expand scope beyond this plan's Small appetite.
 
 4. **SKILL.md comment fix** (edit `.claude/skills/sdlc/SKILL.md` around Step 1.5):
    - Current text: `This is idempotent -- running it multiple times for the same issue reuses the same session.`
@@ -192,7 +197,7 @@ Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` →
 - [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: keep all existing tests (they exercise the fallback paths that remain). Add `TestBridgeShortCircuit`, `TestMessageTextFallback` (where applicable), and `TestKillOrphans` classes as described in Step by Step Task 3.
 - [ ] `tests/unit/test_sdlc_utils.py` — UPDATE: this file owns the `find_session_by_issue` tests. The existing `test_returns_none_when_no_match` test asserts the current `issue_url`-only match behavior. Add `TestMessageTextFallback` class covering: (a) match on `message_text="SDLC issue 1147"`, (b) match on `"issue #1147"`, (c) no match on `"tissue 1147"` (word boundary), (d) no match when `message_text` is None/empty, (e) fallback does not trigger when `issue_url` already matches (preserves priority).
 - [ ] `tests/integration/test_sdlc_session_ensure_integration.py` — NEW: integration test that drives the headline dashboard claim. Given a simulated bridge AgentSession (real Popoto Redis write, `session_type="pm"`, `message_text="SDLC issue 1147"`, `issue_url=None`), invoke `ensure_session(1147)` with `VALOR_SESSION_ID=<bridge_session_id>` in env, then assert exactly one PM session exists for that issue in Redis (`len(AgentSession.query.filter(session_type="pm")) == 1` scoped to the test's `project_key`). Clean up via `instance.delete()` in teardown per CLAUDE.md manual testing hygiene.
-- [ ] `grep -rn "sdlc_session_ensure\|find_session_by_issue\|sdlc-local-" tests/` returns only these three files after the change. No other test files touch this code path.
+- [ ] **Scope note (CA1)**: After changes, `grep -rn "find_session_by_issue\|sdlc_session_ensure\|sdlc-local-" tests/` will continue to return additional files beyond the three above — notably `tests/unit/test_sdlc_stage_marker.py` (patches `tools._sdlc_utils.find_session_by_issue` in three places — lines 63, 89, 135) and `tests/unit/test_sdlc_stage_query.py` (also patches the helper for stage-marker resolution tests). These files patch the function for unrelated concerns (stage marker resolution, not session-ensure logic) and **do NOT need updates** because the fix preserves `find_session_by_issue`'s signature. No action required in those files. `tests/README.md` may also appear as a grep hit and is likewise unaffected. The builder should NOT treat a grep count greater than three as a validation failure.
 
 ## Rabbit Holes
 
@@ -204,9 +209,10 @@ Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` →
 
 ## Risks
 
-### Risk 1: `VALOR_SESSION_ID` points at a dead session
-**Impact:** If the bridge session was killed mid-flight but the env var lingers (Claude Code subprocess outlives the worker's AgentSession lifetime somehow), the short-circuit would return a stale ID and the caller would write stage state to a dead record.
+### Risk 1: `VALOR_SESSION_ID` points at a dead or terminal session
+**Impact:** If the bridge session was killed or finalized mid-flight but the env var lingers (Claude Code subprocess outlives the worker's AgentSession lifetime somehow), the short-circuit would return a stale ID and the caller would write stage state to a dead record.
 **Mitigation:** The short-circuit calls `find_session(session_id=env_val)` which does a live Redis lookup. Returns None on missing record. We only short-circuit on truthy lookup. On None, fall through to the existing path so the local fallback still creates a usable session.
+**Additional mitigation (AD1)**: Even when the record still exists in Redis, the short-circuit rejects it if `status in TERMINAL_STATUSES` (completed, killed, abandoned, failed, superseded). This closes the terminal-race window where the session was finalized between env injection and `ensure_session` execution. The gate is idempotent and cheap (single attribute read), and the test suite covers both the missing-session case and each terminal-status value via parametrized assertion.
 
 ### Risk 2: `message_text` regex matches unrelated issues in a multi-issue conversation
 **Impact:** If a Telegram PM session's `message_text` contains "issue 1140 and issue 1147", a lookup for 1147 could match the wrong session.
@@ -222,9 +228,20 @@ No new race conditions introduced.
 
 - The env short-circuit is a pure read path (env var + one Redis lookup). No state is mutated.
 - The `message_text` fallback is a pure read over the same `pm_sessions` list.
-- The orphan killer iterates sequentially; each `transition_status` call is atomic at the Popoto layer. Concurrent invocations of `--kill-orphans` on the same zombie would both attempt `transition_status(..., "killed")`; the second is a no-op.
+- The orphan killer iterates sequentially; each `finalize_session` call is atomic at the Popoto layer. Concurrent invocations of `--kill-orphans` on the same zombie would both attempt the terminal transition; the second is a no-op (the session is already in a terminal state and `finalize_session` handles this idempotently).
 
-All operations remain synchronous and Redis-single-call at the Popoto-ORM layer. No new async primitives, locks, or multi-step transactions.
+All new operations remain synchronous and Redis-single-call at the Popoto-ORM layer. No new async primitives, locks, or multi-step transactions.
+
+### Pre-existing TOCTOU on the legacy create path (AD3)
+
+**Implementation Note (AD3)**: The legacy fallback path has a pre-existing TOCTOU window between the existence check and the create call — specifically, `AgentSession.query.filter(session_id=local_session_id)` (around line 64 of `tools/sdlc_session_ensure.py`) followed by `AgentSession.create_local(session_id=local_session_id, ...)` (around line 77). Two concurrent `/sdlc` invocations for the same issue on the same local machine could both miss the existence check and both attempt creation. This race is **pre-existing**, not introduced by this plan, and is **out of scope** for this fix.
+
+Why out of scope:
+- The env short-circuit closes this window for bridge-initiated sessions, which is the common case and the one that produces the zombie bug under report.
+- The local-CLI path still has the race, but two concurrent `/sdlc` invocations for the same issue on the same local machine is a pathological interactive flow, not a user-reported failure mode.
+- Closing the race would require a distributed lock or a Redis `SETNX`-style create, adding complexity disproportionate to the observed incidence rate.
+
+The builder should make no attempt to close this TOCTOU — the acknowledgment here exists only so the race is documented and does not reappear as a surprise finding in future reviews.
 
 ## No-Gos (Out of Scope)
 
@@ -402,6 +419,19 @@ Critique run (2026-04-24): 10 findings (2 blockers, 5 concerns, 3 nits). Verdict
 **Nits:** Not addressed in this revision pass (NITs do not block READY TO BUILD per `do-plan-critique` contract). They will be considered during `/do-build` if the builder has spare cycles.
 
 Revision applied: 2026-04-24. Plan is now expected to pass critique and route to `/do-build`.
+
+### Second critique pass (2026-04-24): READY TO BUILD (with concerns)
+
+Artifact hash: `sha256:ea76ddf7bf64ed656e77f276592d9e7172f456e58a0ed6a2fa722c68d815e5e1`. Second critique returned **READY TO BUILD (with concerns)** — 0 blockers, 5 concerns, 5 nits. No blockers, no MAJOR REWORK — the plan is approved to build after a concern-revision pass.
+
+**Concerns (embedded as Implementation Notes in-place, not reclassified):**
+- **AD1** (terminal-status gate on env short-circuit) — Technical Approach step 1 and Risks Risk 1 now require a `TERMINAL_STATUSES` membership check after the `session_type` gate. Prevents stage markers writing to a dead record when the bridge session finalized between env injection and `ensure_session` execution. Parametrized regression test added to the test scope.
+- **CA1** (Test Impact grep assertion factually wrong) — Fourth Test Impact bullet replaced with a scope note explaining that `test_sdlc_stage_marker.py` and `test_sdlc_stage_query.py` patch `find_session_by_issue` for unrelated stage-marker-resolution concerns and do NOT need updates because the function signature is unchanged. Builder should not treat a grep count > 3 as a failure.
+- **AD3** (pre-existing TOCTOU on legacy create path) — Race Conditions section extends with an explicit acknowledgment of the pre-existing race between `AgentSession.query.filter` and `AgentSession.create_local` on the local-CLI fallback. Declared out of scope with justification (env short-circuit closes the common-case window; residual race is a pathological concurrent-interactive flow).
+- **SIM1** (justify-or-drop message_text fallback) — Solution section now documents the specific degraded failure modes the fallback covers (SDK env-injection failure, subprocess env stripping, harness variants without bridge env vars). The fallback is retained as defense-in-depth, not dropped. Cost-benefit rationale explicit.
+- **O1** (observability signal for zombie accumulation) — Technical Approach step 3 now specifies a single stderr log line in `--kill-orphans` output when count > 0. Minimum-cost closed-loop signal; does not touch the JSON stdout contract, the dashboard, or the scheduler.
+
+`revision_applied: true` added to plan frontmatter. Next `/sdlc` invocation will route to Row 4c → `/do-build`.
 
 ---
 
