@@ -26,7 +26,15 @@ Each `STANDARDS_*.md` file holds the rules. Keep those files as the single sourc
 
 Cross-cutting reference docs live under `references/` and are loaded only when the task calls for them (progressive disclosure):
 
-- [`references/EVALS.md`](references/EVALS.md) — how to evaluate a prompt systematically. Read when iterating on a prompt that ships inside a skill, subagent, hook, or agent loop. Not part of the audit itself.
+- [`references/EVALS.md`](references/EVALS.md) — how to evaluate a prompt systematically. Read when iterating on a prompt that ships inside a skill, subagent, hook, or agent loop.
+- [`references/PROMPT_ENGINEERING.md`](references/PROMPT_ENGINEERING.md) — how to iterate on a single prompt to make it reliably produce the output you want (techniques, output steering, multimodal, caching). Read alongside `EVALS.md` when refining a shipping prompt.
+- [`references/TOOL_USE.md`](references/TOOL_USE.md) — designing tool-enabled prompts: schemas, multi-turn loops, parallel execution, structured output via tools, built-in Anthropic tools.
+- [`references/RAG.md`](references/RAG.md) — retrieval-augmented generation: chunking, embeddings, hybrid retrieval, reranking, contextual retrieval, citations.
+- [`references/AGENTS_AND_WORKFLOWS.md`](references/AGENTS_AND_WORKFLOWS.md) — when to use a predetermined workflow vs an agent, and the four standard workflow patterns (chaining, parallelization, routing, evaluator-optimizer).
+- [`references/MCP.md`](references/MCP.md) — using the Model Context Protocol to integrate tools, resources, and prompts authored outside your application.
+- [`references/CLAUDE_CODE.md`](references/CLAUDE_CODE.md) — Claude Code features: context management (CLAUDE.md, @mentions), workflow modes (Plan/Thinking), conversation controls, custom commands, hooks, SDK, and GitHub integration.
+
+None of these are part of the audit itself — they are loaded on demand when a task calls for them.
 
 ## Arguments
 

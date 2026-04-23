@@ -6,7 +6,7 @@ Guidance for evaluating prompts systematically. Load this when iterating on a pr
 
 ## Why evals exist
 
-**Prompt engineering** is how you write a prompt: multishot examples, XML structure, role framing, explicit output contracts. **Prompt evaluation** is how you measure whether the prompt actually works once real inputs hit it. The two are different disciplines. A well-engineered prompt with no eval is still an unmeasured claim.
+**Prompt engineering** is how you write a prompt: multishot examples, XML structure, role framing, explicit output contracts (see [`PROMPT_ENGINEERING.md`](PROMPT_ENGINEERING.md)). **Prompt evaluation** is how you measure whether the prompt actually works once real inputs hit it. The two are different disciplines. A well-engineered prompt with no eval is still an unmeasured claim.
 
 The three common paths after drafting a prompt:
 
