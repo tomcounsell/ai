@@ -173,6 +173,15 @@ class ModelSettings(BaseModel):
         default="llama3.2-vision:11b",
         description="Ollama vision model for local image analysis (env: OLLAMA_VISION_MODEL)",
     )
+    session_default_model: str = Field(
+        default="opus",
+        description=(
+            "Fallback Claude model for sessions where AgentSession.model is None/empty. "
+            "Part of the precedence cascade: session.model > settings > codebase default 'opus'. "
+            "Short aliases (opus, sonnet, haiku) preferred; full names (claude-opus-4-7) also accepted. "
+            "Env: MODELS__SESSION_DEFAULT_MODEL."
+        ),
+    )
 
 
 class FeatureSettings(BaseModel):

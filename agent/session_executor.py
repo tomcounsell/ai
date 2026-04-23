@@ -24,10 +24,34 @@ from agent.session_state import (
 )
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from config.enums import SessionType
+from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_session_model(session: AgentSession | None) -> str | None:
+    """D1 precedence cascade for session model.
+
+    Order (closest to LLM call wins):
+      1. ``session.model`` (explicit per-session, via
+         ``valor-session create --model <name>``)
+      2. ``settings.models.session_default_model`` (machine-local override,
+         env var ``MODELS__SESSION_DEFAULT_MODEL``)
+      3. codebase default ``"opus"`` (set on the pydantic Field default in
+         ``config/settings.py``)
+
+    Returns the resolved model alias (e.g. ``"opus"``, ``"sonnet"``), or
+    ``None`` if the cascade resolves to an empty string (operator-
+    misconfigured settings default to ``""``). ``None`` is treated by
+    ``get_response_via_harness()`` as "omit ``--model``, use CLI default."
+    """
+    explicit = getattr(session, "model", None) if session else None
+    if explicit:
+        return explicit
+    fallback = settings.models.session_default_model
+    return fallback or None
 
 
 def _tick_backstop_check_compaction(
@@ -1306,6 +1330,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         _harness_requeued = False
 
+        # D1 precedence cascade: session.model > settings > codebase default.
+        _effective_model = _resolve_session_model(agent_session)
+
         async def do_work() -> str:
             nonlocal _harness_requeued
             raw = await get_response_via_harness(
@@ -1315,6 +1342,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 prior_uuid=_prior_uuid,
                 session_id=session.session_id,
                 full_context_message=_harness_input,
+                model=_effective_model,
                 # Two-tier no-progress detector callbacks (#1036). These route
                 # through messenger.notify_* wrappers so exceptions are caught
                 # and the queue-layer closures bump ORM fields on AgentSession.
