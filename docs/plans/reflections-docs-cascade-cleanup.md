@@ -207,26 +207,26 @@ No agent integration required — this is a pure documentation edit. The agent d
 
 This PR **is** the documentation work. The edits themselves are the deliverable.
 
-- [ ] Edit `docs/features/popoto-index-hygiene.md` per Solution (remove Cleanup Reflection (Runner) section; **fix line 31 "bridge-hosted" → "worker-embedded"**; **fix Three Cleanup Paths table row 2 Trigger "Bridge tick (daily)" → "Worker scheduler tick (daily)"**; collapse table to two rows; update Key Files table row).
-- [ ] Edit `docs/features/bridge-self-healing.md` per Solution (fix line 11; **drop line-112 `reflections.log` bullet entirely**).
-- [ ] Edit `docs/features/telegram-history.md` per Solution (fix ALL FOUR step-13 references at lines **35, 47, 54, 58**).
-- [ ] Edit `docs/research/claude-code-feature-swot.md` per Solution (REMOVE line-414 Reflections row; add explanatory sentence below the table; rewrite the lines 417-429 code example and its "Tasks performed" commentary).
-- [ ] Edit `docs/guides/claude-code-feature-swot.md` per Solution (same edits as the research copy; keep both in lockstep).
-- [ ] Edit `docs/guides/valor-name-references.md` per Solution (apply pre-computed dispositions: DELETE rows 88, 92, 100; ANNOTATE rows 90, 93, 111 with exact string `(removed service)`).
-- [ ] Verify via `diff` that the two `claude-code-feature-swot.md` copies stay in sync (only pre-existing ChatSession/PM session differences remain).
-- [ ] Run the acceptance-criteria `grep` and confirm remaining hits are only the three annotated rows in `valor-name-references.md` (or in `docs/plans/completed/`). Capture the output in the PR description.
+- [x] Edit `docs/features/popoto-index-hygiene.md` per Solution (remove Cleanup Reflection (Runner) section; **fix line 31 "bridge-hosted" → "worker-embedded"**; **fix Three Cleanup Paths table row 2 Trigger "Bridge tick (daily)" → "Worker scheduler tick (daily)"**; collapse table to two rows; update Key Files table row).
+- [x] Edit `docs/features/bridge-self-healing.md` per Solution (fix line 11; **drop line-112 `reflections.log` bullet entirely**).
+- [x] Edit `docs/features/telegram-history.md` per Solution (fix ALL FOUR step-13 references at lines **35, 47, 54, 58**).
+- [x] Edit `docs/research/claude-code-feature-swot.md` per Solution (REMOVE line-414 Reflections row; add explanatory sentence below the table; rewrite the lines 417-429 code example and its "Tasks performed" commentary).
+- [x] Edit `docs/guides/claude-code-feature-swot.md` per Solution (same edits as the research copy; keep both in lockstep).
+- [x] Edit `docs/guides/valor-name-references.md` per Solution (apply pre-computed dispositions: DELETE rows 88, 92, 100; ANNOTATE rows 90, 93, 111 with exact string `(removed service)`).
+- [x] Verify via `diff` that the two `claude-code-feature-swot.md` copies stay in sync (only pre-existing ChatSession/PM session differences remain).
+- [x] Run the acceptance-criteria `grep` and confirm remaining hits are only the three annotated rows in `valor-name-references.md` (or in `docs/plans/completed/`). Capture the output in the PR description.
 
 No new feature docs or index entries are needed — every change is to existing pages. `/do-docs` is effectively this PR's build step.
 
 ## Success Criteria
 
-- [ ] `popoto-index-hygiene.md`, `bridge-self-healing.md`, `telegram-history.md`, `valor-name-references.md`, and both `claude-code-feature-swot.md` variants no longer describe the monolith as live. (Issue acceptance criterion 1.) Specifically: `popoto-index-hygiene.md` no longer says "bridge-hosted" or "Bridge tick" (scheduler is worker-embedded).
-- [ ] Cited step numbers are replaced with callable names (or removed if no longer applicable). (Issue acceptance criterion 2. Covers `telegram-history.md:35, 47, 54, 58` — all four, not just the three originally in the recon.)
-- [ ] `grep -rn "scripts/reflections.py\|ReflectionRunner\|com.valor.reflections" docs/features docs/guides docs/research` returns only references inside explicitly historical contexts: (a) `docs/plans/completed/*`, (b) the three annotated `(removed service)` rows in `valor-name-references.md` (90, 93, 111), and (c) the seven deferred out-of-scope files explicitly called out in Rabbit Holes (documentation-audit.md, session-lifecycle.md, pm-dev-session-architecture.md, sustainable-self-healing.md, unified-analytics.md, bridge-resilience.md, session-lifecycle-diagnostics.md). (Issue acceptance criterion 3.)
-- [ ] Doc table of contents / README indexes still match what each doc now describes. (Issue acceptance criterion 4. Verified by spot-checking cross-references from `docs/features/README.md` and each edited file's own section structure.)
-- [ ] The two `claude-code-feature-swot.md` copies remain semantically identical aside from the pre-existing ChatSession/PM session terminology delta.
-- [ ] Lint/format pass (`python -m ruff format .` — no-op on markdown, but runs cleanly).
-- [ ] PR description explicitly states scope boundary ("touches only the six files listed in #1032; non-overlapping with #1031 and #1134") AND enumerates the deferred seven files with their disposition ("accepted as tangential history, no follow-up issue tracked").
+- [x] `popoto-index-hygiene.md`, `bridge-self-healing.md`, `telegram-history.md`, `valor-name-references.md`, and both `claude-code-feature-swot.md` variants no longer describe the monolith as live. (Issue acceptance criterion 1.) Specifically: `popoto-index-hygiene.md` no longer says "bridge-hosted" or "Bridge tick" (scheduler is worker-embedded).
+- [x] Cited step numbers are replaced with callable names (or removed if no longer applicable). (Issue acceptance criterion 2. Covers `telegram-history.md:35, 47, 54, 58` — all four, not just the three originally in the recon.)
+- [x] `grep -rn "scripts/reflections.py\|ReflectionRunner\|com.valor.reflections" docs/features docs/guides docs/research` returns only references inside explicitly historical contexts: (a) `docs/plans/completed/*`, (b) the three annotated `(removed service)` rows in `valor-name-references.md` (90, 93, 111), and (c) the seven deferred out-of-scope files explicitly called out in Rabbit Holes (documentation-audit.md, session-lifecycle.md, pm-dev-session-architecture.md, sustainable-self-healing.md, unified-analytics.md, bridge-resilience.md, session-lifecycle-diagnostics.md). (Issue acceptance criterion 3.)
+- [x] Doc table of contents / README indexes still match what each doc now describes. (Issue acceptance criterion 4. Verified by spot-checking cross-references from `docs/features/README.md` and each edited file's own section structure.)
+- [x] The two `claude-code-feature-swot.md` copies remain semantically identical aside from the pre-existing ChatSession/PM session terminology delta.
+- [x] Lint/format pass (`python -m ruff format .` — no-op on markdown, but runs cleanly).
+- [x] PR description explicitly states scope boundary ("touches only the six files listed in #1032; non-overlapping with #1031 and #1134") AND enumerates the deferred seven files with their disposition ("accepted as tangential history, no follow-up issue tracked").
 
 ## Team Orchestration
 
