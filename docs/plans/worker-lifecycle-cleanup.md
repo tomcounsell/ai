@@ -7,6 +7,7 @@ created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1131
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 ---
 
 # Worker Lifecycle Cleanup: Dead Alias, Dead Handler, Starting-Workers Leak Edge Case
