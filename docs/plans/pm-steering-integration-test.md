@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1057
 last_comment_id:
+revision_applied: true
 ---
 
 # PM Steering Popoto Integration Test (follow-up for hotfix #1055 / PR #1056)
@@ -122,6 +123,8 @@ No new dependencies. All prerequisites are baseline repo state.
 - **Harness stub**: patch `agent.sdk_client.get_response_via_harness` to return a canned success string. (Not strictly required since we don't call `_execute_agent_session` directly — see Technical Approach — but retained to match the exact stub pattern used by sibling tests.)
 - **Extraction stall stub**: patch `agent.memory_extraction.run_post_session_extraction` to `await asyncio.sleep(10)` — this is longer than the 5s SLO window, so the task stays pending the whole assertion window.
 - **Production call shape**: exercise `_schedule_post_session_extraction(dev.session_id, "<success result preview>")` then `await _handle_dev_session_completion(session=dev, agent_session=dev, result="<same>")` — the same sequence executed in `_execute_agent_session:1478-1507` post-hotfix.
+
+**Implementation Note (C1 — deliberate omission of `complete_transcript`):** The test deliberately does **not** call or exercise `complete_transcript(...)` before the `_handle_dev_session_completion` invocation. The ordering invariant from #987 (transcript completes first, then dev-completion handler runs) is enforced at `agent/session_executor.py:1481-1507` via explicit comments, and is already covered by sibling tests (`tests/integration/test_parent_child_round_trip.py` and the session-executor unit tests). This plan's test is scoped to the **post-finalization slice only** — specifically the `queued_steering_messages` field-write invariant under a stalled extraction. Folding transcript completion into this test would (a) require a `ChatSession`/`BossMessenger` fixture pair just to satisfy the transcript side effects, (b) broaden the stub surface to cover transcript persistence, and (c) re-cover an invariant that already has direct tests elsewhere. See also No-Go bullet on `complete_transcript` coverage below. If the builder finds that skipping `complete_transcript` causes `_handle_dev_session_completion` to fail on a missing transcript dependency, STOP and raise this as a blocker — do **not** silently add a transcript-complete call to satisfy the test; that would expand scope past what this plan authorized.
 - **Field-growth assertion**: re-query the PM from Popoto (`AgentSession.query.filter(session_id=pm.session_id)`) and compare `queued_steering_messages` length to the pre-call baseline. Must be exactly 1 longer.
 - **5-second SLO assertion**: wrap the whole post-finalization sequence in `time.monotonic()` start/end; elapsed < 5.0s.
 - **Extraction-pending assertion**: `_pending_extraction_tasks[dev.session_id].done() is False` at assertion time.
@@ -154,6 +157,16 @@ No new dependencies. All prerequisites are baseline repo state.
 - Running that slice against real Popoto and without patching the steering chain gives us faithful end-to-end coverage of the exact invariant the issue is asking about: "PM's `queued_steering_messages` grew by exactly 1 within the 5s SLO."
 
 **pyrogram / transport stubbing**: not needed. The post-finalization slice never calls into pyrogram; `steer_session` writes to Popoto only (optionally kicks a worker ping at L541 which is wrapped in `try/except RuntimeError`).
+
+**Implementation Note (C2 — canonical import path):** The test MUST import `_handle_dev_session_completion` as:
+
+```python
+from agent.agent_session_queue import _handle_dev_session_completion
+```
+
+Do **not** import it from `agent.session_completion` even though that module is where the function is *defined*. `agent.agent_session_queue` re-exports it (see `agent/agent_session_queue.py:52`), and the rest of the codebase (including `agent/session_executor.py:16`) imports it via `agent.agent_session_queue`. Using the re-export keeps the test aligned with production call sites — so if the re-export is ever removed or renamed, the test fails loudly at import time instead of silently binding to a stale module path. This applies to both the top-of-file import in the test module AND any `unittest.mock.patch(...)` targets that reference the function by its dotted path.
+
+Consequence for patching: when the test patches `_extract_issue_number` or related helpers, it MUST patch them at `agent.session_completion.<name>` (the definition module) because that is where the call site inside `_handle_dev_session_completion` resolves them. Do NOT patch them at `agent.agent_session_queue.<name>`. This is the standard "patch where it's looked up, not where it's defined" rule — the re-export of `_handle_dev_session_completion` does NOT re-export its internal callees.
 
 ## Failure Path Test Strategy
 
@@ -204,7 +217,9 @@ No other existing tests are affected — this is a pure addition alongside the e
 
 ### Risk 5: `STEERING_QUEUE_MAX` interferes with the length assertion
 **Impact:** If baseline `queued_steering_messages` is already at `STEERING_QUEUE_MAX`, push will drop oldest and length stays the same.
-**Mitigation:** Fresh fixture PM starts with `queued_steering_messages=None` → normalizes to `[]` → baseline length is 0. Pushing 1 message yields length 1, which is well under `STEERING_QUEUE_MAX` (50 per `models/agent_session.py`). No risk in practice.
+**Mitigation:** Fresh fixture PM starts with `queued_steering_messages=None` → normalizes to `[]` → baseline length is 0. Pushing 1 message yields length 1, which is well under `STEERING_QUEUE_MAX` (**10** per `models/agent_session.py:52`). No risk in practice.
+
+**Implementation Note (C3 — source of truth):** `STEERING_QUEUE_MAX` is defined at `models/agent_session.py:52` as `STEERING_QUEUE_MAX = 10` (NOT 50 — an earlier draft of this plan cited 50 in error). The builder MUST verify the constant's value at build time by reading `models/agent_session.py` directly — do not trust this number in the plan. If the constant has moved or changed value by the time the build runs, update the citation here and in the assertion reasoning. The cap is small enough (10) that it is plausibly relevant to a test that exercises `push_steering_message` in a loop; this test only pushes once, so the cap is not load-bearing for the length assertion, but the citation must remain accurate so future readers / future tests don't copy a wrong number.
 
 ## Race Conditions
 
@@ -231,6 +246,7 @@ No other existing tests are affected — this is a pure addition alongside the e
 - **Drive the full outermost `_execute_agent_session`** — see Rabbit Holes; not aligned with the issue's practical intent.
 - **Add coverage for `post_stage_comment` / GitHub integration** — out of scope; patched to no-op.
 - **Change `test_parent_child_round_trip.py`** — it already provides Popoto coverage of `_handle_dev_session_completion` with a `steer_session` patch. We do not need to modify it; this plan's test provides the stricter no-patch coverage.
+- **Cover `complete_transcript` ordering or side-effects** — **deliberate omission.** The #987 invariant ("_handle_dev_session_completion runs AFTER complete_transcript") is already tested at the session-executor call-site level and by `test_parent_child_round_trip.py`. This plan's test exercises the **post-finalization slice only** (`_schedule_post_session_extraction` → `_handle_dev_session_completion`), starting at a point where a successful transcript completion is presumed. Adding transcript coverage here would require ChatSession/BossMessenger fixtures, widen the patch surface, and duplicate sibling coverage. If future work needs a single test that spans transcript → dev-completion → steering end-to-end, file a separate issue — do not fold it into this one.
 
 ## Update System
 
@@ -302,7 +318,11 @@ Built on `builder` and `validator` — no specialists needed for this narrow sco
 - Update the module docstring lines 7-13: replace "A follow-up issue (#1057) tracks adding the full Popoto-backed test that exercises the PM inbox end-to-end." with a reference to the new class.
 - Below the existing `TestSessionFinalizationDecoupled` class, add a new class `TestPMSteeringPopotoIntegration` with one `@pytest.mark.asyncio` method `test_pm_queued_steering_messages_grew_by_exactly_one_within_5s`.
 - Inside the test:
-  - Import `AgentSession`, `PipelineStateMachine`, `_handle_dev_session_completion`, `_schedule_post_session_extraction`, `_pending_extraction_tasks`.
+  - Imports (use the canonical paths pinned in the Technical Approach C2 note):
+    - `from models.agent_session import AgentSession`
+    - `from models.pipeline_state_machine import PipelineStateMachine`
+    - `from agent.agent_session_queue import _handle_dev_session_completion` (re-export path — NOT `agent.session_completion`)
+    - `from agent.session_executor import _schedule_post_session_extraction, _pending_extraction_tasks`
   - Create `pm = AgentSession.create(session_type="pm", project_key="test-1057-popoto", status="active", session_id=f"pm-1057-{time.time_ns()}", chat_id="1057", sender_name="TestUser", message_text="BUILD issue #1057", created_at=datetime.now(tz=UTC), started_at=datetime.now(tz=UTC), updated_at=datetime.now(tz=UTC), turn_count=0, tool_call_count=0)`.
   - Advance PM to BUILD: `sm = PipelineStateMachine(pm); sm.start_stage("ISSUE"); sm.complete_stage("ISSUE"); sm.start_stage("PLAN"); sm.complete_stage("PLAN"); sm.start_stage("CRITIQUE"); sm.complete_stage("CRITIQUE"); sm.start_stage("BUILD")`.
   - Reload PM: `pm = list(AgentSession.query.filter(session_id=pm.session_id))[0]`.
@@ -371,13 +391,16 @@ Built on `builder` and `validator` — no specialists needed for this narrow sco
 | No production code changes | `git diff --name-only main...HEAD -- agent/ models/ bridge/ worker/ tools/ mcp_servers/` | exit code 0 with empty output |
 | Format clean | `python -m ruff format --check tests/integration/test_session_finalization_decoupled.py` | exit code 0 |
 | Recognizable project_key | `grep -c 'test-1057-' tests/integration/test_session_finalization_decoupled.py` | output > 0 |
-| Explicit session cleanup | `grep -c 'session.delete()\|pm.delete()\|dev.delete()' tests/integration/test_session_finalization_decoupled.py` | output > 0 |
+| Explicit session cleanup | `grep -cE '\.delete\(\)' tests/integration/test_session_finalization_decoupled.py` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Verdict: READY TO BUILD (with concerns). Revision pass applied 2026-04-23. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | C1 | Deliberate omission of `complete_transcript` coverage was implicit; future readers could mistake it for a gap. | Revision pass (2026-04-23): added explicit No-Go bullet under `## No-Gos` and Implementation Note in Technical Approach. | See Technical Approach → "Implementation Note (C1 — deliberate omission of `complete_transcript`)" and `## No-Gos` bullet on `complete_transcript` ordering. |
+| CONCERN | C2 | Import path for `_handle_dev_session_completion` was unpinned; builder could import from definition module (`agent.session_completion`) instead of canonical re-export (`agent.agent_session_queue`). | Revision pass (2026-04-23): added Implementation Note in Technical Approach pinning `from agent.agent_session_queue import _handle_dev_session_completion`, plus updated task-step 1 imports to match. | See Technical Approach → "Implementation Note (C2 — canonical import path)" and Step 1 imports section. |
+| CONCERN | C3 | `STEERING_QUEUE_MAX` cited as 50; actual value is 10 (`models/agent_session.py:52`). | Revision pass (2026-04-23): corrected citation in Risk 5 from 50 → 10 with source-of-truth Implementation Note directing builder to verify value at build time. | See Risks → "Risk 5" and "Implementation Note (C3 — source of truth)". |
 
 ---
 
