@@ -512,7 +512,7 @@ async def _deliver_pipeline_completion(
     except Exception:
         # Defence in depth: fall back to the known literal if the import
         # fails (e.g. during partial reloads in tests).
-        _HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"
+        _HARNESS_NOT_FOUND_PREFIX = "Error: CLI harness not found"  # noqa: N806
 
     try:
         from agent.sdk_client import get_response_via_harness  # noqa: PLC0415

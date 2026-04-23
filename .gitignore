@@ -453,3 +453,6 @@ config/personas/teammate.md
 
 # Happy path test evidence (screenshots, runtime artifacts)
 tests/happy-paths/evidence/
+
+# Working-state scratchpad (gitignored per long-task-checkpointing feature)
+PROGRESS.md

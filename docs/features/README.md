@@ -67,6 +67,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Local Doctor](local-doctor.md) | Unified health check CLI consolidating environment, service, auth, and resource checks into `python -m tools.doctor` | Shipped |
 | [Log Rotation](log-rotation.md) | User-space log rotation via LaunchAgent (`com.valor.log-rotate`) replacing root-requiring newsyslog; 30-minute schedule, 10 MB/3 backups, self-exclusion, content-idempotent installer | Shipped |
+| [Long-Task Checkpointing](long-task-checkpointing.md) | PROGRESS.md scratchpad and frequent-commit guidance for dev sessions to survive context compaction without semantic drift | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, forgetting, and health-checking memories from the Memory model (`status` subcommand: Redis ping, counts, superseded ratio, category breakdown) | Shipped |
 | [Message Drafter](message-drafter.md) | Medium-aware drafting layer that owns wire-format compliance for every user-visible message — Telegram/email orthogonality, drafter-at-the-handler integration, relay length guard, tool-call delivery (planned) | Shipped |

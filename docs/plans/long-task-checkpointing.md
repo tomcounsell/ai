@@ -28,7 +28,9 @@ The remaining gap is prompt-level: the dev session prompt does not instruct the 
 
 **Desired outcome:**
 
-- Dev sessions externalize working state in two mutually-reinforcing channels: (a) **frequent git commits** — every meaningful unit of work is committed, not only at failure boundaries; (b) a **top-level `PROGRESS.md` file** in the worktree tracking Done / In-progress / Left, re-read on session start and updated at checkpoints.
+- Dev sessions externalize working state in two mutually-reinforcing channels: (a) **frequent git commits** — every meaningful unit of work is committed, not only at failure boundaries; (b) a **top-level `PROGRESS.md` file** in the worktree — a plain-text scratchpad tracking Done / In-progress / Left, re-read on session start and updated at checkpoints.
+- `PROGRESS.md` is a **working-memory scratchpad only**, not ground truth. Ground truth for progress = the plan doc + `git log --oneline main..HEAD`. Ground truth for scope = the plan doc. `PROGRESS.md` helps the agent pick up where it left off after compaction; it supplements but never replaces file-readable signals.
+- `PROGRESS.md` is **gitignored** — it stays in the worktree filesystem during the session but does not pollute PR diffs or session-branch history.
 - After a compaction, the agent's next turn re-reads `PROGRESS.md` and `git log --oneline main..HEAD` to re-anchor itself, instead of relying on the (lossy) compacted summary.
 - `/do-build` has a soft gate: if `PROGRESS.md` is missing at the session-branch HEAD when build reports "implementation complete," log a warning (not a hard fail). This treats PROGRESS.md as a nudge, not a blocker — the worker output still ships.
 - The example `PROGRESS.md` shape is documented in `docs/features/long-task-checkpointing.md` so future contributors can reproduce it.
@@ -81,18 +83,18 @@ External research is not required — this is an internal prompt-engineering cha
 For reference — the PROGRESS.md lifecycle inside a dev session:
 
 1. **Session start** — Dev session spawned by PM session via `python -m tools.valor_session create --role dev --slug {slug}`. Worker harness sets CWD to `.worktrees/{slug}/`. System prompt includes `builder.md` body (for sub-agents) and developer persona overlay (for top-level session).
-2. **First turn (after reading plan)** — Agent follows the new "Working-state externalization" prompt section: creates `PROGRESS.md` at worktree root with three sections (Done / In-progress / Left), populated from the plan's Step by Step Tasks.
-3. **During work** — After each meaningful unit (completed task, completed sub-step), agent (a) commits to the session branch, (b) moves the task entry from "In-progress" to "Done" in PROGRESS.md and updates "In-progress" to the next item. Update batched with the code commit when possible.
+2. **First turn (after reading plan)** — Agent follows the new "Working-state externalization" prompt section: creates `PROGRESS.md` at worktree root with three sections (Done / In-progress / Left), populated from the plan's Step by Step Tasks. `PROGRESS.md` is already gitignored — it never appears in `git status` output.
+3. **During work** — After each meaningful unit (completed task, completed sub-step), agent (a) commits code to the session branch, (b) moves the task entry from "In-progress" to "Done" in PROGRESS.md and updates "In-progress" to the next item. PROGRESS.md update is a filesystem write only; it is not added to git commits.
 4. **Compaction fires** — PreCompact hook takes the JSONL backup (existing, #1127). Compacted summary replaces conversation history.
-5. **First turn post-compaction** — The new prompt instruction "On session start or resumption, re-read `PROGRESS.md` and `git log --oneline main..HEAD`" fires. Agent re-orients from the file + git log, not the compacted summary.
-6. **Session completion** — `/do-build` Step 5 (Definition of Done) now runs a soft check: `test -f .worktrees/{slug}/PROGRESS.md && grep -q '^## Done' PROGRESS.md`. If missing, log a warning but do not block PR creation.
+5. **First turn post-compaction** — The new prompt instruction "On session start or resumption, re-read `PROGRESS.md` and `git log --oneline main..HEAD`" fires. Agent re-orients from the scratchpad + git log, not the compacted summary. If PROGRESS.md is absent (e.g., worktree was recreated), agent falls back to the plan doc and `git log --oneline main..HEAD` — both are directly accessible from the worktree and authoritative.
+6. **Session completion** — `/do-build` Step 5 (Definition of Done) now runs a soft check: `[ -f .worktrees/{slug}/PROGRESS.md ]`. If missing, log a warning but do not block PR creation.
 
 ## Architectural Impact
 
-- **No new dependencies.** Prompt edits only, plus a soft-check shell line in `/do-build`.
+- **No new dependencies.** Prompt edits only, plus a soft-check shell line in `/do-build`, plus a .gitignore entry.
 - **Interface changes**: none. PROGRESS.md is a convention, not an interface.
 - **Coupling**: decreases — making post-compaction recovery independent of SDK summary fidelity.
-- **Data ownership**: PROGRESS.md lives inside the worktree alongside the plan. Same ownership as the code — the session branch owns it.
+- **Data ownership**: PROGRESS.md lives inside the worktree filesystem only. It is explicitly NOT committed to the session branch — it is ephemeral working memory, not a source of truth.
 - **Reversibility**: trivially reversible. Prompt edits are revertable in one commit. No state migration.
 
 ## Appetite
@@ -105,7 +107,7 @@ For reference — the PROGRESS.md lifecycle inside a dev session:
 - PM check-ins: 1 (plan-doc-review before /do-plan-critique; Tom answers Open Questions)
 - Review rounds: 1 (standard PR review)
 
-**Why Small:** four prompt edits (builder.md, do-build SKILL.md, developer persona overlay, dev-session.md if warranted), one feature doc, one integration test. Zero new code paths, zero dependencies, zero schema changes. The hardest part is keeping the prompt deltas terse enough to not inflate token counts.
+**Why Small:** five deliverables (builder.md, developer persona overlay, do-build SKILL.md, .gitignore entry, feature doc), one integration test. Zero new code paths, zero dependencies, zero schema changes. The hardest part is keeping the prompt deltas terse enough to not inflate token counts.
 
 ## Prerequisites
 
@@ -115,7 +117,8 @@ No prerequisites — all touched files exist and are readable.
 |-------------|---------------|---------|
 | Builder prompt present | `test -f .claude/agents/builder.md` | Target of the primary prompt edit |
 | Do-build skill present | `test -f .claude/skills/do-build/SKILL.md` | Target of soft-check addition |
-| Dev persona overlay present | `test -f ~/Desktop/Valor/personas/developer.md || test -f config/personas/developer.md` | Target of persona edit (authoritative source is ~/Desktop/Valor/) |
+| Dev persona overlay present | `test -f ~/Desktop/Valor/personas/developer.md` | Target of consistent persona edit (authoritative source is ~/Desktop/Valor/) |
+| .gitignore present | `test -f .gitignore` | Target of PROGRESS.md entry |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/long-task-checkpointing.md`
 
@@ -124,43 +127,51 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/long-task-chec
 ### Key Elements
 
 - **Working-state externalization prompt section** — added to `.claude/agents/builder.md` (affects builder sub-agents spawned by `/do-build` team-lead orchestration). ~40-60 lines, written tersely.
-- **PROGRESS.md convention** — a single top-level file in the worktree with three H2 sections: `## Done`, `## In progress`, `## Left`. Committed to the session branch alongside code. Auto-created by the dev session on first turn.
+- **Consistent update to developer persona overlay** — `~/Desktop/Valor/personas/developer.md` receives the same working-state externalization principles as `builder.md`. Content is consistent but not verbatim duplicate. Persona overlay is iCloud-synced; the change propagates automatically. Both files must align because a PM agent may spawn the dev session as either a top-level developer persona or a builder sub-agent — the behavior should be identical.
+- **PROGRESS.md convention** — a single top-level file in the worktree with three H2 sections: `## Done`, `## In progress`, `## Left`. **Gitignored** (never committed). A working-memory scratchpad only, not a source of truth. If PROGRESS.md is absent, the agent falls back to the plan doc and `git log --oneline main..HEAD` — both are directly readable from the worktree.
 - **Post-compaction re-orientation instruction** — in the same prompt section, an explicit "on session start or resumption, `cat PROGRESS.md` and `git log --oneline main..HEAD` before continuing."
+- **.gitignore entry** — `PROGRESS.md` added to the repo `.gitignore` so it never accidentally appears in commits or PR diffs.
 - **Soft gate in `/do-build`** — a warn-not-block check that PROGRESS.md exists at PR time. Runs after Definition of Done, before PR creation.
-- **Feature doc** — `docs/features/long-task-checkpointing.md` with the example PROGRESS.md skeleton, rationale, and cross-link to `docs/features/compaction-hardening.md`.
-- **Integration test** — reads `.claude/agents/builder.md` and asserts presence of the new section markers (e.g., `## Working-state externalization`, `PROGRESS.md`). Token-count test asserts the delta is under a threshold. A separate integration test stubs the /do-build soft-check path.
+- **Feature doc** — `docs/features/long-task-checkpointing.md` with the example PROGRESS.md skeleton, rationale, scratchpad vs. ground-truth distinction, and cross-link to `docs/features/compaction-hardening.md`.
+- **Integration test** — reads `.claude/agents/builder.md` and asserts presence of the new section markers (e.g., `## Working-state externalization`, `PROGRESS.md`). Token-count tests assert deltas are within soft and hard limits. A separate integration test stubs the /do-build soft-check path.
 
 ### Flow
 
-**Dev session spawns in worktree** → reads plan + builder prompt → creates `PROGRESS.md` with plan tasks populated → commits `[WIP] scaffold` → works on first task → commits with PROGRESS.md update → compaction fires → (JSONL backup takes, summary replaces history) → agent's next turn reads `PROGRESS.md` + `git log` → continues from recorded in-progress line → finishes → /do-build soft-check sees PROGRESS.md → PR opens.
+**Dev session spawns in worktree** → reads plan + builder prompt → creates `PROGRESS.md` (gitignored, scratchpad only) with plan tasks populated → works on first task → commits code only (PROGRESS.md stays local) → updates PROGRESS.md in-place → compaction fires → (JSONL backup takes, summary replaces history) → agent's next turn reads `PROGRESS.md` + `git log` → continues from recorded in-progress line → finishes → /do-build soft-check sees PROGRESS.md → PR opens.
 
 ### Technical Approach
 
 1. **Prompt edit to `.claude/agents/builder.md`** — add `## Working-state externalization` section after the existing "Safety Net — Commit Before Exit" block (line ~169). Content covers:
-   - Create `PROGRESS.md` at worktree root on session start if absent.
+   - Create `PROGRESS.md` at worktree root on session start if absent. `PROGRESS.md` is a scratchpad — gitignored, never committed. Ground truth for working state is the plan doc and `git log --oneline main..HEAD`; PROGRESS.md is a convenience aid, not authoritative.
    - Three H2 sections: Done, In progress, Left.
-   - Commit after each meaningful unit of work — both code and PROGRESS.md in the same commit when possible. `[WIP]` prefix allowed for partial steps.
-   - On session start or post-compaction resumption, re-read `PROGRESS.md` and `git log --oneline main..HEAD` before acting on anything else.
-   - Target 40-60 lines. The cumulative token budget delta for `builder.md` must stay under +800 tokens (verified by a deterministic test that counts characters, not a tokenizer — see Test Impact).
+   - Commit **code** after each meaningful unit of work. Update `PROGRESS.md` in the same turn but do NOT add it to the commit (it is gitignored — `git add -A` will silently omit it).
+   - On session start or post-compaction resumption, read `PROGRESS.md` and `git log --oneline main..HEAD` BEFORE acting on anything else. If PROGRESS.md is absent, fall back to the plan doc and `git log` — both are directly readable from the worktree. The compacted summary may be lossy.
+   - Target 40-60 lines of terse imperative English.
+   - **Soft limit: +5000 chars** over current baseline — a lint-style warning asserted in a separate test.
+   - **Hard limit: +10000 chars** over current baseline — test failure if exceeded.
 
-2. **Note in `.claude/skills/do-build/SKILL.md`** — add a one-line bullet in the "Critical Rules" list pointing to PROGRESS.md as the standard handoff artifact, plus a soft-check step between Step 5 (Definition of Done) and Step 7 (PR):
+2. **Consistent edit to developer persona overlay** (`~/Desktop/Valor/personas/developer.md`) — add the same working-state externalization principles as `builder.md`. The content need not be verbatim duplicate but must convey the same behavior: create PROGRESS.md scratchpad on session start, commit code frequently, re-read PROGRESS.md + git log on resumption. This covers top-level dev sessions that don't load `builder.md` (e.g., direct "build this" conversations routed to the developer persona rather than a builder sub-agent). Persona overlay is iCloud-synced; the change propagates automatically.
+
+3. **Add `PROGRESS.md` to `.gitignore`** — a single line in the repo root `.gitignore`. This prevents accidental commits of the scratchpad file. Verify with `git check-ignore -v PROGRESS.md` returning a match.
+
+4. **Note in `.claude/skills/do-build/SKILL.md`** — add a one-line bullet in the "Critical Rules" list pointing to PROGRESS.md as the standard in-session scratchpad (gitignored working memory, not authoritative progress record), plus a soft-check step inserted after Step 5.5 (CWD Safety Reset) and before Step 6 (Documentation Gate):
    ```
-   **5.6 PROGRESS.md soft check** — `[ -f .worktrees/{slug}/PROGRESS.md ] || echo "[warn] No PROGRESS.md at session HEAD — not blocking, but recovery from compaction may be degraded next run."`
+   **5.6 PROGRESS.md soft check** — `[ -f .worktrees/{slug}/PROGRESS.md ] || echo "[warn] No PROGRESS.md at worktree root — not blocking, but recovery from compaction may be degraded next run."`
    ```
    The check does not gate PR creation.
 
-3. **Optional cross-reference in developer persona overlay** (`~/Desktop/Valor/personas/developer.md` — authoritative source, iCloud-synced; `config/personas/developer.md` is a fallback that does not exist in-repo). Since the persona overlay lives outside the repo on Tom's machine, the edit lands through a synchronized copy. **Deferred — covered in Open Questions.** Default plan: do NOT edit the persona overlay; rely on `builder.md` (which is loaded for sub-agents via `agent/agent_definitions.py`) and the `do-build` SKILL.md guidance for the orchestrator. If post-ship observation shows PROGRESS.md adoption is spotty in top-level dev sessions (where the persona overlay dominates), add a follow-up issue.
-
-4. **Feature doc `docs/features/long-task-checkpointing.md`** — includes:
+5. **Feature doc `docs/features/long-task-checkpointing.md`** — includes:
    - Rationale (the semantic vs. crash-safe distinction vs. #1127)
+   - The scratchpad vs. ground-truth distinction: PROGRESS.md is ephemeral working memory; SDLC stages are authoritative progress; plan doc is authoritative scope
    - Example PROGRESS.md skeleton (exact markdown)
    - Cross-reference to `docs/features/compaction-hardening.md`
    - Index entry added to `docs/features/README.md`
 
-5. **Integration test `tests/integration/test_long_task_checkpointing.py`** — three checks:
-   - `test_builder_prompt_has_externalization_section`: asserts `"## Working-state externalization"` appears in `.claude/agents/builder.md`.
-   - `test_builder_prompt_token_budget`: asserts character count of `builder.md` is under a ceiling (current + 3000 chars as upper bound, roughly +750 tokens). Acts as a regression fence against unbounded prompt growth.
-   - `test_progress_md_in_build_soft_check`: reads `.claude/skills/do-build/SKILL.md` and asserts the soft-check line is present. This verifies the /do-build prompt references PROGRESS.md as a handoff artifact.
+6. **Unit test `tests/unit/test_long_task_checkpointing.py`** — four checks (pure file-read string assertions; placed in `tests/unit/` for fast CI feedback with no subprocess or external dependency):
+   - `test_builder_prompt_has_externalization_section`: asserts `"## Working-state externalization"` appears in `.claude/agents/builder.md` and `"PROGRESS.md"` appears at least 3 times.
+   - `test_builder_prompt_soft_limit`: asserts `len(builder_md_text) < BASELINE_CHARS + 5000`. Emits a warning-style assert message if exceeded. `BASELINE_CHARS = 11029` (pinned at commit `ceedbe68`).
+   - `test_builder_prompt_hard_limit`: asserts `len(builder_md_text) < BASELINE_CHARS + 10000`. Test fails if exceeded.
+   - `test_progress_md_in_build_soft_check`: reads `.claude/skills/do-build/SKILL.md` and asserts a line matching the pattern `\[ -f .*PROGRESS\.md .* \] \|\| echo` is present (the soft-check line).
 
    These are structural assertions, not behavioral — we are not spinning up a full dev session in CI (too slow, too flaky). The structural assertion proves the prompts contain the required guidance; the behavioral outcome (agents actually create PROGRESS.md) is monitored post-merge via the soft-check log line.
 
@@ -174,6 +185,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/long-task-chec
 
 - [ ] Test: if `builder.md` is missing entirely, `_parse_agent_markdown` (agent/agent_definitions.py:49-57) already handles this with a fallback prompt and a warning log. Our changes do not alter that path — no new test needed.
 - [ ] Test: if `PROGRESS.md` is present but empty, the soft-check in /do-build (`[ -f ... ] || echo ...`) still passes (file exists). Deliberate — empty PROGRESS.md is degraded but not broken. A future follow-up could assert non-empty; out of scope here.
+- [ ] Test: if `PROGRESS.md` is absent (deleted or never created), agent falls back to plan doc + SDLC stages. The prompt explicitly lists the fallback chain. Structural test (`test_builder_prompt_has_externalization_section`) verifies the fallback instruction is present in the prompt.
 
 ### Error State Rendering
 
@@ -181,9 +193,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/long-task-chec
 
 ## Test Impact
 
-- [ ] `tests/integration/test_long_task_checkpointing.py` — CREATE: three structural assertions per Technical Approach Step 5.
+- [ ] `tests/unit/test_long_task_checkpointing.py` — CREATE: four structural file-read assertions per Technical Approach Step 6 (placed in `tests/unit/` since these are pure string assertions with no external dependencies; token budget changed from +3000 to soft 5K / hard 10K; `BASELINE_CHARS = 11029` pinned at commit `ceedbe68`).
 - [ ] `tests/unit/test_agent_definitions.py` — UPDATE if a test asserts exact line count of `builder.md`; otherwise leave untouched. Verified at plan time: `grep -n 'line.count\|wc -l\|len(.*splitlines' tests/unit/test_agent_definitions.py` returns no exact-count assertions. No update required.
-- [ ] No other test files are affected. Changes are prompt text and one skill line; behavior at the Python layer is unchanged.
+- [ ] No other test files are affected. Changes are prompt text, a .gitignore line, and one skill line; behavior at the Python layer is unchanged.
 
 ## Rabbit Holes
 
@@ -192,6 +204,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/long-task-chec
 - **Auto-injection of "re-read PROGRESS.md" after compaction via a PostCompact hook.** Shipped as issue #1139 / PR #1150 (see [Post-Compact Re-Grounding](../features/post-compact-regrounding.md)). The hook includes PROGRESS.md as item 3 when the file exists in the session's `cwd`. This plan remains prompt-only; the hook is the hook-based complement.
 - **Extending PROGRESS.md with YAML frontmatter (status, owner, created_at).** Violates the "simple file the agent writes freely" principle. Adds maintenance burden for near-zero benefit. Deferred.
 - **Multi-worktree PROGRESS.md aggregation** (e.g., a `docs/PROGRESS.md` that tracks all worktrees). Out of scope; solves a different problem (fleet visibility).
+- **Using PROGRESS.md as the source of truth for SDLC progress reporting.** Explicitly rejected by Tom: the plan doc + git log are ground truth; PROGRESS.md is only a working-memory aid. Wiring PROGRESS.md into any progress-reporting path would create conflicting authority.
 
 ## Risks
 
@@ -199,19 +212,25 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/long-task-chec
 
 **Impact:** Every additional token in the builder prompt consumes context budget on every turn. A 60-line section is ~600-800 tokens; across a multi-hour dev session with many turns, this is non-trivial. The issue body calls out: "Prompt changes must not materially inflate system-prompt token count."
 
-**Mitigation:** The test `test_builder_prompt_token_budget` caps character count at current + 3000 chars (~750 tokens). Actual added content is targeted at 40-60 lines of terse, imperative English. No examples, no rationale paragraphs — the rationale lives in the feature doc, the prompt carries only the instructions.
+**Mitigation:** Two-tier budget enforcement: soft limit (+5000 chars / ~1250 tokens) triggers a test warning; hard limit (+10000 chars / ~2500 tokens) fails the test. Tom confirmed: "builder can have a lot of leeway especially when combined with strong models like Opus." Actual added content is targeted at 40-60 lines of terse, imperative English. No examples, no rationale paragraphs — the rationale lives in the feature doc, the prompt carries only the instructions.
 
 ### Risk 2: Agents create `PROGRESS.md` once and never update it
 
 **Impact:** A stale PROGRESS.md is worse than none — the post-compaction agent reads it and gets misleading "In-progress" state. Agent drifts anyway.
 
-**Mitigation:** The prompt pairs "commit after each meaningful unit" with "update PROGRESS.md in the same commit when possible" — linking the two acts reduces the chance of one without the other. Post-merge, monitor via the soft-check log to see how many sessions close with a non-trivial PROGRESS.md (file exists AND has been updated at least once after creation). If adoption is weak, tighten the prompt in a follow-up.
+**Mitigation:** The prompt pairs "commit after each meaningful unit" with "update PROGRESS.md in the same turn when possible" — linking the two acts reduces the chance of one without the other. Post-merge, monitor via the soft-check log to see how many sessions close with a non-trivial PROGRESS.md (file exists AND has been updated at least once after creation). If adoption is weak, tighten the prompt in a follow-up.
 
 ### Risk 3: Developer persona overlay edits are blocked by the "no edits from plain CLI" constraint
 
 **Impact:** The issue warns that `.claude/agents/*.md` and `.claude/commands/*.md` edits "must run inside an Agent-SDK-powered dev session" because the harness blocks self-modification from a plain Claude Code CLI. If this plan is executed from a plain CLI by accident, the edits fail silently.
 
 **Mitigation:** This plan is routed through `/do-build`, which spawns an Agent-SDK-powered dev session in an isolated worktree. The harness block only triggers in non-SDK Claude Code runs. The Test Impact integration test verifies post-edit that the expected content landed — any silent edit failure is caught by that test failing.
+
+### Risk 4: PROGRESS.md gitignore entry causes confusion if an agent tries to commit it
+
+**Impact:** `git add PROGRESS.md` will be silently ignored; `git add -A` will omit it. If the agent explicitly tries to stage PROGRESS.md (e.g., includes it in a commit), the gitignore prevents it. This is intentional but could confuse an agent that expects the file to appear in `git status`.
+
+**Mitigation:** The prompt explicitly states "PROGRESS.md is gitignored — do NOT attempt to add it to git commits." The gitignore acts as a hard guardrail. The feature doc explains the rationale. If an agent is confused by the missing file in `git status`, that's expected behavior.
 
 ## Race Conditions
 
@@ -220,15 +239,15 @@ No race conditions identified — all operations are synchronous (prompt file ed
 ## No-Gos (Out of Scope)
 
 - **Hard-fail if PROGRESS.md absent.** Soft warn only — see Rabbit Holes. If adoption data warrants hardening, that is a separate issue.
-- **PostCompact hook auto-injecting "re-read PROGRESS.md" nudge.** Belongs to compaction-hardening follow-up territory if pursued. This plan is prompt-only.
+- **PostCompact hook auto-injecting "re-read PROGRESS.md" nudge.** Tracked as #1139 (backlog). This plan is prompt-only (#1130). See Rabbit Holes for the reasoning and cross-reference.
 - **Per-worktree or per-session dashboards showing PROGRESS.md contents.** Not the problem being solved. A future observability feature.
 - **Auto-generating PROGRESS.md from the plan document.** The agent writes it. If we auto-generate, we lose the forcing function of the agent having to reason about its own working state.
-- **Editing the developer persona overlay** (`~/Desktop/Valor/personas/developer.md`). See Open Questions — default is to defer. Builder.md is loaded for sub-agents via `agent_definitions.py`; the do-build SKILL.md covers orchestrator-level guidance. That combination should be sufficient for the first pass.
+- **Committing PROGRESS.md to the session branch.** PROGRESS.md is gitignored by design. It is ephemeral working memory, not a historical record. If the worktree is cleaned up, the scratchpad goes with it — that is intentional.
 - **Migrating existing in-flight worktrees to have PROGRESS.md.** Agents create their own on first turn of new sessions. No backfill needed.
 
 ## Update System
 
-No update system changes required. This feature is purely internal — prompt edits and one test file. The `/update` skill propagates git pulls; when users update, the new prompts ship automatically via the pulled `.claude/agents/builder.md`. No new dependencies, no config propagation, no migration steps.
+No update system changes required. This feature is purely internal — prompt edits, a .gitignore line, and one test file. The `/update` skill propagates git pulls; when users update, the new prompts ship automatically via the pulled `.claude/agents/builder.md`. No new dependencies, no config propagation, no migration steps.
 
 ## Agent Integration
 
@@ -240,6 +259,7 @@ No agent integration required — this is a prompt-engineering change. The agent
 
 - [ ] Create `docs/features/long-task-checkpointing.md` describing:
   - What problem PROGRESS.md solves (post-compaction semantic drift)
+  - The scratchpad vs. ground-truth distinction (PROGRESS.md is ephemeral; SDLC stages are authoritative progress; plan doc is authoritative scope)
   - How it complements `docs/features/compaction-hardening.md` (crash-safe vs. semantically-safe)
   - The exact PROGRESS.md skeleton agents should produce
   - How the /do-build soft-check works
@@ -256,13 +276,15 @@ No agent integration required — this is a prompt-engineering change. The agent
 
 ## Success Criteria
 
-- [ ] `.claude/agents/builder.md` contains a `## Working-state externalization` section with commit-frequency guidance and PROGRESS.md creation/update/re-read instructions.
-- [ ] `.claude/skills/do-build/SKILL.md` references PROGRESS.md as the standard handoff artifact AND contains a soft-check step that warns (does not fail) if PROGRESS.md is missing at PR time.
-- [ ] `docs/features/long-task-checkpointing.md` exists and contains an example PROGRESS.md skeleton.
+- [ ] `.claude/agents/builder.md` contains a `## Working-state externalization` section with commit-frequency guidance and PROGRESS.md creation/update/re-read instructions. Scratchpad nature and gitignore status are explicitly stated.
+- [ ] `~/Desktop/Valor/personas/developer.md` contains consistent working-state externalization principles — same behavior, possibly different prose.
+- [ ] `.gitignore` contains a `PROGRESS.md` entry. `git check-ignore -v PROGRESS.md` returns a match.
+- [ ] `.claude/skills/do-build/SKILL.md` references PROGRESS.md as the standard in-session scratchpad AND contains a soft-check step that warns (does not fail) if PROGRESS.md is missing at PR time.
+- [ ] `docs/features/long-task-checkpointing.md` exists and contains an example PROGRESS.md skeleton and the scratchpad-vs-ground-truth distinction.
 - [ ] `docs/features/README.md` has a new entry linking to the feature doc.
-- [ ] `tests/integration/test_long_task_checkpointing.py` passes and includes the three structural assertions (section presence, token-budget ceiling, soft-check line presence).
-- [ ] `builder.md` character count has grown by no more than +3000 chars from baseline.
-- [ ] Tests pass (`pytest tests/integration/test_long_task_checkpointing.py -v`).
+- [ ] `tests/unit/test_long_task_checkpointing.py` passes and includes the four structural assertions (section presence, soft-limit warning, hard-limit ceiling, soft-check line presence). `BASELINE_CHARS = 11029` hardcoded.
+- [ ] `builder.md` character count has grown by no more than **+10000 chars** from baseline (hard limit); soft warning if over **+5000 chars**.
+- [ ] Tests pass (`pytest tests/unit/test_long_task_checkpointing.py -v`).
 - [ ] `python -m ruff check .` and `python -m ruff format --check .` pass.
 - [ ] Documentation gate in /do-build passes (feature doc + index entry present).
 
@@ -272,7 +294,7 @@ No agent integration required — this is a prompt-engineering change. The agent
 
 - **Prompt Editor**
   - Name: `prompt-editor`
-  - Role: Edit `.claude/agents/builder.md` and `.claude/skills/do-build/SKILL.md` to add PROGRESS.md guidance and soft-check.
+  - Role: Edit `.claude/agents/builder.md`, `~/Desktop/Valor/personas/developer.md`, and `.claude/skills/do-build/SKILL.md` to add PROGRESS.md guidance and soft-check. Also adds PROGRESS.md to `.gitignore`.
   - Agent Type: builder
   - Resume: true
 
@@ -284,7 +306,7 @@ No agent integration required — this is a prompt-engineering change. The agent
 
 - **Test Author**
   - Name: `test-author`
-  - Role: Write `tests/integration/test_long_task_checkpointing.py` with three structural assertions.
+  - Role: Write `tests/integration/test_long_task_checkpointing.py` with four structural assertions.
   - Agent Type: test-engineer
   - Resume: true
 
@@ -306,14 +328,36 @@ No agent integration required — this is a prompt-engineering change. The agent
 - **Parallel**: true
 - Add `## Working-state externalization` H2 section to `.claude/agents/builder.md`, immediately after the existing "Safety Net — Commit Before Exit" block.
 - Section content (target: 40-60 lines, terse imperative English, no examples):
-  - "On session start, if `PROGRESS.md` does not exist at the worktree root, create it with three H2 sections: `## Done` (empty), `## In progress` (first task from the plan), `## Left` (remaining tasks from the plan)."
-  - "After each meaningful unit of work — a completed task, a passing test, a validated sub-step — commit to the session branch. Update `PROGRESS.md` in the same commit when possible: move the completed item from `## In progress` to `## Done` and advance `## In progress` to the next item."
+  - "On session start, if `PROGRESS.md` does not exist at the worktree root, create it with three H2 sections: `## Done` (empty), `## In progress` (first task from the plan), `## Left` (remaining tasks from the plan). `PROGRESS.md` is a scratchpad — gitignored, never committed. Ground truth for working state is the plan doc and `git log --oneline main..HEAD`; PROGRESS.md is a convenience aid only."
+  - "After each meaningful unit of work — a completed task, a passing test, a validated sub-step — commit **code** to the session branch. Update `PROGRESS.md` in the same turn but do NOT add it to the commit (it is gitignored and will be silently omitted from `git add -A`)."
   - "`[WIP]` commit prefix is allowed and encouraged for partial steps. Frequent small commits are preferred over large batched commits."
-  - "On session start or resumption (including after context compaction), read `PROGRESS.md` and `git log --oneline main..HEAD` BEFORE acting on any other instruction. The compacted summary may be lossy — the file and the git log are authoritative."
-  - "`PROGRESS.md` is committed to the session branch. It is worktree-local and does not survive worktree cleanup — that is intentional."
-- Verify character delta is under +3000.
+  - "On session start or resumption (including after context compaction), read `PROGRESS.md` and `git log --oneline main..HEAD` BEFORE acting on any other instruction. If `PROGRESS.md` is absent, fall back to the plan doc and `git log` — both are directly readable from the worktree. The compacted summary may be lossy."
+- Verify character delta is under +5000 (soft) and +10000 (hard).
 
-### 2. Add PROGRESS.md soft-check to /do-build
+### 2. Edit developer persona overlay
+
+- **Task ID**: build-persona-edit
+- **Depends On**: none
+- **Validates**: Success criterion for developer.md
+- **Assigned To**: prompt-editor
+- **Agent Type**: builder
+- **Parallel**: true
+- Edit `~/Desktop/Valor/personas/developer.md` to add working-state externalization principles consistent with the builder.md section above.
+- Content must convey the same behavior: create PROGRESS.md scratchpad on session start (gitignored, not ground truth), commit code frequently, re-read PROGRESS.md + git log on resumption, fall back to plan doc + git log if PROGRESS.md absent.
+- Prose can differ from builder.md — this is a persona overlay, not a builder prompt. Keep it terse (≤20 lines). No duplication needed; consistency required.
+
+### 3. Add PROGRESS.md to .gitignore
+
+- **Task ID**: build-gitignore-edit
+- **Depends On**: none
+- **Validates**: `git check-ignore -v PROGRESS.md` returns a match
+- **Assigned To**: prompt-editor
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `PROGRESS.md` to the repo root `.gitignore` (or `/.gitignore` for a root-only pattern).
+- Verify the entry is present and `git check-ignore -v PROGRESS.md` returns a non-empty result.
+
+### 4. Add PROGRESS.md soft-check to /do-build
 
 - **Task ID**: build-dobuild-edit
 - **Depends On**: none
@@ -322,10 +366,10 @@ No agent integration required — this is a prompt-engineering change. The agent
 - **Agent Type**: builder
 - **Parallel**: true
 - Edit `.claude/skills/do-build/SKILL.md`:
-  - In the "Critical Rules" section (line ~193), add a bullet: `**PROGRESS.md is the standard handoff artifact** — dev sessions maintain it at the worktree root per builder.md's "Working-state externalization" section. Missing PROGRESS.md is a warning, not a blocker.`
-  - Add a new step 5.6 between Step 5 (Definition of Done) and Step 5.5 (CWD Safety Reset): a soft-check shell line that warns if PROGRESS.md is absent at `.worktrees/{slug}/PROGRESS.md`. Use `[ -f ... ] || echo "..."` form so the check never returns nonzero.
+  - In the "Critical Rules" section (line ~193), add a bullet: `**PROGRESS.md is the standard in-session scratchpad** — dev sessions maintain it at the worktree root per builder.md's "Working-state externalization" section. It is gitignored (not committed). Missing PROGRESS.md is a warning, not a blocker. The plan doc and git log remain the authoritative progress record.`
+  - Add a new step 5.6 inserted **after** Step 5.5 (CWD Safety Reset) and **before** Step 6 (Documentation Gate): a soft-check shell line that warns if PROGRESS.md is absent at `.worktrees/{slug}/PROGRESS.md`. Use `[ -f ... ] || echo "..."` form so the check never returns nonzero. (In SKILL.md, CWD Safety Reset is ~line 333; Documentation Gate starts ~line 343 — insert between them.)
 
-### 3. Write feature doc
+### 5. Write feature doc
 
 - **Task ID**: build-feature-doc
 - **Depends On**: none
@@ -333,39 +377,44 @@ No agent integration required — this is a prompt-engineering change. The agent
 - **Assigned To**: feature-doc-writer
 - **Agent Type**: documentarian
 - **Parallel**: true
+- **Before writing**: verify `docs/features/compaction-hardening.md` exists in the worktree (it shipped on main in PR #1135 but may not be in the branch yet). If absent, run `git fetch origin main && git checkout origin/main -- docs/features/compaction-hardening.md` to pull it in before writing the cross-link.
 - Create `docs/features/long-task-checkpointing.md`:
   - Opening paragraph: what and why, distinguishing from compaction-hardening.
-  - Section: "The PROGRESS.md convention" — the three-H2 structure with an exact markdown skeleton.
+  - Section: "The PROGRESS.md convention" — scratchpad nature, gitignored, not ground truth; the three-H2 structure with an exact markdown skeleton.
+  - Section: "Source of truth hierarchy" — plan doc + git log (progress), plan doc (scope), PROGRESS.md (working-memory scratchpad only — never authoritative).
   - Section: "How it works" — dev session creates on first turn, updates at checkpoints, re-reads on resumption.
   - Section: "Soft-check in /do-build" — what the warning looks like, when it fires.
-  - Section: "See also" — link to `docs/features/compaction-hardening.md` and `.claude/agents/builder.md`.
+  - Section: "See also" — link to `docs/features/compaction-hardening.md`, `.claude/agents/builder.md`, and issue #1139 (PostCompact hook follow-up).
 - Update `docs/features/README.md`: add a new row to the index table with the title, a one-line description, and the link.
 
-### 4. Write integration test
+### 6. Write integration test
 
 - **Task ID**: build-test
 - **Depends On**: none
 - **Assigned To**: test-author
 - **Agent Type**: test-engineer
 - **Parallel**: true
-- Create `tests/integration/test_long_task_checkpointing.py` with three tests:
+- Create `tests/unit/test_long_task_checkpointing.py` with four tests (structural file-read assertions — placed in `tests/unit/` for fast CI feedback):
   - `test_builder_prompt_has_externalization_section` — reads `.claude/agents/builder.md` and asserts `"## Working-state externalization"` appears, plus asserts `"PROGRESS.md"` appears at least 3 times (create/update/re-read mentions).
-  - `test_builder_prompt_token_budget` — asserts `len(builder_md_text) < BASELINE_CHARS + 3000`. Hardcode the baseline as a constant at test-write time (approximately current length + safety margin).
+  - `test_builder_prompt_soft_limit` — asserts `len(builder_md_text) < BASELINE_CHARS + 5000`. Emits a descriptive assert message on failure to indicate soft-limit violation.
+  - `test_builder_prompt_hard_limit` — asserts `len(builder_md_text) < BASELINE_CHARS + 10000`. Hard failure — test fails if exceeded.
   - `test_progress_md_in_build_soft_check` — reads `.claude/skills/do-build/SKILL.md` and asserts a line matching the pattern `\[ -f .*PROGRESS\.md .* \] \|\| echo` is present (the soft-check line).
-- Mark all three with `@pytest.mark.integration` and `@pytest.mark.sdlc`.
+- Mark all four with `@pytest.mark.unit` and `@pytest.mark.sdlc`.
+- Use `BASELINE_CHARS = 11029` (pinned: pre-edit size of `builder.md` at commit `ceedbe68`). Do NOT measure current file size at test-write time — tasks are parallel and builder.md may already be edited by the time this test is written.
 
-### 5. Final validation
+### 7. Final validation
 
 - **Task ID**: validate-all
-- **Depends On**: build-prompt-edit, build-dobuild-edit, build-feature-doc, build-test
+- **Depends On**: build-prompt-edit, build-persona-edit, build-gitignore-edit, build-dobuild-edit, build-feature-doc, build-test
 - **Assigned To**: checkpoint-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/integration/test_long_task_checkpointing.py -v` — all three tests pass.
+- Run `pytest tests/integration/test_long_task_checkpointing.py -v` — all four tests pass.
 - Run `python -m ruff check .` — zero errors.
 - Run `python -m ruff format --check .` — zero format issues.
 - Verify `.claude/agents/builder.md` ends with trailing newline and no broken markdown.
 - Verify `docs/features/README.md` new row is well-formed (no broken table syntax).
+- Verify `git check-ignore -v PROGRESS.md` returns a match.
 - Generate final report.
 
 ## Verification
@@ -374,45 +423,71 @@ No agent integration required — this is a prompt-engineering change. The agent
 |-------|---------|----------|
 | Builder prompt has externalization section | `grep -c "## Working-state externalization" .claude/agents/builder.md` | output > 0 |
 | Builder prompt mentions PROGRESS.md | `grep -c "PROGRESS.md" .claude/agents/builder.md` | output > 2 |
+| Builder prompt mentions scratchpad | `grep -c "scratchpad\|gitignore" .claude/agents/builder.md` | output > 0 |
 | Do-build references PROGRESS.md | `grep -c "PROGRESS.md" .claude/skills/do-build/SKILL.md` | output > 1 |
 | Soft-check line present | `grep -c '\[ -f.*PROGRESS.md' .claude/skills/do-build/SKILL.md` | output > 0 |
+| .gitignore has PROGRESS.md | `git check-ignore -v PROGRESS.md` | non-empty output |
 | Feature doc exists | `test -f docs/features/long-task-checkpointing.md` | exit code 0 |
 | Index entry exists | `grep -c "long-task-checkpointing" docs/features/README.md` | output > 0 |
-| Integration tests pass | `pytest tests/integration/test_long_task_checkpointing.py -v -x` | exit code 0 |
+| Unit tests pass | `pytest tests/unit/test_long_task_checkpointing.py -v -x` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Builder prompt size bound | `python -c "import sys; sys.exit(0 if len(open('.claude/agents/builder.md').read()) < 14000 else 1)"` | exit code 0 |
+| Builder prompt hard size bound | `python -c "import sys; sys.exit(0 if len(open('.claude/agents/builder.md').read()) < BASELINE + 10000 else 1)"` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique run**: 2026-04-23
+**Verdict**: READY TO BUILD (with concerns)
+**Findings**: 5 total (0 blockers, 3 concerns, 2 nits)
+
+### Concerns
+
+**C1: Step number contradiction for soft-check placement**
+- Solution section says: add "Step 5.6 between Step 5 (DoD) and Step 7 (PR)"
+- Task 4 says: add "step 5.6 between Step 5 (DoD) and Step 5.5 (CWD Safety Reset)"
+- do-build SKILL.md step sequence is: 5 → 5.1 → 5.5 → 6 → 7
+- A step labeled "5.6" cannot go between steps 5 and 5.5 (would be 5.2 or 5.4 at most)
+- **Fix**: Resolve to one location. The Solution section wording (between 5.5 and 6) is more operationally correct since the soft-check needs the worktree to already be fully built. Rename to step 5.6 between 5.5 and 6, or simply insert as step 5.9 (last sub-step before 6). Update Task 4 to match.
+- **Implementation note**: In SKILL.md, the CWD Safety Reset (5.5) runs at line 333. Insert the soft-check block after 5.5 and before Step 6 (Documentation Gate, line 343). The label "5.6" is available there — no collision.
+
+**C2: Stale field reference — `AgentSession.sdlc_stages` does not exist**
+- The plan repeatedly uses `AgentSession.sdlc_stages` as the authoritative fallback for SDLC progress (e.g., "Ground truth for progress is `AgentSession.sdlc_stages`" in Technical Approach, Task 1, Solution section, and Data Flow).
+- This field was removed as part of the completed `agent-session-field-cleanup` plan — it was consolidated into `stage_states` (and subsequently `session_events`). Running `grep -rn "sdlc_stages" . --include="*.py"` returns zero results.
+- A dev agent reading the new prompt guidance and following the fallback chain will look for `AgentSession.sdlc_stages` — which doesn't exist and can't be queried from inside a worktree dev session anyway.
+- **Fix**: Replace all references to `AgentSession.sdlc_stages` with `AgentSession.stage_states` (the current field) — or better, since a dev agent can't directly query the ORM from a worktree, replace the instruction with "fall back to the plan doc and `git log --oneline main..HEAD`" which are both directly accessible. The SDLC env vars (`SDLC_CURRENT_STAGE` etc.) may also be available via environment.
+- **Implementation note**: Replace the phrase "Ground truth for progress is `AgentSession.sdlc_stages`" with "Fall back to the plan doc and `git log --oneline main..HEAD` for authoritative progress state" in builder.md, developer.md, and all plan sections that repeat this instruction. The dev agent has no ORM access in the worktree — file and git-based fallbacks are the only actionable options.
+
+**C3: BASELINE_CHARS may be measured post-edit due to parallel task execution**
+- All six tasks have `Parallel: true` and `Depends On: none`. Task 6 (test-author) may therefore run after Task 1 (prompt-editor) has already edited `builder.md`.
+- The plan instructs: "Hardcode `BASELINE_CHARS` as a constant at test-write time (approximately current `builder.md` length)." If test-author runs after the prompt edit, they will observe the post-edit size (~14K chars) and hardcode that as `BASELINE_CHARS`. The test then asserts `14000 < 14000 + 5000` — trivially true, making the budget guard useless.
+- **Fix**: Pin the pre-edit baseline explicitly in the plan: `BASELINE_CHARS = 11029` (current `builder.md` size at plan-write time, verified). Task 6 should hardcode this value regardless of execution order.
+- **Implementation note**: Add `BASELINE_CHARS = 11029  # pre-edit size of builder.md at commit ceedbe68` as a module-level constant in the test file. The test author must NOT measure the current file size at test-write time — use the pinned constant.
+
+### Nits
+
+**N1: Test classification mismatch — file-read assertions placed in `tests/integration/`**
+- All four proposed tests (`test_builder_prompt_has_externalization_section`, `test_builder_prompt_soft_limit`, `test_builder_prompt_hard_limit`, `test_progress_md_in_build_soft_check`) are pure file-read string assertions. They open a markdown file, call `len()` or `in`, and assert. No Redis, no API, no subprocess, no Popoto model, no cross-process boundary.
+- The plan itself acknowledges "These are structural assertions, not behavioral." They belong in `tests/unit/` for fast CI feedback.
+- This is a NIT — placing them in `tests/integration/` works but slows CI unnecessarily for trivially fast checks.
+
+**N2: `docs/features/compaction-hardening.md` is missing from the worktree branch**
+- The plan references and cross-links to `docs/features/compaction-hardening.md` in the feature doc (Task 5). This file does not exist in the current worktree branch (`session/long-task-checkpointing`).
+- It does exist on `main` (shipped with PR #1135). The worktree was cut from a commit before that merge — the file will be available once the worktree is rebased or when the feature doc links to it at PR merge time.
+- No action needed at plan level, but the feature-doc-writer agent should verify the file exists in the worktree before writing the cross-link (the worktree may need a `git merge main` or `git rebase main` first).
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-These architectural decisions need Tom's input before /do-plan-critique or /do-build. Defaults are stated; confirm or override.
+All five open questions answered by Tom on 2026-04-23:
 
-1. **Hard requirement vs. soft nudge: does missing PROGRESS.md block the build?**
-   - **Default:** Soft nudge. `/do-build` logs a warning if PROGRESS.md is absent at PR time, does not block PR creation. Rationale in Rabbit Holes: a hard fail creates a new failure mode without fixing drift.
-   - **Alternative:** Hard fail. `/do-build` aborts PR creation if PROGRESS.md is missing. Forces agents to comply but introduces a new red light.
-   - **Your call:** soft nudge (default) or hard fail?
+1. **Hard requirement vs. soft nudge** → **Soft nudge** (confirmed). No plan change.
 
-2. **Commit PROGRESS.md to the session branch, or .gitignore as working state?**
-   - **Default:** Commit it. PROGRESS.md lives on the session branch, travels with the worktree, is readable post-compaction via `git show HEAD:PROGRESS.md` even if the file was just edited. When the worktree is cleaned up after merge, the file goes with it. The session branch history preserves the journey.
-   - **Alternative:** .gitignore it. Keeps PR diffs cleaner. Downside: the file is ephemeral in the true sense — if the worktree disappears, the record is gone.
-   - **Your call:** commit (default) or gitignore?
+2. **Commit PROGRESS.md or gitignore?** → **Gitignore**. PROGRESS.md is a working-memory scratchpad, not ground truth. SDLC stages are authoritative progress; plan doc is authoritative scope. Added to .gitignore. Skill files note that PROGRESS.md must be recreated at session start if absent (worktrees may be recreated). Prompt wording clarifies scratchpad status.
 
 3. **Scope overlap with compaction-hardening: should the post-compaction "re-read PROGRESS.md" nudge be a prompt instruction or a PostCompact hook?**
    - **Resolved:** Both. This plan ships the prompt instruction. Issue #1139 (PR #1150) shipped a PostCompact CLI hook ([Post-Compact Re-Grounding](../features/post-compact-regrounding.md)) that also includes the PROGRESS.md re-read nudge when the file exists in `cwd`. The two are complementary and independent.
 
-4. **Should the developer persona overlay (`~/Desktop/Valor/personas/developer.md`) also be edited, or is builder.md + do-build SKILL.md sufficient?**
-   - **Default:** Do NOT edit the persona overlay. The builder prompt covers sub-agents spawned by the team-lead `/do-build`; the do-build SKILL.md covers the orchestrator. Top-level dev sessions use the developer persona, but the work orchestrated by /do-build spawns builders that DO load builder.md. The typical long-task case is under /do-build, so builder.md is where the guidance belongs.
-   - **Alternative:** Also edit the developer persona overlay to cover top-level dev sessions that don't go through /do-build (e.g., direct "fix this bug" conversations). This requires editing a file outside the repo (iCloud-synced); the change propagates but is harder to audit.
-   - **Your call:** skip persona edit (default) or add it to scope?
+4. **Persona overlay: skip or edit?** → **Edit both** (`builder.md` AND `~/Desktop/Valor/personas/developer.md`), keeping them consistent. A PM agent may spawn a dev session as either persona; both should exhibit the same working-state externalization behavior. Content should be consistent, not verbatim duplicate.
 
-5. **Token budget ceiling for the builder.md delta: what is the acceptable upper bound?**
-   - **Default:** +3000 characters (~+750 tokens). Cap enforced by `test_builder_prompt_token_budget`. Rationale: the current `builder.md` is 267 lines / ~9300 chars; a +3000 cap gives room for 40-60 lines of terse guidance while preventing future unbounded growth.
-   - **Alternative tighter:** +2000 chars (~+500 tokens). Forces very terse prose.
-   - **Alternative looser:** +5000 chars (~+1250 tokens). More rationale/examples allowed.
-   - **Your call:** +3000 (default), tighter, or looser?
+5. **Token budget ceiling** → **Soft: +5000 chars, Hard: +10000 chars** (overrides original +3000 default). Tom: "builder can have a lot of leeway especially when combined with strong models like Opus." Two-tier budget enforced by two separate test assertions.

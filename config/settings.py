@@ -178,7 +178,8 @@ class ModelSettings(BaseModel):
         description=(
             "Fallback Claude model for sessions where AgentSession.model is None/empty. "
             "Part of the precedence cascade: session.model > settings > codebase default 'opus'. "
-            "Short aliases (opus, sonnet, haiku) preferred; full names (claude-opus-4-7) also accepted. "
+            "Short aliases (opus, sonnet, haiku) preferred; "
+            "full names (claude-opus-4-7) also accepted. "
             "Env: MODELS__SESSION_DEFAULT_MODEL."
         ),
     )

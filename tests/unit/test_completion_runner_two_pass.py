@@ -13,7 +13,6 @@ import pytest
 
 from agent import session_completion
 
-
 # ---------------------------------------------------------------------------
 # Fixtures (mirror test_deliver_pipeline_completion.py)
 # ---------------------------------------------------------------------------

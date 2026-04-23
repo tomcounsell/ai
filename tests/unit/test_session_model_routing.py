@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers (mirrors fixtures used in test_harness_streaming.py)
 # ---------------------------------------------------------------------------
