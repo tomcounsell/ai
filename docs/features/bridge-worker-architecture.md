@@ -326,7 +326,7 @@ On the subprocess's first prompt, the hook:
 4. If the resolved target is terminal (killed/completed/failed/abandoned/cancelled): falls through to the existing `create_local` gate, preserving #1113 terminal-session semantics (no zombie revival).
 5. If neither env var resolves: falls through to the existing gate, which blocks the creation unless `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set (direct-CLI path from #1001).
 
-The `PostToolUse` and `Stop` hooks use the same sidecar-first lookup pattern: primary via `AgentSession.get_by_id(sidecar_agent_session_id)`, legacy fallback via `query.filter(session_id=f"local-{claude_session_id}")`. The fallback is retained because direct-CLI sessions still write `local-*` records.
+The `PostToolUse` and `Stop` hooks use the same sidecar-first lookup pattern: primary via `AgentSession.get_by_id(sidecar_agent_session_id)`, with a fallback via `query.filter(session_id=f"local-{claude_session_id}")`. The fallback is retained because direct-CLI sessions still write `local-*` records.
 
 **Race prevention invariant:** the worker's `AgentSession.create()/save()` must complete synchronously before `subprocess.Popen`. Python interpreter startup + hook import + Redis connection take hundreds of ms, while Redis commits are sub-ms; the race is theoretically possible but practically impossible. If the race ever fires, the hook falls through to `create_local()` (status quo, not worse than before).
 
