@@ -50,7 +50,7 @@ Exit code is always 0. Returns `{}` on error, `{"stage": "DOCS", "status": "comp
 
 - Infer stages from plan files on disk
 - Query GitHub PRs to infer BUILD/TEST/REVIEW/DOCS completion
-- Accept a `slug=` parameter (removed in #729)
+- Accept a `slug=` parameter (the keyword was dropped in #729)
 
 This was intentional. Artifact inference caused stage skipping (#723, #729): a plan file created by `/do-build` as a deliverable would incorrectly satisfy DOCS without `/do-docs` ever running.
 
