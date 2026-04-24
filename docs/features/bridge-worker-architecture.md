@@ -309,6 +309,27 @@ chat_id = session_id  # Claude Code UUID (e.g., "abc123-def456-...")
 
 This ensures that multiple CLI sessions (e.g., parallel `/do-build` runs) each get their own worker queue and never serialize with each other.
 
+### Hook-Layer Session Attach (issue #1157)
+
+Worker-spawned subprocesses produce exactly ONE `AgentSession` row — the worker-created record. The `UserPromptSubmit` hook at `.claude/hooks/user_prompt_submit.py` does NOT mint a duplicate `local-*` record when the worker has already created one.
+
+The worker communicates ownership by setting two env vars before `subprocess.Popen` (see `agent/sdk_client.py:1343-1369`):
+
+- `AGENT_SESSION_ID` — the worker's `agent_session_id` UUID (primary signal)
+- `VALOR_SESSION_ID` — the worker's bridge `session_id` (fallback signal)
+
+On the subprocess's first prompt, the hook:
+
+1. Reads `AGENT_SESSION_ID` and resolves it via `AgentSession.get_by_id()` (indexed, O(1)).
+2. Falls back to `VALOR_SESSION_ID` via `query.filter(session_id=...)` if the primary misses.
+3. If resolved and non-terminal: writes that `agent_session_id` into the sidecar and returns. **The `create_local()` call is never reached.**
+4. If the resolved target is terminal (killed/completed/failed/abandoned/cancelled): falls through to the existing `create_local` gate, preserving #1113 terminal-session semantics (no zombie revival).
+5. If neither env var resolves: falls through to the existing gate, which blocks the creation unless `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set (direct-CLI path from #1001).
+
+The `PostToolUse` and `Stop` hooks use the same sidecar-first lookup pattern: primary via `AgentSession.get_by_id(sidecar_agent_session_id)`, legacy fallback via `query.filter(session_id=f"local-{claude_session_id}")`. The fallback is retained because direct-CLI sessions still write `local-*` records.
+
+**Race prevention invariant:** the worker's `AgentSession.create()/save()` must complete synchronously before `subprocess.Popen`. Python interpreter startup + hook import + Redis connection take hundreds of ms, while Redis commits are sub-ms; the race is theoretically possible but practically impossible. If the race ever fires, the hook falls through to `create_local()` (status quo, not worse than before).
+
 ## Session Pickup: Fast Path vs Safety Net
 
 The worker uses two mechanisms to discover new sessions:
