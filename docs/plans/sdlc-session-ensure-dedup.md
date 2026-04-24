@@ -164,22 +164,22 @@ Operator runs `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` →
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The existing `try/except Exception` in `ensure_session()` (`tools/sdlc_session_ensure.py:96`) wraps the whole function and returns `{}` on error. The env short-circuit sits inside this same try block so Redis failures during the `find_session` call degrade gracefully to the existing path. Test: simulate `find_session` raising `ConnectionError` and assert `ensure_session` still falls through to legacy create.
-- [ ] The new `--kill-orphans` path must not crash when a session transition fails. Each transition runs inside its own try/except; failures are recorded in the output JSON, never raised. Test: mock `transition_status` to raise, confirm CLI still exits 0 and reports the failure in the payload.
+- [x] The existing `try/except Exception` in `ensure_session()` (`tools/sdlc_session_ensure.py:96`) wraps the whole function and returns `{}` on error. The env short-circuit sits inside this same try block so Redis failures during the `find_session` call degrade gracefully to the existing path. Test: simulate `find_session` raising `ConnectionError` and assert `ensure_session` still falls through to legacy create.
+- [x] The new `--kill-orphans` path must not crash when a session transition fails. Each transition runs inside its own try/except; failures are recorded in the output JSON, never raised. Test: mock `transition_status` to raise, confirm CLI still exits 0 and reports the failure in the payload.
 
 ### Empty/Invalid Input Handling
-- [ ] `VALOR_SESSION_ID=""` (empty string) behaves identically to unset — short-circuit does not activate, falls through. Test: `os.environ["VALOR_SESSION_ID"] = ""` with no real session, assert create path runs.
-- [ ] `find_session_by_issue(0)` and `(-1)` still return None (existing guard). No new tests needed; existing `test_returns_empty_for_invalid_issue_number` covers.
-- [ ] `message_text` containing `"issue 1147"` as a substring of a larger word (e.g., `"tissue 1147"`) must NOT match. The `\b` word boundaries in the regex handle this. Test: add regression assertion.
+- [x] `VALOR_SESSION_ID=""` (empty string) behaves identically to unset — short-circuit does not activate, falls through. Test: `os.environ["VALOR_SESSION_ID"] = ""` with no real session, assert create path runs.
+- [x] `find_session_by_issue(0)` and `(-1)` still return None (existing guard). No new tests needed; existing `test_returns_empty_for_invalid_issue_number` covers.
+- [x] `message_text` containing `"issue 1147"` as a substring of a larger word (e.g., `"tissue 1147"`) must NOT match. The `\b` word boundaries in the regex handle this. Test: add regression assertion.
 
 ### Error State Rendering
-- [ ] CLI always prints valid JSON on stdout and exits 0 (documented contract). Add a test that runs `--kill-orphans --dry-run` and asserts `json.loads(stdout)` succeeds.
-- [ ] If the env short-circuit branch returns a session ID, the caller (SDLC skill) must observe `created: False`. Add a test that patches env, provides a mock PM session, and asserts the result dict.
+- [x] CLI always prints valid JSON on stdout and exits 0 (documented contract). Add a test that runs `--kill-orphans --dry-run` and asserts `json.loads(stdout)` succeeds.
+- [x] If the env short-circuit branch returns a session ID, the caller (SDLC skill) must observe `created: False`. Add a test that patches env, provides a mock PM session, and asserts the result dict.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: keep all six existing tests (they exercise the fallback paths that remain). Add new tests listed in Step 5 below.
-- [ ] No other test files touch this code path. `grep -rn "sdlc_session_ensure\|find_session_by_issue\|sdlc-local-" tests/` returns only the one file.
+- [x] `tests/unit/test_sdlc_session_ensure.py` — UPDATE: keep all six existing tests (they exercise the fallback paths that remain). Add new tests listed in Step 5 below.
+- [x] No other test files touch this code path. `grep -rn "sdlc_session_ensure\|find_session_by_issue\|sdlc-local-" tests/` returns only the one file.
 
 ## Rabbit Holes
 
@@ -234,30 +234,30 @@ No agent integration required — `sdlc_session_ensure` is not exposed as an MCP
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/sdlc-pipeline-state.md`: add a short subsection under "Local SDLC sessions" explaining the env-var short-circuit and what happens when Step 1.5 runs inside a bridge session. Note the `--kill-orphans` operator tool and link to its usage.
-- [ ] Update `docs/features/sdlc-stage-tracking.md`: the existing paragraph at line 68 describes `sdlc_session_ensure` for local sessions. Append a note that bridge sessions short-circuit and do not create records.
+- [x] Update `docs/features/sdlc-pipeline-state.md`: add a short subsection under "Local SDLC sessions" explaining the env-var short-circuit and what happens when Step 1.5 runs inside a bridge session. Note the `--kill-orphans` operator tool and link to its usage.
+- [x] Update `docs/features/sdlc-stage-tracking.md`: the existing paragraph at line 68 describes `sdlc_session_ensure` for local sessions. Append a note that bridge sessions short-circuit and do not create records.
 
 ### Inline Documentation
-- [ ] `ensure_session()` docstring: document the env-var short-circuit behavior and when it falls through.
-- [ ] `find_session_by_issue()` docstring: document the two-pass match (`issue_url` first, then `message_text` regex) and the known limitation (first match wins on multi-mention).
-- [ ] `_iter_orphan_sessions()` helper: docstring covering the zombie criteria (pattern, age floor, heartbeat).
+- [x] `ensure_session()` docstring: document the env-var short-circuit behavior and when it falls through.
+- [x] `find_session_by_issue()` docstring: document the two-pass match (`issue_url` first, then `message_text` regex) and the known limitation (first match wins on multi-mention).
+- [x] `_iter_orphan_sessions()` helper: docstring covering the zombie criteria (pattern, age floor, heartbeat).
 
 ### Skill Documentation
-- [ ] `.claude/skills/sdlc/SKILL.md` Step 1.5: correct the comment so "no-op for bridge-initiated sessions" matches real behavior after fix.
+- [x] `.claude/skills/sdlc/SKILL.md` Step 1.5: correct the comment so "no-op for bridge-initiated sessions" matches real behavior after fix.
 
 ## Success Criteria
 
-- [ ] `ensure_session(1140)` called with `VALOR_SESSION_ID=tg_valor_-1003449100931_691` in env AND a live PM session matching that ID returns `{"session_id": "tg_valor_-1003449100931_691", "created": false}`. No new session created.
-- [ ] `ensure_session(1140)` called with `VALOR_SESSION_ID=stale_id` where no session exists falls through to the legacy path and creates `sdlc-local-1140` (preserves degraded-mode behavior).
-- [ ] `find_session_by_issue(1140)` returns a Telegram PM session whose `message_text="SDLC issue 1140"` and `issue_url is None`.
-- [ ] `find_session_by_issue(1147)` does NOT match a session whose `message_text` contains `"tissue 1147"` (word-boundary regression).
-- [ ] Running SDLC on a bridge-initiated session produces exactly one PM session on the dashboard (curl `/dashboard.json`, count `pm` sessions for this issue). Zero `sdlc-local-{N}` duplicates.
-- [ ] `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` lists existing zombies without modifying them. Output is valid JSON, exit 0.
-- [ ] `python -m tools.sdlc_session_ensure --kill-orphans` transitions zombie sessions to `killed` and reports per-session results in JSON.
-- [ ] Tests in `tests/unit/test_sdlc_session_ensure.py` cover: bridge short-circuit (happy path), stale env fallback, message_text fallback match, message_text word-boundary negative case, orphan listing, orphan killing, transition failure handling in orphan killer.
-- [ ] `.claude/skills/sdlc/SKILL.md` Step 1.5 comment reads accurately.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] `ensure_session(1140)` called with `VALOR_SESSION_ID=tg_valor_-1003449100931_691` in env AND a live PM session matching that ID returns `{"session_id": "tg_valor_-1003449100931_691", "created": false}`. No new session created.
+- [x] `ensure_session(1140)` called with `VALOR_SESSION_ID=stale_id` where no session exists falls through to the legacy path and creates `sdlc-local-1140` (preserves degraded-mode behavior).
+- [x] `find_session_by_issue(1140)` returns a Telegram PM session whose `message_text="SDLC issue 1140"` and `issue_url is None`.
+- [x] `find_session_by_issue(1147)` does NOT match a session whose `message_text` contains `"tissue 1147"` (word-boundary regression).
+- [x] Running SDLC on a bridge-initiated session produces exactly one PM session on the dashboard (curl `/dashboard.json`, count `pm` sessions for this issue). Zero `sdlc-local-{N}` duplicates.
+- [x] `python -m tools.sdlc_session_ensure --kill-orphans --dry-run` lists existing zombies without modifying them. Output is valid JSON, exit 0.
+- [x] `python -m tools.sdlc_session_ensure --kill-orphans` transitions zombie sessions to `killed` and reports per-session results in JSON.
+- [x] Tests in `tests/unit/test_sdlc_session_ensure.py` cover: bridge short-circuit (happy path), stale env fallback, message_text fallback match, message_text word-boundary negative case, orphan listing, orphan killing, transition failure handling in orphan killer.
+- [x] `.claude/skills/sdlc/SKILL.md` Step 1.5 comment reads accurately.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
