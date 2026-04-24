@@ -21,14 +21,20 @@ Usage:
     valor-session kill --all
 
 Project Key Resolution (for `create` subcommand):
-    The project_key is derived automatically from the current working directory by
-    matching against the working_directory field of each project in projects.json.
-    The most-specific match (longest path prefix) wins.
+    ``project_key`` is the only input that ties a session to a repo. The on-disk
+    path (``working_dir``) is always *derived* from
+    ``projects.json[project_key].working_directory`` — never supplied
+    independently. There is no working-directory override flag.
 
-    If no match is found, "valor" is used as the fallback and a warning is printed
-    to stderr so it doesn't pollute --json output.
+    Resolution precedence:
+        1. ``--project-key <key>`` (explicit flag)
+        2. ``--parent <id>`` inherits ``project_key`` from the parent session
+        3. ``resolve_project_key(os.getcwd())`` — matches cwd against
+           ``projects.json``; raises ``ProjectKeyResolutionError`` on no match
+           (no silent "valor" fallback)
 
-    Use --project-key to override resolution explicitly (useful in scripts/CI).
+    If none of the above yield a key, the CLI exits non-zero with an error
+    naming the cwd and listing the available project keys.
 
 This tool is the external interface for session steering. It writes to
 AgentSession.queued_steering_messages (via steer_session()) and manages
@@ -118,33 +124,88 @@ def _check_worker_health() -> tuple[bool, int | None]:
         return (False, None)
 
 
+class ProjectsConfigUnavailableError(RuntimeError):
+    """Raised when ``bridge.routing.load_config()`` cannot be loaded.
+
+    This means no project→repo pairing is available at all. The caller cannot
+    fall back — there is no "default" project under the immutable-pairing rule.
+    """
+
+
+class ProjectKeyResolutionError(ValueError):
+    """Raised when no ``project_key`` can be resolved from inputs.
+
+    Fired when:
+    - ``resolve_project_key(cwd)`` is called with a ``cwd`` that matches no
+      project ``working_directory`` in ``projects.json``.
+    - ``_resolve_project_working_directory(key)`` is called with a key that is
+      not in ``projects.json`` or whose project entry has no
+      ``working_directory``.
+
+    The ``str(exception)`` form carries a user-oriented message (cwd, available
+    keys, suggested remediation) because ``cmd_create``'s broad ``except
+    Exception`` is the surface the user ultimately sees.
+    """
+
+    def __init__(
+        self,
+        *,
+        cwd: str | None = None,
+        project_key: str | None = None,
+        available_keys: list[str] | None = None,
+        detail: str | None = None,
+    ):
+        self.cwd = cwd
+        self.project_key = project_key
+        self.available_keys = available_keys or []
+        self.detail = detail
+        if cwd is not None:
+            msg = (
+                f"cwd {cwd!r} does not match any project in projects.json. "
+                f"Available keys: {self.available_keys}. "
+                f"Pass --project-key <key> explicitly."
+            )
+        elif project_key is not None:
+            msg = (
+                f"project_key {project_key!r} is not in projects.json or has no "
+                f"working_directory set. Available keys: {self.available_keys}."
+            )
+            if detail:
+                msg += f" ({detail})"
+        else:
+            msg = detail or "project_key could not be resolved"
+        super().__init__(msg)
+
+
 def resolve_project_key(cwd: str) -> str:
-    """Derive the project_key from cwd by matching against projects.json.
+    """Derive the ``project_key`` from ``cwd`` by matching ``projects.json``.
 
-    Loads projects.json via bridge.routing.load_config(), iterates the projects
-    dict, and returns the key whose working_directory equals or is a parent of
-    cwd. When multiple projects match (overlapping paths), the most specific
-    match (longest working_directory path) wins.
-
-    Falls back to "valor" and prints a warning to stderr if no match is found
-    or if projects.json is unavailable.
+    Loads ``projects.json`` via ``bridge.routing.load_config()``, iterates the
+    ``projects`` dict, and returns the key whose ``working_directory`` equals
+    or is a parent of ``cwd``. When multiple projects match (overlapping
+    paths), the most specific match (longest ``working_directory`` path) wins.
 
     Args:
         cwd: The current working directory to match against project paths.
 
     Returns:
-        The matching project key, or "valor" if no match is found.
+        The matching project key.
+
+    Raises:
+        ProjectsConfigUnavailableError: If ``load_config()`` itself raises
+            (missing file, unreadable, etc.). There is no silent fallback —
+            without ``projects.json`` there is no defined project→repo pairing.
+        ProjectKeyResolutionError: If no project's ``working_directory`` is an
+            ancestor of (or equal to) ``cwd``. The message names ``cwd`` and
+            lists the available keys so the caller knows what to pass as
+            ``--project-key``.
     """
     try:
         from bridge.routing import load_config
 
         config = load_config()
     except Exception as e:
-        print(
-            f"Warning: could not load projects.json ({e}), using project_key='valor'",
-            file=sys.stderr,
-        )
-        return "valor"
+        raise ProjectsConfigUnavailableError(f"could not load projects.json: {e}") from e
 
     cwd_path = Path(cwd).resolve()
     best_key: str | None = None
@@ -168,12 +229,57 @@ def resolve_project_key(cwd: str) -> str:
     if best_key is not None:
         return best_key
 
-    print(
-        f"Warning: current directory {cwd!r} does not match any project in projects.json, "
-        "using project_key='valor'",
-        file=sys.stderr,
-    )
-    return "valor"
+    raise ProjectKeyResolutionError(cwd=cwd, available_keys=sorted(projects.keys()))
+
+
+def _resolve_project_working_directory(project_key: str) -> tuple[Path, dict]:
+    """Return ``(repo_root_path, project_dict)`` for ``project_key``.
+
+    Loads ``projects.json`` once via ``bridge.routing.load_config()``, looks up
+    the project entry, expands ``working_directory`` to an absolute
+    ``pathlib.Path``, and returns both the path and the full project dict so the
+    caller can pass the dict as ``project_config=`` on the enqueue without a
+    second ``load_config()`` call.
+
+    Args:
+        project_key: Key into ``projects.json[projects]``. Must be an exact
+            match (no fuzzy resolution).
+
+    Returns:
+        Tuple of:
+          - ``Path``: absolute, user-expanded path to the project's repo root.
+          - ``dict``: the raw project entry from ``projects.json``. Pass this
+            unchanged to ``_push_agent_session(..., project_config=...)`` so
+            CLI-created sessions carry the same payload as bridge-created
+            sessions (PR #685).
+
+    Raises:
+        ProjectsConfigUnavailableError: If ``load_config()`` itself raises.
+        ProjectKeyResolutionError: If ``project_key`` is not in
+            ``projects.json`` or its entry has no ``working_directory``.
+    """
+    try:
+        from bridge.routing import load_config
+
+        config = load_config()
+    except Exception as e:
+        raise ProjectsConfigUnavailableError(f"could not load projects.json: {e}") from e
+
+    projects = config.get("projects", {})
+    project = projects.get(project_key)
+    if not project:
+        raise ProjectKeyResolutionError(
+            project_key=project_key,
+            available_keys=sorted(projects.keys()),
+        )
+    wd = project.get("working_directory", "")
+    if not wd:
+        raise ProjectKeyResolutionError(
+            project_key=project_key,
+            available_keys=sorted(projects.keys()),
+            detail="project entry has no working_directory",
+        )
+    return Path(wd).expanduser(), project
 
 
 def _format_ts(ts: str | float | None) -> str:
@@ -195,8 +301,10 @@ def _format_ts(ts: str | float | None) -> str:
 def cmd_create(args: argparse.Namespace) -> int:
     """Create a new AgentSession and enqueue it.
 
-    project_key is resolved from the current working directory via projects.json
-    unless --project-key is provided explicitly.
+    ``project_key`` determines the repo; ``working_dir`` is always derived from
+    ``projects.json[project_key].working_directory`` (optionally with a
+    ``.worktrees/{slug}/`` suffix). Callers who need a different repo pass a
+    different ``--project-key``.
     """
     _load_env()
     try:
@@ -241,13 +349,14 @@ def cmd_create(args: argparse.Namespace) -> int:
         ts_suffix = str(int(utc_now().timestamp() * 1000))
         session_id = f"{chat_id}_{ts_suffix}"
 
-        working_dir = args.working_dir or str(_repo_root)
-
-        # If --slug is provided, validate and provision worktree (issue #887).
-        # For PM-role sessions without --slug, auto-derive slug from "issue #N"
-        # in the message (issue #1109). This prevents PM sessions from inheriting
-        # the worker's current branch/worktree state. PM sessions with no issue
-        # reference and no --slug are refused with a clear error.
+        # ------------------------------------------------------------------
+        # Step 1: resolve PM slug BEFORE any project/working_dir work.
+        #
+        # PM auto-slug derivation is a pure function of ``message`` and MUST
+        # fire before worktree creation so that "PM without slug and without
+        # issue reference" can refuse (exit 1) without first having computed
+        # a project root or touching the filesystem.
+        # ------------------------------------------------------------------
         slug = getattr(args, "slug", None)
         if not slug and role == "pm":
             derived = _derive_slug_from_message(message)
@@ -267,20 +376,56 @@ def cmd_create(args: argparse.Namespace) -> int:
                 )
                 return 1
 
+        # ------------------------------------------------------------------
+        # Step 2: resolve project_key.
+        #
+        # Precedence: --project-key > --parent inheritance > cwd-match.
+        # No silent fallback — if all three fail, resolve_project_key raises
+        # ProjectKeyResolutionError, which propagates to the outer
+        # ``except Exception`` and returns exit 1 with a user-facing message.
+        # ------------------------------------------------------------------
+        explicit_key = getattr(args, "project_key", None)
+        project_key: str | None = None
+        if explicit_key:
+            project_key = explicit_key
+        elif parent_id:
+            # Parent inheritance: copy project_key from the parent session.
+            # If --parent points to a non-existent session, fall through to
+            # cwd-based resolution — a typo in --parent is a separate concern
+            # from mis-routing and should not hard-fail creation.
+            parent = _find_session(parent_id)
+            if parent is not None:
+                inherited_key = getattr(parent, "project_key", None)
+                if inherited_key:
+                    project_key = inherited_key
+                    parent_uuid = getattr(parent, "agent_session_id", parent_id)
+                    print(
+                        f"  Inherited project_key={project_key} from parent {parent_uuid}",
+                        file=sys.stderr,
+                    )
+        if project_key is None:
+            # Final fallback: cwd-based match. Raises ProjectKeyResolutionError
+            # on no match — no silent "valor" coercion.
+            project_key = resolve_project_key(os.getcwd())
+
+        # ------------------------------------------------------------------
+        # Step 3: derive repo_root and working_dir from project_key.
+        #
+        # The project dict returned here becomes project_config= on the
+        # enqueue so CLI-created sessions carry the same payload as
+        # bridge-created sessions (PR #685).
+        # ------------------------------------------------------------------
+        repo_root, project_config = _resolve_project_working_directory(project_key)
+
         if slug:
             from agent.worktree_manager import _validate_slug, get_or_create_worktree
 
             _validate_slug(slug)  # Raises ValueError for invalid slugs
-            wt_path = get_or_create_worktree(Path(working_dir), slug)
+            wt_path = get_or_create_worktree(repo_root, slug)
             working_dir = str(wt_path)
             print(f"  Worktree:    {working_dir}", file=sys.stderr)
-
-        # Resolve project_key: explicit flag takes priority, else derive from cwd
-        explicit_key = getattr(args, "project_key", None)
-        if explicit_key:
-            project_key = explicit_key
         else:
-            project_key = resolve_project_key(os.getcwd())
+            working_dir = str(repo_root)
 
         async def _create():
             await _push_agent_session(
@@ -295,6 +440,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 parent_agent_session_id=parent_id,
                 slug=slug,
                 model=model,
+                project_config=project_config,
             )
             return session_id
 
@@ -1044,13 +1190,15 @@ def main() -> int:
     )
     create_parser.add_argument("--chat-id", help="Telegram chat ID (default: 0)")
     create_parser.add_argument("--parent", help="Parent AgentSession ID (for child sessions)")
-    create_parser.add_argument("--working-dir", help="Working directory for the session")
     create_parser.add_argument(
         "--project-key",
         help=(
             "Explicit project key (overrides automatic cwd-based resolution). "
-            "If omitted, the key is derived from the current working directory "
-            "by matching against projects.json."
+            "If omitted, the key is derived from --parent (if set) or from the "
+            "current working directory by matching against projects.json. "
+            "On no match, the CLI exits with an error listing available keys. "
+            "The matched project's working_directory sets the session's "
+            "working_dir; there is no separate working-directory override flag."
         ),
     )
     create_parser.add_argument(

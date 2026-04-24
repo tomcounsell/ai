@@ -119,12 +119,25 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         if issue_url:
             kwargs["issue_url"] = issue_url
 
-        from tools.valor_session import resolve_project_key
+        from tools.valor_session import (
+            ProjectKeyResolutionError,
+            ProjectsConfigUnavailableError,
+            _resolve_project_working_directory,
+            resolve_project_key,
+        )
+
+        # Resolve project_key from cwd (raises if unmatched — caught below by
+        # the broad except Exception, which returns {} for idempotent failure).
+        project_key = resolve_project_key(os.getcwd())
+        # Derive working_dir from projects.json, NOT os.getcwd(). This enforces
+        # the immutable project→repo pairing: the session runs in the repo
+        # declared for its project_key, not wherever the caller happens to be.
+        repo_root, _ = _resolve_project_working_directory(project_key)
 
         session = AgentSession.create_local(
             session_id=local_session_id,
-            project_key=resolve_project_key(os.getcwd()),
-            working_dir=os.getcwd(),
+            project_key=project_key,
+            working_dir=str(repo_root),
             session_type="pm",
             **kwargs,
         )
@@ -141,7 +154,14 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         return {"session_id": local_session_id, "created": True}
 
     except Exception as e:
-        logger.debug(f"sdlc_session_ensure: ensure_session failed: {e}")
+        # ProjectKeyResolutionError and ProjectsConfigUnavailableError both
+        # land here intentionally — if the project→repo pairing can't be
+        # resolved, we return {} rather than creating a mis-scoped session.
+        logger.debug(
+            "sdlc_session_ensure: ensure_session failed: %s (%s)",
+            e,
+            type(e).__name__,
+        )
         return {}
 
 

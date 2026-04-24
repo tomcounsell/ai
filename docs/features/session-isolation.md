@@ -100,6 +100,42 @@ See GitHub issue [#237](https://github.com/tomcounsell/ai/issues/237) for the or
 
 This guard was added in response to the 2026-04-10 incident (issue [#880](https://github.com/tomcounsell/ai/issues/880)), where a session branch got checked out in the main working tree and the cleanup helper was handed the main repo path; the `shutil.rmtree(..., ignore_errors=True)` fallback then recursively deleted the main repository. The guard now refuses bogus paths loudly and the fallback no longer hides errors.
 
+### CLI-level Project Scope Resolution (Issue #1158)
+
+When a session is created via `valor-session create` (e.g. a PM session spawning a child SDLC session), the CLI enforces an **immutable project → repo pairing**: a project name determines its repo, and no input may decouple them.
+
+**Governing principle**:
+
+> A project and a repo should not be provided separately. The local machine's configuration sets the pairing and that pairing cannot be broken.
+
+**Resolution precedence for `cmd_create`**:
+
+1. `--project-key <key>` — explicit flag wins over everything else.
+2. `--parent <id>` — if the parent `AgentSession` is resolvable, its `project_key` is inherited. `working_dir` is **never** inherited — it is always re-derived from the (inherited) `project_key`.
+3. `resolve_project_key(os.getcwd())` — matches the cwd against each project's `working_directory` in `projects.json`. Raises `ProjectKeyResolutionError` on no match; the CLI prints the message (cwd, available keys, suggested `--project-key`) to stderr and exits non-zero.
+
+**Removed surfaces**:
+
+- There is no working-directory override flag on `valor-session create`. Callers who need a different repo pass a different `--project-key`.
+- `resolve_project_key` no longer silently returns `"valor"` on unmatched cwd. It raises `ProjectKeyResolutionError`. Callers relying on the old fallback must catch the exception explicitly or supply a key.
+- `load_config()` failures raise `ProjectsConfigUnavailableError` (distinct from `ProjectKeyResolutionError`) so operators can distinguish a missing config from an unknown key.
+
+**Helper**:
+
+- `_resolve_project_working_directory(project_key)` — loads `projects.json` once and returns `(repo_root: Path, project_dict: dict)`. The dict is passed through to `AgentSession.project_config` so CLI-created sessions carry the same per-project payload as bridge-created sessions (PR #685).
+
+**Where the rule is enforced**:
+
+- `tools/valor_session.py::cmd_create` — the primary CLI surface.
+- `tools/sdlc_session_ensure.py::ensure_session` — derives `working_dir` from `projects.json` (not `os.getcwd()`). On resolution failure the function returns `{}` (idempotent no-op), never a mis-scoped session.
+- `agent/reflection_scheduler.py` — catches the new typed errors explicitly; falls back to `PROJECT_KEY` env var as a last-resort for local nightly reflections only.
+
+**Where it is NOT enforced (by design)**:
+
+- `_push_agent_session(..., working_dir=...)` — internal primitive; its `working_dir` kwarg is computed by the CLI/scheduler/bridge, not supplied by users.
+- `bridge/telegram_bridge.py` — already correct (derives `working_directory` from `projects.json`).
+- `tools/agent_session_scheduler.py` — already follows the rule; was the reference model for the fix.
+
 ### Post-Merge Worktree Cleanup
 
 When a PR is merged via `gh pr merge --squash --delete-branch`, the remote branch is deleted but local branch deletion fails if a git worktree still references it. The `cleanup_after_merge()` function handles this:

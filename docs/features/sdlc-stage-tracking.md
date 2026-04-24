@@ -74,7 +74,7 @@ SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null ||
 python -m tools.sdlc_session_ensure --issue-number 941 --issue-url "https://github.com/$SDLC_REPO/issues/941"
 ```
 
-The `SDLC_REPO` value is shell-derived to avoid hardcoding the repo owner/name. `tools/sdlc_session_ensure.py` also resolves `project_key` dynamically via `resolve_project_key(cwd)` — it no longer hardcodes `project_key='ai'`.
+The `SDLC_REPO` value is shell-derived to avoid hardcoding the repo owner/name. `tools/sdlc_session_ensure.py` resolves `project_key` dynamically via `resolve_project_key(cwd)`, then derives `working_dir` from `projects.json[project_key].working_directory` (not `os.getcwd()`) via `_resolve_project_working_directory()` — enforcing the immutable project→repo pairing from issue #1158. If resolution fails, the function returns `{}` (idempotent no-op) rather than creating a mis-scoped session.
 
 See `docs/features/sdlc-pipeline-state.md` for the full local session tracking design.
 

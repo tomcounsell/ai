@@ -172,8 +172,8 @@ valor-email threads
 | `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
 | `python -m tools.valor_session kill --id <ID>` | Kill a session |
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
-| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session (warns to stderr if no worker is running) |
-| `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation (warns to stderr if no worker is running) |
+| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session. `project_key` determines the repo via `projects.json`; there is no working-directory override flag. Precedence: `--project-key` > `--parent` inheritance > cwd match (raises on no match). Warns to stderr if no worker is running. |
+| `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation under the project's declared repo. Warns to stderr if no worker is running. |
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
 | `python -m tools.memory_search search "query"` | Search memories by query |

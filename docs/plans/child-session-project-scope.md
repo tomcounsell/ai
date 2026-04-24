@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -227,38 +227,38 @@ No changes needed to `AgentSession` model, `bridge/telegram_bridge.py`, `agent/s
 
 ### Exception Handling Coverage
 
-- [ ] `tools/valor_session.py:cmd_create` has a broad `try/except Exception` that catches any error and returns exit code 1. Verify both new exceptions produce clear stderr messages **before** being caught — tests must assert stderr content, not just exit code.
-- [ ] `agent/reflection_scheduler.py:394-399` now catches two specific exception types. Add a test that simulates each raising and asserts the scheduler falls back gracefully and logs a warning.
-- [ ] `tools/sdlc_session_ensure.py:ensure_session` — on `ProjectKeyResolutionError`, it should return `{}` (no session created) rather than coercing to a wrong project.
+- [x] `tools/valor_session.py:cmd_create` has a broad `try/except Exception` that catches any error and returns exit code 1. Verify both new exceptions produce clear stderr messages **before** being caught — tests must assert stderr content, not just exit code.
+- [x] `agent/reflection_scheduler.py:394-399` now catches two specific exception types. Add a test that simulates each raising and asserts the scheduler falls back gracefully and logs a warning. Covered by `tests/unit/test_reflection_scheduler.py::TestEnqueueAgentReflectionTypedErrors` (both `ProjectKeyResolutionError` and `ProjectsConfigUnavailableError` → PROJECT_KEY env fallback + `logger.warning`).
+- [x] `tools/sdlc_session_ensure.py:ensure_session` — on `ProjectKeyResolutionError`, it should return `{}` (no session created) rather than coercing to a wrong project. Covered by `tests/unit/test_sdlc_session_ensure.py::TestEnsureSession::test_project_key_resolution_error_returns_empty` and `::test_projects_config_unavailable_error_returns_empty` — `AgentSession.create_local` asserted not called.
 
 ### Empty/Invalid Input Handling
 
-- [ ] `cmd_create` when `--project-key` refers to a key not in `projects.json` → exit 1, stderr names the missing key and lists available keys.
-- [ ] `cmd_create` when cwd matches no project and no `--project-key` → exit 1 with same hint.
-- [ ] `cmd_create` when `projects.json` is unloadable → exit 1 with `ProjectsConfigUnavailableError` message.
-- [ ] `cmd_create` when `--parent <id>` points to a nonexistent session → exit 1.
+- [x] `cmd_create` when `--project-key` refers to a key not in `projects.json` → exit 1, stderr names the missing key and lists available keys.
+- [x] `cmd_create` when cwd matches no project and no `--project-key` → exit 1 with same hint.
+- [x] `cmd_create` when `projects.json` is unloadable → exit 1 with `ProjectsConfigUnavailableError` message.
+- [x] `cmd_create` when `--parent <id>` points to a nonexistent session → falls through to cwd-based `resolve_project_key` (per Implementation Note at line 441: parent is advisory; typo should not hard-fail when cwd can still resolve). Hard-fail only when BOTH parent lookup AND cwd resolution fail. Covered by `test_parent_not_found_falls_through_to_cwd_resolution`.
 
 ### Error State Rendering
 
-- [ ] All new error paths write to stderr, preserving stdout for `--json`. Assert `stdout_capture.getvalue() == ""` on error.
-- [ ] Error messages include: attempted value, list of valid project keys, suggested remediation (`pass --project-key <key>`).
+- [x] All new error paths write to stderr, preserving stdout for `--json`. Assert `stdout_capture.getvalue() == ""` on error. Covered by `tests/unit/test_valor_session_working_dir_resolution.py::TestErrorPathWritesToStderrOnly` (3 tests: unmatched cwd, unknown project key, load_config failure — all assert `capsys.out == ""`).
+- [x] Error messages include: attempted value, list of valid project keys, suggested remediation (`pass --project-key <key>`).
 
 ## Test Impact
 
 Test files rewritten to match the new surface. Counts: **5 existing files affected, 1 new file added, net disposition REPLACE-heavy.**
 
-- [ ] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_no_match_returns_valor` (line 111) — **REPLACE**: assert `with pytest.raises(ProjectKeyResolutionError): resolve_project_key(...)` and that the exception message contains the cwd and the available keys list.
-- [ ] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_empty_projects_returns_valor` (line 131) — **REPLACE**: empty projects + any cwd → raises `ProjectKeyResolutionError`.
-- [ ] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_load_config_exception_returns_valor` (line 141) — **REPLACE**: `load_config` raising → `ProjectsConfigUnavailableError` (distinct from `ProjectKeyResolutionError`).
-- [ ] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_project_missing_working_directory_skipped` (line 151) — **REPLACE**: when no project matches → raises; when the one matching project has an empty `working_directory` AND cwd is exactly that path, the helper `_resolve_project_working_directory` also raises.
-- [ ] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_project_empty_working_directory_skipped` (line 164) — **REPLACE**: same treatment as above.
-- [ ] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_fallback_warning_goes_to_stderr_not_stdout` (line 177) — **REPLACE**: rewrite to assert that when `cmd_create` catches the new exception, the CLI's stderr is non-empty and stdout is clean. (The helper itself no longer prints.)
-- [ ] `tests/unit/test_valor_session_project_key.py::TestProjectKeyFlagOverride::test_explicit_flag_bypasses_resolution` (line 199) — **UPDATE**: still valid; extend to also assert that the test namespace no longer has a `working_dir` attribute (the flag is gone).
-- [ ] `tests/unit/test_pm_session_auto_slug.py` — multiple tests use `_make_args(..., working_dir=None, ...)` at lines 36, and reference auto-derived working_dir in lines 77 etc. — **UPDATE**: drop `working_dir` from `_make_args` defaults; mock `bridge.routing.load_config` to return a test `projects.json` including a `"valor"` key with `working_directory` pointing at `tmp_path`; assert the derived `working_dir` passed to `fake_push` equals the worktree path under that `tmp_path`.
-- [ ] `tests/unit/test_pm_session_refuse_no_issue.py` (line 32: `working_dir=None`) — **UPDATE**: drop the attribute; add `load_config` mock.
-- [ ] `tests/unit/test_valor_session_cli.py` — three `monkeypatch.setattr(valor_session, "resolve_project_key", lambda cwd: "test-1148")` stubs (lines 76, 102, 121). **UPDATE**: keep the stubs but also mock `tools.valor_session._resolve_project_working_directory` to return a `Path`, because `cmd_create` will now call it right after `resolve_project_key`. Drop any `working_dir` namespace attribute from `_make_args` helpers.
-- [ ] `tests/integration/test_parent_child_round_trip.py` (if it exists — verify) — **UPDATE**: assert child `working_dir` is rooted inside the parent's project (via the projects.json lookup), not by direct parent.working_dir inheritance.
-- [ ] **ADD** `tests/unit/test_valor_session_working_dir_resolution.py` — new file covering:
+- [x] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_no_match_returns_valor` (line 111) — **REPLACE**: assert `with pytest.raises(ProjectKeyResolutionError): resolve_project_key(...)` and that the exception message contains the cwd and the available keys list.
+- [x] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_empty_projects_returns_valor` (line 131) — **REPLACE**: empty projects + any cwd → raises `ProjectKeyResolutionError`.
+- [x] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_load_config_exception_returns_valor` (line 141) — **REPLACE**: `load_config` raising → `ProjectsConfigUnavailableError` (distinct from `ProjectKeyResolutionError`).
+- [x] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_project_missing_working_directory_skipped` (line 151) — **REPLACE**: when no project matches → raises; when the one matching project has an empty `working_directory` AND cwd is exactly that path, the helper `_resolve_project_working_directory` also raises.
+- [x] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_project_empty_working_directory_skipped` (line 164) — **REPLACE**: same treatment as above.
+- [x] `tests/unit/test_valor_session_project_key.py::TestResolveProjectKeyFallback::test_fallback_warning_goes_to_stderr_not_stdout` (line 177) — **REPLACE**: rewrite to assert that when `cmd_create` catches the new exception, the CLI's stderr is non-empty and stdout is clean. (The helper itself no longer prints.)
+- [x] `tests/unit/test_valor_session_project_key.py::TestProjectKeyFlagOverride::test_explicit_flag_bypasses_resolution` (line 199) — **UPDATE**: still valid; extend to also assert that the test namespace no longer has a `working_dir` attribute (the flag is gone).
+- [x] `tests/unit/test_pm_session_auto_slug.py` — multiple tests use `_make_args(..., working_dir=None, ...)` at lines 36, and reference auto-derived working_dir in lines 77 etc. — **UPDATE**: drop `working_dir` from `_make_args` defaults; mock `bridge.routing.load_config` to return a test `projects.json` including a `"valor"` key with `working_directory` pointing at `tmp_path`; assert the derived `working_dir` passed to `fake_push` equals the worktree path under that `tmp_path`.
+- [x] `tests/unit/test_pm_session_refuse_no_issue.py` (line 32: `working_dir=None`) — **UPDATE**: drop the attribute; add `load_config` mock.
+- [x] `tests/unit/test_valor_session_cli.py` — three `monkeypatch.setattr(valor_session, "resolve_project_key", lambda cwd: "test-1148")` stubs (lines 76, 102, 121). **UPDATE**: keep the stubs but also mock `tools.valor_session._resolve_project_working_directory` to return a `Path`, because `cmd_create` will now call it right after `resolve_project_key`. Drop any `working_dir` namespace attribute from `_make_args` helpers.
+- [x] `tests/integration/test_parent_child_round_trip.py` — **UPDATE** applied: added `test_child_working_dir_rooted_under_parent_project_via_projects_json` asserting `captured["working_dir"].startswith(parent_project_root)` AND `captured["working_dir"] != fake_parent.working_dir` (child re-derives from projects.json, not copied from parent).
+- [x] **ADD** `tests/unit/test_valor_session_working_dir_resolution.py` — new file covering:
   - `--project-key cuttlefish` from cwd `/Users/valorengels/src/ai` produces `working_dir` rooted at the cuttlefish project (via mocked `load_config`).
   - There is **no** `--working-dir` flag — `argparse` rejects it (`SystemExit`) and stderr mentions unrecognized arguments.
   - `--parent <id>` inherits `project_key` from the parent `AgentSession`; `working_dir` is re-derived from the inherited `project_key`, not copied from the parent.
@@ -339,14 +339,16 @@ The fix does affect **what the PM agent experiences** when it runs `python -m to
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-isolation.md`: add a "CLI-level project scope resolution" subsection documenting (a) removal of `--working-dir`, (b) the precedence chain `--project-key` > `--parent` > cwd-match, (c) the hard-error behavior on unmatched cwd.
-- [ ] Update `CLAUDE.md` Quick Commands entries for `valor-session create --role pm/dev` — note that `project_key` determines `working_dir` via `projects.json`, and there is no `--working-dir` flag.
+- [x] Update `docs/features/session-isolation.md`: add a "CLI-level project scope resolution" subsection documenting (a) removal of `--working-dir`, (b) the precedence chain `--project-key` > `--parent` > cwd-match, (c) the hard-error behavior on unmatched cwd.
+- [x] Update `CLAUDE.md` Quick Commands entries for `valor-session create --role pm/dev` — note that `project_key` determines `working_dir` via `projects.json`, and there is no `--working-dir` flag.
+- [x] Update `docs/tools-reference.md` and `docs/features/tools-reference.md` — replace the stale "Falls back to `\"valor\"`" description with the new precedence rule (added by /do-docs cascade).
+- [x] Update `docs/features/sdlc-stage-tracking.md` — extend the `sdlc_session_ensure.py` note to cover `working_dir` derivation via `_resolve_project_working_directory()` (added by /do-docs cascade).
 
 ### Inline Documentation
 
-- [ ] Rewrite the module docstring in `tools/valor_session.py` (lines 23-31) to describe the new resolution rule: one input (`project_key`), two sources (explicit flag or cwd-match), no fallback, no `--working-dir`.
-- [ ] Add docstring to `_resolve_project_working_directory`.
-- [ ] Update `resolve_project_key` docstring to document the raised exception types.
+- [x] Rewrite the module docstring in `tools/valor_session.py` (lines 23-31) to describe the new resolution rule: one input (`project_key`), two sources (explicit flag or cwd-match), no fallback, no `--working-dir`.
+- [x] Add docstring to `_resolve_project_working_directory`.
+- [x] Update `resolve_project_key` docstring to document the raised exception types.
 
 ### External Documentation Site
 
@@ -354,17 +356,17 @@ Not applicable — this repo does not publish external docs.
 
 ## Success Criteria
 
-- [ ] A parent PM session running with `cwd=/Users/valorengels/src/cuttlefish` that invokes `valor-session create --role pm --message "Run SDLC on issue 290"` (no `--project-key`) produces a child `AgentSession` with `project_key=cuttlefish` AND `working_dir` rooted under `/Users/valorengels/src/cuttlefish`.
-- [ ] When `--project-key cuttlefish` is passed explicitly from a cwd of `/Users/valorengels/src/ai`, the resulting session's `working_dir` is rooted under the cuttlefish project, not the ai repo.
-- [ ] A `valor-session create` invocation from a cwd that matches no project, with no `--project-key`, exits non-zero with an error naming the cwd and listing valid keys (not silently defaulting).
-- [ ] `valor-session create --working-dir /any/path --role pm --message "..."` exits with argparse error (unrecognized argument).
-- [ ] Regression test: three-level PM chain in project X → all levels carry consistent `project_key` and `working_dir` rooted inside X.
-- [ ] `AgentSession.project_config` is populated on CLI-created sessions.
-- [ ] `agent/reflection_scheduler.py` handles the new typed exceptions with an explicit catch and a logged warning.
-- [ ] `tools/sdlc_session_ensure.py` derives `working_dir` from `projects.json`, not `os.getcwd()`.
-- [ ] All updated tests pass: `pytest tests/unit/test_valor_session_project_key.py tests/unit/test_pm_session_auto_slug.py tests/unit/test_pm_session_refuse_no_issue.py tests/unit/test_valor_session_cli.py tests/unit/test_valor_session_working_dir_resolution.py`.
-- [ ] `grep -n 'return "valor"' tools/valor_session.py` matches nothing (except explicit test-only strings).
-- [ ] `grep -n -- '--working-dir' tools/valor_session.py` matches nothing.
+- [x] A parent PM session running with `cwd=/Users/valorengels/src/cuttlefish` that invokes `valor-session create --role pm --message "Run SDLC on issue 290"` (no `--project-key`) produces a child `AgentSession` with `project_key=cuttlefish` AND `working_dir` rooted under `/Users/valorengels/src/cuttlefish`.
+- [x] When `--project-key cuttlefish` is passed explicitly from a cwd of `/Users/valorengels/src/ai`, the resulting session's `working_dir` is rooted under the cuttlefish project, not the ai repo.
+- [x] A `valor-session create` invocation from a cwd that matches no project, with no `--project-key`, exits non-zero with an error naming the cwd and listing valid keys (not silently defaulting).
+- [x] `valor-session create --working-dir /any/path --role pm --message "..."` exits with argparse error (unrecognized argument).
+- [x] Regression test: three-level PM chain in project X → all levels carry consistent `project_key` and `working_dir` rooted inside X. Covered by `tests/unit/test_valor_session_working_dir_resolution.py::TestThreeLevelPMChain::test_pm_pm_dev_chain_all_rooted_in_project` — drives PM→PM→Dev cmd_create chain, asserts all three levels carry `project_key=="demo"` and `working_dir.startswith(demo_root)`.
+- [x] `AgentSession.project_config` is populated on CLI-created sessions.
+- [x] `agent/reflection_scheduler.py` handles the new typed exceptions with an explicit catch and a logged warning.
+- [x] `tools/sdlc_session_ensure.py` derives `working_dir` from `projects.json`, not `os.getcwd()`.
+- [x] All updated tests pass: `pytest tests/unit/test_valor_session_project_key.py tests/unit/test_pm_session_auto_slug.py tests/unit/test_pm_session_refuse_no_issue.py tests/unit/test_valor_session_cli.py tests/unit/test_valor_session_working_dir_resolution.py`.
+- [x] `grep -n 'return "valor"' tools/valor_session.py` matches nothing (except explicit test-only strings).
+- [x] `grep -n -- '--working-dir' tools/valor_session.py` matches nothing.
 
 ## Team Orchestration
 

@@ -117,6 +117,62 @@ class TestEnsureSession:
 
         assert result == {"session_id": "sdlc-local-944", "created": True}
 
+    def test_project_key_resolution_error_returns_empty(self):
+        """#1158: on ProjectKeyResolutionError, ensure_session returns {} and
+        does NOT create an AgentSession with a coerced/wrong project_key.
+
+        The plan's governing principle: if the project→repo pairing can't be
+        resolved, refuse to create a session rather than silently misroute.
+        """
+        from tools.sdlc_session_ensure import ensure_session
+        from tools.valor_session import ProjectKeyResolutionError
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.valor_session.resolve_project_key",
+                side_effect=ProjectKeyResolutionError(
+                    cwd="/tmp/unknown", available_keys=["valor", "ai"]
+                ),
+            ),
+        ):
+            result = ensure_session(issue_number=945)
+
+        # Empty dict → no session created.
+        assert result == {}
+        # AgentSession.create_local was NEVER called — no coercion to a wrong
+        # project happened.
+        mock_as.create_local.assert_not_called()
+
+    def test_projects_config_unavailable_error_returns_empty(self):
+        """#1158: on ProjectsConfigUnavailableError (e.g., projects.json load
+        failure), ensure_session returns {} with no session created.
+        """
+        from tools.sdlc_session_ensure import ensure_session
+        from tools.valor_session import ProjectsConfigUnavailableError
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "tools.valor_session.resolve_project_key",
+                side_effect=ProjectsConfigUnavailableError(
+                    "could not load projects.json: permission denied"
+                ),
+            ),
+        ):
+            result = ensure_session(issue_number=946)
+
+        assert result == {}
+        mock_as.create_local.assert_not_called()
+
 
 class TestCLI:
     """Tests for CLI invocation."""

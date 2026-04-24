@@ -1,9 +1,12 @@
 """Unit tests for PM-role refusal when no --slug and no issue reference (#1109).
 
-When `valor-session create --role pm` is invoked WITHOUT `--slug` AND the
+When ``valor-session create --role pm`` is invoked WITHOUT ``--slug`` AND the
 message does NOT contain an issue reference, the CLI must refuse with a
 clear error and exit non-zero. This prevents PM sessions from silently
 running on the worker's current branch (defect 1 in issue #1109).
+
+The refusal path MUST fire BEFORE any project/worktree lookup — a PM session
+with no slug never needs a working_dir at all (#1158 Technical Approach step 7).
 
 Dev/teammate roles are unaffected — they may legitimately run without a
 slug (e.g. ad-hoc conversations).
@@ -29,7 +32,6 @@ def _make_args(**overrides) -> argparse.Namespace:
         message="",
         chat_id=None,
         parent=None,
-        working_dir=None,
         project_key="valor",
         slug=None,
         model=None,
@@ -39,9 +41,21 @@ def _make_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+def _stub_project_lookup(repo_root: Path):
+    return patch(
+        "tools.valor_session._resolve_project_working_directory",
+        return_value=(repo_root, {"working_directory": str(repo_root)}),
+    )
+
+
 class TestPMRefuseWithoutIssue:
     def test_pm_role_no_slug_no_issue_reference_exits_nonzero(self, capsys):
-        """PM create with no --slug and no issue ref must refuse."""
+        """PM create with no --slug and no issue ref must refuse.
+
+        The refusal must happen BEFORE any project/worktree lookup so we do
+        NOT need to stub ``_resolve_project_working_directory``. If it is
+        called, that's a regression in the ordering — make it crash loudly.
+        """
         args = _make_args(
             role="pm",
             message="Do something generic for me",
@@ -53,6 +67,12 @@ class TestPMRefuseWithoutIssue:
         with (
             patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
             patch("tools.valor_session._check_worker_health", return_value=(True, 5)),
+            patch(
+                "tools.valor_session._resolve_project_working_directory",
+                side_effect=AssertionError(
+                    "project lookup must not be called before PM slug check"
+                ),
+            ),
         ):
             rc = cmd_create(args)
 
@@ -75,7 +95,9 @@ class TestPMRefuseWithoutIssue:
         async def fake_push(**kwargs):
             captured_kwargs.update(kwargs)
 
-        wt_path = tmp_path / ".worktrees" / "some-feature"
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        wt_path = repo_root / ".worktrees" / "some-feature"
         wt_path.mkdir(parents=True)
 
         with (
@@ -86,13 +108,14 @@ class TestPMRefuseWithoutIssue:
             ),
             patch("agent.worktree_manager._validate_slug"),
             patch("tools.valor_session._check_worker_health", return_value=(True, 5)),
+            _stub_project_lookup(repo_root),
         ):
             rc = cmd_create(args)
 
         assert rc == 0
         assert captured_kwargs.get("slug") == "some-feature"
 
-    def test_dev_role_no_slug_no_issue_allowed(self):
+    def test_dev_role_no_slug_no_issue_allowed(self, tmp_path):
         """Dev sessions may legitimately run without a slug (ad-hoc)."""
         args = _make_args(
             role="dev",
@@ -104,16 +127,20 @@ class TestPMRefuseWithoutIssue:
         async def fake_push(**kwargs):
             captured_kwargs.update(kwargs)
 
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+
         with (
             patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
             patch("tools.valor_session._check_worker_health", return_value=(True, 5)),
+            _stub_project_lookup(repo_root),
         ):
             rc = cmd_create(args)
 
         assert rc == 0
         assert captured_kwargs.get("slug") is None
 
-    def test_teammate_role_no_slug_no_issue_allowed(self):
+    def test_teammate_role_no_slug_no_issue_allowed(self, tmp_path):
         """Teammate sessions are conversational — no slug required."""
         args = _make_args(
             role="teammate",
@@ -125,9 +152,13 @@ class TestPMRefuseWithoutIssue:
         async def fake_push(**kwargs):
             captured_kwargs.update(kwargs)
 
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+
         with (
             patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
             patch("tools.valor_session._check_worker_health", return_value=(True, 5)),
+            _stub_project_lookup(repo_root),
         ):
             rc = cmd_create(args)
 
