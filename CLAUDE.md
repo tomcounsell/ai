@@ -198,6 +198,8 @@ valor-email threads
 | `python -m tools.doctor --install-hook` | Install git pre-push hook running doctor --quick |
 | `valor-youtube-search "query"` | Search YouTube for videos by query |
 | `valor-youtube-search --limit N "query"` | Search YouTube with limited results |
+| `valor-ingest <path-or-url>` | Convert a PDF/DOCX/PPTX/XLSX/HTML/image/YouTube URL into a `.md` sidecar the knowledge indexer picks up (see `docs/features/markitdown-ingestion.md`) |
+| `valor-ingest --scan ~/work-vault/` | Backfill every convertible binary file in the vault recursively (audio formats deliberately excluded) |
 
 ## Manual Testing Hygiene
 
