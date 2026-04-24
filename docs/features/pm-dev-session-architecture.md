@@ -383,7 +383,7 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 | `PipelineStateMachine` | `agent/pipeline_state.py` | Manages stage_states on the parent AgentSession (moved from `bridge/` in Phase 3) |
 | `classify_outcome()` | `agent/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
 | `get_definition()` | `agent/agent_definitions.py` | Returns actionable error for stale callers requesting `"dev-session"` Agent tool dispatch |
-| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, creates the `local-*` AgentSession record; reads `SESSION_TYPE` and `VALOR_PARENT_SESSION_ID` env vars |
+| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, decides attach-vs-create: worker-spawned subprocesses attach the sidecar to the worker's existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars (no new record, issue #1157); direct-CLI subprocesses fall through to `create_local()` gated by `SESSION_TYPE` / `VALOR_PARENT_SESSION_ID` |
 
 ### Outcome Classification
 

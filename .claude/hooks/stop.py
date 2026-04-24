@@ -126,8 +126,16 @@ def main():
 def _complete_agent_session(session_id: str, hook_input: dict) -> None:
     """Mark the AgentSession as completed or failed based on stop_reason.
 
-    Reads the agent_session_id from the sidecar file, updates the
-    AgentSession status, completed_at timestamp, and log_path.
+    Reads the agent_session_id from the sidecar file and looks up the
+    AgentSession record. Updates status, completed_at timestamp, and log_path.
+
+    Primary lookup path: ``AgentSession.get_by_id(sidecar_agent_session_id)``.
+    This is the fast path for worker-spawned subprocesses whose sidecar
+    points at the worker-created record (issue #1157).
+
+    Legacy fallback path: ``AgentSession.query.filter(session_id=f"local-{session_id}")``.
+    Retained for direct-CLI sessions that still create local-* records
+    (answer to open question 3: local CLI use is supported).
 
     Fails silently -- session completion errors never block stop.
     """
@@ -141,13 +149,26 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
 
         from models.agent_session import AgentSession
 
-        # Popoto AutoKeyField .get() requires a key object, not a raw string.
-        # Use filter on session_id instead.
-        sidecar_session_id = f"local-{session_id}"
-        matches = list(AgentSession.query.filter(session_id=sidecar_session_id))
-        if not matches:
-            return
-        agent_session = matches[0]
+        # Primary: resolve via sidecar's agent_session_id through the indexed
+        # id lookup. For worker-spawned subprocesses after #1157, the sidecar
+        # points at the worker-created record (no local-* twin exists).
+        agent_session = None
+        try:
+            agent_session = AgentSession.get_by_id(agent_session_id)
+        except Exception:
+            agent_session = None
+
+        if agent_session is None:
+            # Legacy fallback: reconstruct local-{session_id} for direct-CLI
+            # paths that still create local-* records.
+            sidecar_session_id = f"local-{session_id}"
+            try:
+                matches = list(AgentSession.query.filter(session_id=sidecar_session_id))
+            except Exception:
+                matches = []
+            if not matches:
+                return
+            agent_session = matches[0]
 
         # Issue #1156: If this PM is in waiting_for_children, do not collapse the
         # hierarchy from the Stop hook. Children will finalize the parent via

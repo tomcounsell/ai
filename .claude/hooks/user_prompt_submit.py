@@ -103,6 +103,59 @@ def main():
                 except Exception:
                     pass  # Non-fatal
             else:
+                # Phantom PM twin prevention (issue #1157).
+                #
+                # Worker-spawned subprocesses (PM/Teammate/Dev) already have an
+                # authoritative AgentSession record created by the worker BEFORE
+                # the subprocess is spawned. The worker communicates ownership
+                # by setting two env vars (see agent/sdk_client.py:1343-1369):
+                #   - AGENT_SESSION_ID : the worker's agent_session_id UUID
+                #   - VALOR_SESSION_ID : the worker's bridge session_id
+                #
+                # If either env var resolves to a live (non-terminal) record,
+                # attach the sidecar to THAT record and return. The create_local()
+                # call below is never reached — no phantom twin is minted.
+                #
+                # This is strict PREVENTION, not cleanup: if prevention lands
+                # correctly, no phantom ever gets written to Redis.
+                worker_agent_session_id = os.environ.get("AGENT_SESSION_ID", "").strip()
+                worker_bridge_session_id = os.environ.get("VALOR_SESSION_ID", "").strip()
+
+                if worker_agent_session_id or worker_bridge_session_id:
+                    try:
+                        from models.agent_session import AgentSession
+                        from models.session_lifecycle import TERMINAL_STATUSES
+
+                        attached = None
+
+                        if worker_agent_session_id:
+                            attached = AgentSession.get_by_id(worker_agent_session_id)
+
+                        if attached is None and worker_bridge_session_id:
+                            try:
+                                matches = list(
+                                    AgentSession.query.filter(session_id=worker_bridge_session_id)
+                                )
+                                if matches:
+                                    attached = matches[0]
+                            except Exception:
+                                attached = None
+
+                        if (
+                            attached is not None
+                            and getattr(attached, "status", None) not in TERMINAL_STATUSES
+                        ):
+                            sidecar["agent_session_id"] = attached.agent_session_id
+                            save_agent_session_sidecar(session_id, sidecar)
+                            return
+                        # If attached is terminal, fall through to the existing
+                        # gate (preserves #1113 semantics: terminal sessions are
+                        # operator-resume-only).
+                    except Exception:
+                        # Silent failure -- never block prompt submission.
+                        # Falls through to existing gate below.
+                        pass
+
                 # Only create AgentSession for worker-spawned sessions.
                 # Direct CLI invocations (no parent worker, no session type) produce no record —
                 # they add noise to the queue without providing value (issue #1001).

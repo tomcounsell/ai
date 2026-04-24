@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -388,16 +388,16 @@ No agent integration required — this is a bridge-internal change. The hook is 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/claude-code-memory.md` — the "AgentSession Tracking" subsection describes the hook's session creation behavior. Add a paragraph documenting the env-var resolution path: when `AGENT_SESSION_ID` / `VALOR_SESSION_ID` resolve to a live worker session, the hook attaches instead of creating.
-- [ ] Update `docs/features/bridge-worker-architecture.md` if it describes the hook layer — add a note that the worker's AgentSession is the canonical record; the hook attaches via env vars rather than creating a duplicate.
-- [ ] No new entry needed in `docs/features/README.md` — this is a bugfix to an existing documented feature (claude-code-memory), not a new feature.
+- [x] Update `docs/features/claude-code-memory.md` — the "AgentSession Tracking" subsection describes the hook's session creation behavior. Add a paragraph documenting the env-var resolution path: when `AGENT_SESSION_ID` / `VALOR_SESSION_ID` resolve to a live worker session, the hook attaches instead of creating. (Shipped in PR #1166 build; cascade also updated `pm-dev-session-architecture.md`, `subconscious-memory.md`, and the `claude-code-memory.md` comparison table row.)
+- [x] Update `docs/features/bridge-worker-architecture.md` if it describes the hook layer — add a note that the worker's AgentSession is the canonical record; the hook attaches via env vars rather than creating a duplicate. (Added as new "Hook-Layer Session Attach (issue #1157)" subsection; `CLI Session Isolation (create_local())` section scoped to direct-CLI only.)
+- [x] No new entry needed in `docs/features/README.md` — this is a bugfix to an existing documented feature (claude-code-memory), not a new feature.
 
 ### External Documentation Site
-- [ ] N/A — repo does not use Sphinx / Read the Docs / MkDocs for user-facing docs; the `docs/` tree is the source of truth.
+- [x] N/A — repo does not use Sphinx / Read the Docs / MkDocs for user-facing docs; the `docs/` tree is the source of truth.
 
 ### Inline Documentation
-- [ ] Docstring at the top of the new prevention guard in `user_prompt_submit.py` explaining why the guard exists, naming issue #1157, and stating explicitly that this is prevention (no duplicate record minted), not cleanup.
-- [ ] Docstring update on `.claude/hooks/stop.py::_complete_agent_session` clarifying the primary `get_by_id` path vs legacy `local-{session_id}` fallback (with a note that the fallback is retained for direct-CLI users — see open question 3).
+- [x] Docstring at the top of the new prevention guard in `user_prompt_submit.py` explaining why the guard exists, naming issue #1157, and stating explicitly that this is prevention (no duplicate record minted), not cleanup. (`.claude/hooks/user_prompt_submit.py:106`)
+- [x] Docstring update on `.claude/hooks/stop.py::_complete_agent_session` clarifying the primary `get_by_id` path vs legacy `local-{session_id}` fallback (with a note that the fallback is retained for direct-CLI users — see open question 3). (`.claude/hooks/stop.py:132-136,153-164`)
 
 ## Success Criteria
 
@@ -405,14 +405,14 @@ No agent integration required — this is a bridge-internal change. The hook is 
 - [ ] `valor-session children --id {pm_session}` shows only real dispatched children (or empty), never a `local-*` entry whose session_id matches the PM's own `claude_session_uuid`.
 - [ ] PostToolUse and Stop hooks still fire correctly for worker-spawned sessions — memory extraction records, transcript backup `.jsonl` files, and lifecycle terminal transitions all occur against the worker's `AgentSession` row. Verified by unit tests + a manual PM→Telegram send test confirming memory records accumulate on the real session.
 - [ ] `wait-for-children` on a PM does not terminate instantly due to a phantom's subprocess-exit Stop hook. It transitions to `waiting_for_children` and remains there until a real dispatched child reaches a terminal state. Verified by: create PM with no dispatched children → call wait-for-children → assert status remains `waiting_for_children` and does NOT auto-complete in < 60s from the PM's own Stop hook.
-- [ ] Regression test: when `user_prompt_submit.py` runs with `VALOR_SESSION_ID=X` AND `X` resolves to an existing live AgentSession, NO new AgentSession is created; the sidecar is populated with `X`'s `agent_session_id`. Assertion on `AgentSession.create_local` mock: `assert_not_called()`.
-- [ ] Regression test: when `user_prompt_submit.py` runs with `AGENT_SESSION_ID=Y` AND `Y` resolves to a live AgentSession, same behavior. Mock `AgentSession.get_by_id` to return the session and assert the sidecar contains `Y` with no `create_local` call.
+- [x] Regression test: when `user_prompt_submit.py` runs with `VALOR_SESSION_ID=X` AND `X` resolves to an existing live AgentSession, NO new AgentSession is created; the sidecar is populated with `X`'s `agent_session_id`. Assertion on `AgentSession.create_local` mock: `assert_not_called()`. (Verified: `TestPhantomTwinPrevention::test_attaches_via_valor_session_id_fallback` PASSED.)
+- [x] Regression test: when `user_prompt_submit.py` runs with `AGENT_SESSION_ID=Y` AND `Y` resolves to a live AgentSession, same behavior. Mock `AgentSession.get_by_id` to return the session and assert the sidecar contains `Y` with no `create_local` call. (Verified: `TestPhantomTwinPrevention::test_attaches_to_worker_session_when_agent_session_id_set` PASSED.)
 - [ ] Regression test: when env vars resolve to a terminal-status session, the hook falls through to the existing gate — preserving #1113 semantics.
 - [ ] Integration test `test_pm_session_terminal_transition_fires_after_stop_hook_change` passes — PM/Teammate terminal transition still happens after the `stop.py` sidecar-first change.
-- [ ] Tests pass (`pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py tests/integration/test_pm_terminal_transition_after_stop_hook.py -v`) — all existing tests updated, new tests added, all green.
-- [ ] Documentation updated (`/do-docs`) — `claude-code-memory.md` reflects the env-var attachment path.
-- [ ] `grep -rn 'local-' .claude/hooks/*.py` after the change still shows the legacy fallback in stop.py (on purpose), but no NEW `local-*` creation paths for worker-spawned subprocesses.
-- [ ] No `tools/cleanup_phantom_twins.py` exists. Prevention is the fix; a cleanup utility would contradict the plan.
+- [x] Tests pass (`pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py tests/integration/test_pm_terminal_transition_after_stop_hook.py -v`) — all existing tests updated, new tests added, all green. (Verified: 40 passed in 0.47s on branch `session/phantom-pm-twin-dedupe`.)
+- [x] Documentation updated (`/do-docs`) — `claude-code-memory.md` reflects the env-var attachment path. (Verified: `docs/features/claude-code-memory.md` lines 104, 114, 237 reference issue #1157 and the attach path.)
+- [x] `grep -rn 'local-' .claude/hooks/*.py` after the change still shows the legacy fallback in stop.py (on purpose), but no NEW `local-*` creation paths for worker-spawned subprocesses. (Verified: grep shows only legacy fallbacks in `stop.py:136,164`, `post_tool_use.py:371-373`, and the existing direct-CLI path in `user_prompt_submit.py:170`.)
+- [x] No `tools/cleanup_phantom_twins.py` exists. Prevention is the fix; a cleanup utility would contradict the plan. (Verified: `ls tools/cleanup_phantom_twins.py` returns No such file.)
 
 ## Team Orchestration
 
