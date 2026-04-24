@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -150,9 +150,10 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/markitdown-ing
 - **`tools/knowledge/converter.py`** — new module. Pure function interface: `convert_to_sidecar(source_path) -> Path`. Handles subprocess CLI path (default) and optional Python API path (when LLM is configured and format benefits).
 - **Idempotency via frontmatter hash** — generated sidecars carry YAML frontmatter with `source_hash`, `source_path`, and `generated_by: markitdown`. The converter reads that frontmatter before regenerating and skips when the source hash matches.
 - **Extended watcher** — `bridge/knowledge_watcher.py` gains a `CONVERTIBLE_EXTENSIONS` set (PDF, docx, pptx, xlsx, html, msg, epub). On match, the watcher calls the converter; the generated sidecar then trips the existing `SUPPORTED_EXTENSIONS` branch.
-- **`tools/valor_ingest.py`** — new CLI module. Mirrors the pattern of `tools/valor_telegram.py` and friends. Registered in `pyproject.toml` `[project.scripts]`.
+- **`tools/valor_ingest.py`** — new CLI module. Mirrors the pattern of `tools/valor_telegram.py` and friends. Registered in `pyproject.toml` `[project.scripts]`. Supports `--scan <dir>` for backfilling existing binary files into sidecars.
+- **`/update` skill reminder** — after a successful update, the skill reminds the user that `valor-ingest --scan ~/work-vault/` will backfill any new binary formats that have been sitting in the vault unindexed.
 - **`[knowledge]` optional extra** — `markitdown[pdf,docx,pptx,xlsx,outlook,youtube-transcription]` (notably **excluding** `audio-transcription`). Installation via `uv pip install -e '.[knowledge]'`.
-- **LLM configuration** — new env var `MARKITDOWN_LLM_MODEL` (default unset = subprocess-only). If set to a Haiku model ID, the converter constructs an OpenAI-compatible client pointed at `https://api.anthropic.com/v1/` using `ANTHROPIC_API_KEY`, matching the pattern already used elsewhere in this codebase. Other allowed values: OpenAI model IDs (uses `OPENAI_API_KEY` and default OpenAI endpoint).
+- **LLM configuration** — new env var `MARKITDOWN_LLM_MODEL` (default unset = subprocess-only). The **recommended default** when setting this is Haiku via Anthropic's OpenAI-compat endpoint (`https://api.anthropic.com/v1/`) using the existing `ANTHROPIC_API_KEY`. Other allowed values: OpenAI model IDs (uses `OPENAI_API_KEY`). A dedicated build-time probe test (`tests/integration/test_markitdown_haiku_vision.py`) must confirm that markitdown's vision request flow works end-to-end through Anthropic's OpenAI-compat endpoint before the plan ships; if it fails, the converter falls back to gpt-4o-mini and the test file documents the failure mode for future retry.
 
 ### Flow
 
@@ -172,17 +173,19 @@ PDF dropped in vault → watcher detects convertible extension → converter wri
 - **Sidecar naming:** `{original_filename}.md` in the same directory. Example: `report.pdf` → `report.pdf.md`. Preserves the `.pdf` in the stem for traceability.
 - **Watcher wiring (`bridge/knowledge_watcher.py`):** At line 44, replace the single extension check with: if ext in SUPPORTED → existing path; elif ext in CONVERTIBLE → call converter; else skip. The converter call must be guarded in a try/except because watcher crashes can never take down the bridge (per existing module docstring).
 - **Loop prevention:** The generated `.md` sidecar's path ends in the original extension + `.md` (e.g., `report.pdf.md`). The watcher sees this as a .md file, passes to indexer, no re-convert loop. The converter checks before running: if the passed path already ends in `.md`, it's a sidecar — skip entirely.
-- **CLI entry point (`tools/valor_ingest.py`):** `argparse`-based. Required positional: `source` (path or URL). Optional: `--vault-subdir PATH`, `--force` (ignore hash, regenerate), `--output PATH` (explicit sidecar path). Import `converter.convert_to_sidecar` and call with parsed args. Exit code 0 on success, 1 on conversion failure.
+- **CLI entry point (`tools/valor_ingest.py`):** `argparse`-based. Required positional: `source` (path or URL). Optional: `--vault-subdir PATH`, `--force` (ignore hash, regenerate), `--output PATH` (explicit sidecar path), `--scan PATH` (backfill directory). **Destination defaults:** For local files, sidecar lands in the same directory as source (the filename itself is the value — `report.pdf.md` next to `report.pdf`). For URLs (no source directory exists), default to CWD but emit a notice encouraging `--vault-subdir` for vault ingestion. Import `converter.convert_to_sidecar` and call with parsed args. Exit code 0 on success, 1 on conversion failure.
 - **Frontmatter format:**
   ```yaml
   ---
   source_hash: <sha256>
   source_path: report.pdf
   generated_by: markitdown
-  generated_at: 2026-04-24T12:00:00Z
+  generated_at: 2026-04-24T12:00:00Z         # first generation
+  regenerated_at: 2026-04-24T12:00:00Z        # updated on any hash-mismatch regeneration
   llm_model: none | claude-haiku-4-5-20251001 | gpt-4o-mini
   ---
   ```
+  `regenerated_at` is what downstream tools (xref audit, KnowledgeDocument indexing) watch to detect content changes without reading every sidecar's body. On first generation, `regenerated_at` equals `generated_at`. On subsequent regenerations (hash mismatch triggers conversion), only `regenerated_at` is updated.
 
 ## Failure Path Test Strategy
 
@@ -267,7 +270,6 @@ If the existing test files above do not exist, the builder creates them:
 - **Audio transcription** — explicitly deferred. Requires local Whisper, GB-scale models, async streaming, and its own test surface. Separate issue.
 - **`markitdown-ocr` plugin** — defer until vault content demonstrably needs OCR.
 - **Modifying `bridge/media.py`** — different code path, different lifetime.
-- **Backfilling existing binary files in the vault** — initial v1 only handles files dropped/modified after the feature ships. Retroactive ingestion via `valor-ingest --scan ~/work-vault/` can be a follow-up if the user wants it.
 - **Extending `do-xref-audit` to understand binary formats** — the sidecar pattern subsumes this.
 - **Indexing binary originals directly** — always index the `.md` sidecar, never the source.
 - **Azure Document Intelligence extra (`[az-doc-intel]`)** — paid service, not needed.
@@ -285,8 +287,8 @@ If the existing test files above do not exist, the builder creates them:
 - Existing machines pick it up via `uv pip install -e '.[knowledge]'` on next `/update`
 
 **Migration for existing installations:**
-- First run after update: the watcher will ignore non-`.md` files already in the vault (only the modified-after-ship files trigger conversion). Document this explicitly.
-- Optional backfill: `valor-ingest --scan ~/work-vault/` — out of scope for v1, but the architecture supports it.
+- First run after update: the watcher ignores existing non-`.md` files in the vault until they're modified. To pick up everything already present, run `valor-ingest --scan ~/work-vault/`.
+- The `/update` skill must emit a one-line reminder after successful install: `Tip: run 'valor-ingest --scan ~/work-vault/' to backfill existing binary files into sidecars.` This reminder is suppressed on subsequent updates (flag-file based, e.g., `~/.cache/valor/markitdown-backfill-reminded`) so it doesn't become noise.
 
 ## Agent Integration
 
@@ -328,8 +330,12 @@ No new MCP registration. No agent-facing behavior change beyond: the agent now r
 - [ ] `MARKITDOWN_LLM_MODEL` env var controls the LLM path; unset → subprocess only; set → Python API for image-benefit formats
 - [ ] Default LLM is Haiku via Anthropic OpenAI-compat endpoint when set
 - [ ] Audio formats (`.mp3`, `.wav`, `.m4a`) are NOT in `CONVERTIBLE_EXTENSIONS` and NOT in the installed extras
-- [ ] Sidecar frontmatter contains `source_hash`, `source_path`, `generated_by`, `generated_at`, `llm_model`
-- [ ] Re-running converter on unchanged source skips (hash match), logs at DEBUG only
+- [ ] Sidecar frontmatter contains `source_hash`, `source_path`, `generated_by`, `generated_at`, `regenerated_at`, `llm_model`
+- [ ] Re-running converter on unchanged source skips (hash match), logs at DEBUG only; regeneration on hash-mismatch updates only `regenerated_at`
+- [ ] `valor-ingest --scan <dir>` backfills all convertible files in the directory (recursive)
+- [ ] `/update` skill prints a one-line backfill reminder on first install; suppressed thereafter via flag file
+- [ ] `do-xref-audit` skips files with `generated_by: markitdown` frontmatter
+- [ ] Haiku-via-Anthropic-compat vision probe test (`tests/integration/test_markitdown_haiku_vision.py`) passes using a small fixture PNG; falls back to gpt-4o-mini only if that test fails (documented in the test file)
 - [ ] Integration test: drop `tests/fixtures/sample.pdf` → sidecar → `KnowledgeDocument` row present
 - [ ] Bridge starts cleanly when the `[knowledge]` extra is NOT installed (lazy import verified by test)
 - [ ] Tests pass (`/do-test`)
@@ -449,10 +455,11 @@ No new MCP registration. No agent-facing behavior change beyond: the agent now r
 - **Assigned To**: converter-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Create `tests/unit/test_knowledge_converter.py` — 10+ cases covering subprocess success, subprocess failure, Python API path, hash idempotency, sidecar naming, `.md` skip, frontmatter parsing, empty source, unicode paths, loop prevention
-- Create `tests/unit/test_valor_ingest_cli.py` — argparse edge cases, URL handling, exit codes
+- Create `tests/unit/test_knowledge_converter.py` — 10+ cases covering subprocess success, subprocess failure, Python API path, hash idempotency, sidecar naming, `.md` skip, frontmatter parsing (including `regenerated_at` update), empty source, unicode paths, loop prevention
+- Create `tests/unit/test_valor_ingest_cli.py` — argparse edge cases, URL handling, exit codes, `--scan` recursion
 - Create `tests/integration/test_markitdown_ingestion.py` — real end-to-end using fixture PDF: drop file → wait for watcher debounce → assert `KnowledgeDocument` row exists
-- Fixture: `tests/fixtures/sample.pdf` (small, checked-in)
+- Create `tests/integration/test_markitdown_haiku_vision.py` — probe test that sets `MARKITDOWN_LLM_MODEL=claude-haiku-4-5-20251001`, converts a small fixture PNG, and asserts the resulting markdown contains an LLM-generated description. If the Anthropic OpenAI-compat endpoint does not support the vision request, the test documents the failure and the converter defaults to `gpt-4o-mini` in the fallback path.
+- Fixture: `tests/fixtures/sample.pdf` (small, checked-in) and `tests/fixtures/sample.png` (small, checked-in)
 - Run `pytest tests/ -k markitdown -v` and confirm all pass
 
 ### 6. Integration validation
@@ -466,16 +473,28 @@ No new MCP registration. No agent-facing behavior change beyond: the agent now r
 - Verify `MARKITDOWN_LLM_MODEL=claude-haiku-4-5-20251001` path — PNG fixture produces a sidecar with LLM-generated description
 - Confirm `grep -r "recognize_google\|audio-transcription" tools/ bridge/ pyproject.toml` returns empty
 
+### 6.5. Xref-audit sidecar skip + /update backfill reminder
+- **Task ID**: build-skill-integrations
+- **Depends On**: build-cli
+- **Validates**: manual smoke — run `do-xref-audit` in a vault containing a sidecar; run `/update` and confirm backfill reminder appears once
+- **Assigned To**: cli-builder
+- **Agent Type**: builder
+- **Parallel**: true (with build-tests)
+- In `.claude/skills/do-xref-audit/SKILL.md`, add a filter step: when inventorying vault markdown, skip any file whose YAML frontmatter contains `generated_by: markitdown` (sidecars are derivative; their source is the authoritative content)
+- In `.claude/skills/update/SKILL.md` (or the remote-update flow), add a post-install reminder step: if `~/.cache/valor/markitdown-backfill-reminded` is absent, print `Tip: run 'valor-ingest --scan ~/work-vault/' to backfill existing binary files into sidecars.` and touch the flag file
+- Document the `regenerated_at` frontmatter convention in the xref-audit skill so future audit extensions can use it for change-detection
+
 ### 7. Documentation
 - **Task ID**: document-feature
-- **Depends On**: validate-integration
+- **Depends On**: validate-integration, build-skill-integrations
 - **Assigned To**: markitdown-docs
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Create `docs/features/markitdown-ingestion.md` with: overview, sidecar pattern, LLM config, audio exclusion rationale, troubleshooting
 - Update `docs/features/README.md` index table
 - Update `docs/features/subconscious-memory.md` to note binary-format coverage
-- Update `CLAUDE.md` Quick Commands with `valor-ingest` usage
+- Update `CLAUDE.md` Quick Commands with `valor-ingest` usage including `--scan` backfill
+- Document the `regenerated_at` frontmatter convention and how future tools should detect sidecar changes
 
 ### 8. Final validation
 - **Task ID**: validate-all
@@ -507,12 +526,11 @@ No new MCP registration. No agent-facing behavior change beyond: the agent now r
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Haiku vision via Anthropic OpenAI-compat:** Should we default `MARKITDOWN_LLM_MODEL` to Haiku via Anthropic's OpenAI-compat endpoint, or to OpenAI's `gpt-4o-mini`? Haiku matches the issue's stated preference but requires we prove Anthropic's compat layer handles markitdown's vision requests. If the build-time probe fails, we fall back to documenting OpenAI as recommended. Confirm the desired default ordering.
+*(from Open Questions, confirmed with Valor on 2026-04-24)*
 
-2. **`valor-ingest` URL destination:** When a URL is passed (e.g., YouTube), where should the sidecar land by default? Options: (a) require explicit `--vault-subdir`, (b) default to `~/work-vault/_ingested/` (new subdir), (c) default to CWD. I've defaulted to (a) in the plan; is that what you want?
-
-3. **Backfill policy:** The plan explicitly defers backfilling existing binary files in the vault. If there are already PDFs/docx files sitting in the vault today that you'd want indexed immediately, we could either (a) add a one-shot `valor-ingest --scan ~/work-vault/` command to this plan, or (b) handle it manually after merge. Currently (b); let me know if you want (a) in scope.
-
-4. **Sidecar visibility in `do-xref-audit`:** Sidecars named `report.pdf.md` will appear as "unreferenced" in future xref audits (since nothing links to them). Should the audit skip files with `generated_by: markitdown` in frontmatter, or should we require every sidecar's source be linked from at least one human-written doc? I'm leaning "skip in audit" — sidecars are derivative, not primary content.
+1. **Default LLM → Haiku via Anthropic OpenAI-compat endpoint**, gated by a build-time vision probe test (`tests/integration/test_markitdown_haiku_vision.py`). If the probe fails at build time, the converter documents the failure and falls back to `gpt-4o-mini`.
+2. **`valor-ingest` destinations:** For local paths, sidecar next to source — the filename itself carries the value (`report.pdf.md` next to `report.pdf`). For URLs, default to CWD but print a notice encouraging `--vault-subdir`. CLI help text encourages explicit destination.
+3. **Backfill is in scope:** `valor-ingest --scan <dir>` added to v1. The `/update` skill emits a one-time reminder after install (flag-file-gated so it doesn't spam on every update).
+4. **`do-xref-audit` skips sidecars** via the `generated_by: markitdown` frontmatter tag. Change detection uses a new `regenerated_at` field — updated only on hash-mismatch regeneration. No commit hook (explicitly ruled out).
