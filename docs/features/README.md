@@ -70,6 +70,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Long-Task Checkpointing](long-task-checkpointing.md) | PROGRESS.md scratchpad and frequent-commit guidance for dev sessions to survive context compaction without semantic drift | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, forgetting, and health-checking memories from the Memory model (`status` subcommand: Redis ping, counts, superseded ratio, category breakdown) | Shipped |
+| [Merge-Gate Baseline](merge-gate-baseline.md) | Categorised per-test baseline (`real`/`flaky`/`hung`/`import_error`) for `/do-merge`'s Full Suite Gate; `scripts/refresh_test_baseline.py` regenerates from N pytest runs with `pytest-timeout`; `scripts/baseline_gate.py` implements the comparison logic | Shipped |
 | [Message Drafter](message-drafter.md) | Medium-aware drafting layer that owns wire-format compliance for every user-visible message — Telegram/email orthogonality, drafter-at-the-handler integration, relay length guard, tool-call delivery (planned) | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |

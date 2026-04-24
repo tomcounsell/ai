@@ -52,6 +52,15 @@ Check counts with: `pytest -m <marker> --collect-only -q`
 
 When a test patches a symbol, patch the **canonical module that owns the symbol**, not the shim that re-exports it. After PR #1023 split `agent/agent_session_queue.py` into purpose-specific modules (`session_health`, `session_completion`, `session_executor`, `branch_manager`, etc.), tests that still patched `agent.agent_session_queue.<X>` silently no-op'd because the new modules import helpers via direct paths (`from agent.session_executor import steer_session as _steer_session`). The shim keeps re-exports for type checkers and editor navigation, but patch targets must hit the runtime import site. See #1041 and the post-mortem in its plan for details.
 
+## Merge-Gate Baseline vs. PR-Branch Flaky Filter
+
+Two independent test-reliability layers exist in this repo and are easy to confuse:
+
+- **PR-branch flaky filter** (`/do-test`, PR #484, issue #476) — when a test fails on the PR branch, pytest retries the failure once; tests that pass on retry are dropped from the failure report before `/do-merge` sees them. This layer addresses flakiness *on the PR branch*.
+- **Merge-gate baseline** (`/do-merge`, PR #484 of #1084) — a categorised per-test baseline (`data/main_test_baseline.json`, schema v2) records which tests are pre-existing failures on `main`. The Full Suite Gate compares PR failures against the baseline per category (`real`, `flaky`, `hung`, `import_error`). New regressions in the blocking categories fail the gate; pre-existing failures — including baseline-`flaky` re-occurrences — do not. This layer addresses staleness *on main*.
+
+Regenerate the merge-gate baseline with `python scripts/refresh_test_baseline.py` on a clean `main` checkout. The tool uses `pytest-timeout` (added as a dev dep) for per-test `hung` classification, but the plugin is NOT registered in pytest's default addopts — it only activates when the refresh tool invokes pytest with `-p pytest_timeout --timeout=N`, so regular `pytest tests/unit/` runs and `/do-test` invocations are unaffected. See `docs/features/merge-gate-baseline.md` for the full contract.
+
 ## Directory Structure
 
 ```
