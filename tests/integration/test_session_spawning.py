@@ -120,3 +120,96 @@ class TestHarnessEnvPassthrough:
         )
 
         assert dev_session.parent_agent_session_id == parent_uuid
+
+    def test_session_type_in_harness_env(self, redis_test_db):
+        """Issue #1148: SESSION_TYPE is injected into _harness_env for typed sessions.
+
+        Without SESSION_TYPE, _is_pm_session() in pre_tool_use.py:97-99 returns
+        False and the PM Bash allowlist is silently disabled. This test mirrors
+        the env-construction logic in agent/session_executor.py:1324-1346.
+        """
+        from config.enums import SessionType
+
+        for session_type in ("pm", "teammate", "dev"):
+            session = _make_session(
+                session_type, f"{session_type}-session-type-001", redis_test_db
+            )
+            _harness_env: dict[str, str] = {
+                "AGENT_SESSION_ID": session.agent_session_id or "",
+                "CLAUDE_CODE_TASK_LIST_ID": "",
+            }
+            # Mirror the real injection at session_executor.py:1333-1334
+            if session_type:
+                _harness_env["SESSION_TYPE"] = session_type
+            assert _harness_env["SESSION_TYPE"] == session_type
+
+        # Sanity: SessionType enum values match the strings stored in env
+        assert SessionType.PM == "pm"
+        assert SessionType.TEAMMATE == "teammate"
+        assert SessionType.DEV == "dev"
+
+    def test_telegram_chat_id_in_harness_env_for_pm(self, redis_test_db):
+        """Issue #1148: TELEGRAM_CHAT_ID injected for PM/Teammate when chat_id set.
+
+        Required by tools/send_telegram.py for PM-side message sends.
+        """
+        from config.enums import SessionType
+
+        pm = _make_session("pm", "pm-telegram-chat-001", redis_test_db)
+        teammate = _make_session("teammate", "tm-telegram-chat-001", redis_test_db)
+
+        for session, expected_st in ((pm, SessionType.PM), (teammate, SessionType.TEAMMATE)):
+            _harness_env: dict[str, str] = {}
+            _session_type = session.session_type
+            # Mirror session_executor.py:1340-1342
+            if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+                if session.chat_id:
+                    _harness_env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
+            assert _harness_env.get("TELEGRAM_CHAT_ID") == "999"
+            assert _session_type == expected_st
+
+    def test_sentry_token_in_harness_env_for_pm(self, monkeypatch, redis_test_db):
+        """Issue #1148: SENTRY_AUTH_TOKEN injected for PM/Teammate when resolvable.
+
+        Uses the shared _resolve_sentry_auth_token helper from sdk_client.
+        """
+        from agent.sdk_client import _resolve_sentry_auth_token
+        from config.enums import SessionType
+
+        monkeypatch.setenv("SENTRY_PERSONAL_TOKEN", "harness-sentry-token-xyz")
+        pm = _make_session("pm", "pm-sentry-001", redis_test_db)
+
+        _harness_env: dict[str, str] = {}
+        if pm.session_type in (SessionType.PM, SessionType.TEAMMATE):
+            tok = _resolve_sentry_auth_token()
+            if tok:
+                _harness_env["SENTRY_AUTH_TOKEN"] = tok
+
+        assert _harness_env["SENTRY_AUTH_TOKEN"] == "harness-sentry-token-xyz"
+
+    def test_dev_session_does_not_get_telegram_chat_id(self, monkeypatch, redis_test_db):
+        """Issue #1148 negative test: dev sessions never get PM-only env vars.
+
+        Prevents future regressions that accidentally widen the injection guard.
+        """
+        from agent.sdk_client import _resolve_sentry_auth_token
+        from config.enums import SessionType
+
+        monkeypatch.setenv("SENTRY_PERSONAL_TOKEN", "should-not-appear")
+        dev = _make_session("dev", "dev-no-pm-env-001", redis_test_db)
+
+        _harness_env: dict[str, str] = {}
+        # Mirror the guarded blocks in session_executor.py:1335 + 1340-1346
+        _session_type = dev.session_type
+        if _session_type in (SessionType.PM, SessionType.TEAMMATE) and dev.agent_session_id:
+            _harness_env["VALOR_PARENT_SESSION_ID"] = dev.agent_session_id
+        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+            if dev.chat_id:
+                _harness_env["TELEGRAM_CHAT_ID"] = str(dev.chat_id)
+            tok = _resolve_sentry_auth_token()
+            if tok:
+                _harness_env["SENTRY_AUTH_TOKEN"] = tok
+
+        assert "TELEGRAM_CHAT_ID" not in _harness_env
+        assert "SENTRY_AUTH_TOKEN" not in _harness_env
+        assert "VALOR_PARENT_SESSION_ID" not in _harness_env

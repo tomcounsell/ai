@@ -1267,8 +1267,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # All session types route to CLI harness (claude -p)
         from agent.sdk_client import (
             _get_prior_session_uuid,
+            _resolve_sentry_auth_token,
             build_harness_turn_input,
             get_response_via_harness,
+            load_pm_system_prompt,
         )
 
         project_key = project_config.get("_key", "valor") if project_config else "valor"
@@ -1325,8 +1327,22 @@ async def _execute_agent_session(session: AgentSession) -> None:
             "AGENT_SESSION_ID": session.agent_session_id or "",
             "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
         }
+        # SESSION_TYPE drives pre_tool_use hook behavior (_is_pm_session in
+        # agent/hooks/pre_tool_use.py:97-99). Without it, PM Bash restrictions
+        # are silently disabled in the harness subprocess (issue #1148).
+        if _session_type:
+            _harness_env["SESSION_TYPE"] = _session_type
         if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
             _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
+        # PM/Teammate need Telegram + Sentry auth so tools/send_telegram.py and
+        # sentry-cli work without manual export. Mirrors ValorAgent.env
+        # (sdk_client.py:1264, 1272). chat_id comes from the project config.
+        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+            if session.chat_id:
+                _harness_env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
+            _sentry_token = _resolve_sentry_auth_token()
+            if _sentry_token:
+                _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
 
         _harness_requeued = False
 
