@@ -1922,7 +1922,7 @@ _DISABLE_THINKING_SENTINEL = os.environ.get("DISABLE_THINKING_SENTINEL", "").str
 )
 
 
-class HarnessThinkingBlockCorruption(Exception):
+class HarnessThinkingBlockCorruptionError(Exception):
     """Raised by ``get_response_via_harness`` when the harness subprocess exits
     non-zero AND its stderr contains ``THINKING_BLOCK_SENTINEL``.
 
@@ -2202,12 +2202,13 @@ async def get_response_via_harness(
         # Always log BEFORE raising so operators can grep for false positives
         # during initial deployment. The WARNING is grep-friendly by design.
         logger.warning(
-            "[harness] THINKING_BLOCK_SENTINEL matched: session_id=%s returncode=%d stderr_prefix=%r",
+            "[harness] THINKING_BLOCK_SENTINEL matched: session_id=%s returncode=%d "
+            "stderr_prefix=%r",
             session_id,
             returncode,
             stderr_snippet[:200],
         )
-        raise HarnessThinkingBlockCorruption(
+        raise HarnessThinkingBlockCorruptionError(
             "Session context corrupted — please start a new thread"
         )
 

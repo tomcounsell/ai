@@ -1266,7 +1266,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         # All session types route to CLI harness (claude -p)
         from agent.sdk_client import (
-            HarnessThinkingBlockCorruption,
+            HarnessThinkingBlockCorruptionError,
             _get_prior_session_uuid,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
@@ -1383,7 +1383,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     on_sdk_started=messenger.notify_sdk_started,
                     on_stdout_event=messenger.notify_stdout_event,
                 )
-            except HarnessThinkingBlockCorruption as exc:
+            except HarnessThinkingBlockCorruptionError as exc:
                 # Mode 1 of issue #1099 — extended-thinking + compaction has
                 # corrupted the transcript beyond in-process recovery. Surface a
                 # clean user-facing message and re-raise so BackgroundTask._run_work

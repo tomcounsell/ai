@@ -2,7 +2,7 @@
 
 When extended-thinking + compaction corrupts the transcript, the Claude CLI
 exits non-zero with stderr containing ``redacted_thinking``. The harness must
-detect this and raise ``HarnessThinkingBlockCorruption`` so the executor can
+detect this and raise ``HarnessThinkingBlockCorruptionError`` so the executor can
 finalize the session as ``failed`` instead of returning silently.
 
 These tests mock ``_run_harness_subprocess`` so they run instantly without a
@@ -14,15 +14,15 @@ real claude CLI binary, API key, or network. The mock signature follows the
 import pytest
 
 from agent.sdk_client import (
-    HarnessThinkingBlockCorruption,
     THINKING_BLOCK_SENTINEL,
+    HarnessThinkingBlockCorruptionError,
     get_response_via_harness,
 )
 
 
 @pytest.mark.asyncio
 async def test_sentinel_in_stderr_with_nonzero_exit_raises(monkeypatch):
-    """Sentinel string in stderr + returncode != 0 → HarnessThinkingBlockCorruption."""
+    """Sentinel string in stderr + returncode != 0 → HarnessThinkingBlockCorruptionError."""
     stderr_snippet = (
         f"Error: {THINKING_BLOCK_SENTINEL} block cannot be modified after the "
         "previous turn closed it."
@@ -38,7 +38,7 @@ async def test_sentinel_in_stderr_with_nonzero_exit_raises(monkeypatch):
     # Ensure the env-gated kill switch is OFF for this test.
     monkeypatch.setattr("agent.sdk_client._DISABLE_THINKING_SENTINEL", False)
 
-    with pytest.raises(HarnessThinkingBlockCorruption) as exc_info:
+    with pytest.raises(HarnessThinkingBlockCorruptionError) as exc_info:
         await get_response_via_harness(
             message="hello",
             working_dir="/tmp",
@@ -67,7 +67,7 @@ async def test_sentinel_message_is_user_facing(monkeypatch):
     monkeypatch.setattr("agent.sdk_client._store_exit_returncode", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client._DISABLE_THINKING_SENTINEL", False)
 
-    with pytest.raises(HarnessThinkingBlockCorruption) as exc_info:
+    with pytest.raises(HarnessThinkingBlockCorruptionError) as exc_info:
         await get_response_via_harness(
             message="hi",
             working_dir="/tmp",

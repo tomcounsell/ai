@@ -170,8 +170,9 @@ def test_store_exit_returncode_works_against_hash_missing_field():
     after subprocess exit. If the target session's hash predates the field,
     the writer must still persist the new value instead of crashing.
     """
-    from agent.sdk_client import _store_exit_returncode
     from popoto.redis_db import POPOTO_REDIS_DB
+
+    from agent.sdk_client import _store_exit_returncode
 
     s = AgentSession(
         project_key="test-exit-returncode-backcompat-writer",
