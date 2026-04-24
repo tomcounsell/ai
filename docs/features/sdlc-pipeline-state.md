@@ -47,7 +47,7 @@ Inside a bridge-initiated session (where `VALOR_SESSION_ID` is exported by `agen
 3. Confirm `session_type == "pm"` and `status not in TERMINAL_STATUSES`.
 4. Return the bridge session id with `created: false` — no `sdlc-local-{N}` record is created.
 
-The short-circuit falls through to the legacy create path when:
+The short-circuit falls through to the issue-number lookup and create path when:
 
 - The env var is unset or empty.
 - The env-resolved session does not exist in Redis (stale env).
@@ -58,7 +58,7 @@ The message-text fallback inside `find_session_by_issue` is a secondary defense 
 
 ### Orphan cleanup
 
-Legacy zombie `sdlc-local-{N}` sessions (running status, no heartbeats, older than 10 minutes) can be listed and finalized with:
+Stale zombie `sdlc-local-{N}` sessions (running status, no heartbeats, older than 10 minutes) can be listed and finalized with:
 
 ```bash
 # Preview without modifying (exits 0, prints JSON list)
