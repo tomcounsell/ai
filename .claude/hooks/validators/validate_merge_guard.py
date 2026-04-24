@@ -76,6 +76,144 @@ def _is_authorized(command: str) -> bool:
 _COMMAND_SEPARATORS = ("&&", "||", ";;", ";", "|", "\n")
 
 
+def _skip_heredoc(command: str, i: int) -> int:
+    """Given the index of the first ``<`` of ``<<``, return the index at which
+    scanning should resume (i.e. after the heredoc body). If the heredoc is
+    malformed or unterminated, scanning resumes mid-body (fail-closed: the
+    rest of the command is still scanned). Returns ``i + 2`` if this is not
+    actually a heredoc.
+    """
+    import re as _re
+    n = len(command)
+    if not (i + 1 < n and command[i + 1] == "<"):
+        return i + 1
+    j = i + 2
+    if j < n and command[j] == "-":
+        j += 1
+    while j < n and command[j] in " \t":
+        j += 1
+    delim_quote: str | None = None
+    if j < n and command[j] in ("'", '"'):
+        delim_quote = command[j]
+        j += 1
+    delim_start = j
+    while j < n and command[j] not in " \t\n;|&" and command[j] != delim_quote:
+        j += 1
+    delim = command[delim_start:j]
+    if delim_quote and j < n and command[j] == delim_quote:
+        j += 1
+    line_end = command.find("\n", j)
+    if line_end == -1 or not delim:
+        return j
+    body_start = line_end + 1
+    end_pattern = _re.compile(r"(?m)^[ \t]*" + _re.escape(delim) + r"[ \t]*$")
+    m = end_pattern.search(command, body_start)
+    if m is None:
+        return n
+    return m.end()
+
+
+def _find_dollar_paren_close(command: str, start: int) -> int:
+    """Given the index just after ``$(``, return the index of the matching ``)``.
+
+    Respects nested ``$(...)``, ``` ` ... ` ```, single/double quotes,
+    backslash escapes, and heredocs inside the substitution body. Returns
+    ``-1`` if no matching close is found (unterminated substitution).
+
+    Heredoc handling is essential: when the outer substitution contains
+    ``cat <<EOF ... EOF`` with a body that happens to include literal ``$(``
+    or ``)`` characters, failing to skip the body would cause us to pick a
+    bogus close inside the body. That would collapse the outer span and
+    let content after the real close be mis-tokenised.
+    """
+    n = len(command)
+    i = start
+    depth = 1
+    in_single = False
+    in_double = False
+    in_backtick = False
+    while i < n:
+        ch = command[i]
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_backtick:
+            if ch == "`":
+                in_backtick = False
+            i += 1
+            continue
+        if in_double:
+            if ch == '"':
+                in_double = False
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and command[i + 1] == "(":
+                depth += 1
+                i += 2
+                continue
+            if ch == ")" and depth > 1:
+                depth -= 1
+                i += 1
+                continue
+            if ch == "`":
+                in_backtick = True
+                i += 1
+                continue
+            i += 1
+            continue
+        # Not in any quote/backtick
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "`":
+            in_backtick = True
+            i += 1
+            continue
+        if ch == "<" and i + 1 < n and command[i + 1] == "<":
+            i = _skip_heredoc(command, i)
+            continue
+        if ch == "$" and i + 1 < n and command[i + 1] == "(":
+            depth += 1
+            i += 2
+            continue
+        if ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+            continue
+        i += 1
+    return -1
+
+
+def _find_backtick_close(command: str, start: int) -> int:
+    """Given the index just after an opening ``` ` ```, return the index of the
+    matching closing backtick. Respects backslash escapes. Returns ``-1`` if
+    unterminated.
+    """
+    n = len(command)
+    i = start
+    while i < n:
+        ch = command[i]
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "`":
+            return i
+        i += 1
+    return -1
+
+
 def _extract_executed_commands(command: str) -> list[tuple[int, int]]:
     """Return (start, end) positions of actual command tokens in ``command``.
 
@@ -83,6 +221,14 @@ def _extract_executed_commands(command: str) -> list[tuple[int, int]]:
     position (fail-closed): a false positive (wrong block on a quoted
     reference) is recoverable; a false negative (missed block on a real
     merge) defeats the guard.
+
+    Command-substitution handling (``$(...)`` and ``` `...` ```) descends
+    recursively into the body so that a real merge call wrapped in
+    substitution (e.g. ``X="$(gh pr merge 42)"``, ``eval "$(gh pr merge 42)"``,
+    ``` eval `gh pr merge 42` ```) is still recognised. This preserves
+    defense-in-depth parity with a bare-regex implementation while keeping
+    the heredoc and quoted-argument exemptions that item 7 of sdlc-1155
+    introduced.
     """
     if not command:
         return []
@@ -93,7 +239,6 @@ def _extract_executed_commands(command: str) -> list[tuple[int, int]]:
     cmd_start = 0
     in_single = False
     in_double = False
-    in_backtick = False
 
     def flush(end: int) -> None:
         if cmd_start < end:
@@ -102,6 +247,19 @@ def _extract_executed_commands(command: str) -> list[tuple[int, int]]:
                 trimmed_start += 1
             if trimmed_start < end:
                 spans.append((trimmed_start, end))
+
+    def descend(body_start: int, body_end: int) -> None:
+        """Recursively tokenize a command-substitution body and append its
+        spans (offset into the outer command string)."""
+        if body_end <= body_start:
+            return
+        nested = command[body_start:body_end]
+        try:
+            for ns, ne in _extract_executed_commands(nested):
+                spans.append((body_start + ns, body_start + ne))
+        except Exception:
+            # Fail-closed: treat the whole body as an actual command position.
+            spans.append((body_start, body_end))
 
     while i < n:
         ch = command[i]
@@ -125,14 +283,29 @@ def _extract_executed_commands(command: str) -> list[tuple[int, int]]:
                 i += 1
                 cmd_start = i
                 continue
-            i += 1
-            continue
-
-        if in_backtick:
+            # Descend into $() inside double quotes -- command substitution
+            # is a real execution context and must be scanned.
+            if ch == "$" and i + 1 < n and command[i + 1] == "(":
+                close = _find_dollar_paren_close(command, i + 2)
+                if close == -1:
+                    # Unterminated substitution: fail-closed -- treat the
+                    # rest of the string as a nested command body.
+                    descend(i + 2, n)
+                    i = n
+                    continue
+                descend(i + 2, close)
+                i = close + 1
+                continue
+            # Descend into `...` inside double quotes -- also command
+            # substitution (older syntax).
             if ch == "`":
-                in_backtick = False
-                i += 1
-                cmd_start = i
+                close = _find_backtick_close(command, i + 1)
+                if close == -1:
+                    descend(i + 1, n)
+                    i = n
+                    continue
+                descend(i + 1, close)
+                i = close + 1
                 continue
             i += 1
             continue
@@ -172,14 +345,42 @@ def _extract_executed_commands(command: str) -> list[tuple[int, int]]:
             cmd_start = i
             continue
 
-        if ch in ("'", '"', "`"):
+        # $(...) at an unquoted position: close the current span, descend
+        # into the body, then resume scanning after the close.
+        if ch == "$" and i + 1 < n and command[i + 1] == "(":
+            flush(i)
+            close = _find_dollar_paren_close(command, i + 2)
+            if close == -1:
+                descend(i + 2, n)
+                i = n
+                cmd_start = n
+                continue
+            descend(i + 2, close)
+            i = close + 1
+            cmd_start = i
+            continue
+
+        # `...` at an unquoted position: command substitution (older syntax).
+        # Descend into the body rather than treating it as opaque.
+        if ch == "`":
+            flush(i)
+            close = _find_backtick_close(command, i + 1)
+            if close == -1:
+                descend(i + 1, n)
+                i = n
+                cmd_start = n
+                continue
+            descend(i + 1, close)
+            i = close + 1
+            cmd_start = i
+            continue
+
+        if ch in ("'", '"'):
             flush(i)  # close current command span before entering quoted region
             if ch == "'":
                 in_single = True
-            elif ch == '"':
-                in_double = True
             else:
-                in_backtick = True
+                in_double = True
             i += 1
             continue
 

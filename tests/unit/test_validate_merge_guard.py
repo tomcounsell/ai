@@ -114,3 +114,66 @@ def test_tokenizer_empty_span_fails_closed(guard, monkeypatch):
     """An ambiguous parse (empty list on non-empty input) also falls back."""
     monkeypatch.setattr(guard, "_extract_executed_commands", lambda _c: [])
     assert guard._merge_cmd_in_command(f"{MERGE} 42") is True
+
+
+def test_command_substitution_is_detected(guard):
+    """Merge calls wrapped in command substitution MUST still block.
+
+    Regression coverage for the PR #1160 review finding: the tokenizer used
+    to treat double-quoted and backtick regions as opaque, which meant a real
+    merge invocation hidden inside ``$(...)`` or ``` `...` `` could slip
+    through as a "quoted argument" even though shell would execute it.
+
+    All three patterns below execute the merge command in the shell; the
+    guard must recognise each of them as an actual command position.
+    """
+    # $() inside double quotes, used as a variable value
+    cmd1 = f'X="$({MERGE} 42)" && echo ok'
+    assert guard._merge_cmd_in_command(cmd1) is True
+
+    # $() inside double quotes, passed to eval
+    cmd2 = f'eval "$({MERGE} 42)"'
+    assert guard._merge_cmd_in_command(cmd2) is True
+
+    # Legacy backtick substitution at an unquoted position
+    cmd3 = f"eval `{MERGE} 42`"
+    assert guard._merge_cmd_in_command(cmd3) is True
+
+    # $() at an unquoted position (direct substitution)
+    cmd4 = f"$({MERGE} 42)"
+    assert guard._merge_cmd_in_command(cmd4) is True
+
+    # Backtick substitution nested inside double quotes
+    cmd5 = f'eval "`{MERGE} 42`"'
+    assert guard._merge_cmd_in_command(cmd5) is True
+
+
+def test_commit_heredoc_body_with_substitution_patterns_allowed(guard):
+    """A commit-message heredoc whose body contains literal ``$(...)``,
+    backticks, and stray ``)`` characters must still be exempt.
+
+    This covers the secondary bug surfaced by the PR #1160 patch: when the
+    outer ``$(cat <<'EOF' ... EOF)`` substitution body contained literal
+    shell-syntax tokens (from code examples in commit prose), the
+    paren-close finder miscounted depth and picked a bogus close inside
+    the body. That collapsed the outer span and let content after the real
+    close get mis-tokenised as a live merge call. _find_dollar_paren_close
+    must skip heredoc bodies during its depth scan.
+    """
+    body = (
+        f"Fix describes patterns:\n"
+        f"  X=\"$({MERGE} 42)\" && echo ok\n"
+        f"  eval \"$({MERGE} 42)\"\n"
+        f"  eval `{MERGE} 42`\n"
+        f"And prose with stray tokens: encounters $( or backtick "
+        f"(whether quoted or unquoted), same result.\n"
+    )
+    cmd = (
+        f"git add file && git commit -m \"$(cat <<'EOF'\n"
+        f"{body}"
+        f"EOF\n"
+        f")\" && git push"
+    )
+    # The entire merge-token content is inside the heredoc body, so the
+    # guard must NOT block this commit.
+    assert guard._merge_cmd_in_command(cmd) is False
