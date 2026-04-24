@@ -4,11 +4,17 @@ type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-04-24
+revised: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1157
 last_comment_id:
 ---
 
 # Phantom PM Twin Dedupe
+
+## Revision Log
+
+- **2026-04-24 (revision 2)** — Reoriented around **prevention**, not cleanup, per Valor feedback: "Our solution here is more about cleanup when it should be a higher focus on prevention. Ideally something like a cleanup phantom twin function should never need to be used. We should always place way more attention on prevention than band-aids." Cut the `tools/cleanup_phantom_twins.py` dry-run utility entirely. Sharpened the "Why this bug happens" analysis and centered the plan on guards at the exact creation site (`user_prompt_submit.py::main` line 134's `AgentSession.create_local()` call). Added an integration test asserting PM terminal-transition still fires after the `stop.py` change (answer to open question 2). Preserved the `local-{session_id}` legacy fallback in `stop.py` for direct-CLI users (answer to open question 3).
+- **2026-04-24 (revision 1)** — Initial plan drafted by `/do-plan`. Scope widened during recon to cover `stop.py:146-147` reconstructing `local-{session_id}` instead of reading the sidecar's `agent_session_id`.
 
 ## Problem
 
@@ -24,6 +30,35 @@ Every worker-spawned PM or Teammate subprocess produces two `AgentSession` rows 
 - A worker-spawned PM or Teammate subprocess produces exactly ONE `AgentSession` row (the worker-created one). Zero `local-*` twins.
 - PostToolUse, Stop, and SubagentStop hooks continue to work against the existing worker-created `AgentSession`.
 - `wait-for-children` reflects only real dispatched children, not phantom self-references.
+
+## Why This Bug Happens (Root Cause)
+
+Phantoms come from exactly **one creation site**: the `AgentSession.create_local(...)` call at `.claude/hooks/user_prompt_submit.py:134`. Every other code path in `user_prompt_submit.py`, `stop.py`, `post_tool_use.py`, `subagent_stop.py`, `sdk_client.py`, and `tools/valor_session.py` merely *reads* or *transitions* sessions — none of them births one. The entire phantom phenomenon is a single unguarded mint at that line.
+
+The precondition chain that leads to that call:
+1. Worker spawns a subprocess and sets `AGENT_SESSION_ID` + `VALOR_SESSION_ID` env vars at `agent/sdk_client.py:1345-1351`. The worker has **already created** the authoritative `AgentSession` record before spawning.
+2. Subprocess starts. On first prompt, `user_prompt_submit.py::main()` runs. Sidecar is empty (fresh subprocess), so control enters the `else:` branch at line 105.
+3. The gate at line 109 (`if not VALOR_PARENT_SESSION_ID and not SESSION_TYPE: return`) was introduced by PR #1002 to block direct-CLI orphans. **Worker-spawned subprocesses have both env vars set**, so the gate passes by design.
+4. Line 134 calls `create_local(...)` unconditionally — **without ever checking whether the worker already minted a real record**. Phantom is born.
+
+**The missing invariant:** `user_prompt_submit.py` should never mint an `AgentSession` when `AGENT_SESSION_ID` (or `VALOR_SESSION_ID`) already resolves to a live, worker-owned record. The env vars exist precisely to communicate "I already own this subprocess." The hook never consulted them.
+
+**Prevention, not cleanup:** the fix must refuse to create at that line, not clean up after creation. If prevention lands correctly, no phantom ever gets written to Redis. A cleanup utility would signal that prevention has failed; we don't ship one.
+
+## Prevention Strategy
+
+Every change in this plan is a guard placed at a session-creation or lifecycle decision point, so that the wrong `AgentSession` cannot be created or looked up in the first place.
+
+| Site | Guard | Effect |
+|------|-------|--------|
+| `.claude/hooks/user_prompt_submit.py:134` (`create_local()` call) | New env-var resolution block inserted ahead of the gate at line 109: resolve `AGENT_SESSION_ID` via `AgentSession.get_by_id()`, fallback to `VALOR_SESSION_ID` via `query.filter(session_id=...)`. If resolved and non-terminal, write sidecar + return — the `create_local` call is never reached. | Phantom is never minted. |
+| `.claude/hooks/stop.py:146-147` (key-reconstruction lookup) | Primary lookup via `AgentSession.get_by_id(sidecar["agent_session_id"])`. Legacy `local-{session_id}` fallback retained for direct-CLI sessions (answer to open question 3). | Correct record is found at subprocess exit; no silent misses on worker-spawned sessions. |
+| `.claude/hooks/post_tool_use.py`, `.claude/hooks/subagent_stop.py` (DB-lookup reconstructions, if any) | Same sidecar-first pattern as stop.py where DB lookups use `local-{session_id}` reconstruction. Log-path-only uses of `local-*` remain untouched. | No hook silently operates on the wrong record. |
+| `agent/sdk_client.py:1343-1369` (env-var injection ordering) | Build-step verification that AgentSession `create()`/`save()` completes **before** `subprocess.Popen` is called. Documented as a race-prevention invariant in the code comment. | Worker record is always visible to Redis readers before the child subprocess's first prompt arrives. |
+
+Explicitly **not** in scope:
+- A `tools/cleanup_phantom_twins.py` utility. Prevention makes it unnecessary; a cleanup utility is a band-aid. Existing phantoms in Redis remain as benign historical noise (they are already completed/terminal and cannot resurrect — see #1113's terminal-state guard).
+- Automated phantom deletion at worker startup. Same reasoning.
 
 ## Freshness Check
 
@@ -111,12 +146,12 @@ Every worker-spawned PM or Teammate subprocess produces two `AgentSession` rows 
 - **Confidence**: medium (the PM lifecycle finalization path needs one more verification read during build)
 - **Impact on plan**: stop.py must be updated to try sidecar's `agent_session_id` first (via `get_by_id`), fall back to `local-{session_id}` reconstruction for legacy paths. post_tool_use.py and subagent_stop.py may have similar reconstruction patterns — build step must grep all four hook files for `local-{` / `f"local-"` / `local_session_id` and audit each site.
 
-### spike-4: How many existing phantom rows are in Redis across the fleet?
-- **Assumption**: Cleanup strategy depends on phantom volume. A few dozen -> leave as noise; thousands -> automated cleanup.
-- **Method**: code-read + deferred to build step
-- **Finding**: Fingerprint is `session.session_id.startswith("local-") AND session.parent_agent_session_id is set AND session.session_type in ("pm", "teammate") AND session.claude_session_uuid is None` (the phantom never records its own `claude_session_uuid`, per the issue table — column is `None`). A scan via `AgentSession.query.filter(...)` at build time can count them. Issue accepts either "one-time cleanup pass" or "leave as historical noise" — plan defaults to the latter, with a small `tools/cleanup_phantom_twins.py --dry-run` utility as optional scope.
-- **Confidence**: medium (volume unknown until a scan runs)
-- **Impact on plan**: Ship the fix first. Add a **dry-run-only** cleanup utility in the same PR so operators can count phantoms and decide whether to `--execute`. Do not auto-delete.
+### spike-4: Are existing phantom rows in Redis harmful if left alone?
+- **Assumption**: Phantoms accumulate but are harmless once their subprocess exits — they are terminal, cannot resurrect, and cannot mis-route new work.
+- **Method**: code-read
+- **Finding**: Phantoms reach `completed` via the subprocess's Stop hook, then sit in Redis like any other terminal session. Fingerprint: `session.session_id.startswith("local-") AND session.parent_agent_session_id is set AND session.session_type in ("pm", "teammate") AND session.claude_session_uuid is None`. PR #1113's terminal-state guard in `user_prompt_submit.py:80-90` prevents any code path from re-activating a terminal session. No daemon reads terminal phantoms and dispatches on them; `wait-for-children` reads `status`, and a `completed` phantom satisfies the "done" predicate immediately (which is exactly the acute bug, but it only fires while the phantom's subprocess is alive — after that the phantom is inert). The only lingering impact is cosmetic: `valor-session children` output noise and memory records attached to the phantom instead of the real session.
+- **Confidence**: high
+- **Impact on plan**: **Do not ship a cleanup utility.** Prevention makes it unnecessary. After the fix, no new phantoms are created, and existing ones decay naturally as Redis TTLs / operator cleanup happen in the normal course. If operator tooling is ever needed, it is a separate concern in a separate plan — never in the same PR as the prevention fix.
 
 ## Architectural Impact
 
@@ -136,7 +171,7 @@ Every worker-spawned PM or Teammate subprocess produces two `AgentSession` rows 
 - PM check-ins: 0 (scope fully specified in issue + recon)
 - Review rounds: 1 (standard PR review)
 
-This is a ~20-line behavior change in two hook files plus ~80 lines of unit tests. The investigation cost was front-loaded into the issue + recon; execution is mechanical.
+This is a ~20-line prevention-guard change in two hook files plus ~100 lines of unit tests and a short integration test. The investigation cost was front-loaded into the issue + recon; execution is mechanical.
 
 ## Prerequisites
 
@@ -151,12 +186,15 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/phantom-pm-twi
 
 ### Key Elements
 
-- **Env-var resolution branch in `user_prompt_submit.py`**: Before the existing `VALOR_PARENT_SESSION_ID or SESSION_TYPE` gate, read `AGENT_SESSION_ID` from the environment. If present and it resolves via `AgentSession.get_by_id()` to a live (non-terminal) session, write that session's `agent_session_id` into the sidecar and return. No `create_local()` call.
-- **VALOR_SESSION_ID fallback**: If `AGENT_SESSION_ID` is missing or doesn't resolve, try `VALOR_SESSION_ID` via `query.filter(session_id=...)`. If that resolves to a live session, same behavior — sidecar write, return.
-- **Existing gate unchanged**: If neither env var resolves, fall through to the existing gate at line 109 (still blocks direct-CLI, still allows direct-but-nested cases where `VALOR_PARENT_SESSION_ID` / `SESSION_TYPE` is set without a worker owning the session — if that population even exists). Current behavior preserved for non-worker-spawned subprocesses.
-- **Terminal-status safety**: If `AGENT_SESSION_ID` resolves to a session in a terminal state (killed/completed/failed/abandoned/cancelled), do NOT attach — this protects the #1113 zombie-revival fix. Instead, fall through to `create_local()` as before (treats subprocess as a fresh local session, same as today's behavior for an orphaned subprocess).
-- **Stop hook sidecar-first lookup**: `.claude/hooks/stop.py` (and any other hook that reconstructs `local-{session_id}`) changed to prefer `AgentSession.get_by_id(sidecar["agent_session_id"])` as the primary lookup, with the existing `query.filter(session_id=local-{session_id})` as the fallback for legacy paths.
-- **Optional dry-run cleanup utility**: `tools/cleanup_phantom_twins.py` script that scans Redis for phantom records matching the fingerprint (`session_id.startswith("local-")`, `parent_agent_session_id IS NOT NULL`, `session_type in (pm,teammate)`, `claude_session_uuid IS NULL`) and reports counts. `--execute` flag is opt-in, gated behind confirmation. Default output is dry-run.
+This plan is **all prevention, no cleanup**. Every element below is a guard at an existing decision point that blocks the wrong outcome at the source.
+
+- **Prevention guard in `user_prompt_submit.py` (the phantom's single creation site)**: Before the existing `VALOR_PARENT_SESSION_ID or SESSION_TYPE` gate at line 109, read `AGENT_SESSION_ID` from the environment. If present and it resolves via `AgentSession.get_by_id()` to a live (non-terminal) session, write that session's `agent_session_id` into the sidecar and return. **No `create_local()` call at line 134 is reached.** This is the primary prevention — the phantom is never minted.
+- **VALOR_SESSION_ID fallback (secondary prevention)**: If `AGENT_SESSION_ID` is missing or doesn't resolve, try `VALOR_SESSION_ID` via `query.filter(session_id=...)`. Makes the guard robust to future env-var divergence without widening the call surface.
+- **Existing gate unchanged**: If neither env var resolves, fall through to the existing gate at line 109. Current behavior preserved for legitimate non-worker paths. The gate remains the keep-direct-CLI-users-honest backstop.
+- **Terminal-status safety (preserves #1113)**: If `AGENT_SESSION_ID` resolves to a session in a terminal state (killed/completed/failed/abandoned/cancelled), do NOT attach. Fall through to existing gate — same behavior as today for orphaned subprocesses. This is important: we are preventing the creation of a new wrong record, not reviving a terminal record.
+- **Stop hook sidecar-first lookup (prevents silent miss on the correct record)**: `.claude/hooks/stop.py` changed to prefer `AgentSession.get_by_id(sidecar["agent_session_id"])` as the primary lookup. The existing `query.filter(session_id=local-{session_id})` remains as a fallback for direct-CLI / legacy paths — per answer to open question 3, we keep this fallback because local CLI use is still supported.
+- **Hook audit for other reconstruction sites**: `post_tool_use.py` and `subagent_stop.py` grepped for `local-{` / `f"local-"` / `local_session_id`. Any DB-lookup reconstruction gets the same sidecar-first treatment. Log-path-only uses are left alone.
+- **No cleanup utility.** We deliberately do not ship `tools/cleanup_phantom_twins.py`. Prevention makes it unnecessary, and shipping one would contradict the plan's stance that prevention is the right level to fix this.
 
 ### Flow
 
@@ -228,7 +266,7 @@ Compare to today: **Fresh worker subprocess spawn** → `claude -p` starts → f
 
 - **post_tool_use.py / subagent_stop.py audit**: build step must grep for `local-{` / `f"local-"` / `local_session_id` in all four hook files. Any other reconstruction site gets the same sidecar-first pattern.
 
-- **Cleanup utility** (`tools/cleanup_phantom_twins.py`): a thin CLI that scans `AgentSession.query` (via the Popoto ORM — never raw Redis), filters by the fingerprint, and prints counts + optional `--execute` to call `session.delete()` on each.
+- **Race-prevention invariant in `agent/sdk_client.py`**: at the subprocess spawn site, the ordering must be `AgentSession.create()` → `save()` (synchronous Redis write) → set env vars → `subprocess.Popen`. The builder verifies this ordering is already correct (spike-2 / Risk 2 both confirm it is) and leaves a short comment at the spawn site marking it as a load-bearing invariant — any future refactor that reorders this would re-introduce the race that Risk 2 describes.
 
 ## Failure Path Test Strategy
 
@@ -255,7 +293,7 @@ Compare to today: **Fresh worker subprocess spawn** → `claude -p` starts → f
 - [ ] `tests/unit/test_stop_hook.py::TestCompleteAgentSession::test_complete_delegates_to_finalize_session` — **UPDATE**: currently mocks `AgentSession.query.filter` and asserts `finalize_session` is called. The mock setup works unchanged because the test mocks `query.filter` AND implicitly `get_by_id` would need a separate mock. Split: (a) happy path uses new `get_by_id` lookup — assert that is called and returns the session; (b) legacy path where `get_by_id` returns None — assert fallback to `query.filter` still fires.
 - [ ] `tests/unit/test_stop_hook.py::TestCompleteAgentSession::test_complete_delegates_failed_on_error` — **UPDATE**: same split pattern.
 
-**New tests to add:**
+**New unit tests to add:**
 - [ ] `test_main_attaches_to_worker_session_when_agent_session_id_set` — new worker-spawn scenario: `AGENT_SESSION_ID=agt_real_worker` resolves to a live session → `create_local` NOT called, sidecar contains `agt_real_worker`.
 - [ ] `test_main_attaches_via_valor_session_id_fallback` — `AGENT_SESSION_ID` missing or invalid, `VALOR_SESSION_ID=0_12345` resolves via filter lookup → same behavior.
 - [ ] `test_main_falls_through_when_worker_session_terminal` — `AGENT_SESSION_ID=agt_killed` resolves to a session with `status=killed` → falls through to gate → create_local IS called (or gate blocks, depending on other env vars). This guards the #1113 semantics.
@@ -264,13 +302,17 @@ Compare to today: **Fresh worker subprocess spawn** → `claude -p` starts → f
 - [ ] `test_stop_hook_uses_get_by_id_primary_lookup` — sidecar contains `agent_session_id=agt_worker`; assert `get_by_id` is called first and `finalize_session` receives the worker session.
 - [ ] `test_stop_hook_falls_back_to_filter_on_get_by_id_miss` — `get_by_id` returns None (legacy sidecar points at `local-*`); assert `query.filter` is used as fallback.
 
+**New integration test to add (per answer to open question 2):**
+- [ ] `tests/integration/test_pm_terminal_transition_after_stop_hook.py::test_pm_session_terminal_transition_fires_after_stop_hook_change` — programmatically asserts that a PM/Teammate session's terminal transition path still completes after the `stop.py` sidecar-first change. Uses an in-process `AgentSession` fixture (non-terminal), invokes `stop.py::_complete_agent_session` with a sidecar pointing at the real worker `agent_session_id`, and asserts `finalize_session` was called and the session transitioned to a terminal status. Prevents a future refactor from silently breaking PM session finalization — better coverage can't hurt.
+
 ## Rabbit Holes
 
 - **Don't refactor the whole hook.** The `try:/except Exception: pass` structure is intentional and has been churned repeatedly; resist the urge to "clean it up" while making this change. Any refactor extends scope and risks regressions on #1001, #808, #1113, #1148 — all touching the same file.
-- **Don't build a one-time migration pass in this PR.** The issue accepts "leave existing phantoms as historical noise" as a valid outcome. A dry-run scanner is small and valuable; an automated deletion pass would require a separate plan, testing against a production-like Redis, and explicit user approval.
+- **Don't build a cleanup utility, even scaffolded, even dry-run-only.** Prevention is the right level to fix this bug. Shipping a `cleanup_phantom_twins` script — even as a safety net — implicitly admits that prevention might fail, which contradicts the plan's stance. Existing phantoms in Redis are already terminal and inert; they are historical noise, not an operational liability.
 - **Don't touch the subsequent-prompt re-activation branch semantics.** The `filter(session_id=local_sid)` at line 65 becomes a no-op for worker-spawned subprocesses after this fix. That is correct and intentional — the worker owns the session's status. Adding a "try get_by_id here too" would be elegant but creates a second path that duplicates the worker's re-activation logic and risks racing with it.
 - **Don't expand the fix to the PM fan-out rule.** The issue explicitly rules this out. The fan-out rule produced legitimate child sessions; the phantom is the hook's duplication, not the fan-out's.
-- **Don't change `AgentSession.create_local` semantics.** It stays exactly as is. Only the *call site* in the hook changes.
+- **Don't change `AgentSession.create_local` semantics.** It stays exactly as is. Only the *call-site precondition* in the hook changes — `create_local` itself is a well-tested primitive.
+- **Don't remove the `local-{session_id}` fallback in `stop.py`.** Per decision on open question 3: local CLI use is still supported, and it is hard to tell the difference between an agent's headless use and a real local session. The fallback is the backstop for direct-CLI users.
 
 ## Risks
 
@@ -308,19 +350,21 @@ Compare to today: **Fresh worker subprocess spawn** → `claude -p` starts → f
 
 ## No-Gos (Out of Scope)
 
-- **Auto-deletion of existing phantom rows**: The PR ships a dry-run scanner only. Automated cleanup of historical phantoms needs separate review and a migration-style plan.
+- **Any cleanup utility for existing phantom rows.** No `tools/cleanup_phantom_twins.py`, no `--dry-run` scanner, no worker-startup sweep, no scheduled job. Prevention is the fix; cleanup would be a band-aid. Existing phantoms stay as benign terminal historical noise.
+- **Auto-deletion of existing phantom rows** from any entry point. If operators ever need it, it is a separate plan.
+- **Removing the `local-{session_id}` legacy fallback in `stop.py`.** Per open question 3: local CLI use is supported; fallback stays.
 - **PM persona fan-out rule revision**: Explicitly excluded by the issue. The Multi-Issue Fan-out in `config/personas/project-manager.md:367-389` is working correctly; don't touch it.
 - **Refactoring `AgentSession.create_local` or `AgentSession.get_by_id`**: These are well-tested foundations. Use them as-is.
 - **Adding a `worker_owns_me` flag on AgentSession**: Tempting but out of scope. The env vars + sidecar are sufficient signaling.
-- **Changing the PM / Teammate subprocess lifecycle management (who finalizes the session)**: Out of scope. This plan only dedupes record creation.
+- **Changing the PM / Teammate subprocess lifecycle management (who finalizes the session)**: Out of scope. This plan only prevents the duplicate record from being minted.
 
 ## Update System
 
-No update system changes required — this feature is purely internal. The fix is a one-file hook change + one-file stop hook change + an optional CLI utility. All changes land on `main` via the standard PR/merge flow and propagate to deployed machines via `./scripts/remote-update.sh` with no special steps. No new dependencies, no new config files, no migration steps.
+No update system changes required — this feature is purely internal. The fix is a one-file hook change + one-file stop hook change. All changes land on `main` via the standard PR/merge flow and propagate to deployed machines via `./scripts/remote-update.sh` with no special steps. No new dependencies, no new config files, no migration steps.
 
 ## Agent Integration
 
-No agent integration required — this is a bridge-internal change. The hook is part of the Claude Code CLI subprocess lifecycle, not an agent-callable tool. The `tools/cleanup_phantom_twins.py` utility is a CLI-only script; operators invoke it directly. No MCP server changes, no `.mcp.json` changes, no bridge imports.
+No agent integration required — this is a bridge-internal change. The hook is part of the Claude Code CLI subprocess lifecycle, not an agent-callable tool. No MCP server changes, no `.mcp.json` changes, no bridge imports.
 
 ## Documentation
 
@@ -333,9 +377,8 @@ No agent integration required — this is a bridge-internal change. The hook is 
 - [ ] N/A — repo does not use Sphinx / Read the Docs / MkDocs for user-facing docs; the `docs/` tree is the source of truth.
 
 ### Inline Documentation
-- [ ] Docstring at the top of the new block in `user_prompt_submit.py` explaining why the env-var attachment path exists and referencing issue #1157.
-- [ ] Docstring update on `.claude/hooks/stop.py::_complete_agent_session` clarifying the primary `get_by_id` path vs legacy fallback.
-- [ ] Module docstring in `tools/cleanup_phantom_twins.py` explaining the fingerprint and the `--dry-run` default.
+- [ ] Docstring at the top of the new prevention guard in `user_prompt_submit.py` explaining why the guard exists, naming issue #1157, and stating explicitly that this is prevention (no duplicate record minted), not cleanup.
+- [ ] Docstring update on `.claude/hooks/stop.py::_complete_agent_session` clarifying the primary `get_by_id` path vs legacy `local-{session_id}` fallback (with a note that the fallback is retained for direct-CLI users — see open question 3).
 
 ## Success Criteria
 
@@ -346,10 +389,11 @@ No agent integration required — this is a bridge-internal change. The hook is 
 - [ ] Regression test: when `user_prompt_submit.py` runs with `VALOR_SESSION_ID=X` AND `X` resolves to an existing live AgentSession, NO new AgentSession is created; the sidecar is populated with `X`'s `agent_session_id`. Assertion on `AgentSession.create_local` mock: `assert_not_called()`.
 - [ ] Regression test: when `user_prompt_submit.py` runs with `AGENT_SESSION_ID=Y` AND `Y` resolves to a live AgentSession, same behavior. Mock `AgentSession.get_by_id` to return the session and assert the sidecar contains `Y` with no `create_local` call.
 - [ ] Regression test: when env vars resolve to a terminal-status session, the hook falls through to the existing gate — preserving #1113 semantics.
-- [ ] Optional cleanup utility `tools/cleanup_phantom_twins.py --dry-run` runs against live Redis and reports a count. `--execute` path is covered by a unit test but not run in CI (requires live Redis).
-- [ ] Tests pass (`pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py -v`) — all existing tests updated, new tests added, all green.
+- [ ] Integration test `test_pm_session_terminal_transition_fires_after_stop_hook_change` passes — PM/Teammate terminal transition still happens after the `stop.py` sidecar-first change.
+- [ ] Tests pass (`pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py tests/integration/test_pm_terminal_transition_after_stop_hook.py -v`) — all existing tests updated, new tests added, all green.
 - [ ] Documentation updated (`/do-docs`) — `claude-code-memory.md` reflects the env-var attachment path.
-- [ ] `grep -rn 'phantom\|local-' .claude/hooks/*.py` after the change still shows the legacy fallback in stop.py (on purpose), but no NEW `local-*` creation paths for worker-spawned subprocesses.
+- [ ] `grep -rn 'local-' .claude/hooks/*.py` after the change still shows the legacy fallback in stop.py (on purpose), but no NEW `local-*` creation paths for worker-spawned subprocesses.
+- [ ] No `tools/cleanup_phantom_twins.py` exists. Prevention is the fix; a cleanup utility would contradict the plan.
 
 ## Team Orchestration
 
@@ -359,19 +403,19 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 - **Builder (hook-dedupe)**
   - Name: `hook-dedupe-builder`
-  - Role: Implement the env-var resolution branch in `user_prompt_submit.py`, update `stop.py` for sidecar-first lookup, audit `post_tool_use.py` and `subagent_stop.py` for similar reconstruction patterns, and write the `tools/cleanup_phantom_twins.py` dry-run utility.
+  - Role: Implement the prevention guard in `user_prompt_submit.py`, update `stop.py` for sidecar-first lookup (preserving the `local-{session_id}` legacy fallback), and audit `post_tool_use.py` and `subagent_stop.py` for similar reconstruction patterns.
   - Agent Type: builder
   - Resume: true
 
 - **Validator (hook-dedupe)**
   - Name: `hook-dedupe-validator`
-  - Role: Verify the implementation against Success Criteria and Test Impact tables. Run `pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py -v` and report pass/fail. Run a live manual test invoking `valor-session create --role pm` against a dev Redis and count AgentSession records to confirm zero phantoms.
+  - Role: Verify the implementation against Success Criteria and Test Impact tables. Run `pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py tests/integration/test_pm_terminal_transition_after_stop_hook.py -v` and report pass/fail. Run a live manual test invoking `valor-session create --role pm` against a dev Redis and count AgentSession records to confirm zero new phantoms.
   - Agent Type: validator
   - Resume: true
 
 - **Test Writer (hook-dedupe-tests)**
   - Name: `hook-dedupe-test-writer`
-  - Role: Write the new unit tests enumerated in Test Impact (`test_main_attaches_to_worker_session_when_agent_session_id_set`, `test_main_attaches_via_valor_session_id_fallback`, `test_main_falls_through_when_worker_session_terminal`, `test_main_falls_through_when_get_by_id_raises`, `test_subsequent_prompt_misses_filter_on_worker_session_is_harmless`, `test_stop_hook_uses_get_by_id_primary_lookup`, `test_stop_hook_falls_back_to_filter_on_get_by_id_miss`). Update existing tests per the UPDATE directives.
+  - Role: Write the new unit tests enumerated in Test Impact (`test_main_attaches_to_worker_session_when_agent_session_id_set`, `test_main_attaches_via_valor_session_id_fallback`, `test_main_falls_through_when_worker_session_terminal`, `test_main_falls_through_when_get_by_id_raises`, `test_subsequent_prompt_misses_filter_on_worker_session_is_harmless`, `test_stop_hook_uses_get_by_id_primary_lookup`, `test_stop_hook_falls_back_to_filter_on_get_by_id_miss`) plus the new integration test `test_pm_session_terminal_transition_fires_after_stop_hook_change`. Update existing tests per the UPDATE directives.
   - Agent Type: test-engineer
   - Resume: true
 
@@ -383,7 +427,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ### Step by Step Tasks
 
-### 1. Implement env-var resolution branch in user_prompt_submit.py
+### 1. Implement prevention guard in user_prompt_submit.py
 - **Task ID**: build-hook-attach
 - **Depends On**: none
 - **Validates**: `tests/unit/test_hook_user_prompt_submit.py`
@@ -392,9 +436,9 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: true
 - Open `.claude/hooks/user_prompt_submit.py`.
-- In the `else:` branch at line 105 (first-prompt path), BEFORE the existing `if not os.environ.get("VALOR_PARENT_SESSION_ID")` gate at line 109, insert the new env-var resolution block per Technical Approach. Try `AGENT_SESSION_ID` first via `AgentSession.get_by_id()`; fall back to `VALOR_SESSION_ID` via `query.filter(session_id=...)`; if resolved and non-terminal, write sidecar and return.
+- In the `else:` branch at line 105 (first-prompt path), BEFORE the existing `if not os.environ.get("VALOR_PARENT_SESSION_ID")` gate at line 109, insert the prevention guard per Technical Approach. Try `AGENT_SESSION_ID` first via `AgentSession.get_by_id()`; fall back to `VALOR_SESSION_ID` via `query.filter(session_id=...)`; if resolved and non-terminal, write sidecar and return — the `create_local()` call at line 134 must never execute for worker-spawned subprocesses.
 - Add the `from models.session_lifecycle import TERMINAL_STATUSES` import inside the block (consistent with the existing re-activation branch at line 69).
-- Add a docstring comment referencing issue #1157 and explaining the worker-attachment semantics.
+- Add a docstring comment at the top of the block referencing issue #1157 and explicitly stating that this guard exists to **prevent** duplicate `AgentSession` creation — not to clean up after it.
 - Run `python -m ruff format .claude/hooks/user_prompt_submit.py` to normalize.
 
 ### 2. Update stop.py for sidecar-first lookup
@@ -422,29 +466,31 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - If only log-path construction uses `local-*` (non-DB), leave it alone — log paths do not care about session identity.
 - Document the audit outcome in the PR body (which files were touched, which were skipped and why).
 
-### 4. Build cleanup_phantom_twins.py dry-run utility
-- **Task ID**: build-cleanup-utility
-- **Depends On**: none
-- **Validates**: `tests/unit/test_cleanup_phantom_twins.py` (create)
-- **Assigned To**: hook-dedupe-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Create `tools/cleanup_phantom_twins.py` — a CLI that scans `AgentSession.query` (Popoto ORM, never raw Redis) for the phantom fingerprint (`session_id.startswith("local-")` AND `parent_agent_session_id IS NOT NULL` AND `session_type in ("pm", "teammate")` AND `claude_session_uuid IS NULL`).
-- Default output: dry-run count + sample of phantom IDs (first 10).
-- `--execute` flag: iterate and call `session.delete()` on each (Popoto ORM delete; never raw Redis). Print each deletion.
-- `--yes` flag required alongside `--execute` to confirm the operator intent.
-- Include a module docstring explaining the fingerprint and referencing issue #1157.
-
-### 5. Write new unit tests
+### 4. Write new unit tests
 - **Task ID**: build-tests-new
 - **Depends On**: build-hook-attach, build-stop-lookup
 - **Validates**: `tests/unit/test_hook_user_prompt_submit.py`, `tests/unit/test_stop_hook.py`
 - **Assigned To**: hook-dedupe-test-writer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Add the seven new tests enumerated in Test Impact: attachment via AGENT_SESSION_ID, fallback via VALOR_SESSION_ID, terminal-status fallthrough, get_by_id raise fallthrough, subsequent-prompt filter-miss harmlessness, stop.py primary path, stop.py fallback path.
+- Add the seven new unit tests enumerated in Test Impact: attachment via AGENT_SESSION_ID, fallback via VALOR_SESSION_ID, terminal-status fallthrough, get_by_id raise fallthrough, subsequent-prompt filter-miss harmlessness, stop.py primary path, stop.py fallback path.
 - Use the existing `_load_hook_module()` pattern for testing `user_prompt_submit.py::main()`.
 - For stop.py tests, follow the existing `patch("models.agent_session.AgentSession.query")` mocking approach and add `patch("models.agent_session.AgentSession.get_by_id")`.
+
+### 5. Write PM terminal-transition integration test
+- **Task ID**: build-integration-test
+- **Depends On**: build-stop-lookup
+- **Validates**: `tests/integration/test_pm_terminal_transition_after_stop_hook.py` (create)
+- **Informed By**: answer to open question 2 — better coverage can't hurt; prevents future refactor from silently breaking PM finalization
+- **Assigned To**: hook-dedupe-test-writer
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Create `tests/integration/test_pm_terminal_transition_after_stop_hook.py`.
+- Fixture: a live non-terminal PM `AgentSession` with `session_type="pm"`, `status="running"`, plus a sidecar file pointing at that session's `agent_session_id`.
+- Invoke `stop.py::_complete_agent_session(session_id, hook_input={"stop_reason": "end"})` directly.
+- Assert the AgentSession reached a terminal `status` (`completed` or `failed`) via the `get_by_id`-first path.
+- Assert the legacy `local-{session_id}` fallback was NOT consulted (it shouldn't be for a sidecar containing a worker `agent_session_id`).
+- Teardown: `session.delete()` via Popoto ORM (never raw Redis), per project manual-testing hygiene.
 
 ### 6. Update existing unit tests per Test Impact
 - **Task ID**: update-tests-existing
@@ -456,54 +502,42 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - Update the four TestMainCallChain tests per the UPDATE disposition: the existing assertions stay when env vars for worker attachment are NOT set; new assertions added when they ARE set.
 - Update the two TestCompleteAgentSession tests to cover both primary (`get_by_id` hit) and fallback (`get_by_id` miss → filter hit) paths.
 
-### 7. Write cleanup utility tests
-- **Task ID**: build-cleanup-tests
-- **Depends On**: build-cleanup-utility
-- **Validates**: `tests/unit/test_cleanup_phantom_twins.py` (create)
-- **Assigned To**: hook-dedupe-test-writer
-- **Agent Type**: test-engineer
-- **Parallel**: false
-- Create `tests/unit/test_cleanup_phantom_twins.py`.
-- Test the fingerprint matcher: constructs AgentSession fixtures covering phantom vs. non-phantom cases (real worker session, real dev child, real direct-CLI session, legacy local-* without parent, etc.) and asserts the scan finds exactly the phantoms.
-- Test `--dry-run` (default): no deletion, count printed.
-- Test `--execute --yes`: calls `session.delete()` on each phantom.
-- Test `--execute` without `--yes`: refuses, exits non-zero.
-
-### 8. Update feature docs
+### 7. Update feature docs
 - **Task ID**: document-feature
-- **Depends On**: build-hook-attach, build-stop-lookup, build-cleanup-utility, update-tests-existing, build-tests-new, build-cleanup-tests
+- **Depends On**: build-hook-attach, build-stop-lookup, update-tests-existing, build-tests-new, build-integration-test
 - **Assigned To**: hook-dedupe-docs
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/claude-code-memory.md` — add a subsection or paragraph to the AgentSession Tracking description explaining the env-var attachment path.
-- Update `docs/features/bridge-worker-architecture.md` if it describes the hook layer — add a note that hook-created `local-*` records are now reserved for direct-CLI paths; worker-spawned subprocesses attach via env vars.
-- Add `tools/cleanup_phantom_twins.py` to `docs/tools-reference.md` if that reference exists.
+- Update `docs/features/claude-code-memory.md` — add a subsection or paragraph to the AgentSession Tracking description explaining the prevention guard and env-var attachment semantics.
+- Update `docs/features/bridge-worker-architecture.md` if it describes the hook layer — add a note that hook-created `local-*` records are now reserved for direct-CLI paths; worker-spawned subprocesses attach via env vars so no duplicate record is ever minted.
 
-### 9. Final Validation
+### 8. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: build-hook-attach, build-stop-lookup, build-hook-audit, build-cleanup-utility, build-tests-new, update-tests-existing, build-cleanup-tests, document-feature
+- **Depends On**: build-hook-attach, build-stop-lookup, build-hook-audit, build-tests-new, build-integration-test, update-tests-existing, document-feature
 - **Assigned To**: hook-dedupe-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py tests/unit/test_cleanup_phantom_twins.py -v`. All must pass.
-- Run `python -m ruff check .claude/hooks/ tools/cleanup_phantom_twins.py`. Clean.
-- Run `python -m ruff format --check .claude/hooks/ tools/cleanup_phantom_twins.py`. Clean.
+- Run `pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py tests/integration/test_pm_terminal_transition_after_stop_hook.py -v`. All must pass.
+- Run `python -m ruff check .claude/hooks/`. Clean.
+- Run `python -m ruff format --check .claude/hooks/`. Clean.
 - Run the Verification table commands (see below).
 - Manual test: create a worker-spawned PM session on a dev Redis, let it run to completion, query `AgentSession.query.filter(parent_agent_session_id=<pm.agent_session_id>)`, confirm zero `local-*` children.
+- Confirm `tools/cleanup_phantom_twins.py` does NOT exist (prevention-only plan).
 - Generate final report: success criteria status, test pass counts, any unresolved concerns.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Unit tests pass | `pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py tests/unit/test_cleanup_phantom_twins.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check .claude/hooks/ tools/cleanup_phantom_twins.py` | exit code 0 |
-| Format clean | `python -m ruff format --check .claude/hooks/ tools/cleanup_phantom_twins.py` | exit code 0 |
+| Unit tests pass | `pytest tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py -q` | exit code 0 |
+| Integration test passes | `pytest tests/integration/test_pm_terminal_transition_after_stop_hook.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check .claude/hooks/` | exit code 0 |
+| Format clean | `python -m ruff format --check .claude/hooks/` | exit code 0 |
 | No stale xfails | `grep -rn 'xfail' tests/unit/test_hook_user_prompt_submit.py tests/unit/test_stop_hook.py` | exit code 1 |
-| New block exists in user_prompt_submit | `grep -n 'AGENT_SESSION_ID' .claude/hooks/user_prompt_submit.py` | output contains `AGENT_SESSION_ID` |
+| Prevention guard exists in user_prompt_submit | `grep -n 'AGENT_SESSION_ID' .claude/hooks/user_prompt_submit.py` | output contains `AGENT_SESSION_ID` |
 | Stop hook primary path exists | `grep -n 'get_by_id' .claude/hooks/stop.py` | output contains `get_by_id` |
-| Cleanup utility exists | `ls tools/cleanup_phantom_twins.py` | exit code 0 |
-| Cleanup utility dry-run default | `python tools/cleanup_phantom_twins.py --help` | output contains `--execute` and `--dry-run` |
+| Stop hook legacy fallback preserved | `grep -n 'local-{session_id}\|f"local-"' .claude/hooks/stop.py` | output is non-empty (fallback retained per open question 3) |
+| No cleanup utility was created | `test ! -e tools/cleanup_phantom_twins.py` | exit code 0 |
 
 ## Critique Results
 
@@ -515,8 +549,16 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Open Questions
 
-1. **Cleanup scope**: Should the `tools/cleanup_phantom_twins.py` utility ship in this PR at all, or be deferred to a separate operational task? The issue accepts either outcome. Default in this plan is "ship dry-run only, no `--execute` in production until operator-approved." Does that match your preference?
+1. **Cleanup scope**: Should the `tools/cleanup_phantom_twins.py` utility ship in this PR at all, or be deferred to a separate operational task?
+   - **RESOLVED 2026-04-24 (Valor):** NO. Don't over-engineer this. Drop the cleanup utility from the plan entirely. The focus is prevention, not cleanup — if prevention works, this utility should never need to be used.
+   - Plan impact: removed the utility from all sections (Solution, Technical Approach, Team Orchestration, Step-by-Step Tasks, Verification, Test Impact). Added an explicit No-Gos bullet and a Verification check asserting the file is NOT created.
 
-2. **PM/Teammate terminal transition path**: spike-3 flagged medium confidence that after the stop.py fix, the PM/Teammate session's terminal transition path is still intact (worker manages it, not the hook). Build step 9 (final validation) includes a manual test for this, but should we add a second integration test that asserts it programmatically? This would prevent a future refactor from silently breaking PM session lifecycle.
+2. **PM/Teammate terminal transition path**: spike-3 flagged medium confidence that after the stop.py fix, the PM/Teammate session's terminal transition path is still intact (worker manages it, not the hook). Should we add a programmatic integration test asserting it?
+   - **RESOLVED 2026-04-24 (Valor):** YES. Add the integration test. Better coverage can't hurt.
+   - Plan impact: added `tests/integration/test_pm_terminal_transition_after_stop_hook.py` under Test Impact and a dedicated build task (Step 5) to create it.
 
-3. **Legacy path preservation in stop.py**: The stop.py fallback to `local-{session_id}` reconstruction is preserved for direct-CLI sessions. Do direct-CLI sessions even need stop.py to finalize them? Or is it OK to simplify stop.py to sidecar-only lookup and let direct-CLI sessions rely on their own worker-side finalization (if any)? The conservative choice is to keep the fallback; the principled choice is to remove it if direct-CLI sessions no longer exist as a supported population (see #1001's gate).
+3. **Legacy path preservation in stop.py**: Do direct-CLI sessions even need stop.py to finalize them? Or can we simplify stop.py to sidecar-only lookup?
+   - **RESOLVED 2026-04-24 (Valor):** KEEP the fallback. We support local CLI use because in some cases it's hard to tell the difference between an agent's headless use and a real local session. Do not remove the `local-{session_id}` path.
+   - Plan impact: stop.py change is additive only — `AgentSession.get_by_id(sidecar["agent_session_id"])` is the primary lookup, `query.filter(session_id=local-{session_id})` remains as the fallback. A No-Gos bullet and a Verification check explicitly prevent future removal of the fallback.
+
+_All three original open questions are resolved. No new open questions have been surfaced by this revision._
