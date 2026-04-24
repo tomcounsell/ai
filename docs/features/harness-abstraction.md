@@ -81,6 +81,37 @@ When `DEV_SESSION_HARNESS` is set to a non-`sdk` value, the worker runs `verify_
 - `AGENT_SESSION_ID` and `CLAUDE_CODE_TASK_LIST_ID` are passed to all session types for session isolation
 - `VALOR_PARENT_SESSION_ID` is additionally injected for PM and Teammate sessions, enabling child subprocesses (spawned via `valor_session create --parent` or the Agent tool) to link their `AgentSession` records back to the parent session in `user_prompt_submit.py`. Dev sessions do not receive this env var — they are leaf nodes in the hierarchy.
 
+### Session Environment Injection (issue #1148)
+
+The harness path mirrors the env contract that the SDK-era `ValorAgent.env` builder provided. `agent/session_executor.py` constructs `_harness_env` with the following keys, scoped by session type:
+
+| Env Var | Scope | Source | Consumer |
+|---------|-------|--------|----------|
+| `AGENT_SESSION_ID` | All typed sessions | `session.agent_session_id` | Hooks (`pre_tool_use.py`, `user_prompt_submit.py`); session isolation |
+| `CLAUDE_CODE_TASK_LIST_ID` | All typed sessions | Tier 1 thread-derived or Tier 2 slug | Task list isolation per `docs/features/session-isolation.md` |
+| `SESSION_TYPE` | All typed sessions | `session.session_type` (`pm`/`teammate`/`dev`) | `agent/hooks/pre_tool_use.py::_is_pm_session()` — drives the PM Bash allowlist + write restrictions |
+| `VALOR_PARENT_SESSION_ID` | PM, Teammate | `session.agent_session_id` | Child subprocess linkage (`user_prompt_submit.py`) |
+| `TELEGRAM_CHAT_ID` | PM, Teammate (when `chat_id` set) | `session.chat_id` | `tools/send_telegram.py` for PM-side message sends |
+| `SENTRY_AUTH_TOKEN` | PM, Teammate | `agent/sdk_client.py::_resolve_sentry_auth_token()` | `sentry-cli` (no manual export needed) |
+
+Sentry token resolution cascade: `SENTRY_PERSONAL_TOKEN` env var → `SENTRY_AUTH_TOKEN` env var → `~/Desktop/Valor/.env` file read. Under `VALOR_LAUNCHD=1` the file read is skipped (macOS TCC blocks `open()` on `~/Desktop` files under launchd).
+
+### PM Persona Injection — `--append-system-prompt` (issue #1148)
+
+PM sessions append the project-manager persona to `claude -p`'s default system prompt via `--append-system-prompt`:
+
+1. The executor calls `agent.sdk_client.load_pm_system_prompt(working_dir)` — returns the persona file plus the project-specific work-vault `CLAUDE.md` if present.
+2. The result is passed as `system_prompt=` to `get_response_via_harness()`.
+3. `get_response_via_harness()` injects `["--append-system-prompt", <text>]` into the harness argv after `--model` and before the positional message.
+
+`--append-system-prompt` (not `--system-prompt`) preserves Claude Code's default tool-handling protocol — the PM persona is additive guidance. Defensive 512KB cap avoids macOS `ARG_MAX` overflows; oversized prompts are dropped with a `logger.warning` and the session continues without the persona (degraded but functional).
+
+Failure modes:
+- Persona load raises (e.g. missing persona file on a fresh machine): logs `[pm-persona-missing]` and proceeds with `system_prompt=None`. Session runs without SDLC orchestration rules — visible to the dashboard via the structured log prefix.
+- Drafter call sites in `agent/session_completion.py` (Pass 1 + Pass 2 of `_deliver_pipeline_completion`) MUST keep `system_prompt=None`. Tainting drafter turns with PM orchestration corrupts the user-facing summary. Enforced by `tests/unit/test_session_completion.py::test_drafter_calls_omit_system_prompt_via_grep` and the AST guard alongside it.
+
+Dev and Teammate sessions do not have a harness-side persona loader; they keep the default Claude Code protocol.
+
 ## Harness Command Registry
 
 New harnesses are added to `_HARNESS_COMMANDS` in `agent/sdk_client.py`:
