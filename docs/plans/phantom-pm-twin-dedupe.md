@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -388,16 +388,16 @@ No agent integration required — this is a bridge-internal change. The hook is 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/claude-code-memory.md` — the "AgentSession Tracking" subsection describes the hook's session creation behavior. Add a paragraph documenting the env-var resolution path: when `AGENT_SESSION_ID` / `VALOR_SESSION_ID` resolve to a live worker session, the hook attaches instead of creating.
-- [ ] Update `docs/features/bridge-worker-architecture.md` if it describes the hook layer — add a note that the worker's AgentSession is the canonical record; the hook attaches via env vars rather than creating a duplicate.
-- [ ] No new entry needed in `docs/features/README.md` — this is a bugfix to an existing documented feature (claude-code-memory), not a new feature.
+- [x] Update `docs/features/claude-code-memory.md` — the "AgentSession Tracking" subsection describes the hook's session creation behavior. Add a paragraph documenting the env-var resolution path: when `AGENT_SESSION_ID` / `VALOR_SESSION_ID` resolve to a live worker session, the hook attaches instead of creating. (Shipped in PR #1166 build; cascade also updated `pm-dev-session-architecture.md`, `subconscious-memory.md`, and the `claude-code-memory.md` comparison table row.)
+- [x] Update `docs/features/bridge-worker-architecture.md` if it describes the hook layer — add a note that the worker's AgentSession is the canonical record; the hook attaches via env vars rather than creating a duplicate. (Added as new "Hook-Layer Session Attach (issue #1157)" subsection; `CLI Session Isolation (create_local())` section scoped to direct-CLI only.)
+- [x] No new entry needed in `docs/features/README.md` — this is a bugfix to an existing documented feature (claude-code-memory), not a new feature.
 
 ### External Documentation Site
-- [ ] N/A — repo does not use Sphinx / Read the Docs / MkDocs for user-facing docs; the `docs/` tree is the source of truth.
+- [x] N/A — repo does not use Sphinx / Read the Docs / MkDocs for user-facing docs; the `docs/` tree is the source of truth.
 
 ### Inline Documentation
-- [ ] Docstring at the top of the new prevention guard in `user_prompt_submit.py` explaining why the guard exists, naming issue #1157, and stating explicitly that this is prevention (no duplicate record minted), not cleanup.
-- [ ] Docstring update on `.claude/hooks/stop.py::_complete_agent_session` clarifying the primary `get_by_id` path vs legacy `local-{session_id}` fallback (with a note that the fallback is retained for direct-CLI users — see open question 3).
+- [x] Docstring at the top of the new prevention guard in `user_prompt_submit.py` explaining why the guard exists, naming issue #1157, and stating explicitly that this is prevention (no duplicate record minted), not cleanup. (`.claude/hooks/user_prompt_submit.py:106`)
+- [x] Docstring update on `.claude/hooks/stop.py::_complete_agent_session` clarifying the primary `get_by_id` path vs legacy `local-{session_id}` fallback (with a note that the fallback is retained for direct-CLI users — see open question 3). (`.claude/hooks/stop.py:132-136,153-164`)
 
 ## Success Criteria
 

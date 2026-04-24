@@ -234,7 +234,7 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
 | Ingestion | `Memory.safe_save()` in bridge | `ingest()` called from UserPromptSubmit hook |
 | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
 | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |
-| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession created by UserPromptSubmit hook only for worker-spawned sessions (`AgentSession.create_local(session_type=SESSION_TYPE env var, ...)`); direct CLI sessions create no AgentSession (gated by `SESSION_TYPE`/`VALOR_PARENT_SESSION_ID` env vars) |
+| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession attached or created by UserPromptSubmit hook. Worker-spawned subprocesses **attach** to the worker's existing record via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no new record (issue #1157). Direct-CLI subprocesses fall through to `AgentSession.create_local(session_type=SESSION_TYPE env var, ...)` only if `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set; otherwise no AgentSession is created. |
 | Category re-ranking | `_apply_category_weights()` in `check_and_inject()` | `_apply_category_weights()` imported from `agent.memory_hook` in `recall()` |
 | Shared code | `extract_topic_keywords()`, `_apply_category_weights()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
 

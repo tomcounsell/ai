@@ -297,7 +297,9 @@ A short-lived Redis lock (`SETNX worker:pop_lock:{worker_key}`) wraps the queryâ
 
 ### CLI Session Isolation (`create_local()`)
 
-Local CLI sessions created by `models/agent_session.py:create_local()` now use the **Claude Code session UUID** as `chat_id` instead of a collision-prone modulo timestamp:
+> **Scope after #1157:** `create_local()` is only called by the `UserPromptSubmit` hook for **direct-CLI subprocesses** (developer running `claude` at the terminal with `SESSION_TYPE` / `VALOR_PARENT_SESSION_ID` exported). Worker-spawned PM/Teammate/Dev subprocesses never reach this path â€” the hook attaches the sidecar to the worker's pre-existing AgentSession instead (see [Hook-Layer Session Attach](#hook-layer-session-attach-issue-1157) below).
+
+Direct-CLI sessions created by `models/agent_session.py:create_local()` use the **Claude Code session UUID** as `chat_id` instead of a collision-prone modulo timestamp:
 
 ```python
 # Before (collision-prone): same chat_id for sessions created within same 2.7-hour window
