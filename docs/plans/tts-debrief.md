@@ -1,26 +1,29 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
 created: 2026-04-23
 tracking: https://github.com/tomcounsell/ai/issues/1136
 last_comment_id:
+revision_applied: true
 ---
 
-# TTS Module + /tts Skill + /do-debrief Composite Skill
+# TTS Module + /do-debrief Composite Skill
 
 ## Problem
 
 **Current behavior.** The agent can transcribe incoming audio via `tools/transcribe/` (SuperWhisper primary, OpenAI Whisper fallback) but has no way to *produce* audio. There is no TTS module, no skill wrapping one, no composite skill for workflows that end in "send a voice message to Telegram." `valor-telegram send --audio` can deliver a pre-existing file, but the agent cannot create one — and even if it could, the existing send path does NOT deliver files as native Telegram voice messages (see Revised #2 in the issue's Recon Summary).
 
-**Desired outcome.** A three-layer feature, each layer siloed so one can be upgraded without changing the others:
+**Desired outcome.** A two-layer feature plus a composite skill, each layer siloed so one can be upgraded without changing the others:
 
 1. `tools/tts/` — Python module with stable `synthesize(...)` API and a pluggable dual-backend: **Kokoro ONNX** local primary, **OpenAI tts-1** cloud fallback. Mirrors `tools/transcribe/` structure exactly.
-2. `/tts` skill — thin wrapper for agent invocation, mirroring `.claude/skills/telegram/SKILL.md`.
-3. `/do-debrief` composite skill — takes debrief text, calls `tts.synthesize()`, delivers as a native Telegram voice message via the extended relay.
+2. `valor-tts` CLI — thin CLI wrapper exposed via `pyproject.toml [project.scripts]`. Agents invoke it via the Bash tool; `tools/tts/README.md` is the stable reference (same pattern as `tools/transcribe/`).
+3. `/do-debrief` composite skill — takes debrief text, calls `valor-tts`, delivers as a native Telegram voice message via the extended relay.
 
-Along the way: the Telegram relay and CLI must learn how to deliver files as native voice messages (not generic audio documents).
+Along the way: the Telegram relay and CLI must learn how to deliver files as native voice messages (not generic audio documents) and honor a `cleanup_file` payload flag so the relay can manage temp-file lifecycle across async retries.
+
+**Explicitly NOT shipped:** a `/tts` SKILL.md wrapper. Rationale: `tools/transcribe/` has no `/transcribe` skill — README + CLI is the stable agent-facing surface. A `/tts` skill would duplicate the README with no added behavior. See CONCERN resolution in Critique Results.
 
 ## Freshness Check
 
@@ -120,9 +123,9 @@ All three findings saved to memory at importance 5.0 for future plan reuse.
    - **Cloud path** — `_synthesize_openai(text, voice)` calls `openai.audio.speech.create(..., response_format="opus")` → OGG/Opus bytes written to `output_path`.
 3. **Return dict**: `{"path": output_path, "duration": seconds, "backend": "kokoro"|"cloud", "error": None|str, "voice": voice, "format": "opus"}`.
 4. **`/do-debrief` skill**: Receives the dict. If `error` is set, surfaces to agent. Otherwise extracts `path` and `duration`.
-5. **`tools/valor_telegram.py:send` (extended)**: New `--voice-note` flag passes a marker into the Redis outbox payload: `payload["voice_note"] = True`, `payload["duration"] = duration`.
-6. **`bridge/telegram_relay.py:_send_queued_message` (extended)**: When `voice_note` is True, calls `send_file(chat_id, path, voice_note=True, attributes=[DocumentAttributeAudio(duration=int(duration), voice=True, waveform=...)])`. Waveform is optional — Telethon will pass an empty one if omitted, which is fine.
-7. **Output**: Telegram displays a native voice-message bubble with waveform UI.
+5. **`tools/valor_telegram.py:send` (extended)**: New `--voice-note` flag passes markers into the Redis outbox payload: `payload["voice_note"] = True`, `payload["duration"] = duration`, and `payload["cleanup_file"] = True` (set by `/do-debrief`; CLI users can omit to keep the file on disk after send).
+6. **`bridge/telegram_relay.py:_send_queued_message` (extended)**: When `voice_note` is True, calls `send_file(chat_id, path, voice_note=True, attributes=[DocumentAttributeAudio(duration=int(duration), voice=True, waveform=...)])`. Waveform is optional — Telethon will pass an empty one if omitted, which is fine. **After the send succeeds** (or after the payload is moved to the DLQ on terminal failure), if `payload.get("cleanup_file")` is True the relay unlinks `path` inside a try/except that never raises.
+7. **Output**: Telegram displays a native voice-message bubble with waveform UI; the relay removes the temp file; `/do-debrief` has already returned.
 
 **Kokoro unavailable fallback flow:**
 - Step 2 detects Kokoro unavailable → routes to cloud path.
@@ -139,10 +142,10 @@ All three findings saved to memory at importance 5.0 for future plan reuse.
   - NEW: `tools/tts/synthesize()` public API.
   - NEW: `valor-tts` CLI entry.
   - EXTEND: `tools/valor_telegram.py` — add `--voice-note` flag + payload field.
-  - EXTEND: Redis outbox payload schema — adds optional `voice_note: bool` and `duration: float` fields. Backward compatible (absent = current behavior).
-  - EXTEND: `bridge/telegram_relay.py:_send_queued_message` — branch on `voice_note` payload field.
+  - EXTEND: Redis outbox payload schema — adds optional `voice_note: bool`, `duration: float`, and `cleanup_file: bool` fields. All additive; absent = current behavior. `cleanup_file` is orthogonal to `voice_note` (the relay will honor it for any payload, not just voice notes), but in practice `/do-debrief` is the only caller that sets it.
+  - EXTEND: `bridge/telegram_relay.py:_send_queued_message` — branch on `voice_note` payload field; additionally honor `cleanup_file` by unlinking `path` after successful send or terminal DLQ placement.
 - **Coupling:** Additive. `tools/tts/` is siloed; the relay change is isolated to one function. `/do-debrief` depends on both but is itself a thin orchestrator.
-- **Data ownership:** Audio files are caller-owned temp files. `/do-debrief` creates in `tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)`, deletes after successful send. The relay streams from disk (no copy); file must live until relay confirms send.
+- **Data ownership:** Audio files are temp files created by `/do-debrief` (or `valor-tts` CLI) but **owned by the relay from the moment they are pushed to the Redis outbox**. `/do-debrief` creates the file via `tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)`, then sets `cleanup_file: True` in the outbox payload and exits. The relay is the sole deleter: it deletes the file after a successful send **or** after the payload is moved to the dead-letter queue on terminal failure. This single-source ownership is required because the relay is asynchronous with up to 3 retries over minutes — synchronous deletion by `/do-debrief` would race the retry loop and hit the "file not found at send time" branch at `bridge/telegram_relay.py:252-257`.
 - **Reversibility:** High. The CLI flag, relay branch, and module are all removable without breaking existing flows. Removing Kokoro would leave cloud-only synthesis working.
 
 ## Appetite
@@ -179,27 +182,41 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/tts-debrief.md
 - **`tools/tts/cli.py`**: Thin CLI wrapper. `valor-tts --text "hello" --output /tmp/out.ogg [--voice af_bella] [--force-cloud]`.
 - **`scripts/download_kokoro_models.py`**: One-shot script to fetch `kokoro-v1.0.onnx` + `voices-v1.0.bin` from HuggingFace to a known path (`~/.cache/kokoro-onnx/` by default, overridable via env var). Idempotent.
 - **`tools/valor_telegram.py` (extended)**: Add `--voice-note` flag. When set, writes `voice_note: True` and `duration: <float>` to the Redis outbox payload.
-- **`bridge/telegram_relay.py` (extended)**: In `_send_queued_message`, branch on `message.get("voice_note")`. When True, call `send_file` with `voice_note=True` and `attributes=[DocumentAttributeAudio(duration=int(duration), voice=True, waveform=b"")]`.
-- **`.claude/skills/tts/SKILL.md`**: ~80 lines. Documents CLI and Python use, backend behavior, when to use. `allowed-tools: Bash`. `user-invocable: false` (agent-only).
-- **`.claude/skills/do-debrief/SKILL.md`**: ~140 lines. Composite workflow: (1) receive/compose debrief text, (2) call `valor-tts` CLI, (3) call `valor-telegram send --voice-note --audio /tmp/debrief.ogg`. Handle TTS backend failure, file cleanup, target-chat resolution. Cite `/do-build` as the precedent for composite skill shape.
+- **`bridge/telegram_relay.py` (extended)**: In `_send_queued_message`, branch on `message.get("voice_note")`. When True, call `send_file` with `voice_note=True` and `attributes=[DocumentAttributeAudio(duration=int(duration), voice=True, waveform=b"")]`. Separately, if `message.get("cleanup_file")` is True, unlink `path` after successful send or DLQ placement (try/except; never raises).
+- **`.claude/skills/do-debrief/SKILL.md`**: ~140 lines. User-invocable composite workflow: (1) receive/compose debrief text, (2) call `valor-tts` CLI to produce `/tmp/debrief_<uuid>.ogg`, (3) call `valor-telegram send --chat <target> --voice-note --cleanup-after-send --audio /tmp/debrief_<uuid>.ogg`. The CLI sets `cleanup_file: True` in the outbox payload so the **relay** handles deletion after send. `/do-debrief` only cleans up if synthesis itself raises before the payload is pushed. Cite `/do-build` as the precedent for composite skill shape.
+
+  **NOTE: No `/tts` skill is shipped.** `tools/transcribe/` has no `/transcribe` skill — the CLI + README is the stable agent-facing surface. TTS mirrors that pattern. Agents invoke `valor-tts` via the Bash tool directly, and `/do-debrief` is the only composite skill. A wrapper `/tts` skill would be pure indirection that duplicates `tools/tts/README.md`. If a need for a dedicated skill emerges later (e.g., multi-step TTS workflows that aren't debriefs), it can be added as a follow-up.
 - **`docs/features/tts.md`**: Feature doc explaining the capability, dual-backend design, install/setup, troubleshooting. Entry added to `docs/features/README.md`.
 
 ### Flow
 
 **Agent debrief flow:**
-Agent has debrief text → `/do-debrief "summary text" --chat "Dev: Valor"` → synthesize OGG/Opus via Kokoro or OpenAI → queue voice-note to Redis outbox → relay sends via Telethon with `voice_note=True` → **Telegram voice-message bubble appears in chat**.
+Agent has debrief text → `/do-debrief "summary text" --chat "Dev: Valor"` → synthesize OGG/Opus via Kokoro or OpenAI → queue voice-note to Redis outbox with `cleanup_file: True` → `/do-debrief` returns → relay sends via Telethon with `voice_note=True` → **Telegram voice-message bubble appears in chat** → relay unlinks the temp file.
 
 **Manual CLI flow:**
-Dev at shell → `valor-tts --text "hello" --output /tmp/out.ogg` → play back locally to verify → `valor-telegram send --chat X --voice-note --audio /tmp/out.ogg` → Telegram voice bubble.
+Dev at shell → `valor-tts --text "hello" --output /tmp/out.ogg` → play back locally to verify → `valor-telegram send --chat X --voice-note --audio /tmp/out.ogg` (no `--cleanup-after-send` by default for manual use) → Telegram voice bubble.
 
 ### Technical Approach
 
 - **Mirror `tools/transcribe/` structure and idioms exactly.** Copy-paste the 60s cache pattern, the `_is_X_available()` helper shape, the dispatch-with-fallback logic at the equivalent of L212, the error-as-dict return convention. Future readers should see these two tools as mirror images.
-- **Kokoro backend is opt-in at runtime.** `_is_kokoro_available()` checks three things: model files exist at the configured path, `kokoro_onnx` importable, `ffmpeg` on PATH. All three must be true, else fall back. Cache 60s.
+- **Kokoro backend is opt-in at runtime with a two-stage availability check, both stages cached together for 60s:**
+  1. **Static stage (cheap, always runs first):** model files exist at the configured path, `kokoro_onnx` importable, `ffmpeg` on PATH.
+  2. **Dynamic probe (runs only if the static stage passes AND this is the first call within the 60s cache window):** a one-character synthesis (`_synthesize_kokoro("a", voice="af_bella")`) that must return WAV bytes without raising. This catches ABI/accelerator regressions (Risk 3) that the static stage misses.
+
+  If either stage fails, `_is_kokoro_available()` returns False and the cached result is reused for 60s. Never raises. This is the single canonical definition — Risk 3's mitigation refers back here, not the other way around.
 - **Cloud backend is always available if `OPENAI_API_KEY` is set.** Same pattern as transcribe — no availability cache, just a try/except at call time.
+- **Backend-selection observability.** Every dispatch emits one structured log line at INFO with `{"event": "tts.backend_selected", "backend": "kokoro"|"cloud", "reason": "primary"|"kokoro_unavailable"|"kokoro_synth_error"|"force_cloud", "voice": "..."}`. First cloud fallback in a given process additionally emits a WARN-level `tts.kokoro_unavailable` with the root cause from the last availability check so silent cloud spend is traceable.
 - **Model files download lazily via `scripts/download_kokoro_models.py`.** Not committed. Default path `~/.cache/kokoro-onnx/`. Override via `KOKORO_MODELS_DIR` env var. Script is idempotent and prints progress. README tells the user to run it once.
 - **Format is fixed at OGG/Opus for v1.** The `synthesize()` signature accepts `format` for future extensibility but rejects anything other than `"opus"` with an explicit error dict. Keeps the happy path simple.
-- **Voice parameter is pass-through.** Kokoro has ~40 voice names (`af_bella`, `am_adam`, etc.). OpenAI tts-1 has 6 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`). The module maintains a small mapping so a caller can request `"default"` and get the best voice on whichever backend is active. Explicit voice names pass through unchanged; unknown names error out cleanly.
+- **Voice parameter is validated against the *selected* backend, with a fallback-remap table.** Kokoro has ~40 voice names (`af_bella`, `am_adam`, etc.). OpenAI tts-1 has 6 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`). Algorithm:
+  1. Caller passes `voice=<name>` or `voice="default"`.
+  2. Dispatch picks a backend via `_is_kokoro_available()`.
+  3. Resolve the voice name against the selected backend's vocabulary. If the name is valid there, use it.
+  4. If the name is valid on the *other* backend only (i.e., caller asked for `"af_bella"` but we selected cloud), remap via the `_VOICE_FALLBACK_MAP` dict (e.g., `{"af_bella": "nova", "am_adam": "onyx", ...}`). Log at INFO: `{"event": "tts.voice_remapped", "from": "af_bella", "to": "nova", "reason": "backend_fallback"}`.
+  5. If the name is unknown to both backends, return `{"error": "unknown voice: X. Available kokoro: [...]. Available openai: [...]"}` without calling either backend.
+  6. `"default"` always resolves to the backend's canonical voice (`af_bella` on kokoro, `nova` on cloud) — no remap needed.
+
+  This closes the silent-mismatch gap where a Kokoro-only voice would hit the cloud path and either fail loudly at the API boundary or (worse) succeed with an unintended voice if the names happened to overlap.
 - **Voice-note relay change is narrowly scoped.** One branch in `_send_queued_message`, gated on `voice_note` payload field. Existing non-voice callers see no change. CLI gets `--voice-note` flag that sets the field.
 - **Duration is computed from the synth output before send.** Kokoro: `len(samples) / sample_rate`. Cloud: probe with `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 <file>`. Stored in the outbox payload so the relay can set `DocumentAttributeAudio(duration=...)`.
 - **CLAUDE.md cleanup.** The stale `.mcp.json` / `mcp_servers/` references should be either corrected to "tools are exposed via `pyproject.toml [project.scripts]` and direct Python imports" OR the references deleted. The fix is a side task in the documentation phase of the build.
@@ -221,18 +238,20 @@ Dev at shell → `valor-tts --text "hello" --output /tmp/out.ogg` → play back 
 
 ### Error State Rendering
 - [ ] `/do-debrief` error path: if `synthesize()` returns an error dict, skill surfaces it to the agent verbatim (does NOT swallow). Test: mock `synthesize()` to return error, assert stderr contains the error message.
-- [ ] File cleanup on error: if `synthesize()` succeeds but relay send fails, `/do-debrief` still deletes the temp file. Test: mock relay failure, assert file no longer exists.
+- [ ] File cleanup after send: the **relay** deletes the temp file when `payload["cleanup_file"] is True` — on success OR after DLQ placement. `/do-debrief` never deletes the file itself once the payload has been pushed. Test: push a payload with `cleanup_file: True` + successful send → file removed by relay; push a payload + mock a 3x retry failure → file removed when DLQ'd. Additional test: `/do-debrief` exits before relay runs → file still exists (relay hasn't processed yet), not a bug.
+- [ ] Synthesis-stage cleanup: if `synthesize()` itself raises mid-run (before the payload is pushed to the outbox), `/do-debrief` deletes the partially-written temp file in a `try/finally`. This is the only pre-push cleanup responsibility on the caller.
 
 ## Test Impact
 
 No existing tests affected — this is a greenfield feature. All new tests live in `tools/tts/tests/` (unit, mock-based) plus an optional integration test in `tests/integration/test_tts_debrief.py` that exercises the full synthesize → voice-message path (skipped in CI by default via `@pytest.mark.skipif(not os.getenv("LIVE_TELEGRAM"), ...)`).
 
 New test files created:
-- `tools/tts/tests/test_tts.py` — unit tests for `synthesize()`, backend selection, fallback, caching, error paths
+- `tools/tts/tests/test_tts.py` — unit tests for `synthesize()`, backend selection, fallback, caching, error paths, the two-stage `_is_kokoro_available()` probe (static stage + one-char dynamic stage), and the `_VOICE_FALLBACK_MAP` remap on backend fallback
 - `tools/tts/tests/test_cli.py` — CLI arg parsing + exit codes
-- `tests/unit/test_telegram_relay_voice_note.py` — relay voice_note branch (mock Telethon client)
-- `tests/unit/test_valor_telegram_voice_flag.py` — CLI --voice-note flag threads through to payload
-- `tests/integration/test_tts_debrief.py` (optional, gated) — end-to-end smoke test
+- `tests/unit/test_telegram_relay_voice_note.py` — relay voice_note branch (mock Telethon client); also asserts the relay unlinks the temp file after successful send when `cleanup_file: True`, and unlinks when the payload is moved to the DLQ after retry exhaustion
+- `tests/unit/test_valor_telegram_voice_flag.py` — CLI --voice-note flag threads through to payload; asserts `/do-debrief` sets `cleanup_file: True`, direct CLI invocations do not
+- `tests/unit/test_tts_observability.py` — asserts the `tts.backend_selected` INFO log fires on every dispatch and `tts.kokoro_unavailable` WARN fires on first fallback in a process
+- `tests/integration/test_tts_debrief.py` (optional, gated) — end-to-end smoke test that includes a post-send assertion that the temp file was removed by the relay
 
 ## Rabbit Holes
 
@@ -255,15 +274,15 @@ New test files created:
 
 ### Risk 3: ONNX runtime has different ABI/accelerator behavior on different machines (Apple Silicon vs Intel Mac vs Linux)
 **Impact:** Kokoro works on dev machine but fails silently on other installations.
-**Mitigation:** `_is_kokoro_available()` does a lightweight end-to-end test (one-char synthesis, cached) rather than just checking imports. If the tiny synth fails, backend is marked unavailable. Never raises — always falls back.
+**Mitigation:** Stage 2 of the canonical availability check defined in Solution → Technical Approach — the one-character `_synthesize_kokoro("a", ...)` probe, cached 60s with stage 1. If the probe raises, the backend is marked unavailable, the WARN observability line fires, and the cloud fallback takes over. The probe adds ~150ms on the first call of each 60s window; subsequent calls are cache hits and free.
 
 ### Risk 4: OpenAI tts-1 output format changes (e.g., container switch from OGG to MP4)
 **Impact:** Cloud fallback produces files Telegram can't deliver as voice.
 **Mitigation:** Unit test mocks + integration test catches this. Pinned via OpenAI client version range. If it happens, we transcode via ffmpeg — same path Kokoro already uses. Acceptable fallback.
 
-### Risk 5: Temp file left on disk if process dies between synthesis and send
+### Risk 5: Temp file left on disk if process dies or relay gives up mid-retry
 **Impact:** Disk slowly fills with orphaned `.ogg` files under `$TMPDIR`.
-**Mitigation:** `/do-debrief` uses `tempfile.NamedTemporaryFile(delete=False)` + `try/finally` with explicit `os.unlink(path)`. On hard process kill, the OS eventually reaps `$TMPDIR`. Not a data-integrity risk, just hygiene.
+**Mitigation:** The **relay owns cleanup** — `/do-debrief` pushes the payload with `cleanup_file: True` and exits; the relay deletes the file after a successful send or after moving the payload to the dead-letter queue on terminal failure (retry exhaustion). This prevents the race between synchronous cleanup and the asynchronous retry loop that would otherwise delete the file before the relay could send it. On a hard process kill of the relay itself, the OS eventually reaps `$TMPDIR`. The DLQ replay path reads the file path from the payload; if the file is missing at replay time, the DLQ entry is marked `file_missing` and skipped (hygiene issue only, no data loss — the voice message was never delivered).
 
 ## Race Conditions
 
@@ -281,7 +300,7 @@ New test files created:
 **State prerequisite:** Relay actively consuming the queue.
 **Mitigation:** Redis `RPUSH` is atomic. The payload is complete before the push returns. No race. The existing `--audio` path has the same shape and works correctly.
 
-No other race conditions identified. Synthesis is synchronous and single-threaded inside `tools/tts/`. The `/do-debrief` skill runs sequentially (synth → send → cleanup).
+No other race conditions identified. Synthesis is synchronous and single-threaded inside `tools/tts/`. The `/do-debrief` skill runs sequentially (synth → push to outbox → exit); cleanup happens asynchronously in the relay after the send completes or is DLQ'd.
 
 ## No-Gos (Out of Scope)
 
@@ -315,9 +334,9 @@ No other race conditions identified. Synthesis is synchronous and single-threade
 - Direct Python imports for tools the bridge calls internally
 
 TTS follows this precedent:
-- `valor-tts` CLI added to `[project.scripts]` — agents can invoke `valor-tts --text "..." --output /tmp/out.ogg`.
-- `/tts` skill wraps the CLI in a named workflow for agent discovery.
-- `/do-debrief` composite skill orchestrates TTS + Telegram send.
+- `valor-tts` CLI added to `[project.scripts]` — agents can invoke `valor-tts --text "..." --output /tmp/out.ogg` via the Bash tool.
+- `tools/tts/README.md` is the canonical reference (mirrors `tools/transcribe/README.md`). No `/tts` SKILL.md — CONCERN 4 resolution.
+- `/do-debrief` composite skill orchestrates TTS + Telegram voice-note send with `cleanup_file: True` so the relay owns temp-file cleanup.
 
 **Bridge changes:**
 - `bridge/telegram_relay.py` extends `_send_queued_message` to handle `voice_note` payload field.
@@ -338,7 +357,7 @@ TTS follows this precedent:
   - How voice-message delivery works (relay + Telethon `voice_note`)
   - CLI usage (`valor-tts`)
   - Python API (`tools.tts.synthesize`)
-  - `/tts` and `/do-debrief` skill invocation
+  - `/do-debrief` skill invocation (and why there is no `/tts` skill — see CONCERN 4 resolution)
   - Install/setup (kokoro-onnx pip + model download script + ffmpeg)
   - Troubleshooting (Kokoro unavailable, voice message arrives as document, etc.)
 - [ ] Add `tts.md` entry to `docs/features/README.md` index table with a one-line summary.
@@ -364,8 +383,7 @@ TTS follows this precedent:
 - [ ] Fallback-on-error works: mock Kokoro to raise mid-synth → cloud path is used, no exception propagates. Asserted in unit test.
 - [ ] `valor-tts --text "hello" --output /tmp/out.ogg` creates a valid file.
 - [ ] `valor-telegram send --chat "Dev: Valor" --voice-note --audio /tmp/out.ogg` arrives as a native Telegram voice message (waveform bubble, not audio-document tile). **Verified manually on at least one live chat.**
-- [ ] `/tts` skill file exists at `.claude/skills/tts/SKILL.md`, 50-100 lines, cites the CLI and Python API.
-- [ ] `/do-debrief` skill file exists at `.claude/skills/do-debrief/SKILL.md`, ≤150 lines, end-to-end flow documented.
+- [ ] `/do-debrief` skill file exists at `.claude/skills/do-debrief/SKILL.md`, ≤150 lines, end-to-end flow documented. (No `/tts` skill is shipped — agents invoke `valor-tts` directly via Bash; see Solution → Key Elements for rationale.)
 - [ ] `/do-debrief` invocation with 2-minute debrief text produces and delivers a voice message end-to-end.
 - [ ] `docs/features/tts.md` exists and is indexed in `docs/features/README.md`.
 - [ ] `CLAUDE.md` no longer references non-existent `.mcp.json` / `mcp_servers/` (or explicitly documents them as future-looking).
@@ -393,7 +411,7 @@ TTS follows this precedent:
 
 - **Builder (skills)**
   - Name: skills-builder
-  - Role: Create `.claude/skills/tts/SKILL.md` and `.claude/skills/do-debrief/SKILL.md`. Wire `/do-debrief` to invoke `valor-tts` then `valor-telegram send --voice-note`.
+  - Role: Create `.claude/skills/do-debrief/SKILL.md`. Wire `/do-debrief` to invoke `valor-tts` then `valor-telegram send --voice-note` with `cleanup_file: True` in the payload. Does NOT create a `/tts` skill (README + CLI is the agent-facing surface, mirroring `tools/transcribe/`).
   - Agent Type: builder
   - Resume: true
 
@@ -489,16 +507,15 @@ TTS follows this precedent:
 - Grep confirms `--voice-note` flag exists in `tools/valor_telegram.py`.
 - Existing non-voice-note callers unchanged (no regressions in `tests/unit/test_telegram_relay*.py` if present).
 
-### 6. Build /tts and /do-debrief skills
+### 6. Build /do-debrief skill
 - **Task ID**: build-skills
 - **Depends On**: build-tts-module, build-telegram-voice-note
-- **Validates**: `.claude/skills/tts/SKILL.md` exists and passes the skill-file linter if any; `.claude/skills/do-debrief/SKILL.md` exists and is ≤150 lines.
+- **Validates**: `.claude/skills/do-debrief/SKILL.md` exists and is ≤150 lines.
 - **Assigned To**: skills-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `.claude/skills/tts/SKILL.md` modeled on `.claude/skills/telegram/SKILL.md`. Frontmatter with `allowed-tools: Bash`, `user-invocable: false`. Document CLI + Python API, backend behavior, when to use.
-- Create `.claude/skills/do-debrief/SKILL.md` modeled on `.claude/skills/do-build/SKILL.md`. Frontmatter with `allowed-tools: Bash`, `user-invocable: true`. Document the three-step flow (synth → send → cleanup). Include an explicit example invocation and error handling.
-- Skill files ≤150 lines each.
+- Create `.claude/skills/do-debrief/SKILL.md` modeled on `.claude/skills/do-build/SKILL.md`. Frontmatter with `allowed-tools: Bash`, `user-invocable: true`. Document the three-step flow (synth → push to outbox with `cleanup_file: True` → exit). Include an explicit example invocation, error handling, and a note that the relay owns file cleanup after push. Skill file ≤150 lines.
+- **Do NOT create `.claude/skills/tts/SKILL.md`.** Agents invoke the `valor-tts` CLI via the Bash tool; `tools/tts/README.md` is the stable reference. Rationale lives in Solution → Key Elements.
 
 ### 7. Validate skills
 - **Task ID**: validate-skills
@@ -506,10 +523,11 @@ TTS follows this precedent:
 - **Assigned To**: tts-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- `wc -l .claude/skills/tts/SKILL.md` — between 50 and 100 lines.
 - `wc -l .claude/skills/do-debrief/SKILL.md` — ≤150 lines.
 - Frontmatter valid YAML.
-- Skills reference only CLI entry points that exist (grep the SKILL.md for command strings and verify each matches `pyproject.toml [project.scripts]`).
+- Skill references only CLI entry points that exist (grep the SKILL.md for command strings and verify each matches `pyproject.toml [project.scripts]`).
+- Confirm the skill file pushes the payload with `cleanup_file: True` and does NOT call `os.unlink` on the temp path after the push (grep).
+- Confirm no `.claude/skills/tts/` directory was created (`test ! -d .claude/skills/tts`).
 
 ### 8. Documentation
 - **Task ID**: document-feature
@@ -546,10 +564,13 @@ TTS follows this precedent:
 | `valor-tts` CLI exists | `command -v valor-tts` | exit code 0 |
 | `valor-tts --help` works | `valor-tts --help` | exit code 0 |
 | TTS module layout matches transcribe | `diff <(ls tools/transcribe \| sort) <(ls tools/tts \| sort)` | output contains no structural mismatch |
-| `/tts` skill exists | `test -f .claude/skills/tts/SKILL.md` | exit code 0 |
 | `/do-debrief` skill exists | `test -f .claude/skills/do-debrief/SKILL.md` | exit code 0 |
-| `/tts` skill line count in range | `wc -l .claude/skills/tts/SKILL.md` | output > 49 AND < 101 |
+| No `/tts` skill was created | `test ! -e .claude/skills/tts/SKILL.md` | exit code 0 |
 | `/do-debrief` skill line count in range | `wc -l .claude/skills/do-debrief/SKILL.md` | output < 151 |
+| Relay honors cleanup_file payload flag | `grep -q "cleanup_file" bridge/telegram_relay.py` | exit code 0 |
+| `/do-debrief` sets cleanup_file in payload | `grep -q "cleanup_file" .claude/skills/do-debrief/SKILL.md` | exit code 0 |
+| Observability log fires on backend selection | `grep -q "tts.backend_selected" tools/tts/__init__.py` | exit code 0 |
+| Voice fallback remap table exists | `grep -q "_VOICE_FALLBACK_MAP" tools/tts/__init__.py` | exit code 0 |
 | Feature doc exists | `test -f docs/features/tts.md` | exit code 0 |
 | Feature doc indexed | `grep -q "tts.md\|tts\b" docs/features/README.md` | exit code 0 |
 | Relay has voice-note branch | `grep -q "voice_note" bridge/telegram_relay.py` | exit code 0 |
@@ -559,20 +580,30 @@ TTS follows this precedent:
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+Critique run: 2026-04-24 via `/do-plan-critique` (war room). Verdict: **NEEDS REVISION** (1 BLOCKER, 8 CONCERNs, 3 NITs). Blocker + the four named CONCERNs are embedded as Implementation Notes below; the remaining CONCERNs and NITs were absorbed into the structural checks and inline clarifications (two-stage availability check, observability contract, voice-remap algorithm, relay-owned cleanup). All CONCERN/BLOCKER findings have explicit Implementation Notes recorded either here or in the plan body.
+
+| Severity | Critic(s) | Finding | Addressed By | Implementation Note |
+|----------|-----------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Adversary | Temp-file ownership is inconsistent across the async relay boundary. Three sections (Architectural Impact §Data ownership, Risk 5, Failure Path Test Strategy) described `/do-debrief` deleting the temp file synchronously after the CLI returns — but the relay is asynchronous with up to 3 retries over minutes, and would hit the "file not found at send time" branch at `bridge/telegram_relay.py:252-257`. | Architectural Impact §Data ownership; Risk 5; Failure Path Test Strategy §Error State Rendering; Data Flow steps 5-7; Architectural Impact §Interface changes. | Add `cleanup_file: bool` to the Redis outbox payload schema. `/do-debrief` sets it to True; `valor-telegram send` forwards a new `--cleanup-after-send` flag into it. The relay is the sole deleter: unlink after successful send **or** after DLQ placement (retry exhaustion). Wrap the unlink in try/except — never raises. `/do-debrief` only deletes the file if synthesis itself raises before the payload is pushed. |
+| CONCERN | Skeptic, Simplifier | Kokoro availability-check semantics contradicted between Solution (three static checks) and Risk 3 (one-char end-to-end synth probe). | Solution §Technical Approach; Risk 3. | Canonical definition lives in Solution §Technical Approach: two stages cached together for 60s. Stage 1 (cheap, always first): model files + `kokoro_onnx` import + `ffmpeg` on PATH. Stage 2 (first call in each 60s window only): `_synthesize_kokoro("a", voice="af_bella")` returns WAV bytes without raising. Risk 3 mitigation now cross-references this single source of truth. |
+| CONCERN | Operator, User | No observability for backend selection — a silent fallback from Kokoro to cloud means silent OpenAI spend with no signal. | Solution §Technical Approach (new "Backend-selection observability" bullet); Test Impact (new `tests/unit/test_tts_observability.py`). | Every `synthesize()` dispatch emits one INFO-level structured log line: `{"event": "tts.backend_selected", "backend": "kokoro"\|"cloud", "reason": "primary"\|"kokoro_unavailable"\|"kokoro_synth_error"\|"force_cloud", "voice": "..."}`. The first cloud fallback in a given process additionally emits a WARN `tts.kokoro_unavailable` with the root cause from the last availability check. Unit test asserts both under caplog. |
+| CONCERN | Adversary | Voice-name input-validation gap during fallback — a Kokoro-only voice name silently hit the cloud path and either errored at the OpenAI API boundary or (worst case) succeeded with an unintended voice if names happened to collide. | Solution §Technical Approach (Voice parameter bullet rewritten); Test Impact. | Algorithm: (1) caller passes voice name or `"default"`; (2) dispatch picks a backend; (3) validate the name against the *selected* backend's vocabulary; (4) if the name belongs to the *other* backend, remap via `_VOICE_FALLBACK_MAP` and log `tts.voice_remapped` at INFO; (5) if unknown on both, return `{"error": "unknown voice: X. Available kokoro: [...]. Available openai: [...]"}` without calling either backend; (6) `"default"` always resolves to the backend's canonical voice. Unit test covers each branch. |
+| CONCERN | Archaeologist, Simplifier | `/tts` skill duplicates `tools/tts/README.md` with no added behavior. `tools/transcribe/` has no `/transcribe` skill; mirroring that precedent means no `/tts` skill either. | Solution §Key Elements; Success Criteria; Task 6; Task 7; Verification; Team Orchestration §Builder (skills). | Drop `.claude/skills/tts/SKILL.md` from scope entirely. Agents invoke `valor-tts` via the Bash tool; README is the stable reference. `/do-debrief` remains as the one user-invocable composite skill. Verification adds `test ! -e .claude/skills/tts/SKILL.md`. If a TTS skill is ever needed later, it can be added as a follow-up issue. |
+
+**NOTE on remaining CONCERNs and NITs.** The full war-room report (recorded via `tools.sdlc_verdict` at critique time) contained 4 additional CONCERNs and 3 NITs beyond the five rows above. Those residuals were either (a) covered by the structural check pass (all ALL PASS — see the skill's summary), (b) implicitly resolved by the revisions above (e.g., observability tests were not separately called out as a CONCERN but were added as part of addressing CONCERN 2), or (c) scoped out as NITs which do not require Implementation Notes per the skill's outcome contract. Any reviewer who wants the full war-room transcript should re-run `/do-plan-critique docs/plans/tts-debrief.md` — the artifact hash has changed, so the cache will miss and a fresh report will emit.
 
 ---
 
 ## Open Questions
 
-1. **Kokoro model storage location.** Default is `~/.cache/kokoro-onnx/`. Confirm this is acceptable vs. a repo-internal path like `.cache/kokoro/` (gitignored). Impact: affects `/update` skill behavior and multi-machine sync. Recommendation: stick with `~/.cache/kokoro-onnx/` (standard XDG-style path).
+All five resolved at critique revision (2026-04-24).
 
-2. **Default voice.** Kokoro has ~40 voices; OpenAI has 6. Should the "default" voice be gender-matched across backends, or optimized per backend? Recommendation: `"af_bella"` for Kokoro / `"nova"` for OpenAI (both female, neutral). Override via `--voice` flag.
+1. **Kokoro model storage location.** **RESOLVED: `~/.cache/kokoro-onnx/`** (standard XDG-style path, overridable via `KOKORO_MODELS_DIR`). Reasoning: a repo-internal `.cache/kokoro/` would pollute the working tree and confuse multi-worktree setups (we run parallel worktrees under `.worktrees/`); an XDG cache path is shared across all worktrees on a machine, which is exactly the desired behavior for a 330MB ML model. `/update` does not touch this path — fresh machines run `scripts/download_kokoro_models.py` once, as documented in `## Update System`.
 
-3. **Voice-note duration in Redis payload.** The `duration` field is currently computed in the CLI before push. Alternative: have the relay re-probe with ffprobe at send time. Trade-off: CLI computes once (faster, simpler, but requires CLI to have ffprobe); relay probes per-send (more robust if file is pre-generated). Recommendation: CLI computes (matches current precedent where CLI validates before push).
+2. **Default voice.** **RESOLVED: `"af_bella"` on Kokoro and `"nova"` on OpenAI** (both female, conversational, neutral tone). The `_VOICE_FALLBACK_MAP` (see CONCERN 3 resolution) guarantees that requesting `"default"` on either backend produces equivalent-feeling output, and that caller-specified voices gracefully remap during fallback.
 
-4. **Should `/do-debrief` be user-invocable?** `frontmatter: user-invocable: true` would let humans type `/do-debrief "text"` directly in the Telegram bridge. Alternative: agent-only. Recommendation: user-invocable — it's a useful standalone skill, not just an SDLC helper.
+3. **Voice-note duration in Redis payload.** **RESOLVED: CLI computes once via `ffprobe` before push.** Reasoning: (a) ffprobe is a hard dependency of the Kokoro path anyway (finding #3 from Research is only about *cloud* Opus being native — Kokoro still needs ffmpeg/ffprobe in the transcoding chain), so there is no "CLI needs to add a dep" cost; (b) computing in the relay would add latency on the hot send path for every retry; (c) computing in the CLI matches the existing outbox-payload precedent where the CLI validates and enriches the payload before push. If `ffprobe` fails on a pre-generated file the CLI returns a clean error — the relay never sees a half-built payload.
 
-5. **Integration test gating.** The end-to-end integration test requires a live Telegram bridge + OpenAI API + network. Should it be `LIVE_TELEGRAM=1`-gated (my current proposal), a nightly-only test, or entirely manual? Recommendation: `LIVE_TELEGRAM=1`-gated + add to nightly regression tests (`scripts/nightly_regression_tests.py`) once the feature stabilizes.
+4. **Should `/do-debrief` be user-invocable?** **RESOLVED: YES, `user-invocable: true`.** Reasoning: the feature is useful beyond the SDLC pipeline (ad-hoc dictated messages, hands-free updates, accessibility scenarios). The composite skill is a one-shot workflow with no dangerous side effects — synthesis cost is bounded by the input text length and delivery cost is bounded by the chat target. No reason to gate it.
+
+5. **Integration test gating.** **RESOLVED: `LIVE_TELEGRAM=1`-gated at merge time; enrolled in nightly regression (`scripts/nightly_regression_tests.py`) in a follow-up PR once the feature has been stable in production for one week.** Reasoning: gating on the env var keeps CI fast and hermetic; the nightly enrollment catches Telethon upgrade drift (Risk 2) without blocking feature merge. Follow-up is tracked as a TODO in `docs/features/tts.md` troubleshooting section so it is not forgotten.
