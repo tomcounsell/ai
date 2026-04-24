@@ -67,6 +67,8 @@ The gate is a reminder, not a hard blocker. The agent can choose to proceed, but
 
 For local Claude Code sessions, the SDLC router ensures a trackable session exists before dispatching sub-skills via `tools/sdlc_session_ensure.py`. This creates an `AgentSession` keyed by `sdlc-local-{issue_number}` so that downstream markers have a session to write to. The operation is idempotent — running it multiple times for the same issue reuses the same session.
 
+Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call short-circuits: it returns the already-active bridge PM session without creating a new `sdlc-local-{N}` record. This prevents the zombie-duplicate dashboard entries that used to appear when SDLC was driven over Telegram. See the "Bridge short-circuit" subsection in `docs/features/sdlc-pipeline-state.md` for the full gate conditions and the `--kill-orphans` operator tool for cleaning up pre-existing zombies.
+
 ```bash
 SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
 python -m tools.sdlc_session_ensure --issue-number 941 --issue-url "https://github.com/$SDLC_REPO/issues/941"

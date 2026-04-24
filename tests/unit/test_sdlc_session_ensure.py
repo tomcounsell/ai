@@ -253,9 +253,7 @@ class TestBridgeShortCircuit:
         # Must NOT return the dev session id; must fall through to create.
         assert result == {"session_id": "sdlc-local-1143", "created": True}
 
-    def test_short_circuit_falls_through_for_terminal_status_pm_session(
-        self, monkeypatch
-    ):
+    def test_short_circuit_falls_through_for_terminal_status_pm_session(self, monkeypatch):
         """Env points at a terminal-status PM session (AD1) — fall through."""
         from tools.sdlc_session_ensure import ensure_session
 
@@ -436,9 +434,7 @@ class TestKillOrphans:
     def test_boundary_at_threshold_is_listed(self):
         from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
 
-        at_boundary = _make_orphan_session(
-            "sdlc-local-9996", ORPHAN_AGE_SECONDS
-        )
+        at_boundary = _make_orphan_session("sdlc-local-9996", ORPHAN_AGE_SECONDS)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [at_boundary]
 
@@ -451,9 +447,7 @@ class TestKillOrphans:
     def test_boundary_one_second_under_not_listed(self):
         from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
 
-        under = _make_orphan_session(
-            "sdlc-local-9997", ORPHAN_AGE_SECONDS - 1
-        )
+        under = _make_orphan_session("sdlc-local-9997", ORPHAN_AGE_SECONDS - 1)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [under]
 
@@ -465,9 +459,7 @@ class TestKillOrphans:
     def test_boundary_one_second_over_is_listed(self):
         from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
 
-        over = _make_orphan_session(
-            "sdlc-local-9998", ORPHAN_AGE_SECONDS + 1
-        )
+        over = _make_orphan_session("sdlc-local-9998", ORPHAN_AGE_SECONDS + 1)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [over]
 
@@ -480,9 +472,7 @@ class TestKillOrphans:
         from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
 
         # A bridge session matching all other zombie criteria must be skipped.
-        bridge = _make_orphan_session(
-            "tg_valor_-1003449100931_691", ORPHAN_AGE_SECONDS + 3600
-        )
+        bridge = _make_orphan_session("tg_valor_-1003449100931_691", ORPHAN_AGE_SECONDS + 3600)
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [bridge]
 

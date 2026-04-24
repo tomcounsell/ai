@@ -183,9 +183,7 @@ class TestMessageTextFallback:
 
         # In query order: first has message_text match only, second has issue_url.
         text_match = self._session(message_text="SDLC issue 1147")
-        url_match = self._session(
-            issue_url="https://github.com/tomcounsell/ai/issues/1147"
-        )
+        url_match = self._session(issue_url="https://github.com/tomcounsell/ai/issues/1147")
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [text_match, url_match]
 
