@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -374,18 +374,18 @@ No agent integration required — the bug lives entirely in `bridge/`, `agent/`,
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/session-lifecycle.md` "Parent Finalization" section (L101-110) to document the transcript-boundary skip: `complete_transcript` is a no-op status-wise for `waiting_for_children` PMs (the SESSION_END marker still writes; the `finalize_session` call is skipped). Name the two sanctioned finalization channels (`_finalize_parent_sync` with reason `"all children terminal"`, and the completion runner with reason `"pipeline complete: final summary delivered"`) as the intended paths.
-- [ ] Add a subsection "Transcript-Boundary Skip" under "State Transitions" describing why the skip exists, linking to issue #1156.
-- [ ] Add a note in `docs/features/pm-dev-session-architecture.md` describing why `complete_transcript` and the Stop hook are both no-ops for `waiting_for_children` PMs.
-- [ ] Add entry to `docs/features/README.md` index if session-lifecycle is not already listed (it is — no new entry needed).
+- [x] Update `docs/features/session-lifecycle.md` "Parent Finalization" section (L101-110) to document the transcript-boundary skip: `complete_transcript` is a no-op status-wise for `waiting_for_children` PMs (the SESSION_END marker still writes; the `finalize_session` call is skipped). Name the two sanctioned finalization channels (`_finalize_parent_sync` with reason `"all children terminal"`, and the completion runner with reason `"pipeline complete: final summary delivered"`) as the intended paths.
+- [x] Add a subsection "Transcript-Boundary Skip" under "State Transitions" describing why the skip exists, linking to issue #1156.
+- [x] Add a note in `docs/features/pm-dev-session-architecture.md` describing why `complete_transcript` and the Stop hook are both no-ops for `waiting_for_children` PMs.
+- [x] Add entry to `docs/features/README.md` index if session-lifecycle is not already listed (it is — no new entry needed).
 
 ### External Documentation Site
 None — this repo does not use Sphinx, Read the Docs, or MkDocs. All documentation lives in `docs/`.
 
 ### Inline Documentation
-- [ ] Inline comment at the `complete_transcript` skip branch citing issue #1156 and summarizing the invariant in 1-2 lines.
-- [ ] Inline comment at the Stop hook skip branch citing issue #1156.
-- [ ] Updated docstring on `complete_transcript` mentioning the skip for `waiting_for_children`.
+- [x] Inline comment at the `complete_transcript` skip branch citing issue #1156 and summarizing the invariant in 1-2 lines.
+- [x] Inline comment at the Stop hook skip branch citing issue #1156.
+- [x] Updated docstring on `complete_transcript` mentioning the skip for `waiting_for_children`.
 
 ## Success Criteria
 
