@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1158
 last_comment_id:
+revision_applied: true
 ---
 
 # Child Session Project Scope — enforce immutable project→repo pairing in `valor-session`
@@ -155,12 +156,14 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/child-session-
 - **Remove `--working-dir`** from `tools/valor_session.py`'s `create` subparser. No flag, no namespace attribute, no code path reads `args.working_dir`.
 - **Remove the `working_dir = args.working_dir or str(_repo_root)` line** (currently line 244). There is no defaulting chain; `working_dir` is derived, not supplied.
 - **Tighten `resolve_project_key`** to raise `ProjectKeyResolutionError` (on unmatched cwd / empty projects / missing `working_directory`) and `ProjectsConfigUnavailableError` (on `load_config` failure). Error messages name the cwd, list available keys, and suggest `--project-key`.
-- **Add `_resolve_project_working_directory(project_key: str) -> Path`** — loads `projects.json`, returns expanded `working_directory` for the key. Raises `ProjectKeyResolutionError` on missing key or missing/empty `working_directory`.
+- **Add `_resolve_project_working_directory(project_key: str) -> tuple[Path, dict]`** — loads `projects.json` once, returns `(expanded_path, project_dict)` for the key. Raises `ProjectKeyResolutionError` on missing key or missing/empty `working_directory`. Returning both values avoids a second `load_config()` call in the CLI path.
 - **Reorder `cmd_create`**: `project_key` → project dict → `repo_root` → `slug` → `working_dir = (worktree or repo_root)` → enqueue with `project_config`.
 - **Parent inheritance:** when `--parent <id>` is supplied, default `project_key` to `parent.project_key`. There is no separate `working_dir` inheritance — once `project_key` is set, `working_dir` follows.
 - **Migrate `tools/sdlc_session_ensure.py`** to derive `working_dir` from `projects.json[project_key].working_directory` instead of passing `os.getcwd()`.
 - **Make `agent/reflection_scheduler.py` exception handling explicit** — catch the new typed errors specifically and log a warning.
-- **Populate `project_config`** on CLI enqueue for parity with the bridge (`bridge/telegram_bridge.py:1987`).
+- **Populate `project_config`** on CLI enqueue for parity with the bridge (`bridge/telegram_bridge.py:1987`). Use the raw `project_dict` returned by `_resolve_project_working_directory` — do NOT filter or reshape it; the bridge passes it whole and the CLI must match.
+
+> **Implementation Note (concern: build-phase test runs will create real worktrees that need cleanup):** When the builder runs the new `test_valor_session_working_dir_resolution.py` locally during development, `cmd_create` will call `get_or_create_worktree(repo_root, slug)` against a mocked `repo_root`. Use `tmp_path` fixtures in pytest so the worktree goes under a per-test temp directory rather than the real `.worktrees/`. If `get_or_create_worktree` hard-fails on a non-git `tmp_path`, mock `agent.worktree_manager.get_or_create_worktree` directly in the affected tests rather than letting it touch the filesystem. Do NOT let the unit tests create real worktrees under `/Users/.../src/ai/.worktrees/test-*/` — that would fill the repo with junk directories across test runs.
 
 ### Flow
 
@@ -180,25 +183,45 @@ Concrete edits to `tools/valor_session.py`:
 5. **Add exception classes** near the top of `tools/valor_session.py`:
    - `class ProjectKeyResolutionError(ValueError)` with `__init__(self, cwd, available_keys)` producing a message like `"cwd {cwd!r} does not match any project in projects.json. Available keys: {available_keys}. Pass --project-key <key> explicitly."`.
    - `class ProjectsConfigUnavailableError(RuntimeError)`.
-6. **Add `_resolve_project_working_directory(project_key: str) -> Path`** helper that wraps `load_config()` and returns `Path(projects[project_key]["working_directory"]).expanduser()`. Raises `ProjectKeyResolutionError` if `project_key` is not in `projects` or the key has no `working_directory`.
+
+   > **Implementation Note (concern: existing broad try/except at `cmd_create` line 335 will catch typed errors too early):** Both classes must carry user-oriented messages in `str(exc)` because the `except Exception as e: print(f"Error: {e}", file=sys.stderr); return 1` block at line 335 is the surface the user sees. `ProjectKeyResolutionError.__init__` must produce the full "cwd X does not match...available keys...pass --project-key" string on `str(self)` so the broad catch still delivers a useful message. Do NOT add `raise ProjectKeyResolutionError` uses that rely on being caught by a narrower handler upstream — there is no narrower handler.
+
+6. **Add `_resolve_project_working_directory(project_key: str) -> tuple[Path, dict]`** helper that wraps `load_config()` and returns `(Path(projects[project_key]["working_directory"]).expanduser(), project_dict)`. Raises `ProjectKeyResolutionError` if `project_key` is not in `projects` or the key has no `working_directory`. Raises `ProjectsConfigUnavailableError` if `load_config()` fails.
+
+   > **Implementation Note (concern: `load_config()` called multiple times per `cmd_create` invocation wastes I/O and opens a TOCTOU window between `resolve_project_key` and `_resolve_project_working_directory`):** Have `_resolve_project_working_directory` return BOTH the `repo_root` path AND the full project dict (as a tuple). The dict is what gets passed to `_push_agent_session` as `project_config=`. This means `cmd_create` only calls `load_config()` once via this helper. When `project_key` comes from `--project-key` or parent inheritance (not from cwd-matching), `resolve_project_key` is not called at all — so the single `_resolve_project_working_directory` call is the only config-load. When `project_key` comes from cwd-matching, `resolve_project_key` DOES call `load_config()` internally; accept this second load as the cost of the fallback path rather than refactoring `resolve_project_key` to return the dict too (which would break its simpler contract and its other caller in `reflection_scheduler`).
+
 7. **Reorder the body of `cmd_create` (lines 195-337):**
    - Compute `project_key` first (explicit flag > parent lookup > `resolve_project_key(os.getcwd())`).
-   - Compute `repo_root = _resolve_project_working_directory(project_key)`.
+   - Compute `repo_root, project = _resolve_project_working_directory(project_key)`.
    - Resolve `slug` (PM auto-derivation logic unchanged).
    - If `slug`: `working_dir = str(get_or_create_worktree(repo_root, slug))`. Else: `working_dir = str(repo_root)`.
    - Call `_push_agent_session(..., working_dir=working_dir, project_key=project_key, project_config=project)`.
-8. **Add parent-inheritance block** before the `project_key` resolution: if `args.parent`, look up `AgentSession.get_by_id(args.parent)` (or `.query.filter(agent_session_id=args.parent).first()`), and if found without `--project-key`, set `project_key = parent.project_key`. Emit a stderr notice.
+
+   > **Implementation Note (concern: PM auto-slug derivation at lines 251-268 reads `message` only and does not depend on `working_dir`, but the current code order interleaves slug resolution with working_dir mutation):** Verify before writing that `_derive_slug_from_message(message)` is a pure function of `message` (it is — see lines 252-255 and the regex at line 48). Keep the auto-slug-or-refuse block logically before the `repo_root`/`working_dir` computation. The existing "PM without slug is refused" path (line 261-268, `return 1`) MUST remain and MUST fire before any worktree creation, because a PM with no slug never needs a `working_dir` at all.
+
+8. **Add parent-inheritance block** before the `project_key` resolution: if `args.parent`, look up the parent session via the existing `_find_session(args.parent)` helper (already defined at `tools/valor_session.py:340`, resolves by both `session_id` and `agent_session_id`). If found without `--project-key`, set `project_key = parent.project_key`. Emit a stderr notice.
+
+   > **Implementation Note (concern: parent lookup method — `AgentSession.get_by_id()` is not the existing convention; the file already has a resolver):** Use `_find_session(args.parent)` — it's the same helper used elsewhere in this file and handles both `session_id` (routing key) and `agent_session_id` (UUID) lookups. Do NOT introduce a new lookup path. If `_find_session` returns `None` AND `--project-key` was not passed, continue to cwd-based `resolve_project_key` rather than raising — the parent field is advisory; a typo should not hard-fail session creation if cwd can resolve the key. (A typed, non-existent parent is a separate bug from mis-routing; defer.)
+
 9. **Delete the `create_parser.add_argument("--working-dir", ...)` line (1047)** and any associated help text in the module docstring (lines 23-31).
+
+   > **Implementation Note (concern: `_repo_root` constant is referenced at line 83 for `_load_env` bootstrap — removing it prematurely breaks the CLI):** Do NOT remove the `_repo_root = Path(__file__).parent.parent` definition at line 82. It is used on line 83 (and possibly elsewhere) for sys.path/.env bootstrap. The bug is the USE of `_repo_root` as a `working_dir` default on line 244, not the constant itself. After removing line 244, run `grep -n '_repo_root' tools/valor_session.py` to confirm remaining uses are all bootstrap-related (env file loading, sys.path manipulation) — NOT session-creation defaulting. If any remaining use is session-creation-related, it is a bug and must be removed.
 
 Concrete edits to `tools/sdlc_session_ensure.py`:
 
-10. Replace `working_dir=os.getcwd()` (line 127) with `working_dir=str(_resolve_project_working_directory(project_key))` where `project_key` is the resolved key on line 126. Catch `ProjectKeyResolutionError` / `ProjectsConfigUnavailableError` and bail out of ensure_session rather than creating a mismatched session.
+10. Replace `working_dir=os.getcwd()` (line 127) with a derivation from `projects.json[project_key].working_directory` using `_resolve_project_working_directory(project_key)[0]` (the repo_root path). Catch `ProjectKeyResolutionError` / `ProjectsConfigUnavailableError` and bail out of `ensure_session` by returning `{}` rather than creating a mismatched session.
+
+    > **Implementation Note (concern: `sdlc_session_ensure` currently calls `resolve_project_key(os.getcwd())` at line 126 — this will now raise instead of silently returning "valor"):** The call at line 126 is inside the function's broad `except Exception as e: return {}` (line 143). Confirm that `ProjectKeyResolutionError` and `ProjectsConfigUnavailableError` both inherit from a base that `Exception` catches (they do — `ValueError` and `RuntimeError` both inherit from `Exception`). The existing broad catch will swallow them and return `{}`, which is the correct behavior. Do NOT add a narrower specific catch — the idempotent "if anything fails, don't create a session" semantic is the design. Just add a `logger.debug(...)` line inside the broad catch to record the typed error class name.
 
 Concrete edits to `agent/reflection_scheduler.py`:
 
 11. Replace the blanket `except Exception: project_key = os.environ.get("PROJECT_KEY", "valor")` (lines 398-399) with explicit `except (ProjectKeyResolutionError, ProjectsConfigUnavailableError) as e: logger.warning("reflection scheduler could not resolve project_key via projects.json: %s", e); project_key = os.environ.get("PROJECT_KEY", "valor")`. The fallback stays (this is not the enforcement surface — the CLI is), but the exception path is no longer silent.
 
+    > **Implementation Note (concern: `reflection_scheduler` imports `resolve_project_key` lazily at line 395 — the new typed exceptions must be importable from the same module):** Import the exception classes next to `resolve_project_key` in the same `from tools.valor_session import ...` statement at line 395. Do NOT import them at module top of `reflection_scheduler.py` — keep the lazy import to avoid circular-import hazards (reflection_scheduler is imported early in the worker boot path).
+
 No changes needed to `AgentSession` model, `bridge/telegram_bridge.py`, `agent/sdk_client.py`, `agent/worktree_manager.py`, or `tools/agent_session_scheduler.py` (already correct).
+
+> **Implementation Note (concern: `project_config` DictField shape — `load_config()["projects"][project_key]` may contain nested structures that don't round-trip through Popoto's DictField):** Before passing `project=` to `_push_agent_session(..., project_config=project)`, confirm the shape matches what the bridge writes today. `bridge/telegram_bridge.py:1972-1988` already passes `project_config=project` where `project = projects.get(project_key, {})` — the bridge is the reference. The CLI must pass the SAME dict object returned by `load_config()["projects"][project_key]`, not a filtered subset. This guarantees parity with bridge-created sessions. If Popoto's serializer rejects some nested structure, the bridge would already be failing — if the bridge works, the CLI will too.
 
 ## Failure Path Test Strategy
 
@@ -372,7 +395,9 @@ Solo dev work via `/do-build`. One builder, one validator, one pass.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `ProjectKeyResolutionError(ValueError)` and `ProjectsConfigUnavailableError(RuntimeError)` near the top of `tools/valor_session.py`.
-- Add `_resolve_project_working_directory(project_key: str) -> Path` helper that calls `load_config()` and returns the expanded path, or raises the typed errors.
+- Add `_resolve_project_working_directory(project_key: str) -> tuple[Path, dict]` helper that calls `load_config()` once and returns `(expanded_path, project_dict)`, or raises the typed errors.
+
+> **Implementation Note:** Return the project dict alongside the path so the caller has both values from a single `load_config()` call. The dict becomes `project_config=` on the enqueue; the path becomes the worktree base or `working_dir`. See Technical Approach step 6 for the coupling rationale.
 
 ### 2. Tighten `resolve_project_key` — remove both silent fallbacks
 
@@ -407,9 +432,11 @@ Solo dev work via `/do-build`. One builder, one validator, one pass.
 - **Assigned To**: valor-session-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- When `args.parent` is set and `args.project_key` is not set, load parent via `AgentSession.get_by_id(args.parent)` or equivalent; if found, set `project_key = parent.project_key`.
+- When `args.parent` is set and `args.project_key` is not set, load parent via the existing `_find_session(args.parent)` helper (at `tools/valor_session.py:340`); if found, set `project_key = parent.project_key`.
 - Emit stderr notice: `f"  Inherited project_key={project_key} from parent {parent.agent_session_id}"`.
-- Do NOT copy `parent.working_dir`. `working_dir` is always re-derived.
+- Do NOT copy `parent.working_dir`. `working_dir` is always re-derived from the (possibly inherited) `project_key`.
+
+> **Implementation Note:** If `_find_session(args.parent)` returns `None` and `--project-key` was not passed, do NOT raise — fall through to `resolve_project_key(os.getcwd())`. A typo in `--parent` is a separate concern from mis-routing and should not hard-fail creation when cwd resolution can still produce a valid key. If the cwd ALSO fails to resolve, the existing `ProjectKeyResolutionError` from `resolve_project_key` is what surfaces, which is correct.
 
 ### 5. Migrate `tools/sdlc_session_ensure.py` to the same rule
 
@@ -443,6 +470,10 @@ Solo dev work via `/do-build`. One builder, one validator, one pass.
 - Execute all items in `## Test Impact`.
 - Add anti-regression grep assertions to the new test file.
 - Run `pytest tests/unit/test_valor_session* tests/unit/test_pm_session*` and full unit suite.
+
+> **Implementation Note (concern: mocking `_resolve_project_working_directory` in `test_valor_session_cli.py` — the helper now returns a TUPLE, not a Path):** When monkeypatching the helper, the stub must return `(Path("/tmp/fake_project_root"), {"working_directory": "/tmp/fake_project_root"})` — a 2-tuple. Tests that mock it as `lambda key: Path(...)` will break. The same applies to mocks in `test_pm_session_auto_slug.py` and `test_pm_session_refuse_no_issue.py`. Cross-check every monkeypatch of `_resolve_project_working_directory` before committing.
+
+> **Implementation Note (concern: the anti-regression grep checks in the new test file run as subprocesses — they must use absolute paths and the correct repo root):** The test must locate `tools/valor_session.py` via the repo root, not a hardcoded path. Use `pathlib.Path(__file__).resolve().parents[2] / "tools" / "valor_session.py"` (tests/unit/file.py → parents[0]=unit, [1]=tests, [2]=repo_root). This keeps the test portable across the `/Users/tomcounsell/` vs `/Users/valorengels/` machines.
 
 ### 8. Documentation
 
@@ -480,7 +511,25 @@ Solo dev work via `/do-build`. One builder, one validator, one pass.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — recorded 2026-04-24T09:22:56Z (artifact hash sha256:a4eaf47e…).
+
+**Revision pass applied:** 2026-04-24 (this commit). Each CONCERN below was re-derived from the plan's structure and addressed inline via an **Implementation Note** embedded in the relevant section; see cross-references.
+
+| # | Concern | Section(s) with Implementation Note |
+|---|---------|------------------------------------|
+| C1 | `cmd_create`'s broad `try/except Exception` at line 335 will catch the new typed errors — the exception `str()` must carry the user-facing message | Technical Approach step 5 |
+| C2 | `bridge.routing.load_config()` may be called twice per `cmd_create` invocation (TOCTOU + wasted I/O) | Technical Approach step 6 (returns tuple) + Key Elements bullet on helper |
+| C3 | PM auto-slug derivation must not depend on `working_dir`, and the "PM without slug is refused" path must still fire before any worktree creation | Technical Approach step 7 |
+| C4 | Parent lookup method — use existing `_find_session`, not a new `AgentSession.get_by_id` path; handle `None` by falling through, not raising | Technical Approach step 8, Step by Step Tasks step 4 |
+| C5 | `_repo_root` constant at line 82 is also used by `_load_env` bootstrap (line 83) — do not delete the constant, only remove its use as a `working_dir` default | Technical Approach step 9 |
+| C6 | `sdlc_session_ensure.py`'s existing broad `except Exception` already catches typed errors — no narrower catch needed, but add a logger.debug for traceability | Technical Approach step 10 |
+| C7 | `reflection_scheduler.py` imports `resolve_project_key` lazily — typed exceptions must be imported lazily too to avoid circular-import hazards | Technical Approach step 11 |
+| C8 | `project_config` DictField shape — pass the bridge-identical raw dict, not a filtered subset, to guarantee serializer parity | Technical Approach trailing note + Key Elements bullet |
+| C9 | Mocks of `_resolve_project_working_directory` in existing test files must return the new 2-tuple shape, not a Path | Step by Step Tasks step 7 |
+| C10 | Anti-regression grep checks in the new test file must resolve repo paths portably (works on both `/Users/tomcounsell/` and `/Users/valorengels/`) | Step by Step Tasks step 7 |
+| C11 | Build-phase unit tests must not create real worktrees under `.worktrees/` — use `tmp_path` or mock `get_or_create_worktree` | Solution → Key Elements trailing note |
+
+All concerns are **acknowledged risks**, not blockers. They are embedded as Implementation Notes so the builder reads guidance inline with the step that creates the risk, rather than cross-referencing a separate critique document. Scope and No-Gos are unchanged.
 
 ---
 
