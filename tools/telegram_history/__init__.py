@@ -8,9 +8,13 @@ Backend: Redis/Popoto (replaced SQLite as of 2026-02-24).
 All data is stored in Redis via Popoto models (TelegramMessage, Link, Chat).
 """
 
+import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramHistoryError(Exception):
@@ -20,6 +24,188 @@ class TelegramHistoryError(Exception):
         self.message = message
         self.category = category
         super().__init__(message)
+
+
+# =============================================================================
+# Chat resolution (issue #1163)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class ChatCandidate:
+    """A candidate chat match from name resolution.
+
+    Plain dataclass that is decoupled from the Popoto `Chat` model — callers
+    that format ambiguity errors are not coupled to model-field churn.
+
+    Attributes:
+        chat_id: The chat identifier (string, may be numeric with '-' prefix).
+        chat_name: The stored chat name as registered by the bridge.
+        last_activity_ts: Unix timestamp of last chat activity (`Chat.updated_at`),
+            or None if never updated. Used for recency ordering.
+    """
+
+    chat_id: str
+    chat_name: str
+    last_activity_ts: float | None
+
+
+class AmbiguousChatError(Exception):
+    """Raised when `resolve_chat_id` finds >1 candidate and `allow_ambiguous=False`.
+
+    Carries the full `list[ChatCandidate]` so CLI callers can render a
+    "did you mean" style disambiguation message. Candidates are ordered
+    by `last_activity_ts` desc with `None` sorting last (i.e., most recently
+    active chat first).
+    """
+
+    def __init__(self, candidates: list["ChatCandidate"]):
+        self.candidates = candidates
+        names = ", ".join(f"{c.chat_name!r} ({c.chat_id})" for c in candidates)
+        super().__init__(f"Ambiguous chat name matched {len(candidates)} candidates: {names}")
+
+
+# Conservative punctuation set stripped from both sides during name comparison.
+# `_` IS stripped (Q2 resolved — see plan): slug/channel naming conventions
+# make underscore-vs-space collisions rare enough that the ambiguity detector
+# is the appropriate safety net. Keep emoji / non-ASCII intact.
+_NORMALIZE_STRIP_CHARS = ":-|_"
+
+
+def _normalize_chat_name(s: str) -> str:
+    """Normalize a chat name for comparison.
+
+    Rules:
+      - lowercase
+      - collapse any run of whitespace to a single space
+      - strip leading/trailing `:`, `-`, `|`, `_` characters
+      - preserve emoji and non-ASCII text
+
+    Examples:
+      "PM: PsyOptimal"   -> "pm psyoptimal"
+      "PM PsyOptimal"    -> "pm psyoptimal"
+      "dev_valor"        -> "dev valor"  (note: underscore stripped internally too)
+      ""                 -> ""
+      "   "              -> ""
+      ":::"              -> ""
+
+    Empty/whitespace/all-punctuation inputs normalize to "".
+    """
+    if not s:
+        return ""
+    # Lowercase first so downstream comparisons are case-insensitive.
+    lowered = s.lower()
+    # Replace the conservative punctuation set with a space so we collapse
+    # alongside whitespace in one pass. Example: "pm: psyoptimal" -> "pm  psyoptimal".
+    for ch in _NORMALIZE_STRIP_CHARS:
+        lowered = lowered.replace(ch, " ")
+    # Collapse whitespace runs.
+    collapsed = " ".join(lowered.split())
+    return collapsed
+
+
+def _chat_to_candidate(chat) -> ChatCandidate:
+    """Project a Popoto `Chat` instance to a `ChatCandidate` dataclass.
+
+    Defensive about missing/None attributes — returns a candidate even when
+    the chat has never been updated.
+    """
+    raw_ts = getattr(chat, "updated_at", None)
+    try:
+        ts = float(raw_ts) if raw_ts is not None else None
+    except (TypeError, ValueError):
+        ts = None
+    return ChatCandidate(
+        chat_id=str(chat.chat_id),
+        chat_name=str(chat.chat_name or ""),
+        last_activity_ts=ts,
+    )
+
+
+def _sort_candidates(candidates: list[ChatCandidate]) -> list[ChatCandidate]:
+    """Sort candidates by `last_activity_ts` desc with `None` sorting last.
+
+    A candidate with `last_activity_ts=None` represents a chat that has never
+    been updated and should never outrank one with a real timestamp.
+    """
+    # Secondary sort by chat_name for deterministic ordering when ts is equal
+    # or both None (relevant under Popoto iteration-order non-determinism —
+    # Risk 4 in the plan).
+    return sorted(
+        candidates,
+        key=lambda c: (
+            0 if c.last_activity_ts is not None else 1,
+            -(c.last_activity_ts or 0.0),
+            c.chat_name,
+        ),
+    )
+
+
+def resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]:
+    """Return all chat candidates matching `chat_name`, ordered by recency.
+
+    Runs a 3-stage cascade (exact → case-insensitive exact → normalized
+    substring) and collects ALL hits at each stage. Only advances to the
+    next stage on zero hits. Candidates are projected to `ChatCandidate`
+    at collection time — Popoto model instances never escape this function.
+
+    Ordering: `last_activity_ts` desc, with `None` sorting last.
+
+    Args:
+        chat_name: The name to resolve. Empty/whitespace-only returns [].
+
+    Returns:
+        List of `ChatCandidate`s. Empty if no match.
+
+    Failure mode: Redis / Popoto errors are logged and an empty list is
+    returned. No bare-except swallowing (see plan Task 3 exception-handling
+    note).
+    """
+    if not chat_name or not chat_name.strip():
+        return []
+
+    from models.chat import Chat
+
+    try:
+        import redis as _redis_pkg  # local import — the module is optional at import time
+        import popoto as _popoto_pkg
+
+        # Stage 1: exact match on the stored chat_name (uses Popoto KeyField index).
+        exact = list(Chat.query.filter(chat_name=chat_name))
+        if exact:
+            return _sort_candidates([_chat_to_candidate(c) for c in exact])
+
+        # For stages 2 and 3 we need the full chat list (there are hundreds,
+        # not thousands — acceptable at this scale; see plan Rabbit Holes).
+        all_chats = list(Chat.query.all())
+        if not all_chats:
+            return []
+
+        chat_name_lower = chat_name.lower()
+        normalized_query = _normalize_chat_name(chat_name)
+
+        # Stage 2: case-insensitive exact match.
+        ci_hits = [
+            c for c in all_chats if c.chat_name and c.chat_name.lower() == chat_name_lower
+        ]
+        if ci_hits:
+            return _sort_candidates([_chat_to_candidate(c) for c in ci_hits])
+
+        # Stage 3: normalized substring match (covers `PM PsyOptimal` → `PM: PsyOptimal`).
+        if not normalized_query:
+            return []
+        substring_hits = [
+            c
+            for c in all_chats
+            if c.chat_name and normalized_query in _normalize_chat_name(c.chat_name)
+        ]
+        if substring_hits:
+            return _sort_candidates([_chat_to_candidate(c) for c in substring_hits])
+
+        return []
+    except (_redis_pkg.RedisError, _popoto_pkg.ModelException, _popoto_pkg.QueryException) as e:
+        logger.warning("resolve_chat_candidates failed: %s", e)
+        return []
 
 
 # =============================================================================
@@ -940,43 +1126,50 @@ def list_chats(
 def resolve_chat_id(
     chat_name: str,
     db_path=None,  # Ignored — kept for API compatibility
+    *,
+    allow_ambiguous: bool = False,
 ) -> str | None:
     """Resolve a chat name to its chat_id.
 
-    Supports partial matching and case-insensitive search.
+    Runs the 3-stage cascade via `resolve_chat_candidates` and returns the
+    single most-recent candidate when unambiguous.
 
     Args:
         chat_name: Chat name to search for.
         db_path: Ignored — kept for backward-compatibility signature.
+        allow_ambiguous: If True (keyword-only), silently returns the first
+            (most-recently-active) candidate when multiple match and emits a
+            `logger.warning`. If False (default), raises `AmbiguousChatError`.
+            This exists as a back-compat escape hatch; production CLI callers
+            never set it — they surface the exception to the user.
 
     Returns:
-        chat_id if found, None otherwise.
+        chat_id if a unique match is found (or the most-recent candidate when
+        `allow_ambiguous=True`); None when no candidates match.
+
+    Raises:
+        AmbiguousChatError: when >1 candidate matches and `allow_ambiguous`
+            is False.
     """
-    from models.chat import Chat
-
-    try:
-        # Exact match via KeyField
-        exact = list(Chat.query.filter(chat_name=chat_name))
-        if exact:
-            return exact[0].chat_id
-
-        # Fall back to Python case-insensitive/partial matching
-        all_chats = list(Chat.query.all())
-        chat_name_lower = chat_name.lower()
-
-        # Case-insensitive exact
-        for chat in all_chats:
-            if chat.chat_name and chat.chat_name.lower() == chat_name_lower:
-                return chat.chat_id
-
-        # Partial contains
-        for chat in all_chats:
-            if chat.chat_name and chat_name_lower in chat.chat_name.lower():
-                return chat.chat_id
-
+    candidates = resolve_chat_candidates(chat_name)
+    if not candidates:
         return None
-    except Exception:
-        return None
+    if len(candidates) == 1:
+        return candidates[0].chat_id
+    # >1 candidate
+    if allow_ambiguous:
+        winner = candidates[0]
+        runner_up = candidates[1]
+        logger.warning(
+            "ambiguous chat %r resolved to %s (%s); runner-up %s (%s)",
+            chat_name,
+            winner.chat_name,
+            winner.chat_id,
+            runner_up.chat_name,
+            runner_up.chat_id,
+        )
+        return winner.chat_id
+    raise AmbiguousChatError(candidates)
 
 
 def search_all_chats(
