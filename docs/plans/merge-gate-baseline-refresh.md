@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1084
 last_comment_id:
+revision_applied: true
 ---
 
 # Merge-Gate Baseline: Categorise Failures + Refresh Tool
@@ -65,9 +66,13 @@ No relevant external findings — proceeding with codebase context and training 
 
 **Baseline refresh path (new):**
 1. **Entry point**: Developer runs `python scripts/refresh_test_baseline.py --runs 3` on a clean `main` checkout.
-2. **Run orchestrator**: Script invokes `pytest tests/ --junitxml=/tmp/baseline-run-{i}.xml -q --tb=no -p pytest_timeout --timeout={test_timeout} --timeout-method=thread` N times (default 3). Each run gets its own XML file so runs are independent. The `pytest-timeout` plugin produces a per-test `<failure message="Timeout ..."/>` entry in junitxml — a real, classifiable `hung` verdict per node ID — instead of killing the whole pytest process as `subprocess.run(timeout=...)` would do. This is the design pick that resolves the critique's BLOCKER: `hung` is now reachable.
+2. **Run orchestrator**: Script invokes `pytest tests/ --junitxml={tmpdir}/baseline-run-{i}.xml -q --tb=no -p pytest_timeout --timeout={test_timeout} --timeout-method=thread` N times (default 3). Each run writes its junitxml into a freshly-created `tempfile.TemporaryDirectory()` unique to that run (not `/tmp/baseline-run-{i}.xml` — see Implementation Note in §4). The `pytest-timeout` plugin produces a per-test `<failure message="Failed: Timeout >...">` entry in junitxml — a real, classifiable `hung` verdict per node ID — instead of killing the whole pytest process as `subprocess.run(timeout=...)` would do. This is the design pick that resolves the critique's BLOCKER: `hung` is now reachable.
 3. **Wall-clock safety net**: The entire pytest invocation is still wrapped in `subprocess.run(timeout=global_wall_clock)` where `global_wall_clock = test_timeout * expected_test_count * safety_factor` (default: 3× the sum of per-test timeouts). If `pytest-timeout` fails to terminate a wedged test (rare, e.g., a C extension ignoring the signal), the outer subprocess timeout catches it. When the outer timeout fires, the whole run is treated as UNCLASSIFIABLE for that attempt — the refresh tool logs a warning, discards the junitxml, and continues with the remaining runs. If all N runs hit the outer timeout, the tool exits non-zero without writing.
-4. **Parser**: `xml.etree.ElementTree` reads each XML file. For each `<testcase>`, read `classname + name` for node identity and inspect children: `<failure>` with `message` containing `"Timeout"` (pytest-timeout's signature) → timeout outcome; `<failure>` without that message → fail outcome; `<error>` at session or module level with no per-testcase entry → collection error. Aggregates per-node-ID: pass/fail/timeout/collection-error counts across the N runs.
+4. **Parser**: `xml.etree.ElementTree` reads each XML file. For each `<testcase>`, read `classname + name` for node identity and inspect children: `<failure>` whose `message` attribute starts with `"Failed: Timeout >"` (the exact signature pytest-timeout emits — see Implementation Note below) → timeout outcome; `<failure>` without that signature → fail outcome; `<error>` at session or module level with no per-testcase entry → collection error. Aggregates per-node-ID: pass/fail/timeout/collection-error counts across the N runs.
+
+> **Implementation Note (Revision):** Do NOT match the loose substring `"Timeout"` against `<failure message="...">` — a regular assertion failure whose message incidentally contains the word "Timeout" (e.g., `assert response != "Timeout"`) would be misclassified as `hung`. Match pytest-timeout's exact emitted signature: the `message` attribute begins with the literal prefix `"Failed: Timeout >"` (pytest-timeout formats it as `"Failed: Timeout >{timeout}.0s"` — see pytest-timeout's `timeout_timer.py`). Implementation: `message.startswith("Failed: Timeout >")`, NOT `"Timeout" in message`. Add a unit test case in `tests/unit/test_refresh_test_baseline.py` that feeds a junitxml fixture with a `<failure message="AssertionError: expected 'Timeout' in output">` entry and asserts it classifies as `real`/`flaky` (fail outcome), not `hung`.
+
+> **Implementation Note (Revision):** Do NOT write junitxml to a shared path like `/tmp/baseline-run-{i}.xml`. If pytest is interrupted mid-run (SIGTERM from the outer `--global-timeout`, `Ctrl-C`, OOM kill, disk full), the junitxml file on disk may be truncated, missing its closing `</testsuites>` tag, or have unterminated elements — `xml.etree.ElementTree.parse()` will raise `xml.etree.ElementTree.ParseError`, and older code that wraps `parse()` in a bare `except Exception` would silently produce partial/wrong classifications. Implementation: (a) each pytest invocation runs with `tempfile.TemporaryDirectory()` as the junitxml output location, so partial files from a previous run can NEVER leak into the next run's parse step; (b) wrap `ET.parse(xml_path)` in a `try/except xml.etree.ElementTree.ParseError` (NOT a bare `except`) — on ParseError, log a warning with the run index, discard that run's results, and continue with the remaining runs exactly as the outer-timeout path does today; (c) if all N runs produce ParseError or outer-timeout, exit non-zero without writing. Add a unit test that writes a truncated junitxml (e.g., cut off at mid-`<testcase>`) and asserts the aggregator logs a warning, treats the run as unusable, and does NOT silently produce a partial result.
 5. **Classifier**: For each test that failed at least once across N runs (applied in this order — first match wins):
    - Any collection error → `import_error` (the test couldn't even load; takes precedence because it is structural).
    - Any timeout outcome (pytest-timeout `<failure message="Timeout ...">`) → `hung`. Takes precedence over fail/flaky — a test that hangs once in 3 runs is `hung`, not `flaky`, because a hang is a different failure mode that warrants a different fix.
@@ -95,7 +100,7 @@ No relevant external findings — proceeding with codebase context and training 
 
 - **New dependencies**: One dev dep — `pytest-timeout>=2.3` — added to `pyproject.toml` and locked in `uv.lock`. `xml.etree.ElementTree` is stdlib; `pytest --junitxml` is built-in. Reuses the parsing approach established by PR #484. The pytest-timeout plugin is NOT registered in pytest's default addopts and does NOT affect non-refresh-tool pytest invocations (see Risk R6).
 - **Interface changes**: `data/main_test_baseline.json` gains a new shape (`schema_version: 2` with a `tests` map). Both shapes must be readable by the merge gate during the migration window.
-- **Coupling**: Minor. Adds one new script (`scripts/refresh_test_baseline.py`), touches the Full Suite Gate section of `.claude/commands/do-merge.md`, and updates `pyproject.toml` + `uv.lock`. No Python source changes outside `scripts/` and `tests/`.
+- **Coupling**: Minor. Adds two new scripts (`scripts/refresh_test_baseline.py` and `scripts/baseline_gate.py`; optionally `scripts/_baseline_common.py` if shared helpers emerge), touches the Full Suite Gate section of `.claude/commands/do-merge.md` (replacing the `comm -23` shell block with a `python -m scripts.baseline_gate` invocation), and updates `pyproject.toml` + `uv.lock`. No Python source changes outside `scripts/` and `tests/`.
 - **Data ownership**: `data/main_test_baseline.json` continues to be git-ignored and per-machine. No change. (Centralising the file is deliberately out of scope — see No-Gos.)
 - **Reversibility**: Fully reversible. The new schema is additive; the merge gate still accepts the legacy flat list. Removing `pytest-timeout` and ripping out the refresh tool leaves the merge gate's legacy-only behavior (flat list, shell `comm`) as a working fallback — the markdown-level gate logic would need to be reverted in a single edit to `.claude/commands/do-merge.md`.
 
@@ -179,7 +184,9 @@ The plugin is NOT registered in `pyproject.toml`'s `[tool.pytest.ini_options]` a
     - `generated_at` (ISO-8601 UTC timestamp with `+00:00` suffix — `datetime.now(timezone.utc).isoformat()`): used by the merge gate's staleness warning (see §4 below).
     - `generated_by` (string): exact invocation, for human debugging of drift.
     - `runs` (int): N pytest invocations that produced this file; needed by the classifier's `fail_rate` validation and by future refreshes that compare counts.
-    - `commit` (string): `git rev-parse --short HEAD` at refresh time. Lets a reader confirm which baseline sha their file reflects.
+    - `commit` (string): `git rev-parse --short HEAD` at refresh time, with a `-dirty` suffix appended if the working tree is dirty at capture time (see Implementation Note below). Lets a reader confirm which baseline sha their file reflects AND whether the baseline is reproducible.
+
+    > **Implementation Note (Revision):** A baseline captured against a dirty working tree is inherently irreproducible — two machines checked out at the same SHA with different uncommitted changes would produce different classifications, and a reader looking at the baseline's `commit` field has no way to tell. Implementation: after running `git rev-parse --short HEAD` to get the base SHA, check both `git diff --quiet` (unstaged changes) AND `git diff --cached --quiet` (staged-but-uncommitted). If either exits non-zero, append the literal suffix `-dirty` to the recorded SHA (e.g., `"commit": "bc23403c-dirty"`). The refresh tool does NOT refuse to write a dirty-tree baseline — devs legitimately need to test local changes — but the `-dirty` marker flags the baseline as non-authoritative. The merge gate's staleness warning treats a `-dirty` suffix the same way it treats `bootstrap: true`: always warn. Add a unit test that sets up a tempdir with `git init`, writes an uncommitted change, and asserts the captured `commit` field ends with `-dirty`.
     - `tests` (object): per-node-ID records.
     - `tests.<node_id>.category` (string, one of `real`|`flaky`|`hung`|`import_error`): used by the gate.
     - `tests.<node_id>.fail_rate` (float, `(fail_count + hung_count) / runs`): used by humans to tune thresholds.
@@ -197,7 +204,7 @@ The plugin is NOT registered in `pyproject.toml`'s `[tool.pytest.ini_options]` a
       -p pytest_timeout --timeout={per_test_timeout} --timeout-method=thread
     ```
 
-    Per-test timeouts use `pytest-timeout`'s **thread** method (default), not `signal`. `thread` works cross-platform and does not conflict with pytest-xdist workers. The plugin emits a `<failure message="Timeout (>...s) from pytest-timeout">` entry per timed-out test in junitxml — a real, classifiable per-node outcome.
+    Per-test timeouts use `pytest-timeout`'s **thread** method (default), not `signal`. `thread` works cross-platform and does not conflict with pytest-xdist workers. The plugin emits a `<failure message="Failed: Timeout >{N}.0s">` entry per timed-out test in junitxml — a real, classifiable per-node outcome with a deterministic prefix that the classifier keys off of (see Data Flow §4 Implementation Note for the exact match rule).
 
     Classify by outcome across N runs, applying rules in this precedence order (first match wins):
     - Any collection error for this node → `import_error`
@@ -221,10 +228,13 @@ The plugin is NOT registered in `pyproject.toml`'s `[tool.pytest.ini_options]` a
     Rationale: put it in `scripts/` because it's a developer/automation tool, not imported by the bridge or worker. `tools/` is reserved for code called by the agent via MCP. `--test-timeout 60` (not 120) is chosen because tests/unit's slowest typical test runs in ~8s (pytest-xdist ceiling on local dev) and any single test taking >60s is almost certainly wedged — a lower default catches real hangs faster while still being forgiving. Devs can raise it with `--test-timeout 120` for slow integration suites. `--global-timeout` exists to catch the edge case where pytest-timeout's thread method fails (e.g., C-extension ignoring the signal).
 
 4. **Merge-gate comparison logic** (see Data Flow step 5):
-    - The gate uses an inline `python3 - <<'PY'` heredoc block in `.claude/commands/do-merge.md` (not a standalone module) for a first-cut implementation. This keeps the diff to `do-merge.md` self-contained and readable; no new importable module is introduced that only `do-merge.md` uses. A later refactor can extract the block into `scripts/refresh_test_baseline.py` as a reusable function — see §4a below.
-    - The block produces four structured outputs (JSON to stdout, consumed by surrounding shell): `new_blocking_regressions` (list of node IDs), `new_flaky_occurrences` (list), `preexisting_failures_present` (count), `baseline_keys_no_longer_failing` (advisory list).
+    - The gate invokes a dedicated module, `scripts/baseline_gate.py`, via `python -m scripts.baseline_gate --pr-junitxml /tmp/pr_run.xml --baseline data/main_test_baseline.json`. The script loads the baseline (auto-promoting legacy shape; bootstrap if missing), parses the PR junitxml, and emits the four structured outputs (JSON to stdout).
+    - `.claude/commands/do-merge.md` calls the script — it does NOT embed the comparison logic as a heredoc.
+    - The script produces four structured outputs (JSON to stdout, consumed by surrounding shell): `new_blocking_regressions` (list of node IDs), `new_flaky_occurrences` (list), `preexisting_failures_present` (count), `baseline_keys_no_longer_failing` (advisory list).
     - The gate blocks if `len(new_blocking_regressions) > 0`.
     - **Staleness warning**: if `generated_at` is more than 14 days old at merge time, the gate prints a non-blocking WARNING line: "Baseline is N days old — consider `python scripts/refresh_test_baseline.py`". This is the primary consumer of the `generated_at` field.
+
+> **Implementation Note (Revision):** Do NOT embed the comparison logic as an inline `python3 - <<'PY'` heredoc inside `.claude/commands/do-merge.md`. Heredocs in markdown are untestable — there is no way to import the logic into a unit test, so every change requires manual end-to-end validation. Instead, extract the comparison logic up-front to `scripts/baseline_gate.py` as a standalone script with a clean `main()` entrypoint and pure-function helpers (`load_baseline`, `parse_pr_failures`, `compute_gate_verdict`). The markdown skill calls `python -m scripts.baseline_gate --pr-junitxml ... --baseline ...` and consumes the JSON it emits on stdout. This makes every line of gate logic reachable from `tests/unit/test_do_merge_baseline.py` via direct function imports, and keeps future iteration cheap (edit Python, not markdown + heredoc). Update Step §2 (`update-merge-gate`) to reflect the extraction: create `scripts/baseline_gate.py` first, then have `.claude/commands/do-merge.md` invoke it. Add a task in Step §1 or a new Step §2a for the extraction if it crosses task boundaries.
 
 5. **Bootstrap path (no baseline file present)**:
     - Current `/do-merge` already has this path: if `data/main_test_baseline.json` is missing and tests fail, write the current failure list as the new baseline and allow the merge.
@@ -232,7 +242,7 @@ The plugin is NOT registered in `pyproject.toml`'s `[tool.pytest.ini_options]` a
     - A bootstrap baseline is strictly a stop-gap; the first `python scripts/refresh_test_baseline.py` run overwrites it (dropping the `bootstrap` flag) and properly categorises. This is documented in `docs/features/merge-gate-baseline.md`.
 
 6. **Merge-gate runtime imports from refresh tool**:
-    - The merge gate's Python block implements the minimum logic (load baseline, diff sets, emit JSON) inline to avoid the markdown skill depending on an importable module. If future work shows duplication pain (the Python block in `do-merge.md` and the classifier in `refresh_test_baseline.py` drift), extract a shared module to `scripts/baseline_lib.py` and have both import from it. Out of scope for this plan.
+    - The merge gate invokes `scripts/baseline_gate.py` (see §4) which implements the minimum logic (load baseline, diff sets, emit JSON). Both `scripts/baseline_gate.py` and `scripts/refresh_test_baseline.py` may share junitxml-parsing helpers via a small `scripts/_baseline_common.py` module if duplication emerges during build. The markdown skill never imports Python directly — it shells out to `python -m scripts.baseline_gate`.
 
 7. **Migration**:
     - Merge gate: if loaded JSON has `failing_tests` key (and no `tests` key), treat as legacy. In-memory promote each entry to `{"category": "real", "fail_rate": 1.0, "hung_count": 0}`. No file write from the merge gate — only the refresh tool upgrades the on-disk format.
@@ -250,7 +260,10 @@ The plugin is NOT registered in `pyproject.toml`'s `[tool.pytest.ini_options]` a
 
 ### Exception Handling Coverage
 - [ ] The parser for `junitxml` must not silently swallow missing attributes. Add a test that feeds a malformed junitxml (e.g., missing `classname`) and asserts the tool reports the error with a node ID hint, not a cryptic `KeyError`.
-- [ ] The merge-gate Python block must not silently pass when `data/main_test_baseline.json` is empty/malformed. Ensure the existing bootstrap path is preserved and add a test for "malformed JSON, no schema_version, no failing_tests" → treat as no baseline.
+- [ ] The merge-gate (`scripts/baseline_gate.py`) must not silently pass when `data/main_test_baseline.json` is empty/malformed. Ensure the existing bootstrap path is preserved and add a test for "malformed JSON, no schema_version, no failing_tests" → treat as no baseline.
+- [ ] **Truncated junitxml** (Concern 4 resolution): Write a test fixture that cuts a valid junitxml at mid-`<testcase>` (simulating a SIGTERM'd pytest run). Assert the refresh-tool aggregator catches `xml.etree.ElementTree.ParseError` specifically (NOT a bare `except`), logs a warning with the run index, treats the run as unusable, and does NOT produce a partial classification. If all N runs produce ParseError or outer-timeout, assert the tool exits non-zero without writing.
+- [ ] **Loose `Timeout` substring** (Concern 1 resolution): Feed a junitxml fixture with a `<failure message="AssertionError: expected 'Timeout' in output">` entry and assert the classifier treats it as a fail outcome (classifying as `real` or `flaky` depending on count), NOT as `hung`. Conversely, feed a fixture with `<failure message="Failed: Timeout >60.0s">` and assert it classifies as `hung`.
+- [ ] **Dirty-tree commit capture** (Concern 3 resolution): In a tempdir `git init` + make an uncommitted change, run the refresh tool's writer path, and assert the emitted `commit` field ends with the literal suffix `-dirty`. Second case: on a clean tree, assert the suffix is absent.
 
 ### Empty/Invalid Input Handling
 - [ ] Zero failures across all runs → write empty `tests: {}` map, not a missing key.
@@ -262,8 +275,8 @@ The plugin is NOT registered in `pyproject.toml`'s `[tool.pytest.ini_options]` a
 
 ## Test Impact
 
-- [ ] `tests/unit/test_do_merge_baseline.py` (create) — NEW file for the categorised baseline logic. Covers: legacy-shape load, v2 load, new-regression detection, flaky-occurrence pass-through, `hung` passthrough, staleness warning, count-coincident regression test (simulated PR #1054/#1070 scenario).
-- [ ] `tests/unit/test_refresh_test_baseline.py` (create) — NEW file for the refresh tool. Covers: N-run aggregation, fail-rate classifier boundaries (0%, 1-of-3, 2-of-3, 3-of-3), classifier precedence (2 fails + 1 timeout → `hung`, not `flaky`), timeout → `hung`, collection error → `import_error`, `--merge` preserves notes, `--dry-run` defaults output to stdout, outer `--global-timeout` discards the stuck run.
+- [ ] `tests/unit/test_do_merge_baseline.py` (create) — NEW file for the merge-gate comparison logic. Imports `load_baseline`, `parse_pr_failures`, `compute_gate_verdict`, `format_staleness_warning` directly from `scripts/baseline_gate.py` (the extraction in Concern 2 resolution makes this possible). Covers: legacy-shape load, v2 load, new-regression detection, flaky-occurrence pass-through, `hung` passthrough, staleness warning (14-day-old `generated_at`, `bootstrap: true`, `-dirty` commit suffix), count-coincident regression test (simulated PR #1054/#1070 scenario).
+- [ ] `tests/unit/test_refresh_test_baseline.py` (create) — NEW file for the refresh tool. Covers: N-run aggregation, fail-rate classifier boundaries (0%, 1-of-3, 2-of-3, 3-of-3), classifier precedence (2 fails + 1 timeout → `hung`, not `flaky`), timeout → `hung` via **exact-prefix match** on `"Failed: Timeout >"` (Concern 1), loose-substring negative case (`"AssertionError: ... Timeout ..."` → `real`/`flaky`, not `hung`), collection error → `import_error`, truncated-junitxml → `ParseError` caught and run discarded (Concern 4), dirty-tree commit capture emits `-dirty` suffix (Concern 3), clean-tree commit capture has no suffix, `--merge` preserves notes, `--dry-run` defaults output to stdout, outer `--global-timeout` discards the stuck run, all-runs-ParseError → exit non-zero.
 - [ ] No existing tests affected — `/do-merge`'s baseline handling has no current unit tests (it's embedded in the markdown skill), and PR #484's test infrastructure (`tests/unit/test_baseline_verifier*.py` if present) is a different layer. No UPDATE/DELETE/REPLACE actions on existing tests. The regression tests are additive.
 - [ ] No existing test is expected to regress from adding `pytest-timeout` as a dep (validated in Step 5: `pytest tests/unit/ -q` runtime unchanged within 5%). If regressions appear, they are blockers — the critique's BLOCKER fix must not break the existing suite.
 
@@ -412,25 +425,27 @@ The builder handles this plan end-to-end: it's a single-module script + one mark
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `scripts/refresh_test_baseline.py` with argparse for `--runs`, `--output`, `--test-timeout`, `--global-timeout`, `--merge`, `--dry-run`, `--verbose`. Default `--output`: `data/main_test_baseline.json` in normal mode, `-` (stdout) in `--dry-run` mode.
-- Implement the N-run orchestrator: for i in range(N), invoke `pytest tests/ -q --tb=no --junitxml=/tmp/baseline-run-{i}.xml -p pytest_timeout --timeout={test_timeout} --timeout-method=thread`. Wrap each pytest invocation in `subprocess.run(timeout=global_timeout)` as a safety net; on `TimeoutExpired` discard that run's junitxml and continue with the remaining runs.
-- Implement the junitxml aggregator: parse each XML with `xml.etree.ElementTree`, for each `<testcase>` read `classname::name` as node ID and inspect children. Distinguish `<failure message="Timeout ..."/>` (from pytest-timeout) from regular `<failure>` and `<error>`. Aggregate per-node-ID: pass/fail/timeout/collection-error counts across the surviving runs.
+- Implement the N-run orchestrator: for i in range(N), create a `tempfile.TemporaryDirectory()` (per-run, to prevent cross-run junitxml contamination — see Data Flow §4 Implementation Note) and invoke `pytest tests/ -q --tb=no --junitxml={tmpdir}/baseline-run.xml -p pytest_timeout --timeout={test_timeout} --timeout-method=thread`. Wrap each pytest invocation in `subprocess.run(timeout=global_timeout)` as a safety net; on `TimeoutExpired` discard that run's junitxml and continue with the remaining runs.
+- Implement the junitxml aggregator: parse each XML with `xml.etree.ElementTree`, wrapping `ET.parse(xml_path)` in a `try/except xml.etree.ElementTree.ParseError` (NOT a bare `except Exception`). On `ParseError`, log a warning with the run index and discard that run's results. For each successfully-parsed `<testcase>`, read `classname::name` as node ID and inspect children. Distinguish `<failure>` entries whose `message` attribute starts with `"Failed: Timeout >"` (from pytest-timeout) from regular `<failure>` and `<error>` — match the exact prefix, not loose substring (see Data Flow §4 Implementation Note). Aggregate per-node-ID: pass/fail/timeout/collection-error counts across the surviving runs.
 - Implement the classifier with explicit precedence order (first match wins): `import_error` (any collection error) → `hung` (any pytest-timeout failure) → `real` (100% non-pass, zero timeouts, zero collection errors) → `flaky` (1-99% non-pass, zero timeouts, zero collection errors). Include assert-based unit tests at each boundary.
-- Implement the writer: emit schema v2 JSON with all required top-level fields (`schema_version: 2`, `generated_at` via `datetime.now(timezone.utc).isoformat()`, `generated_by` recording the full argv, `runs`, `commit` via `git rev-parse --short HEAD`, `tests` map). Support `--merge` to preserve `note` fields from the existing file.
-- If all N runs hit the outer `--global-timeout`, log an error and exit non-zero without writing.
+- Implement the writer: emit schema v2 JSON with all required top-level fields (`schema_version: 2`, `generated_at` via `datetime.now(timezone.utc).isoformat()`, `generated_by` recording the full argv, `runs`, `commit` via `git rev-parse --short HEAD` with a `-dirty` suffix appended when `git diff --quiet` OR `git diff --cached --quiet` exits non-zero (see Technical Approach §1 Implementation Note), `tests` map). Support `--merge` to preserve `note` fields from the existing file.
+- If all N runs hit the outer `--global-timeout` OR all produce `ParseError`, log an error and exit non-zero without writing.
 
-### 2. Update /do-merge comparison logic
+### 2. Extract and wire the merge-gate comparison script
 - **Task ID**: update-merge-gate
 - **Depends On**: add-pytest-timeout-dep (can run in parallel with build-refresh-tool after dep task lands)
 - **Validates**: `tests/unit/test_do_merge_baseline.py` (create)
 - **Assigned To**: baseline-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Replace the shell-based `comm -23` block in `.claude/commands/do-merge.md` (lines ~226-284) with an inline `python3 - <<'PY'` heredoc block that: loads the baseline (auto-promoting legacy shape; bootstrap if missing), parses `/tmp/pr_run.xml` for PR failures, computes four output buckets (`new_blocking_regressions`, `new_flaky_occurrences`, `preexisting_failures_present`, `baseline_keys_no_longer_failing`), emits the verdict. Blocks on any non-empty `new_blocking_regressions`.
+- Create `scripts/baseline_gate.py` with a `main()` entrypoint and pure-function helpers (`load_baseline(path) -> dict`, `parse_pr_failures(junitxml_path) -> set[str]`, `compute_gate_verdict(baseline, pr_failures) -> dict`, `format_staleness_warning(baseline, now) -> str | None`). The script reads `--pr-junitxml` and `--baseline` flags, emits a JSON verdict to stdout with keys `new_blocking_regressions`, `new_flaky_occurrences`, `preexisting_failures_present`, `baseline_keys_no_longer_failing`, and exits with code 0 (all checks pass) or 1 (new blocking regressions). Reuse junitxml parsing helpers from `scripts/refresh_test_baseline.py` (or extract to a shared `scripts/_baseline_common.py` if both scripts need them) — including the exact-prefix timeout match (`"Failed: Timeout >"`) and the ParseError-safe parse (see Data Flow §4 Implementation Notes).
+- Replace the shell-based `comm -23` block in `.claude/commands/do-merge.md` (lines ~226-284) with a single invocation: `python -m scripts.baseline_gate --pr-junitxml /tmp/pr_run.xml --baseline data/main_test_baseline.json`. The markdown no longer embeds Python comparison logic as a heredoc — it shells out to the script.
 - Update the PR-branch pytest invocation to `pytest tests/ -q --tb=no --junitxml=/tmp/pr_run.xml` (no pytest-timeout — merge-gate does not classify hangs).
-- Add the staleness warning: if the loaded baseline's `generated_at` is more than 14 days old (or the file has `"bootstrap": true`), print a non-blocking WARNING.
-- Preserve the existing bootstrap path (missing file → write current failures as baseline). Update the bootstrap writer to emit schema v2 with everything categorised as `real` (a single run can't distinguish real from flaky), plus `"bootstrap": true` at the top level.
+- Implement the staleness warning inside `scripts/baseline_gate.py`: if the loaded baseline's `generated_at` is more than 14 days old, the file has `"bootstrap": true`, or `commit` ends with `-dirty`, emit a non-blocking `WARNING:` line to stderr (and include the reason in the JSON verdict).
+- Preserve the existing bootstrap path (missing file → write current failures as baseline). Update the bootstrap writer (still in `.claude/commands/do-merge.md` or extracted into `scripts/baseline_gate.py --bootstrap-write`) to emit schema v2 with everything categorised as `real` (a single run can't distinguish real from flaky), plus `"bootstrap": true` at the top level.
 - Preserve the post-merge reset path; update it to write `{"schema_version": 2, "generated_at": "<iso-utc>", "runs": 0, "commit": "<sha>", "tests": {}}`.
-- Add an inline comment block at the top of the modified gate pointing to `docs/features/merge-gate-baseline.md`.
+- Add an inline comment block at the top of the modified gate pointing to `docs/features/merge-gate-baseline.md` and naming `scripts/baseline_gate.py` as the logic location.
+- Because the gate logic now lives in `scripts/baseline_gate.py`, `tests/unit/test_do_merge_baseline.py` can import `load_baseline`, `parse_pr_failures`, and `compute_gate_verdict` directly — no shell subprocess needed in the unit tests (this is the key win of the extraction, see Technical Approach §4 Implementation Note).
 
 ### 3. Regression tests for count-coincidence scenario
 - **Task ID**: build-regression-test
@@ -476,9 +491,13 @@ The builder handles this plan end-to-end: it's a single-module script + one mark
 | Refresh-tool tests pass | `pytest tests/unit/test_refresh_test_baseline.py -q` | exit code 0 |
 | Merge-gate tests pass | `pytest tests/unit/test_do_merge_baseline.py -q` | exit code 0 |
 | Regression scenario blocks | `pytest tests/unit/test_do_merge_baseline.py::test_count_coincident_regression_is_blocked -q` | exit code 0 |
-| Lint clean | `python -m ruff check scripts/refresh_test_baseline.py tests/unit/` | exit code 0 |
-| Format clean | `python -m ruff format --check scripts/refresh_test_baseline.py tests/unit/` | exit code 0 |
+| Exact-prefix timeout match | `pytest tests/unit/test_refresh_test_baseline.py::test_loose_timeout_substring_not_misclassified -q` | exit code 0 |
+| Truncated junitxml handled | `pytest tests/unit/test_refresh_test_baseline.py::test_truncated_junitxml_raises_parse_error -q` | exit code 0 |
+| Dirty-tree commit suffix | `pytest tests/unit/test_refresh_test_baseline.py::test_dirty_tree_commit_suffix -q` | exit code 0 |
+| Lint clean | `python -m ruff check scripts/refresh_test_baseline.py scripts/baseline_gate.py tests/unit/` | exit code 0 |
+| Format clean | `python -m ruff format --check scripts/refresh_test_baseline.py scripts/baseline_gate.py tests/unit/` | exit code 0 |
 | Refresh tool dry-run to stdout | `python scripts/refresh_test_baseline.py --dry-run --runs 1` | exit code 0; valid JSON on stdout; `data/main_test_baseline.json` unchanged |
+| baseline_gate script callable | `python -m scripts.baseline_gate --help` | exit code 0 |
 | pytest-timeout not default | `pytest tests/unit/test_sdlc_skill_md_parity.py -q` | exit code 0; no timeout applied |
 | pytest-timeout via refresh tool | `python scripts/refresh_test_baseline.py --dry-run --runs 1 --test-timeout 30` | exit code 0; junit shows `<timeout>` for any >30s test |
 | uv.lock synced | `uv lock --check` | exit code 0 |
@@ -516,6 +535,20 @@ All references to `subprocess.run(timeout=...)` as the per-test mechanism have b
 1. **`--test-timeout 120` default** — Lowered to 60s because typical slow tests in `tests/unit` run in ~8s. Devs with slow integration suites can pass `--test-timeout 120`.
 2. **`--output` default in dry-run** — In `--dry-run` mode, `--output` now defaults to `-` (stdout), so accidentally dropping `--dry-run` does NOT silently overwrite the live baseline.
 3. **ISO-8601 `Z` suffix** — Example JSON corrected from `...Z` to `+00:00` to match what `datetime.now(timezone.utc).isoformat()` actually produces.
+
+### Second-Cycle Concerns (READY TO BUILD with concerns → revision pass)
+
+The re-critique returned **READY TO BUILD (with concerns)** with four additive concerns. Each is now embedded in the plan text as an Implementation Note (Revision) and reflected in the Step by Step Tasks, Failure Path Test Strategy, Test Impact, and Verification sections. No plan content was rewritten — the base design holds.
+
+1. **Timeout message match too loose** (Data Flow §4, Technical Approach §2) — Matcher changed from substring `"Timeout"` to exact prefix `"Failed: Timeout >"` (pytest-timeout's actual emitted signature). New test case `test_loose_timeout_substring_not_misclassified` asserts a `<failure message="AssertionError: ... Timeout ...">` does NOT classify as `hung`.
+
+2. **Heredoc in markdown untestable** (Technical Approach §4, §6, Architectural Impact, Step §2) — Comparison logic extracted up-front to `scripts/baseline_gate.py` with a clean `main()` and pure-function helpers (`load_baseline`, `parse_pr_failures`, `compute_gate_verdict`). `.claude/commands/do-merge.md` invokes `python -m scripts.baseline_gate` instead of embedding a Python heredoc. Unit tests in `tests/unit/test_do_merge_baseline.py` import the helpers directly — no shell subprocess needed.
+
+3. **Dirty-tree commit capture** (Technical Approach §1, Step §1) — The refresh tool's writer now checks `git diff --quiet` AND `git diff --cached --quiet` when capturing `commit`. If either exits non-zero, appends literal `-dirty` suffix (e.g., `"commit": "bc23403c-dirty"`). Staleness warning treats `-dirty` commits the same as `bootstrap: true` — always warn. New test case `test_dirty_tree_commit_suffix`.
+
+4. **Partial junitxml contamination** (Data Flow §2 and §4, Step §1) — Each pytest invocation writes junitxml into a per-run `tempfile.TemporaryDirectory()` (not shared `/tmp/baseline-run-{i}.xml`) so truncated files from one run cannot leak into the next. The aggregator wraps `ET.parse()` in `try/except xml.etree.ElementTree.ParseError` (NOT bare `except`); on ParseError the run is discarded with a warning. If all N runs produce ParseError or outer-timeout, the tool exits non-zero without writing. New test case `test_truncated_junitxml_raises_parse_error`.
+
+Plan frontmatter updated: `revision_applied: true`. Ready for `/do-build` on next dispatch.
 
 ---
 
