@@ -345,23 +345,23 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/design_system_sync.py` has no bare `except Exception: pass`. All `subprocess.CalledProcessError` from `npx` invocations bubble with the stderr captured; all `json.JSONDecodeError` from malformed `.pen` input raises `SystemExit(2)` with file:line context.
-- [ ] The validator `validate_design_system_sync.py` MUST NOT crash on non-`Bash` tool inputs — it early-returns with no-op when `tool_name != "Bash"` or when the command doesn't match the `docs/designs/**` regex.
+- [x] `tools/design_system_sync.py` has no bare `except Exception: pass`. All `subprocess.CalledProcessError` from `npx` invocations bubble with the stderr captured; all `json.JSONDecodeError` from malformed `.pen` input raises `SystemExit(2)` with file:line context.
+- [x] The validator `validate_design_system_sync.py` MUST NOT crash on non-`Bash` tool inputs — it early-returns with no-op when `tool_name != "Bash"` or when the command doesn't match the `docs/designs/**` regex.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty `.pen` (`{}`) → generator emits minimal DESIGN.md with `version: alpha`, `name: (unnamed)`, empty tokens; linter surfaces `missing-primary` / `missing-typography` errors with clear messages (not silent pass).
-- [ ] Missing `.pen` file → `--check` / `--generate` both exit 2 with "design-system.pen not found at <path>".
-- [ ] Unmapped variable prefix → generator logs a warning to stderr AND fails `--check` with exit 1 (not a silent drop). User must either rename the variable or pass `--drop-unmapped`.
-- [ ] Non-reusable frame with `Category/Variant` name → warning only (not error) — the component was intentionally non-reusable.
+- [x] Empty `.pen` (`{}`) → generator emits minimal DESIGN.md with `version: alpha`, `name: (unnamed)`, empty tokens; linter surfaces `missing-primary` / `missing-typography` errors with clear messages (not silent pass).
+- [x] Missing `.pen` file → `--check` / `--generate` both exit 2 with "design-system.pen not found at <path>".
+- [x] Unmapped variable prefix → generator logs a warning to stderr AND fails `--check` with exit 1 (not a silent drop). User must either rename the variable or pass `--drop-unmapped`.
+- [x] Non-reusable frame with `Category/Variant` name → warning only (not error) — the component was intentionally non-reusable.
 
 ### Error State Rendering
-- [ ] Lint failure path: `npx @google/design.md lint` exit 1 causes `--all` to exit 1 with the linter's stderr passed through verbatim. Tests assert the linter's output reaches the user.
-- [ ] Drift-detection block: when the PreToolUse hook fires `decision: block`, the `reason` string names the specific artifact that drifted (e.g. "brand.css differs from generated output — run `python -m tools.design_system_sync --generate`"). Tested via simulated hook input fixtures.
+- [x] Lint failure path: `npx @google/design.md lint` exit 1 causes `--all` to exit 1 with the linter's stderr passed through verbatim. Tests assert the linter's output reaches the user.
+- [x] Drift-detection block: when the PreToolUse hook fires `decision: block`, the `reason` string names the specific artifact that drifted (e.g. "brand.css differs from generated output — run `python -m tools.design_system_sync --generate`"). Tested via simulated hook input fixtures.
 
 ## Test Impact
 
-- [ ] **No existing tests affected** — `tools/design_system_sync.py`, `.claude/hooks/validators/validate_design_system_sync.py`, and `.claude/hooks/validators/validate_design_system_readonly.py` are new files. The `do-design-system` skill has no existing automated tests (skills are validated by human review and runtime invocation), so rewriting its Step 6 & Step 7 documentation is a doc-only edit with no test coverage to update.
-- [ ] New tests to add (covered under Step by Step Tasks):
+- [x] **No existing tests affected** — `tools/design_system_sync.py`, `.claude/hooks/validators/validate_design_system_sync.py`, and `.claude/hooks/validators/validate_design_system_readonly.py` are new files. The `do-design-system` skill has no existing automated tests (skills are validated by human review and runtime invocation), so rewriting its Step 6 & Step 7 documentation is a doc-only edit with no test coverage to update.
+- [x] New tests to add (covered under Step by Step Tasks):
   - `tests/unit/tools/test_design_system_sync.py` — determinism (twice-run byte equality on the fixture `.pen`), schema mapping (each prefix category), empty-`.pen` handling, unmapped-variable warning path, lint-failure propagation, `--pen`/`--css-root`/TOML resolution precedence, **`--no-node` fallback path** (monkeypatch `shutil.which` to simulate missing Node; assert `--generate` falls back with warning and `--all` exits 2), **`--audit` repo-root walk** (assert exit 2 + actionable message when run from a tempdir outside any git tree), **`--audit` initial-pass placeholder** (mock `git show` to exit 128; assert the placeholder text is emitted and the command exits 0), **`--audit` stale-warn** (run `--audit` twice without mutating `.pen`; assert second run emits the stderr stale warning).
   - `tests/unit/hooks/test_validate_design_system_sync.py` — hook reads stdin JSON (NOT `$CLAUDE_HOOK_INPUT`); fires only on Bash commands matching the filename regex; returns `decision: block` on drift; returns no-op on non-Bash, non-matching, or unrelated commits (`git add README.md`, etc.); fail-opens on internal error.
   - `tests/unit/hooks/test_validate_design_system_readonly.py` — hook blocks Write/Edit on generated-artifact filenames; permits Write on `.pen`; no-ops on unrelated paths; matcher regex (`"Write|Edit"` vs two blocks) registered successfully.
@@ -481,28 +481,28 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 
 ## Success Criteria
 
-- [ ] `tests/fixtures/design_system/design-system.pen` exists, is minimal, and opens cleanly in the Pencil desktop app (manual verification). **No `docs/designs/` directory is created in the ai/ repo.**
-- [ ] `tests/fixtures/design_system/design-system-sync.toml` declares a fixture `<css-root>` so the generator can be invoked without explicit `--css-root`.
-- [ ] `python -m tools.design_system_sync --generate --pen tests/fixtures/design_system/design-system.pen` emits `tests/fixtures/design_system/design-system.md` with DESIGN.md-compliant YAML frontmatter, plus `brand.css` and `source.css` under the fixture's `<css-root>` with byte-identical token names in both files.
-- [ ] Running `--generate` twice produces byte-identical output (determinism, unit test).
-- [ ] `npx --no-install @google/design.md lint tests/fixtures/design_system/design-system.md` exits 0 on the fixture.
-- [ ] `npx --no-install @google/design.md export --format dtcg` and `--format tailwind` both succeed and their output is committed to `tests/fixtures/design_system/exports/tokens.dtcg.json` and `tests/fixtures/design_system/exports/tailwind.theme.json`.
-- [ ] `python -m tools.design_system_sync --check --pen tests/fixtures/design_system/design-system.pen` exits 0 on a freshly generated tree and exits 1 with a unified-diff stderr message when an artifact is manually mutated out-of-band.
-- [ ] `python -m tools.design_system_sync --audit` runs against a prior pass (or emits the initial-pass placeholder) and prints markdown tables suitable for pasting into `gap-audit.md`.
-- [ ] `.claude/skills/do-design-system/SKILL.md` Step 6 and Step 7 rewritten to invoke the generator; inline safety-gate assertion at L315-322 augmented with three `assert` lines refusing writes to `design-system.md`, `brand.css`, `source.css`.
-- [ ] Drift-detection validator `validate_design_system_sync.py` registered as PreToolUse on Bash (appended to existing matcher block), reads stdin JSON, blocks commit on drift, fail-open on internal error. Emits one JSONL line per invocation to `logs/validate_design_system_sync.jsonl` with `{ts, tool_name, matched, result, duration_ms, reason, error}`. Path-anchored filename regex (`(?:^|/)` prefix on `brand.css` and `source.css`) prevents false positives on `my-brand.css` / `source.css.bak`. Respects `DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch (logs `result: "bypassed"`).
-- [ ] Read-only validator `validate_design_system_readonly.py` registered as PreToolUse on Write/Edit, blocks edits to generated artifacts by filename regex, preserves `.pen` whitelist. Respects the same `DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch as the drift validator.
-- [ ] Generator categorizes `.pen` variables using **longest-prefix-wins** — `--text-size-md` resolves to typography (not colors), locked in by unit test.
-- [ ] Generator enumerates component children in **sorted order by variable name** before scanning for the "first child with fill ref" — unit test asserts byte-identical output across two `.pen` files that differ only in child insertion order.
-- [ ] `package.json` at ai/ repo root pins `@google/design.md@0.1.1`; `package-lock.json` committed; `node_modules/` in `.gitignore`.
-- [ ] `docs/features/design-system-tooling.md` exists and covers the pipeline (including `--pen` / `--css-root` / TOML resolution), mapping, regenerate workflow, the two-layer safety-gate model (inline assertion + Write/Edit hook), the Node-absent fallback semantics, the `--audit` temporal-ordering requirement, and the "Adopting this in a consumer repo" section with both adoption patterns.
-- [ ] `docs/features/README.md` index updated.
-- [ ] `python -m tools.design_system_sync --generate --pen <fixture> --no-node` succeeds with a stderr warning when Node is removed from PATH (unit test covers this by monkeypatching `shutil.which`).
-- [ ] `python -m tools.design_system_sync --audit --pen <fixture>` exits 2 with an actionable error when no git repo is found above the pen path AND no `--repo-root` is passed (unit test covers this with a tempdir outside any git tree).
-- [ ] `python -m tools.design_system_sync --audit` emits the "initial pass — no prior diff" placeholder when `git show HEAD:<pen-dir>/design-system.md` exits 128 (first-pass case, unit test covers).
-- [ ] `scripts/remote-update.sh` runs `npm ci --only=prod` when `package.json` exists.
-- [ ] Tests pass (`/do-test`) — new unit tests for the generator, hooks (stdin-JSON fixtures), and integration test.
-- [ ] `python -m ruff check .` and `python -m ruff format --check .` exit 0.
+- [x] `tests/fixtures/design_system/design-system.pen` exists, is minimal, and opens cleanly in the Pencil desktop app (manual verification). **No `docs/designs/` directory is created in the ai/ repo.**
+- [x] `tests/fixtures/design_system/design-system-sync.toml` declares a fixture `<css-root>` so the generator can be invoked without explicit `--css-root`.
+- [x] `python -m tools.design_system_sync --generate --pen tests/fixtures/design_system/design-system.pen` emits `tests/fixtures/design_system/design-system.md` with DESIGN.md-compliant YAML frontmatter, plus `brand.css` and `source.css` under the fixture's `<css-root>` with byte-identical token names in both files.
+- [x] Running `--generate` twice produces byte-identical output (determinism, unit test).
+- [x] `npx --no-install @google/design.md lint tests/fixtures/design_system/design-system.md` exits 0 on the fixture.
+- [x] `npx --no-install @google/design.md export --format dtcg` and `--format tailwind` both succeed and their output is committed to `tests/fixtures/design_system/exports/tokens.dtcg.json` and `tests/fixtures/design_system/exports/tailwind.theme.json`.
+- [x] `python -m tools.design_system_sync --check --pen tests/fixtures/design_system/design-system.pen` exits 0 on a freshly generated tree and exits 1 with a unified-diff stderr message when an artifact is manually mutated out-of-band.
+- [x] `python -m tools.design_system_sync --audit` runs against a prior pass (or emits the initial-pass placeholder) and prints markdown tables suitable for pasting into `gap-audit.md`.
+- [x] `.claude/skills/do-design-system/SKILL.md` Step 6 and Step 7 rewritten to invoke the generator; inline safety-gate assertion at L315-322 augmented with three `assert` lines refusing writes to `design-system.md`, `brand.css`, `source.css`.
+- [x] Drift-detection validator `validate_design_system_sync.py` registered as PreToolUse on Bash (appended to existing matcher block), reads stdin JSON, blocks commit on drift, fail-open on internal error. Emits one JSONL line per invocation to `logs/validate_design_system_sync.jsonl` with `{ts, tool_name, matched, result, duration_ms, reason, error}`. Path-anchored filename regex (`(?:^|/)` prefix on `brand.css` and `source.css`) prevents false positives on `my-brand.css` / `source.css.bak`. Respects `DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch (logs `result: "bypassed"`).
+- [x] Read-only validator `validate_design_system_readonly.py` registered as PreToolUse on Write/Edit, blocks edits to generated artifacts by filename regex, preserves `.pen` whitelist. Respects the same `DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch as the drift validator.
+- [x] Generator categorizes `.pen` variables using **longest-prefix-wins** — `--text-size-md` resolves to typography (not colors), locked in by unit test.
+- [x] Generator enumerates component children in **sorted order by variable name** before scanning for the "first child with fill ref" — unit test asserts byte-identical output across two `.pen` files that differ only in child insertion order.
+- [x] `package.json` at ai/ repo root pins `@google/design.md@0.1.1`; `package-lock.json` committed; `node_modules/` in `.gitignore`.
+- [x] `docs/features/design-system-tooling.md` exists and covers the pipeline (including `--pen` / `--css-root` / TOML resolution), mapping, regenerate workflow, the two-layer safety-gate model (inline assertion + Write/Edit hook), the Node-absent fallback semantics, the `--audit` temporal-ordering requirement, and the "Adopting this in a consumer repo" section with both adoption patterns.
+- [x] `docs/features/README.md` index updated.
+- [x] `python -m tools.design_system_sync --generate --pen <fixture> --no-node` succeeds with a stderr warning when Node is removed from PATH (unit test covers this by monkeypatching `shutil.which`).
+- [x] `python -m tools.design_system_sync --audit --pen <fixture>` exits 2 with an actionable error when no git repo is found above the pen path AND no `--repo-root` is passed (unit test covers this with a tempdir outside any git tree).
+- [x] `python -m tools.design_system_sync --audit` emits the "initial pass — no prior diff" placeholder when `git show HEAD:<pen-dir>/design-system.md` exits 128 (first-pass case, unit test covers).
+- [x] `scripts/remote-update.sh` runs `npm ci --only=prod` when `package.json` exists.
+- [x] Tests pass (`/do-test`) — new unit tests for the generator, hooks (stdin-JSON fixtures), and integration test.
+- [x] `python -m ruff check .` and `python -m ruff format --check .` exit 0.
 
 ## Team Orchestration
 
