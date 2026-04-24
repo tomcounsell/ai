@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -466,14 +466,15 @@ The generator is invoked via Bash from the `do-design-system` skill. **No MCP se
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/design-system-tooling.md` covering: the one-way pipeline (with the Data Flow diagram from this plan), the `.pen` → DESIGN.md schema mapping (the full table from the Solution section, **including the longest-prefix-wins rule** for overlapping prefixes like `--text-` vs `--text-size-`), how to regenerate locally (`python -m tools.design_system_sync --all`), the drift validator's behavior, the `--check` / `--audit` / `--drop-unmapped` / `--no-node` / `--repo-root` flag reference, the **Node-absent fallback semantics** (which subcommands fall back, which exit 2), the **JSONL invocation log at `logs/validate_design_system_sync.jsonl`** (schema + how to grep for silent failures), and an **"Emergency bypass"** subsection describing `DESIGN_SYSTEM_HOOK_DISABLED=1` with an explicit reminder to run `--check` manually after bypassing.
-- [ ] Add an **"Adopting this in a consumer repo"** section to the feature doc with two copy-paste adoption patterns: (a) a `.git/hooks/pre-commit` shell script that invokes `python -m tools.design_system_sync --check --pen <path> --css-root <path>` and blocks the commit on non-zero exit; (b) a `.claude/settings.json` fragment that registers the ai/-hosted validators via a `DESIGN_SYSTEM_AI_REPO` env var or a vendored symlink. Include the temporal ordering note for `--audit` (must run pre-commit so `HEAD:` still has the prior pass).
-- [ ] Add entry to `docs/features/README.md` index table under the `skills` or `design` category (whichever fits the existing grouping after `do-docs-audit.md`).
+- [x] Create `docs/features/design-system-tooling.md` covering: the one-way pipeline (with the Data Flow diagram from this plan), the `.pen` → DESIGN.md schema mapping (the full table from the Solution section, **including the longest-prefix-wins rule** for overlapping prefixes like `--text-` vs `--text-size-`), how to regenerate locally (`python -m tools.design_system_sync --all`), the drift validator's behavior, the `--check` / `--audit` / `--drop-unmapped` / `--no-node` / `--repo-root` flag reference, the **Node-absent fallback semantics** (which subcommands fall back, which exit 2), the **JSONL invocation log at `logs/validate_design_system_sync.jsonl`** (schema + how to grep for silent failures), and an **"Emergency bypass"** subsection describing `DESIGN_SYSTEM_HOOK_DISABLED=1` with an explicit reminder to run `--check` manually after bypassing.
+- [x] Add an **"Adopting this in a consumer repo"** section to the feature doc with two copy-paste adoption patterns: (a) a `.git/hooks/pre-commit` shell script that invokes `python -m tools.design_system_sync --check --pen <path> --css-root <path>` and blocks the commit on non-zero exit; (b) a `.claude/settings.json` fragment that registers the ai/-hosted validators via a `DESIGN_SYSTEM_AI_REPO` env var or a vendored symlink. Include the temporal ordering note for `--audit` (must run pre-commit so `HEAD:` still has the prior pass).
+- [x] Add entry to `docs/features/README.md` index table under the `skills` or `design` category (whichever fits the existing grouping after `do-docs-audit.md`).
+- [x] Add `Design System Sync (tools.design_system_sync)` entry to `docs/tools-reference.md` with short CLI reference and cross-link to the feature doc. (Added in docs cascade pass.)
 
 ### Inline Documentation
-- [ ] Module-level docstring on `tools/design_system_sync.py` summarizing the pipeline and linking to `docs/features/design-system-tooling.md`.
-- [ ] One-line comments on the validator hooks explaining the match regex and fail-open behavior.
-- [ ] Update `.claude/skills/do-design-system/SKILL.md` version history block (L499-506) with a `v1.2.0 (2026-04-24)` entry covering the Steps 6 & 7 rewrite and the new safety-gate additions.
+- [x] Module-level docstring on `tools/design_system_sync.py` summarizing the pipeline and linking to `docs/features/design-system-tooling.md`.
+- [x] One-line comments on the validator hooks explaining the match regex and fail-open behavior.
+- [x] Update `.claude/skills/do-design-system/SKILL.md` version history block (L499-506) with a `v1.2.0 (2026-04-24)` entry covering the Steps 6 & 7 rewrite and the new safety-gate additions.
 
 ### INFRA doc
 Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha, free, no auth, no rate limits, local CLI only) does not rise to the bar for a dedicated `docs/infra/` entry. The pin is documented in the feature doc; `package.json` is the canonical record.

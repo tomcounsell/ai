@@ -83,6 +83,26 @@ for r in results:
     print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type}")
 ```
 
+### Design System Sync (`tools.design_system_sync`)
+
+Deterministic one-way generator from Pencil `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.
+
+```bash
+# Python-only emission (no Node required — auto-falls back when npx is missing)
+python -m tools.design_system_sync --generate --pen <path> --css-root <dir>
+
+# Full pipeline: generate + lint + DTCG / Tailwind exports (requires Node)
+python -m tools.design_system_sync --all --pen <path>
+
+# Drift check: regenerate to tempdir and byte-diff; exit 1 on drift
+python -m tools.design_system_sync --check --pen <path>
+
+# Gap-audit markdown tables for pasting into gap-audit.md (run BEFORE git commit)
+python -m tools.design_system_sync --audit --pen <path>
+```
+
+Paired with two PreToolUse validators (`validate_design_system_sync.py`, `validate_design_system_readonly.py`) that block drift at commit time and refuse direct Write/Edit of generated artifacts. Escape hatch: `DESIGN_SYSTEM_HOOK_DISABLED=1`.
+
 ### Emoji Embedding (`tools.emoji_embedding`)
 
 Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 73 standard Telegram reaction emojis and any available Premium custom emoji packs.
