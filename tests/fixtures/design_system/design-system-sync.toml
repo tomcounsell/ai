@@ -1,0 +1,4 @@
+# Config for tools.design_system_sync when run against this fixture.
+# css_root is resolved relative to the directory containing this file
+# (which is also the directory containing design-system.pen).
+css_root = "css"

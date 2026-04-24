@@ -1,0 +1,31 @@
+{
+  "theme": {
+    "extend": {
+      "borderRadius": {
+        "md": "8px"
+      },
+      "colors": {
+        "primary": "#111827",
+        "surface": "#ffffff",
+        "text.body.primary": "#ffffff"
+      },
+      "fontFamily": {
+        "body": [
+          "Inter"
+        ]
+      },
+      "fontSize": {
+        "body": [
+          "16px",
+          {
+            "fontWeight": "400",
+            "lineHeight": "24px"
+          }
+        ]
+      },
+      "spacing": {
+        "md": "16px"
+      }
+    }
+  }
+}

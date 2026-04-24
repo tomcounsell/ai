@@ -431,6 +431,8 @@ telegram_session.session
 # Design-system Node toolchain (do-design-system skill)
 !package.json
 !package-lock.json
+# Fixture exports for the design-system generator (committed snapshots)
+!tests/fixtures/design_system/exports/*.json
 !tools/**/manifest.json
 
 # Telegram session files
