@@ -79,9 +79,7 @@ def load_baseline(path: str | Path) -> dict:
         return {"schema_version": SCHEMA_VERSION, "tests": {}}
 
     # Schema v2 -- already in canonical shape.
-    if data.get("schema_version") == SCHEMA_VERSION and isinstance(
-        data.get("tests"), dict
-    ):
+    if data.get("schema_version") == SCHEMA_VERSION and isinstance(data.get("tests"), dict):
         # Defensive: strip tests whose category is not valid.
         valid_tests: dict[str, dict] = {}
         for node_id, record in data["tests"].items():

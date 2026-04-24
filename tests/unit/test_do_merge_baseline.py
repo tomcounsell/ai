@@ -149,9 +149,7 @@ def test_real_baseline_entry_is_preexisting_not_blocking() -> None:
 def test_hung_baseline_entry_is_preexisting_not_blocking() -> None:
     """The ``hung`` category is treated as pre-existing (BLOCKER resolution verified)."""
     baseline = _baseline({"tests/integration/test_wedge.py::test_deadlock": "hung"})
-    verdict = compute_gate_verdict(
-        baseline, {"tests/integration/test_wedge.py::test_deadlock"}
-    )
+    verdict = compute_gate_verdict(baseline, {"tests/integration/test_wedge.py::test_deadlock"})
     assert verdict["new_blocking_regressions"] == []
     assert verdict["preexisting_failures_present"] == 1
 
@@ -196,9 +194,7 @@ def test_baseline_keys_no_longer_failing_flagged_as_advisory() -> None:
     )
     pr_failures = {"tests/unit/test_a.py::test_real_still"}
     verdict = compute_gate_verdict(baseline, pr_failures)
-    assert verdict["baseline_keys_no_longer_failing"] == [
-        "tests/unit/test_a.py::test_real_gone"
-    ]
+    assert verdict["baseline_keys_no_longer_failing"] == ["tests/unit/test_a.py::test_real_gone"]
     assert verdict["new_blocking_regressions"] == []
 
 
@@ -216,9 +212,7 @@ def test_multiple_flakies_and_one_new_regression_blocks_only_new() -> None:
         "tests/unit/test_a.py::test_new_regression",
     }
     verdict = compute_gate_verdict(baseline, pr_failures)
-    assert verdict["new_blocking_regressions"] == [
-        "tests/unit/test_a.py::test_new_regression"
-    ]
+    assert verdict["new_blocking_regressions"] == ["tests/unit/test_a.py::test_new_regression"]
     assert verdict["new_flaky_occurrences"] == ["tests/unit/test_a.py::test_flaky1"]
 
 
@@ -282,6 +276,59 @@ def test_staleness_warning_fires_on_dirty_commit() -> None:
 # ---------------------------------------------------------------------------
 # parse_pr_failures (integration with parse_junitxml)
 # ---------------------------------------------------------------------------
+
+
+def test_main_normalises_naive_now_to_utc(tmp_path: Path) -> None:
+    """A naive ``--now`` ISO string must not crash on tz-aware subtraction.
+
+    Before the fix: ``datetime.fromisoformat("2026-04-20T00:00:00")`` is tz-naive;
+    ``format_staleness_warning`` then compared it to a tz-aware ``generated_at``
+    and raised ``TypeError: can't subtract offset-naive and offset-aware
+    datetimes``.  After the fix ``main()`` attaches UTC to the naive value.
+    """
+    from scripts.baseline_gate import main
+
+    # Build a baseline whose generated_at is 20 days before the naive --now.
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "generated_at": "2026-04-01T00:00:00+00:00",
+                "commit": "abc1234",
+                "tests": {},
+            }
+        )
+    )
+
+    # Create an empty junitxml with no failures.
+    pr_xml = tmp_path / "pr.xml"
+    pr_xml.write_text(
+        textwrap.dedent(
+            """\
+            <?xml version="1.0" encoding="utf-8"?>
+            <testsuites>
+              <testsuite name="pytest">
+                <testcase classname="tests.unit.test_a" name="test_ok"/>
+              </testsuite>
+            </testsuites>
+            """
+        )
+    )
+
+    # The argument is deliberately tz-naive (no offset suffix).  Before the
+    # fix this path raised TypeError inside format_staleness_warning.
+    exit_code = main(
+        [
+            "--pr-junitxml",
+            str(pr_xml),
+            "--baseline",
+            str(baseline_path),
+            "--now",
+            "2026-04-21T00:00:00",  # naive
+        ]
+    )
+    assert exit_code == 0
 
 
 def test_parse_pr_failures_returns_only_non_pass(tmp_path: Path) -> None:

@@ -210,9 +210,7 @@ def test_aggregate_outcomes_handles_missing_tests() -> None:
 def _init_tmp_repo(tmp_path: Path) -> Path:
     """Initialise a fresh git repo in ``tmp_path`` with a single commit."""
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Tester"], cwd=tmp_path, check=True)
     seed = tmp_path / "seed.txt"
     seed.write_text("hello\n")
@@ -346,14 +344,8 @@ def test_resolve_output_path_normal_defaults_to_baseline_path() -> None:
 
 
 def test_resolve_output_path_explicit_override_wins() -> None:
-    assert (
-        resolve_output_path(_NS(output="/tmp/custom.json", dry_run=True))
-        == "/tmp/custom.json"
-    )
-    assert (
-        resolve_output_path(_NS(output="/tmp/custom.json", dry_run=False))
-        == "/tmp/custom.json"
-    )
+    assert resolve_output_path(_NS(output="/tmp/custom.json", dry_run=True)) == "/tmp/custom.json"
+    assert resolve_output_path(_NS(output="/tmp/custom.json", dry_run=False)) == "/tmp/custom.json"
 
 
 # ---------------------------------------------------------------------------

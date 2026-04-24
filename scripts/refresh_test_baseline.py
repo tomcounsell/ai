@@ -467,9 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(message)s",
     )
 
-    global_timeout = args.global_timeout or compute_default_global_timeout(
-        args.test_timeout
-    )
+    global_timeout = args.global_timeout or compute_default_global_timeout(args.test_timeout)
     output_path = resolve_output_path(args)
     invocation_argv = sys.argv[1:] if argv is None else argv
 
