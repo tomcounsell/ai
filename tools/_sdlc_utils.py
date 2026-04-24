@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 from models.agent_session import AgentSession
@@ -20,8 +21,21 @@ logger = logging.getLogger(__name__)
 def find_session_by_issue(issue_number: int):
     """Find a PM session tracking the given issue number.
 
-    Scans recent PM sessions for an issue_url containing the issue number.
-    Returns the session object or None.
+    Two-pass match over PM sessions:
+
+    1. Primary pass: ``issue_url`` endswith ``/issues/{issue_number}``.
+    2. Fallback pass: ``message_text`` matches the case-insensitive regex
+       ``\\bissue\\s*#?\\s*{issue_number}\\b``. This catches Telegram-
+       originated PM sessions that have no ``issue_url`` (the bridge builds
+       sessions from message text, not URLs) so operators running SDLC over
+       the bridge are still findable by issue number.
+
+    The ``issue_url`` pass takes priority: if any session matches there, it
+    is returned without running the ``message_text`` scan. When multiple
+    sessions could match via ``message_text`` alone (e.g., a conversation
+    mentioning two issue numbers), the first iterated session wins — this is
+    an acceptable limitation because bridge sessions today carry a single
+    originating message and multi-issue mentions are rare.
 
     Args:
         issue_number: GitHub issue number to search for.
@@ -42,6 +56,16 @@ def find_session_by_issue(issue_number: int):
             issue_url = getattr(s, "issue_url", None) or ""
             if issue_url.endswith(target_suffix):
                 return s
+
+        # Fallback: match by message_text for bridge-originated sessions that
+        # have no issue_url. Word boundaries prevent matches like
+        # "tissue 1147" — only "issue 1147", "issue #1147", "SDLC issue 1147".
+        pattern = re.compile(rf"\bissue\s*#?\s*{issue_number}\b", re.IGNORECASE)
+        for s in pm_sessions:
+            message_text = getattr(s, "message_text", None) or ""
+            if message_text and pattern.search(message_text):
+                return s
+
         return None
     except Exception as e:
         logger.debug(f"find_session_by_issue failed: {e}")
