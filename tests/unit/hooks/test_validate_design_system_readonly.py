@@ -52,10 +52,11 @@ def test_blocks_edit_to_brand_css():
 
 
 def test_blocks_export_files():
-    for name in ("docs/designs/exports/tokens.dtcg.json", "docs/designs/exports/tailwind.theme.json"):
-        rc, stdout, _ = _run_hook(
-            {"tool_name": "Write", "tool_input": {"file_path": name}}
-        )
+    for name in (
+        "docs/designs/exports/tokens.dtcg.json",
+        "docs/designs/exports/tailwind.theme.json",
+    ):
+        rc, stdout, _ = _run_hook({"tool_name": "Write", "tool_input": {"file_path": name}})
         assert rc == 0, name
         data = json.loads(stdout)
         assert data["decision"] == "block", name
@@ -70,9 +71,7 @@ def test_permits_pen_writes():
 
 
 def test_permits_unrelated_files():
-    rc, stdout, _ = _run_hook(
-        {"tool_name": "Write", "tool_input": {"file_path": "src/app.py"}}
-    )
+    rc, stdout, _ = _run_hook({"tool_name": "Write", "tool_input": {"file_path": "src/app.py"}})
     assert rc == 0
     assert stdout == ""
 
@@ -99,8 +98,6 @@ def test_escape_hatch_permits_would_block_write():
 
 
 def test_non_write_edit_tool_is_no_op():
-    rc, stdout, _ = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "ls"}}
-    )
+    rc, stdout, _ = _run_hook({"tool_name": "Bash", "tool_input": {"command": "ls"}})
     assert rc == 0
     assert stdout == ""

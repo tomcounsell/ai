@@ -13,8 +13,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -47,8 +45,27 @@ def _write_minimal_pen(tmp_path: Path) -> Path:
                                 "width": 10,
                                 "height": 10,
                                 "children": [
-                                    {"type": "rectangle", "id": "bg", "fill": "$--color-primary", "width": 10, "height": 10, "x": 0, "y": 0},
-                                    {"type": "text", "id": "lbl", "text": "A", "fill": "$--text-body-primary", "font": "$--font-body", "size": "$--text-size-body", "weight": "$--text-weight-body", "lineHeight": "$--text-lh-body", "x": 1, "y": 1},
+                                    {
+                                        "type": "rectangle",
+                                        "id": "bg",
+                                        "fill": "$--color-primary",
+                                        "width": 10,
+                                        "height": 10,
+                                        "x": 0,
+                                        "y": 0,
+                                    },
+                                    {
+                                        "type": "text",
+                                        "id": "lbl",
+                                        "text": "A",
+                                        "fill": "$--text-body-primary",
+                                        "font": "$--font-body",
+                                        "size": "$--text-size-body",
+                                        "weight": "$--text-weight-body",
+                                        "lineHeight": "$--text-lh-body",
+                                        "x": 1,
+                                        "y": 1,
+                                    },
                                 ],
                             }
                         ],

@@ -46,10 +46,8 @@ JSON, Node absent (where required), no git repo above ``.pen`` for
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import difflib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -304,7 +302,7 @@ def _ref_of(token: str) -> str | None:
 
 
 def _token_key_for_color(var_name: str) -> str:
-    """"--color-primary" → "primary"; "--text-body-primary" → "text.body.primary"."""
+    """ "--color-primary" → "primary"; "--text-body-primary" → "text.body.primary"."""
     stripped = re.sub(r"^--", "", var_name)
     if stripped.startswith("color-"):
         stripped = stripped[len("color-") :]
@@ -437,7 +435,7 @@ def _emit_yaml(tokens: dict) -> str:
             head, _, tail = line.partition(":")
             val = tail.strip()
             if val.startswith("#") or val.startswith("{"):
-                line = f"{head}: \"{val}\""
+                line = f'{head}: "{val}"'
         out_lines.append(line)
     body = "\n".join(out_lines).rstrip() + "\n"
     return body
@@ -448,7 +446,10 @@ def render_design_md(tokens: dict) -> str:
     frontmatter = f"---\n{yaml_body}---\n"
     # Emit every required section (even if empty prose) in the spec's order.
     sections = [
-        ("Overview", "Generated from `design-system.pen`. See `docs/features/design-system-tooling.md`."),
+        (
+            "Overview",
+            "Generated from `design-system.pen`. See `docs/features/design-system-tooling.md`.",
+        ),
         ("Colors", _render_colors_prose(tokens)),
         ("Typography", _render_typography_prose(tokens)),
         ("Layout", _render_layout_prose(tokens)),
@@ -478,7 +479,10 @@ def _render_typography_prose(tokens: dict) -> str:
     presets = tokens.get("typography") or {}
     if not presets:
         return "_No typography presets defined._"
-    lines = ["Typography presets are aggregated from `--font-*`, `--text-size-*`, `--text-weight-*`, and `--text-lh-*` tokens."]
+    lines = [
+        "Typography presets are aggregated from `--font-*`, `--text-size-*`, "
+        "`--text-weight-*`, and `--text-lh-*` tokens."
+    ]
     for name in sorted(presets):
         lines.append(f"- **{name}**")
     return "\n".join(lines)
@@ -502,7 +506,9 @@ def _render_components_prose(tokens: dict) -> str:
     components = tokens.get("components") or {}
     if not components:
         return "_No components defined._"
-    lines = ["Reusable components map from Pencil frames (`reusable: true`, `Category/Variant` name)."]
+    lines = [
+        "Reusable components map from Pencil frames (`reusable: true`, `Category/Variant` name)."
+    ]
     for key in sorted(components):
         lines.append(f"- `{key}`")
     return "\n".join(lines)
@@ -821,7 +827,7 @@ def _format_audit_markdown(raw: str) -> str:
 
 def _warn_unmapped(pen_doc: dict, *, drop_unmapped: bool) -> None:
     unmapped: list[str] = []
-    for name in (pen_doc.get("variables") or {}):
+    for name in pen_doc.get("variables") or {}:
         if categorize_prefix(name) is None:
             unmapped.append(name)
     if not unmapped:
@@ -833,8 +839,7 @@ def _warn_unmapped(pen_doc: dict, *, drop_unmapped: bool) -> None:
     )
     if not drop_unmapped:
         raise SystemExit(
-            "error: unmapped variable prefixes present; see stderr. "
-            "Pass --drop-unmapped to ignore."
+            "error: unmapped variable prefixes present; see stderr. Pass --drop-unmapped to ignore."
         )
 
 
@@ -852,13 +857,27 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--generate", action="store_true", help="Emit DESIGN.md, brand.css, source.css.")
-    mode.add_argument("--all", action="store_true", help="--generate plus lint + DTCG/Tailwind exports.")
-    mode.add_argument("--check", action="store_true", help="Drift check against the working tree; exit 1 on drift.")
-    mode.add_argument("--audit", action="store_true", help="Diff against HEAD:<pen-dir>/design-system.md for gap-audit.")
+    mode.add_argument(
+        "--generate", action="store_true", help="Emit DESIGN.md, brand.css, source.css."
+    )
+    mode.add_argument(
+        "--all", action="store_true", help="--generate plus lint + DTCG/Tailwind exports."
+    )
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="Drift check against the working tree; exit 1 on drift.",
+    )
+    mode.add_argument(
+        "--audit",
+        action="store_true",
+        help="Diff against HEAD:<pen-dir>/design-system.md for gap-audit.",
+    )
 
     parser.add_argument("--pen", required=False, help="Path to design-system.pen.")
-    parser.add_argument("--css-root", required=False, help="Directory to emit brand.css and source.css.")
+    parser.add_argument(
+        "--css-root", required=False, help="Directory to emit brand.css and source.css."
+    )
     parser.add_argument(
         "--drop-unmapped",
         action="store_true",

@@ -203,9 +203,7 @@ def main() -> int:
         )
         return 0
     except Exception as exc:
-        sys.stderr.write(
-            f"[validate_design_system_sync] fail-open: {type(exc).__name__}: {exc}\n"
-        )
+        sys.stderr.write(f"[validate_design_system_sync] fail-open: {type(exc).__name__}: {exc}\n")
         _log(
             {
                 "ts": _dt.datetime.now(_dt.UTC).isoformat(),

@@ -9,8 +9,7 @@ import sys
 from pathlib import Path
 
 HOOK = (
-    Path(__file__).resolve().parents[3]
-    / ".claude/hooks/validators/validate_design_system_sync.py"
+    Path(__file__).resolve().parents[3] / ".claude/hooks/validators/validate_design_system_sync.py"
 )
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -38,9 +37,7 @@ def test_non_bash_tool_is_no_op():
 
 
 def test_unrelated_commit_is_no_op():
-    rc, stdout, _ = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "git add README.md"}}
-    )
+    rc, stdout, _ = _run_hook({"tool_name": "Bash", "tool_input": {"command": "git add README.md"}})
     assert rc == 0
     assert stdout == ""
 
@@ -64,9 +61,7 @@ def test_matching_clean_state_allows_commit():
     rc, stdout, _ = _run_hook(
         {
             "tool_name": "Bash",
-            "tool_input": {
-                "command": "git add tests/fixtures/design_system/design-system.pen"
-            },
+            "tool_input": {"command": "git add tests/fixtures/design_system/design-system.pen"},
         }
     )
     assert rc == 0
@@ -91,9 +86,7 @@ def test_drift_produces_block_decision(tmp_path: Path, monkeypatch):
         rc, stdout, _ = _run_hook(
             {
                 "tool_name": "Bash",
-                "tool_input": {
-                    "command": "git add tests/fixtures/design_system/css/brand.css"
-                },
+                "tool_input": {"command": "git add tests/fixtures/design_system/css/brand.css"},
             }
         )
         assert rc == 0  # hook itself succeeds; block is conveyed in stdout
