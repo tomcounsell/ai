@@ -50,7 +50,7 @@ Exit code is always 0. Returns `{}` on error, `{"stage": "DOCS", "status": "comp
 
 - Infer stages from plan files on disk
 - Query GitHub PRs to infer BUILD/TEST/REVIEW/DOCS completion
-- Accept a `slug=` parameter (removed in #729)
+- Accept a `slug=` parameter (the keyword was dropped in #729)
 
 This was intentional. Artifact inference caused stage skipping (#723, #729): a plan file created by `/do-build` as a deliverable would incorrectly satisfy DOCS without `/do-docs` ever running.
 
@@ -66,6 +66,8 @@ The gate is a reminder, not a hard blocker. The agent can choose to proceed, but
 ## Local Session Creation
 
 For local Claude Code sessions, the SDLC router ensures a trackable session exists before dispatching sub-skills via `tools/sdlc_session_ensure.py`. This creates an `AgentSession` keyed by `sdlc-local-{issue_number}` so that downstream markers have a session to write to. The operation is idempotent — running it multiple times for the same issue reuses the same session.
+
+Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call short-circuits: it returns the already-active bridge PM session without creating a new `sdlc-local-{N}` record. This prevents the zombie-duplicate dashboard entries that used to appear when SDLC was driven over Telegram. See the "Bridge short-circuit" subsection in `docs/features/sdlc-pipeline-state.md` for the full gate conditions and the `--kill-orphans` operator tool for cleaning up pre-existing zombies.
 
 ```bash
 SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
