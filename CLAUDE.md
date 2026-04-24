@@ -94,10 +94,15 @@ Use `valor-telegram` to read messages from any chat. It checks Redis first, then
 valor-telegram read --chat "Dev: Valor" --limit 10
 valor-telegram read --chat "Tom" --search "deployment"
 valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+valor-telegram read --chat-id -1001234567 --limit 10       # numeric bypass
+valor-telegram read --user tom --limit 10                  # DM whitelist bypass
+valor-telegram chats --search "psy"                        # discover by fragment
 valor-telegram send --chat "Dev: Valor" "Hello world"
 valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 ```
+
+`--chat`, `--chat-id`, and `--user` on `read` are mutually exclusive. Every successful read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages — trust that header over your intuition about which chat you asked for. If a `--chat` name is ambiguous, the CLI exits non-zero with a candidate list (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation UX).
 
 ## Reading Email
 

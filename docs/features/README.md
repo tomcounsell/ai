@@ -17,7 +17,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) | Delivery-choice protocol (SEND/EDIT/REACT/SILENT/CONTINUE) with defense-in-depth filtering to prevent control signal text leaking to users | Shipped |
 | [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
 | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
-| [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
+| [Bridge Message Query](bridge-message-query.md) | Legacy bridge-side IPC handler; its CLI front-end has been consolidated into `valor-telegram read --user` (issue #1163) | Consolidated |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
 | [Bridge Resilience](bridge-resilience.md) | Circuit breaker, unified recovery loop, degraded mode, structured logging | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |

@@ -73,12 +73,15 @@ TELEGRAM_LINK_COLLECTORS=tomcounsell
 
 ```python
 from tools.telegram_history import (
+    AmbiguousChatError,
+    ChatCandidate,
     store_message,
     search_history,
     get_recent_messages,
     get_chat_stats,
     register_chat,
     list_chats,
+    resolve_chat_candidates,
     resolve_chat_id,
     search_all_chats,
 )
@@ -116,8 +119,30 @@ register_chat(chat_id="12345", chat_name="Dev: Valor", chat_type="group")
 # List all known chats with message counts
 chats = list_chats()
 
-# Resolve chat name to ID
-chat_id = resolve_chat_id("Dev: Valor")  # supports partial match
+# Resolve chat name to candidate list (issue #1163)
+# Runs a 3-stage cascade (exact → case-insensitive exact → normalized
+# substring), collects ALL matches per stage, returns them as
+# ChatCandidate(chat_id, chat_name, last_activity_ts) sorted by
+# last_activity_ts desc (None sorts last).
+candidates = resolve_chat_candidates("Dev: Valor")
+# candidates -> [ChatCandidate(chat_id="-100...", chat_name="Dev: Valor", last_activity_ts=...)]
+
+# Resolve chat name to a single chat ID (strict)
+# Raises AmbiguousChatError when >1 candidates match.
+try:
+    chat_id = resolve_chat_id("Dev: Valor")
+except AmbiguousChatError as e:
+    # e.candidates is list[ChatCandidate]; render to the user.
+    ...
+
+# Back-compat escape hatch: returns the most-recent candidate and logs a
+# WARNING when >1 candidates match. Never used by the CLI — production
+# callers surface the exception.
+chat_id = resolve_chat_id("Dev: Valor", allow_ambiguous=True)
+
+# Narrow exception handling: resolve_chat_candidates catches only
+# redis.RedisError / popoto.ModelException / popoto.QueryException,
+# logs a warning, and returns []. It does NOT swallow arbitrary exceptions.
 
 # Search across all chats
 results = search_all_chats(query="python", max_results=20)
