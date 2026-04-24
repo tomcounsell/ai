@@ -149,6 +149,16 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
             return
         agent_session = matches[0]
 
+        # Issue #1156: If this PM is in waiting_for_children, do not collapse the
+        # hierarchy from the Stop hook. Children will finalize the parent via
+        # _finalize_parent_sync. The stop hook has no visibility into child
+        # liveness and must not bypass the parent-sync terminal transition.
+        # Silent skip (no log) consistent with hook-local silent-failure policy;
+        # the lifecycle log already records when the PM entered
+        # waiting_for_children, giving a complete audit trail.
+        if getattr(agent_session, "status", None) == "waiting_for_children":
+            return
+
         stop_reason = hook_input.get("stop_reason", "unknown")
         status = "failed" if stop_reason in ("error", "crash") else "completed"
 
