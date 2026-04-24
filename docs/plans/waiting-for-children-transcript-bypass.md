@@ -7,6 +7,7 @@ created: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1156
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 ---
 
 # waiting_for_children → terminal bypass via complete_transcript
