@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -339,14 +339,16 @@ The fix does affect **what the PM agent experiences** when it runs `python -m to
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/session-isolation.md`: add a "CLI-level project scope resolution" subsection documenting (a) removal of `--working-dir`, (b) the precedence chain `--project-key` > `--parent` > cwd-match, (c) the hard-error behavior on unmatched cwd.
-- [ ] Update `CLAUDE.md` Quick Commands entries for `valor-session create --role pm/dev` — note that `project_key` determines `working_dir` via `projects.json`, and there is no `--working-dir` flag.
+- [x] Update `docs/features/session-isolation.md`: add a "CLI-level project scope resolution" subsection documenting (a) removal of `--working-dir`, (b) the precedence chain `--project-key` > `--parent` > cwd-match, (c) the hard-error behavior on unmatched cwd.
+- [x] Update `CLAUDE.md` Quick Commands entries for `valor-session create --role pm/dev` — note that `project_key` determines `working_dir` via `projects.json`, and there is no `--working-dir` flag.
+- [x] Update `docs/tools-reference.md` and `docs/features/tools-reference.md` — replace the stale "Falls back to `\"valor\"`" description with the new precedence rule (added by /do-docs cascade).
+- [x] Update `docs/features/sdlc-stage-tracking.md` — extend the `sdlc_session_ensure.py` note to cover `working_dir` derivation via `_resolve_project_working_directory()` (added by /do-docs cascade).
 
 ### Inline Documentation
 
-- [ ] Rewrite the module docstring in `tools/valor_session.py` (lines 23-31) to describe the new resolution rule: one input (`project_key`), two sources (explicit flag or cwd-match), no fallback, no `--working-dir`.
-- [ ] Add docstring to `_resolve_project_working_directory`.
-- [ ] Update `resolve_project_key` docstring to document the raised exception types.
+- [x] Rewrite the module docstring in `tools/valor_session.py` (lines 23-31) to describe the new resolution rule: one input (`project_key`), two sources (explicit flag or cwd-match), no fallback, no `--working-dir`.
+- [x] Add docstring to `_resolve_project_working_directory`.
+- [x] Update `resolve_project_key` docstring to document the raised exception types.
 
 ### External Documentation Site
 

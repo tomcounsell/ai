@@ -248,7 +248,7 @@ python -m tools.valor_session kill --all
 python -m tools.valor_session status --id <SESSION_ID> --json
 ```
 
-**Project key resolution (`create` subcommand):** The `project_key` is derived automatically by matching the current working directory against the `working_directory` field of each project in `~/Desktop/Valor/projects.json`. The most-specific match (longest path prefix) wins. Falls back to `"valor"` with a stderr warning if no match is found. Use `--project-key` to override explicitly (useful in scripts or CI where cwd may not match any project).
+**Project key resolution (`create` subcommand):** `project_key` is the only input that ties a session to a repo — `working_dir` is always derived from `projects.json[project_key].working_directory`, never supplied independently. There is **no** `--working-dir` flag. Resolution precedence: `--project-key <key>` > `--parent <id>` (inherits from parent session's `project_key`) > `resolve_project_key(os.getcwd())` (matches cwd against each project's `working_directory`, longest-prefix wins). On no match the CLI raises `ProjectKeyResolutionError` and exits non-zero — there is no silent `"valor"` fallback. See `docs/features/session-isolation.md#cli-level-project-scope-resolution-issue-1158` for the full rule.
 
 See `docs/features/session-steering.md` for full documentation.
 
