@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: feature
 appetite: Small
 owner: Tom Counsell
@@ -420,11 +420,11 @@ The OOM backoff logic is a single-write, single-read sequence entirely inside th
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdk_client_image_sentinel.py` — **UPDATE**: tuple unpacking tests must shift from 5-tuple to 6-tuple (`stderr_snippet` added). The existing tests mock `_run_harness_subprocess` return — update all mocks to return 6-tuples.
-- [ ] `tests/unit/test_session_watchdog.py` — **no change expected**: this file tests the bridge-hosted watchdog. Mode 3 touches worker-hosted `session_health.py`, which has its own test file.
-- [ ] `tests/unit/test_session_health_phantom_guard.py` — **no change expected**: we add a new reprieve gate; existing phantom-guard tests exercise an unrelated branch.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — **UPDATE**: if it constructs an `AgentSession` via the finalize path, the new field (`exit_returncode`) has `default=None` so no test break is expected. Verify at build time that adding the new field doesn't break `to_dict()` / `from_dict()` assumptions. Also verify this test does not assert the exact ordering of the `recovery_attempts` bump relative to `transition_status()` — if it does, update to match the revised ordering (pre-bump capture).
-- [ ] `tests/unit/test_message_drafter.py` — **UPDATE (regression guard)**: no behavioral change expected from any of the four modes. The drafter pathway is independent of the harness subprocess / health-check changes. This entry is a guard: if the drafter test regresses after this build, a harness change has leaked into drafting logic and must be reverted. Run as part of the Verification step. (Related: `tests/unit/test_drafter_validators.py`, `tests/unit/test_message_drafter_linkify.py`, `tests/integration/test_message_drafter_integration.py` — same regression-guard expectation.)
+- [x] `tests/unit/test_sdk_client_image_sentinel.py` — **UPDATE**: tuple unpacking tests must shift from 5-tuple to 6-tuple (`stderr_snippet` added). The existing tests mock `_run_harness_subprocess` return — update all mocks to return 6-tuples.
+- [x] `tests/unit/test_session_watchdog.py` — **no change expected**: this file tests the bridge-hosted watchdog. Mode 3 touches worker-hosted `session_health.py`, which has its own test file.
+- [x] `tests/unit/test_session_health_phantom_guard.py` — **no change expected**: we add a new reprieve gate; existing phantom-guard tests exercise an unrelated branch.
+- [x] `tests/unit/test_health_check_recovery_finalization.py` — **UPDATE**: if it constructs an `AgentSession` via the finalize path, the new field (`exit_returncode`) has `default=None` so no test break is expected. Verify at build time that adding the new field doesn't break `to_dict()` / `from_dict()` assumptions. Also verify this test does not assert the exact ordering of the `recovery_attempts` bump relative to `transition_status()` — if it does, update to match the revised ordering (pre-bump capture).
+- [x] `tests/unit/test_message_drafter.py` — **UPDATE (regression guard)**: no behavioral change expected from any of the four modes. The drafter pathway is independent of the harness subprocess / health-check changes. This entry is a guard: if the drafter test regresses after this build, a harness change has leaked into drafting logic and must be reverted. Run as part of the Verification step. (Related: `tests/unit/test_drafter_validators.py`, `tests/unit/test_message_drafter_linkify.py`, `tests/integration/test_message_drafter_integration.py` — same regression-guard expectation.)
 
 Greenfield tests to add (4 new test files, one per mode — each uses the `test-resilience-{mode}` `project_key` prefix as required by the acceptance criteria):
 
@@ -519,18 +519,18 @@ No agent integration required — these are bridge-internal / worker-internal ch
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agent-session-health-monitor.md` — add the `compacting` gate to the Tier 2 reprieve list (Mode 3) and add an "OOM backoff" subsection (Mode 4).
-- [ ] Update `docs/features/session-recovery-mechanisms.md` — add a "Thinking-block corruption" subsection (Mode 1) and a "Context-usage observability" subsection (Mode 2).
-- [ ] No new feature doc required — these four fixes are defenses on existing features (harness execution + session health), not a new feature in their own right. An entry in the index table would misrepresent the scope.
+- [x] Update `docs/features/agent-session-health-monitor.md` — add the `compacting` gate to the Tier 2 reprieve list (Mode 3) and add an "OOM backoff" subsection (Mode 4).
+- [x] Update `docs/features/session-recovery-mechanisms.md` — add a "Thinking-block corruption" subsection (Mode 1) and a "Context-usage observability" subsection (Mode 2).
+- [x] No new feature doc required — these four fixes are defenses on existing features (harness execution + session health), not a new feature in their own right. An entry in the index table would misrepresent the scope.
 
 ### External Documentation Site
 - N/A — this repo has no external docs site.
 
 ### Inline Documentation
-- [ ] Docstrings on `_log_context_usage_if_risky`, `HarnessThinkingBlockCorruption`, `_is_memory_tight` explaining trigger conditions and failure handling.
-- [ ] Docstring on the new `compacting` gate in `_tier2_reprieve_signal` citing the issue number (#1099) and the `pre_compact_hook` as the companion writer.
-- [ ] Code comments on the three `_run_harness_subprocess` call sites noting the 6-tuple return.
-- [ ] `models/agent_session.py` field comment explaining `exit_returncode` = last subprocess exit code (for OOM detection, issue #1099). No other new fields — deferred eligibility uses existing `scheduled_at`.
+- [x] Docstrings on `_log_context_usage_if_risky`, `HarnessThinkingBlockCorruption`, `_is_memory_tight` explaining trigger conditions and failure handling.
+- [x] Docstring on the new `compacting` gate in `_tier2_reprieve_signal` citing the issue number (#1099) and the `pre_compact_hook` as the companion writer.
+- [x] Code comments on the three `_run_harness_subprocess` call sites noting the 6-tuple return.
+- [x] `models/agent_session.py` field comment explaining `exit_returncode` = last subprocess exit code (for OOM detection, issue #1099). No other new fields — deferred eligibility uses existing `scheduled_at`.
 
 ## Success Criteria
 

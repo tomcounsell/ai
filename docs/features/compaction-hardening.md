@@ -74,7 +74,7 @@ Four new fields on `AgentSession`:
 
 | Field | Type | Writer | Reader |
 |-------|------|--------|--------|
-| `last_compaction_ts` | `FloatField` (Unix ts) | `pre_compact_hook` (primary), `_tick_backstop_check_compaction` (defense-in-depth) | `determine_delivery_action` |
+| `last_compaction_ts` | `FloatField` (Unix ts) | `pre_compact_hook` (primary), `_tick_backstop_check_compaction` (defense-in-depth) | `determine_delivery_action` (30s post-compact nudge guard), `_tier2_reprieve_signal` (600s compacting reprieve gate, issue #1099 Mode 3) |
 | `compaction_count` | `IntField` (default 0) | `pre_compact_hook` | dashboard / post-hoc analysis |
 | `compaction_skipped_count` | `IntField` (default 0) | `pre_compact_hook` cooldown path, backstop | dashboard |
 | `nudge_deferred_count` | `IntField` (default 0) | `defer_post_compact` action branch | dashboard |
@@ -108,7 +108,7 @@ The hook's top-level contract is **"never raise, always return `{}`"**:
 ## Related Features
 
 - **[Post-Compact Re-Grounding](post-compact-regrounding.md)** — the after-compaction complement: a CLI PostCompact hook that emits a short re-grounding nudge directing the agent to re-read the plan, check SDLC stage progress, and review PROGRESS.md. Shipped as issue #1139.
-- **[Bridge Self-Healing](bridge-self-healing.md)** — the watchdog escalation path is the recovery layer above this hook. Compaction hardening reduces the frequency of escalations by preserving session state across SDK crashes.
+- **[Bridge Self-Healing](bridge-self-healing.md)** — the watchdog escalation path is the recovery layer above this hook. Compaction hardening reduces the frequency of escalations by preserving session state across SDK crashes. Issue #1099 Mode 3 added a second reader of `last_compaction_ts` — the Tier 2 `compacting` reprieve gate in `_tier2_reprieve_signal` uses the same timestamp (within `COMPACT_REPRIEVE_WINDOW_SEC`, default 600s) to prevent post-compaction idle periods from being killed as stuck. See [Agent Session Health Monitor](agent-session-health-monitor.md) for the gate definition.
 - **[Stop Hook JSONL Backup](agent-message-delivery.md)** — sibling pattern: the Stop hook also opens `transcript_path` and reads the JSONL. The PreCompact hook borrowed the same approach for snapshots.
 - **[Externalized Session Steering](session-steering.md)** — the `output_router.py` extraction (issue #743) made the 30s guard possible by turning `determine_delivery_action` into a pure function.
 

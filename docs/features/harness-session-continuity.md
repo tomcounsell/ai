@@ -123,7 +123,12 @@ Fallback incidence: `grep -c 'Stale UUID' logs/worker.log`.
   - `get_response_via_harness()` — harness subprocess entry point with
     `prior_uuid`, `session_id`, and `full_context_message` keyword args.
   - `_run_harness_subprocess()` — the actual `asyncio.create_subprocess_exec`
-    call, returns `(result, session_id, returncode)`.
+    call. Returns a 6-tuple
+    `(result_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)`.
+    The last three entries were added progressively: `usage` + `cost_usd` by
+    PR #1138 (watchdog hardening), `stderr_snippet` by issue #1099 Mode 1 so
+    `get_response_via_harness` can sentinel-match on thinking-block
+    corruption before raising `HarnessThinkingBlockCorruption`.
   - `build_harness_turn_input()` — context-prefix builder with
     `skip_prefix` keyword arg.
 - `agent/agent_session_queue.py`

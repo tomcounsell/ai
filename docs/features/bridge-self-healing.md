@@ -471,6 +471,7 @@ with both heartbeats fresh, `_has_progress()` returns `False` when:
 |----------|---------|---------|---------|
 | `STDOUT_FRESHNESS_WINDOW` | 600s | `STDOUT_FRESHNESS_WINDOW_SECS` | Tier 1 stdout-stale threshold; also Tier 2 gate (e) reprieve window |
 | `FIRST_STDOUT_DEADLINE` | 300s | `FIRST_STDOUT_DEADLINE_SECS` | Tier 1 deadline for sessions that have never produced stdout |
+| `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 gate (b) `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
 
 **Reprieve behavior for alive-but-silent sessions:** When Tier 1 stdout-stale
 fires, `_tier2_reprieve_signal()` is called. Gate (c) "alive" will reprieve the
@@ -486,12 +487,14 @@ indefinite alive-but-silent reprieve loop.
 ### Tier 2 — activity-positive reprieve gates
 
 When Tier 1 flags a session, the health check calls `_tier2_reprieve_signal()`
-which evaluates three OS-level liveness checks via `psutil`:
+which evaluates four gates — one compaction-aware and three OS-level liveness
+checks via `psutil`:
 
 | Gate | Check | Return |
 |------|-------|--------|
+| (b) compacting | `AgentSession.last_compaction_ts` within `COMPACT_REPRIEVE_WINDOW_SEC` (600s). Evaluated first so post-compaction idle periods are never misread as hangs. Companion writer: `agent/hooks/pre_compact.py::pre_compact_hook` (PR #1135). Added by issue #1099 Mode 3. | `"compacting"` |
 | (c) alive    | `psutil.Process(pid).status()` not in `{zombie, dead, stopped}` | `"alive"` |
-| (d) children | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred) |
+| (d) children | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred over `"alive"`) |
 | (e) stdout   | `last_stdout_at` within `STDOUT_FRESHNESS_WINDOW` (600s) | `"stdout"` |
 
 Any **one** passing gate reprieves the kill. The reprieve signal is logged and
@@ -542,7 +545,7 @@ Redis counters keyed by `<project_key>:session-health:`:
 
 * `tier1_flagged_total` — every time both heartbeats were stale (heartbeat-stale path).
 * `tier1_flagged_stdout_stale` — every time Tier 1 fired due to stale stdout or missed `FIRST_STDOUT_DEADLINE` (stdout-stale path, #1046). Use this counter to distinguish the alive-but-silent failure mode from dead-heartbeat kills in dashboards.
-* `tier2_reprieve_total:{alive|children|stdout}` — reprieve by signal.
+* `tier2_reprieve_total:{compacting|alive|children|stdout}` — reprieve by signal. The `compacting` suffix was added by issue #1099 Mode 3; the three OS-level gates were introduced in #1036.
 * `kill_total` — actual kills (after Tier 2 failed and kill-switch off).
 
 **Distinguishing kill causes in dashboards:**
