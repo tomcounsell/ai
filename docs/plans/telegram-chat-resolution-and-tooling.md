@@ -1,12 +1,13 @@
 ---
-status: Ready
+status: Planning
 type: bug
 appetite: Medium
 owner: Valor
 created: 2026-04-24
-revised: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1163
 last_comment_id:
+revision_applied: true
+revision_date: 2026-04-24
 ---
 
 # Telegram Chat Resolution & Tooling Hardening
@@ -23,98 +24,86 @@ Issue [#1163](https://github.com/tomcounsell/ai/issues/1163) enumerates 8 relate
 - CLI output shows no freshness signal — the reader can't tell whether messages are current.
 - Three entry points exist — `valor-telegram`, `scripts/get-telegram-message-history`, and the `telegram` skill — with different identity spaces and no decision tree. The script is an orphan from a half-finished consolidation.
 - No `chats --search` discovery affordance; no "did you mean" on resolution failure.
-- No cross-chat project rollup — a project's group chat + PM sidebar are read separately with manual merging.
 
-**Desired outcome:** A reader querying Telegram history gets the right chat by default via recency-ranked picking, with a stderr warning listing all candidates so a silent wrong-match becomes visible. Read output carries an activity/freshness marker. One blessed CLI entry point (`valor-telegram`) handles groups, DMs (`--user`), and cross-chat project rollups (`--project`); the orphan script and half-finished skill consolidation are cleaned up. Matching rules are coherent and punctuation-tolerant, applied symmetrically at write and query sides.
+**Desired outcome:** A reader querying Telegram history either gets the right chat or gets an explicit disambiguation error with candidates ordered by recency. Read output carries an activity/freshness marker. One blessed CLI entry point (`valor-telegram`) handles groups and DMs; the orphan script and half-finished skill consolidation are cleaned up. Matching rules are coherent and punctuation-tolerant.
 
 ## Freshness Check
 
-**Baseline commit:** `58c3bfee` (2026-04-24 plan time, post-#1158 merge)
+**Baseline commit:** `3ef5894b` (2026-04-24 plan time)
 **Issue filed at:** 2026-04-24T10:04:29Z (same day as planning)
-**Disposition:** Minor drift — one test-path reference in the issue body and routing input is imprecise.
+**Disposition:** Unchanged
 
-File:line references re-verified:
-- `tools/telegram_history/__init__.py:940-979` (`resolve_chat_id`) — **still holds** exactly; 3-stage cascade confirmed.
-- `models/chat.py` — **still holds**; `chat_id` (UniqueKeyField), `chat_name` (KeyField), `chat_type` (KeyField nullable), `project_key` (Field nullable — intentionally NOT a KeyField to avoid delete-and-recreate per line 22 comment), `updated_at` (SortedField). This is relevant for the new `chat_name_normalized` field decision below.
-- `bridge/telegram_bridge.py:899` (`register_chat` invocation) — **still holds**. `register_chat` itself is defined at `tools/telegram_history/__init__.py:830`.
-- `tools/valor_telegram.py` — confirmed structure: `cmd_read` at line 181, `cmd_send` at line 316, `cmd_chats` at line 408, argparse wiring in `main` at line 444.
-- `scripts/get-telegram-message-history` — 211 lines, DM-only via `resolve_username` against `projects.json`, writes `data/message_query_request.json`. Confirmed orphan.
-- `.claude/skills/telegram/SKILL.md` — exists (98 lines); does NOT mention `scripts/get-telegram-message-history`. The "prior `searching-message-history` and `get-telegram-messages` skills" referenced in the issue are confirmed absent from `.claude/skills/`.
+No commits have landed on main between issue creation and this plan. All file:line references in the issue body were confirmed by direct code-read during recon (see issue Recon Summary). Sibling issues referenced ([#1065](https://github.com/tomcounsell/ai/issues/1065), [#1067](https://github.com/tomcounsell/ai/issues/1067), [#949](https://github.com/tomcounsell/ai/issues/949)) are all closed with resolutions consistent with their use here as precedent/context. No active plan in `docs/plans/` overlaps this area.
 
-**Test-path drift correction:** the issue body and do-plan input both name `tests/unit/test_telegram_history.py`. The actual canonical location is **`tests/tools/test_telegram_history.py`** (547+ lines, covers `TestRegisterChat`, `TestResolveChatId`, `TestListChats`, `TestSearchAllChats`). `tests/unit/test_telegram_history.py` does NOT exist. `tests/unit/test_valor_telegram.py` DOES exist and mocks `resolve_chat_id` — both files get updated.
+**Notes:** None — recon is fresh.
 
-**Sibling issues re-checked:**
-- [#1067](https://github.com/tomcounsell/ai/issues/1067) — closed 2026-04-21, shipped `valor-email` CLI; precedent for folding DM-only scripts into unified CLIs.
-- [#1158](https://github.com/tomcounsell/ai/issues/1158) — closed 2026-04-24 (today), enforced immutable project→repo pairing; makes `Chat.project_key` a trustworthy immutable anchor and unblocks defect 7's `--project` rollup.
-- [#1065](https://github.com/tomcounsell/ai/issues/1065) — closed; persona hard rule undermined by current resolver; this plan strengthens its foundation.
-- [#1161](https://github.com/tomcounsell/ai/issues/1161) — open; `valor-ingest` precedent for unified CLIs (referenced in user's routing brief).
-- [#1159](https://github.com/tomcounsell/ai/issues/1159) — open; "last activity: X ago" wording convention referenced in user's Q3 resolution.
+## Revision Notes (post-critique, 2026-04-24)
 
-**Commits on main since issue was filed (touching referenced files):** none; plan was triaged within the hour.
+This revision incorporates critique findings (verdict: NEEDS REVISION). Specifically:
 
-**Active plans in `docs/plans/` overlapping this area:** none. `unify-telegram-send.md` (merged) and `bridge-telegram-api-id-import-crash.md` (merged) are prior-art only.
+1. **Call-site recon completed up front.** The only in-tree caller of `resolve_chat_id` outside the test suite is `tools/valor_telegram.py:61` (via the thin `resolve_chat` wrapper at line 53) — verified by `grep -rn "resolve_chat_id" --include="*.py" .`. The plan previously spoke about "internal callers deep in the bridge hot path"; recon shows that concern is overblown — there is effectively ONE caller, and it owns the CLI-error-formatting path. This reshapes the risk profile and is now reflected in Task ordering (audit moved ahead of the signature change) and in the Risks section.
+2. **Open Questions resolved.** Q1 (ambiguity policy), Q2 (underscore handling), Q3 (orphan script handling), Q5 (audit rigor) are now resolved in-plan. Q4 (defect 7 follow-up timing) is moved to a No-Go with a concrete follow-up-issue task after merge.
+3. **`AmbiguousChatError` payload tightened.** Previously carried raw `list[Chat]` (Popoto model instances). Now carries a frozen dataclass `ChatCandidate(chat_id: str, chat_name: str, last_activity_ts: float | None)` — serializable, decoupled from Popoto field churn.
+4. **Test layout simplified.** No new `test_chat_name_normalization.py` file. Normalization tests join `tests/tools/test_telegram_history.py` alongside the resolver tests they exercise. One file, one failure-domain.
+5. **Failure-mode ordering.** The current `except Exception: return None` at `tools/telegram_history/__init__.py:978` is called out explicitly in Task 3 as "replace with `except RedisError, PopotoError: logger.warning(...); return None`" — the new code will not inherit the bare-except smell.
 
-**Notes:** The canonical test file path is corrected above. No premise-breaking drift. #1158 landing the same day materially strengthens this plan — see Q5 resolution in Solution.
+The issues below drove these fixes; the sections that follow have been updated to match.
 
 ## Prior Art
 
-- **Issue [#1065](https://github.com/tomcounsell/ai/issues/1065)** (closed): added a persona-level hard rule that Valor must search Telegram history before asking in group chats. The rule depends on the resolver — silent wrong-matches here undermine it in practice. This plan strengthens the foundation under #1065.
-- **Issue [#1067](https://github.com/tomcounsell/ai/issues/1067)** (closed): shipped `valor-email` CLI as an analog of `valor-telegram`. Structural precedent for unified CLI design — its `read --search` / `send --to` / `threads` subcommand layout and Redis-first / fallback pattern inform the `read --user` / `read --project` / `chats --search` additions here.
-- **Issue [#1158](https://github.com/tomcounsell/ai/issues/1158)** (closed, 2026-04-24): made `Chat.project_key` a trustworthy immutable anchor via project→repo pairing enforcement. This is the keystone that makes Q5 (`read --project <key>`) safe to ship in this plan — without immutable project_key, a rollup could mix chats whose project association had silently drifted.
-- **Issue [#1161](https://github.com/tomcounsell/ai/issues/1161)** (open): `valor-ingest` CLI precedent. Reinforces the "fold orphan scripts into a single unified CLI" pattern.
-- **Issue [#949](https://github.com/tomcounsell/ai/issues/949)** (closed): reply-to thread context propagation. Different layer (context propagation) than this one (identity resolution); no direct code overlap.
-- **PR [#746](https://github.com/tomcounsell/ai/pull/746)** (merged): `valor-telegram send` routed via Redis relay + `--reply-to` flag. Relevant only as context for how the CLI is structured; doesn't touch resolver.
+Prior issue/PR searches surfaced adjacent work on Telegram tooling but nothing that previously attempted to fix chat-name resolution, so "Why Previous Fixes Failed" is omitted below.
 
-No prior work directly attempted to fix chat-name resolution or add cross-chat project rollup. This is greenfield on those code paths.
+- **Issue [#1065](https://github.com/tomcounsell/ai/issues/1065)** (closed): added a persona-level hard rule that Valor must search Telegram history before asking in group chats. The rule depends on the resolver under it — silent wrong-matches here undermine it in practice. This plan strengthens the foundation under #1065.
+- **Issue [#1067](https://github.com/tomcounsell/ai/issues/1067)** (closed): shipped the `valor-email` CLI as an analog of `valor-telegram`. Useful as a design reference if we add/rename flags; the email CLI's `read --search` pattern is a template for `chats --search`.
+- **Issue [#949](https://github.com/tomcounsell/ai/issues/949)** (closed): reply-to threads and implicit-context messages not carrying conversation context. Different layer (context propagation) than this one (identity resolution); no direct code overlap.
+- **Issue [#919](https://github.com/tomcounsell/ai/issues/919)** (closed): reply-to routing split sessions. Different layer (session routing); not applicable here.
+- **PR [#392](https://github.com/tomcounsell/ai/pull/392)** (merged): Popoto model relationship cleanup. Relevant only as context for how `Chat` model fields are indexed; the SortedField on `updated_at` is already in place from this era.
+
+No prior work directly attempted to fix chat-name resolution. This is greenfield on that code path.
 
 ## Research
 
-No relevant external findings — the work is purely internal Python (Popoto ORM, existing Telethon fallback we do not change, standard library `str.casefold()` for normalization). No new libraries or APIs introduced.
+No relevant external findings — proceeding with codebase context. The work is purely internal Python (Popoto ORM, Telethon as a fallback we do not change), no new libraries or APIs introduced.
 
 ## Data Flow
 
-End-to-end flow for `valor-telegram read`, with the current break points highlighted:
+End-to-end flow for `valor-telegram read --chat NAME`, with the current break points highlighted:
 
-**Write side** (bridge inbound message → Chat record):
-1. **Entry point** — `bridge/telegram_bridge.py` receives a Telegram event.
-2. **Storage** — `store_message` writes the `TelegramMessage` record.
-3. **Chat registration** — `register_chat` at `tools/telegram_history/__init__.py:830` upserts the `Chat` record, setting `chat_name` and bumping `updated_at`. **New behavior:** also compute and set `chat_name_normalized` on the same upsert (foundational write-side change).
-
-**Query side** (`valor-telegram read --chat NAME`):
 1. **Entry point** — `tools/valor_telegram.py:cmd_read` (line 181).
-2. **Name → chat_id resolution** — `resolve_chat()` at line 53 delegates to `tools.telegram_history.resolve_chat_id` (line 940). **Current break:** returns the first arbitrary match across 3 stages, no ambiguity signal, no recency tiebreak, no punctuation tolerance. **New behavior:** normalize the user input using the same helper as the write side, gather all `Chat` candidates whose `chat_name_normalized` matches (exact then substring), sort by `updated_at` desc, tiebreak on `chat_id` asc, return the top candidate and emit a stderr warning listing ALL candidates with last-activity ages. Defensive: if any non-chosen candidate has a strictly greater `updated_at` than the chosen one (should be impossible given the sort, but guards against bugs), upgrade the warning to a non-zero exit unconditionally. `--strict` flag turns the ordinary warning into a non-zero exit as well.
-3. **DM fallback** — if `resolve_chat_id` returns None, falls back to `resolve_username` against `projects.json`. Unchanged by this plan *except* that `read --user USERNAME` now short-circuits directly to this path, folding in `scripts/get-telegram-message-history`.
-4. **Project rollup** — `read --project KEY` (new path): `Chat.query.filter(project_key=KEY)` returns all chats for the key; for each, fetch recent messages; union, sort chronologically ascending, apply `--limit` after merge, annotate each line with `[Chat Name]` prefix.
-5. **Message fetch** — `_fetch_messages_from_redis` reads the Redis message store for the resolved `chat_id`. **Current break:** output does not surface freshness. **New behavior:** include the `Chat.updated_at` timestamp in the CLI output header ("last activity: 2h ago").
-6. **Telethon fallback** — `_fetch_from_telegram_api` at line 258 triggers when Redis returns zero messages. **New behavior:** `--fresh` flag forces this path unconditionally, bypassing the Redis cache entirely.
-7. **Output** — formatted message list to stdout. **New behavior:** prepend a header line with chat_name, chat_id (for unambiguous reuse), and last-activity age.
+2. **Name → chat_id resolution** — `resolve_chat()` at line 53 delegates to `tools.telegram_history.resolve_chat_id` (line 940). **Current break:** returns the first arbitrary match across 3 stages, no ambiguity signal, no recency tiebreak. **New behavior:** collect all candidates surviving normalization+comparison at each stage, sort by `Chat.updated_at` desc, if >1 remain then raise `AmbiguousChatError` carrying the candidate list up to the CLI.
+3. **DM fallback** — if `resolve_chat_id` returns None, falls back to `resolve_username` against `projects.json`. Unchanged by this plan *except* that we'll also accept an explicit `--user USERNAME` flag on `read` to enable folding in `scripts/get-telegram-message-history`.
+4. **Message fetch** — `_fetch_messages_from_redis` (via `get_recent_messages` in `telegram_history`) reads the Redis message store for the resolved `chat_id`. **Current break:** output does not surface freshness. **New behavior:** include the `Chat.updated_at` timestamp in the CLI output header ("last activity: 2h ago").
+5. **Telethon fallback** — `_fetch_from_telegram_api` at line 258 only triggers when Redis returns zero messages. Unchanged.
+6. **Output** — formatted message list to stdout. **New behavior:** prepend a header line with chat_name, chat_id (for unambiguous reuse), and last-activity age.
 
-The orphan path — `scripts/get-telegram-message-history "username" COUNT` — writes a request file to `data/message_query_request.json` and polls for a result. **New behavior:** this path is folded into `valor-telegram read --user USERNAME` and the script is deleted outright (no deprecation shim — see Rabbit Holes).
+The orphan path — `scripts/get-telegram-message-history "username" COUNT` — writes a request file to `data/message_query_request.json` and polls for a result. **New behavior:** this path is folded into `valor-telegram read --user USERNAME` and the script is removed.
 
 ## Architectural Impact
 
 - **New dependencies:** none.
 - **Interface changes:**
-  - `models.chat.Chat` gains one new field: `chat_name_normalized = KeyField(null=True)` — indexed because the primary resolver query hits it directly. `null=True` is load-bearing: existing records have `None` until the bridge re-registers them on next inbound message.
-  - `tools.telegram_history` exports a new pure helper `normalize_chat_name(s: str) -> str` used symmetrically on write side (`register_chat`) and query side (`resolve_chat_id`).
-  - `resolve_chat_id(chat_name: str) -> str | None` return signature is **preserved** for back-compat with all existing callers. The new ambiguity-visibility contract lives entirely in the warning emitted to stderr as a side effect; callers that don't read stderr see the same single return value they saw before (the most recent match).
-  - `valor-telegram read` gains four optional flags: `--user USERNAME`, `--project KEY`, `--strict`, `--fresh`. `--chat`, `--user`, and `--project` are mutually exclusive at the argparse level.
-  - `valor-telegram chats` gains one optional flag: `--search PATTERN` (substring filter on normalized name).
-- **Coupling:** slight decrease. Consolidating the orphan script removes a second identity space. Normalization at write time trades one new field for eliminating the cascade's case-insensitive/substring Python loops.
+  - New `ChatCandidate` dataclass in `tools/telegram_history/__init__.py`: `@dataclass(frozen=True) class ChatCandidate: chat_id: str; chat_name: str; last_activity_ts: float | None`. Serializable, decoupled from Popoto schema.
+  - New `resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]` returns all matches ordered by `last_activity_ts` desc (None sorts last).
+  - New `AmbiguousChatError(candidates: list[ChatCandidate])` exception class.
+  - `resolve_chat_id(chat_name: str, allow_ambiguous: bool = False) -> str | None` signature extends with `allow_ambiguous` kwarg (default False). Behavior change: when `>1` candidate survives and `allow_ambiguous=False`, raises `AmbiguousChatError` instead of silently picking the first. Default remains `str | None` return for the single/zero/`allow_ambiguous=True` cases.
+  - `valor-telegram read` gains optional `--chat-id ID` flag (numeric bypass) and `--user USERNAME` flag (DM bypass, folds in orphan script).
+  - `valor-telegram chats` gains optional `--search PATTERN` flag.
+- **Coupling:** slight decrease. Consolidating the orphan script removes a second identity space. `AmbiguousChatError` carries plain dataclass — callers that format it are not coupled to Popoto.
 - **Data ownership:** unchanged. `Chat` model still owned by the bridge.
-- **Reversibility:** high. The new field is additive and nullable. The normalization helper is pure. Ambiguity detection writes to stderr only — no caller contract changes. Removing the orphan script is the one hard-to-reverse move; mitigated by confirming zero external callers via audit (see Risks).
+- **Reversibility:** high. All changes are additive at the API layer. The `resolve_chat_id` signature extension is keyword-only (`allow_ambiguous=False` default) — the single caller site (`tools/valor_telegram.py:61`) is updated in the same PR to wrap with a `try/except AmbiguousChatError` block. Rollback is a single revert.
+- **Behavioral change risk:** the single in-tree caller of `resolve_chat_id` is `tools/valor_telegram.py:61`. Recon (`grep -rn "resolve_chat_id" --include="*.py" .`) confirms zero other non-test callers. The "silent behavior change in bridge hot path" scenario does not apply here — the bridge registers chats but does not *resolve* them by name.
 
 ## Appetite
 
 **Size:** Medium
 
-**Team:** Solo dev (builder + validator via Task pattern), 1 documentarian, 1 code-reviewer pass.
+**Team:** Solo dev (builder + validator via Task pattern), 1 code-reviewer pass.
 
 **Interactions:**
-- PM check-ins: 0 required — all 5 Solution Sketch open questions resolved before planning started (see binding user inputs in issue-tracking).
+- PM check-ins: 1 — to confirm the ambiguity policy (error vs. pick-most-recent-with-warning) in Open Questions before implementation.
 - Review rounds: 1 — single code review pass after validator confirms tests pass.
 
-Rationale: 8 defects and one additive feature (defect 7), but all tightly coupled around one function family, one model field, one bridge callsite, and one CLI. Scope is bounded; #1158 landing today removed the last blocker for the `--project` rollup. Interface changes are additive and preserve all existing signatures.
+Rationale: 8 defects but tightly coupled around one function family and one model. Scope is bounded; defect 7 (cross-chat project-level stitching) is deferred to a No-Go. Interface changes are additive.
 
 ## Prerequisites
 
@@ -123,306 +112,199 @@ Rationale: 8 defects and one additive feature (defect 7), but all tightly couple
 | Redis running | `redis-cli ping` | `Chat` model reads/writes during tests |
 | Popoto importable | `python -c "from models.chat import Chat"` | Model layer available |
 | Existing test baseline passes | `pytest tests/tools/test_telegram_history.py tests/unit/test_valor_telegram.py -q` | Confirm no unrelated breakage before starting |
-| Project registry populated | `python -c "from models.chat import Chat; print(len(list(Chat.query.all())))"` | At least a handful of Chat records must exist for the normalized-backfill test to be meaningful |
 
 No prerequisites beyond normal dev environment.
 
 ## Solution
 
-All five open questions in the issue's Solution Sketch have pre-resolved answers (binding inputs to this plan). The sub-sections below encode those resolutions directly; they are not open.
-
 ### Key Elements
 
-- **`normalize_chat_name(s: str) -> str`** (new): pure helper. Rules: `str.casefold()` → collapse internal whitespace runs to single space → strip the punctuation set `{_, :, -, ., ,}` (underscore, colon, hyphen, period, comma). Does NOT touch emoji or non-ASCII. Applied symmetrically on both sides of every comparison.
-- **`Chat.chat_name_normalized`** (new field): `KeyField(null=True)`. Populated at write time by `register_chat`. Nullable for legacy records until they are re-registered (see Backfill Strategy).
-- **Recency-ranked pick-with-warning**: when resolution produces >1 candidate, the resolver returns the candidate with the greatest `updated_at` (tiebreak on `chat_id` ascending, for determinism across Popoto iteration order), AND emits a stderr warning listing ALL candidates (chosen + non-chosen) with their `chat_id`, `chat_name`, and last-activity age, in greppable format.
-- **Defensive ordering check**: if the sort returns a chosen candidate whose `updated_at` is strictly less than any other candidate's `updated_at` (this should be impossible given the sort rule, but guards against bugs in future edits), the stderr warning is upgraded to a non-zero exit code unconditionally, regardless of `--strict`.
-- **`--strict` flag on `read`**: flips the stderr warning into a non-zero exit code. For scripted callers (cron, CI) who prefer hard failure over silent-picks-with-stderr.
-- **`--fresh` flag on `read`**: forces a Telethon round-trip, bypassing the Redis cache entirely. For callers who explicitly doubt cache freshness.
-- **`--user USERNAME` flag on `read`**: folds in the orphan script's sole feature. Routes via `resolve_username` against `projects.json` (existing code path); does NOT use `resolve_chat_id`.
-- **`--project KEY` flag on `read`**: unions messages across all chats where `Chat.project_key == KEY`, sorted chronologically ascending, annotated per line with `[Chat Name]`. Mutually exclusive with `--chat` and `--user`. On zero chats matching KEY, prints known project_keys as "did you mean..." output.
-- **`valor-telegram chats --search PATTERN`**: substring filter on `chat_name_normalized` (both sides normalized). Sorted by recency desc.
-- **Freshness header on `read`**: one-line header before the message list: `[chat_name · chat_id=N · last activity: T ago]` using `Chat.updated_at`. Clarifies the semantics in the `--help`: "last activity = last inbound message timestamp; not a last-confirmed-sync signal."
-- **"Did you mean" on zero-match**: on `resolve_chat_id` → None, `cmd_read` prints top-3 candidates from the full Chat list sorted by `updated_at` desc with the lowest-bar normalized substring match. Reuses the same ranking function as the ambiguity warning.
-- **Orphan script removal**: `scripts/get-telegram-message-history` is deleted outright after caller migration. No deprecation shim (per `feedback_prevention_over_cleanup`: half-measures accumulate).
+- **`ChatCandidate`** (new): `@dataclass(frozen=True) class ChatCandidate: chat_id: str; chat_name: str; last_activity_ts: float | None`. Plain dataclass; not tied to Popoto schema.
+- **`resolve_chat_candidates`** (new): returns all matches as `list[ChatCandidate]`, ordered by `last_activity_ts` desc (None sorts last). Empty list for no match, single item for unique, multiple for ambiguous.
+- **`AmbiguousChatError`** (new): exception carrying `candidates: list[ChatCandidate]`. Raised by `resolve_chat_id` when >1 candidate survives and `allow_ambiguous=False`. Callers format it into user-facing "did you mean" output.
+- **Name normalization** (new): helper that lowercases, collapses whitespace, and strips a small, conservative punctuation set (`: - | _`) from both sides of the comparison. Preserves emoji and non-ASCII; conservative by design. Underscore IS included (resolves Q2; rationale in Technical Approach).
+- **`valor-telegram read` output header** (new): one-line activity marker derived from `Chat.updated_at`.
+- **`--chat-id`, `--user` flags on `read`** (new): escape hatches for scripted/unambiguous use; `--user` also folds in the orphan script's sole use case.
+- **`--search PATTERN` on `chats`** (new): substring filter, still sorted by recency.
+- **Resolution-failure UX**: `cmd_read` catches `AmbiguousChatError` and prints a formatted candidate list with `chat_id` values for direct reuse. On zero-match, prints top-3 nearest candidates ordered by `updated_at` (same normalization, with a lower similarity bar).
+- **Orphan script removal**: delete `scripts/get-telegram-message-history`, update any in-tree callers, update `telegram` skill doc.
 
 ### Flow
 
 Happy path (unique match):
-`valor-telegram read --chat "PM: PsyOptimal" --limit 20` → normalized to `pm psyoptimal` on both sides → 1 candidate → header `[PM: PsyOptimal · chat_id=-100123 · last activity: 3m ago]` → message list. Exit 0.
+`valor-telegram read --chat "PM: PsyOptimal" --limit 20` → resolver finds 1 candidate → header `[PM: PsyOptimal · chat_id=-100123 · last activity: 3m ago]` → message list.
 
-Ambiguous path (default — pick-most-recent + warning to stderr):
-`valor-telegram read --chat "PsyOptimal"` → normalized to `psyoptimal` on both sides → 2 candidates. Stderr (greppable):
+Ambiguous path:
+`valor-telegram read --chat "PsyOptimal"` → resolver finds 2 candidates → exits non-zero with:
 ```
-WARN ambiguous-chat query="PsyOptimal" n_candidates=2
-CHOSEN  chat_id=-100123  chat_name="PM: PsyOptimal"  last_activity_age=3m
-OTHER   chat_id=-100456  chat_name="PsyOptimal"      last_activity_age=2d
+Ambiguous chat name "PsyOptimal". 2 candidates (most recent first):
+  -100123  PM: PsyOptimal       last: 3m ago
+  -100456  PsyOptimal           last: 2d ago
+Re-run with --chat-id <id> or a more specific --chat string.
 ```
-Stdout: freshness header + messages from the chosen (most-recent) chat. Exit 0 (warning, not error).
-
-Ambiguous path with `--strict`:
-`valor-telegram read --chat "PsyOptimal" --strict` → same stderr warning → exit 1, no message output.
 
 Zero-match path:
-`valor-telegram read --chat "asdfxxx"` → normalized to `asdfxxx` → 0 candidates → stderr prints top-3 did-you-mean from full Chat list sorted by `updated_at` desc with lowest-bar match. Exit 1.
-
-Fresh bypass:
-`valor-telegram read --chat "PM: PsyOptimal" --fresh` → skips Redis, hits Telethon directly → returns live messages. Freshness header reflects live-fetch provenance.
-
-DM path:
-`valor-telegram read --user lewis --limit 30` → routes via `resolve_username`, not `resolve_chat_id` → reads DM history. Replaces the orphan script.
-
-Project rollup:
-`valor-telegram read --project psyoptimal --limit 30 --since "1 day ago"` → finds all Chat records where `project_key=="psyoptimal"`, merges their messages, sorts ascending, applies `--limit` after merge, prints `[PsyOptimal] ...` / `[PM: PsyOptimal] ...` interleaved.
-
-Project-not-found:
-`valor-telegram read --project unknownkey` → stderr prints "no chats with project_key=unknownkey; known keys: [ai, psyoptimal, ...]" sorted by count desc. Exit 1.
+`valor-telegram read --chat "PM PsyOptimal"` (missing colon) → normalization collapses `: `→` ` on both sides → matches → same as happy path. If normalization still produces zero matches, prints top-3 did-you-mean candidates from full `Chat` list by recency.
 
 Discovery path:
-`valor-telegram chats --search "psy"` → returns all chats whose `chat_name_normalized` contains `psy`, sorted by `updated_at` desc.
+`valor-telegram chats --search "psy"` → returns all chats whose normalized name contains `psy`, sorted by `updated_at` desc.
 
 ### Technical Approach
 
-- **Normalization is applied symmetrically** — the same `normalize_chat_name` helper runs on `register_chat`'s input and on `resolve_chat_id`'s input. The helper is deterministic and pure; unit-tested in isolation. Rules (binding): `str.casefold()` → collapse internal whitespace runs to single space → strip `{_, :, -, ., ,}`. Emoji and non-ASCII are untouched.
-- **Chat model sidecar field** — `chat_name_normalized = KeyField(null=True)`. Chose `KeyField` (not `Field`) because the resolver's first stage will query this field directly — KeyField gives O(1) indexed lookup via `Chat.query.filter(chat_name_normalized=X)`. The `null=True` flag is required to avoid delete-and-recreate churn when an existing record is re-registered (contrast with `project_key` at models/chat.py:22 which intentionally uses `Field` to avoid delete-and-recreate on change — for `chat_name_normalized`, value changes only when chat_name itself changes, which already delete-and-recreates via the `chat_name` KeyField cascade at `register_chat` lines 858-868, so the KeyField choice is consistent with existing semantics).
-- **Resolver order of operations** — new cascade: (1) `Chat.query.filter(chat_name_normalized=normalize(input))` returns all indexed matches. (2) If zero matches, fall back to the legacy Python-side cascade (case-insensitive exact on `chat_name`, then substring) to handle records whose `chat_name_normalized` is still NULL from pre-backfill. (3) Collect all candidates across stages before returning. Sort by `updated_at` desc, tiebreak on `chat_id` asc. (4) If >1 candidate, emit stderr warning; return the top candidate (or exit 1 if `--strict`).
-- **`resolve_chat_id` signature preservation** — external contract `resolve_chat_id(chat_name: str) -> str | None` is preserved. The warning side-effect goes to stderr via a dedicated log channel (not `print` — use `sys.stderr.write` directly so we control the format precisely and it stays greppable). Internal callers that don't route stderr keep working unchanged.
-- **CLI argparse** — `--chat`, `--user`, `--project` are declared in a `mutually_exclusive_group(required=True)` on the `read` subparser. `--strict` and `--fresh` are independent booleans. `--search` on `chats` is an independent optional string.
-- **Freshness header** — one line before messages: `[{chat_name} · chat_id={chat_id} · last activity: {format_timestamp(updated_at)}]`. `format_timestamp` already exists in `valor_telegram.py` (line 79); extend it if needed to emit relative form (e.g., "3m ago", "2d ago") rather than absolute. Wording convention from [#1159](https://github.com/tomcounsell/ai/issues/1159) Tweak 4.
-- **`--fresh` implementation** — set a boolean flag that skips the `get_recent_messages` / Redis path and goes straight to `_fetch_from_telegram_api`. The Telethon client setup at `valor_telegram.py:90` is already gated on env vars; `--fresh` simply reorders the dispatch.
-- **`--project` implementation** — new function `cmd_read_project(project_key, limit, since)` in `valor_telegram.py`. `Chat.query.filter(project_key=project_key)` returns the chat set; iterate to fetch recent messages from each; merge into one list, sort by timestamp ascending, apply limit after merge. Annotate each line with `[chat_name]` prefix. Error path: if the query returns empty, query all Chat records for their project_keys, dedupe, print sorted list as "did you mean..." candidates.
-- **No separate `last_sync_ts`** — per Q3 resolution, we extend `updated_at` semantics only. The cost of a new field (bridge write-path coupling, migration) outweighs the benefit when "last inbound message" is what readers actually need. Documented explicitly in CLI `--help` and skill doc: "`last activity` = last inbound message timestamp, not a last-confirmed-sync signal."
-- **Orphan script consolidation** — delete `scripts/get-telegram-message-history` outright after auditing for callers. `valor-telegram read --user USERNAME` replaces the sole feature (DM by username).
-- **Orphan skill directory cleanup** — the issue body notes that `.claude/skills/searching-message-history/` and `.claude/skills/get-telegram-messages/` directories no longer exist (confirmed in Freshness Check). The `.claude/skills/telegram/SKILL.md` header still claims consolidation from them. Update the SKILL header to reflect the final state; no files to remove.
-
-### Backfill Strategy
-
-Existing `Chat` records have `chat_name_normalized = None` until re-registered by the bridge on next inbound message. Two approaches were considered:
-
-**Chosen: Lazy populate-on-read (with migration helper fallback).**
-
-Rationale:
-- The bridge updates `chat_name_normalized` on every inbound message anyway (automatic over time). For an active chat, this happens within minutes to hours.
-- For dormant chats that haven't received a message recently, the resolver's legacy-cascade fallback (Python-side case-insensitive exact, then substring, on `chat_name`) keeps them resolvable until they're re-registered. Nothing breaks.
-- On every resolver call, if a candidate `Chat` has `chat_name_normalized is None` but matches via the legacy cascade, we populate and save it eagerly (one-line side effect, cost is a single Redis HSET per affected record). This converges all actively-queried chats within normal use.
-- A one-shot migration helper `python -m tools.backfill_chat_normalized_names` is provided as an escape hatch for operators who want to backfill immediately. It iterates `Chat.query.all()`, populates the new field, saves. Idempotent; safe to re-run.
-
-Rejected alternative: mandatory upfront migration. Rejected because (a) the Chat table is small (hundreds of rows), (b) lazy-populate guarantees correctness even if the migration isn't run, and (c) the legacy cascade provides a safety net during the transition. Shipping with an optional helper is strictly safer than requiring a pre-deployment migration step.
+- **Normalization** is applied symmetrically on both sides of every comparison. Keep it conservative to avoid false positives (no Levenshtein, no emoji stripping, no unicode folding). Implementation: one pure helper `_normalize_chat_name(s: str) -> str` in `telegram_history/__init__.py`, unit-tested in `tests/tools/test_telegram_history.py`.
+  - **Underscore handling (Q2 resolved):** `_` IS stripped. Rationale: in practice, chat names with underscores (`dev_valor`, `backup_logs`) mirror slug/channel conventions; users typing them interactively are likely to type space or nothing. Name collisions where `dev_valor` and `dev valor` mean *different* chats are vanishingly rare in this workspace — and if they ever occur, the ambiguity detector is the safety net: both would show up in the candidate list for the user to disambiguate. Being conservative on `_` would trade a real UX win for a hypothetical edge case.
+- **Candidate collection** changes the cascade semantics: at each of the three stages (exact → case-insensitive exact → substring), collect ALL hits before returning. Only move to the next stage if the current stage yields zero hits. This preserves the "prefer exact over fuzzy" ordering but within a stage never silently picks one of N. Each hit is projected to a `ChatCandidate` at collection time — `Chat` model instances never leak past this boundary.
+- **Recency ranking** sorts `ChatCandidate`s by `last_activity_ts` desc with `None` sorting last (i.e., chats that have never been updated). Popoto's `SortedField` on `Chat.updated_at` already indexes this; we read all candidates for a stage (small N — there are hundreds of chats, not thousands) and sort in Python. If this becomes a performance concern in the future, we can use Popoto's sorted query API — not needed now.
+- **`AmbiguousChatError`** carries `list[ChatCandidate]`. Internal callers that set `allow_ambiguous=True` get the first (most-recent) candidate's `chat_id` and a `logger.warning` recording the ambiguity plus the runner-up chat_name; the CLI never sets this flag.
+- **Ambiguity policy (Q1 resolved):** hard error with candidate list (exit 1). The silent wrong-match was the bug. Scripted callers that want the old "pick first" behavior opt in explicitly via `--chat-id NUMBER` (unambiguous) or accept the ambiguity error and shell-parse it. We do NOT add `--allow-ambiguous` to the CLI surface — the only supported path to bypass ambiguity is explicit `--chat-id`.
+- **Freshness in output** reads `Chat.updated_at` once per read and formats as relative time (`format_timestamp` already exists in `valor_telegram.py`). Header format: `[chat_name · chat_id=N · last activity: T]`. If `updated_at` is None (chat registered but no messages yet), format as `last activity: never`.
+- **No new `last_sync_ts` field.** The original defect 3 suggested adding one, but recon confirmed `updated_at` is updated on every inbound message — which is what "freshness" practically means for a reader ("is this chat active or quiet?"). Adding a second timestamp field would require bridge changes and migration for marginal benefit. Surfacing `updated_at` closes the information gap without the schema churn.
+- **Narrow exception handling.** The current `except Exception: return None` at `tools/telegram_history/__init__.py:978` is replaced by an explicit `except (redis.RedisError, popoto.errors.PopotoError): logger.warning(...); return None` (or equivalent — exact exception classes confirmed at implementation time). A test asserts the log is emitted when Redis is unavailable.
+- **Orphan script consolidation (Q3 resolved):** straight delete if audit finds zero callers, single-commit deprecation shim otherwise. The script's sole feature is "read DM messages by username via bridge IPC." `valor-telegram read --user USERNAME` achieves the same outcome by routing through `resolve_username` and the existing Redis-first/Telethon-fallback path. After migration, `scripts/get-telegram-message-history` is deleted.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `resolve_chat_id` at lines 978–979 currently has `except Exception: return None` — this swallows all Redis/Popoto errors. The new implementation tightens the exception handler to catch only `popoto.ModelException` and `redis.exceptions.RedisError`, logging the exception detail via `logger.warning` before returning None. Test must assert the log message is emitted, not just that None is returned.
-- [ ] `register_chat` exception handler at lines 888-889 must also populate `chat_name_normalized` in both the "existing + update" and "new + create" branches. Test that the field is populated even when the Chat record is being renamed (delete-and-recreate path).
-- [ ] `normalize_chat_name` is pure and deterministic — no exceptions expected. Test that it accepts empty string, whitespace-only, extremely long input, and non-ASCII without raising.
+- [ ] `resolve_chat_id` at lines 978–979 has an `except Exception: return None` — this must be kept narrow (catch only the Popoto/Redis error we actually anticipate) or replaced with a logger.warning + re-raise in the new code. Test must assert the log/metric when the underlying query fails, not just that None is returned.
+- [ ] New `resolve_chat_candidates` must have the same try/except discipline; test both the success path and the Redis-unavailable path.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty string `--chat ""` → clear error message, not silent None. Argparse `required=True` + `mutually_exclusive_group` handles the mutual-exclusion case; `cmd_read` checks for empty-after-strip.
+- [ ] Empty string `--chat ""` → clear error message, not silent None.
 - [ ] Whitespace-only `--chat "   "` → treated same as empty.
-- [ ] Non-ASCII / emoji-containing chat names → normalization preserves them; matching still works (e.g., a chat named "🚀 Launch" still resolves to itself).
+- [ ] Non-ASCII / emoji-containing chat names → normalization preserves them; matching still works.
 - [ ] Very long chat names (>200 chars) → no crash; either match or clean no-match.
-- [ ] `--project` with empty key → clear error message.
-- [ ] `--user` with empty username → clear error message.
 
 ### Error State Rendering
-- [ ] Ambiguity warning renders to stderr in greppable format with the CHOSEN/OTHER discriminator on each line. Exit 0 by default; exit 1 with `--strict`.
-- [ ] Zero-match "did you mean" renders top-3 to stderr with exit code 1.
-- [ ] `--project` with unknown key → stderr lists known keys, exit 1.
-- [ ] `--fresh` with no Telethon credentials → clear actionable error pointing at `.env` setup, not a raw exception.
-- [ ] Defensive ordering violation (chosen candidate has lower `updated_at` than any non-chosen) → exit 1 unconditionally with a specific error log.
+- [ ] Ambiguity error renders candidate list to stdout with exit code 1 (not silent selection).
+- [ ] Zero-match "did you mean" renders top-3 to stdout with exit code 1.
+- [ ] `--chat-id` with numeric input that has no messages → renders "no messages found for chat -100123" (clear), not a raw empty list.
 
 ## Test Impact
 
-- [ ] `tests/tools/test_telegram_history.py::TestRegisterChat` — UPDATE: `test_register_new_chat` and `test_register_chat_idempotent` should both assert that `chat_name_normalized` is populated after the registration (not just `registered=True`).
-- [ ] `tests/tools/test_telegram_history.py::TestResolveChatId::test_resolve_exact_match` — UPDATE: still passes but now goes through the normalized-field indexed path; add a dedicated assertion that the normalized-field query is hit (spy on the Popoto filter).
-- [ ] `tests/tools/test_telegram_history.py::TestResolveChatId::test_resolve_case_insensitive` — UPDATE: current test asserts `resolve_chat_id("dev: valor")` finds a chat named `"Dev: Valor"`. New implementation resolves via normalization (both normalize to `dev valor`). Keep the assertion; extend with a punctuation case: `resolve_chat_id("dev valor")` (no colon) must also find `"Dev: Valor"`.
-- [ ] `tests/tools/test_telegram_history.py::TestResolveChatId::test_resolve_partial_match` — UPDATE: currently asserts `resolve_chat_id("Valor")` resolves to `"Dev: Valor Project"` via silent substring match. Under new contract: still returns a chat_id (most-recent match wins), but stderr warning is emitted. Test must capture stderr and assert the warning format, plus assert the correct winner when two candidates are seeded.
-- [ ] `tests/tools/test_telegram_history.py::TestResolveChatId::test_resolve_not_found` — UPDATE: `resolve_chat_id("NonexistentChatXYZ")` still returns None at the function level; NEW test case for `cmd_read` behavior: the CLI prints top-3 did-you-mean candidates with exit 1.
-- [ ] `tests/tools/test_telegram_history.py` — ADD: `TestNormalizeChatName` class with cases for casefold, whitespace collapse, punctuation stripping (`{_, :, -, ., ,}`), emoji preservation, non-ASCII preservation, empty/whitespace-only input.
-- [ ] `tests/tools/test_telegram_history.py` — ADD: `TestResolveAmbiguity` class with the canonical collision fixture (`PsyOptimal` group + `PM: PsyOptimal` DM), asserting (a) the most-recent wins, (b) deterministic tiebreak on chat_id when `updated_at` ties, (c) stderr warning lists both candidates in greppable format, (d) defensive check fires when a non-chosen candidate has greater `updated_at` (simulated by monkey-patching sort key).
-- [ ] `tests/unit/test_valor_telegram.py::TestResolveChat` (mock-based tests around `resolve_chat`) — UPDATE: existing tests mock `resolve_chat_id` and assume single return value; add tests for the new stderr warning path, `--strict` exit behavior, `--fresh` dispatch, `--user` and `--project` flags, `chats --search` flag.
-- [ ] `tests/unit/test_valor_telegram.py` — ADD: `TestCmdReadProject` class covering the rollup behavior (union across chats, chronological sort, limit-after-merge, `[Chat Name]` annotations, zero-match did-you-mean).
-- [ ] `tests/tools/test_telegram_history.py` — ADD: `TestBackfillChatNormalized` covering (a) migration helper populates all NULL records, (b) lazy populate-on-read updates a single record during resolve, (c) idempotent re-run of migration.
-- [ ] Integration test for bridge chat registration — UPDATE: any integration test that exercises `bridge/telegram_bridge.py::register_chat` must assert `chat_name_normalized` is populated after inbound message handling.
-- [ ] `scripts/get-telegram-message-history` has no dedicated tests in the tree (confirmed via `find tests -name "*get-telegram*"` → zero results) — nothing to DELETE there. The only adjacent reference is in the tools/test_telegram_history.py file.
-- [ ] `.claude/skills/telegram/SKILL.md` — UPDATE (docs task): new flags documented, stale references removed.
+- [ ] `tests/tools/test_telegram_history.py` — UPDATE: add tests for `_normalize_chat_name` (whitespace collapse, punctuation stripping including `_`, case folding, emoji/non-ASCII preservation, empty and whitespace-only input), `resolve_chat_candidates` (zero/one/many matches, ordering by `last_activity_ts` desc with None-last, stage cascade exact→ci→substring), and `resolve_chat_id` (`AmbiguousChatError` on >1 candidate, `allow_ambiguous=True` returns first and logs, `None` on zero, narrow exception handling on Redis error). Add a fixture that seeds two `Chat` records with overlapping names (`PsyOptimal` + `PM: PsyOptimal`) and assert the ambiguity-detection path. Normalization tests live alongside resolver tests (same file, same failure-domain).
+- [ ] `tests/unit/test_valor_telegram.py` — UPDATE: existing `TestResolveChat` tests pass through `resolve_chat_id` as a mock; add new tests that assert `cmd_read` handles the new `AmbiguousChatError` by printing candidates and exiting non-zero. Add tests for the new `--chat-id`, `--user`, and `chats --search` flags. Add a test for the freshness header format (`last activity: Xh ago` vs `last activity: never`).
+- [ ] `tests/unit/test_valor_telegram.py::TestResolveChat::test_returns_none_for_unknown` — UPDATE: current behavior returns None; new behavior should still return None (for legacy API preservation) but the CLI caller should print the "did you mean" candidates. Test both the function-level None return and the CLI-level did-you-mean output.
+- [ ] `scripts/get-telegram-message-history` tests (if any) — DELETE when the script is removed. Audit `tests/` for references first (`grep -rln "get-telegram-message-history" tests/`).
 
 ## Rabbit Holes
 
-- **Separate `last_sync_ts` field on `Chat`**: explicitly out of scope per Q3. Adding the field is a bridge hot-path coupling and a new invariant for marginal benefit. Surface `updated_at` instead; document the semantics gap.
-- **Levenshtein / fuzzy-matching libraries**: tempting for "did you mean" but adds a dependency and can produce surprising matches (e.g., "PsyOptimal" matching "OptimalPsy"). Stick to substring + normalization. The top-3 did-you-mean uses normalized substring match.
-- **Unicode normalization (NFC/NFKC)**: tempting — "café" vs "café" differ by composition — but injecting Unicode normalization into chat-name matching risks over-matching unrelated names. Defer to a follow-up if real collisions surface.
-- **Deprecation shim for `scripts/get-telegram-message-history`**: explicitly rejected. Per `feedback_prevention_over_cleanup`, half-measures accumulate. If the audit finds callers, migrate them in the same PR. If it finds none, delete outright. No shim.
-- **Rewriting the `Chat` model schema beyond the one sidecar field**: adding `aliases`, `nicknames`, `emoji_prefix` — out of scope. This plan adds exactly one new field.
-- **Telethon fallback enrichment beyond `--fresh`**: making Telethon fallback trigger on stale-match suspicion (not just zero-match or `--fresh`) — invites new failure modes and spec ambiguity; keep current fallback semantics.
-- **Popoto query-layer optimization**: reading all chats for did-you-mean and sorting in Python is fine at this scale (hundreds of chats); resist premature optimization.
-- **Expanding `--project` to support multiple project_keys or wildcard matching**: out of scope. Exactly-one key at a time; add in a follow-up if needed.
+- **Levenshtein / fuzzy-matching libraries**: tempting for "did you mean" but adds a dependency and can produce surprising matches (e.g., "PsyOptimal" matching "OptimalPsy"). Stick to substring + normalization. The top-3 did-you-mean uses same normalization with a lower bar (shortest chat-name substring match).
+- **Rewriting the `Chat` model schema**: adding `last_sync_ts`, `aliases`, `nicknames` — out of scope. This plan deliberately avoids schema churn; surface the existing `updated_at` instead.
+- **Cross-chat project-level stitching** (defect 7): high value but a larger design (project_key indexing, unified read semantics, display formatting). Separate follow-up.
+- **Telethon fallback enrichment**: making Telethon fallback trigger on stale-match suspicion (not just zero-match) — invites new failure modes and spec ambiguity; keep current fallback semantics.
+- **Popoto query-layer optimization**: reading all chats and sorting in Python is fine at this scale (hundreds of chats); resist premature optimization.
 
 ## Risks
 
-### Risk 1: Pre-backfill `Chat` records fail the normalized-field query silently
+### Risk 1: Existing internal callers rely on current `resolve_chat_id` behavior (first-match silent)
 
-**Impact:** After deployment, existing `Chat` records have `chat_name_normalized=None`. A resolver query using the normalized-field index finds none and falls through to the legacy cascade. If the legacy cascade then hits the silent-wrong-match bug this plan is fixing, we've regressed.
+**Impact:** If internal code paths call `resolve_chat_id` and expect a single chat_id even when ambiguous, they'll now hit `AmbiguousChatError`. Silent behavior change could propagate deep.
 
-**Mitigation:** The new resolver also gathers all candidates from the legacy cascade (not just the first hit), sorts by `updated_at` desc, and emits the same stderr warning on >1 match. The legacy-fallback path never silently picks without a visible warning. Additionally, every resolver call with a legacy-path hit eagerly populates the missing `chat_name_normalized` field on the matched record, converging the index over normal use. A test explicitly exercises the pre-backfill state and asserts the warning is still emitted.
+**Status:** Recon completed. The only in-tree caller outside the test suite is `tools/valor_telegram.py:61` (via `resolve_chat` wrapper at line 53). The bridge does NOT call `resolve_chat_id` — it calls `register_chat` (the writer). No hot-path caller exists.
 
-### Risk 2: Normalization strips too much, merging legitimately-distinct chat names
+**Mitigation:** `resolve_chat_id` retains the `str | None` return signature by default; the new kwarg `allow_ambiguous=False` is keyword-only. The single caller (`valor_telegram.py`) is updated in the same PR to catch `AmbiguousChatError` and format it for the CLI. Task 1 (audit-callers) re-confirms at build time — if a new caller has appeared since recon, it's recorded and handled explicitly. The `allow_ambiguous=True` opt-in is only used for callers that explicitly want the old pick-first semantics with a logged warning — not as a silent fallback.
 
-**Impact:** Normalizing `backup_logs` and `backup logs` to the same form may cause an unintended ambiguity warning (or worse, a silent wrong-pick if only one exists). Per Q4, `_` IS in the strip set — this is a deliberate choice but has blast radius.
+### Risk 2: Normalization over-matches, silently resolving to the wrong chat
 
-**Mitigation:** The ambiguity-warning design is the primary safety net: ambiguous normalization always surfaces via stderr with both candidates visible. Add unit tests that explicitly verify (a) normalization-collision cases emit the warning, (b) `--strict` converts to an error for scripted callers. If post-deployment surfaces genuine false-positive merges, pulling `_` from the strip set is a one-line change. The choice of `{_, :, -, ., ,}` as the strip set is conservative against `/`, `|`, `;`, `!`, `?`, `@`, `#`, `$`, `%`, `&`, `*`, `(`, `)`, `[`, `]`, `{`, `}`, `<`, `>`, `~`, `` ` ``, `'`, `"`, `=`, `+`, `^` — none of those are stripped.
+**Impact:** Normalization that's too aggressive (e.g., stripping `_`) could merge two legitimately-distinct chat names (`dev_valor` + `dev valor`).
 
-### Risk 3: `--project` rollup returns duplicate messages if a chat appears in two project_keys
+**Mitigation:** Conservative set — lowercasing, whitespace collapse, and `: - _ |` stripping only. No unicode folding, no emoji stripping, no Levenshtein. Unit tests cover both the "should match despite punctuation" and "should NOT match when names are genuinely different after normalization" cases. The ambiguity detector is the safety net: if normalization produces >1 distinct `chat_id`, the user sees both and picks.
 
-**Impact:** `Chat.project_key` is a `Field` (not unique) and in principle could be changed. Although #1158 made it immutable at creation, legacy records may have drifted project_keys from before that enforcement.
-
-**Mitigation:** #1158's enforcement is prevention-at-creation-site; pre-#1158 records are grandfathered. For this plan, the `--project` rollup queries `Chat.query.filter(project_key=KEY)` and each `Chat` has exactly one `project_key` at a time (scalar field), so no dedupe is needed within a single call — a given chat appears in the result for at most one project_key. No message-level dedupe needed. Add a test that exercises a chat with a post-#1158 project_key to confirm the filter behaves correctly.
-
-### Risk 4: Existing internal callers of `resolve_chat_id` rely on stderr being quiet
-
-**Impact:** If an internal caller routes stderr into a structured log or pipes it somewhere user-visible, the new warning noise could confuse downstream consumers.
-
-**Mitigation:** Audit all internal callers via `grep -rln "resolve_chat_id" --include="*.py" .`. The warning writes to `sys.stderr` directly as a formatted greppable line; it is not using a logger that could be redirected. Each internal caller is reviewed for stderr handling. If any caller cannot tolerate stderr writes, a `silent=True` kwarg on `resolve_chat_id` is added as an explicit opt-in (but this is only added if an actual caller needs it — no speculative addition).
-
-### Risk 5: Orphan script has undocumented callers (scripts, cron, external docs)
+### Risk 3: Orphan script has callers we don't know about (scripts, cron, external docs)
 
 **Impact:** Deleting `scripts/get-telegram-message-history` breaks unknown callers.
 
-**Mitigation:** Before deletion, run `grep -rn "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" --include="*.json" .` across the repo. Check `~/Desktop/Valor/` for any machine-local cron references (user-accessible only). Migrate any caller to `valor-telegram read --user`. Delete outright after audit confirms zero remaining references. No shim per rabbit-hole rejection.
+**Mitigation:** `grep -r "get-telegram-message-history"` across `scripts/`, `docs/`, `.claude/`, `tests/`, and recent git log before deletion. Migrate any found callers to `valor-telegram read --user`. Leave a one-commit deprecation window: replace the script body with a shim that prints a deprecation message and forwards to `valor-telegram read --user`, then delete in a follow-up. (Optional — if audit confirms no callers, straight delete is fine.)
 
-### Risk 6: Chat model schema change blocks bridge startup on machines with stale Redis state
+### Risk 4: Popoto `Chat.query.all()` iteration order changes under Redis load
 
-**Impact:** The new `chat_name_normalized` KeyField adds a new Popoto index. On startup, Popoto may try to rebuild indices for existing records, slowing bootstrap or failing if the index assumption is violated.
+**Impact:** Tests pass in isolation but flake under realistic load; users hit non-deterministic ambiguity-error ordering.
 
-**Mitigation:** `KeyField(null=True)` permits existing records to have null values without reindexing failure — Popoto's indexed fields with `null=True` create index entries only for non-null values. Test the upgrade path on a machine with pre-existing Chat records before merging. If Popoto's null-KeyField semantics turn out to be different in practice, fall back to lazy populate-on-read (already the chosen backfill strategy) and file a follow-up to migrate to `chat_name_normalized = Field(null=True)` — losing the index but keeping the feature. Verified in Phase 1.5 below.
+**Mitigation:** Always sort candidates by `updated_at` desc before returning. Never rely on natural iteration order. Tests include an "order-independence" fixture (multiple runs, same expected top candidate).
 
 ## Race Conditions
 
-### Race 1: Bridge write vs CLI read on `chat_name_normalized`
-
-**Location:** `bridge/telegram_bridge.py:899` (register_chat call) vs `tools/telegram_history/__init__.py:940` (resolve_chat_id).
-
-**Trigger:** Bridge receives an inbound message and starts updating a `Chat` record. Concurrently, the CLI reader calls `resolve_chat_id` on the same chat name.
-
-**Data prerequisite:** The Chat record exists; the race is on whether `chat_name_normalized` has been updated to match the new input.
-
-**State prerequisite:** None; resolver is read-only.
-
-**Mitigation:** Popoto operations on a single Chat record are atomic at the Redis level (HSET + index update). The CLI read will see either the pre-update or post-update state, never a torn read. The legacy cascade fallback also works against whichever state is visible. Worst case: the CLI misses a newly-populated normalized value by milliseconds and falls through to legacy cascade — which is correct. No explicit lock needed.
-
-### Race 2: Concurrent `--fresh` Telethon fetches
-
-**Location:** `tools/valor_telegram.py:258` (`_fetch_from_telegram_api`).
-
-**Trigger:** Two concurrent `valor-telegram read --fresh` invocations.
-
-**Data prerequisite:** Shared Telethon session file.
-
-**State prerequisite:** Telethon client uses a shared session file at the default location.
-
-**Mitigation:** Pre-existing constraint unchanged by this plan. The Telethon client at `valor_telegram.py:90` already reuses a single session file. Concurrent reads are safe; concurrent writes are not attempted. No new risk introduced.
-
-Other than these two, there are no new races — `resolve_chat_id` is a synchronous read-only lookup on the Redis `Chat` index; the CLI is a short-lived process with no concurrent state mutation.
+No race conditions identified — `resolve_chat_id` is a synchronous read-only lookup on the Redis `Chat` index; the CLI is a short-lived process with no concurrent state mutation. Bridge writes to the `Chat` model may race with a concurrent CLI read, but the worst case is that the CLI sees a slightly-stale `updated_at` — which is exactly the freshness surface this plan exposes, not a correctness bug.
 
 ## No-Gos (Out of Scope)
 
-- **New `last_sync_ts` field on `Chat`**: per Q3 resolution. Use `updated_at` with documented semantics.
-- **Fuzzy matching beyond normalization**: no Levenshtein, no trigram, no aliases table, no Unicode normalization.
+- **Defect 7 (cross-chat project-level stitching)**: `valor-telegram read --project psyoptimal` unioning across all chats tagged with a project_key. High value for PM sessions but a separate design task (project_key semantics, multi-chat merge formatting, pagination across chats). Task 8 (validate-all) files a follow-up issue titled "Telegram read: cross-chat project-level stitching (defect 7 of #1163)" so it lands in the backlog instead of being forgotten.
+- **New `last_sync_ts` field on `Chat`**: superseded by the decision to surface existing `updated_at`. Not needed.
+- **Fuzzy matching beyond normalization**: no Levenshtein, no trigram, no aliases table.
 - **Persona/agent behavior changes**: [#1065](https://github.com/tomcounsell/ai/issues/1065) already handles the persona layer. This plan is infrastructure only.
-- **Telethon live-query improvements beyond `--fresh`**: fallback semantics unchanged except for the new `--fresh` dispatch.
-- **Bridge control-flow changes beyond `register_chat`**: `register_chat` writes the new field; no other bridge code changes.
-- **Deprecation shim for the orphan script**: rejected per rabbit-hole.
-- **Aliases or nickname system for chats**: separate design task.
-- **Multi-project rollup (`--project a,b,c`)**: exactly-one project_key per invocation; multi-project is a follow-up.
-- **Pagination for `--project` rollup**: `--limit` is applied after merge, sufficient for N<1000 messages across <20 chats. Pagination is a follow-up if the feature's usage pushes past that scale.
+- **Telethon live-query improvements**: fallback semantics unchanged; no new paths through `_fetch_from_telegram_api`.
+- **Bridge-side changes**: `register_chat` is untouched. No schema migration.
 
 ## Update System
 
-Minimal update-system changes required. The new `chat_name_normalized` field is populated lazily on read and on next bridge-registered inbound message (see Backfill Strategy), so no pre-deployment migration is strictly required. However:
-
-- On each machine that runs the bridge, operators may OPTIONALLY run `python -m tools.backfill_chat_normalized_names` once after deploy to eagerly populate all existing records. This is idempotent and safe. The script is added to this repo.
-- The update skill (`.claude/skills/update/SKILL.md`) gains a one-line note: "After updating, `python -m tools.backfill_chat_normalized_names` is available as an optional one-shot to backfill Chat normalization for legacy records. Not required — the bridge and resolver populate lazily."
-- No new `.env` variables.
-- No new system dependencies.
-- The `scripts/get-telegram-message-history` deletion is in-repo; no cross-machine concern beyond the standard `git pull` that `/update` already performs.
+No update system changes required. This is a purely internal refactor of Python code and CLI surface. No new dependencies, no new config files, no new env vars. The `valor-telegram` CLI continues to be installed via the standard entry-point mechanism; the orphan script removal requires no update-skill support because it was never installed outside this repo.
 
 ## Agent Integration
 
-The agent already invokes `valor-telegram read` via Bash (see `.claude/skills/telegram/SKILL.md`). This plan only changes the CLI output format and adds new flags; the existing invocation pattern continues to work. Specifically:
+No new agent integration required — the agent already invokes `valor-telegram read` via Bash (see `.claude/skills/telegram/SKILL.md`). This plan only changes the CLI output format and adds new flags; the existing invocation pattern continues to work.
 
-- No new MCP server required. No changes to `.mcp.json` or `mcp_servers/`.
-- No new bridge imports.
-- The new flags (`--user`, `--project`, `--strict`, `--fresh`, `chats --search`) are additive; the agent uses them via Bash directly once the skill doc advertises them.
-- The CLI continues to be installed as a `pyproject.toml` entry point (no new install step).
-- Integration verification: a smoke test confirms the skill's documented invocation pattern still works (`valor-telegram read --chat NAME` — unchanged), plus new invocations (`valor-telegram read --project KEY`, `valor-telegram chats --search PATTERN`) return zero-exit on success and the expected output format.
+Changes to surface:
+- Update `.claude/skills/telegram/SKILL.md` to document the new `--chat-id`, `--user`, and `--search` flags and the new ambiguity-error format the agent may encounter.
+- No changes to `.mcp.json` or `mcp_servers/`.
+- No bridge imports change.
 
-Ambiguity warning format is designed to be agent-parseable. The stderr lines (`WARN ambiguous-chat ...`, `CHOSEN ...`, `OTHER ...`) are keyword-prefixed so a downstream grep or structured log parser can identify them without ambiguity. The skill doc will note that stderr may contain these lines on some invocations and should not be treated as failure unless `--strict` is set.
+Integration test: a smoke test that the skill's documented invocation pattern (`valor-telegram read --chat NAME`) still works and that an ambiguous invocation surfaces the candidate list in a format the agent can parse.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create or update `docs/features/telegram-cli.md` to describe the unified CLI, all flags (`--chat`, `--user`, `--project`, `--strict`, `--fresh`, `chats --search`), error formats (ambiguity warning, did-you-mean), and the `updated_at` freshness semantics ("last inbound message timestamp, not last-confirmed-sync").
-- [ ] Update `docs/features/README.md` index table with an entry for `telegram-cli.md`.
+- [ ] Update [`docs/features/telegram-messaging.md`](../features/telegram-messaging.md) to reflect the new flags and error format.
+- [ ] Update [`docs/features/telegram-history.md`](../features/telegram-history.md) if it documents `resolve_chat_id` semantics.
+- [ ] Update [`docs/features/bridge-message-query.md`](../features/bridge-message-query.md) if it references `scripts/get-telegram-message-history`.
+- [ ] Update [`docs/features/README.md`](../features/README.md) index if any file names change.
 
 ### Skill Documentation
-- [ ] Update `.claude/skills/telegram/SKILL.md`:
-  - Document `--user`, `--project`, `--strict`, `--fresh` flags on `read`.
-  - Document `--search` on `chats`.
-  - Remove any stale references to `scripts/get-telegram-message-history` or `get-telegram-messages` skill.
-  - Update the "Notes" section to clarify that chat names are resolved via normalization (casefold, whitespace collapse, punctuation strip) and that ambiguous matches emit a stderr warning with all candidates listed.
-  - Remove the header claim about consolidating the `searching-message-history` and `get-telegram-messages` skills (those directories are already gone; the claim is stale).
-- [ ] Update `CLAUDE.md` "Reading Telegram Messages" section to mention `--user`, `--project`, `--strict`, `--fresh` examples.
+- [ ] Update [`.claude/skills/telegram/SKILL.md`](../../.claude/skills/telegram/SKILL.md) to document new flags and the ambiguity-error format the agent should handle.
+- [ ] Remove references to `scripts/get-telegram-message-history` from the `telegram` skill and any other skill that mentions it.
+- [ ] Update [`CLAUDE.md`](../../CLAUDE.md) "Reading Telegram Messages" section to include the new flags.
 
 ### Inline Documentation
-- [ ] Docstring on `normalize_chat_name` documents the exact rules (casefold, whitespace collapse, punctuation-strip set) and what is NOT touched (emoji, non-ASCII).
-- [ ] Docstring on `resolve_chat_id` documents the new recency-ranked ordering, the stderr warning contract on ambiguity, and the defensive ordering check.
-- [ ] Docstring on `Chat.chat_name_normalized` explains its purpose (indexed lookup for the resolver) and its nullable-for-legacy rationale.
-- [ ] CLI `--help` text for `--fresh` explicitly says "forces a Telethon round-trip bypassing Redis cache".
-- [ ] CLI `--help` for `--chat` / the header output documents "last activity" as "last inbound message timestamp, not last-confirmed-sync".
-- [ ] CLI `--help` for `--strict` explicitly says "converts ambiguity warnings into exit code 1; for scripted callers who want hard failure on ambiguity".
+- [ ] Docstring on `resolve_chat_candidates` documents the ordering guarantee (by `updated_at` desc) and the normalization rules.
+- [ ] Docstring on `AmbiguousChatError` documents the candidate list shape.
+- [ ] One-line comment on the `allow_ambiguous` kwarg explaining why it exists (back-compat escape hatch).
 
 ## Success Criteria
 
-- [ ] `valor-telegram read --chat "PsyOptimal"` with both `PsyOptimal` (last activity 2d ago) and `PM: PsyOptimal` (last activity 3m ago) in Redis returns messages from `PM: PsyOptimal` (most recent), emits a stderr warning listing BOTH candidates with `chat_id`, `chat_name`, and activity-age, and exits 0.
-- [ ] Same scenario with `--strict` flag: exits 1 with stderr warning, no stdout messages.
+- [ ] `valor-telegram read --chat "PsyOptimal"` with both `PsyOptimal` and `PM: PsyOptimal` in Redis prints an ambiguity error with both candidates, ordered by `updated_at` desc, and exits non-zero.
 - [ ] `valor-telegram read --chat "PM PsyOptimal"` (missing colon) resolves to `PM: PsyOptimal` via normalization.
-- [ ] `valor-telegram read --chat "asdfxxx"` (zero-match) prints top-3 did-you-mean candidates to stderr and exits 1.
-- [ ] `valor-telegram read --user lewis` reads DM messages for the whitelisted username (replacing the orphan script's behavior).
-- [ ] `valor-telegram read --project psyoptimal --limit 30` returns a chronologically-ascending union of messages across all chats with `project_key=="psyoptimal"`, annotated with `[Chat Name]` per line.
-- [ ] `valor-telegram read --project unknownkey` exits 1 with a stderr list of known project_keys.
-- [ ] `valor-telegram read --chat "X" --fresh` bypasses Redis cache and fetches live from Telethon.
-- [ ] `valor-telegram read` output includes a header line `[{chat_name} · chat_id={N} · last activity: {T} ago]`.
+- [ ] `valor-telegram read --chat-id -100123` bypasses the matcher entirely and reads that chat unconditionally.
+- [ ] `valor-telegram read --user lewis` reads DM messages from a whitelisted username (replacing the orphan script's behavior).
+- [ ] `valor-telegram read` output includes a header line with chat name, chat_id, and last-activity age.
 - [ ] `valor-telegram chats --search "psy"` returns only chats whose normalized name contains `psy`, sorted by recency desc.
-- [ ] `scripts/get-telegram-message-history` is deleted; `grep -r "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" --include="*.json" .` returns zero matches in tracked files.
-- [ ] `.claude/skills/telegram/SKILL.md` documents all new flags and removes stale orphan-script references.
-- [ ] `docs/features/telegram-cli.md` exists (or existing feature doc is updated) with the full CLI reference.
-- [ ] `chat_name_normalized` field exists on `Chat` with `KeyField(null=True)`; `register_chat` populates it on every call; lazy-populate fires on resolver legacy-path hits.
-- [ ] Backfill helper `python -m tools.backfill_chat_normalized_names` exists, is idempotent, and populates all NULL records.
+- [ ] `scripts/get-telegram-message-history` is deleted; no remaining in-tree callers.
+- [ ] `.claude/skills/telegram/SKILL.md` documents the new flags and ambiguity-error format.
+- [ ] `docs/features/telegram-messaging.md` and related docs reflect the new behavior.
 - [ ] All new and modified tests pass (`pytest tests/tools/test_telegram_history.py tests/unit/test_valor_telegram.py -q`).
 - [ ] Full test suite green (`/do-test`).
 - [ ] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`).
+- [ ] `grep -r "get-telegram-message-history"` returns no matches outside git history.
 
 ## Team Orchestration
 
-Simple solo builder + validator pattern with a documentarian in parallel. One builder handles the Python + CLI work (tight cohesion — all edits touch `tools/telegram_history/__init__.py`, `tools/valor_telegram.py`, `models/chat.py`, and `bridge/telegram_bridge.py` at the single `register_chat` call-site). One documentarian updates docs once the CLI surface is stable. One validator confirms end-to-end before merge.
+Simple solo builder + validator pattern. One builder handles the Python + CLI work (tight cohesion — all edits touch `tools/telegram_history/__init__.py`, `tools/valor_telegram.py`, and `models/chat.py` at most). One documentarian updates docs in parallel once the CLI surface is stable. One validator confirms end-to-end before merge.
 
 ### Team Members
 
 - **Builder (core)**
   - Name: telegram-resolver-builder
-  - Role: Implement normalization helper, `chat_name_normalized` field, `register_chat` write-side population, resolver indexed-lookup + ambiguity warning + defensive check, all CLI flags (`--user`, `--project`, `--strict`, `--fresh`, `chats --search`), freshness header, orphan script removal, backfill helper, and all new tests.
+  - Role: Implement normalization helper, `resolve_chat_candidates`, `AmbiguousChatError`, CLI flag wiring, freshness header, orphan script removal, and all new tests.
   - Agent Type: builder
   - Resume: true
 
 - **Documentarian (docs)**
   - Name: telegram-resolver-docs
-  - Role: Create/update `docs/features/telegram-cli.md`, update `docs/features/README.md`, update `.claude/skills/telegram/SKILL.md` (new flags + remove orphan references + stale header claim), update `CLAUDE.md` "Reading Telegram Messages" section.
+  - Role: Update `docs/features/telegram-messaging.md`, `docs/features/telegram-history.md`, `.claude/skills/telegram/SKILL.md`, and `CLAUDE.md` sections to reflect new flags and error format.
   - Agent Type: documentarian
   - Resume: true
 
 - **Validator (final)**
   - Name: telegram-resolver-validator
-  - Role: Verify all Success Criteria, run full test suite, confirm orphan script removal is complete, confirm docs match behavior, exercise the collision fixture (PsyOptimal + PM: PsyOptimal) end-to-end against live Redis.
+  - Role: Verify all Success Criteria, run full test suite, confirm orphan script removal is complete, confirm docs match behavior.
   - Agent Type: validator
   - Resume: true
 
@@ -432,165 +314,111 @@ Standard tier 1 agents — no specialists needed.
 
 ## Step by Step Tasks
 
-### 1. Audit orphan-script callers
+### 1. Audit orphan-script and resolve_chat_id callers
 - **Task ID**: audit-callers
 - **Depends On**: none
-- **Validates**: grep output captured
+- **Validates**: grep output captured for review; caller disposition checklist produced
 - **Assigned To**: telegram-resolver-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Run `grep -rn "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" --include="*.json" .` and enumerate callers.
-- For each caller, decide: migrate to `valor-telegram read --user` (preferred) or annotate as safe-to-break.
-- Record disposition for each site in the PR body.
+- Run `grep -rln "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" .` and enumerate callers.
+- Run `grep -rln "resolve_chat_id" --include="*.py" .` and enumerate every call site (excluding tests and the definition itself).
+- Produce a checklist: for `get-telegram-message-history` callers, note whether each migrates to `valor-telegram read --user`. For `resolve_chat_id` callers, note whether each (a) lets the `AmbiguousChatError` propagate, or (b) needs `allow_ambiguous=True`. (Recon already establishes the only in-tree caller is `tools/valor_telegram.py:61`; this task confirms and catches anything new.)
+- The checklist output lives in the PR description for reviewer visibility.
 
 ### 2. Implement normalization helper
 - **Task ID**: build-normalization
 - **Depends On**: none
-- **Validates**: tests/tools/test_telegram_history.py::TestNormalizeChatName
+- **Validates**: tests/tools/test_telegram_history.py::test_normalize_chat_name_* (create within existing file)
 - **Assigned To**: telegram-resolver-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add pure-function `normalize_chat_name(s: str) -> str` in `tools/telegram_history/__init__.py`.
-- Rules: `s.casefold()` → collapse internal whitespace runs to single space (`re.sub(r"\s+", " ", x)`) → strip `{_, :, -, ., ,}` via `str.translate`.
-- Do NOT touch emoji or non-ASCII.
-- Write unit tests: casefold, whitespace collapse, each punctuation stripped individually, emoji preservation, non-ASCII preservation, empty string, whitespace-only, extremely-long input.
+- Add pure-function `_normalize_chat_name(s: str) -> str` in `tools/telegram_history/__init__.py`.
+- Cover: lowercase, whitespace collapse (multiple spaces → single space), strip `: - | _` from both sides, preserve non-ASCII/emoji.
+- Edge cases: empty string → `""`; whitespace-only → `""`; all-punctuation `":::"` → `""`.
+- Write tests in the existing `tests/tools/test_telegram_history.py` (no new file) covering the listed transforms and an over-match sanity case: `dev_valor` and `dev valor` MUST normalize equal (Q2 policy decision; the ambiguity detector is the safety net).
 
-### 3. Add `chat_name_normalized` field to Chat model
-- **Task ID**: build-chat-field
-- **Depends On**: none
-- **Validates**: tests/tools/test_telegram_history.py::TestRegisterChat (updated)
-- **Assigned To**: telegram-resolver-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add `chat_name_normalized = KeyField(null=True)` to `models/chat.py::Chat`.
-- Update `cleanup_expired` if needed (no change expected; `updated_at` logic is independent).
-
-### 4. Update `register_chat` to populate normalized field
-- **Task ID**: build-register-chat
-- **Depends On**: build-normalization, build-chat-field
-- **Validates**: tests/tools/test_telegram_history.py::TestRegisterChat (updated)
+### 3. Implement ChatCandidate, candidate resolver, and ambiguity error
+- **Task ID**: build-candidates
+- **Depends On**: build-normalization
+- **Validates**: tests/tools/test_telegram_history.py (expanded)
 - **Assigned To**: telegram-resolver-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `tools/telegram_history/__init__.py::register_chat` (line 830):
-  - On the "existing + update" branch (lines 856-873), compute and assign `chat_name_normalized` whenever `chat_name` is written.
-  - On the "new + create" branch (lines 874-881), include `chat_name_normalized` in the `Chat.create()` call.
-- Tests: register new chat + assert normalized field populated; rename a chat + assert normalized field reflects new name; idempotent re-register.
+- Add `@dataclass(frozen=True) class ChatCandidate: chat_id: str; chat_name: str; last_activity_ts: float | None` to `tools/telegram_history/__init__.py`.
+- Add `AmbiguousChatError(Exception)` with `__init__(self, candidates: list[ChatCandidate])` storing `self.candidates`.
+- Add `resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]` — runs the 3-stage cascade, collects ALL matches per stage (project each to `ChatCandidate` at collection), only advances to next stage on zero hits, returns candidates sorted by `last_activity_ts` desc with None sorting last.
+- Refactor `resolve_chat_id(chat_name: str, allow_ambiguous: bool = False) -> str | None` to delegate to `resolve_chat_candidates`. Raise `AmbiguousChatError` when `>1` candidates and `allow_ambiguous=False`. Return the first candidate's `chat_id` when `allow_ambiguous=True` with a `logger.warning("ambiguous chat %r resolved to %s (%s); runner-up %s (%s)", ...)`.
+- **Replace the bare `except Exception: return None`** at line 978–979 with a narrow `except (redis.RedisError, popoto.errors.PopotoError) as e: logger.warning("resolve_chat_candidates failed: %s", e); return None` (exact exception classes confirmed at implementation time — may be `popoto.exceptions.PopotoError` or similar; adjust to the actual package layout).
+- Tests: ambiguity with 2 candidates (raises + candidates ordered), ambiguity with 3 candidates, zero-match (returns `[]` / None), unique match, ordering by recency with a None-last case, `allow_ambiguous=True` returning most-recent and emitting `logger.warning` (assert via `caplog`), narrow exception on simulated Redis error.
 
-### 5. Rewrite `resolve_chat_id` with normalized lookup + ambiguity warning
-- **Task ID**: build-resolver
-- **Depends On**: build-register-chat
-- **Validates**: tests/tools/test_telegram_history.py::TestResolveChatId, TestResolveAmbiguity
-- **Assigned To**: telegram-resolver-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- In `tools/telegram_history/__init__.py::resolve_chat_id`:
-  - Primary path: `Chat.query.filter(chat_name_normalized=normalize_chat_name(chat_name))` returns candidates.
-  - Legacy fallback (for NULL `chat_name_normalized` records): Python-side case-insensitive exact on `chat_name`, then substring; collect ALL matches. On legacy-path hit, eagerly populate the missing `chat_name_normalized` field on the matched record.
-  - Sort candidates by `updated_at` desc, tiebreak on `chat_id` asc.
-  - If >1 candidate: emit stderr warning in greppable format:
-    ```
-    WARN ambiguous-chat query="..." n_candidates=N
-    CHOSEN  chat_id=...  chat_name="..."  last_activity_age=...
-    OTHER   chat_id=...  chat_name="..."  last_activity_age=...
-    ```
-  - Defensive: after the sort, assert chosen `updated_at >= max(other updated_ats)`; if violated, stderr-print and return None (or raise — design decision: return None so caller exits 1 via zero-match path, preserving existing signature).
-  - Return chosen candidate's `chat_id`.
-- Keep the `str | None` signature; do NOT add `--strict` at this layer (it's a CLI-layer concern).
-- Tests: unique match, 2-candidate ambiguity (most-recent wins, stderr warning emitted), 3-candidate ambiguity, tiebreak on chat_id when `updated_at` equal, zero-match returns None, defensive check fires when monkey-patched sort returns a violator, legacy-NULL path works and populates the field.
-
-### 6. Wire CLI `read` flags and error paths
+### 4. Wire CLI read command
 - **Task ID**: build-cli-read
-- **Depends On**: build-resolver
-- **Validates**: tests/unit/test_valor_telegram.py::TestCmdRead
+- **Depends On**: build-candidates, audit-callers
+- **Validates**: tests/unit/test_valor_telegram.py (expanded)
 - **Assigned To**: telegram-resolver-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `tools/valor_telegram.py`:
-  - `read` subparser: add `--chat`, `--user`, `--project` inside a `mutually_exclusive_group(required=True)`. Add `--strict`, `--fresh` as booleans.
-  - `cmd_read`:
-    - If `--project`: invoke new `cmd_read_project` (see next task).
-    - If `--user`: route directly via `resolve_username` (existing code path, no resolve_chat_id).
-    - If `--chat`: call `resolve_chat_id` as usual.
-    - After resolve: fetch messages. If `--fresh`, skip Redis and go directly to Telethon.
-    - Capture the stderr warning: if the resolver emitted one AND `--strict` is set, exit 1 with no stdout output.
-    - On zero-match: print top-3 did-you-mean candidates to stderr, exit 1.
-    - Prepend output with header: `[{chat_name} · chat_id={N} · last activity: {T} ago]`.
-- Tests: `--chat` single-match (header + messages), `--chat` ambiguous (stderr warning, exit 0), `--chat` ambiguous + `--strict` (exit 1), `--chat` zero-match (did-you-mean), `--user` DM path, `--fresh` bypass, mutually-exclusive flag validation.
+- Add `--chat-id ID` flag to `read` subcommand (numeric passthrough; bypasses matcher; mutually exclusive with `--chat` and `--user`).
+- Add `--user USERNAME` flag (forces DM path via `resolve_username`; mutually exclusive with `--chat` and `--chat-id`).
+- In `cmd_read`, catch `AmbiguousChatError` from the `resolve_chat` wrapper and format candidates to stdout, exit 1. Format (example):
+  ```
+  Ambiguous chat name "PsyOptimal". 2 candidates (most recent first):
+    -100123  PM: PsyOptimal       last: 3m ago
+    -100456  PsyOptimal           last: 2d ago
+  Re-run with --chat-id <id> or a more specific --chat string.
+  ```
+- On zero-match (`resolve_chat` returns None AND no `--chat-id`/`--user`), print top-3 did-you-mean candidates from full Chat list sorted by `updated_at` desc, exit 1.
+- Prepend successful read output with header: `[chat_name · chat_id=N · last activity: T]` using `Chat.updated_at` and existing `format_timestamp`. If `updated_at` is None, format as `last activity: never`.
+- Tests: new flag behaviors (happy path + mutex violation), ambiguity handling in CLI, zero-match did-you-mean, freshness header (Xh-ago case and never case).
 
-### 7. Implement `read --project` rollup
-- **Task ID**: build-cli-project
-- **Depends On**: build-cli-read
-- **Validates**: tests/unit/test_valor_telegram.py::TestCmdReadProject
-- **Assigned To**: telegram-resolver-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Add `cmd_read_project(project_key, limit, since)` in `tools/valor_telegram.py`.
-- `Chat.query.filter(project_key=project_key)` → list of chats.
-- For each chat, fetch recent messages via existing `get_recent_messages`. Apply per-chat `--since` filter early for perf.
-- Merge all messages into one list, sort by `timestamp` ascending, apply `--limit` after merge.
-- Annotate each output line: `[{chat_name}] {timestamp} {sender}: {content}`.
-- Zero-chats path: fetch `Chat.query.all()`, dedupe their `project_key` values, print "no chats with project_key={key}; known keys: [list]" to stderr sorted by count desc. Exit 1.
-- Tests: 2-chat rollup with known project_key (chronological merge), `--limit` applies after merge not per-chat, `--since` filters per-chat before merge, zero-chats path emits did-you-mean project_keys.
-
-### 8. Implement `chats --search`
+### 5. Wire CLI chats search
 - **Task ID**: build-cli-chats-search
 - **Depends On**: build-normalization
-- **Validates**: tests/unit/test_valor_telegram.py::TestCmdChatsSearch
+- **Validates**: tests/unit/test_valor_telegram.py::TestCmdChats (expanded)
 - **Assigned To**: telegram-resolver-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `--search PATTERN` to `chats` subparser.
-- In `cmd_chats`: after fetching chats via `list_chats`, if `--search` is set, apply `normalize_chat_name(PATTERN) in normalize_chat_name(chat.chat_name)` filter. Sort unchanged (by `last_message` desc).
-- Tests: search returns single match, multiple matches, zero-match empty-but-clean.
+- Add `--search PATTERN` flag to `chats` subcommand.
+- Apply normalized substring filter (reusing `_normalize_chat_name`); keep existing sort by last-message desc.
+- Tests: search finds single match, multiple matches, zero-match returns empty list cleanly, normalization-aware match (e.g., `--search "PM psy"` matches `PM: PsyOptimal`).
 
-### 9. Implement backfill helper
-- **Task ID**: build-backfill
-- **Depends On**: build-normalization, build-chat-field
-- **Validates**: tests/tools/test_telegram_history.py::TestBackfillChatNormalized
-- **Assigned To**: telegram-resolver-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add `tools/backfill_chat_normalized_names.py` (new module).
-- `main()`: iterates `Chat.query.all()`, for each record with `chat_name_normalized is None`, compute the normalized form and save. Idempotent. Prints a count at end.
-- Tests: populates all NULL records in one pass, idempotent on re-run, handles empty Chat table cleanly.
-
-### 10. Delete orphan script
-- **Task ID**: delete-orphan
+### 6. Consolidate orphan script
+- **Task ID**: consolidate-orphan
 - **Depends On**: build-cli-read, audit-callers
-- **Validates**: `grep -r "get-telegram-message-history"` returns zero
+- **Validates**: grep returns no matches outside git history
 - **Assigned To**: telegram-resolver-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Migrate any callers found in audit-callers to `valor-telegram read --user USERNAME`.
-- Delete `scripts/get-telegram-message-history`.
-- Delete any associated orphan test files (none expected per Test Impact audit, but double-check with `find tests -name "*get-telegram-history*"`).
-- `grep -r "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" --include="*.json" .` must return zero in tracked files.
+- Migrate any callers found in `audit-callers` to `valor-telegram read --user USERNAME`.
+- If audit found zero callers: delete `scripts/get-telegram-message-history` and associated test files.
+- If audit found callers: replace the script body with a one-line shim (`exec valor-telegram read --user "$@"`), commit separately, migrate callers in the same PR, then delete the shim in a follow-up commit within the same PR.
+- `grep -rln "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" .` must return zero matches in tracked files at PR merge time.
 
-### 11. Update documentation
+### 7. Update documentation
 - **Task ID**: document-feature
-- **Depends On**: build-cli-read, build-cli-project, build-cli-chats-search, delete-orphan, build-backfill
+- **Depends On**: build-cli-read, build-cli-chats-search, consolidate-orphan
 - **Assigned To**: telegram-resolver-docs
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create or update `docs/features/telegram-cli.md` with the full unified-CLI reference, all new flags, error formats, freshness semantics, backfill helper.
-- Update `docs/features/README.md` index table.
-- Update `.claude/skills/telegram/SKILL.md` with new flags, error format, remove orphan references, correct stale "consolidation" claim in header.
-- Update `CLAUDE.md` "Reading Telegram Messages" section with `--user`, `--project`, `--strict`, `--fresh` examples.
+- Update `docs/features/telegram-messaging.md` with new flags and error format.
+- Update `docs/features/telegram-history.md` for resolver semantics (candidate projection, ambiguity, narrow exception).
+- Update `.claude/skills/telegram/SKILL.md` with new flags and ambiguity-error format the agent should handle on stderr.
+- Update `CLAUDE.md` "Reading Telegram Messages" section.
+- Remove references to `scripts/get-telegram-message-history` from all docs.
 
-### 12. Final validation
+### 8. Final validation
 - **Task ID**: validate-all
-- **Depends On**: all previous task IDs
+- **Depends On**: build-cli-read, build-cli-chats-search, consolidate-orphan, document-feature
 - **Assigned To**: telegram-resolver-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run `pytest tests/tools/test_telegram_history.py tests/unit/test_valor_telegram.py -v`.
 - Run full suite via `/do-test`.
 - Run `python -m ruff check . && python -m ruff format --check .`.
-- Run `grep -rn "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" --include="*.json" .` and confirm zero.
-- Seed a live Redis instance with the canonical collision fixture (`PsyOptimal` + `PM: PsyOptimal`) and run `valor-telegram read --chat "PsyOptimal"` by hand; assert the stderr warning appears and the most-recent chat's messages are returned.
-- Run `python -m tools.backfill_chat_normalized_names` against the same Redis; confirm no errors; confirm it's idempotent on second run.
+- Run `grep -rln "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" .` and confirm zero hits.
 - Walk the Success Criteria list and confirm each item.
+- File the defect-7 follow-up issue (see No-Gos) now that the PR is otherwise ready.
 - Generate pass/fail report.
 
 ## Verification
@@ -601,13 +429,28 @@ Standard tier 1 agents — no specialists needed.
 | Full suite green | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Orphan script removed | `grep -rn "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" --include="*.json" .` | exit code 1 |
-| New CLI flags in skill | `grep -E "^- .*--user\|--project\|--strict\|--fresh\|chats --search" .claude/skills/telegram/SKILL.md` | output contains all five flag tokens |
-| Backfill helper exists | `python -c "import tools.backfill_chat_normalized_names"` | exit code 0 |
-| Normalized field on Chat | `python -c "from models.chat import Chat; assert 'chat_name_normalized' in Chat._fields"` | exit code 0 |
+| Orphan script removed | `grep -rln "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" .` | exit code 1 |
+| Ambiguity error format correct | `python -c "from tools.telegram_history import AmbiguousChatError; e = AmbiguousChatError([]); assert hasattr(e, 'candidates')"` | exit code 0 |
+| New CLI flags documented | `grep -l "chat-id\|--user\|--search" .claude/skills/telegram/SKILL.md` | output contains `.claude/skills/telegram/SKILL.md` |
 
 ## Critique Results
 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 
 ---
+
+## Open Questions
+
+**All resolved in the post-critique revision.** Recorded decisions:
+
+1. **Ambiguity policy (Q1):** RESOLVED — hard error with candidate list (exit 1). Silent pick was the original defect; re-introducing it behind a flag would re-open the same bug class. The CLI does NOT expose `--allow-ambiguous`. Scripted callers that want unambiguous reads use `--chat-id NUMBER`. The Python-layer `allow_ambiguous=True` remains for programmatic opt-in with a logged warning, but is not surfaced in the CLI.
+
+2. **Underscore handling (Q2):** RESOLVED — strip `_`. Real-world chat names with underscores mirror slug/channel conventions and users typing them interactively are likely to type space or nothing. The ambiguity detector is the safety net for the rare collision case. Conservative-on-`_` trades a real UX win for a hypothetical edge case.
+
+3. **Orphan script delete vs. shim (Q3):** RESOLVED — straight delete if audit finds zero callers (expected outcome); one-commit shim-then-delete within the same PR otherwise. Task 6 encodes the branch.
+
+4. **Defect 7 follow-up issue (Q4):** RESOLVED — file the follow-up issue at `validate-all` time (Task 8), not deferred to a separate coordination step. See No-Gos for details.
+
+5. **`allow_ambiguous=True` rigor (Q5):** RESOLVED — PR-body disposition checklist is sufficient. Recon shows only ONE in-tree caller; the disposition for that one site goes in the PR body (expected: the CLI caller does NOT set `allow_ambiguous=True`; it catches the exception). We do not file tracking issues per-site because there is no "per-site" plural to track.
+
+Leave this section in place as the historical record of decisions — do not remove during finalize.
