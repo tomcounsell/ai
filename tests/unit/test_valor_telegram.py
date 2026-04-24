@@ -372,9 +372,7 @@ class TestCmdReadFlags:
             _CandidateStub("-100456", "PsyOptimal", 1_700_000_000.0),
         ]
 
-        with patch(
-            "tools.valor_telegram.resolve_chat", side_effect=AmbiguousChatError(candidates)
-        ):
+        with patch("tools.valor_telegram.resolve_chat", side_effect=AmbiguousChatError(candidates)):
             result = cmd_read(self._read_args(chat="PsyOptimal"))
 
         assert result == 1
@@ -388,14 +386,19 @@ class TestCmdReadFlags:
         """--chat-id skips resolve_chat entirely and reads the id directly."""
         from tools.valor_telegram import cmd_read
 
-        with patch(
-            "tools.valor_telegram.resolve_chat", side_effect=AssertionError("should not be called")
-        ), patch(
-            "tools.valor_telegram._lookup_chat_metadata",
-            return_value={"chat_name": "Direct Chat", "last_activity_ts": None},
-        ), patch(
-            "tools.telegram_history.get_recent_messages",
-            return_value={"messages": []},
+        with (
+            patch(
+                "tools.valor_telegram.resolve_chat",
+                side_effect=AssertionError("should not be called"),
+            ),
+            patch(
+                "tools.valor_telegram._lookup_chat_metadata",
+                return_value={"chat_name": "Direct Chat", "last_activity_ts": None},
+            ),
+            patch(
+                "tools.telegram_history.get_recent_messages",
+                return_value={"messages": []},
+            ),
         ):
             result = cmd_read(self._read_args(chat_id="-999"))
 
@@ -408,12 +411,10 @@ class TestCmdReadFlags:
         """--user forces resolve_username and reads that id."""
         from tools.valor_telegram import cmd_read
 
-        with patch(
-            "tools.telegram_users.resolve_username", return_value=12345
-        ), patch(
-            "tools.valor_telegram._lookup_chat_metadata", return_value=None
-        ), patch(
-            "tools.telegram_history.get_recent_messages", return_value={"messages": []}
+        with (
+            patch("tools.telegram_users.resolve_username", return_value=12345),
+            patch("tools.valor_telegram._lookup_chat_metadata", return_value=None),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
         ):
             result = cmd_read(self._read_args(user="lewis"))
 
@@ -440,10 +441,9 @@ class TestCmdReadFlags:
             {"chat_id": "-100123", "chat_name": "PM: PsyOptimal", "last_activity_ts": None},
             {"chat_id": "-100456", "chat_name": "PsyOptimal Old", "last_activity_ts": None},
         ]
-        with patch(
-            "tools.valor_telegram.resolve_chat", return_value=None
-        ), patch(
-            "tools.valor_telegram._did_you_mean_candidates", return_value=fake_suggestions
+        with (
+            patch("tools.valor_telegram.resolve_chat", return_value=None),
+            patch("tools.valor_telegram._did_you_mean_candidates", return_value=fake_suggestions),
         ):
             result = cmd_read(self._read_args(chat="Psy"))
 
@@ -457,10 +457,9 @@ class TestCmdReadFlags:
         """Zero-match with no suggestions still exits 1 cleanly."""
         from tools.valor_telegram import cmd_read
 
-        with patch(
-            "tools.valor_telegram.resolve_chat", return_value=None
-        ), patch(
-            "tools.valor_telegram._did_you_mean_candidates", return_value=[]
+        with (
+            patch("tools.valor_telegram.resolve_chat", return_value=None),
+            patch("tools.valor_telegram._did_you_mean_candidates", return_value=[]),
         ):
             result = cmd_read(self._read_args(chat="NothingXYZ"))
 
@@ -475,13 +474,13 @@ class TestCmdReadFlags:
         from tools.valor_telegram import cmd_read
 
         fresh_ts = time.time() - 120  # 2 minutes ago
-        with patch(
-            "tools.valor_telegram.resolve_chat", return_value="-100123"
-        ), patch(
-            "tools.valor_telegram._lookup_chat_metadata",
-            return_value={"chat_name": "PM: PsyOptimal", "last_activity_ts": fresh_ts},
-        ), patch(
-            "tools.telegram_history.get_recent_messages", return_value={"messages": []}
+        with (
+            patch("tools.valor_telegram.resolve_chat", return_value="-100123"),
+            patch(
+                "tools.valor_telegram._lookup_chat_metadata",
+                return_value={"chat_name": "PM: PsyOptimal", "last_activity_ts": fresh_ts},
+            ),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
         ):
             result = cmd_read(self._read_args(chat="PM: PsyOptimal"))
 
@@ -495,13 +494,13 @@ class TestCmdReadFlags:
         """Freshness header shows 'never' when last_activity_ts is None."""
         from tools.valor_telegram import cmd_read
 
-        with patch(
-            "tools.valor_telegram.resolve_chat", return_value="-100456"
-        ), patch(
-            "tools.valor_telegram._lookup_chat_metadata",
-            return_value={"chat_name": "Fresh Chat", "last_activity_ts": None},
-        ), patch(
-            "tools.telegram_history.get_recent_messages", return_value={"messages": []}
+        with (
+            patch("tools.valor_telegram.resolve_chat", return_value="-100456"),
+            patch(
+                "tools.valor_telegram._lookup_chat_metadata",
+                return_value={"chat_name": "Fresh Chat", "last_activity_ts": None},
+            ),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
         ):
             result = cmd_read(self._read_args(chat="Fresh Chat"))
 
@@ -513,10 +512,9 @@ class TestCmdReadFlags:
         """--chat-id with numeric input that has no messages renders a clear line."""
         from tools.valor_telegram import cmd_read
 
-        with patch(
-            "tools.valor_telegram._lookup_chat_metadata", return_value=None
-        ), patch(
-            "tools.telegram_history.get_recent_messages", return_value={"messages": []}
+        with (
+            patch("tools.valor_telegram._lookup_chat_metadata", return_value=None),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
         ):
             result = cmd_read(self._read_args(chat_id="-100123"))
 
@@ -566,8 +564,18 @@ class TestCmdChatsSearch:
 
         fake = {
             "chats": [
-                {"chat_id": "1", "chat_name": "PM: PsyOptimal", "message_count": 3, "last_message": "2026-04-24T10:00"},
-                {"chat_id": "2", "chat_name": "Dev: Valor", "message_count": 5, "last_message": "2026-04-24T09:00"},
+                {
+                    "chat_id": "1",
+                    "chat_name": "PM: PsyOptimal",
+                    "message_count": 3,
+                    "last_message": "2026-04-24T10:00",
+                },
+                {
+                    "chat_id": "2",
+                    "chat_name": "Dev: Valor",
+                    "message_count": 5,
+                    "last_message": "2026-04-24T09:00",
+                },
             ],
             "count": 2,
         }
@@ -587,7 +595,12 @@ class TestCmdChatsSearch:
 
         fake = {
             "chats": [
-                {"chat_id": "1", "chat_name": "PM: PsyOptimal", "message_count": 3, "last_message": "2026-04-24T10:00"},
+                {
+                    "chat_id": "1",
+                    "chat_name": "PM: PsyOptimal",
+                    "message_count": 3,
+                    "last_message": "2026-04-24T10:00",
+                },
             ],
             "count": 1,
         }
@@ -602,7 +615,14 @@ class TestCmdChatsSearch:
         from tools.valor_telegram import cmd_chats
 
         fake = {
-            "chats": [{"chat_id": "1", "chat_name": "Alpha", "message_count": 1, "last_message": None}],
+            "chats": [
+                {
+                    "chat_id": "1",
+                    "chat_name": "Alpha",
+                    "message_count": 1,
+                    "last_message": None,
+                }
+            ],
             "count": 1,
         }
         with patch("tools.telegram_history.list_chats", return_value=fake):

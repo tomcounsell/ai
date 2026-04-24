@@ -167,8 +167,8 @@ def resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]:
     from models.chat import Chat
 
     try:
-        import redis as _redis_pkg  # local import — the module is optional at import time
         import popoto as _popoto_pkg
+        import redis as _redis_pkg  # local import — the module is optional at import time
 
         # Stage 1: exact match on the stored chat_name (uses Popoto KeyField index).
         exact = list(Chat.query.filter(chat_name=chat_name))
@@ -185,9 +185,7 @@ def resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]:
         normalized_query = _normalize_chat_name(chat_name)
 
         # Stage 2: case-insensitive exact match.
-        ci_hits = [
-            c for c in all_chats if c.chat_name and c.chat_name.lower() == chat_name_lower
-        ]
+        ci_hits = [c for c in all_chats if c.chat_name and c.chat_name.lower() == chat_name_lower]
         if ci_hits:
             return _sort_candidates([_chat_to_candidate(c) for c in ci_hits])
 

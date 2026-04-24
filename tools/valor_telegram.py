@@ -117,9 +117,7 @@ def _format_ambiguity_error(candidates) -> str:
     max_name = max((len(c.chat_name) for c in candidates), default=16)
     for c in candidates:
         age = _format_relative_age(c.last_activity_ts)
-        lines.append(
-            f"  {str(c.chat_id):<{max_id}}  {c.chat_name:<{max_name}}  last: {age}"
-        )
+        lines.append(f"  {str(c.chat_id):<{max_id}}  {c.chat_name:<{max_name}}  last: {age}")
     lines.append("Re-run with --chat-id <id> or a more specific --chat string.")
     return "\n".join(lines)
 
@@ -133,11 +131,10 @@ def _did_you_mean_candidates(query: str, limit: int = 3) -> list:
     last_activity_ts) dicts. Empty list if lookup fails.
     """
     try:
-        from tools.telegram_history import _normalize_chat_name, resolve_chat_candidates
-
         # If resolve_chat_candidates found nothing, the user query didn't hit
         # any of the three stages. We run a broader scan across all chats.
         from models.chat import Chat
+        from tools.telegram_history import _normalize_chat_name
 
         normalized = _normalize_chat_name(query)
         if not normalized:
@@ -152,15 +149,17 @@ def _did_you_mean_candidates(query: str, limit: int = 3) -> list:
                     {
                         "chat_id": str(chat.chat_id),
                         "chat_name": chat.chat_name,
-                        "last_activity_ts": (
-                            float(chat.updated_at) if chat.updated_at else None
-                        ),
+                        "last_activity_ts": (float(chat.updated_at) if chat.updated_at else None),
                     }
                 )
+
         # Sort by last_activity_ts desc, None-last.
-        matches.sort(
-            key=lambda c: (0 if c["last_activity_ts"] is not None else 1, -(c["last_activity_ts"] or 0.0), c["chat_name"])
-        )
+        def _sort_key(c):
+            has_ts = 0 if c["last_activity_ts"] is not None else 1
+            neg_ts = -(c["last_activity_ts"] or 0.0)
+            return (has_ts, neg_ts, c["chat_name"])
+
+        matches.sort(key=_sort_key)
         return matches[:limit]
     except Exception:
         return []
@@ -628,8 +627,7 @@ def cmd_chats(args: argparse.Namespace) -> int:
             chats = [
                 c
                 for c in chats
-                if c.get("chat_name")
-                and normalized_pattern in _normalize_chat_name(c["chat_name"])
+                if c.get("chat_name") and normalized_pattern in _normalize_chat_name(c["chat_name"])
             ]
         # Preserve `count` invariant by updating the returned dict.
         result = {"chats": chats, "count": len(chats), "search": search_pattern}
