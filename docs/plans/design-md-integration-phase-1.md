@@ -4,7 +4,8 @@ type: feature
 appetite: Medium
 owner: Valor
 created: 2026-04-24
-revised: 2026-04-24
+revised: 2026-04-25
+revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1162
 last_comment_id:
 ---
@@ -264,6 +265,8 @@ The `do-design-system` skill already enforces tier-aware, semantically-prefixed 
 | `--space-*`, `--gap-*`, `--pad-*` | `spacing` | `--space-lg` → `spacing.lg` |
 | Any other prefix | Dropped with a lint warning from the generator (surfaced to the skill as "unmapped variable — rename to match a known prefix or add to `--drop-unmapped` allowlist") |
 
+**Prefix-collision resolution: longest-prefix-wins.** Because `--text-*` maps to `colors` and `--text-size-*` / `--text-weight-*` / `--text-lh-*` map to `typography`, the generator MUST apply the longest matching prefix first. Given a variable `--text-size-md`, the generator tests prefixes in descending length order (`--text-size-` → typography) before falling back to the shorter `--text-` (colors). The rule generalizes to any future `.pen` that ships two prefixes where one is a strict prefix of the other (e.g. `color.brand` and `color.brand.primary`). Implementation: prefixes are stored as a list sorted by `len()` descending; the first match wins. Unit test asserts that `--text-size-md` categorizes as typography (not colors) to lock in the rule.
+
 **Typography aggregation:** Typography in DESIGN.md is structured (font family + weight + size + line-height per named preset). `.pen` tends to have flat tokens. The generator aggregates by suffix:
 - `--font-{name}` → `typography.{name}.fontFamily`
 - `--text-size-{name}` → `typography.{name}.fontSize`
@@ -274,13 +277,15 @@ Presets with missing properties inherit from a `base` preset defined in the `.pe
 
 **Component mapping:** Pencil components with `"reusable": true` and `name: "Category/Variant"` map into DESIGN.md `components`:
 - Component key = lowercase slugified `Category-Variant` (e.g. `Annotation/Crosshair` → `annotation-crosshair`).
-- DESIGN.md component properties populated from Pencil children: first child with a `fill` variable ref → `backgroundColor`; first text child → `textColor` + `typography`; any `radius` attribute → `rounded`; width/height → `width`/`height`; explicit `padding` attribute → `padding`.
+- **Child enumeration is sorted by variable name (or attribute key) before scanning**, NOT driven by Pencil's JSON insertion order. The `.pen` file's child list order is not byte-stable across Pencil saves and Python dict rebuilds; sorting makes the generator's output deterministic regardless of authoring order. Concretely: the generator calls `sorted(component.children, key=lambda c: c.get("var_ref") or c.get("name") or "")` before the "first child with a `fill` ref" scan below.
+- DESIGN.md component properties populated from Pencil children (after sorting): first child with a `fill` variable ref → `backgroundColor`; first text child → `textColor` + `typography`; any `radius` attribute → `rounded`; width/height → `width`/`height`; explicit `padding` attribute → `padding`. "First" is defined by the sorted order, not by authoring order — so two identical `.pen` files with different child insertion orders produce byte-identical DESIGN.md output.
 - Non-reusable frames, layout nodes, and the `variables` frame are excluded. Frames without a `Category/Variant` name are excluded with a generator warning.
 
 **Reference syntax:** `.pen` uses `$--name` for variable refs. The generator converts to DESIGN.md's `{colors.x.y}` syntax at emission time. Round-tripping is one-way; DESIGN.md never feeds back into `.pen`.
 
 **Determinism guarantees:**
 - Variables, components, and token categories are emitted in **sorted order** (alphabetical by key).
+- **Component children are sorted by variable name (or attribute key) before scanning** — the "first child with a `fill` ref" rule operates on the sorted list, so Pencil's JSON insertion order cannot affect the emitted `backgroundColor` / `textColor` choices. This is the second determinism layer on top of the top-level key sort, and is specifically what makes the generator byte-stable across Python runs on all inputs (not just "most inputs").
 - Color hex values are emitted uppercase with `#RRGGBB` (6-hex, no alpha in Phase 1).
 - Numbers are emitted without trailing zeros (1, not 1.0).
 - YAML frontmatter uses block style (not flow), double-quoted strings, explicit `---` fences with single trailing newline.
@@ -308,13 +313,16 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 - **Determinism via canonical emission:** helper `_emit_yaml()` uses `yaml.safe_dump(..., sort_keys=True, default_flow_style=False, allow_unicode=True)` + post-processing to normalize spacing. `_emit_css()` sorts keys before writing. Snapshot tests assert byte-identical output on repeated runs.
 - **Drift check algorithm:** `--check` mode writes artifacts to a `tempfile.TemporaryDirectory()`, then compares each byte-for-byte against `<pen-dir>/design-system.md`, `<css-root>/brand.css`, `<css-root>/source.css`, and `<pen-dir>/exports/*.json` (paths resolved from `--pen` / `--css-root` / TOML). Diffs printed as unified diff to stderr; exit 1 on any mismatch; exit 0 on parity.
 - **PreToolUse Bash validator wiring:** `.claude/hooks/validators/validate_design_system_sync.py` follows the existing `validate_no_raw_redis_delete.py` pattern verbatim:
+  - **Escape hatch at top of file:** `if os.environ.get("DESIGN_SYSTEM_HOOK_DISABLED") == "1": sys.exit(0)` before any other logic. Documented in the hook's module docstring and the feature doc. Operators invoke `DESIGN_SYSTEM_HOOK_DISABLED=1 git commit ...` for emergency commits — broken tooling, Node regressions, urgent hotfixes where drift blocking would stall a legitimate fix. The escape is deliberately loud (inline env var, not a config file) so it is not forgotten after the emergency.
   - Reads JSON from **stdin** via `sys.stdin.read()` + `json.loads()`.
   - Early-returns `sys.exit(0)` if `tool_name != "Bash"` or if the command doesn't match the combined regex `r"git (add|commit).*\b(design-system\.(pen|md)|brand\.css|source\.css)\b"`.
   - On match, extracts the closest `.pen` path from the command (or discovers via TOML walk), invokes `python -m tools.design_system_sync --check --pen <detected> --css-root <detected>` with `capture_output=True`.
   - On CalledProcessError (drift detected): prints `json.dumps({"decision": "block", "reason": <unified diff summary>})` and `sys.exit(0)` (hook-spec: the decision is in stdout, exit 0 means the hook ran cleanly).
   - On any internal exception: **fails open** — prints the exception to stderr and `sys.exit(0)` without emitting a block decision. This is the critique-flagged "fail-open vs fail-closed" question, resolved to fail-open for the reasons in Risk 2.
+  - **JSONL invocation log (observability for fail-open behavior).** On every invocation — matched, unmatched, blocked, or errored — the validator appends one JSON object per line to `logs/validate_design_system_sync.jsonl`. Schema: `{"ts": <ISO-8601 UTC>, "tool_name": <str>, "matched": <bool>, "result": <"ok"|"block"|"error"|"bypassed">, "duration_ms": <int>, "reason": <str|null>, "error": <str|null>}`. The log write is wrapped in its own try/except (swallowed silently — logging MUST never break the hook). `logs/` is already git-ignored; directory is created on first write (`Path("logs").mkdir(exist_ok=True)`). This is the observability surface that closes the fail-open gap — without it, a validator that errors silently would leak drift into the repo with no audit trail. Operators can `tail -f logs/validate_design_system_sync.jsonl | jq 'select(.result=="error")'` to catch silent failures post-hoc.
   - Registered in `.claude/settings.json` under `hooks.PreToolUse` → existing `matcher: "Bash"` block, appended after the existing three entries with a 10s `timeout`.
 - **PreToolUse Write/Edit validator wiring:** `.claude/hooks/validators/validate_design_system_readonly.py`:
+  - **Same escape hatch:** `DESIGN_SYSTEM_HOOK_DISABLED=1` at the top of the file, before any other logic. One env var disables both validators so operators don't need to remember two separate knobs. Documented alongside the drift validator's escape hatch.
   - Stdin JSON, same pattern.
   - Matches when `tool_name in ("Write", "Edit")` AND `tool_input.file_path` matches the generated-artifact regex (`design-system\.md$|/brand\.css$|/source\.css$|\.dtcg\.json$|tailwind\.theme\.json$`).
   - On match, emits `{"decision": "block", "reason": "<path> is a generated artifact — run python -m tools.design_system_sync --generate to regenerate"}`.
@@ -376,12 +384,16 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 **Mitigation:** Pin to `0.1.1` in `package.json` AND commit `package-lock.json`. `scripts/check_prerequisites.py` asserts the pinned version via `npx --no-install @google/design.md --version`. Generator does NOT auto-upgrade; version bumps are deliberate, human-reviewed PRs.
 
 ### Risk 2: Hook failure silences drift
-**Impact:** If the PreToolUse validator crashes or times out, drift slips into the repo and we learn about it downstream.
-**Mitigation:** Validator has a 10s timeout (per existing hook pattern). On internal error (exception, not a drift match), it logs to stderr and exits 0 (fail-open) rather than blocking all commits. The standalone `python -m tools.design_system_sync --check` CLI is the backstop — documented in the feature doc as the manual verification command, and intended for CI integration if we add that later.
+**Impact:** If the PreToolUse validator crashes or times out, drift slips into the repo and we learn about it downstream. Pure fail-open without observability would mean a silently-broken validator is indistinguishable from a working validator that never found drift.
+**Mitigation:** Four layers:
+1. **10s timeout** (per existing hook pattern) bounds wedged-hook blast radius.
+2. **Fail-open on internal error** — logs to stderr and exits 0 rather than blocking all commits.
+3. **JSONL invocation log at `logs/validate_design_system_sync.jsonl`** (schema in Technical Approach). Every invocation — matched or not, blocked or not, errored or not — appends one JSON line. This is the observability layer that closes the fail-open gap: operators can `tail -f` the log or grep for `"result":"error"` post-hoc to detect a silently-broken validator. Without this log, a fail-open validator would leak drift with zero audit trail. Log writes are themselves wrapped in try/except so they cannot break the hook.
+4. **Standalone `python -m tools.design_system_sync --check`** is the backstop — documented in the feature doc as the manual verification command, and intended for CI integration if we add that later.
 
 ### Risk 3: Generator non-determinism under dict ordering
-**Impact:** Different Python versions or `pyyaml` minor versions emit keys in different orders → spurious drift → false alarms that condition users to ignore the validator.
-**Mitigation:** Explicit `sort_keys=True` on every `yaml.safe_dump` call. Explicit `sorted()` on all dict iterations in CSS emission. Unit test asserts byte-identical output across two runs. Snapshot test in `tests/unit/tools/test_design_system_sync.py` catches regressions.
+**Impact:** Different Python versions or `pyyaml` minor versions emit keys in different orders → spurious drift → false alarms that condition users to ignore the validator. The subtler failure mode is **per-component child ordering**: if the generator relies on Pencil's JSON insertion order to pick "the first child with a `fill` ref" for `backgroundColor`, then a round-trip through any tool that reorders JSON keys (Pencil re-saves, jq, manual edits) flips the component's emitted colors.
+**Mitigation:** Explicit `sort_keys=True` on every `yaml.safe_dump` call. Explicit `sorted()` on all dict iterations in CSS emission. **Per-component child enumeration is explicitly sorted by variable name / attribute key before the "first-child-with-fill-ref" scan** — see the Determinism guarantees block and the Component mapping section in Solution. Unit test asserts byte-identical output across two runs AND across two `.pen` files that differ only in child insertion order. Snapshot test in `tests/unit/tools/test_design_system_sync.py` catches regressions.
 
 ### Risk 4: Fixture `.pen` doesn't open in Pencil
 **Impact:** If the fixture file has a schema mistake, humans can't verify the tooling end-to-end (and consumer-repo `.pen` files produced by Pencil may hit edge cases the fixture didn't cover).
@@ -392,12 +404,16 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 **Mitigation:** Fixture `.pen` exercises at least one variable from each category (color, typography, rounded, spacing) plus one reusable component. The first real moodboard pass after landing Phase 1 is expected to surface edge cases; the `--drop-unmapped` flag and the warning-to-stderr path for unmapped variables keep the first pass productive even when mapping gaps appear. Follow-up ticket tracks post-first-pass refinements.
 
 ### Risk 6: Validator hook fires in ai/ commits that never touch the design system
-**Impact:** If the filename regex is too loose, every `git commit` in ai/ runs the drift check — adding 100-500ms per commit even when nothing to validate.
-**Mitigation:** Regex anchors on explicit filenames (`design-system\.(pen|md)`, `/brand\.css`, `/source\.css`). The generic pattern `docs/designs/` is deliberately NOT matched — we match filenames, not directories, so unrelated commits in ai/ early-return. Unit test asserts the hook no-ops on commands like `git add README.md`, `git commit -m "foo"`, and `git add tests/unit/test_unrelated.py`.
+**Impact:** If the filename regex is too loose, every `git commit` in ai/ runs the drift check — adding 100-500ms per commit even when nothing to validate. A too-loose regex also produces false positives on unrelated files whose names happen to contain `brand.css` or `source.css` as a suffix (e.g. `my-brand.css`, `source.css.bak`).
+**Mitigation:** Regex is **path-anchored**: `r"git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b"`. The `(?:^|/)` prefix group requires `brand.css` and `source.css` to appear at the start of a path segment — `my-brand.css` fails the match; `static/css/brand.css` succeeds. The generic pattern `docs/designs/` is deliberately NOT matched — we match filenames, not directories, so unrelated commits in ai/ early-return. This spec is the single source of truth for the hook's match pattern; Task 4 cites it directly and any change to one MUST be mirrored in the other. Unit test asserts the hook no-ops on commands like `git add README.md`, `git commit -m "foo"`, `git add tests/unit/test_unrelated.py`, and specifically on `git add my-brand.css` and `git add source.css.bak` (path-anchoring false-positive cases).
 
 ### Risk 7: Write/Edit hook matcher regex may not parse `Write|Edit` syntax
 **Impact:** If `.claude/settings.json` matcher strings don't support `|` alternation, registering the read-only hook with `matcher: "Write|Edit"` silently fails to match either. The hook never fires.
 **Mitigation:** The hook task explicitly validates matcher behavior at registration time (run a dummy Write tool call, confirm the hook fires) before closing the build task. If `Write|Edit` doesn't parse, fall back to two registration blocks — one `matcher: "Write"`, one `matcher: "Edit"`. Either form is fine; the generator task verifies which works.
+
+### Risk 9: `.pen` variable prefix collisions categorize to the wrong DESIGN.md bucket
+**Impact:** `--text-color-primary` (colors) and `--text-size-md` (typography) share the `--text-` prefix. A naive first-match-wins iteration over the prefix list would categorize `--text-size-md` as colors — emitting a `colors.size.md` token in the DESIGN.md output that the linter would reject as `broken-ref` (size isn't a color subtree) or, worse, silently produce a malformed palette. The same hazard applies to any future `.pen` that ships `color.brand` alongside `color.brand.primary`.
+**Mitigation:** **Longest-prefix-wins is a hard rule, not an optimization.** Prefixes are stored as a list sorted by `len()` descending; the generator iterates in that order and breaks on the first match. Documented in the Schema Mapping section of Solution and enforced by a dedicated unit test asserting `--text-size-md` → typography (not colors). Any future prefix added to the mapping MUST preserve the invariant that if prefix A is a strict prefix of prefix B, B appears before A in the sorted list — a lint assertion at module import time verifies this automatically so a future contributor can't accidentally re-introduce first-match ordering.
 
 ### Risk 8: ai/-registered hooks don't fire in consumer-repo Claude Code sessions
 **Impact:** A Claude Code session's hooks come from `$CLAUDE_PROJECT_DIR/.claude/settings.json`, which is the *current project's* settings, not ai/'s. When the `do-design-system` skill runs inside a consumer repo, neither `validate_design_system_sync.py` nor `validate_design_system_readonly.py` fires on that session's commits or Write/Edit calls. A naive reading of the plan presents the hooks as universal enforcement; they aren't.
@@ -422,11 +438,18 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 
 The `/update` skill (`scripts/remote-update.sh`) currently syncs Python deps, env vars, and restarts services. Phase 1 adds a Node toolchain to the design-system slice only:
 
-- **Update script changes:** `scripts/remote-update.sh` gains one new step after `requirements.txt` sync: if `package.json` exists at repo root, run `npm ci --only=prod` (install from `package-lock.json` exactly). Skipped silently on machines without Node.
+- **Update script changes:** `scripts/remote-update.sh` gains one new step after `requirements.txt` sync. Guarded form (both `package.json` existence AND `command -v npm` required) so the update never aborts on machines that lack Node:
+  ```bash
+  if [ -f package.json ] && command -v npm >/dev/null 2>&1; then
+    ( set +o pipefail; npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"
+  fi
+  ```
+  The non-pipefail subshell + `|| echo` trailer guarantees a missing-Node or `npm ci` failure does not propagate up the update script's exit status. Machines without `npm` simply skip the block silently; machines with `npm` but a transient failure (registry hiccup, lockfile stale) log a non-fatal warning and continue. This avoids the "update script aborts at step N+1 because Node isn't installed" failure mode.
 - **New deps to propagate:** `@google/design.md@0.1.1` via `package.json` + `package-lock.json`. Committed to the repo; `npm ci` on update pulls them.
 - **Migration for existing installations:** On first `/update` after this lands, `npm ci` runs fresh — idempotent, no manual step.
 - **Docs update:** `/update` skill's SKILL.md gets a short addendum noting that Node + npm are now soft prerequisites for machines that run the `do-design-system` skill. Machines that only run the bridge/worker are unaffected (the skill is the only path that needs `npx`).
 - **Fallback:** Behaviour specified in Technical Approach's `_run_npx` / `--no-node` section. Specifically: `python -m tools.design_system_sync --generate` auto-detects missing Node (via the `_probe_npx` precheck) and falls back to Python-only emission (`design-system.md`, `brand.css`, `source.css`) with a stderr warning. Every other subcommand (`--all`, `--audit`, `--check` when exports are part of the comparison set) exits 2 with an actionable "Node required" message unless the user explicitly passes `--no-node`. Full pipeline (lint + exports) requires Node; the fallback is only for the core emission path. This ensures `check=True` never silently propagates — the fallback is explicit and tested.
+- **Emergency bypass for the drift validators:** operators can set `DESIGN_SYSTEM_HOOK_DISABLED=1` as an env-var prefix on any `git commit` (or Write/Edit-heavy session) to disable BOTH the drift validator and the read-only validator for that invocation. Intended only for genuine hotfixes or for unblocking commits when the validator itself is broken. Bypasses are logged (`result: "bypassed"`) in `logs/validate_design_system_sync.jsonl` so they remain auditable post-hoc. The feature doc documents this in an "Emergency bypass" section and reminds operators to run `python -m tools.design_system_sync --check` immediately after the bypass to confirm drift is intentional.
 
 ## Agent Integration
 
@@ -443,7 +466,7 @@ The generator is invoked via Bash from the `do-design-system` skill. **No MCP se
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/design-system-tooling.md` covering: the one-way pipeline (with the Data Flow diagram from this plan), the `.pen` → DESIGN.md schema mapping (the full table from the Solution section), how to regenerate locally (`python -m tools.design_system_sync --all`), the drift validator's behavior, the `--check` / `--audit` / `--drop-unmapped` / `--no-node` / `--repo-root` flag reference, and the **Node-absent fallback semantics** (which subcommands fall back, which exit 2).
+- [ ] Create `docs/features/design-system-tooling.md` covering: the one-way pipeline (with the Data Flow diagram from this plan), the `.pen` → DESIGN.md schema mapping (the full table from the Solution section, **including the longest-prefix-wins rule** for overlapping prefixes like `--text-` vs `--text-size-`), how to regenerate locally (`python -m tools.design_system_sync --all`), the drift validator's behavior, the `--check` / `--audit` / `--drop-unmapped` / `--no-node` / `--repo-root` flag reference, the **Node-absent fallback semantics** (which subcommands fall back, which exit 2), the **JSONL invocation log at `logs/validate_design_system_sync.jsonl`** (schema + how to grep for silent failures), and an **"Emergency bypass"** subsection describing `DESIGN_SYSTEM_HOOK_DISABLED=1` with an explicit reminder to run `--check` manually after bypassing.
 - [ ] Add an **"Adopting this in a consumer repo"** section to the feature doc with two copy-paste adoption patterns: (a) a `.git/hooks/pre-commit` shell script that invokes `python -m tools.design_system_sync --check --pen <path> --css-root <path>` and blocks the commit on non-zero exit; (b) a `.claude/settings.json` fragment that registers the ai/-hosted validators via a `DESIGN_SYSTEM_AI_REPO` env var or a vendored symlink. Include the temporal ordering note for `--audit` (must run pre-commit so `HEAD:` still has the prior pass).
 - [ ] Add entry to `docs/features/README.md` index table under the `skills` or `design` category (whichever fits the existing grouping after `do-docs-audit.md`).
 
@@ -466,8 +489,10 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - [ ] `python -m tools.design_system_sync --check --pen tests/fixtures/design_system/design-system.pen` exits 0 on a freshly generated tree and exits 1 with a unified-diff stderr message when an artifact is manually mutated out-of-band.
 - [ ] `python -m tools.design_system_sync --audit` runs against a prior pass (or emits the initial-pass placeholder) and prints markdown tables suitable for pasting into `gap-audit.md`.
 - [ ] `.claude/skills/do-design-system/SKILL.md` Step 6 and Step 7 rewritten to invoke the generator; inline safety-gate assertion at L315-322 augmented with three `assert` lines refusing writes to `design-system.md`, `brand.css`, `source.css`.
-- [ ] Drift-detection validator `validate_design_system_sync.py` registered as PreToolUse on Bash (appended to existing matcher block), reads stdin JSON, blocks commit on drift, fail-open on internal error.
-- [ ] Read-only validator `validate_design_system_readonly.py` registered as PreToolUse on Write/Edit, blocks edits to generated artifacts by filename regex, preserves `.pen` whitelist.
+- [ ] Drift-detection validator `validate_design_system_sync.py` registered as PreToolUse on Bash (appended to existing matcher block), reads stdin JSON, blocks commit on drift, fail-open on internal error. Emits one JSONL line per invocation to `logs/validate_design_system_sync.jsonl` with `{ts, tool_name, matched, result, duration_ms, reason, error}`. Path-anchored filename regex (`(?:^|/)` prefix on `brand.css` and `source.css`) prevents false positives on `my-brand.css` / `source.css.bak`. Respects `DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch (logs `result: "bypassed"`).
+- [ ] Read-only validator `validate_design_system_readonly.py` registered as PreToolUse on Write/Edit, blocks edits to generated artifacts by filename regex, preserves `.pen` whitelist. Respects the same `DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch as the drift validator.
+- [ ] Generator categorizes `.pen` variables using **longest-prefix-wins** — `--text-size-md` resolves to typography (not colors), locked in by unit test.
+- [ ] Generator enumerates component children in **sorted order by variable name** before scanning for the "first child with fill ref" — unit test asserts byte-identical output across two `.pen` files that differ only in child insertion order.
 - [ ] `package.json` at ai/ repo root pins `@google/design.md@0.1.1`; `package-lock.json` committed; `node_modules/` in `.gitignore`.
 - [ ] `docs/features/design-system-tooling.md` exists and covers the pipeline (including `--pen` / `--css-root` / TOML resolution), mapping, regenerate workflow, the two-layer safety-gate model (inline assertion + Write/Edit hook), the Node-absent fallback semantics, the `--audit` temporal-ordering requirement, and the "Adopting this in a consumer repo" section with both adoption patterns.
 - [ ] `docs/features/README.md` index updated.
@@ -565,21 +590,24 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - Implement `--generate`, `--check`, `--audit`, `--all` entrypoints. All subcommands accept `--pen` and `--css-root` path args.
 - Path resolution precedence: `--pen` / `--css-root` CLI args > `design-system-sync.toml` adjacent to `--pen` > `$CWD/docs/designs/design-system-sync.toml` > error.
 - Implement the `.pen` → DESIGN.md mapping per the Solution section's mapping spec. Include `--drop-unmapped` flag for ignoring unknown-prefix variables.
+- **Prefix categorization uses longest-prefix-wins.** Prefixes are stored as a list sorted by `len()` descending; the first match wins. This is required because `--text-*` (colors) and `--text-size-*` / `--text-weight-*` / `--text-lh-*` (typography) overlap. Unit test asserts `--text-size-md` categorizes as typography, not colors. Extend the rule to any future colliding prefix pair (e.g. `color.brand` vs `color.brand.primary`).
 - Shell out to `npx --no-install @google/design.md` for lint and export steps via the `_run_npx` helper. Use `cwd=<ai-repo-root>` so `npx` resolves the pinned package.
 - Implement `_probe_npx()` pre-flight check; auto-enable `--no-node` fallback on `--generate` when Node is missing; exit 2 on all other subcommands unless `--no-node` is explicit.
 - Implement `--audit` cross-repo git resolution: walk up from `--pen` to find `.git/`, or honor `--repo-root`; run `git show HEAD:<pen-rel>/design-system.md` with `cwd=<consumer-repo-root>`. Emit `--stale-warn` on stderr when the current `design-system.md` exactly matches `HEAD`'s copy.
-- Emit artifacts deterministically: alphabetical dict ordering, uppercase hex, fixed YAML style.
+- Emit artifacts deterministically: alphabetical dict ordering at every level (top-level keys, category entries, **AND** per-component child enumeration — sort component children by variable name / attribute key before the "first-child-with-fill-ref" scan, so Pencil's JSON insertion order cannot affect `backgroundColor` / `textColor` selection). Uppercase hex, fixed YAML style. Unit test asserts that two fixture `.pen` files with identical content but permuted child insertion order produce byte-identical DESIGN.md output.
 - Module docstring with pipeline summary and link to the feature doc.
 
 ### 4. Implement drift-detection validator
 - **Task ID**: build-drift-validator
 - **Depends On**: build-generator
-- **Validates**: Hook fires on `git commit` / `git add` touching design-system filenames (regex match), returns `{"decision": "block", ...}` on drift, returns no-op on non-matching commands; fail-open on internal error. Tested via stdin-JSON fixtures (NOT `$CLAUDE_HOOK_INPUT` — hooks read from stdin per `validate_no_raw_redis_delete.py:108-125`).
+- **Validates**: Hook fires on `git commit` / `git add` touching design-system filenames (regex match), returns `{"decision": "block", ...}` on drift, returns no-op on non-matching commands; fail-open on internal error. Tested via stdin-JSON fixtures (NOT `$CLAUDE_HOOK_INPUT` — hooks read from stdin per `validate_no_raw_redis_delete.py:108-125`). **JSONL log at `logs/validate_design_system_sync.jsonl` contains one line per invocation with `{ts, tool_name, matched, result, duration_ms, reason, error}`; unit test asserts a line is written for each of the matched/unmatched/blocked/errored/bypassed paths.**
 - **Assigned To**: hooks-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `.claude/hooks/validators/validate_design_system_sync.py` following the pattern of `validate_no_raw_redis_delete.py` (stdin JSON, early-return on non-match, print decision JSON on block, fail-open on exception).
-- Path regex: `r"git (add|commit).*\b(design-system\.(pen|md)|brand\.css|source\.css)\b"`. Extract `.pen` path from the command or via TOML walk.
+- **Escape hatch (first check, before stdin read):** `if os.environ.get("DESIGN_SYSTEM_HOOK_DISABLED") == "1": sys.exit(0)`. Document in the module docstring ("Emergency bypass — set `DESIGN_SYSTEM_HOOK_DISABLED=1` to skip the validator. Use only for genuine hotfixes; drift will be caught by `--check` in CI and on the next normal commit."). Unit test asserts the hook no-ops when the env var is set, even on an input that would otherwise block. JSONL log emits `result: "bypassed"` for the bypass path so audits remain possible.
+- **Emit a JSONL invocation log line to `logs/validate_design_system_sync.jsonl` on every invocation** (schema in Technical Approach). Directory created on first write with `Path("logs").mkdir(exist_ok=True)`. Wrap the log write in try/except so a log-write failure cannot break the hook.
+- Path regex (path-anchored per Risk 6): `r"git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b"`. The `(?:^|/)` prefix prevents false positives on unrelated files whose names happen to end in `brand.css` or `source.css` (e.g. `my-brand.css`, `source.css.bak`). This regex is the concrete realization of Risk 6's "anchor on explicit filenames" spec — any future change to this pattern MUST be reflected in Risk 6 and vice versa. Extract `.pen` path from the command or via TOML walk.
 - Register in `.claude/settings.json` under `hooks.PreToolUse` → existing `matcher: "Bash"` block, appended as the fourth entry, 10s timeout.
 
 ### 5. Implement read-only artifact validator
@@ -590,6 +618,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `.claude/hooks/validators/validate_design_system_readonly.py`.
+- **Same escape hatch:** `if os.environ.get("DESIGN_SYSTEM_HOOK_DISABLED") == "1": sys.exit(0)` at the very top. One env var disables both validators simultaneously. Document in the module docstring. Unit test asserts the hook no-ops on a would-block Write when the env var is set.
 - Register in `.claude/settings.json` under `hooks.PreToolUse` with `matcher: "Write|Edit"`. If that regex syntax is unsupported at runtime, fall back to two separate blocks (`matcher: "Write"` and `matcher: "Edit"`) — the task must verify which pattern actually registers both tool names.
 
 ### 6. Rewrite `do-design-system` Steps 6 & 7 + augment inline safety gate
@@ -619,12 +648,12 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 ### 8. Update `/update` skill + remote-update script
 - **Task ID**: build-update-system
 - **Depends On**: build-node-toolchain
-- **Validates**: `scripts/remote-update.sh` conditionally runs `npm ci --only=prod`; `/update` SKILL.md has addendum.
+- **Validates**: `scripts/remote-update.sh` conditionally runs `npm ci --only=prod` **only when both `package.json` exists AND `command -v npm` succeeds**, in a non-pipefail subshell whose failure does not abort the parent script; `/update` SKILL.md has addendum. Unit-scriptable verification: run the relevant section of `remote-update.sh` on a temp PATH with `npm` aliased to a nonexistent binary and confirm the script exits 0.
 - **Assigned To**: sync-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `npm ci` step to `scripts/remote-update.sh`, gated on `package.json` existence.
-- Add a short addendum to `.claude/skills/update/SKILL.md` noting Node soft-dep for the design-system path.
+- Add `npm ci` step to `scripts/remote-update.sh`, guarded by **both** `[ -f package.json ]` AND `command -v npm >/dev/null 2>&1`. Wrap the call in a non-pipefail subshell (`( set +o pipefail; npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"`) so that a missing npm or a transient `npm ci` failure never aborts the rest of the update. Machines without Node are silently skipped; machines with Node but a failed install emit a non-fatal warning.
+- Add a short addendum to `.claude/skills/update/SKILL.md` noting Node soft-dep for the design-system path and the exact guard used in `remote-update.sh`.
 
 ### 9. Write feature doc
 - **Task ID**: document-feature
@@ -687,6 +716,10 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 | Feature doc exists | `test -f docs/features/design-system-tooling.md` | exit code 0 |
 | Drift validator registered | `grep -q validate_design_system_sync .claude/settings.json` | exit code 0 |
 | Read-only validator registered | `grep -q validate_design_system_readonly .claude/settings.json` | exit code 0 |
+| Escape hatch honored (drift) | `DESIGN_SYSTEM_HOOK_DISABLED=1 python .claude/hooks/validators/validate_design_system_sync.py < /dev/null` | exit code 0 (no-op) |
+| Escape hatch honored (readonly) | `DESIGN_SYSTEM_HOOK_DISABLED=1 python .claude/hooks/validators/validate_design_system_readonly.py < /dev/null` | exit code 0 (no-op) |
+| JSONL log records bypass | `DESIGN_SYSTEM_HOOK_DISABLED=1 python .claude/hooks/validators/validate_design_system_sync.py < tests/fixtures/hooks/match_bash.json && tail -1 logs/validate_design_system_sync.jsonl \| grep -q bypassed` | exit code 0 |
+| Longest-prefix-wins enforced | `python -c "from tools.design_system_sync import categorize_prefix; assert categorize_prefix('--text-size-md') == 'typography'"` | exit code 0 |
 | node_modules ignored | `grep -q '^node_modules' .gitignore` | exit code 0 |
 | package.json at ai/ root | `test -f package.json && grep -q '0.1.1' package.json` | exit code 0 |
 
@@ -742,9 +775,27 @@ A second pass re-ran the war-room rubric against the revised plan and closed fou
 - Success Criteria now includes Node-absent unit test, `--audit` repo-root failure test, and `--audit` initial-pass unit test.
 - Feature doc now REQUIRED to contain an "Adopting this in a consumer repo" section with both copy-paste patterns.
 
+### Revision pass 3 (2026-04-25) — concern-revision pass
+
+A third `/do-plan-critique` returned **READY TO BUILD (with concerns)** — 0 blockers, 6 concerns, 5 nits. Per SDLC Row 4b, this is the concern-revision-pass flow: embed the 6 Implementation Notes as concrete edits in the plan text so the next `/sdlc` invocation routes to `/do-build`.
+
+**Concerns embedded in this pass:**
+
+13. **Path-anchored hook regex (Task 4 ↔ Risk 6 reconciliation).** Task 4's regex lacked the `(?:^|/)` path-anchor prefix that Risk 6's narrative specified. The two sections are now reconciled: both cite the exact regex `r"git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b"`, and both carry an explicit cross-reference demanding that future changes update both sections together. Unit test covers the false-positive path-anchoring cases (`my-brand.css`, `source.css.bak`).
+
+14. **`npm ci` guarded against missing-Node systems.** `scripts/remote-update.sh` now invokes `npm ci --only=prod` only when BOTH `[ -f package.json ]` AND `command -v npm >/dev/null 2>&1` pass, wrapped in a non-pipefail subshell (`( set +o pipefail; npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"`). A missing `npm` or a transient `npm ci` failure cannot abort the parent update script. Verification is unit-scriptable: run the block on a temp PATH with `npm` aliased to nonexistent and confirm the script exits 0.
+
+15. **JSONL invocation log for the drift validator.** `logs/validate_design_system_sync.jsonl` now records every validator invocation with `{ts, tool_name, matched, result, duration_ms, reason, error}`. Closes the fail-open observability gap — a silently-broken validator is now detectable via `tail -f logs/validate_design_system_sync.jsonl | jq 'select(.result=="error")'`. Log writes wrapped in try/except so logging failures cannot break the hook.
+
+16. **Deterministic component-child enumeration.** The generator now sorts component children by variable name (or attribute key) before the "first child with fill ref" scan. Closes the dict-insertion-order hazard that could flip `backgroundColor` / `textColor` selection on a Pencil re-save or JSON round-trip. Unit test asserts byte-identical output across two `.pen` files that differ only in child insertion order. Risk 3 expanded to call out the subtler hazard.
+
+17. **Longest-prefix-wins for `.pen` variable prefix collisions.** Prefixes are stored as a list sorted by `len()` descending; the generator iterates in that order and breaks on the first match. Required because `--text-*` (colors) and `--text-size-*` (typography) overlap. Rule generalizes to any future colliding prefix pair (e.g. `color.brand` vs `color.brand.primary`). Risk 9 added; unit test locks in `--text-size-md` → typography.
+
+18. **`DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch.** Both validators check `os.environ.get("DESIGN_SYSTEM_HOOK_DISABLED") == "1"` as their first line and `sys.exit(0)` if set. One env var disables both hooks simultaneously. Bypasses are logged as `result: "bypassed"` in the JSONL log, preserving auditability. Documented in module docstrings, Update System section, and the feature doc under "Emergency bypass" — with a reminder to re-run `--check` manually after bypassing.
+
 ### Revision artifact marker
 
-`revised: 2026-04-24` is set in the frontmatter. The SDLC router's Row 4b→4c detection flag (`revision_applied: true`) should be set to `true` in the frontmatter ONLY if/when the critique returns `READY TO BUILD (with concerns)` and a subsequent revision pass embeds the Implementation Notes. Both revision passes here address BLOCKERs from a NEEDS REVISION verdict — they are not the concern-revision-pass flow.
+`revised: 2026-04-25` and `revision_applied: true` are set in the frontmatter. The most recent critique verdict is **READY TO BUILD (with concerns)** — the router's Row 4b→4c path. Implementation Notes for all 18 findings across the three revision passes (8 from pass 1 — 4 blocker-shaped, 4 concern-shaped; 4 BLOCKER-severity from pass 2; 6 concerns from pass 3) are embedded into the affected plan sections above. The next SDLC invocation should route to Row 4c (`/do-build`).
 
 ---
 
