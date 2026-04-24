@@ -94,13 +94,16 @@ class TestRunHarnessSubprocessReturnTuple:
             )
 
         assert isinstance(result, tuple)
-        assert len(result) == 5
-        result_text, session_id, returncode, out_usage, out_cost = result
+        # Issue #1099 Mode 1 — return tuple widened to 6 elements (adds stderr_snippet).
+        assert len(result) == 6
+        result_text, session_id, returncode, out_usage, out_cost, stderr_snippet = result
         assert result_text == "ok"
         assert session_id == "sess_abc"
         assert returncode == 0
         assert out_usage == usage
         assert out_cost == pytest.approx(0.99)
+        # Healthy run (returncode == 0) → stderr_snippet is None.
+        assert stderr_snippet is None
 
     @pytest.mark.asyncio
     async def test_missing_usage_returns_none(self):
@@ -116,7 +119,8 @@ class TestRunHarnessSubprocessReturnTuple:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            _, _, _, usage_out, cost_out = await _run_harness_subprocess(
+            # Issue #1099 Mode 1 — 6-tuple return (adds trailing stderr_snippet).
+            _, _, _, usage_out, cost_out, _ = await _run_harness_subprocess(
                 ["claude", "-p", "test"],
                 "/tmp",
                 {},
@@ -125,17 +129,19 @@ class TestRunHarnessSubprocessReturnTuple:
         assert cost_out is None
 
     @pytest.mark.asyncio
-    async def test_binary_not_found_returns_five_tuple(self):
+    async def test_binary_not_found_returns_six_tuple(self):
+        """Issue #1099 Mode 1 — binary-not-found path still returns a 6-tuple."""
         from agent.sdk_client import _run_harness_subprocess
 
         with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("claude")):
             out = await _run_harness_subprocess(["claude"], "/tmp", {})
         assert isinstance(out, tuple)
-        assert len(out) == 5
-        # On binary-not-found: usage + cost are None and returncode is None
+        assert len(out) == 6
+        # On binary-not-found: returncode, usage, cost, stderr_snippet all None.
         assert out[2] is None
         assert out[3] is None
         assert out[4] is None
+        assert out[5] is None
 
 
 class TestGetResponseViaHarnessAccumulates:

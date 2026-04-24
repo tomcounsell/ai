@@ -1019,9 +1019,7 @@ async def _agent_session_health_check() -> None:
                         ):
                             entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
                             try:
-                                entry.save(
-                                    update_fields=["scheduled_at", "recovery_attempts"]
-                                )
+                                entry.save(update_fields=["scheduled_at", "recovery_attempts"])
                             except Exception as _sa_err:
                                 logger.debug(
                                     "[session-health] scheduled_at save failed: %s",
