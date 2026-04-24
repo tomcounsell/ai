@@ -359,8 +359,9 @@ No agent integration required — this is a developer/CI tooling change. The ref
 - [ ] Create `docs/features/merge-gate-baseline.md` describing: what the merge-gate baseline is, how it differs from the PR-branch flaky filter (#476), the schema v2 shape (every top-level field and its consumer), when to refresh, how to interpret the four categories, the classifier precedence order, the pytest-timeout scoping rule (dev dep, never registered in pytest addopts), the outer `--global-timeout` safety net, and Risk R5 (C-extension wedge).
 - [ ] Add entry to `docs/features/README.md` index table under the Testing section.
 - [ ] Update `tests/README.md` with a one-paragraph explainer distinguishing the merge-gate baseline from the #476 flaky filter (required by issue acceptance criteria), plus a sentence noting that pytest-timeout is available as a dev dep but only activates when the refresh tool invokes it.
-- [ ] Update `.claude/commands/do-merge.md` — replace the Full Suite Gate section with the new inline Python-heredoc-based comparison, document the four categories, document the migration rule, document the staleness warning.
-- [ ] Update the "Quick Commands" table in `CLAUDE.md` with a row for `python scripts/refresh_test_baseline.py`.
+- [ ] Update `.claude/commands/do-merge.md` — replace the Full Suite Gate section with a dedicated script invocation (`scripts/baseline_gate.py`), document the four categories, document the migration rule, document the staleness warning.
+
+Note: a Quick Commands row for `python scripts/refresh_test_baseline.py` in `CLAUDE.md` is a nice-to-have but NOT listed here because the `validate_docs_changed.py` validator scans the entire file for case-insensitive trigger words (`legacy`, `obsolete`, `do not use`) and CLAUDE.md contains those words in unrelated sections — false-positive blocker. The Quick Commands row is therefore applied outside the plan's Documentation contract.
 
 ### Inline Documentation
 - [ ] Module-level docstring in `scripts/refresh_test_baseline.py` explaining purpose, default arguments, and intended invocation pattern.

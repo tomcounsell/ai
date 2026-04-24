@@ -256,9 +256,9 @@ After a clean merge (all tests passing), `/do-merge` writes:
 
 …so future PRs are held to a fully green standard.
 
-### Legacy migration
+### Backwards-compat migration
 
-The gate auto-promotes the legacy flat shape
+The gate auto-promotes the schema-v1 flat shape
 (`{"failing_tests": [...]}`) in memory: every entry becomes
 `{"category": "real", "fail_rate": 1.0, "hung_count": 0}`. No on-disk write
 happens from the gate. Only `refresh_test_baseline.py` upgrades the file
@@ -319,7 +319,7 @@ the 5% noise threshold.
   truncated-file safety), classifier precedence, exact-prefix timeout match
   vs. loose substring, dirty-tree commit capture, `--merge` note
   preservation, `--dry-run` defaults.
-- `tests/unit/test_do_merge_baseline.py` — legacy-shape load, schema-v2 load,
+- `tests/unit/test_do_merge_baseline.py` — schema-v1 load (backwards compat), schema-v2 load,
   new-regression detection (including the PR #1054/#1070 count-coincident
   scenario), flaky pass-through, `hung`/`import_error` pass-through,
   staleness warnings for all three triggers.

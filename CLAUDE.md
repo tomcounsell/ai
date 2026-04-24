@@ -154,9 +154,6 @@ valor-email threads
 | `python scripts/nightly_regression_tests.py --dry-run` | Preview nightly test run without Telegram |
 | `tail -f logs/nightly_tests.log` | Stream nightly test logs |
 | `tail -f logs/nightly_tests_error.log` | Stream nightly test error log (startup crashes) |
-| `python scripts/refresh_test_baseline.py` | Regenerate `data/main_test_baseline.json` (merge-gate baseline) from 3 pytest runs; use `--dry-run` to preview |
-| `python scripts/refresh_test_baseline.py --runs 5 --merge` | Refresh with broader sample and preserve `note` fields on existing entries |
-| `python -m scripts.baseline_gate --pr-junitxml /tmp/pr_run.xml --baseline data/main_test_baseline.json` | Run the merge-gate comparison manually against a junitxml |
 | `python -m tools.analytics export --days 30` | Export analytics metrics as JSON |
 | `python -m tools.analytics summary` | Print human-readable analytics summary |
 | `python -m tools.analytics rollup` | Run analytics daily rollup manually |

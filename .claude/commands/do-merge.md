@@ -318,7 +318,7 @@ fi
 
 **Categories:** The baseline is keyed by test node ID with a `category` field. Categories: `real` (deterministic failure on main), `flaky` (1-99% fail rate across N baseline runs), `hung` (pytest-timeout fired, delegated via `pytest-timeout` on refresh), `import_error` (collection failure). Only the refresh tool (`scripts/refresh_test_baseline.py`) writes categorised baselines. See `docs/features/merge-gate-baseline.md`.
 
-**Migration:** The legacy `{"failing_tests": [...]}` shape is promoted to schema v2 in memory (every entry becomes `category="real"`). No file write happens from the merge gate itself; only the refresh tool upgrades the on-disk format.
+**Backwards compat:** The schema-v1 `{"failing_tests": [...]}` flat shape is promoted to schema v2 in memory (every entry becomes `category="real"`). No file write happens from the merge gate itself; only the refresh tool upgrades the on-disk format.
 
 **Note:** The full suite collects all failures into `/tmp/pr_run.xml` before comparison. Using `-x` (fail-fast) would stop after the first pre-existing failure and hide new regressions.
 
