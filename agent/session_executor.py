@@ -1267,8 +1267,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # All session types route to CLI harness (claude -p)
         from agent.sdk_client import (
             _get_prior_session_uuid,
+            _resolve_sentry_auth_token,
             build_harness_turn_input,
             get_response_via_harness,
+            load_pm_system_prompt,
         )
 
         project_key = project_config.get("_key", "valor") if project_config else "valor"
@@ -1325,13 +1327,42 @@ async def _execute_agent_session(session: AgentSession) -> None:
             "AGENT_SESSION_ID": session.agent_session_id or "",
             "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
         }
+        # SESSION_TYPE drives pre_tool_use hook behavior (_is_pm_session in
+        # agent/hooks/pre_tool_use.py:97-99). Without it, PM Bash restrictions
+        # are silently disabled in the harness subprocess (issue #1148).
+        if _session_type:
+            _harness_env["SESSION_TYPE"] = _session_type
         if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
             _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
+        # PM/Teammate need Telegram + Sentry auth so tools/send_telegram.py and
+        # sentry-cli work without manual export. Mirrors ValorAgent.env
+        # (sdk_client.py:1264, 1272). chat_id comes from the project config.
+        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+            if session.chat_id:
+                _harness_env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
+            _sentry_token = _resolve_sentry_auth_token()
+            if _sentry_token:
+                _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
 
         _harness_requeued = False
 
         # D1 precedence cascade: session.model > settings > codebase default.
         _effective_model = _resolve_session_model(agent_session)
+
+        # PM sessions get persona-level SDLC orchestration rules via
+        # --append-system-prompt (issue #1148). Dev and Teammate sessions have
+        # no harness-side persona loader; they keep the default Claude Code
+        # protocol. Drafter call sites in session_completion.py MUST also leave
+        # system_prompt at the default None — see Risk 4 in docs/plans/sdlc-1148.md.
+        _pm_system_prompt: str | None = None
+        if _session_type == SessionType.PM:
+            try:
+                _pm_system_prompt = load_pm_system_prompt(str(working_dir))
+            except Exception as e:
+                logger.warning(
+                    f"{log_prefix} [pm-persona-missing] Failed to load PM persona: {e}; "
+                    "session will run without SDLC orchestration rules"
+                )
 
         async def do_work() -> str:
             nonlocal _harness_requeued
@@ -1343,6 +1374,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 session_id=session.session_id,
                 full_context_message=_harness_input,
                 model=_effective_model,
+                system_prompt=_pm_system_prompt,
                 # Two-tier no-progress detector callbacks (#1036). These route
                 # through messenger.notify_* wrappers so exceptions are caught
                 # and the queue-layer closures bump ORM fields on AgentSession.

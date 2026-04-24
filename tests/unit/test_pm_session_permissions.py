@@ -637,6 +637,78 @@ class TestPMSessionEnvInjection:
         assert "SENTRY_AUTH_TOKEN" not in options.env
 
 
+class TestResolveSentryAuthToken:
+    """Direct tests for the _resolve_sentry_auth_token helper.
+
+    Issue #1148: extracted from ValorAgent.env so the harness path
+    (agent/session_executor.py) can reuse the same cascade.
+    """
+
+    def test_resolve_from_sentry_personal_token_env(self, monkeypatch):
+        """SENTRY_PERSONAL_TOKEN env var is the highest-priority source."""
+        from agent.sdk_client import _resolve_sentry_auth_token
+
+        monkeypatch.setenv("SENTRY_PERSONAL_TOKEN", "from-personal")
+        monkeypatch.setenv("SENTRY_AUTH_TOKEN", "from-auth")
+        assert _resolve_sentry_auth_token() == "from-personal"
+
+    def test_resolve_from_sentry_auth_token_env(self, monkeypatch):
+        """SENTRY_AUTH_TOKEN is used when SENTRY_PERSONAL_TOKEN is unset."""
+        from agent.sdk_client import _resolve_sentry_auth_token
+
+        monkeypatch.delenv("SENTRY_PERSONAL_TOKEN", raising=False)
+        monkeypatch.setenv("SENTRY_AUTH_TOKEN", "from-auth")
+        assert _resolve_sentry_auth_token() == "from-auth"
+
+    def test_resolve_sentry_auth_token_launchd_shortcircuits(self, monkeypatch, tmp_path):
+        """Under VALOR_LAUNCHD=1, the helper short-circuits to None
+        without touching ~/Desktop (TCC blocks it)."""
+        from agent.sdk_client import _resolve_sentry_auth_token
+
+        monkeypatch.delenv("SENTRY_PERSONAL_TOKEN", raising=False)
+        monkeypatch.delenv("SENTRY_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+
+        # Mock Path.home so we'd notice if file read was attempted (it shouldn't be).
+        called = {"home": False}
+
+        def home_mock():
+            called["home"] = True
+            return tmp_path
+
+        with patch("agent.sdk_client.Path.home", side_effect=home_mock):
+            result = _resolve_sentry_auth_token()
+
+        assert result is None
+        assert called["home"] is False, "VALOR_LAUNCHD must short-circuit before Path.home()"
+
+    def test_resolve_from_file_in_terminal_mode(self, monkeypatch, tmp_path):
+        """In terminal mode (no VALOR_LAUNCHD), helper reads ~/Desktop/Valor/.env."""
+        from agent.sdk_client import _resolve_sentry_auth_token
+
+        monkeypatch.delenv("SENTRY_PERSONAL_TOKEN", raising=False)
+        monkeypatch.delenv("SENTRY_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
+
+        valor_dir = tmp_path / "Desktop" / "Valor"
+        valor_dir.mkdir(parents=True)
+        (valor_dir / ".env").write_text("SENTRY_PERSONAL_TOKEN=file-token-xyz\n")
+
+        with patch("agent.sdk_client.Path.home", return_value=tmp_path):
+            assert _resolve_sentry_auth_token() == "file-token-xyz"
+
+    def test_resolve_returns_none_on_missing_file(self, monkeypatch, tmp_path):
+        """If ~/Desktop/Valor/.env does not exist, returns None without raising."""
+        from agent.sdk_client import _resolve_sentry_auth_token
+
+        monkeypatch.delenv("SENTRY_PERSONAL_TOKEN", raising=False)
+        monkeypatch.delenv("SENTRY_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("VALOR_LAUNCHD", raising=False)
+
+        with patch("agent.sdk_client.Path.home", return_value=tmp_path):
+            assert _resolve_sentry_auth_token() is None
+
+
 class TestPMPermissionMode:
     """PM session should use bypassPermissions, not plan mode."""
 
