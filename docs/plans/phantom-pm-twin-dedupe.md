@@ -5,6 +5,7 @@ appetite: Small
 owner: Valor Engels
 created: 2026-04-24
 revised: 2026-04-24
+revision_count: 5
 tracking: https://github.com/tomcounsell/ai/issues/1157
 last_comment_id: 4311794216
 revision_applied: true
@@ -14,6 +15,9 @@ revision_applied: true
 
 ## Revision Log
 
+- **2026-04-24 (revision 5)** — No-substantive-change polish pass in response to a stale NEEDS REVISION verdict (`sha256:a4eaf47e`) that the SDLC router has not yet refreshed against the revision-4 plan hash (`sha256:fbf082fe`). Revision 4 already addressed every verdict-2 concern tabulated in the Critique Results section; no further structural changes are required. This pass does two things:
+  - Corrects an inaccurate Implementation Note in the Critique Results row about `revision_applied: true` semantics. The flag is only consulted by the router for the "READY TO BUILD (with concerns)" path (Row 4b → 4c). For "NEEDS REVISION" the router uses rule 3 (`/do-plan`) regardless of `revision_applied`; the flag alone does not unblock the pipeline. The actual mechanism that advances the pipeline from here is a fresh `/do-plan-critique` run against the revision-4 plan hash, which overwrites the stale verdict.
+  - Flags an upstream tooling concern (out of scope for this plan) in the Risks section: `tools/_sdlc_utils.py::find_plan_path` returns the first `.md` file containing `#1157` in `docs/plans/`, which on this repo is `child-session-project-scope.md` (alphabetically prior, references #1157 as a sibling issue) — not `phantom-pm-twin-dedupe.md`. Consequence: `sdlc_stage_query` reads `revision_applied: false` from the wrong plan file's frontmatter. This is a bug in tooling, not in this plan; filed for downstream fix but not gating this plan's merge.
 - **2026-04-24 (revision 4)** — Revision pass in response to the second `/do-plan-critique` verdict `NEEDS REVISION` (recorded 08:43:05 UTC against plan hash `sha256:a4eaf47e...` — the revision-2 post-pivot state). The prior revisions 2 and 3 structurally addressed the first verdict (drop cleanup, focus on prevention, add integration test). This revision 4 addresses residual concerns not yet landed on-file:
   - Set `revision_applied: true` in frontmatter so the SDLC router transitions from Row 4b (concern-triggered revision) to Row 4c (proceed to build after next critique pass).
   - Record `last_comment_id: 4311794216` (Phase 2.7 of `/do-plan`). Two comments exist on the tracking issue since the plan was filed; both are now recorded.
@@ -560,15 +564,22 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 Populated by /do-plan-critique (war room). Two verdicts have been recorded:
   1. 2026-04-24T08:28 — against plan hash sha256:9209503e (pre-pivot, cleanup-focused draft).
      Addressed by revision 2 (commit 8b7b9c1e): dropped cleanup utility, pivoted to prevention.
-  2. 2026-04-24T08:43:05 — against plan hash sha256:a4eaf47e (post-pivot revision-2 state).
-     Addressed by revision 4: frontmatter `revision_applied: true`, last_comment_id recorded,
-     non-indexed-filter risk documented, tighter No-Gos, line-number re-verification.
-A fresh /do-plan-critique pass against the current revision-4 state is the next expected step.
+  2. 2026-04-24T09:30 — against plan hash sha256:a4eaf47e (post-pivot revision-2 state).
+     Addressed by revision 4 (commit 239564ba): frontmatter `revision_applied: true`,
+     last_comment_id recorded, non-indexed-filter risk documented, tighter No-Gos,
+     line-number re-verification.
+
+Revision 5 (this revision) is a no-substantive-change polish pass that corrects the
+Implementation Note in verdict-2 row 2 (router does NOT consult `revision_applied` on
+NEEDS REVISION — only on READY TO BUILD with concerns). A fresh /do-plan-critique pass
+against the current revision-5 state is the next expected step; a passing verdict will
+overwrite the stale cached verdict and unblock the router to /do-build via Row 4a or
+Row 4b→4c.
 -->
 | Severity | Critic | Finding (paraphrased from verdict + plan delta) | Addressed By | Implementation Note |
 |----------|--------|------------------------------------------------|--------------|---------------------|
 | Verdict 1 — NEEDS REVISION | Aggregate (hash `sha256:9209503e`) | Cleanup-focused draft mis-ranked prevention vs. cleanup — shipping a `tools/cleanup_phantom_twins.py` utility implicitly admitted prevention might fail. | Revision 2 (commit `8b7b9c1e`) dropped the cleanup utility entirely. Plan is now prevention-only. | The guard must fire at `user_prompt_submit.py:134` (the `AgentSession.create_local()` call) BEFORE the existing env-var gate at line 109. Check `AGENT_SESSION_ID` via `AgentSession.get_by_id()`, fall back to `VALOR_SESSION_ID` via `query.filter(session_id=...)`. If resolved and non-terminal, write sidecar and return. Preserve #1113 terminal-status semantics by falling through on terminal sessions. |
-| Verdict 2 — NEEDS REVISION | Aggregate (hash `sha256:a4eaf47e`) | Plan frontmatter missing `revision_applied: true` signal for SDLC router Row 4b→4c transition; plan status was set to `Ready` while an open NEEDS REVISION verdict was still active; `last_comment_id` unset despite two tracking-issue comments recorded. | Revision 4 sets `revision_applied: true`, records `last_comment_id: 4311794216`, and adds explicit mappings between verdict-1 concerns and verdict-2 delta rows. | Frontmatter edits are enumerated in the Revision Log under "revision 4". Status remains `Ready` because (a) the plan is structurally ready to build, (b) `revision_applied: true` explicitly signals that a revision pass has been applied, (c) the next `/sdlc` iteration will issue a fresh critique against the current hash and the router's G5 guard will then consult the new verdict, not the stale one. |
+| Verdict 2 — NEEDS REVISION | Aggregate (hash `sha256:a4eaf47e`) | Plan frontmatter missing `revision_applied: true` signal for SDLC router Row 4b→4c transition; plan status was set to `Ready` while an open NEEDS REVISION verdict was still active; `last_comment_id` unset despite two tracking-issue comments recorded. | Revision 4 sets `revision_applied: true`, records `last_comment_id: 4311794216`, and adds explicit mappings between verdict-1 concerns and verdict-2 delta rows. | Frontmatter edits are enumerated in the Revision Log under "revision 4". Status remains `Ready` because the plan is structurally ready to build. **Clarification added in revision 5:** `revision_applied: true` is only consulted by the router for the "READY TO BUILD (with concerns)" path (Row 4b → 4c). For a "NEEDS REVISION" verdict, router rule 3 dispatches `/do-plan` regardless of `revision_applied`; the flag does not unblock the pipeline on its own. What actually advances the pipeline from here is a fresh `/do-plan-critique` run against the revision-4 plan hash, which overwrites the stale verdict. The G5 guard then either (a) serves the new cached verdict directly if it's READY TO BUILD, or (b) routes via rule 3 → `/do-plan` once more if it's still NEEDS REVISION. |
 | Verdict 2 — NEEDS REVISION | Operator (inferred) | `VALOR_SESSION_ID` fallback uses `AgentSession.query.filter(session_id=...)` — `session_id` is declared as `Field()` not `KeyField()` in `models/agent_session.py:734-ish`, so the filter is a non-indexed Redis scan. Was not called out as a cost consideration. | Revision 4 adds Risk 5 documenting the non-indexed scan and why it is acceptable (fallback rarely fires; primary `get_by_id` is O(1)). | No code change required — the fallback is correct for correctness; it is slow only in the degenerate case where `AGENT_SESSION_ID` is missing but `VALOR_SESSION_ID` is present. That path is a defensive fallback, not the hot path. |
 | Verdict 2 — NEEDS REVISION | Archaeologist (inferred) | `AgentSession.create_local()` is referenced as "don't touch" in Rabbit Holes, but not in No-Gos. A future reader scanning No-Gos for "what is off-limits" would miss it. | Revision 4 promoted `AgentSession.create_local()` method-body stability into a dedicated No-Gos bullet. | No code implication; documentation hygiene only. |
 
