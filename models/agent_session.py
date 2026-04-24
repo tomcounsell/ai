@@ -314,6 +314,16 @@ class AgentSession(Model):
     # use to audit how often teardown fires.
     sdk_connection_torn_down_at = DatetimeField(null=True)
 
+    # Last subprocess exit code from `_run_harness_subprocess` (issue #1099).
+    # Persisted best-effort by `get_response_via_harness` after the stale-UUID
+    # fallback completes. Read by `agent/session_health.py` in the recovery
+    # branch to distinguish OS-initiated OOM kills (`exit_returncode == -9`)
+    # from health-check-initiated kills (where this field is typically None
+    # or a different value). When Mode 4 OOM-defer conditions are met, the
+    # health check sets `scheduled_at = now + 120s` to throttle re-queue under
+    # memory pressure. Default None; no migration required for existing rows.
+    exit_returncode = IntField(null=True, default=None)
+
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 
