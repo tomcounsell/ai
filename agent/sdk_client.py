@@ -1133,6 +1133,33 @@ def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -
     )
 
 
+def _resolve_sentry_auth_token() -> str | None:
+    """Resolve Sentry auth token for PM/Teammate session env injection.
+
+    Cascade: SENTRY_PERSONAL_TOKEN env var -> SENTRY_AUTH_TOKEN env var ->
+    ~/Desktop/Valor/.env file read (only in terminal mode; launchd blocks
+    ~/Desktop under TCC).
+
+    Returns:
+        The Sentry auth token, or None if no source resolves successfully.
+    """
+    token = os.environ.get("SENTRY_PERSONAL_TOKEN") or os.environ.get("SENTRY_AUTH_TOKEN")
+    if token:
+        return token
+    if os.environ.get("VALOR_LAUNCHD"):
+        return None  # launchd cannot read ~/Desktop (macOS TCC)
+    sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
+    try:
+        if not sentry_env.exists():
+            return None
+        for line in sentry_env.read_text().splitlines():
+            if line.startswith("SENTRY_PERSONAL_TOKEN="):
+                return line.split("=", 1)[1]
+    except (OSError, PermissionError):
+        return None
+    return None
+
+
 class ValorAgent:
     """
     Valor's Claude Agent SDK wrapper.
@@ -1265,23 +1292,13 @@ class ValorAgent:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
-        # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        # Under launchd (VALOR_LAUNCHD=1), macOS TCC blocks open() on ~/Desktop
-        # files, causing indefinite hangs. Prefer the env var injected by
-        # install_worker.sh; only fall back to file read in terminal mode.
+        # manual export. Token resolution is delegated to _resolve_sentry_auth_token,
+        # which encapsulates the env-var-then-file cascade and the VALOR_LAUNCHD
+        # short-circuit (macOS TCC blocks open() on ~/Desktop files under launchd).
         if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
-            sentry_token = os.environ.get("SENTRY_PERSONAL_TOKEN") or os.environ.get(
-                "SENTRY_AUTH_TOKEN"
-            )
+            sentry_token = _resolve_sentry_auth_token()
             if sentry_token:
                 env["SENTRY_AUTH_TOKEN"] = sentry_token
-            elif not os.environ.get("VALOR_LAUNCHD"):
-                sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
-                if sentry_env.exists():
-                    for line in sentry_env.read_text().splitlines():
-                        if line.startswith("SENTRY_PERSONAL_TOKEN="):
-                            env["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
-                            break
 
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
