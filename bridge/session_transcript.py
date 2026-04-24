@@ -302,7 +302,9 @@ def complete_transcript(
             # written above, which is the transcript-visible artifact we preserve.
             if s.status == "waiting_for_children" and status in ("completed", "failed"):
                 logger.info(
-                    "[session-lifecycle] complete_transcript skipping terminal transition for %s — session is waiting_for_children; children will finalize via _finalize_parent_sync (issue #1156)",
+                    "[session-lifecycle] complete_transcript skipping terminal "
+                    "transition for %s — session is waiting_for_children; children "
+                    "will finalize via _finalize_parent_sync (issue #1156)",
                     s.session_id,
                 )
                 return
