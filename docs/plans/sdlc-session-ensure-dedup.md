@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1147
 last_comment_id:
+allow_unchecked: true
 ---
 
 # SDLC Session Ensure — Dedup Against Bridge Sessions
