@@ -223,7 +223,7 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 - **Accountability**: Each stage result is verified before progressing
 - **Visibility**: The PM surfaces questions and the final delivery summary to the stakeholder, not intermediate step-by-step narration
 - **Recovery**: If a stage fails, the PM can re-dispatch or escalate without losing prior work
-- **Judgment**: The PM decides whether trivial/docs-only work warrants the full pipeline
+- **No bypass**: All software changes route through the full pipeline — triviality is not an override. Docs-only work (no code, no PR) may skip BUILD/TEST/REVIEW but still requires an issue and DOCS stage.
 
 ### Spawn vs. Resume
 
