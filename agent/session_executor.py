@@ -1266,6 +1266,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         # All session types route to CLI harness (claude -p)
         from agent.sdk_client import (
+            HarnessThinkingBlockCorruptionError,
             _get_prior_session_uuid,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
@@ -1366,21 +1367,35 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         async def do_work() -> str:
             nonlocal _harness_requeued
-            raw = await get_response_via_harness(
-                message=_minimal_input if _prior_uuid else _harness_input,
-                working_dir=str(working_dir),
-                env=_harness_env,
-                prior_uuid=_prior_uuid,
-                session_id=session.session_id,
-                full_context_message=_harness_input,
-                model=_effective_model,
-                system_prompt=_pm_system_prompt,
-                # Two-tier no-progress detector callbacks (#1036). These route
-                # through messenger.notify_* wrappers so exceptions are caught
-                # and the queue-layer closures bump ORM fields on AgentSession.
-                on_sdk_started=messenger.notify_sdk_started,
-                on_stdout_event=messenger.notify_stdout_event,
-            )
+            try:
+                raw = await get_response_via_harness(
+                    message=_minimal_input if _prior_uuid else _harness_input,
+                    working_dir=str(working_dir),
+                    env=_harness_env,
+                    prior_uuid=_prior_uuid,
+                    session_id=session.session_id,
+                    full_context_message=_harness_input,
+                    model=_effective_model,
+                    system_prompt=_pm_system_prompt,
+                    # Two-tier no-progress detector callbacks (#1036). These route
+                    # through messenger.notify_* wrappers so exceptions are caught
+                    # and the queue-layer closures bump ORM fields on AgentSession.
+                    on_sdk_started=messenger.notify_sdk_started,
+                    on_stdout_event=messenger.notify_stdout_event,
+                )
+            except HarnessThinkingBlockCorruptionError as exc:
+                # Mode 1 of issue #1099 — extended-thinking + compaction has
+                # corrupted the transcript beyond in-process recovery. Surface a
+                # clean user-facing message and re-raise so BackgroundTask._run_work
+                # records the failure (task.error truthy → session finalizes as
+                # "failed"). No retry — the sentinel only fires after the stale-UUID
+                # fallback has already failed.
+                logger.warning(
+                    "[%s] Harness thinking-block corruption detected; finalizing as failed: %s",
+                    session.session_id,
+                    exc,
+                )
+                raise
             if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
                 result, requeued = await _handle_harness_not_found(raw, agent_session)
                 if requeued:

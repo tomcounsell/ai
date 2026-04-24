@@ -197,6 +197,38 @@ Callers that previously did a bare `transition_status()` or `finalize_session()`
 
 - **Redis TTL expiry**: If terminal session records expire from Redis before a revival check, the terminal-sibling filter in `check_revival()` cannot detect them. Revival may proceed for sessions whose completion record has expired. This is acceptable: if the record is gone, there is no reliable way to detect prior completion.
 
+## Harness Failure Hardening (issue #1099)
+
+The `claude -p stream-json` subprocess is the execution engine for every Dev / PM / Teammate session. Four failure modes were historically handled by silently returning an empty string and marking the session `completed` — the user got silence with no clear path to recovery. Issue #1099 added minimal, targeted defenses for each mode.
+
+### Mode 1 — Thinking-block corruption (detection + typed failure)
+
+When extended-thinking interacts pathologically with compaction, both the primary harness call AND the stale-UUID fallback exit non-zero with stderr containing the substring `redacted_thinking`. The harness now:
+
+1. Captures the first 2000 chars of stderr (`stderr_snippet`) from `_run_harness_subprocess` (widened from a 5-tuple to a 6-tuple return).
+2. After the stale-UUID fallback completes, checks `stderr_snippet` against `THINKING_BLOCK_SENTINEL = "redacted_thinking"` AND `returncode != 0`. When BOTH conditions are met, raises `HarnessThinkingBlockCorruption` with the user-facing message "Session context corrupted — please start a new thread".
+3. `agent/session_executor.py` catches the exception so `BackgroundTask` finalizes the session as `failed` — the user sees the specific error message, not silence.
+
+**Escape hatch:** set `DISABLE_THINKING_SENTINEL=1` (or `true`/`yes`/`on`) in the environment to disable the check at runtime without a code rollback. The sentinel string is taken from the amux "Every way Claude Code crashes" report and is not yet confirmed against Anthropic's published error taxonomy. Every match emits `logger.warning("[harness] THINKING_BLOCK_SENTINEL matched: ...")` BEFORE raising, giving operators a grep-able audit trail (`grep "THINKING_BLOCK_SENTINEL matched" logs/worker.log`).
+
+**Tests:** `tests/unit/test_harness_thinking_block_sentinel.py` (5 cases: sentinel fires, message is user-facing, healthy run passes through, env var disables, zero-exit bypass).
+
+### Mode 2 — Context-usage observability
+
+When per-turn `usage.input_tokens / context_window > 0.75`, the harness emits a single WARNING log per turn:
+
+```
+context_usage pct=0.82 session_id=<sid> model=opus input_tokens=164000
+```
+
+Pure observability — no state change, no behavior change. Dashboards and operators can grep for `context_usage` to get an early-warning signal before the session degrades.
+
+The helper lives at `agent/sdk_client.py::_log_context_usage_if_risky` and is called from `get_response_via_harness` after the turn completes. Model context windows are looked up via `config/models.py::get_model_context_window`, which accepts both short aliases (`opus`/`sonnet`/`haiku`) and full Anthropic model IDs. Unknown models log a separate "unknown model" WARNING and skip the pct calc rather than crashing.
+
+The entire helper body is wrapped in `try/except Exception: return` — observability must never crash the turn.
+
+**Tests:** `tests/unit/test_harness_context_usage_log.py` (9 cases including alias/full-id parametrization and malformed-usage defensive checks).
+
 ## Test Coverage
 
 All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
@@ -268,4 +300,5 @@ Additional coverage in `tests/integration/test_session_heartbeat_progress.py` (i
 - Issue #917 -- Health-check recovery finalization gap (fallback else branch)
 - Issue #986 -- Startup recovery local session guard (do not hijack interactive CLI sessions)
 - Issue #1036 -- Two-tier no-progress detector (dual heartbeat + Tier 2 reprieve gates)
+- Issue #1099 -- Harness failure hardening for four known modes (thinking-block corruption, context-usage observability, compacting reprieve gate, OOM backoff)
 - Issue #1092 -- Session_type-aware local session recovery (local dev sessions survive worker restart; PM/teammate still abandoned)

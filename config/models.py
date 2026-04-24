@@ -224,3 +224,42 @@ MODEL_INFO = {
         ],
     },
 }
+
+
+# =============================================================================
+# MODEL ALIASES + LOOKUP HELPERS
+# =============================================================================
+
+# Short-alias to full model-id mapping, matching the ``--model`` values accepted
+# by the Claude CLI and the per-session model cascade in
+# ``agent/session_executor.py::_resolve_session_model``. Consumed by
+# ``get_model_context_window`` so callers can pass either form.
+_MODEL_ALIASES: dict[str, str] = {
+    "haiku": HAIKU,
+    "sonnet": SONNET,
+    "opus": OPUS,
+}
+
+
+def get_model_context_window(model_name: str | None) -> int | None:
+    """Return the context window (in tokens) for a registered model.
+
+    Accepts either a short alias (``"opus"``/``"sonnet"``/``"haiku"``) or a
+    full Anthropic model id (e.g. ``"claude-opus-4-5-20251101"``). Returns
+    ``None`` when the model is not registered in ``MODEL_INFO`` — callers
+    (e.g. ``agent/sdk_client.py::_log_context_usage_if_risky``) treat ``None``
+    as "unknown model" and skip their percentage calculation.
+
+    Added for issue #1099 Mode 2 so the SDK/harness observer is decoupled from
+    the nested-dict layout of ``MODEL_INFO``.
+    """
+    if not model_name:
+        return None
+    key = _MODEL_ALIASES.get(model_name, model_name)
+    entry = MODEL_INFO.get(key)
+    if entry is None:
+        return None
+    value = entry.get("context_window")
+    if isinstance(value, int) and value > 0:
+        return value
+    return None

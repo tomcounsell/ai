@@ -328,7 +328,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None)
+            return ("done", None, 0, None, None, None)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -351,7 +351,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None)
+            return ("done", None, 0, None, None, None)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -381,7 +381,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None)
+            return ("done", None, 0, None, None, None)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -415,7 +415,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None)
+            return ("done", None, 0, None, None, None)
 
         oversize = "x" * 600_000
         caplog.set_level(logging.WARNING, logger="agent.sdk_client")
