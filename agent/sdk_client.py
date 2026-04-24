@@ -1217,6 +1217,33 @@ def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -
     )
 
 
+def _resolve_sentry_auth_token() -> str | None:
+    """Resolve Sentry auth token for PM/Teammate session env injection.
+
+    Cascade: SENTRY_PERSONAL_TOKEN env var -> SENTRY_AUTH_TOKEN env var ->
+    ~/Desktop/Valor/.env file read (only in terminal mode; launchd blocks
+    ~/Desktop under TCC).
+
+    Returns:
+        The Sentry auth token, or None if no source resolves successfully.
+    """
+    token = os.environ.get("SENTRY_PERSONAL_TOKEN") or os.environ.get("SENTRY_AUTH_TOKEN")
+    if token:
+        return token
+    if os.environ.get("VALOR_LAUNCHD"):
+        return None  # launchd cannot read ~/Desktop (macOS TCC)
+    sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
+    try:
+        if not sentry_env.exists():
+            return None
+        for line in sentry_env.read_text().splitlines():
+            if line.startswith("SENTRY_PERSONAL_TOKEN="):
+                return line.split("=", 1)[1]
+    except (OSError, PermissionError):
+        return None
+    return None
+
+
 class ValorAgent:
     """
     Valor's Claude Agent SDK wrapper.
@@ -1349,23 +1376,13 @@ class ValorAgent:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
-        # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        # Under launchd (VALOR_LAUNCHD=1), macOS TCC blocks open() on ~/Desktop
-        # files, causing indefinite hangs. Prefer the env var injected by
-        # install_worker.sh; only fall back to file read in terminal mode.
+        # manual export. Token resolution is delegated to _resolve_sentry_auth_token,
+        # which encapsulates the env-var-then-file cascade and the VALOR_LAUNCHD
+        # short-circuit (macOS TCC blocks open() on ~/Desktop files under launchd).
         if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
-            sentry_token = os.environ.get("SENTRY_PERSONAL_TOKEN") or os.environ.get(
-                "SENTRY_AUTH_TOKEN"
-            )
+            sentry_token = _resolve_sentry_auth_token()
             if sentry_token:
                 env["SENTRY_AUTH_TOKEN"] = sentry_token
-            elif not os.environ.get("VALOR_LAUNCHD"):
-                sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
-                if sentry_env.exists():
-                    for line in sentry_env.read_text().splitlines():
-                        if line.startswith("SENTRY_PERSONAL_TOKEN="):
-                            env["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
-                            break
 
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
@@ -1927,6 +1944,7 @@ async def get_response_via_harness(
     session_id: str | None = None,
     full_context_message: str | None = None,
     model: str | None = None,
+    system_prompt: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
 ) -> str:
@@ -1972,6 +1990,13 @@ async def get_response_via_harness(
             When None/empty, the CLI uses its own default. Part of the per-
             session model routing cascade (see
             ``agent/session_executor.py::_resolve_session_model``).
+        system_prompt: Optional persona/role text appended to Claude Code's
+            default system prompt via ``--append-system-prompt`` (issue #1148).
+            Use ``--append`` (not ``--system-prompt``) to preserve the default
+            tool-handling protocol — the persona is additive guidance. PM
+            sessions pass ``load_pm_system_prompt(working_dir)`` here; drafter
+            and dev sessions must keep this ``None``. Strings larger than
+            512KB are dropped with a warning to avoid ARG_MAX overflows.
     """
     # Validate prior_uuid format; treat empty or invalid as None
     if prior_uuid and not _UUID_PATTERN.match(prior_uuid):
@@ -1994,6 +2019,25 @@ async def get_response_via_harness(
     if model:
         harness_cmd.extend(["--model", model])
         logger.info(f"[harness] Using --model {model} for session_id={session_id}")
+
+    # System prompt injection (issue #1148). Use --append-system-prompt
+    # (NOT --system-prompt) so Claude Code's default tool-handling protocol is
+    # preserved — the PM persona is additive guidance, not a full replacement.
+    # Defensive size cap: macOS ARG_MAX is 1MB; we cap at 512KB to leave room
+    # for the rest of the argv. The current PM persona is ~25KB.
+    if system_prompt:
+        if len(system_prompt) > 512_000:
+            logger.warning(
+                f"[harness] system_prompt is {len(system_prompt)} bytes; "
+                "exceeds 512KB soft cap, omitting to avoid ARG_MAX (session_id="
+                f"{session_id})"
+            )
+        else:
+            harness_cmd.extend(["--append-system-prompt", system_prompt])
+            logger.info(
+                f"[harness] Appending {len(system_prompt)}-char system prompt for "
+                f"session_id={session_id}"
+            )
 
     # Build subprocess env: inherit current env, merge extras, strip API key
     proc_env = dict(os.environ)

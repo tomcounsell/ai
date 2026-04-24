@@ -47,6 +47,17 @@ from pathlib import Path
 # Bounded lookbehind via (?:^|\W) so we don't false-positive on "tissue123".
 _ISSUE_REF_RE = re.compile(r"(?:^|\W)issue\s*#?\s*(\d+)", re.IGNORECASE)
 
+# Issue #1148: enrichment-header guard. The worker's build_harness_turn_input
+# prepends headers like "PROJECT:", "FROM:", "SESSION_ID:", "TASK_SCOPE:",
+# "SCOPE:", "MESSAGE:" to the raw message before passing it to claude -p.
+# A PM session that lacks the persona+SESSION_TYPE wiring sometimes forwards
+# its own enrichment payload as the --message to a child dev session, which
+# stalls the dev with "the message appears to have been truncated" (the
+# observed failure trace for issue #1148). This guard rejects --message
+# values whose first 200 chars start with one of those header prefixes.
+# Case-sensitive: lowercase prose like "scope: database stuff" is allowed.
+_ENRICHMENT_HEADER_RE = re.compile(r"^(?:SESSION_ID|PROJECT|FROM|TASK_SCOPE|SCOPE):")
+
 
 def _derive_slug_from_message(message: str) -> str | None:
     """Extract the first issue number from ``message`` and return ``sdlc-{N}``.
@@ -208,6 +219,20 @@ def cmd_create(args: argparse.Namespace) -> int:
             )
         session_type = _role_to_session_type[role]
         message = args.message
+        # Issue #1148: reject enrichment-header forwarding. A 200-char window
+        # at the start of the message is enough to catch the observed pattern
+        # ("PROJECT: Valor AI\nFOCUS: ...") without false-positives on prose
+        # that uses the words SCOPE/FROM/etc. mid-sentence.
+        if message and _ENRICHMENT_HEADER_RE.match(message[:200]):
+            print(
+                "Error: --message looks like a forwarded enrichment header, not a "
+                "task description.\n"
+                "Enrichment headers (PROJECT:, FROM:, SESSION_ID:, TASK_SCOPE:, "
+                "SCOPE:) are\n"
+                "injected automatically by the worker. Pass only the task content.",
+                file=sys.stderr,
+            )
+            return 2
         chat_id = args.chat_id or "0"
         parent_id = getattr(args, "parent", None)
         model = getattr(args, "model", None)

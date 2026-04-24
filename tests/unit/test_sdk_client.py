@@ -9,8 +9,12 @@ import sys
 
 import pytest
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add repo root to sys.path so `from agent.* import ...` works when this module
+# is imported standalone (pytest already provides the rootdir, but this keeps
+# the file runnable via `python -m unittest`). The previous form pointed at the
+# `tests/` directory, which broke transitive `from tools.* import ...` chains
+# (e.g. agent.constants -> tools.emoji_embedding) at collection time.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agent.sdk_client import ValorAgent, load_system_prompt
 
@@ -298,3 +302,133 @@ class TestGetPriorSessionUuidStatusFilter:
         new_completed = self._make_session_row("completed", "uuid-new-completed", created_at=500)
         # Pass them in non-sorted order to exercise the sort.
         assert self._run_with_sessions([old_killed, new_completed]) == "uuid-new-completed"
+
+
+# -----------------------------------------------------------------------------
+# get_response_via_harness: --append-system-prompt argv injection (issue #1148)
+# -----------------------------------------------------------------------------
+
+
+class TestGetResponseViaHarnessSystemPrompt:
+    """Verify --append-system-prompt argv injection for the system_prompt kwarg.
+
+    Issue #1148: PM harness sessions need to carry the project-manager persona
+    via --append-system-prompt. Drafter sessions must NOT receive any persona
+    so this is a strict opt-in via the system_prompt kwarg.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_system_prompt_means_no_flag(self):
+        """Default system_prompt=None must not add --append-system-prompt to argv."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+            )
+
+        assert "--append-system-prompt" not in captured["cmd"]
+
+    @pytest.mark.asyncio
+    async def test_empty_system_prompt_means_no_flag(self):
+        """system_prompt='' (falsy) must not add --append-system-prompt to argv."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+                system_prompt="",
+            )
+
+        assert "--append-system-prompt" not in captured["cmd"]
+
+    @pytest.mark.asyncio
+    async def test_truthy_system_prompt_appends_flag(self):
+        """A non-empty system_prompt is injected as --append-system-prompt <text>.
+
+        Verifies positional ordering: --append-system-prompt must appear after
+        --model (model selection precedes any persona flag) but before the
+        positional message at the tail of the argv.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+        persona = "PM persona body — CRITIQUE is Mandatory After PLAN"
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            await get_response_via_harness(
+                message="user-message-tail",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+                system_prompt=persona,
+            )
+
+        cmd = captured["cmd"]
+        assert "--append-system-prompt" in cmd, cmd
+        idx = cmd.index("--append-system-prompt")
+        assert cmd[idx + 1] == persona, "persona text must immediately follow the flag"
+        # Position invariant: --model precedes --append-system-prompt
+        assert "--model" in cmd
+        assert cmd.index("--model") < idx, "--model must precede --append-system-prompt"
+        # Position invariant: positional message is at the tail (after persona)
+        assert cmd[-1] == "user-message-tail"
+        assert idx < len(cmd) - 1
+
+    @pytest.mark.asyncio
+    async def test_oversized_system_prompt_logs_and_omits(self, caplog):
+        """A 600KB system_prompt must be omitted with a warning, not injected."""
+        import logging
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        captured = {}
+
+        async def fake_run(cmd, working_dir, proc_env, **_kw):
+            captured["cmd"] = cmd
+            return ("done", None, 0, None, None, None)
+
+        oversize = "x" * 600_000
+        caplog.set_level(logging.WARNING, logger="agent.sdk_client")
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+            await get_response_via_harness(
+                message="hi",
+                working_dir="/tmp",
+                env={"AGENT_SESSION_ID": "x"},
+                model="opus",
+                system_prompt=oversize,
+            )
+
+        assert "--append-system-prompt" not in captured["cmd"]
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("exceeds 512KB soft cap" in m for m in warnings), warnings

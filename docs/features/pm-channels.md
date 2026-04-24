@@ -37,6 +37,10 @@ PM mode uses `load_pm_system_prompt()` which:
 - Does NOT include WORKER_RULES (no branch safety rails needed for PM work)
 - Raises `FileNotFoundError` if persona segments are missing (no silent fallback)
 
+The composed prompt is wired into `claude -p` via `--append-system-prompt` (issue #1148). `agent/session_executor.py` calls `load_pm_system_prompt(working_dir)` for PM sessions and passes the result through `get_response_via_harness(system_prompt=...)`. The harness appends it to Claude Code's default system prompt so the PM persona is additive guidance rather than a full replacement — see `docs/features/harness-abstraction.md#pm-persona-injection-append-system-prompt-issue-1148` for the argv-level details.
+
+Prior to #1148, the harness path silently dropped the persona entirely (the `_harness_env` did not carry `SESSION_TYPE` and the `claude -p` argv did not carry `--append-system-prompt`). PM sessions ran without their orchestration rules and the `_is_pm_session()` hook gate was bypassed. The fix restores parity with the SDK-era `ValorAgent.system_prompt` path.
+
 ### What PM Mode Skips
 
 - SDLC classification (`classify_work_request()`)
