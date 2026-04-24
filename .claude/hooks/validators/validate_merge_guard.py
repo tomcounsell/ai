@@ -84,6 +84,7 @@ def _skip_heredoc(command: str, i: int) -> int:
     actually a heredoc.
     """
     import re as _re
+
     n = len(command)
     if not (i + 1 < n and command[i + 1] == "<"):
         return i + 1
