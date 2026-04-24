@@ -1349,6 +1349,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # D1 precedence cascade: session.model > settings > codebase default.
         _effective_model = _resolve_session_model(agent_session)
 
+        # PM sessions get persona-level SDLC orchestration rules via
+        # --append-system-prompt (issue #1148). Dev and Teammate sessions have
+        # no harness-side persona loader; they keep the default Claude Code
+        # protocol. Drafter call sites in session_completion.py MUST also leave
+        # system_prompt at the default None — see Risk 4 in docs/plans/sdlc-1148.md.
+        _pm_system_prompt: str | None = None
+        if _session_type == SessionType.PM:
+            try:
+                _pm_system_prompt = load_pm_system_prompt(str(working_dir))
+            except Exception as e:
+                logger.warning(
+                    f"{log_prefix} [pm-persona-missing] Failed to load PM persona: {e}; "
+                    "session will run without SDLC orchestration rules"
+                )
+
         async def do_work() -> str:
             nonlocal _harness_requeued
             raw = await get_response_via_harness(
@@ -1359,6 +1374,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 session_id=session.session_id,
                 full_context_message=_harness_input,
                 model=_effective_model,
+                system_prompt=_pm_system_prompt,
                 # Two-tier no-progress detector callbacks (#1036). These route
                 # through messenger.notify_* wrappers so exceptions are caught
                 # and the queue-layer closures bump ORM fields on AgentSession.
