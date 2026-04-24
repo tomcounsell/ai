@@ -94,6 +94,15 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
+# ── Sync design-system Node toolchain (soft dep) ─────────────────────
+# @google/design.md pinned in package.json powers `python -m tools.design_system_sync`.
+# Guarded: requires BOTH package.json AND `npm` on PATH. Wrapped in a
+# non-pipefail subshell so a missing npm or a transient install failure
+# cannot abort the parent update script.
+if [ -f "$PROJECT_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"
+fi
+
 # ── Run update in cron mode ──────────────────────────────────────────
 # Output goes directly to Telegram - keep it clean for PM-style summary
 # --no-pull: git pull already done above; orchestrator skips its own pull step

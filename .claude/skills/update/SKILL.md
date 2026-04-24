@@ -225,3 +225,25 @@ worker = service.get_worker_status(project_dir)
 service.install_worker(project_dir)   # Installs standalone worker service
 service.restart_worker(project_dir)
 ```
+
+## Node toolchain (soft prerequisite)
+
+Machines that run the `do-design-system` skill also need Node + npm (for
+`npx @google/design.md`). `remote-update.sh` runs `npm ci --only=prod`
+guarded by:
+
+```bash
+if [ -f "$PROJECT_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --only=prod ) \
+        || echo "[update] npm ci failed (non-fatal); continuing"
+fi
+```
+
+The non-pipefail subshell + `|| echo` trailer guarantee a missing `npm`
+or a transient install failure never aborts the parent update. Machines
+without Node simply skip the block silently; design-system tooling then
+falls back to Python-only emission (`--generate --no-node`) for
+`design-system.md` / `brand.css` / `source.css`. Lint and DTCG / Tailwind
+exports still require Node and are only produced on Node-equipped
+machines. See `docs/features/design-system-tooling.md` for the full
+fallback semantics.
