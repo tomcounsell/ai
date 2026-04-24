@@ -793,7 +793,7 @@ A third `/do-plan-critique` returned **READY TO BUILD (with concerns)** — 0 bl
 
 18. **`DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch.** Both validators check `os.environ.get("DESIGN_SYSTEM_HOOK_DISABLED") == "1"` as their first line and `sys.exit(0)` if set. One env var disables both hooks simultaneously. Bypasses are logged as `result: "bypassed"` in the JSONL log, preserving auditability. Documented in module docstrings, Update System section, and the feature doc under "Emergency bypass" — with a reminder to re-run `--check` manually after bypassing.
 
-### Revision pass 4 (2026-04-25) — consolidation pass
+### Revision pass 4 (2026-04-25) — consolidation pass (tracking #1162)
 
 SDLC router's G1 guard fired again on a stale `_meta.latest_critique_verdict == "NEEDS REVISION"` signal (the stage_states `_verdicts` store was not updated to reflect pass 3's `READY TO BUILD (with concerns)` verdict until after this session began; the router saw the older meta value and dispatched `/do-plan`). This consolidation pass walked the full plan start to finish to confirm every critique finding from passes 1–3 remains addressed in the text and no new gaps have crept in. Findings:
 
