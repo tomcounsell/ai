@@ -26,8 +26,12 @@ import pytest
 _COMPLETION_PATH = Path(__file__).resolve().parent.parent.parent / "agent" / "session_completion.py"
 
 
-def test_drafter_calls_omit_system_prompt_via_grep():
-    """No call site in session_completion.py may pass system_prompt= to harness."""
+def test_drafter_calls_omit_system_prompt():
+    """No call site in session_completion.py may pass system_prompt= to harness.
+
+    This is the canonical Risk 4 regression guard cited by docs/plans/sdlc-1148.md
+    and the plan's Verification table.
+    """
     source = _COMPLETION_PATH.read_text()
     # Reject any literal system_prompt= kwarg anywhere in the file. This is
     # narrower and stricter than a positional check because the harness

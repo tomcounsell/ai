@@ -108,7 +108,7 @@ PM sessions append the project-manager persona to `claude -p`'s default system p
 
 Failure modes:
 - Persona load raises (e.g. missing persona file on a fresh machine): logs `[pm-persona-missing]` and proceeds with `system_prompt=None`. Session runs without SDLC orchestration rules — visible to the dashboard via the structured log prefix.
-- Drafter call sites in `agent/session_completion.py` (Pass 1 + Pass 2 of `_deliver_pipeline_completion`) MUST keep `system_prompt=None`. Tainting drafter turns with PM orchestration corrupts the user-facing summary. Enforced by `tests/unit/test_session_completion.py::test_drafter_calls_omit_system_prompt_via_grep` and the AST guard alongside it.
+- Drafter call sites in `agent/session_completion.py` (Pass 1 + Pass 2 of `_deliver_pipeline_completion`) MUST keep `system_prompt=None`. Tainting drafter turns with PM orchestration corrupts the user-facing summary. Enforced by `tests/unit/test_session_completion.py::test_drafter_calls_omit_system_prompt` and the AST/anchor guards alongside it.
 
 Dev and Teammate sessions do not have a harness-side persona loader; they keep the default Claude Code protocol.
 
