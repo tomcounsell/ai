@@ -534,17 +534,17 @@ No agent integration required — these are bridge-internal / worker-internal ch
 
 ## Success Criteria
 
-- [ ] Mode 1: `THINKING_BLOCK_SENTINEL` in stderr + non-zero returncode → `HarnessThinkingBlockCorruption` raised → session finalized as `failed` with user-visible error. Healthy run (returncode=0, no sentinel) returns a non-empty result and status `completed`. (Test: `test_harness_thinking_block_sentinel.py`)
-- [ ] Mode 2: `usage.input_tokens / context_window > 0.75` → a single `logger.warning("context_usage ...")` record emitted per turn. Result text, session status, returncode, and all other behavior unchanged. (Test: `test_harness_context_usage_log.py`)
-- [ ] Mode 3: `last_compaction_ts` within 600s → Tier 2 returns `"compacting"` → kill skipped. `last_compaction_ts` stale (>600s) or None → existing gate chain runs unchanged. (Test: `test_session_health_compacting_reprieve.py`)
-- [ ] Mode 4: `exit_returncode == -9` AND `pre_bump_attempts == 0` AND `_is_memory_tight()` → `scheduled_at = now + 120s`. Any condition unmet → normal recovery. `pre_bump_attempts` is captured BEFORE line 873's `recovery_attempts` increment, ensuring first-time OS kills actually trigger the defer. (Test: `test_harness_oom_backoff.py`)
-- [ ] The one new field (`exit_returncode`) defaults to `None`. Existing sessions loaded from Redis deserialize correctly without migration. No other new AgentSession fields are added — Mode 4 reuses the existing `scheduled_at`.
-- [ ] Drafter tests (`test_message_drafter.py`, `test_drafter_validators.py`, `test_message_drafter_linkify.py`) remain green — no behavioral regression. (Regression guard per Test Impact section.)
-- [ ] No raw Redis operations introduced. All AgentSession writes use `save(update_fields=[...])` pattern. (Enforced by `validate_no_raw_redis_delete.py` hook.)
-- [ ] `python -m ruff format --check .` passes.
-- [ ] Affected test files green: `pytest tests/unit/test_sdk_client_image_sentinel.py tests/unit/test_harness_thinking_block_sentinel.py tests/unit/test_harness_context_usage_log.py tests/unit/test_session_health_compacting_reprieve.py tests/unit/test_harness_oom_backoff.py` all pass.
-- [ ] Full unit suite (`pytest tests/unit/ -n auto`) remains green.
-- [ ] Documentation updates (`docs/features/agent-session-health-monitor.md`, `docs/features/session-recovery-mechanisms.md`) landed in the same PR.
+- [x] Mode 1: `THINKING_BLOCK_SENTINEL` in stderr + non-zero returncode → `HarnessThinkingBlockCorruption` raised → session finalized as `failed` with user-visible error. Healthy run (returncode=0, no sentinel) returns a non-empty result and status `completed`. (Test: `test_harness_thinking_block_sentinel.py`)
+- [x] Mode 2: `usage.input_tokens / context_window > 0.75` → a single `logger.warning("context_usage ...")` record emitted per turn. Result text, session status, returncode, and all other behavior unchanged. (Test: `test_harness_context_usage_log.py`)
+- [x] Mode 3: `last_compaction_ts` within 600s → Tier 2 returns `"compacting"` → kill skipped. `last_compaction_ts` stale (>600s) or None → existing gate chain runs unchanged. (Test: `test_session_health_compacting_reprieve.py`)
+- [x] Mode 4: `exit_returncode == -9` AND `pre_bump_attempts == 0` AND `_is_memory_tight()` → `scheduled_at = now + 120s`. Any condition unmet → normal recovery. `pre_bump_attempts` is captured BEFORE line 873's `recovery_attempts` increment, ensuring first-time OS kills actually trigger the defer. (Test: `test_harness_oom_backoff.py`)
+- [x] The one new field (`exit_returncode`) defaults to `0` (changed from `None` during patch — see review for IntField descriptor pollution fix). Existing sessions loaded from Redis deserialize correctly without migration. No other new AgentSession fields are added — Mode 4 reuses the existing `scheduled_at`.
+- [x] Drafter tests (`test_message_drafter.py`, `test_drafter_validators.py`, `test_message_drafter_linkify.py`) remain green — no behavioral regression. (Regression guard per Test Impact section.)
+- [x] No raw Redis operations introduced. All AgentSession writes use `save(update_fields=[...])` pattern. (Enforced by `validate_no_raw_redis_delete.py` hook.)
+- [x] `python -m ruff format --check .` passes.
+- [x] Affected test files green: `pytest tests/unit/test_sdk_client_image_sentinel.py tests/unit/test_harness_thinking_block_sentinel.py tests/unit/test_harness_context_usage_log.py tests/unit/test_session_health_compacting_reprieve.py tests/unit/test_harness_oom_backoff.py` all pass.
+- [x] Full unit suite (`pytest tests/unit/ -n auto`) remains green.
+- [x] Documentation updates (`docs/features/agent-session-health-monitor.md`, `docs/features/session-recovery-mechanisms.md`) landed in the same PR.
 
 ## Team Orchestration
 
