@@ -149,15 +149,28 @@ Before merging, scan the plan document for unchecked items that indicate unfinis
 SLUG=$(echo "$BRANCH" | sed 's|^session/||')
 PLAN_PATH="docs/plans/${SLUG}.md"
 
-# Read plan from origin/main (authoritative copy), not from cwd (which may be a stale worktree)
-PLAN_TEXT=$(git show origin/main:${PLAN_PATH} 2>/dev/null) || { echo "WARN: No plan found at origin/main:${PLAN_PATH} -- skipping completion gate"; exit 0; }
+# Read plan from the PR branch HEAD (origin/$BRANCH), not origin/main.
+# The plan's checkoff commits live on the session branch and only reach main
+# VIA this merge — reading from origin/main creates a chicken-and-egg deadlock
+# where the gate refuses to merge because the commits that would satisfy it
+# are the ones being merged. Fall back to origin/main only if the PR branch
+# has no plan (greenfield work items without a plan doc).
+git fetch origin "$BRANCH" --quiet 2>/dev/null || true
+PLAN_TEXT=$(git show "origin/${BRANCH}:${PLAN_PATH}" 2>/dev/null)
+if [ -z "$PLAN_TEXT" ]; then
+  PLAN_TEXT=$(git show "origin/main:${PLAN_PATH}" 2>/dev/null)
+fi
+if [ -z "$PLAN_TEXT" ]; then
+  echo "WARN: No plan found at origin/${BRANCH}:${PLAN_PATH} or origin/main:${PLAN_PATH} -- skipping completion gate"
+  exit 0
+fi
 
 echo "$PLAN_TEXT" | python3 -c "
 import re, sys, yaml
 
 plan_text = sys.stdin.read()
 if not plan_text.strip():
-    print('WARN: Empty plan at origin/main:$PLAN_PATH -- skipping completion gate')
+    print('WARN: Empty plan at $PLAN_PATH -- skipping completion gate')
     sys.exit(0)
 
 # Parse frontmatter for allow_unchecked override
