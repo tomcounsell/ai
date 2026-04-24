@@ -84,19 +84,10 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                         # Gate on non-terminal status (AD1): if the bridge session
                         # finalized between env injection and this call, fall
                         # through so we do not write stage state to a dead record.
-                        try:
-                            from models.session_lifecycle import TERMINAL_STATUSES
+                        from models.session_lifecycle import TERMINAL_STATUSES
 
-                            status = getattr(resolved, "status", None)
-                            if status not in TERMINAL_STATUSES:
-                                return {"session_id": env_session_id, "created": False}
-                        except Exception as e:
-                            logger.debug(
-                                f"sdlc_session_ensure: terminal-status gate failed: {e}"
-                            )
-                            # If TERMINAL_STATUSES import fails for any reason,
-                            # degrade to honoring only the PM check (safer than
-                            # creating a zombie duplicate).
+                        status = getattr(resolved, "status", None)
+                        if status not in TERMINAL_STATUSES:
                             return {"session_id": env_session_id, "created": False}
             except Exception as e:
                 logger.debug(f"sdlc_session_ensure: env short-circuit failed: {e}")
