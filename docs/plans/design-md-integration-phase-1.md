@@ -393,8 +393,8 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 **Mitigation:** Fixture `.pen` exercises at least one variable from each category (color, typography, rounded, spacing) plus one reusable component. The first real moodboard pass after landing Phase 1 is expected to surface edge cases; the `--drop-unmapped` flag and the warning-to-stderr path for unmapped variables keep the first pass productive even when mapping gaps appear. Follow-up ticket tracks post-first-pass refinements.
 
 ### Risk 6: Validator hook fires in ai/ commits that never touch the design system
-**Impact:** If the filename regex is too loose, every `git commit` in ai/ runs the drift check — adding 100-500ms per commit even when nothing to validate.
-**Mitigation:** Regex anchors on explicit filenames (`design-system\.(pen|md)`, `/brand\.css`, `/source\.css`). The generic pattern `docs/designs/` is deliberately NOT matched — we match filenames, not directories, so unrelated commits in ai/ early-return. Unit test asserts the hook no-ops on commands like `git add README.md`, `git commit -m "foo"`, and `git add tests/unit/test_unrelated.py`.
+**Impact:** If the filename regex is too loose, every `git commit` in ai/ runs the drift check — adding 100-500ms per commit even when nothing to validate. A too-loose regex also produces false positives on unrelated files whose names happen to contain `brand.css` or `source.css` as a suffix (e.g. `my-brand.css`, `source.css.bak`).
+**Mitigation:** Regex is **path-anchored**: `r"git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b"`. The `(?:^|/)` prefix group requires `brand.css` and `source.css` to appear at the start of a path segment — `my-brand.css` fails the match; `static/css/brand.css` succeeds. The generic pattern `docs/designs/` is deliberately NOT matched — we match filenames, not directories, so unrelated commits in ai/ early-return. This spec is the single source of truth for the hook's match pattern; Task 4 cites it directly and any change to one MUST be mirrored in the other. Unit test asserts the hook no-ops on commands like `git add README.md`, `git commit -m "foo"`, `git add tests/unit/test_unrelated.py`, and specifically on `git add my-brand.css` and `git add source.css.bak` (path-anchoring false-positive cases).
 
 ### Risk 7: Write/Edit hook matcher regex may not parse `Write|Edit` syntax
 **Impact:** If `.claude/settings.json` matcher strings don't support `|` alternation, registering the read-only hook with `matcher: "Write|Edit"` silently fails to match either. The hook never fires.
@@ -423,7 +423,13 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 
 The `/update` skill (`scripts/remote-update.sh`) currently syncs Python deps, env vars, and restarts services. Phase 1 adds a Node toolchain to the design-system slice only:
 
-- **Update script changes:** `scripts/remote-update.sh` gains one new step after `requirements.txt` sync: if `package.json` exists at repo root, run `npm ci --only=prod` (install from `package-lock.json` exactly). Skipped silently on machines without Node.
+- **Update script changes:** `scripts/remote-update.sh` gains one new step after `requirements.txt` sync. Guarded form (both `package.json` existence AND `command -v npm` required) so the update never aborts on machines that lack Node:
+  ```bash
+  if [ -f package.json ] && command -v npm >/dev/null 2>&1; then
+    ( set +o pipefail; npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"
+  fi
+  ```
+  The non-pipefail subshell + `|| echo` trailer guarantees a missing-Node or `npm ci` failure does not propagate up the update script's exit status. Machines without `npm` simply skip the block silently; machines with `npm` but a transient failure (registry hiccup, lockfile stale) log a non-fatal warning and continue. This avoids the "update script aborts at step N+1 because Node isn't installed" failure mode.
 - **New deps to propagate:** `@google/design.md@0.1.1` via `package.json` + `package-lock.json`. Committed to the repo; `npm ci` on update pulls them.
 - **Migration for existing installations:** On first `/update` after this lands, `npm ci` runs fresh — idempotent, no manual step.
 - **Docs update:** `/update` skill's SKILL.md gets a short addendum noting that Node + npm are now soft prerequisites for machines that run the `do-design-system` skill. Machines that only run the bridge/worker are unaffected (the skill is the only path that needs `npx`).
@@ -580,7 +586,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `.claude/hooks/validators/validate_design_system_sync.py` following the pattern of `validate_no_raw_redis_delete.py` (stdin JSON, early-return on non-match, print decision JSON on block, fail-open on exception).
-- Path regex: `r"git (add|commit).*\b(design-system\.(pen|md)|brand\.css|source\.css)\b"`. Extract `.pen` path from the command or via TOML walk.
+- Path regex (path-anchored per Risk 6): `r"git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b"`. The `(?:^|/)` prefix prevents false positives on unrelated files whose names happen to end in `brand.css` or `source.css` (e.g. `my-brand.css`, `source.css.bak`). This regex is the concrete realization of Risk 6's "anchor on explicit filenames" spec — any future change to this pattern MUST be reflected in Risk 6 and vice versa. Extract `.pen` path from the command or via TOML walk.
 - Register in `.claude/settings.json` under `hooks.PreToolUse` → existing `matcher: "Bash"` block, appended as the fourth entry, 10s timeout.
 
 ### 5. Implement read-only artifact validator
@@ -620,12 +626,12 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 ### 8. Update `/update` skill + remote-update script
 - **Task ID**: build-update-system
 - **Depends On**: build-node-toolchain
-- **Validates**: `scripts/remote-update.sh` conditionally runs `npm ci --only=prod`; `/update` SKILL.md has addendum.
+- **Validates**: `scripts/remote-update.sh` conditionally runs `npm ci --only=prod` **only when both `package.json` exists AND `command -v npm` succeeds**, in a non-pipefail subshell whose failure does not abort the parent script; `/update` SKILL.md has addendum. Unit-scriptable verification: run the relevant section of `remote-update.sh` on a temp PATH with `npm` aliased to a nonexistent binary and confirm the script exits 0.
 - **Assigned To**: sync-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `npm ci` step to `scripts/remote-update.sh`, gated on `package.json` existence.
-- Add a short addendum to `.claude/skills/update/SKILL.md` noting Node soft-dep for the design-system path.
+- Add `npm ci` step to `scripts/remote-update.sh`, guarded by **both** `[ -f package.json ]` AND `command -v npm >/dev/null 2>&1`. Wrap the call in a non-pipefail subshell (`( set +o pipefail; npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"`) so that a missing npm or a transient `npm ci` failure never aborts the rest of the update. Machines without Node are silently skipped; machines with Node but a failed install emit a non-fatal warning.
+- Add a short addendum to `.claude/skills/update/SKILL.md` noting Node soft-dep for the design-system path and the exact guard used in `remote-update.sh`.
 
 ### 9. Write feature doc
 - **Task ID**: document-feature
