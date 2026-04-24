@@ -283,11 +283,8 @@ class TestAgentSessionCompletion:
                 {"stop_reason": "end_turn", "session_id": "test-session-primary"},
             )
 
-            # Primary path: get_by_id is called with sidecar's agent_session_id
             mock_get_by_id.assert_called_once_with("agt_worker_primary")
-            # Fallback filter is NOT consulted when get_by_id succeeds
             mock_query.filter.assert_not_called()
-            # finalize_session still fires with the primary session
             mock_finalize.assert_called_once_with(
                 mock_session,
                 "completed",
@@ -301,9 +298,6 @@ class TestAgentSessionCompletion:
         mock_session = MagicMock()
         mock_session.status = "running"
 
-        # Legacy sidecar: agent_session_id field is set but get_by_id won't find it
-        # (simulates a direct-CLI local-* session where the real record has
-        # session_id="local-abc" and was stored before the id alias was consistent)
         mock_sidecar = {"agent_session_id": "legacy-local-id"}
 
         import sys
@@ -333,7 +327,6 @@ class TestAgentSessionCompletion:
             )
 
             mock_get_by_id.assert_called_once_with("legacy-local-id")
-            # Fallback fires with the reconstructed local-{session_id}
             mock_query.filter.assert_called_once_with(session_id="local-test-legacy-session")
             mock_finalize.assert_called_once()
 
@@ -366,12 +359,52 @@ class TestAgentSessionCompletion:
 
             from stop import _complete_agent_session
 
-            # Must not raise
             _complete_agent_session(
                 "test-raising", {"stop_reason": "end_turn", "session_id": "test-raising"}
             )
 
             mock_finalize.assert_called_once()
+
+    def test_stop_hook_skips_finalize_when_waiting_for_children(self):
+        """Issue #1156: Stop hook must NOT collapse a PM in waiting_for_children.
+
+        The hook has no visibility into child liveness. Children will finalize
+        the parent via ``_finalize_parent_sync`` once they terminate. The stop
+        hook skip is silent (no log) consistent with the hook's
+        silent-failure policy.
+        """
+        mock_session = MagicMock()
+        mock_session.status = "waiting_for_children"
+
+        mock_sidecar = {"agent_session_id": "session-wfc-123"}
+
+        import sys
+
+        hook_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
+        if hook_dir not in sys.path:
+            sys.path.insert(0, hook_dir)
+
+        with (
+            patch(
+                "hook_utils.memory_bridge.load_agent_session_sidecar",
+                return_value=mock_sidecar,
+            ),
+            patch(
+                "models.agent_session.AgentSession.get_by_id", return_value=mock_session
+            ),
+            patch("models.agent_session.AgentSession.query") as mock_query,
+            patch("models.session_lifecycle.finalize_session") as mock_finalize,
+        ):
+            mock_query.filter.return_value = [mock_session]
+
+            from stop import _complete_agent_session
+
+            _complete_agent_session(
+                "test-session-wfc",
+                {"stop_reason": "end_turn", "session_id": "test-session-wfc"},
+            )
+
+            mock_finalize.assert_not_called()
 
     def test_no_sidecar_skips_gracefully(self):
         """No error when sidecar has no agent_session_id."""

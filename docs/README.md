@@ -56,6 +56,12 @@ tail -f logs/bridge.log
 | [Quality Standards](guides/quality-standards.md) | Tool quality standards and patterns |
 | [Tools Reference](tools-reference.md) | Complete tool documentation |
 
+### Postmortems
+
+| Document | Description |
+|----------|-------------|
+| [2026-04-24: PM SDLC Bypass](postmortems/2026-04-24-pm-sdlc-bypass.md) | PM agent implemented code directly instead of routing through SDLC |
+
 ## Architecture Summary
 
 ```
