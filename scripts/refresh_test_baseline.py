@@ -36,7 +36,16 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from scripts._baseline_common import (
+# When invoked as ``python scripts/refresh_test_baseline.py`` (rather than
+# ``python -m scripts.refresh_test_baseline``), the repo root is not on
+# sys.path so ``from scripts._baseline_common import ...`` fails. Inject the
+# repo root (parent of the ``scripts`` dir) before the import so both
+# invocation styles work.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts._baseline_common import (  # noqa: E402 -- sys.path must be set first
     CATEGORY_FLAKY,
     CATEGORY_HUNG,
     CATEGORY_IMPORT_ERROR,
