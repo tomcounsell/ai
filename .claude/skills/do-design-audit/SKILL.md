@@ -55,11 +55,19 @@ agent-browser screenshot
 
 Desktop viewport only. Do not resize for mobile in v1.
 
-### Step 3: Evaluate
+### Step 3: Close the Browser
+
+```bash
+agent-browser close
+```
+
+The daemon persists indefinitely if not closed — always run this before moving to evaluation.
+
+### Step 4: Evaluate
 
 Evaluate ALL collected screenshots against the 10 rubric dimensions below. Do not rush — look carefully at each screenshot before scoring.
 
-### Step 4: Produce the Report
+### Step 5: Produce the Report
 
 Output the structured report format defined in the Output Format section. Every row in the evaluation table must have a specific finding, not a generic one.
 

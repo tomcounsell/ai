@@ -51,7 +51,11 @@ agent-browser screenshot generated_images/pr-${PR_NUMBER}/01_main_view.png
 
 ### 5. Cleanup
 
-Stop the dev server if started.
+Close the browser, then stop the dev server if started:
+
+```bash
+agent-browser close
+```
 
 ## Completion
 
