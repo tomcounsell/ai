@@ -38,6 +38,8 @@ The orchestrator will:
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
+**First-install backfill reminder (markitdown):** When the update run is the first to install the `[knowledge]` extra on this machine (detected by `scripts/update/deps.py`'s lockfile-diff check), the Telegram summary appends a one-line tip: `run 'valor-ingest --scan ~/work-vault/' to backfill existing binary files into sidecars.` The reminder is gated by `~/.cache/valor/markitdown-backfill-reminded` and fires only once per machine. If the user asks why existing PDFs/docs in the vault are not yet indexed after update, point them at this command — the watcher only picks up files modified after it starts.
+
 **Log rotation:** The orchestrator installs the user-space log-rotate LaunchAgent on every `--full` run (`com.valor.log-rotate.plist` → `~/Library/LaunchAgents/`). No root/sudo needed; the LaunchAgent runs `scripts/log_rotate.py` every 30 minutes to rotate any `logs/*.log` file over 10 MB. The installer is content-idempotent — if the rendered plist matches the installed file, the bootout/bootstrap cycle is skipped entirely. If a stale `/etc/newsyslog.d/valor.conf` exists from prior releases, the orchestrator attempts `sudo -n rm` (non-interactive) to remove it; if sudo requires a password, the cleanup is skipped with a warning and retried next run.
 
 The orchestrator automatically cleans up sessions as part of Step 5.5:

@@ -19,6 +19,13 @@ class DepSyncResult:
     method: str  # "uv", "pip", or "skipped"
     output: str
     error: str | None = None
+    # True iff `markitdown` was absent from uv.lock before this sync AND
+    # is present after. Used by scripts/update/run.py to append a one-time
+    # valor-ingest --scan backfill reminder to the Telegram summary on the
+    # run that actually installs the [knowledge] extra (per plan C6).
+    # Not set on pip/skipped paths — those are fallback code paths that
+    # don't own the lockfile.
+    backfill_reminder_needed: bool = False
 
 
 @dataclass
@@ -74,8 +81,25 @@ def install_uv() -> bool:
         return False
 
 
+def _lockfile_mentions_markitdown(project_dir: Path) -> bool:
+    """Return True if uv.lock currently lists the markitdown package.
+
+    Narrow string match — avoids a toml parser dep for a one-line check.
+    Returns False when uv.lock is absent (pre-sync on a fresh clone).
+    """
+    lockfile = project_dir / "uv.lock"
+    if not lockfile.exists():
+        return False
+    try:
+        return 'name = "markitdown"' in lockfile.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
 def sync_with_uv(project_dir: Path, reinstall: bool = False) -> DepSyncResult:
     """Sync dependencies using uv."""
+    had_markitdown_before = _lockfile_mentions_markitdown(project_dir)
+
     cmd = ["uv", "sync", "--all-extras"]
     if reinstall:
         cmd.append("--reinstall")
@@ -86,10 +110,13 @@ def sync_with_uv(project_dir: Path, reinstall: bool = False) -> DepSyncResult:
         # Also install in editable mode
         run_cmd(["uv", "pip", "install", "-e", "."], cwd=project_dir)
 
+        has_markitdown_after = _lockfile_mentions_markitdown(project_dir)
+
         return DepSyncResult(
             success=True,
             method="uv",
             output=result.stdout + result.stderr,
+            backfill_reminder_needed=(not had_markitdown_before and has_markitdown_after),
         )
     except subprocess.CalledProcessError as e:
         return DepSyncResult(
