@@ -427,6 +427,10 @@ telegram_session.session
 .mcp.json
 !config/*.example.json
 !config/mcp_library.json
+
+# Design-system Node toolchain (do-design-system skill)
+!package.json
+!package-lock.json
 !tools/**/manifest.json
 
 # Telegram session files

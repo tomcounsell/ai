@@ -1,0 +1,9 @@
+{
+  "name": "ai-design-system-tooling",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Design-system tooling scoped to the do-design-system skill. Pins @google/design.md for invocation via npx.",
+  "devDependencies": {
+    "@google/design.md": "0.1.1"
+  }
+}
