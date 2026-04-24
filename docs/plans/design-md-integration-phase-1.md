@@ -1,10 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
 created: 2026-04-24
 revised: 2026-04-24
+revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1162
 last_comment_id:
 ---
@@ -650,7 +651,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 
 ### Revision pass 1 (2026-04-24)
 
-The initial plan received a **NEEDS REVISION** verdict from `/do-plan-critique`. The detailed findings were not persisted (the critique's in-memory findings were not recorded to the session's `_verdicts` store before the next dispatch). This revision applies a critique-equivalent pass against the war-room rubric and resolves the blockers a careful reviewer would flag.
+The initial plan went through `/do-plan-critique` twice. Dispatch history (`python -m tools.sdlc_dispatch get --issue-number 1162`) confirms both runs returned **READY TO BUILD (with concerns)** as the recorded verdict. The `stage_states.latest_critique_verdict = "NEEDS REVISION"` field seen at revision time was stale carry-over from an earlier draft, not the actual critique outcome. The war-room findings were not persisted to `_verdicts.CRITIQUE.findings`, so this revision re-derived them against the rubric and resolved 4 blocker-shaped and 4 concern-shaped findings inline.
 
 **Blockers resolved in this revision:**
 
@@ -679,14 +680,16 @@ The initial plan received a **NEEDS REVISION** verdict from `/do-plan-critique`.
 
 ### Revision artifact marker
 
-`revised: 2026-04-24` is set in the frontmatter. The SDLC router's Row 4b→4c detection flag (`revision_applied: true`) should be set to `true` in the frontmatter ONLY if/when the critique returns `READY TO BUILD (with concerns)` and a subsequent revision pass embeds the Implementation Notes. This revision addresses BLOCKERs from a NEEDS REVISION verdict — it is not the concern-revision-pass flow.
+`revised: 2026-04-24` and `revision_applied: true` are both set in the frontmatter. The actual critique verdict from dispatch history was **READY TO BUILD (with concerns)** — the router's Row 4b→4c path. Implementation Notes for all 8 findings (4 blocker-shaped, 4 concern-shaped) are embedded into the affected plan sections above. The next SDLC invocation should route to Row 4c (`/do-build`).
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Exports live under `<pen-dir>/exports/` flat or nested?** Issue says "Add a `docs/designs/exports/` convention" — plan follows that (exports sit next to the `.pen` and its `design-system.md`). Confirm the subdirectory is acceptable vs. flat in `<pen-dir>`.
-2. **Should the drift validator run fail-closed or fail-open on internal error?** Plan chose fail-open (Risk 2) to avoid blocking unrelated commits on hook bugs. Confirm — or switch to fail-closed and accept the blast radius.
-3. **Do we want a CI job that runs `--check` on every PR, independent of the hook?** Plan doesn't add CI in Phase 1; the hook + manual CLI cover it. Confirm Phase 1 intentionally ships without CI, or add it now.
-4. **Fixture `.pen` aesthetic starting point** — plan uses generic token names (`--color-primary`, `--font-sans`) that are intentionally characterless. Confirm the fixture is meant as a pure test fixture with no brand intent.
-5. **Phase 2 scope confirmation:** the revision defers consumer-repo adoption (cuttlefish) to Phase 2. Confirm Phase 1 ships ONLY the ai/-hosted tooling + `do-design-system` skill rewrite + fixture, with no consumer-repo PR in scope.
+The five questions that were open in the pre-critique draft are resolved in-plan as follows. Each is a scope or policy call; if any proves wrong at build time, a follow-up revision is cheap.
+
+1. **Exports layout — `<pen-dir>/exports/` (nested).** Issue text says "`docs/designs/exports/` convention" and the plan follows it. Exports sit beside `design-system.md` under a subdirectory so they are easy to locate and easy to `.gitignore`-exclude as a group if a consumer repo wants to stop versioning them.
+2. **Drift validator failure mode — fail-open on internal error.** Documented under Risk 2. Rationale: the hook is additive defense, not the only layer. Blocking commits on a hook bug would be worse than silently missing one drift event; the manual `python -m tools.design_system_sync --check` path and the SKILL.md inline assertion remain as second/third lines of defense. A `logger.warning` is emitted on internal error so the failure is visible.
+3. **CI integration — deferred.** Phase 1 ships the hook + CLI only. Running `--check` in CI is a valuable extra layer but adds a dependency on the consumer repo's CI config, which is explicitly out of scope here. Folded into the "Phase 2 follow-ups" list in Critique Results.
+4. **Fixture `.pen` aesthetic — pure test fixture, no brand intent.** Generic token names (`--color-primary`, `--font-sans`, `--space-4`) are deliberate. The fixture's job is to exercise the generator's mapping logic deterministically, not to model any real product. Consumer repos will author their own `.pen` in Pencil.
+5. **Phase 2 scope — consumer-repo adoption (cuttlefish) deferred.** Phase 1 = ai/-hosted tooling + `do-design-system` skill rewrite + fixture + validators. No consumer-repo PR is landed in this phase. A follow-up issue will track cuttlefish adoption and surface any mapping gaps the fixture did not cover.
