@@ -397,3 +397,83 @@ class TestPipelineStateMachineTransitions:
                 agent_session=dev_session,
                 result="Some result text.",
             )
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Transcript-boundary skip for waiting_for_children (issue #1156)
+# ---------------------------------------------------------------------------
+
+
+class TestTranscriptBoundarySkipWaitingForChildren:
+    """Issue #1156: PM in waiting_for_children must not be prematurely finalized.
+
+    When the PM's transcript ends while a child is still running, the PM stays
+    in ``waiting_for_children``. Only after the last child terminates does
+    ``_finalize_parent_sync`` transition the PM to ``completed`` with reason
+    ``"all children terminal"``.
+    """
+
+    def test_pm_with_live_child_not_prematurely_finalized_by_transcript_end(self, redis_test_db):
+        """End-to-end scenario from the issue evidence.
+
+        1. PM enters ``waiting_for_children`` with a running child.
+        2. PM's transcript ends (worker calls ``complete_transcript``).
+        3. PM MUST remain ``waiting_for_children`` — no bypass.
+        4. Child finalizes → PM transitions via ``_finalize_parent_sync``.
+        5. Parent terminal timestamp is at-or-after the child's.
+        """
+        from bridge.session_transcript import complete_transcript
+        from models.session_lifecycle import finalize_session
+
+        # Step 1: create PM in waiting_for_children with a running child
+        pm = AgentSession.create(
+            session_id="pm-wfc-e2e-001",
+            session_type="pm",
+            project_key="test",
+            status="waiting_for_children",
+            chat_id="999",
+            sender_name="TestUser",
+            message_text="Run BUILD",
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        child = AgentSession.create(
+            session_id="dev-wfc-e2e-001",
+            session_type="dev",
+            project_key="test",
+            status="running",
+            chat_id="999",
+            sender_name="TestUser",
+            message_text="Child task",
+            parent_agent_session_id=pm.agent_session_id,
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        # Step 2: PM's transcript ends with status="completed"
+        complete_transcript(pm.session_id, status="completed")
+
+        # Step 3: PM must still be waiting_for_children (skip branch fired)
+        pm_reloaded = list(AgentSession.query.filter(session_id=pm.session_id))[0]
+        assert pm_reloaded.status == "waiting_for_children", (
+            f"PM was prematurely finalized to {pm_reloaded.status} — issue #1156 bypass"
+        )
+
+        # Step 4: terminate the child; _finalize_parent_sync should transition the PM
+        finalize_session(child, "completed", reason="child work done")
+
+        # Step 5: PM transitioned via the sanctioned channel
+        pm_after = list(AgentSession.query.filter(session_id=pm.session_id))[0]
+        assert pm_after.status == "completed"
+
+        # Both sessions are terminal and carry completion timestamps
+        child_after = list(AgentSession.query.filter(session_id=child.session_id))[0]
+        assert getattr(child_after, "completed_at", None) is not None
+        assert getattr(pm_after, "completed_at", None) is not None

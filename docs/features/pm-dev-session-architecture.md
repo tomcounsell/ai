@@ -269,6 +269,16 @@ The continuation PM is a new `AgentSession(session_type="pm", status="pending")`
 
 **Monitoring**: The `[continuation-pm-created]` structured log tag is searchable by `scripts/reflections.py`. Daily metrics are tracked at `metrics:continuation_pm_created:{date}`.
 
+**3. Transcript-boundary skip (issue #1156)**
+
+`complete_transcript` and the Claude Code Stop hook are both **no-ops** (status-wise) for PMs currently in `waiting_for_children` when the target is `completed`/`failed`. Without this skip, the PM's own transcript ending would force-finalize the PM via `finalize_session`, bypassing the child-liveness gate inside `_finalize_parent_sync` and stranding children.
+
+With the skip in place:
+- The `SESSION_END` transcript marker is still written (preserved for auditability).
+- The PM stays in `waiting_for_children` until one of the sanctioned channels finalizes it: `_finalize_parent_sync` after all children terminate, the completion runner after delivering the final summary, or — for genuinely wedged sessions — `_complete_agent_session`, health check, or watchdog recovery.
+
+See `docs/features/session-lifecycle.md#transcript-boundary-skip-issue-1156` for the full rationale and caller audit.
+
 ### Single-Issue Scoping
 
 PM sessions are scoped to a single issue when the incoming message references a specific issue number. The PM persona includes a hard rule (Rule 3) prohibiting `gh issue list` queries for other issues and dispatching stages for unrelated issues. This prevents cross-contamination between concurrent SDLC pipelines observed in production when one PM session assessed global state and dispatched BUILD for another PM's issue.

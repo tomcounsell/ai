@@ -260,6 +260,13 @@ def complete_transcript(
         session_id: Session identifier.
         status: Final status (completed, failed, dormant).
         summary: Brief summary of session outcome (optional).
+
+    Note:
+        For sessions in ``waiting_for_children``, the terminal mutation
+        (``completed``/``failed``) is skipped — the SESSION_END marker still
+        writes, but the status transition is deferred to
+        ``_finalize_parent_sync`` or the completion runner, whichever fires
+        after the last child terminates (issue #1156).
     """
     from models.agent_session import AgentSession
 
@@ -288,6 +295,19 @@ def complete_transcript(
             if summary:
                 s.summary = summary
                 s.save()  # persist summary before finalize (finalize does its own save)
+            # Issue #1156: If this session is in waiting_for_children, the terminal
+            # transition must come from _finalize_parent_sync (after children finalize)
+            # or the completion runner — NOT from the transcript-end call site. Skip
+            # the finalize_session call; the SESSION_END marker has already been
+            # written above, which is the transcript-visible artifact we preserve.
+            if s.status == "waiting_for_children" and status in ("completed", "failed"):
+                logger.info(
+                    "[session-lifecycle] complete_transcript skipping terminal "
+                    "transition for %s — session is waiting_for_children; children "
+                    "will finalize via _finalize_parent_sync (issue #1156)",
+                    s.session_id,
+                )
+                return
             if status in TERMINAL_STATUSES:
                 finalize_session(s, status, reason=f"transcript completed: {status}")
             else:

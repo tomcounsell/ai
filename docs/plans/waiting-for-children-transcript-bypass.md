@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -253,46 +253,46 @@ These are recovery paths for genuinely stuck sessions. Blocking them would creat
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `bridge/session_transcript.py:298-299` `except Exception:` block — the new skip branch is a plain early return and cannot raise. Add a test asserting the new INFO-level log line appears when a `waiting_for_children` session hits `complete_transcript`.
-- [ ] `.claude/hooks/stop.py:166-167` `except Exception: pass` — the new `if status == "waiting_for_children": return` is a plain early return and cannot raise. Add a unit test that calls the hook's finalization helper with a `waiting_for_children` session and asserts the session remains in `waiting_for_children`.
+- [x] `bridge/session_transcript.py:298-299` `except Exception:` block — the new skip branch is a plain early return and cannot raise. Add a test asserting the new INFO-level log line appears when a `waiting_for_children` session hits `complete_transcript`.
+- [x] `.claude/hooks/stop.py:166-167` `except Exception: pass` — the new `if status == "waiting_for_children": return` is a plain early return and cannot raise. Add a unit test that calls the hook's finalization helper with a `waiting_for_children` session and asserts the session remains in `waiting_for_children`.
 
 ### Empty/Invalid Input Handling
-- [ ] `finalize_session(session=None, ...)` — unchanged; still raises `ValueError` at L261-262. No new validation.
-- [ ] `finalize_session(session, status, reason=None, ...)` — unchanged. No new `reason` validation in this revision.
-- [ ] `complete_transcript(session_id, status="completed", summary=None)` — already handles `summary=None`; unchanged. If a summary is passed for a `waiting_for_children` session, the summary-save at L288-290 still executes; only the `finalize_session` call is skipped. The final summary is later owned by `_finalize_parent_sync` or the completion runner.
+- [x] `finalize_session(session=None, ...)` — unchanged; still raises `ValueError` at L261-262. No new validation.
+- [x] `finalize_session(session, status, reason=None, ...)` — unchanged. No new `reason` validation in this revision.
+- [x] `complete_transcript(session_id, status="completed", summary=None)` — already handles `summary=None`; unchanged. If a summary is passed for a `waiting_for_children` session, the summary-save at L288-290 still executes; only the `finalize_session` call is skipped. The final summary is later owned by `_finalize_parent_sync` or the completion runner.
 
 ### Error State Rendering
-- [ ] The INFO log line `[session-lifecycle] complete_transcript skipping terminal transition for ... — session is waiting_for_children; children will finalize via _finalize_parent_sync (issue #1156)` must appear with the session_id populated. Test this with a log capture fixture.
-- [ ] The Stop hook skip is silent (no log line), consistent with the hook's silent-failure policy. Add an inline comment at the skip branch explaining why no log is emitted. Operational audit trail is preserved by the lifecycle log written when the PM entered `waiting_for_children` earlier.
+- [x] The INFO log line `[session-lifecycle] complete_transcript skipping terminal transition for ... — session is waiting_for_children; children will finalize via _finalize_parent_sync (issue #1156)` must appear with the session_id populated. Test this with a log capture fixture.
+- [x] The Stop hook skip is silent (no log line), consistent with the hook's silent-failure policy. Add an inline comment at the skip branch explaining why no log is emitted. Operational audit trail is preserved by the lifecycle log written when the PM entered `waiting_for_children` earlier.
 
 ## Test Impact
 
 Every test listed here has a deliberate disposition. The dispositions reflect the Option-A-only design (no `finalize_session` guard). The revised design changes `complete_transcript` and the Stop hook; it does NOT change `finalize_session`.
 
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py` — UNAFFECTED: `_finalize_parent_sync` is unchanged. No edits required.
-- [ ] `tests/unit/test_session_lifecycle.py` — UNAFFECTED: `finalize_session` is unchanged. No edits required. (Original draft proposed multiple UPDATEs here tied to the dropped Option B guard — none are needed.)
-- [ ] `tests/unit/test_agent_session_hierarchy.py` — UNAFFECTED: parent-child finalization paths use `_finalize_parent_sync`, which is unchanged. No edits required.
-- [ ] `tests/integration/test_lifecycle_transition.py` — UPDATE: this test asserts the string `"transcript completed"` per issue evidence. If any fixture places the session in `waiting_for_children` before calling `complete_transcript`, update the assertion to expect the new skip log line instead of the lifecycle transition. If the fixture uses `running`, no change needed — read the file during build and apply the correct disposition.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE (conditional): exercises `complete_transcript` in the `agent_session=None` fallback path. If any fixture constructs a `waiting_for_children` session, the new skip branch will suppress the terminal mutation; update the assertion to expect `s.status == "waiting_for_children"` after the call. If no such fixture exists, no change.
-- [ ] `tests/unit/test_error_summary_enforcement.py` — UNAFFECTED: exercises the `"failed"` path with `task.error`. Grep the file during build to confirm no `waiting_for_children` fixture exists; if one does, apply the same skip-assertion update.
-- [ ] `tests/integration/test_pm_final_delivery.py` — UNAFFECTED: tests the completion runner. Runner is unchanged, and its reason string is not validated against an allow-list in the revised design.
-- [ ] `tests/integration/test_session_finalization_decoupled.py`, `tests/integration/test_session_finalize.py`, `tests/integration/test_parent_child_round_trip.py` — REVIEW: confirm no fixture puts a session in `waiting_for_children` before calling `complete_transcript`. If found, apply UPDATE as in `test_lifecycle_transition.py`.
-- [ ] `tests/unit/test_stop_hook.py` — UPDATE: add a new test `test_stop_hook_skips_finalize_when_waiting_for_children` asserting that after the hook fires on a PM in `waiting_for_children`, the session remains in that state. If existing tests set up the hook for sessions in `running`, they pass unchanged.
-- [ ] `tests/unit/test_completion_runner_two_pass.py`, `tests/unit/test_deliver_pipeline_completion.py` — UNAFFECTED: completion runner is unchanged.
+- [x] `tests/unit/test_session_lifecycle_consolidation.py` — UNAFFECTED: `_finalize_parent_sync` is unchanged. No edits required.
+- [x] `tests/unit/test_session_lifecycle.py` — UNAFFECTED: `finalize_session` is unchanged. No edits required. (Original draft proposed multiple UPDATEs here tied to the dropped Option B guard — none are needed.)
+- [x] `tests/unit/test_agent_session_hierarchy.py` — UNAFFECTED: parent-child finalization paths use `_finalize_parent_sync`, which is unchanged. No edits required.
+- [x] `tests/integration/test_lifecycle_transition.py` — UPDATE: this test asserts the string `"transcript completed"` per issue evidence. If any fixture places the session in `waiting_for_children` before calling `complete_transcript`, update the assertion to expect the new skip log line instead of the lifecycle transition. If the fixture uses `running`, no change needed — read the file during build and apply the correct disposition.
+- [x] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE (conditional): exercises `complete_transcript` in the `agent_session=None` fallback path. If any fixture constructs a `waiting_for_children` session, the new skip branch will suppress the terminal mutation; update the assertion to expect `s.status == "waiting_for_children"` after the call. If no such fixture exists, no change.
+- [x] `tests/unit/test_error_summary_enforcement.py` — UNAFFECTED: exercises the `"failed"` path with `task.error`. Grep the file during build to confirm no `waiting_for_children` fixture exists; if one does, apply the same skip-assertion update.
+- [x] `tests/integration/test_pm_final_delivery.py` — UNAFFECTED: tests the completion runner. Runner is unchanged, and its reason string is not validated against an allow-list in the revised design.
+- [x] `tests/integration/test_session_finalization_decoupled.py`, `tests/integration/test_session_finalize.py`, `tests/integration/test_parent_child_round_trip.py` — REVIEW: confirm no fixture puts a session in `waiting_for_children` before calling `complete_transcript`. If found, apply UPDATE as in `test_lifecycle_transition.py`.
+- [x] `tests/unit/test_stop_hook.py` — UPDATE: add a new test `test_stop_hook_skips_finalize_when_waiting_for_children` asserting that after the hook fires on a PM in `waiting_for_children`, the session remains in that state. If existing tests set up the hook for sessions in `running`, they pass unchanged.
+- [x] `tests/unit/test_completion_runner_two_pass.py`, `tests/unit/test_deliver_pipeline_completion.py` — UNAFFECTED: completion runner is unchanged.
 
 **New tests to add:**
 
 The transcript-focused tests need a home. The file `tests/unit/test_session_transcript.py` does NOT currently exist (verified via `ls tests/unit/test_session_transcript.py`). Plan decision: **create it as a new unit test file** rather than squeezing these tests into `test_session_lifecycle.py`, which is already large and thematically focused on `finalize_session` itself. The new file focuses on `bridge/session_transcript.py:complete_transcript` behaviors.
 
-- [ ] **CREATE** `tests/unit/test_session_transcript.py` as a new file with:
-  - [ ] `test_complete_transcript_skips_finalize_when_waiting_for_children` — construct a `waiting_for_children` session, call `complete_transcript(session_id, status="completed")`, assert (a) SESSION_END marker was written to the transcript file, (b) `s.status` remains `waiting_for_children` after the call, (c) the INFO log line appears (use `caplog` fixture with `propagate=True` on the `bridge.session_transcript` logger).
-  - [ ] `test_complete_transcript_skips_finalize_when_waiting_for_children_with_failed_status` — same pattern with `status="failed"`. Both `"completed"` and `"failed"` targets are covered by the skip.
-  - [ ] `test_complete_transcript_finalizes_when_running` — regression: a session in `running` → `completed` still transitions normally via `complete_transcript`.
-  - [ ] `test_complete_transcript_passes_through_dormant_transition` — regression: non-terminal `dormant` transitions are unaffected by the skip (which only applies to `completed`/`failed` targets).
-- [ ] **UPDATE** `tests/unit/test_stop_hook.py`:
-  - [ ] `test_stop_hook_skips_finalize_when_waiting_for_children` — construct a PM in `waiting_for_children`, synthesize a hook input dict, call the stop hook's finalization helper, assert `s.status` remains `waiting_for_children` (the skip branch returned early; no exception raised).
-- [ ] **UPDATE** `tests/integration/test_parent_child_round_trip.py`:
-  - [ ] `test_pm_with_live_child_not_prematurely_finalized_by_transcript_end` — the end-to-end scenario from the issue: PM enters `waiting_for_children` with a child in `running`, PM's transcript ends (simulate worker call to `complete_transcript`), assert PM remains `waiting_for_children`. Then terminate the child; assert PM transitions to `completed` with reason `"all children terminal"`. Verify lifecycle timestamps: parent terminal transition happens AFTER child's.
+- [x] **CREATE** `tests/unit/test_session_transcript.py` as a new file with:
+  - [x] `test_complete_transcript_skips_finalize_when_waiting_for_children` — construct a `waiting_for_children` session, call `complete_transcript(session_id, status="completed")`, assert (a) SESSION_END marker was written to the transcript file, (b) `s.status` remains `waiting_for_children` after the call, (c) the INFO log line appears (use `caplog` fixture with `propagate=True` on the `bridge.session_transcript` logger).
+  - [x] `test_complete_transcript_skips_finalize_when_waiting_for_children_with_failed_status` — same pattern with `status="failed"`. Both `"completed"` and `"failed"` targets are covered by the skip.
+  - [x] `test_complete_transcript_finalizes_when_running` — regression: a session in `running` → `completed` still transitions normally via `complete_transcript`.
+  - [x] `test_complete_transcript_passes_through_dormant_transition` — regression: non-terminal `dormant` transitions are unaffected by the skip (which only applies to `completed`/`failed` targets).
+- [x] **UPDATE** `tests/unit/test_stop_hook.py`:
+  - [x] `test_stop_hook_skips_finalize_when_waiting_for_children` — construct a PM in `waiting_for_children`, synthesize a hook input dict, call the stop hook's finalization helper, assert `s.status` remains `waiting_for_children` (the skip branch returned early; no exception raised).
+- [x] **UPDATE** `tests/integration/test_parent_child_round_trip.py`:
+  - [x] `test_pm_with_live_child_not_prematurely_finalized_by_transcript_end` — the end-to-end scenario from the issue: PM enters `waiting_for_children` with a child in `running`, PM's transcript ends (simulate worker call to `complete_transcript`), assert PM remains `waiting_for_children`. Then terminate the child; assert PM transitions to `completed` with reason `"all children terminal"`. Verify lifecycle timestamps: parent terminal transition happens AFTER child's.
 
 ## Rabbit Holes
 
@@ -374,32 +374,32 @@ No agent integration required — the bug lives entirely in `bridge/`, `agent/`,
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/session-lifecycle.md` "Parent Finalization" section (L101-110) to document the transcript-boundary skip: `complete_transcript` is a no-op status-wise for `waiting_for_children` PMs (the SESSION_END marker still writes; the `finalize_session` call is skipped). Name the two sanctioned finalization channels (`_finalize_parent_sync` with reason `"all children terminal"`, and the completion runner with reason `"pipeline complete: final summary delivered"`) as the intended paths.
-- [ ] Add a subsection "Transcript-Boundary Skip" under "State Transitions" describing why the skip exists, linking to issue #1156.
-- [ ] Add a note in `docs/features/pm-dev-session-architecture.md` describing why `complete_transcript` and the Stop hook are both no-ops for `waiting_for_children` PMs.
-- [ ] Add entry to `docs/features/README.md` index if session-lifecycle is not already listed (it is — no new entry needed).
+- [x] Update `docs/features/session-lifecycle.md` "Parent Finalization" section (L101-110) to document the transcript-boundary skip: `complete_transcript` is a no-op status-wise for `waiting_for_children` PMs (the SESSION_END marker still writes; the `finalize_session` call is skipped). Name the two sanctioned finalization channels (`_finalize_parent_sync` with reason `"all children terminal"`, and the completion runner with reason `"pipeline complete: final summary delivered"`) as the intended paths.
+- [x] Add a subsection "Transcript-Boundary Skip" under "State Transitions" describing why the skip exists, linking to issue #1156.
+- [x] Add a note in `docs/features/pm-dev-session-architecture.md` describing why `complete_transcript` and the Stop hook are both no-ops for `waiting_for_children` PMs.
+- [x] Add entry to `docs/features/README.md` index if session-lifecycle is not already listed (it is — no new entry needed).
 
 ### External Documentation Site
 None — this repo does not use Sphinx, Read the Docs, or MkDocs. All documentation lives in `docs/`.
 
 ### Inline Documentation
-- [ ] Inline comment at the `complete_transcript` skip branch citing issue #1156 and summarizing the invariant in 1-2 lines.
-- [ ] Inline comment at the Stop hook skip branch citing issue #1156.
-- [ ] Updated docstring on `complete_transcript` mentioning the skip for `waiting_for_children`.
+- [x] Inline comment at the `complete_transcript` skip branch citing issue #1156 and summarizing the invariant in 1-2 lines.
+- [x] Inline comment at the Stop hook skip branch citing issue #1156.
+- [x] Updated docstring on `complete_transcript` mentioning the skip for `waiting_for_children`.
 
 ## Success Criteria
 
-- [ ] Reproducing the evidence scenario (PM in `waiting_for_children`, live child, PM transcript ends with `status="completed"`) leaves the PM in `waiting_for_children` until the child finalizes (covered by `test_pm_with_live_child_not_prematurely_finalized_by_transcript_end`).
-- [ ] When the child eventually finalizes, the PM transitions to `completed` with reason `"all children terminal"` via `_finalize_parent_sync` (assertion inside the same test).
-- [ ] The transcript-end bypass is blocked — regression test `test_complete_transcript_skips_finalize_when_waiting_for_children` enforces.
-- [ ] The Stop-hook bypass is blocked — regression test `test_stop_hook_skips_finalize_when_waiting_for_children` enforces.
-- [ ] The sanctioned channels (`_finalize_parent_sync`, completion runner) still work: their tests pass unchanged.
-- [ ] Legitimate recovery paths (`_complete_agent_session` crash path, health-check recovery, watchdog) still finalize `waiting_for_children` PMs to their respective terminal states — no regression.
-- [ ] Lifecycle logs for all new PM sessions with children show the parent's terminal transition at-or-after the last child's terminal transition (property check can run against historical session records post-deploy).
-- [ ] No regression in `_handle_dev_session_completion` steering, `_deliver_pipeline_completion` final delivery, continuation-PM creation, or watchdog recovery.
-- [ ] Kill path from `valor-session kill` still finalizes `waiting_for_children` PMs without issue.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] Reproducing the evidence scenario (PM in `waiting_for_children`, live child, PM transcript ends with `status="completed"`) leaves the PM in `waiting_for_children` until the child finalizes (covered by `test_pm_with_live_child_not_prematurely_finalized_by_transcript_end`).
+- [x] When the child eventually finalizes, the PM transitions to `completed` with reason `"all children terminal"` via `_finalize_parent_sync` (assertion inside the same test).
+- [x] The transcript-end bypass is blocked — regression test `test_complete_transcript_skips_finalize_when_waiting_for_children` enforces.
+- [x] The Stop-hook bypass is blocked — regression test `test_stop_hook_skips_finalize_when_waiting_for_children` enforces.
+- [x] The sanctioned channels (`_finalize_parent_sync`, completion runner) still work: their tests pass unchanged.
+- [x] Legitimate recovery paths (`_complete_agent_session` crash path, health-check recovery, watchdog) still finalize `waiting_for_children` PMs to their respective terminal states — no regression.
+- [x] Lifecycle logs for all new PM sessions with children show the parent's terminal transition at-or-after the last child's terminal transition (property check can run against historical session records post-deploy).
+- [x] No regression in `_handle_dev_session_completion` steering, `_deliver_pipeline_completion` final delivery, continuation-PM creation, or watchdog recovery.
+- [x] Kill path from `valor-session kill` still finalizes `waiting_for_children` PMs without issue.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
