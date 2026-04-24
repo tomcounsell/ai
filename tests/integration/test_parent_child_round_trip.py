@@ -413,9 +413,7 @@ class TestTranscriptBoundarySkipWaitingForChildren:
     ``"all children terminal"``.
     """
 
-    def test_pm_with_live_child_not_prematurely_finalized_by_transcript_end(
-        self, redis_test_db
-    ):
+    def test_pm_with_live_child_not_prematurely_finalized_by_transcript_end(self, redis_test_db):
         """End-to-end scenario from the issue evidence.
 
         1. PM enters ``waiting_for_children`` with a running child.
