@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -411,13 +411,13 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 **Impact:** If `.claude/settings.json` matcher strings don't support `|` alternation, registering the read-only hook with `matcher: "Write|Edit"` silently fails to match either. The hook never fires.
 **Mitigation:** The hook task explicitly validates matcher behavior at registration time (run a dummy Write tool call, confirm the hook fires) before closing the build task. If `Write|Edit` doesn't parse, fall back to two registration blocks — one `matcher: "Write"`, one `matcher: "Edit"`. Either form is fine; the generator task verifies which works.
 
-### Risk 9: `.pen` variable prefix collisions categorize to the wrong DESIGN.md bucket
-**Impact:** `--text-color-primary` (colors) and `--text-size-md` (typography) share the `--text-` prefix. A naive first-match-wins iteration over the prefix list would categorize `--text-size-md` as colors — emitting a `colors.size.md` token in the DESIGN.md output that the linter would reject as `broken-ref` (size isn't a color subtree) or, worse, silently produce a malformed palette. The same hazard applies to any future `.pen` that ships `color.brand` alongside `color.brand.primary`.
-**Mitigation:** **Longest-prefix-wins is a hard rule, not an optimization.** Prefixes are stored as a list sorted by `len()` descending; the generator iterates in that order and breaks on the first match. Documented in the Schema Mapping section of Solution and enforced by a dedicated unit test asserting `--text-size-md` → typography (not colors). Any future prefix added to the mapping MUST preserve the invariant that if prefix A is a strict prefix of prefix B, B appears before A in the sorted list — a lint assertion at module import time verifies this automatically so a future contributor can't accidentally re-introduce first-match ordering.
-
 ### Risk 8: ai/-registered hooks don't fire in consumer-repo Claude Code sessions
 **Impact:** A Claude Code session's hooks come from `$CLAUDE_PROJECT_DIR/.claude/settings.json`, which is the *current project's* settings, not ai/'s. When the `do-design-system` skill runs inside a consumer repo, neither `validate_design_system_sync.py` nor `validate_design_system_readonly.py` fires on that session's commits or Write/Edit calls. A naive reading of the plan presents the hooks as universal enforcement; they aren't.
 **Mitigation:** Documented explicitly in Technical Approach's **"Enforcement reach — ai/ hook vs consumer repos"** subsection. Phase 1 ships three enforcement surfaces with clearly labeled scope: (1) ai/ hook guards the ai/ fixture, (2) CLI `--check` is the cross-repo path, (3) adoption docs in `docs/features/design-system-tooling.md` give consumer repos two copy-paste patterns (git pre-commit hook + settings fragment) to opt into the same protection. Phase 2 (cuttlefish adoption) is when we actually land a consumer-repo registration and discover whether the symlink/env-var approach survives contact with reality. Phase 1 cannot over-promise cross-repo coverage without that validation.
+
+### Risk 9: `.pen` variable prefix collisions categorize to the wrong DESIGN.md bucket
+**Impact:** `--text-color-primary` (colors) and `--text-size-md` (typography) share the `--text-` prefix. A naive first-match-wins iteration over the prefix list would categorize `--text-size-md` as colors — emitting a `colors.size.md` token in the DESIGN.md output that the linter would reject as `broken-ref` (size isn't a color subtree) or, worse, silently produce a malformed palette. The same hazard applies to any future `.pen` that ships `color.brand` alongside `color.brand.primary`.
+**Mitigation:** **Longest-prefix-wins is a hard rule, not an optimization.** Prefixes are stored as a list sorted by `len()` descending; the generator iterates in that order and breaks on the first match. Documented in the Schema Mapping section of Solution and enforced by a dedicated unit test asserting `--text-size-md` → typography (not colors). Any future prefix added to the mapping MUST preserve the invariant that if prefix A is a strict prefix of prefix B, B appears before A in the sorted list — a lint assertion at module import time verifies this automatically so a future contributor can't accidentally re-introduce first-match ordering.
 
 ## Race Conditions
 
@@ -793,9 +793,20 @@ A third `/do-plan-critique` returned **READY TO BUILD (with concerns)** — 0 bl
 
 18. **`DESIGN_SYSTEM_HOOK_DISABLED=1` escape hatch.** Both validators check `os.environ.get("DESIGN_SYSTEM_HOOK_DISABLED") == "1"` as their first line and `sys.exit(0)` if set. One env var disables both hooks simultaneously. Bypasses are logged as `result: "bypassed"` in the JSONL log, preserving auditability. Documented in module docstrings, Update System section, and the feature doc under "Emergency bypass" — with a reminder to re-run `--check` manually after bypassing.
 
+### Revision pass 4 (2026-04-25) — consolidation pass (tracking #1162)
+
+SDLC router's G1 guard fired again on a stale `_meta.latest_critique_verdict == "NEEDS REVISION"` signal (the stage_states `_verdicts` store was not updated to reflect pass 3's `READY TO BUILD (with concerns)` verdict until after this session began; the router saw the older meta value and dispatched `/do-plan`). This consolidation pass walked the full plan start to finish to confirm every critique finding from passes 1–3 remains addressed in the text and no new gaps have crept in. Findings:
+
+- **Risk numbering ordering (NIT, structural).** Risk 8 and Risk 9 were declared out of numeric order in the text (Risk 9 appeared before Risk 8 because Risk 9 was added in pass 3 and appended above the pre-existing Risk 8 from pass 2). Corrected to monotonically ascending order — Risk 8 (hook reach) now precedes Risk 9 (prefix collisions), matching the order they are cited in Technical Approach and Solution.
+- **No content drift.** Every Implementation Note referenced from passes 1–3 is still embedded in the corresponding Solution, Technical Approach, Risks, Update System, Success Criteria, or Step-by-Step-Tasks section. No implementation-note references point to missing text.
+- **AC mapping still holds.** The per-AC interpretation table in Freshness Check still matches the Success Criteria one-for-one. No Phase 1 scope drift introduced.
+- **Open Questions unchanged.** The five open questions from pass 3 remain the items requiring human confirmation before build. No new open questions surfaced in this pass.
+
+**Why no further content revisions:** the plan has absorbed 4 BLOCKER resolutions (passes 1–2) and 6 concern-pass Implementation Notes (pass 3). Additional tightening would be churn, not signal — the `/do-plan-critique` war room's rubric has been satisfied at the BLOCKER level, and the concern-pass flow has already embedded the pass-3 findings. The next `/sdlc` invocation should see `revision_applied: true` in frontmatter + `READY TO BUILD (with concerns)` in `_meta.latest_critique_verdict` and route to Row 4c (`/do-build`), not Row 4b (re-revise) or Row 2 (re-critique).
+
 ### Revision artifact marker
 
-`revised: 2026-04-25` and `revision_applied: true` are set in the frontmatter. The most recent critique verdict is **READY TO BUILD (with concerns)** — the router's Row 4b→4c path. Implementation Notes for all 18 findings across the three revision passes (8 from pass 1 — 4 blocker-shaped, 4 concern-shaped; 4 BLOCKER-severity from pass 2; 6 concerns from pass 3) are embedded into the affected plan sections above. The next SDLC invocation should route to Row 4c (`/do-build`).
+`revised: 2026-04-25` and `revision_applied: true` are set in the frontmatter. The most recent critique verdict is **READY TO BUILD (with concerns)** — the router's Row 4b→4c path. Implementation Notes for all 18 findings across the three revision passes (8 from pass 1 — 4 blocker-shaped, 4 concern-shaped; 4 BLOCKER-severity from pass 2; 6 concerns from pass 3) are embedded into the affected plan sections above, plus a structural tidy from pass 4 (risk numbering). The next SDLC invocation should route to Row 4c (`/do-build`).
 
 ---
 
