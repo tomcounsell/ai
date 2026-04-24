@@ -16,7 +16,12 @@ from tools import valor_session
 
 
 def _make_args(message: str, **overrides) -> argparse.Namespace:
-    """Build a minimal argparse.Namespace to feed cmd_create."""
+    """Build a minimal argparse.Namespace to feed cmd_create.
+
+    Note: no ``working_dir`` attribute — the flag was removed in #1158. The
+    derived working_dir now comes from ``_resolve_project_working_directory``
+    which tests below monkeypatch to a ``tmp_path``-friendly stub.
+    """
     base = {
         "role": "pm",
         "message": message,
@@ -25,7 +30,6 @@ def _make_args(message: str, **overrides) -> argparse.Namespace:
         "model": None,
         "slug": "sdlc-1148",  # Skip the auto-derive branch in cmd_create
         "project_key": "test-1148",
-        "working_dir": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -61,7 +65,7 @@ class TestCreateEnrichmentHeaderGuard:
         assert rc == 2, f"Expected exit code 2, got {rc} for message: {msg!r}"
         assert "enrichment header" in captured.err.lower(), captured.err
 
-    def test_accepts_lowercase_prose_with_scope_keyword(self, capsys, monkeypatch):
+    def test_accepts_lowercase_prose_with_scope_keyword(self, capsys, monkeypatch, tmp_path):
         """Lowercase 'scope: ...' is normal prose and must NOT fire the guard.
 
         We mock the downstream session-creation path so the test does not
@@ -76,6 +80,13 @@ class TestCreateEnrichmentHeaderGuard:
             "resolve_project_key",
             lambda cwd: "test-1148",
         )
+        # #1158: cmd_create now calls _resolve_project_working_directory after
+        # resolving project_key. The helper returns a 2-tuple (Path, dict).
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
+        )
 
         args = _make_args("scope: database refactor\nLet's look at the connection pool config")
         # We don't care if the downstream code raises (no Redis in this test);
@@ -89,7 +100,7 @@ class TestCreateEnrichmentHeaderGuard:
             f"Lowercase 'scope:' prose tripped the guard. Stderr: {captured.err!r}"
         )
 
-    def test_accepts_buried_enrichment_after_first_line(self, capsys, monkeypatch):
+    def test_accepts_buried_enrichment_after_first_line(self, capsys, monkeypatch, tmp_path):
         """Enrichment-header text buried after the first line must NOT fire.
 
         The regex anchors at ^ and only inspects the first 200 chars; this
@@ -102,6 +113,11 @@ class TestCreateEnrichmentHeaderGuard:
             "resolve_project_key",
             lambda cwd: "test-1148",
         )
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
+        )
 
         args = _make_args("Fix the bug where SESSION_ID: prefix sometimes appears in logs")
         try:
@@ -113,13 +129,18 @@ class TestCreateEnrichmentHeaderGuard:
             f"Buried 'SESSION_ID:' tripped the guard. Stderr: {captured.err!r}"
         )
 
-    def test_empty_message_does_not_fire(self, capsys, monkeypatch):
+    def test_empty_message_does_not_fire(self, capsys, monkeypatch, tmp_path):
         """An empty --message bypasses this guard (other validation owns that case)."""
         monkeypatch.setattr(valor_session, "_check_worker_health", lambda: (True, 1))
         monkeypatch.setattr(
             valor_session,
             "resolve_project_key",
             lambda cwd: "test-1148",
+        )
+        monkeypatch.setattr(
+            valor_session,
+            "_resolve_project_working_directory",
+            lambda key: (tmp_path, {"working_directory": str(tmp_path)}),
         )
 
         args = _make_args("")

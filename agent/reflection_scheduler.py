@@ -390,12 +390,21 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
     # time (line ~1031), so no env setup is needed here — _push_agent_session()
     # only creates a Redis entry; the worker handles env injection later.
 
-    # Resolve project key from the repo root
+    # Resolve project key from the repo root.
+    # On this machine project_root=~/src/ai reliably matches the 'valor' key
+    # in projects.json, so the fallback is defensive-only. We catch the new
+    # typed errors specifically (instead of a blanket Exception) so any other
+    # failure surfaces as a crash rather than being silently swallowed.
     try:
-        from tools.valor_session import resolve_project_key
+        from tools.valor_session import (
+            ProjectKeyResolutionError,
+            ProjectsConfigUnavailableError,
+            resolve_project_key,
+        )
 
         project_key = resolve_project_key(str(project_root))
-    except Exception:
+    except (ProjectKeyResolutionError, ProjectsConfigUnavailableError) as e:
+        logger.warning("[reflection] could not resolve project_key via projects.json: %s", e)
         project_key = os.environ.get("PROJECT_KEY", "valor")
 
     ts_suffix = str(int(utc_now().timestamp() * 1000))
