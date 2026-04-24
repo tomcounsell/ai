@@ -1174,3 +1174,178 @@ class TestClassifyOutcomeVerdictUnification:
             "_record_verdict_from_output must import record_verdict lazily inside "
             "the function body to preserve the one-way agent -> tools boundary"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for derive_from_durable_signals (item 1 of sdlc-1155)
+# ---------------------------------------------------------------------------
+
+
+class _DummySession:
+    """Minimal session shim exposing the ``slug`` attribute."""
+
+    def __init__(self, slug="demo-feature"):
+        self.slug = slug
+        self.stage_states = None
+        self.session_id = "durable-test"
+
+    def save(self):  # pragma: no cover - never exercised
+        pass
+
+
+def _install_durable_stub(monkeypatch, responses):
+    """Patch the durable-signal helpers with deterministic stubs."""
+    import agent.pipeline_state as ps
+
+    defaults = {
+        "_durable_git_show": lambda _spec: None,
+        "_durable_gh_pr_for_branch": lambda _branch: None,
+        "_durable_pr_checks_verdict": lambda _pr: "unknown",
+        "_durable_pr_latest_commit_date": lambda _pr: None,
+        "_durable_latest_review_comment": lambda _pr, _date: None,
+        "_durable_pr_diff_has_docs": lambda _pr: False,
+    }
+    for name, value in {**defaults, **responses}.items():
+        monkeypatch.setattr(ps, name, value)
+
+
+def test_derive_from_durable_signals_all_signals_present(monkeypatch):
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: (
+                "---\ntracking: https://github.com/x/y/issues/1\n---\n"
+                "## Critique Results\nsome content\n"
+                "## Documentation\n- [x] feature doc\n"
+            ),
+            "_durable_gh_pr_for_branch": lambda _b: {
+                "number": 42,
+                "headRefName": "session/demo-feature",
+            },
+            "_durable_pr_checks_verdict": lambda _pr: "success",
+            "_durable_pr_latest_commit_date": lambda _pr: "2026-04-24T10:00:00Z",
+            "_durable_latest_review_comment": lambda _pr, _d: "## Review: Approved\nLGTM",
+            "_durable_pr_diff_has_docs": lambda _pr: True,
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["ISSUE"] == "completed"
+    assert states["PLAN"] == "completed"
+    assert states["CRITIQUE"] == "completed"
+    assert states["BUILD"] == "completed"
+    assert states["TEST"] == "completed"
+    assert states["REVIEW"] == "completed"
+    assert states["DOCS"] == "completed"
+
+
+def test_derive_plan_missing_returns_pending(monkeypatch):
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: None,
+            "_durable_gh_pr_for_branch": lambda _b: {"number": 42},
+            "_durable_pr_checks_verdict": lambda _pr: "success",
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["PLAN"] == "pending"
+
+
+def test_derive_pr_missing_leaves_build_pending(monkeypatch):
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: "tracking: https://github.com/x/y/issues/1\n",
+            "_durable_gh_pr_for_branch": lambda _b: None,
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["BUILD"] == "pending"
+    assert states["TEST"] == "pending"
+
+
+def test_derive_ci_failing_marks_test_failed(monkeypatch):
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: "tracking: https://github.com/x/y/issues/1\n",
+            "_durable_gh_pr_for_branch": lambda _b: {"number": 42},
+            "_durable_pr_checks_verdict": lambda _pr: "failure",
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["TEST"] == "failed"
+
+
+def test_derive_review_changes_requested_marks_review_failed(monkeypatch):
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: "tracking: https://github.com/x/y/issues/1\n",
+            "_durable_gh_pr_for_branch": lambda _b: {"number": 42},
+            "_durable_pr_checks_verdict": lambda _pr: "success",
+            "_durable_latest_review_comment": lambda _pr, _d: (
+                "## Review: Changes Requested\n- [ ] fix"
+            ),
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["REVIEW"] == "failed"
+
+
+def test_derive_no_docs_diff_leaves_docs_pending(monkeypatch):
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: (
+                "tracking: https://github.com/x/y/issues/1\n## Documentation\n- [ ] some item\n"
+            ),
+            "_durable_gh_pr_for_branch": lambda _b: {"number": 42},
+            "_durable_pr_diff_has_docs": lambda _pr: False,
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["DOCS"] == "pending"
+
+
+def test_derive_subprocess_exception_returns_empty_never_raises(monkeypatch):
+    import agent.pipeline_state as ps
+
+    def boom(_spec):
+        raise RuntimeError("synthetic subprocess failure")
+
+    monkeypatch.setattr(ps, "_durable_git_show", boom)
+    monkeypatch.setattr(ps, "_durable_gh_pr_for_branch", lambda _b: None)
+
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["PLAN"] == "pending"
+    assert states["BUILD"] == "pending"
+
+
+def test_docs_derived_from_review_comment(monkeypatch):
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: "tracking: https://github.com/x/y/issues/1\n",
+            "_durable_gh_pr_for_branch": lambda _b: {"number": 42},
+            "_durable_pr_diff_has_docs": lambda _pr: False,
+            "_durable_latest_review_comment": lambda _pr, _d: (
+                "## Review: Approved\n\nDocs Updated and verified."
+            ),
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["DOCS"] == "completed"
+
+    # Case-insensitive
+    _install_durable_stub(
+        monkeypatch,
+        {
+            "_durable_git_show": lambda _s: "tracking: https://github.com/x/y/issues/1\n",
+            "_durable_gh_pr_for_branch": lambda _b: {"number": 42},
+            "_durable_pr_diff_has_docs": lambda _pr: False,
+            "_durable_latest_review_comment": lambda _pr, _d: "## Review: Approved\nDOCS COMPLETE",
+        },
+    )
+    states = PipelineStateMachine.derive_from_durable_signals(_DummySession())
+    assert states["DOCS"] == "completed"

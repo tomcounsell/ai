@@ -213,6 +213,174 @@ def format_staleness_warning(baseline: dict, now: datetime | None = None) -> str
     )
 
 
+# ---------------------------------------------------------------------------
+# Decay + flake-tracking helpers (item 4 of sdlc-1155)
+#
+# Consumes the advisory ``baseline_keys_no_longer_failing`` list already
+# emitted by ``compute_gate_verdict`` to age out stale ``real`` entries
+# across multiple clean merges, and emits a quarantine hint when the same
+# test appears in ``new_flaky_occurrences`` across several gate runs.
+# Both trackers live inside ``main_test_baseline.json`` as optional
+# top-level fields (``_decay_tracker`` and ``_flake_tracker``) so existing
+# baselines without the fields keep working (treated as fresh).
+# ---------------------------------------------------------------------------
+
+DEFAULT_DECAY_THRESHOLD = 5
+DEFAULT_FLAKE_THRESHOLD = 3
+
+
+def _coerce_tracker(raw: object) -> dict[str, dict]:
+    """Coerce an arbitrary value to a ``{test_id: {...}}`` dict.
+
+    Malformed input (non-dict, dict with non-dict values) collapses to an
+    empty tracker. Never raises.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, dict] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        if not isinstance(value, dict):
+            continue
+        cleaned[key] = dict(value)
+    return cleaned
+
+
+def apply_decay(
+    baseline: dict,
+    pr_failures: set | list,
+    threshold: int = DEFAULT_DECAY_THRESHOLD,
+) -> dict:
+    """Return a new baseline dict with decay-tracker counters applied.
+
+    Increments ``_decay_tracker[test_id].recent_pass_count`` for every
+    ``real``-category baseline entry NOT present in ``pr_failures``. Entries
+    whose counter reaches ``threshold`` are removed from ``tests`` and from
+    ``_decay_tracker``. Tests that fail on the PR have their counter reset
+    to 0. Orphan tracker entries (IDs that no longer exist in ``tests``)
+    are garbage-collected on every call. The same GC rule applies to
+    ``_flake_tracker`` so both trackers stay in sync with ``tests``.
+
+    The function returns a NEW dict; it does not mutate ``baseline``.
+    """
+    if not isinstance(baseline, dict):
+        return {}
+    failures = set(pr_failures or [])
+    threshold = (
+        int(threshold) if isinstance(threshold, int) and threshold > 0 else DEFAULT_DECAY_THRESHOLD
+    )
+
+    tests_in = baseline.get("tests") or {}
+    if not isinstance(tests_in, dict):
+        tests_in = {}
+
+    tracker = _coerce_tracker(baseline.get("_decay_tracker"))
+    flake_tracker = _coerce_tracker(baseline.get("_flake_tracker"))
+
+    new_tests: dict[str, dict] = {}
+    new_tracker: dict[str, dict] = {}
+    for node_id, record in tests_in.items():
+        if not isinstance(record, dict):
+            new_tests[node_id] = record
+            continue
+        category = record.get("category")
+        if category != CATEGORY_REAL:
+            new_tests[node_id] = record
+            # Preserve trackers for non-real entries only if they're present
+            if node_id in tracker:
+                new_tracker[node_id] = dict(tracker[node_id])
+            continue
+        entry = dict(tracker.get(node_id, {}))
+        if node_id in failures:
+            entry["recent_pass_count"] = 0
+            new_tests[node_id] = record
+            new_tracker[node_id] = entry
+            continue
+        count = int(entry.get("recent_pass_count", 0) or 0) + 1
+        entry["recent_pass_count"] = count
+        if count >= threshold:
+            # Decay out — drop from both tests AND tracker.
+            continue
+        new_tests[node_id] = record
+        new_tracker[node_id] = entry
+
+    # Orphan GC for _flake_tracker: drop entries whose test_id is no longer in tests.
+    new_flake_tracker = {
+        node_id: dict(entry) for node_id, entry in flake_tracker.items() if node_id in new_tests
+    }
+
+    result = dict(baseline)
+    result["tests"] = new_tests
+    if new_tracker:
+        result["_decay_tracker"] = new_tracker
+    else:
+        result.pop("_decay_tracker", None)
+    if new_flake_tracker:
+        result["_flake_tracker"] = new_flake_tracker
+    else:
+        result.pop("_flake_tracker", None)
+    return result
+
+
+def update_flake_tracker(
+    flake_tracker: dict | None,
+    pr_flaky_occurrences: list | set,
+) -> dict:
+    """Return a new ``_flake_tracker`` dict with consecutive-run counters updated.
+
+    Tests present in ``pr_flaky_occurrences`` have their counter incremented;
+    tests absent have their counter reset to 0 (and may be dropped entirely
+    once the count is 0 to keep the tracker compact). Never mutates input.
+    """
+    tracker = _coerce_tracker(flake_tracker)
+    occurrences = set(pr_flaky_occurrences or [])
+    new_tracker: dict[str, dict] = {}
+    for node_id, entry in tracker.items():
+        if node_id in occurrences:
+            count = int(entry.get("consecutive_flake_runs", 0) or 0) + 1
+            new_tracker[node_id] = {**entry, "consecutive_flake_runs": count}
+        else:
+            # Reset counter to 0 — drop the entry entirely to keep it compact.
+            continue
+    for node_id in occurrences:
+        if node_id not in new_tracker:
+            # New occurrence or reset-then-reappear: start at 1
+            existing = tracker.get(node_id, {})
+            new_tracker[node_id] = {**existing, "consecutive_flake_runs": 1}
+    return new_tracker
+
+
+def format_quarantine_hints(
+    flake_tracker: dict | None,
+    pr_flaky_occurrences: list | set,
+    threshold: int = DEFAULT_FLAKE_THRESHOLD,
+) -> list[str]:
+    """Return a list of quarantine-hint stderr strings.
+
+    The tracker is expected to be the POST-update state (the caller should
+    invoke :func:`update_flake_tracker` first). For each entry whose
+    ``consecutive_flake_runs`` has reached ``threshold`` AND which appears
+    in the current PR run (``pr_flaky_occurrences``), emit a deterministic
+    greppable hint line. Malformed tracker entries are silently skipped.
+    """
+    tracker = _coerce_tracker(flake_tracker)
+    occurrences = set(pr_flaky_occurrences or [])
+    threshold = (
+        int(threshold) if isinstance(threshold, int) and threshold > 0 else DEFAULT_FLAKE_THRESHOLD
+    )
+    hints: list[str] = []
+    for node_id in sorted(occurrences):
+        entry = tracker.get(node_id) or {}
+        count = int(entry.get("consecutive_flake_runs", 0) or 0)
+        if count >= threshold:
+            hints.append(
+                f"QUARANTINE_HINT: {node_id} flaked {count}/{threshold} consecutive runs; "
+                f"consider @pytest.mark.flaky or file an issue."
+            )
+    return hints
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare PR junitxml against the merge-gate baseline.",

@@ -18,6 +18,7 @@ python3 -c "
 from bridge.pipeline_graph import DISPLAY_STAGES
 
 # Try programmatic state machine first
+derived = False
 try:
     from bridge.pipeline_state import PipelineStateMachine
     from models.agent_session import AgentSession
@@ -29,6 +30,20 @@ try:
         states = {}
 except Exception:
     states = {}
+    session = None
+
+# Fallback: derive from durable signals when Redis is cold (empty or all-pending).
+# This runs only when the primary path returned nothing useful -- it NEVER
+# overrides a populated state machine. See agent/pipeline_state.py for the
+# signal list and failure semantics.
+if session is not None and (not states or all(v in ('pending', 'ready') for v in states.values())):
+    try:
+        fallback = PipelineStateMachine.derive_from_durable_signals(session)
+        if fallback:
+            states = fallback
+            derived = True
+    except Exception:
+        pass
 
 # Show pipeline progress
 icons = {'completed': '✓', 'in_progress': '~', 'failed': '✗'}
@@ -44,6 +59,8 @@ for stage in DISPLAY_STAGES:
         skipped.append(stage)
 
 print('Pipeline: ' + '  '.join(stages_display))
+if derived:
+    print('INFO: Redis state cold -- derived from durable signals.')
 all_pending = all(s in ('pending', 'ready') for s in states.values())
 if all_pending and not states:
     print()
@@ -116,16 +133,34 @@ print('ALL_GATES_PASS' if all_pass else 'GATES_FAILED')
 
 ### Structured Review Comment Check
 
-Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment:
+Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment.
+Stale reviews are filtered by comparing each comment's `created_at` against the PR's latest
+commit `committer.date` — comments that predate the latest commit are treated as stale (a
+force-push would have superseded them) and are dropped from consideration.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# Read the latest commit's committer date for commit-SHA-aware filtering.
+# On transient API failure we fail the gate with a specific diagnostic rather
+# than silently regressing to unfiltered behavior -- a silent fallback would
+# defeat the exact class of bug this filter prevents (stale Approved after
+# force-push).
+LATEST_COMMIT_DATE=$(gh api repos/$REPO/pulls/$ARGUMENTS/commits --jq '.[-1].commit.committer.date' 2>/dev/null)
+if [ -z "$LATEST_COMMIT_DATE" ]; then
+  echo "REVIEW_COMMENT: FAIL — could not fetch latest commit date for review filter"
+  echo "Diagnose: gh api repos/$REPO/pulls/$ARGUMENTS/commits --jq '.[-1]'"
+  echo "GATES_FAILED"
+  exit 1
+fi
+
 LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
-  --jq '[.[] | select(.body | startswith("## Review:"))] | last | .body // ""' \
+  --jq "[.[] | select(.body | startswith(\"## Review:\")) | select(.created_at >= \"$LATEST_COMMIT_DATE\")] | last | .body // \"\"" \
   2>/dev/null) || { echo "REVIEW_COMMENT: FAIL — gh api call failed (network/auth error)"; echo "GATES_FAILED"; exit 1; }
 
 if [ -z "$LAST_REVIEW" ]; then
-  echo "REVIEW_COMMENT: FAIL — No '## Review:' comment found on PR #$ARGUMENTS"
+  echo "REVIEW_COMMENT: FAIL — No current '## Review:' comment found on PR #$ARGUMENTS"
+  echo "(Comments older than the latest commit at $LATEST_COMMIT_DATE were filtered as stale.)"
   echo "Run /do-pr-review before merging."
   echo "GATES_FAILED"
 elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
@@ -135,7 +170,7 @@ elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
   echo "$BLOCKERS"
   echo "GATES_FAILED"
 else
-  echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved'"
+  echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved' (post-latest-commit)"
 fi
 ```
 
@@ -319,6 +354,11 @@ else
         PREEXISTING=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(json.load(sys.stdin)['preexisting_failures_present'])")
         FLAKY_COUNT=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(len(json.load(sys.stdin)['new_flaky_occurrences']))")
         echo "FULL_SUITE: PASS (pre-existing=$PREEXISTING, flaky re-occurrences=$FLAKY_COUNT -- all non-blocking)"
+        # Baseline decay + quarantine hint emission (item 4 of sdlc-1155).
+        # Invokes the helpers added in scripts/baseline_gate.py so the gate
+        # can age out stale `real` entries and flag repeat flakes without a
+        # separate pass.
+        python3 scripts/_baseline_post_merge_update.py "$BASELINE_FILE" "$GATE_OUTPUT" /tmp/pr_run.xml || true
     else
         echo "FULL_SUITE: FAIL — new regression(s) not in baseline:"
         echo "$GATE_OUTPUT" | python3 -c "import json, sys; [print(' -', n) for n in json.load(sys.stdin)['new_blocking_regressions'][:20]]"

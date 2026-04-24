@@ -349,3 +349,121 @@ def test_parse_pr_failures_returns_only_non_pass(tmp_path: Path) -> None:
     path.write_text(xml)
     failing = parse_pr_failures(path)
     assert failing == {"tests/unit/test_a.py::test_bad"}
+
+
+# ---------------------------------------------------------------------------
+# apply_decay / update_flake_tracker / format_quarantine_hints (item 4 of sdlc-1155)
+# ---------------------------------------------------------------------------
+
+from scripts.baseline_gate import (  # noqa: E402
+    DEFAULT_DECAY_THRESHOLD,
+    DEFAULT_FLAKE_THRESHOLD,
+    apply_decay,
+    format_quarantine_hints,
+    update_flake_tracker,
+)
+
+
+def _baseline_with(tests, decay_tracker=None, flake_tracker=None):
+    return {
+        "schema_version": 2,
+        "tests": tests,
+        **({"_decay_tracker": decay_tracker} if decay_tracker is not None else {}),
+        **({"_flake_tracker": flake_tracker} if flake_tracker is not None else {}),
+    }
+
+
+def test_apply_decay_increments_counter_on_clean_merge():
+    baseline = _baseline_with({"tests/a::t": {"category": "real"}})
+    out = apply_decay(baseline, pr_failures=set(), threshold=5)
+    assert out["_decay_tracker"]["tests/a::t"]["recent_pass_count"] == 1
+
+
+def test_apply_decay_removes_entry_at_threshold():
+    baseline = _baseline_with(
+        {"tests/a::t": {"category": "real"}},
+        decay_tracker={"tests/a::t": {"recent_pass_count": 4}},
+    )
+    out = apply_decay(baseline, pr_failures=set(), threshold=5)
+    assert "tests/a::t" not in out["tests"]
+    assert "_decay_tracker" not in out
+
+
+def test_apply_decay_resets_counter_when_test_fails_again():
+    baseline = _baseline_with(
+        {"tests/a::t": {"category": "real"}},
+        decay_tracker={"tests/a::t": {"recent_pass_count": 3}},
+    )
+    out = apply_decay(baseline, pr_failures={"tests/a::t"}, threshold=5)
+    assert out["_decay_tracker"]["tests/a::t"]["recent_pass_count"] == 0
+
+
+def test_update_flake_tracker_increments_on_repeat_occurrence():
+    tracker = update_flake_tracker(
+        {"tests/b::t": {"consecutive_flake_runs": 2}},
+        pr_flaky_occurrences=["tests/b::t"],
+    )
+    assert tracker["tests/b::t"]["consecutive_flake_runs"] == 3
+
+
+def test_update_flake_tracker_resets_when_absent():
+    tracker = update_flake_tracker(
+        {"tests/b::t": {"consecutive_flake_runs": 3}},
+        pr_flaky_occurrences=[],
+    )
+    # Absent => removed (compact)
+    assert "tests/b::t" not in tracker
+
+
+def test_format_quarantine_hints_emits_at_threshold():
+    hints = format_quarantine_hints(
+        {"tests/b::t": {"consecutive_flake_runs": 3}},
+        pr_flaky_occurrences=["tests/b::t"],
+        threshold=3,
+    )
+    assert len(hints) == 1
+    assert "QUARANTINE_HINT: tests/b::t flaked 3/3" in hints[0]
+
+
+def test_format_quarantine_hints_below_threshold_emits_nothing():
+    hints = format_quarantine_hints(
+        {"tests/b::t": {"consecutive_flake_runs": 2}},
+        pr_flaky_occurrences=["tests/b::t"],
+        threshold=3,
+    )
+    assert hints == []
+
+
+def test_format_quarantine_hints_malformed_tracker_returns_empty():
+    assert format_quarantine_hints(None, ["any"], threshold=3) == []
+    assert format_quarantine_hints({"x": "not-a-dict"}, ["x"], threshold=3) == []
+
+
+def test_missing_decay_tracker_treated_as_fresh():
+    baseline = _baseline_with({"tests/a::t": {"category": "real"}})
+    out = apply_decay(baseline, pr_failures=set(), threshold=DEFAULT_DECAY_THRESHOLD)
+    assert out["_decay_tracker"]["tests/a::t"]["recent_pass_count"] == 1
+
+
+def test_orphan_tracker_entries_collected():
+    """_decay_tracker entries whose test_id is absent from the baseline are
+    dropped on the next apply_decay call (GC rule from the plan)."""
+    baseline = _baseline_with(
+        {"tests/still_here::t": {"category": "real"}},
+        decay_tracker={
+            "tests/still_here::t": {"recent_pass_count": 0},
+            "tests/deleted::t": {"recent_pass_count": 2},
+        },
+        flake_tracker={
+            "tests/deleted::t": {"consecutive_flake_runs": 5},
+        },
+    )
+    out = apply_decay(baseline, pr_failures=set(), threshold=DEFAULT_DECAY_THRESHOLD)
+    assert "tests/deleted::t" not in out.get("_decay_tracker", {})
+    # _flake_tracker must also drop the orphan.
+    assert "tests/deleted::t" not in out.get("_flake_tracker", {})
+
+
+def test_threshold_defaults_are_documented():
+    assert DEFAULT_DECAY_THRESHOLD == 5
+    assert DEFAULT_FLAKE_THRESHOLD == 3
