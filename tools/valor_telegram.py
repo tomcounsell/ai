@@ -54,14 +54,26 @@ def resolve_chat(name: str) -> str | None:
     """Resolve a chat name to a chat_id.
 
     Tries the history database first (groups), then the DM whitelist (users).
+
+    Raises:
+        AmbiguousChatError: when the history resolver finds >1 candidate.
+            Callers (e.g., `cmd_read`, `cmd_send`) MUST catch this and render
+            a disambiguation message. Silent first-match was the original
+            defect (issue #1163).
     """
+    from tools.telegram_history import AmbiguousChatError  # noqa: F401 — re-export
+
     try:
         from tools.telegram_history import resolve_chat_id
 
         chat_id = resolve_chat_id(name)
         if chat_id:
             return chat_id
+    except AmbiguousChatError:
+        # Intentionally propagate — CLI callers must disambiguate.
+        raise
     except Exception:
+        # Other failures (Redis down, etc.) fall through to the DM path.
         pass
 
     try:
@@ -74,6 +86,105 @@ def resolve_chat(name: str) -> str | None:
         pass
 
     return None
+
+
+def _format_relative_age(ts: float | None) -> str:
+    """Format a unix timestamp as a human-readable "X ago" string.
+
+    Returns "never" for None; "<1m ago" for very fresh activity.
+    """
+    if ts is None:
+        return "never"
+    try:
+        delta_s = max(0.0, time.time() - float(ts))
+    except (TypeError, ValueError):
+        return "never"
+    if delta_s < 60:
+        return "<1m ago"
+    if delta_s < 3600:
+        return f"{int(delta_s // 60)}m ago"
+    if delta_s < 86400:
+        return f"{int(delta_s // 3600)}h ago"
+    days = int(delta_s // 86400)
+    return f"{days}d ago"
+
+
+def _format_ambiguity_error(candidates) -> str:
+    """Render an `AmbiguousChatError` payload as a user-facing message."""
+    lines = [f"Ambiguous chat name. {len(candidates)} candidates (most recent first):"]
+    # Column width sized to the longest chat_id / chat_name for readable alignment.
+    max_id = max((len(str(c.chat_id)) for c in candidates), default=8)
+    max_name = max((len(c.chat_name) for c in candidates), default=16)
+    for c in candidates:
+        age = _format_relative_age(c.last_activity_ts)
+        lines.append(
+            f"  {str(c.chat_id):<{max_id}}  {c.chat_name:<{max_name}}  last: {age}"
+        )
+    lines.append("Re-run with --chat-id <id> or a more specific --chat string.")
+    return "\n".join(lines)
+
+
+def _did_you_mean_candidates(query: str, limit: int = 3) -> list:
+    """Return top-N chats (by last activity) whose normalized name contains `query`.
+
+    Used to render a "did you mean" list on zero-match. Uses a lower bar
+    than the resolver: any normalized substring match, sorted by updated_at
+    desc. Returns a list of ChatCandidate-like (chat_id, chat_name,
+    last_activity_ts) dicts. Empty list if lookup fails.
+    """
+    try:
+        from tools.telegram_history import _normalize_chat_name, resolve_chat_candidates
+
+        # If resolve_chat_candidates found nothing, the user query didn't hit
+        # any of the three stages. We run a broader scan across all chats.
+        from models.chat import Chat
+
+        normalized = _normalize_chat_name(query)
+        if not normalized:
+            return []
+        all_chats = list(Chat.query.all())
+        matches = []
+        for chat in all_chats:
+            if not chat.chat_name:
+                continue
+            if normalized in _normalize_chat_name(chat.chat_name):
+                matches.append(
+                    {
+                        "chat_id": str(chat.chat_id),
+                        "chat_name": chat.chat_name,
+                        "last_activity_ts": (
+                            float(chat.updated_at) if chat.updated_at else None
+                        ),
+                    }
+                )
+        # Sort by last_activity_ts desc, None-last.
+        matches.sort(
+            key=lambda c: (0 if c["last_activity_ts"] is not None else 1, -(c["last_activity_ts"] or 0.0), c["chat_name"])
+        )
+        return matches[:limit]
+    except Exception:
+        return []
+
+
+def _lookup_chat_metadata(chat_id: str) -> dict | None:
+    """Look up chat_name and last_activity_ts for a given chat_id.
+
+    Used to render the freshness header on successful reads. Returns None if
+    the chat is unknown (e.g., a raw `--chat-id` with no stored metadata).
+    """
+    try:
+        from models.chat import Chat
+
+        hits = list(Chat.query.filter(chat_id=str(chat_id)))
+        if not hits:
+            return None
+        chat = hits[0]
+        return {
+            "chat_name": chat.chat_name or "",
+            "last_activity_ts": float(chat.updated_at) if chat.updated_at else None,
+        }
+    except Exception:
+        return None
 
 
 def format_timestamp(ts: str | None) -> str:
@@ -181,16 +292,63 @@ def _fetch_from_telegram_api(
 def cmd_read(args: argparse.Namespace) -> int:
     """Read messages from a chat."""
     from tools.telegram_history import (
+        AmbiguousChatError,
         get_recent_messages,
         search_all_chats,
         search_history,
     )
 
+    # --- Flag mutex validation (argparse mutex group already enforces, but
+    # defend here for direct cmd_read() calls from tests). ---
+    flag_count = sum(
+        1
+        for v in (
+            getattr(args, "chat", None),
+            getattr(args, "chat_id", None),
+            getattr(args, "user", None),
+        )
+        if v
+    )
+    if flag_count > 1:
+        print(
+            "Error: --chat, --chat-id, and --user are mutually exclusive.",
+            file=sys.stderr,
+        )
+        return 1
+
     chat_id = None
-    if args.chat:
-        chat_id = resolve_chat(args.chat)
+
+    # Explicit numeric --chat-id bypasses the resolver.
+    if getattr(args, "chat_id", None):
+        chat_id = str(args.chat_id)
+
+    # Explicit --user routes through the DM whitelist.
+    elif getattr(args, "user", None):
+        try:
+            from tools.telegram_users import resolve_username
+
+            user_id = resolve_username(args.user)
+            if not user_id:
+                print(f"Error: Unknown username '{args.user}'", file=sys.stderr)
+                print(
+                    "Use 'valor-telegram chats' to list chats, or check the DM whitelist.",
+                    file=sys.stderr,
+                )
+                return 1
+            chat_id = str(user_id)
+        except Exception as e:
+            print(f"Error resolving --user: {e}", file=sys.stderr)
+            return 1
+
+    # Default path — resolve by name.
+    elif args.chat:
+        try:
+            chat_id = resolve_chat(args.chat)
+        except AmbiguousChatError as e:
+            print(_format_ambiguity_error(e.candidates), file=sys.stderr)
+            return 1
         if not chat_id:
-            # Try raw value (might be a numeric chat ID)
+            # Try raw value (might be a numeric chat ID typed via --chat).
             if args.chat.lstrip("-").isdigit():
                 chat_id = args.chat
 
@@ -222,8 +380,29 @@ def cmd_read(args: argparse.Namespace) -> int:
         messages = result.get("results", [])
     else:
         # Recent messages mode
-        if not chat_id and not args.chat:
-            print("Error: --chat is required when not using --search", file=sys.stderr)
+        if not chat_id and not args.chat and not getattr(args, "user", None):
+            print(
+                "Error: --chat, --chat-id, or --user is required when not using --search",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Zero-match on --chat with no numeric fallback — render "did you mean".
+        if not chat_id and args.chat:
+            suggestions = _did_you_mean_candidates(args.chat, limit=3)
+            if suggestions:
+                print(
+                    f"No chat matched {args.chat!r}. Did you mean:",
+                    file=sys.stderr,
+                )
+                for s in suggestions:
+                    age = _format_relative_age(s["last_activity_ts"])
+                    print(
+                        f"  {s['chat_id']}  {s['chat_name']}  last: {age}",
+                        file=sys.stderr,
+                    )
+            else:
+                print(f"No chat matched {args.chat!r}.", file=sys.stderr)
             return 1
 
         if chat_id:
@@ -274,8 +453,24 @@ def cmd_read(args: argparse.Namespace) -> int:
         print(json.dumps(messages, indent=2, default=str))
         return 0
 
+    # Freshness header — single line with chat name, chat_id, and last-activity
+    # age. Written BEFORE any "No messages found" so the reader always knows
+    # which chat they queried and whether it's active. Skipped in --json mode.
+    if chat_id:
+        meta = _lookup_chat_metadata(chat_id)
+        if meta is not None:
+            age = _format_relative_age(meta["last_activity_ts"])
+            name = meta["chat_name"] or "(unnamed)"
+            print(f"[{name} · chat_id={chat_id} · last activity: {age}]")
+        else:
+            # --chat-id with no stored metadata (e.g., never seen by bridge).
+            print(f"[chat_id={chat_id} · last activity: never]")
+
     if not messages:
-        print("No messages found.")
+        if chat_id:
+            print(f"No messages found for chat {chat_id}.")
+        else:
+            print("No messages found.")
         return 0
 
     for msg in messages:
@@ -327,7 +522,13 @@ def cmd_send(args: argparse.Namespace) -> int:
         TTL: 1 hour
     """
     # Resolve chat name to numeric ID
-    chat_id = resolve_chat(args.chat)
+    from tools.telegram_history import AmbiguousChatError
+
+    try:
+        chat_id = resolve_chat(args.chat)
+    except AmbiguousChatError as e:
+        print(_format_ambiguity_error(e.candidates), file=sys.stderr)
+        return 1
     if not chat_id:
         if args.chat.lstrip("-").isdigit():
             chat_id = args.chat
@@ -407,7 +608,7 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 def cmd_chats(args: argparse.Namespace) -> int:
     """List known chats."""
-    from tools.telegram_history import list_chats
+    from tools.telegram_history import _normalize_chat_name, list_chats
 
     result = list_chats()
 
@@ -415,17 +616,42 @@ def cmd_chats(args: argparse.Namespace) -> int:
         print(f"Error: {result['error']}", file=sys.stderr)
         return 1
 
+    chats = result.get("chats", [])
+
+    # Optional --search filter: normalized substring match, keeps existing sort.
+    search_pattern = getattr(args, "search", None)
+    if search_pattern:
+        normalized_pattern = _normalize_chat_name(search_pattern)
+        if not normalized_pattern:
+            chats = []
+        else:
+            chats = [
+                c
+                for c in chats
+                if c.get("chat_name")
+                and normalized_pattern in _normalize_chat_name(c["chat_name"])
+            ]
+        # Preserve `count` invariant by updating the returned dict.
+        result = {"chats": chats, "count": len(chats), "search": search_pattern}
+
     if args.json:
         print(json.dumps(result, indent=2, default=str))
         return 0
 
-    chats = result.get("chats", [])
     if not chats:
-        print("No chats found in history database.")
-        print("Chats are registered as messages are received by the bridge.")
+        if search_pattern:
+            print(f"No chats matched {search_pattern!r}.")
+        else:
+            print("No chats found in history database.")
+            print("Chats are registered as messages are received by the bridge.")
         return 0
 
-    print(f"Known chats ({len(chats)}):")
+    header = (
+        f"Known chats matching {search_pattern!r} ({len(chats)}):"
+        if search_pattern
+        else f"Known chats ({len(chats)}):"
+    )
+    print(header)
     print()
     print(f"{'Chat Name':<35} {'Messages':>10} {'Last Activity':<20}")
     print("-" * 70)
@@ -451,7 +677,18 @@ def main() -> int:
 
     # read subcommand
     read_parser = subparsers.add_parser("read", help="Read messages from a chat")
-    read_parser.add_argument("--chat", "-c", help="Chat name or ID")
+    # --chat / --chat-id / --user are mutually exclusive — the user picks ONE.
+    # We still allow not specifying any when --search is set (cross-chat search).
+    read_target_group = read_parser.add_mutually_exclusive_group()
+    read_target_group.add_argument("--chat", "-c", help="Chat name (resolved against history)")
+    read_target_group.add_argument(
+        "--chat-id",
+        help="Explicit numeric chat ID — bypasses the name matcher",
+    )
+    read_target_group.add_argument(
+        "--user",
+        help="Username from the DM whitelist — forces the DM path",
+    )
     read_parser.add_argument(
         "--limit", "-n", type=int, default=10, help="Max messages (default: 10)"
     )
@@ -475,6 +712,11 @@ def main() -> int:
 
     # chats subcommand
     chats_parser = subparsers.add_parser("chats", help="List known chats")
+    chats_parser.add_argument(
+        "--search",
+        "-s",
+        help="Filter by substring of chat name (normalized)",
+    )
     chats_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
