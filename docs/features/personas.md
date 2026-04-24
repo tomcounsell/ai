@@ -138,6 +138,8 @@ prompt = load_system_prompt()                 # developer persona + WORKER_RULES
 prompt = load_pm_system_prompt("/path")       # PM persona + work-vault CLAUDE.md
 ```
 
+`load_pm_system_prompt()` is invoked from `agent/session_executor.py` for PM sessions (issue #1148). The result is passed to `get_response_via_harness(system_prompt=...)` and appended to `claude -p`'s default prompt via `--append-system-prompt`. See `docs/features/harness-abstraction.md#pm-persona-injection-append-system-prompt-issue-1148`.
+
 ## Related
 
 - `config/identity.json` -- Structured identity data (name, email, timezone, org)

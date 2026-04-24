@@ -314,6 +314,29 @@ class AgentSession(Model):
     # use to audit how often teardown fires.
     sdk_connection_torn_down_at = DatetimeField(null=True)
 
+    # Last subprocess exit code from `_run_harness_subprocess` (issue #1099).
+    # Persisted best-effort by `get_response_via_harness` after the stale-UUID
+    # fallback completes. Read by `agent/session_health.py` in the recovery
+    # branch to distinguish OS-initiated OOM kills (`exit_returncode == -9`)
+    # from health-check-initiated kills. When Mode 4 OOM-defer conditions are
+    # met, the health check sets `scheduled_at = now + 120s` to throttle
+    # re-queue under memory pressure.
+    #
+    # Default 0 = "no exit code recorded". Matches the convention used by every
+    # other IntField on this model. A healthy clean exit (returncode 0) is not
+    # meaningful to any reader here — the only reader checks for `== -9`, so
+    # conflating "not recorded" with "healthy exit" is safe.
+    #
+    # Why `default=0` and NOT `default=None, null=True`: the latter combination
+    # crashes Popoto serialization when a pre-existing AgentSession row in Redis
+    # (written before this field was added) is loaded and then re-saved. The
+    # descriptor returns the `IntField` class object itself instead of `None`,
+    # which breaks `save()` with "can not serialize 'IntField' object". See the
+    # TEST-stage regression that blocked PR #1153. The regression test
+    # `tests/unit/test_agent_session_exit_returncode_backcompat.py` guards
+    # against this failure mode.
+    exit_returncode = IntField(default=0)
+
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 
@@ -365,10 +388,131 @@ class AgentSession(Model):
         "sdk_connection_torn_down_at",
     }
 
+    # IntField names added after initial model creation. When a pre-existing
+    # AgentSession row in Redis (written before the field existed) is loaded
+    # via ``decode_popoto_model_hashmap``, the hash key is absent and Popoto's
+    # field descriptor can leak the ``IntField`` instance itself through to
+    # the attribute. ``__setattr__`` coerces any non-int, non-None value to
+    # the field's safe default (0) so downstream readers and ``save()`` never
+    # see the descriptor object. Mirrors the ``_DATETIME_FIELDS`` coercion
+    # pattern. See issue #1099 and
+    # ``tests/unit/test_agent_session_exit_returncode_backcompat.py``.
+    _INT_FIELDS_BACKCOMPAT = {
+        "exit_returncode",
+    }
+
     def __init__(self, **kwargs):
         """Initialize AgentSession with backward-compatible field name support."""
         kwargs = self.__class__._normalize_kwargs(kwargs)
         super().__init__(**kwargs)
+
+    def __getattribute__(self, name):
+        """Heal ``_INT_FIELDS_BACKCOMPAT`` descriptor leaks on read access.
+
+        Issue #1099: Popoto's lazy-load path (``_create_lazy_model``) uses
+        ``object.__new__`` and only registers keys present in the Redis hash.
+        When a field was added after a row was written, accessing the field
+        falls through to the class-level ``IntField`` descriptor object
+        itself — readers like ``session_health.py``'s ``exit_returncode ==
+        -9`` check then silently misbehave (descriptor != -9 is always True
+        in the sense of "not equal", so the OOM detector never fires for
+        legacy rows).
+
+        This override intercepts reads of ``_INT_FIELDS_BACKCOMPAT`` names
+        and, if the attribute is the descriptor object itself, substitutes
+        the declared default (0) while also healing ``__dict__`` so future
+        reads hit the cached scalar. Uses ``object.__getattribute__`` to
+        avoid recursion. Must call ``super().__getattribute__`` to preserve
+        Popoto's lazy-load semantics for all other field names.
+        """
+        # Fast path: Popoto's lazy-load and non-field attributes.
+        value = super().__getattribute__(name)
+        # Only heal fields we've explicitly registered as backcompat IntFields.
+        # Guard against recursion and AttributeError during __init__ ordering
+        # by reading the class attribute directly via type.__getattribute__.
+        try:
+            backcompat = type.__getattribute__(type(self), "_INT_FIELDS_BACKCOMPAT")
+        except AttributeError:
+            return value
+        if name not in backcompat:
+            return value
+        # If the value we got back is the class-level IntField descriptor
+        # itself, coerce to the declared default and cache in __dict__ so
+        # future reads are scalar.
+        from popoto.fields.shortcuts import IntField as _IntField  # local import
+
+        if isinstance(value, _IntField):
+            field = value
+            default = field.default
+            if default is None or not isinstance(default, int):
+                default = 0
+            # Direct __dict__ write bypasses __setattr__ to avoid any
+            # further coercion cycles; the value is already a plain int.
+            object.__getattribute__(self, "__dict__")[name] = default
+            return default
+        return value
+
+    def _heal_int_field_descriptor_pollution(self) -> None:
+        """Force-set ``_INT_FIELDS_BACKCOMPAT`` attributes that still hold the
+        Popoto field descriptor object back to their declared default.
+
+        Background (issue #1099 / PR #1153):
+            Popoto's lazy-load path (``_create_lazy_model``) bypasses
+            ``__init__`` entirely — it uses ``object.__new__`` and only stores
+            the keys present in the Redis hash. When a new field is added to
+            the model after rows have already been written, the missing-key
+            fields fall through to the class-level Field descriptor on
+            attribute access. ``__setattr__`` does NOT trigger for missing
+            keys (there is nothing to set), so the existing ``_INT_FIELDS_BACKCOMPAT``
+            coercion in ``__setattr__`` cannot catch this case.
+
+            The descriptor object then poisons every downstream save path:
+
+              * ``encode_popoto_model_obj`` (called by both full and partial
+                ``save()``) iterates every field and calls
+                ``msgpack.packb(IntField_instance)`` → TypeError.
+              * ``is_valid()`` (called by full ``save()``) calls
+                ``int(IntField_instance)`` → TypeError.
+
+            The live repro that triggered this fix: SDLC dispatch tried to
+            ``append_event`` on session ``sdlc-local-1099`` (a row written
+            before ``exit_returncode`` was added). The partial save
+            ``save(update_fields=["session_events", "updated_at"])`` crashed
+            because the encoder still touches ``exit_returncode``.
+
+        This helper iterates ``_INT_FIELDS_BACKCOMPAT``, checks each attribute
+        via the descriptor protocol, and writes the field's declared default
+        directly into ``__dict__`` for any attribute that is still the
+        descriptor object itself. It is called from ``save()`` so every save
+        path (full save, partial save, ``append_event``) is protected.
+
+        Direct ``__dict__`` write avoids re-entering ``__setattr__`` (which
+        already passed-through the original poisoned value).
+        """
+        for field_name in self._INT_FIELDS_BACKCOMPAT:
+            field = self._meta.fields.get(field_name)
+            if field is None:
+                continue
+            try:
+                value = getattr(self, field_name)
+            except Exception:  # swallow-ok: descriptor introspection must not break save
+                continue
+            if value is field:
+                default = field.default
+                if default is None or not isinstance(default, int):
+                    default = 0
+                self.__dict__[field_name] = default
+
+    def save(self, *args, **kwargs):
+        """Save with defensive descriptor-pollution healing.
+
+        See ``_heal_int_field_descriptor_pollution`` for rationale. The heal
+        runs before ``super().save()`` so it precedes both ``pre_save``
+        (which calls ``is_valid()``) and ``encode_popoto_model_obj`` — the
+        two code paths that crash on the polluted descriptor.
+        """
+        self._heal_int_field_descriptor_pollution()
+        return super().save(*args, **kwargs)
 
     def __setattr__(self, name, value):
         """Auto-convert timestamps to datetime for DatetimeField fields.
@@ -402,6 +546,17 @@ class AgentSession(Model):
                     f"(bad type {type(value).__name__})"
                 )
                 value = None
+        elif name in self._INT_FIELDS_BACKCOMPAT:
+            # Issue #1099: guard against Popoto descriptor leaking the
+            # ``IntField`` instance through when a row predates this field
+            # in Redis. Any non-int, non-None value is coerced to 0 (the
+            # field's safe default). bool is a subclass of int in Python,
+            # so this accepts True/False intentionally.
+            if value is not None and not isinstance(value, int):
+                logger.debug(
+                    f"AgentSession: coerced {name}={value!r} → 0 (bad type {type(value).__name__})"
+                )
+                value = 0
         super().__setattr__(name, value)
 
     @classmethod
