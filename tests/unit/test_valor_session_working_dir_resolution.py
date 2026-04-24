@@ -427,3 +427,233 @@ class TestAntiRegressionGreps:
             text=True,
         )
         assert result.returncode == 1, f'Found default="valor" pattern in {path}:\n{result.stdout}'
+
+
+# ---------------------------------------------------------------------------
+# Stdout cleanliness on error: --json callers must see an empty stdout when
+# cmd_create fails, so a consumer parsing stdout as JSON does not get polluted
+# error text.
+# ---------------------------------------------------------------------------
+
+
+class TestErrorPathWritesToStderrOnly:
+    """Plan's Failure Path Test Strategy (#1158):
+    > All new error paths write to stderr, preserving stdout for --json.
+
+    cmd_create's error branch (``print(f"Error: {e}", file=sys.stderr)``) must
+    never leak to stdout. This test drives the three new error paths and
+    asserts stdout is exactly empty on each.
+    """
+
+    def test_unmatched_cwd_writes_only_to_stderr(self, tmp_path, monkeypatch, capsys):
+        """Unmatched cwd with no --project-key: stderr populated, stdout empty."""
+        proj_root = tmp_path / "proj"
+        proj_root.mkdir()
+        unrelated_cwd = tmp_path / "unrelated"
+        unrelated_cwd.mkdir()
+        monkeypatch.chdir(unrelated_cwd)
+
+        projects_json = {"proj": {"working_directory": str(proj_root)}}
+
+        with (
+            patch(
+                "bridge.routing.load_config",
+                return_value={"projects": projects_json, "defaults": {}},
+            ),
+            patch("agent.agent_session_queue._push_agent_session"),
+            patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
+        ):
+            rc = cmd_create(_make_args(role="dev", project_key=None, message="hi"))
+
+        assert rc != 0
+        cap = capsys.readouterr()
+        # stdout MUST be empty — it is reserved for --json output on success.
+        assert cap.out == "", f"Expected empty stdout, got: {cap.out!r}"
+        # stderr carries the user-facing error.
+        assert cap.err != ""
+
+    def test_unknown_project_key_writes_only_to_stderr(self, tmp_path, capsys):
+        """--project-key naming a missing key: stderr populated, stdout empty."""
+        proj_root = tmp_path / "proj"
+        proj_root.mkdir()
+        projects_json = {"proj": {"working_directory": str(proj_root)}}
+
+        with (
+            patch(
+                "bridge.routing.load_config",
+                return_value={"projects": projects_json, "defaults": {}},
+            ),
+            patch("agent.agent_session_queue._push_agent_session"),
+            patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
+        ):
+            rc = cmd_create(_make_args(role="dev", project_key="nonexistent", message="hi"))
+
+        assert rc != 0
+        cap = capsys.readouterr()
+        assert cap.out == "", f"Expected empty stdout, got: {cap.out!r}"
+        assert cap.err != ""
+
+    def test_load_config_failure_writes_only_to_stderr(self, capsys):
+        """When load_config itself raises: stderr populated, stdout empty."""
+        with (
+            patch(
+                "bridge.routing.load_config",
+                side_effect=OSError("projects.json permission denied"),
+            ),
+            patch("agent.agent_session_queue._push_agent_session"),
+            patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
+        ):
+            rc = cmd_create(_make_args(role="dev", project_key="anything", message="hi"))
+
+        assert rc != 0
+        cap = capsys.readouterr()
+        assert cap.out == "", f"Expected empty stdout, got: {cap.out!r}"
+        assert cap.err != ""
+
+
+# ---------------------------------------------------------------------------
+# Three-level PM chain: PM → PM → Dev in project X — all levels carry
+# consistent project_key AND working_dir rooted inside X.
+# ---------------------------------------------------------------------------
+
+
+class TestThreeLevelPMChain:
+    """Plan's Success Criteria (#1158):
+    > Regression test: three-level PM chain in project X → all levels carry
+    > consistent project_key and working_dir rooted inside X.
+
+    Drives three cmd_create invocations:
+      - level 1 (root PM) — explicit --project-key demo
+      - level 2 (PM spawned by PM) — --parent <level1_uuid>, inherits project_key
+      - level 3 (Dev spawned by level 2) — --parent <level2_uuid>, inherits project_key
+
+    Each level's working_dir must be rooted under ``/.../demo/``.
+    """
+
+    def test_pm_pm_dev_chain_all_rooted_in_project(self, tmp_path, monkeypatch):
+        demo_root = tmp_path / "demo"
+        demo_root.mkdir()
+        unrelated_cwd = tmp_path / "unrelated"
+        unrelated_cwd.mkdir()
+        monkeypatch.chdir(unrelated_cwd)  # cwd deliberately doesn't match demo
+
+        projects_json = {"demo": {"working_directory": str(demo_root)}}
+
+        # Per-level captured kwargs passed to _push_agent_session.
+        captured_per_level: list[dict] = []
+
+        async def fake_push(**kwargs):
+            captured_per_level.append(dict(kwargs))
+
+        # Worktree paths — each slug gets its own directory under demo_root.
+        wt_level1 = demo_root / ".worktrees" / "sdlc-100"
+        wt_level1.mkdir(parents=True)
+        wt_level2 = demo_root / ".worktrees" / "sdlc-101"
+        wt_level2.mkdir(parents=True)
+
+        def fake_worktree(root, slug):
+            if slug == "sdlc-100":
+                return wt_level1
+            if slug == "sdlc-101":
+                return wt_level2
+            raise AssertionError(f"Unexpected slug: {slug}")
+
+        # Level-1 PM creation — explicit project_key, cwd unrelated.
+        with (
+            patch(
+                "bridge.routing.load_config",
+                return_value={"projects": projects_json, "defaults": {}},
+            ),
+            patch(
+                "agent.worktree_manager.get_or_create_worktree",
+                side_effect=fake_worktree,
+            ),
+            patch("agent.worktree_manager._validate_slug"),
+            patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
+            patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
+        ):
+            rc1 = cmd_create(
+                _make_args(
+                    role="pm",
+                    project_key="demo",
+                    message="Run SDLC on issue #100",
+                )
+            )
+        assert rc1 == 0
+        level1 = captured_per_level[-1]
+        level1_uuid = "level1-uuid-abc"
+
+        # Level-2 PM creation — inherits via --parent; parent returns project_key="demo".
+        fake_parent_level1 = MagicMock()
+        fake_parent_level1.project_key = "demo"
+        fake_parent_level1.agent_session_id = level1_uuid
+
+        with (
+            patch(
+                "bridge.routing.load_config",
+                return_value={"projects": projects_json, "defaults": {}},
+            ),
+            patch("tools.valor_session._find_session", return_value=fake_parent_level1),
+            patch(
+                "agent.worktree_manager.get_or_create_worktree",
+                side_effect=fake_worktree,
+            ),
+            patch("agent.worktree_manager._validate_slug"),
+            patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
+            patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
+        ):
+            rc2 = cmd_create(
+                _make_args(
+                    role="pm",
+                    parent=level1_uuid,
+                    project_key=None,
+                    message="Run SDLC on issue #101",
+                )
+            )
+        assert rc2 == 0
+        level2 = captured_per_level[-1]
+        level2_uuid = "level2-uuid-def"
+
+        # Level-3 Dev creation — inherits via --parent, no slug (Dev default).
+        fake_parent_level2 = MagicMock()
+        fake_parent_level2.project_key = "demo"
+        fake_parent_level2.agent_session_id = level2_uuid
+
+        with (
+            patch(
+                "bridge.routing.load_config",
+                return_value={"projects": projects_json, "defaults": {}},
+            ),
+            patch("tools.valor_session._find_session", return_value=fake_parent_level2),
+            patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
+            patch("tools.valor_session._check_worker_health", return_value=(True, 1)),
+        ):
+            rc3 = cmd_create(
+                _make_args(
+                    role="dev",
+                    parent=level2_uuid,
+                    project_key=None,
+                    message="implement feature",
+                )
+            )
+        assert rc3 == 0
+        level3 = captured_per_level[-1]
+
+        # All three levels carry the SAME project_key.
+        assert level1["project_key"] == "demo"
+        assert level2["project_key"] == "demo"
+        assert level3["project_key"] == "demo"
+
+        # All three working_dirs are rooted inside demo_root.
+        demo_str = str(demo_root)
+        assert level1["working_dir"].startswith(demo_str)
+        assert level2["working_dir"].startswith(demo_str)
+        assert level3["working_dir"].startswith(demo_str)
+
+        # Level-3 has no slug so working_dir IS the demo_root (no worktree).
+        assert level3["working_dir"] == demo_str
+
+        # project_config also travels consistently with the project dict.
+        assert level1["project_config"] == projects_json["demo"]
+        assert level2["project_config"] == projects_json["demo"]
+        assert level3["project_config"] == projects_json["demo"]

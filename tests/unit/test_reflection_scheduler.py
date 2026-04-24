@@ -713,3 +713,89 @@ class TestTimeoutEnforcement:
                     # Check that warning was logged about high memory delta
                     warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
                     assert any("HIGH MEMORY DELTA" in str(c) for c in warning_calls)
+
+
+# === Typed-error fallback tests (#1158) ===
+
+
+class TestEnqueueAgentReflectionTypedErrors:
+    """Covers plan #1158 Failure Path: when resolve_project_key raises a typed
+    error, _enqueue_agent_reflection must fall back to PROJECT_KEY env var and
+    log a warning — not crash, not silently coerce.
+    """
+
+    @pytest.mark.asyncio
+    async def test_project_key_resolution_error_falls_back_to_env(self, monkeypatch):
+        """ProjectKeyResolutionError → logs warning, uses PROJECT_KEY env var."""
+        from agent.reflection_scheduler import _enqueue_agent_reflection
+        from tools.valor_session import ProjectKeyResolutionError
+
+        entry = ReflectionEntry(
+            name="agent-typed-err-test",
+            description="Test reflection typed-error fallback",
+            interval=3600,
+            priority="low",
+            execution_type="agent",
+            command="Test agent reflection",
+        )
+
+        monkeypatch.setenv("PROJECT_KEY", "override-from-env")
+        captured: dict = {}
+
+        async def fake_push(**kwargs):
+            captured.update(kwargs)
+
+        with (
+            patch(
+                "tools.valor_session.resolve_project_key",
+                side_effect=ProjectKeyResolutionError(
+                    cwd="/tmp/unknown", available_keys=["valor", "ai"]
+                ),
+            ),
+            patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
+            patch("agent.reflection_scheduler.logger") as mock_logger,
+        ):
+            await _enqueue_agent_reflection(entry)
+
+        # Warning fired with the error message.
+        warnings_logged = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("could not resolve project_key" in w for w in warnings_logged)
+        # Enqueue used the env var fallback.
+        assert captured["project_key"] == "override-from-env"
+
+    @pytest.mark.asyncio
+    async def test_projects_config_unavailable_error_falls_back_to_env(self, monkeypatch):
+        """ProjectsConfigUnavailableError → logs warning, uses PROJECT_KEY env var."""
+        from agent.reflection_scheduler import _enqueue_agent_reflection
+        from tools.valor_session import ProjectsConfigUnavailableError
+
+        entry = ReflectionEntry(
+            name="agent-config-err-test",
+            description="Test reflection typed-error fallback (config unavailable)",
+            interval=3600,
+            priority="low",
+            execution_type="agent",
+            command="Test agent reflection",
+        )
+
+        monkeypatch.setenv("PROJECT_KEY", "env-fallback-key")
+        captured: dict = {}
+
+        async def fake_push(**kwargs):
+            captured.update(kwargs)
+
+        with (
+            patch(
+                "tools.valor_session.resolve_project_key",
+                side_effect=ProjectsConfigUnavailableError(
+                    "could not load projects.json: permission denied"
+                ),
+            ),
+            patch("agent.agent_session_queue._push_agent_session", side_effect=fake_push),
+            patch("agent.reflection_scheduler.logger") as mock_logger,
+        ):
+            await _enqueue_agent_reflection(entry)
+
+        warnings_logged = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("could not resolve project_key" in w for w in warnings_logged)
+        assert captured["project_key"] == "env-fallback-key"
