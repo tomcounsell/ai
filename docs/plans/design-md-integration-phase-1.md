@@ -4,6 +4,7 @@ type: feature
 appetite: Medium
 owner: Valor
 created: 2026-04-24
+revised: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1162
 last_comment_id:
 ---
@@ -12,34 +13,46 @@ last_comment_id:
 
 ## Problem
 
-The `do-design-system` skill currently drives design-system changes through a hand-written pipeline: the agent reads `docs/designs/design-system.pen`, manually mirrors tokens into `brand.css` and Tailwind's `source.css`, and hand-composes a variables/components changelog table in `docs/designs/gap-audit.md` each moodboard pass. Four gaps result:
+The `do-design-system` skill (defined in this ai/ repo, run against *consumer* repos like `yudame/cuttlefish`) currently drives design-system changes through a hand-written pipeline: the agent reads the consumer repo's `docs/designs/design-system.pen`, manually mirrors tokens into the consumer's `<css-root>/brand.css` and Tailwind `<css-root>/source.css`, and hand-composes a variables/components changelog table in `docs/designs/gap-audit.md` each moodboard pass. Four gaps result:
 
 - **No validation.** Broken token references, WCAG contrast misses, orphaned tokens, and missing primaries are caught by eyeball or not at all. `SKILL.md:417-418` explicitly warns that token names "MUST match `brand.css` exactly, or the system diverges silently" — there is no tool enforcing that mirror.
 - **CSS sync is hand-written.** Step 6 of the skill instructs the agent to retype tokens from `.pen` into two separate CSS files. Typos and missed edits are invisible until a template breaks.
 - **Gap-audit tables are hand-written.** Step 7 asks the agent to hand-compose a dated changelog of variable/component changes. Drift between passes is invisible until a human notices.
 - **No ecosystem export.** `.pen` tokens cannot be consumed by Figma, Style Dictionary, or Tailwind tooling without bespoke conversion.
 
-**Current behavior:** Agent edits `.pen` → agent manually retypes into `brand.css` → agent manually retypes into `source.css` → agent manually drafts changelog table. No linter runs. No drift check fires at commit time.
+**Current behavior:** Agent edits consumer-repo `.pen` → agent manually retypes into `brand.css` → agent manually retypes into `source.css` → agent manually drafts changelog table. No linter runs. No drift check fires at commit time.
 
-**Desired outcome:** `.pen` stays the only human-editable file. A deterministic generator emits `design-system.md` (DESIGN.md-compliant), `brand.css`, `source.css`, and DTCG / Tailwind exports from it. `@google/design.md lint` runs against the emitted DESIGN.md; `@google/design.md diff` drives the gap-audit changelog. A pre-commit validator fails commits that leave the derived artifacts out of sync with `.pen`.
+**Desired outcome:** `.pen` stays the only human-editable file. A deterministic generator (hosted in this ai/ repo under `tools/`, taking `--pen` and `--css-root` path args so it works against any consumer repo) emits `design-system.md` (DESIGN.md-compliant), `brand.css`, `source.css`, and DTCG / Tailwind exports from it. `@google/design.md lint` runs against the emitted DESIGN.md; `@google/design.md diff` drives the gap-audit changelog. A validator hook fails commits (in the consumer repo or in ai/ itself if anyone mutates the fixture) that leave the derived artifacts out of sync with `.pen`.
 
 ## Freshness Check
 
-**Baseline commit:** `75f613b8` (`git rev-parse HEAD` at plan time)
+**Baseline commit:** `12438918` (`git rev-parse main` at revision time, 2026-04-24)
 **Issue filed at:** 2026-04-24T08:43:45Z (same day as plan)
-**Disposition:** Unchanged
+**Disposition:** Minor drift (revision pass corrects three drifts flagged by critique)
 
 **File:line references re-verified:**
-- `.claude/skills/do-design-system/SKILL.md` (Steps 6 & 7, safety gate at L314-322) — still holds. File mtime 2026-04-23, unchanged since issue filed.
-- `docs/designs/` — confirmed empty except for `SKILL.md` and `charter-template.md`. No `.pen` file, no CSS artifacts, no `gap-audit.md`. Seed creation is a genuine prerequisite, not a legacy-file cleanup.
+- `.claude/skills/do-design-system/SKILL.md` — **Safety gate header is at L313** (`### Safety gate (required before any write)`), with the Python assertion body at L315-322. The initial plan misstated this as L314-322. Fixed throughout this revision.
+- **`docs/designs/` does NOT exist in this ai/ repo.** The only `docs/designs/`-like content in the skill is `.claude/skills/do-design-system/charter-template.md`. The skill is authored in ai/ but is designed to run against **consumer repos** (cuttlefish and equivalents) that have their own `docs/designs/` + `<css-root>/`. See Key Clarification below.
+- `.claude/hooks/validators/validate_no_raw_redis_delete.py:108-125` — verified the existing validator pattern: hooks read JSON from **stdin**, not `$CLAUDE_HOOK_INPUT`. The initial plan misstated this; corrected in Technical Approach.
+- `.claude/settings.json:26-56` — verified PreToolUse registration shape: `matcher: "Bash"` block currently lists `validate_commit_message`, `validate_merge_guard`, `validate_no_raw_redis_delete`; adding two new entries here is additive.
 
 **Cited sibling issues/PRs re-checked:** None cited in issue body.
 
 **Commits on main since issue was filed (touching referenced files):** None. Issue and plan share the same day.
 
-**Active plans in `docs/plans/` overlapping this area:** None. No other plan touches `docs/designs/` or `do-design-system`.
+**Active plans in `docs/plans/` overlapping this area:** None. No other plan touches `docs/designs/`, `do-design-system`, or design-system tooling.
 
-**Notes:** No drift. Plan proceeds on the issue's premises as written.
+### Key clarification — repo that hosts the tooling vs. repos that consume it
+
+The initial plan assumed `docs/designs/design-system.pen`, `brand.css`, and `source.css` live in this ai/ repo. **They don't, and they shouldn't.** The `do-design-system` skill is designed to operate in consumer repos (e.g., `yudame/cuttlefish`) that ship user-facing CSS. The ai/ repo hosts the skill definition and this Phase 1 tooling, but is NOT itself a design-system consumer.
+
+Consequences (applied throughout the revision):
+- **Tooling code lives in ai/** (`tools/design_system_sync.py`, validators, `package.json`). Committed to ai/.
+- **Tooling is exercised against a fixture `.pen`** under `tests/fixtures/design_system/design-system.pen` — never a "seed" at `docs/designs/design-system.pen` in ai/, because that path should not exist in ai/.
+- **Consumer repos adopt the tooling** by installing `@google/design.md@0.1.1` (matching `package.json`) and invoking `python -m tools.design_system_sync --generate --pen <path> --css-root <path>` from within their repo. The generator takes explicit path args — no hardcoded `docs/designs/` assumptions.
+- **Cuttlefish adoption is out of Phase 1 scope.** Phase 1 ships the tooling + skill rewrite + validators. A follow-up Phase 2 ticket will land the first real consumer adoption (cuttlefish) and surface any mapping gaps.
+
+This is the critique-flagged blocker resolved.
 
 ## Prior Art
 
@@ -86,56 +99,71 @@ Sources:
 - **Impact on plan:** Solution adds a minimal `package.json` at repo root containing only `@google/design.md@0.1.1` in `devDependencies`, plus a `package-lock.json` for reproducibility. `.gitignore` entry for `node_modules/` added if missing. No `npm run` scripts — the generator invokes `npx` directly.
 
 ### spike-3: Is there a .pen file today to design the generator against?
-- **Assumption:** "We can sample an existing `.pen` to design the mapping."
-- **Method:** `ls docs/designs/`.
-- **Finding:** Only `SKILL.md` and `charter-template.md`. No `.pen` file, no `brand.css`, no `source.css`, no `gap-audit.md`. Phase 1 must create a seed `.pen` as a genuine prerequisite — the generator spec is derived from the skill's documented conventions (tier-aware naming, `Category/Variant` components, `$--name` variable refs, `reusable: true` component frames) rather than an existing file sample.
+- **Assumption:** "This ai/ repo has an existing `.pen` we can sample."
+- **Method:** `ls docs/designs/` (path does not exist); `ls .claude/skills/do-design-system/` (skill body only).
+- **Finding (revised):** `docs/designs/` does not exist in the ai/ repo, and **shouldn't** — the skill operates against consumer repos (e.g. cuttlefish). Phase 1 ships the tooling hosted in ai/ + a **test fixture** `.pen` under `tests/fixtures/design_system/design-system.pen`. The generator spec is derived from the skill's documented conventions (tier-aware naming, `Category/Variant` components, `$--name` variable refs, `reusable: true` component frames) and from the reference-implementation commit `a702484` on `yudame/cuttlefish`.
 - **Confidence:** High.
-- **Impact on plan:** First build task is **seed `design-system.pen`** (minimal — 3 colors, 2 typography presets, 1 radius, spacing scale, 1 component). Mapping spec and generator are built against the seed. Design invariants come from `SKILL.md`, not from reverse-engineering a sample.
+- **Impact on plan:** First build task is **fixture `tests/fixtures/design_system/design-system.pen`** (minimal — 3 colors, 2 typography presets, 1 radius, spacing scale, 1 component). Mapping spec and generator are built against the fixture. Design invariants come from `SKILL.md`, not from reverse-engineering a sample. **No `docs/designs/` is created in the ai/ repo.**
 
 ### spike-4: Pre-commit hook vs. PostToolUse validator — which fits this repo's pattern?
 - **Assumption:** "Other validators in this repo are registered as PostToolUse hooks."
-- **Method:** Read `.claude/settings.json` hook registrations and `ls .claude/hooks/validators/`.
-- **Finding:** The repo's native drift-detection pattern is a Python validator under `.claude/hooks/validators/` wired into `PostToolUse` or `PreToolUse` blocks in `.claude/settings.json` (e.g. `validate_no_raw_redis_delete.py`, `validate_file_contains.py`, `validate_features_readme_sort.py`). Git `pre-commit` hooks are not used for validator enforcement — the Claude Code hook surface is the enforcement layer for agent-driven edits.
+- **Method:** Read `.claude/settings.json` hook registrations and `ls .claude/hooks/validators/`; read `validate_no_raw_redis_delete.py:108-125` as a reference implementation.
+- **Finding:** The repo's native drift-detection pattern is a Python validator under `.claude/hooks/validators/` wired into `PostToolUse` or `PreToolUse` blocks in `.claude/settings.json`. Hooks **read JSON from stdin** via `sys.stdin.read()` + `json.loads()` (not from `$CLAUDE_HOOK_INPUT`) and return `{"decision": "block", "reason": ...}` on stdout.
 - **Confidence:** High.
-- **Impact on plan:** Drift-detection mechanism is implemented as `python` validator at `.claude/hooks/validators/validate_design_system_sync.py`, registered as a **PreToolUse** hook on `Bash` (catching `git commit` / `git add` commands touching `docs/designs/`) **and** as a standalone CLI entrypoint runnable via `python -m tools.design_system_sync --check`. This gives us both agent-path enforcement and a CLI path for human/CI verification. A git `pre-commit` hook (optional, documented in the feature doc) can invoke the CLI for non-agent edits.
+- **Impact on plan:** Drift-detection mechanism is implemented as `python` validator at `.claude/hooks/validators/validate_design_system_sync.py`, registered as a **PreToolUse** hook on `Bash` (catching `git commit` / `git add` commands whose **combined command path arguments** match `.pen` or the consumer repo's `brand.css`/`source.css` conventions) **and** as a standalone CLI entrypoint runnable via `python -m tools.design_system_sync --check --pen <path> --css-root <path>`. This gives us both agent-path enforcement and a CLI path for human/CI verification. A git `pre-commit` hook (optional, documented in the feature doc) can invoke the CLI for non-agent edits.
+
+### spike-5: How does the skill's existing Safety gate interact with the new Write/Edit hook?
+- **Assumption:** "The Safety gate at L314-322 can be 'extended' to cover generated artifacts."
+- **Method:** Read `.claude/skills/do-design-system/SKILL.md:313-322`.
+- **Finding:** The "Safety gate" at L313 is **not a hook** — it is an inline Python assertion block the agent is instructed to paste and execute in the session before any `.pen` write. It checks `target.name == "design-system.pen"`. It runs *in the agent process*, not as an enforcement hook. Adding new file restrictions to THIS Python block covers only paths the agent itself edits via its own Python invocations; it does NOT block Write/Edit tool calls to generated artifacts.
+- **Confidence:** High.
+- **Impact on plan:** **Two distinct mechanisms are needed, with clear scope:**
+  1. **Update the inline assertion block** in SKILL.md to also refuse direct writes to `design-system.md`, `brand.css`, `source.css`, and `docs/designs/exports/**` — this catches agent-authored Python edits within the skill context.
+  2. **Add a new PreToolUse hook** `validate_design_system_readonly.py` on the `Write`/`Edit` tool matchers — this catches direct Write/Edit tool calls anywhere in the repo, whether the agent is running the skill or not.
+  These are separate artifacts, not an "extension" of a single gate. The revision renames the section to "Safety-gate updates (two parts)" to reflect this.
 
 ## Data Flow
 
+**Note:** Paths below use `<pen-path>` (defaults to `docs/designs/design-system.pen` in a consumer repo) and `<css-root>` (e.g. `static/css/`, consumer-dependent). The generator takes these as explicit `--pen` / `--css-root` arguments — no hardcoded paths. In the ai/ repo itself the generator is only exercised against `tests/fixtures/design_system/design-system.pen` with a fixture `<css-root>` under the same tests/ tree.
+
 ```
-Human edits design-system.pen in Pencil desktop app
+Human edits design-system.pen in Pencil desktop app (consumer repo)
         │
         ▼
-docs/designs/design-system.pen        (JSON — canonical ground truth)
+<pen-path> (e.g. docs/designs/design-system.pen)   (JSON — canonical ground truth)
         │
-        ▼  python -m tools.design_system_sync --generate
+        ▼  python -m tools.design_system_sync --generate --pen <pen-path> --css-root <css-root>
 ┌───────┴─────────────────────────────────────────────────────────┐
 │ Generator (deterministic, idempotent)                           │
-│   1. Load .pen JSON                                             │
+│   1. Load .pen JSON from --pen arg                              │
 │   2. Extract variables → categorize (colors / typography /      │
 │      rounded / spacing)                                         │
 │   3. Extract reusable components → map to DESIGN.md components  │
 │      schema                                                     │
-│   4. Emit design-system.md YAML frontmatter + markdown body     │
-│   5. Emit brand.css (:root {} with --vars)                      │
-│   6. Emit source.css (@theme {} for Tailwind)                   │
+│   4. Emit <pen-dir>/design-system.md YAML frontmatter + body    │
+│   5. Emit <css-root>/brand.css (:root {} with --vars)           │
+│   6. Emit <css-root>/source.css (@theme {} for Tailwind)        │
 │   7. Exec `npx @google/design.md export --format dtcg` →        │
-│      exports/tokens.dtcg.json                                   │
+│      <pen-dir>/exports/tokens.dtcg.json                         │
 │   8. Exec `npx @google/design.md export --format tailwind` →    │
-│      exports/tailwind.theme.json                                │
+│      <pen-dir>/exports/tailwind.theme.json                      │
 └──────┬──────────┬──────────┬──────────┬──────────┬──────────────┘
        ▼          ▼          ▼          ▼          ▼
-docs/designs/  brand.css  source.css  exports/   exports/
-design-system.md                      tokens.    tailwind.
-                                      dtcg.json  theme.json
+<pen-dir>/    <css-root>/ <css-root>/ <pen-dir>/  <pen-dir>/
+design-      brand.css   source.css  exports/    exports/
+system.md                            tokens.     tailwind.
+                                     dtcg.json   theme.json
        │
-       ▼  npx @google/design.md lint docs/designs/design-system.md
+       ▼  npx @google/design.md lint <pen-dir>/design-system.md
 Lint exit 0 required
        │
-       ▼  (commit)
+       ▼  (commit in consumer repo)
        │
-       ▼  PreToolUse hook on Bash (git commit / git add)
+       ▼  PreToolUse hook on Bash (git commit / git add, when run inside ai/)
 validate_design_system_sync.py
-  → re-runs generator to tempdir
+  → matches only when the command references a .pen path OR
+    a <css-root>/{brand,source}.css path (regex anchors on filenames)
+  → re-runs generator to tempdir with detected --pen / --css-root
   → diffs against working-tree artifacts
   → exit 1 if any artifact drifted
        │
@@ -143,19 +171,23 @@ validate_design_system_sync.py
 git commit proceeds
 ```
 
+**Config discovery in consumer repos:** The generator reads `<pen-dir>/design-system-sync.toml` (optional) for `<css-root>` if the flag is not passed. Missing config + missing flag → error "pass --css-root or create design-system-sync.toml". The fixture in ai/ ships with an explicit TOML so the integration test does not need flag args.
+
+**Hook scope:** The drift validator fires ONLY when the matched Bash command references a known design-system path. In ai/, this means the fixture under `tests/fixtures/design_system/`. The validator never fires on unrelated `git commit` calls in ai/ — this is the critique-flagged false-positive risk, closed by regex anchoring on filenames the plan actually touches.
+
 **Gap-audit diff flow (separate from commit-time drift check):**
 
 ```
-Previous pass's design-system.md (from git show HEAD~1:...)
+Previous pass's design-system.md (from git show HEAD~1:<pen-dir>/design-system.md)
            │
            ▼  npx @google/design.md diff <prev> <current>
 Diff output (JSON or markdown)
            │
-           ▼  reformatter (tools/design_system_sync.py --audit)
+           ▼  reformatter (tools/design_system_sync.py --audit --pen <pen-path>)
 Markdown table — Variables changed / Components added
            │
            ▼
-Appended to docs/designs/gap-audit.md under ## YYYY-MM-DD — <theme>
+Appended to <pen-dir>/gap-audit.md under ## YYYY-MM-DD — <theme>
 ```
 
 ## Appetite
@@ -175,8 +207,9 @@ Medium because the work has three distinct moving parts (generator, lint/diff/ex
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Node + npx | `command -v npx >/dev/null` | Invoke `@google/design.md` CLI |
-| `@google/design.md@0.1.1` installed | `npx --no-install @google/design.md --version \| grep -q 0.1.1` | Pinned DESIGN.md CLI available |
+| `@google/design.md@0.1.1` installed in ai/ | `npx --no-install @google/design.md --version \| grep -q 0.1.1` | Pinned DESIGN.md CLI available (pin lives in ai/ `package.json`) |
 | Existing `pyyaml` in requirements | `python -c "import yaml"` | YAML emission (no new Python dep) |
+| Python 3.11+ `tomllib` | `python -c "import tomllib"` | Read `design-system-sync.toml` (stdlib, no new dep) |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/design-md-integration-phase-1.md`
 
@@ -184,16 +217,17 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/design-md-inte
 
 ### Key Elements
 
-- **Seed `docs/designs/design-system.pen`** — minimal, Pencil-openable JSON with a documented set of tokens and one reusable component. Serves as the generator's test fixture and the skill's first-pass starting point.
-- **`tools/design_system_sync.py`** — plain Python CLI module (no new runtime deps). Reads `.pen` JSON, emits `design-system.md`, `brand.css`, `source.css`, and shells out to `npx @google/design.md export` for DTCG / Tailwind exports. Deterministic — running twice produces byte-identical output. Entrypoints: `--generate`, `--check`, `--audit` (diff for gap-audit), `--all` (generate + lint + export).
+- **Test fixture `tests/fixtures/design_system/design-system.pen`** — minimal, Pencil-openable JSON with a documented set of tokens and one reusable component, plus a companion `tests/fixtures/design_system/design-system-sync.toml` declaring a fixture `<css-root>`. Serves as the generator's test fixture. Lives under `tests/fixtures/` specifically so it does NOT create a `docs/designs/` in the ai/ repo.
+- **`tools/design_system_sync.py`** — plain Python CLI module (no new runtime deps). Reads `.pen` JSON from `--pen` arg (or TOML config), emits `design-system.md` next to the `.pen`, emits `brand.css` and `source.css` under `<css-root>` (from `--css-root` arg or TOML), and shells out to `npx @google/design.md export` for DTCG / Tailwind exports. Deterministic — running twice produces byte-identical output. Entrypoints: `--generate`, `--check`, `--audit` (diff for gap-audit), `--all` (generate + lint + export). All entrypoints take `--pen` and `--css-root` path args (or read from `design-system-sync.toml` adjacent to the `.pen`).
 - **`.pen` → DESIGN.md YAML mapping spec** — captured in `docs/features/design-system-tooling.md`. Defines how Pencil variable names categorize into `colors` / `typography` / `rounded` / `spacing` and how reusable component frames map to DESIGN.md `components` entries. See **Schema Mapping** section below.
-- **`package.json`** — minimal, repo-root, pins `@google/design.md@0.1.1` only. `package-lock.json` committed. `node_modules/` added to `.gitignore`.
-- **Drift-detection validator** — `.claude/hooks/validators/validate_design_system_sync.py`. PreToolUse hook fires on `git commit` / `git add docs/designs/*` Bash commands; re-runs the generator to a tempdir, byte-compares each emitted artifact against the working-tree copy, blocks commit on mismatch. Same script runnable as `python -m tools.design_system_sync --check` for CI or manual verification.
+- **`package.json`** — minimal, repo-root of ai/, pins `@google/design.md@0.1.1` only. `package-lock.json` committed. `node_modules/` added to `.gitignore`. Consumer repos that adopt this tooling will add their own `package.json` with the matching pin.
+- **Drift-detection validator** — `.claude/hooks/validators/validate_design_system_sync.py`. PreToolUse hook on `Bash`; fires ONLY when the Bash command matches a design-system-touching regex (`(design-system\.pen|/brand\.css|/source\.css|design-system\.md)` within `git (add|commit)` context). Reads hook JSON from stdin (per the existing `validate_no_raw_redis_delete.py` pattern). Re-runs the generator to a tempdir with `--pen`/`--css-root` discovered from the matched path, byte-compares each emitted artifact against the working-tree copy, returns `{"decision": "block", "reason": ...}` on mismatch. Fails open (exits 0) on internal error. Same script runnable as `python -m tools.design_system_sync --check --pen <path> --css-root <path>` for CI or manual verification.
+- **Read-only artifact validator** — `.claude/hooks/validators/validate_design_system_readonly.py`. PreToolUse hook on `Write`/`Edit` matchers. Blocks direct Write/Edit to filenames matching `design-system\.md|brand\.css|source\.css|.*\.dtcg\.json|tailwind\.theme\.json` (those must flow through the generator). The `.pen` whitelist is preserved: writes to `design-system.pen` remain allowed; writes to any other `.pen` file under `docs/designs/` are NOT covered by this hook (the existing SKILL.md safety gate handles that).
 - **`do-design-system` skill rewrite** — Steps 6 & 7 replaced:
-  - Step 6 becomes: "Run `python -m tools.design_system_sync --all`. Verify `npx @google/design.md lint docs/designs/design-system.md` exits 0. Do not hand-edit `brand.css`, `source.css`, or `design-system.md`."
-  - Step 7 becomes: "Run `python -m tools.design_system_sync --audit` to produce the variables/components diff table. Append to `gap-audit.md` under `## YYYY-MM-DD — <theme>`."
-  - Existing safety gate (SKILL.md L314-322) extended: reject direct Write/Edit to `design-system.md`, `brand.css`, `source.css`, `docs/designs/exports/**` — those flow through the generator only. The `.pen` whitelist (only `design-system.pen`) is preserved verbatim.
-- **Feature doc** — `docs/features/design-system-tooling.md` documents the one-way pipeline, schema mapping, regenerate-locally workflow, and drift validator semantics.
+  - Step 6 becomes: "Run `python -m tools.design_system_sync --all` (takes `--pen` / `--css-root` args or reads `design-system-sync.toml`). Verify `npx @google/design.md lint <pen-dir>/design-system.md` exits 0. Do not hand-edit `brand.css`, `source.css`, or `design-system.md` — the read-only validator will block the Write/Edit."
+  - Step 7 becomes: "Run `python -m tools.design_system_sync --audit` to produce the variables/components diff table. Append to `<pen-dir>/gap-audit.md` under `## YYYY-MM-DD — <theme>`."
+  - **Inline safety-gate assertion at SKILL.md L315-322 is augmented** (not "extended" — a distinct surface from the Write/Edit hook): the Python assertion block gains three additional `assert` lines refusing agent-authored writes to `design-system.md`, `brand.css`, `source.css`, `docs/designs/exports/**`. This is belt-and-braces alongside the Write/Edit hook — the hook catches tool-level writes; the assertion catches raw-Python `Path.write_text()` inside the agent's skill-context Python code.
+- **Feature doc** — `docs/features/design-system-tooling.md` documents the one-way pipeline, schema mapping, regenerate-locally workflow (`--pen` / `--css-root` / TOML config), and validator semantics.
 
 ### `.pen` → DESIGN.md YAML Mapping Spec
 
@@ -217,7 +251,7 @@ The `do-design-system` skill already enforces tier-aware, semantically-prefixed 
 - `--text-weight-{name}` → `typography.{name}.fontWeight`
 - `--text-lh-{name}` → `typography.{name}.lineHeight`
 
-Presets with missing properties inherit from a `base` preset defined in the seed `.pen`. If `base` is missing, the generator emits a hard error (caught by `--check` and by the lint rule `missing-typography`).
+Presets with missing properties inherit from a `base` preset defined in the `.pen`. If `base` is missing, the generator emits a hard error (caught by `--check` and by the lint rule `missing-typography`).
 
 **Component mapping:** Pencil components with `"reusable": true` and `name: "Category/Variant"` map into DESIGN.md `components`:
 - Component key = lowercase slugified `Category-Variant` (e.g. `Annotation/Crosshair` → `annotation-crosshair`).
@@ -235,22 +269,36 @@ Presets with missing properties inherit from a `base` preset defined in the seed
 
 ### Flow
 
-**Ground truth path:** Pencil desktop app → edit `docs/designs/design-system.pen` → save → `python -m tools.design_system_sync --all` → generator writes artifacts + lints + exports → `git add docs/designs/ brand.css source.css` → commit (drift validator re-checks) → push.
+**Ground truth path (consumer repo):** Pencil desktop app → edit `<consumer-repo>/docs/designs/design-system.pen` → save → `python -m tools.design_system_sync --all --pen <pen-path> --css-root <css-root>` (or rely on `design-system-sync.toml`) → generator writes artifacts + lints + exports → `git add docs/designs/ <css-root>/brand.css <css-root>/source.css` → commit (drift validator re-checks) → push.
 
-**Moodboard pass path (via do-design-system skill):**
-Moodboard URL → agent runs skill → agent edits `design-system.pen` directly (existing Step 5 path) → `python -m tools.design_system_sync --all` (new Step 6) → `python -m tools.design_system_sync --audit` (new Step 7) → skill appends audit table to `gap-audit.md` → commit → drift validator passes.
+**Moodboard pass path (via do-design-system skill, run in consumer repo):**
+Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.pen` directly (existing Step 5 path) → `python -m tools.design_system_sync --all` (new Step 6) → `python -m tools.design_system_sync --audit` (new Step 7) → skill appends audit table to `gap-audit.md` → commit → drift validator passes.
+
+**ai/-repo fixture path:** `pytest tests/integration/test_design_system_pipeline.py` invokes the generator against `tests/fixtures/design_system/design-system.pen` (with `<css-root>` from the fixture's TOML). The integration test is the ai/ repo's only interaction with the generator.
 
 ### Technical Approach
 
-- **Single CLI module** at `tools/design_system_sync.py` exposes `--generate`, `--check`, `--audit`, `--all`. `python -m tools.design_system_sync` is the canonical invocation (matches existing repo tool-module conventions: `python -m tools.analytics`, `python -m tools.memory_search`).
-- **stdlib-only Python:** `json`, `pathlib`, `subprocess`, `sys`, `argparse`, `yaml` (already in `requirements.txt`). No new Python runtime deps.
-- **Shell-out to `npx`** for DESIGN.md CLI invocations — lint, diff, export. `subprocess.run(["npx", "--no-install", "@google/design.md", ...], check=True, capture_output=True, text=True)`. `--no-install` forces use of the pinned local version.
+- **Single CLI module** at `tools/design_system_sync.py` exposes `--generate`, `--check`, `--audit`, `--all`. `python -m tools.design_system_sync` is the canonical invocation (matches existing repo tool-module conventions: `python -m tools.analytics`, `python -m tools.memory_search`). All subcommands accept `--pen <path>` and `--css-root <path>`; if absent, the generator looks for `design-system-sync.toml` adjacent to `--pen` (or in `$CWD/docs/designs/`). Missing path resolution → `SystemExit(2)` with actionable message naming both failure modes.
+- **stdlib-only Python:** `json`, `pathlib`, `subprocess`, `sys`, `argparse`, `tomllib` (Python 3.11+, already the repo's version), `yaml` (already in `requirements.txt`). No new Python runtime deps.
+- **Shell-out to `npx`** for DESIGN.md CLI invocations — lint, diff, export. `subprocess.run(["npx", "--no-install", "@google/design.md", ...], check=True, capture_output=True, text=True, cwd=ai_repo_root)`. `--no-install` forces use of the pinned local version. `cwd=ai_repo_root` ensures `npx` resolves the `@google/design.md` pinned in ai/'s `package.json` even when the generator is invoked from a consumer repo's cwd.
 - **Determinism via canonical emission:** helper `_emit_yaml()` uses `yaml.safe_dump(..., sort_keys=True, default_flow_style=False, allow_unicode=True)` + post-processing to normalize spacing. `_emit_css()` sorts keys before writing. Snapshot tests assert byte-identical output on repeated runs.
-- **Drift check algorithm:** `--check` mode writes artifacts to a `tempfile.TemporaryDirectory()`, then compares each byte-for-byte against `docs/designs/design-system.md`, downstream `brand.css`, `source.css`, and `docs/designs/exports/*.json` (paths discovered by convention). Diffs printed as unified diff; exit 1 on any mismatch.
-- **PreToolUse validator wiring:** `.claude/hooks/validators/validate_design_system_sync.py` reads `$CLAUDE_HOOK_INPUT` JSON (per existing validator pattern), inspects `tool_name == "Bash"` and matches `tool_input.command` against `^(git commit|git add).*docs/designs` or `^(git commit|git add).*brand\\.css` etc. On match, invokes `python -m tools.design_system_sync --check`. Non-zero exit returns `{"decision": "block", "reason": "..."}`. Registration added to `.claude/settings.json` under `hooks.PreToolUse` matcher `Bash` list.
-- **Safety gate extension:** `do-design-system` SKILL.md safety-gate block (L314-322) augmented with an assertion that refuses Write/Edit to `design-system.md`, `brand.css`, `source.css`, or `docs/designs/exports/**`. Implementation: the skill's guidance becomes agent-readable, and a companion validator `validate_design_system_readonly.py` enforces it as a PreToolUse hook on `Write`/`Edit` matchers (same pattern as existing `validate_no_raw_redis_delete.py`).
+- **Drift check algorithm:** `--check` mode writes artifacts to a `tempfile.TemporaryDirectory()`, then compares each byte-for-byte against `<pen-dir>/design-system.md`, `<css-root>/brand.css`, `<css-root>/source.css`, and `<pen-dir>/exports/*.json` (paths resolved from `--pen` / `--css-root` / TOML). Diffs printed as unified diff to stderr; exit 1 on any mismatch; exit 0 on parity.
+- **PreToolUse Bash validator wiring:** `.claude/hooks/validators/validate_design_system_sync.py` follows the existing `validate_no_raw_redis_delete.py` pattern verbatim:
+  - Reads JSON from **stdin** via `sys.stdin.read()` + `json.loads()`.
+  - Early-returns `sys.exit(0)` if `tool_name != "Bash"` or if the command doesn't match the combined regex `r"git (add|commit).*\b(design-system\.(pen|md)|brand\.css|source\.css)\b"`.
+  - On match, extracts the closest `.pen` path from the command (or discovers via TOML walk), invokes `python -m tools.design_system_sync --check --pen <detected> --css-root <detected>` with `capture_output=True`.
+  - On CalledProcessError (drift detected): prints `json.dumps({"decision": "block", "reason": <unified diff summary>})` and `sys.exit(0)` (hook-spec: the decision is in stdout, exit 0 means the hook ran cleanly).
+  - On any internal exception: **fails open** — prints the exception to stderr and `sys.exit(0)` without emitting a block decision. This is the critique-flagged "fail-open vs fail-closed" question, resolved to fail-open for the reasons in Risk 2.
+  - Registered in `.claude/settings.json` under `hooks.PreToolUse` → existing `matcher: "Bash"` block, appended after the existing three entries with a 10s `timeout`.
+- **PreToolUse Write/Edit validator wiring:** `.claude/hooks/validators/validate_design_system_readonly.py`:
+  - Stdin JSON, same pattern.
+  - Matches when `tool_name in ("Write", "Edit")` AND `tool_input.file_path` matches the generated-artifact regex (`design-system\.md$|/brand\.css$|/source\.css$|\.dtcg\.json$|tailwind\.theme\.json$`).
+  - On match, emits `{"decision": "block", "reason": "<path> is a generated artifact — run python -m tools.design_system_sync --generate to regenerate"}`.
+  - Does **not** block `.pen` writes — those are handled by the existing skill-level safety-gate assertion.
+  - Registered under `hooks.PreToolUse` with a new `matcher: "Write|Edit"` block (note: settings.json matcher strings are regex; `"Write|Edit"` is not currently used in this repo — if that syntax is unsupported, fall back to registering two separate matcher blocks, `matcher: "Write"` and `matcher: "Edit"`).
+- **Inline SKILL.md assertion augmentation:** `do-design-system/SKILL.md:315-322` currently contains a two-line assert block for `target.name == "design-system.pen"`. The revision appends three additional `assert` lines that check the agent isn't about to write to `design-system.md`, `brand.css`, or `source.css` via Python. This is **belt-and-braces** — the Write/Edit hook catches tool-level writes; the assertion catches raw `Path.write_text()` Python in the agent's skill context. The assertion block is intentionally repeated in the skill text for discoverability, even though the hook provides the real enforcement.
 - **CLI-first for the generator:** No MCP wrapper. The skill invokes via Bash. This matches the issue's stated constraint ("The generator should be runnable as a plain CLI … so the skill can invoke it via Bash").
-- **Gap-audit diff generator:** `--audit` mode: (a) `git show HEAD:docs/designs/design-system.md > /tmp/prev.md`, (b) `npx @google/design.md diff /tmp/prev.md docs/designs/design-system.md` captures structured diff, (c) Python reformats into the markdown tables the existing `gap-audit.md` format expects (`### Variables` and `### New components`), (d) prints to stdout for the skill to paste. If `git show HEAD:...` fails (first pass, no prior version), emits a "(initial pass — no prior diff)" placeholder.
+- **Gap-audit diff generator:** `--audit` mode: (a) `git show HEAD:<pen-dir>/design-system.md > <tmpdir>/prev.md` (`git -C <consumer-repo-root> show ...` when run cross-repo), (b) `npx --no-install @google/design.md diff <tmpdir>/prev.md <pen-dir>/design-system.md` captures structured diff, (c) Python reformats into the markdown tables the existing `gap-audit.md` format expects (`### Variables` and `### New components`), (d) prints to stdout for the skill to paste. If `git show HEAD:...` fails (first pass, no prior version), emits a "(initial pass — no prior diff)" placeholder.
 
 ## Failure Path Test Strategy
 
@@ -272,9 +320,10 @@ Moodboard URL → agent runs skill → agent edits `design-system.pen` directly 
 
 - [ ] **No existing tests affected** — `tools/design_system_sync.py`, `.claude/hooks/validators/validate_design_system_sync.py`, and `.claude/hooks/validators/validate_design_system_readonly.py` are new files. The `do-design-system` skill has no existing automated tests (skills are validated by human review and runtime invocation), so rewriting its Step 6 & Step 7 documentation is a doc-only edit with no test coverage to update.
 - [ ] New tests to add (covered under Step by Step Tasks):
-  - `tests/unit/tools/test_design_system_sync.py` — determinism (twice-run byte equality), schema mapping (each prefix category), empty-`.pen` handling, unmapped-variable warning path, lint-failure propagation.
-  - `tests/unit/hooks/test_validate_design_system_sync.py` — hook fires only on matching Bash commands; returns `decision: block` on drift; returns no-op on non-Bash or non-matching commands.
-  - `tests/integration/test_design_system_pipeline.py` — full round trip: edit seed `.pen` → run `--all` → assert linter exits 0 → assert exports present and non-empty → assert `--check` passes.
+  - `tests/unit/tools/test_design_system_sync.py` — determinism (twice-run byte equality on the fixture `.pen`), schema mapping (each prefix category), empty-`.pen` handling, unmapped-variable warning path, lint-failure propagation, `--pen`/`--css-root`/TOML resolution precedence.
+  - `tests/unit/hooks/test_validate_design_system_sync.py` — hook reads stdin JSON (NOT `$CLAUDE_HOOK_INPUT`); fires only on Bash commands matching the filename regex; returns `decision: block` on drift; returns no-op on non-Bash, non-matching, or unrelated commits (`git add README.md`, etc.); fail-opens on internal error.
+  - `tests/unit/hooks/test_validate_design_system_readonly.py` — hook blocks Write/Edit on generated-artifact filenames; permits Write on `.pen`; no-ops on unrelated paths; matcher regex (`"Write|Edit"` vs two blocks) registered successfully.
+  - `tests/integration/test_design_system_pipeline.py` — full round trip against the fixture: run `--all --pen tests/fixtures/design_system/design-system.pen` → assert linter exits 0 → assert exports present and non-empty → assert `--check` passes → mutate an artifact → assert `--check` exits 1.
 
 ## Rabbit Holes
 
@@ -300,13 +349,21 @@ Moodboard URL → agent runs skill → agent edits `design-system.pen` directly 
 **Impact:** Different Python versions or `pyyaml` minor versions emit keys in different orders → spurious drift → false alarms that condition users to ignore the validator.
 **Mitigation:** Explicit `sort_keys=True` on every `yaml.safe_dump` call. Explicit `sorted()` on all dict iterations in CSS emission. Unit test asserts byte-identical output across two runs. Snapshot test in `tests/unit/tools/test_design_system_sync.py` catches regressions.
 
-### Risk 4: Seed `.pen` doesn't open in Pencil
-**Impact:** If the seed file has a schema mistake, humans can't edit the ground truth — the whole pipeline is blocked at day one.
-**Mitigation:** Seed file is built by reading Pencil's documented `.pen` JSON shape from `SKILL.md` Step 5 (which has a working example at L356-386) and validated by (a) opening in Pencil manually during the build, (b) round-tripping through the generator and confirming lint exit 0. Validation is a task-completion criterion.
+### Risk 4: Fixture `.pen` doesn't open in Pencil
+**Impact:** If the fixture file has a schema mistake, humans can't verify the tooling end-to-end (and consumer-repo `.pen` files produced by Pencil may hit edge cases the fixture didn't cover).
+**Mitigation:** Fixture file is built by reading Pencil's documented `.pen` JSON shape from `SKILL.md` Step 5 (which has a working example at L356-386) and validated by (a) opening the fixture in Pencil manually during the build, (b) round-tripping through the generator and confirming lint exit 0. Validation is a task-completion criterion.
 
 ### Risk 5: No existing `.pen` sample to validate against
 **Impact:** The generator mapping is spec'd abstractly; a real-world moodboard pass may reveal edge cases (unusual token names, nested component frames, primitive tokens the charter forgot).
-**Mitigation:** Seed `.pen` exercises at least one variable from each category (color, typography, rounded, spacing) plus one reusable component. The first real moodboard pass after landing Phase 1 is expected to surface edge cases; the `--drop-unmapped` flag and the warning-to-stderr path for unmapped variables keep the first pass productive even when mapping gaps appear. Follow-up ticket tracks post-first-pass refinements.
+**Mitigation:** Fixture `.pen` exercises at least one variable from each category (color, typography, rounded, spacing) plus one reusable component. The first real moodboard pass after landing Phase 1 is expected to surface edge cases; the `--drop-unmapped` flag and the warning-to-stderr path for unmapped variables keep the first pass productive even when mapping gaps appear. Follow-up ticket tracks post-first-pass refinements.
+
+### Risk 6: Validator hook fires in ai/ commits that never touch the design system
+**Impact:** If the filename regex is too loose, every `git commit` in ai/ runs the drift check — adding 100-500ms per commit even when nothing to validate.
+**Mitigation:** Regex anchors on explicit filenames (`design-system\.(pen|md)`, `/brand\.css`, `/source\.css`). The generic pattern `docs/designs/` is deliberately NOT matched — we match filenames, not directories, so unrelated commits in ai/ early-return. Unit test asserts the hook no-ops on commands like `git add README.md`, `git commit -m "foo"`, and `git add tests/unit/test_unrelated.py`.
+
+### Risk 7: Write/Edit hook matcher regex may not parse `Write|Edit` syntax
+**Impact:** If `.claude/settings.json` matcher strings don't support `|` alternation, registering the read-only hook with `matcher: "Write|Edit"` silently fails to match either. The hook never fires.
+**Mitigation:** The hook task explicitly validates matcher behavior at registration time (run a dummy Write tool call, confirm the hook fires) before closing the build task. If `Write|Edit` doesn't parse, fall back to two registration blocks — one `matcher: "Write"`, one `matcher: "Edit"`. Either form is fine; the generator task verifies which works.
 
 ## Race Conditions
 
@@ -337,12 +394,13 @@ The `/update` skill (`scripts/remote-update.sh`) currently syncs Python deps, en
 
 The generator is invoked via Bash from the `do-design-system` skill. **No MCP server, no `.mcp.json` changes, no bridge imports.** This matches the issue's stated constraint and the repo's existing pattern (skills invoke Python CLI modules via Bash — see `do-plan` Phase 1's `python -m tools.code_impact_finder`).
 
-- **Skill rewrite:** `.claude/skills/do-design-system/SKILL.md` Step 6 and Step 7 replaced with generator invocations. Safety-gate block (L314-322) extended to reject Write/Edit to `design-system.md`, `brand.css`, `source.css`, `docs/designs/exports/**`.
+- **Skill rewrite:** `.claude/skills/do-design-system/SKILL.md` Step 6 and Step 7 replaced with generator invocations. Inline safety-gate assertion block at L315-322 **augmented** (three new assert lines) — distinct artifact from the new Write/Edit hook.
 - **New validator hooks** (registered in `.claude/settings.json`):
-  - `.claude/hooks/validators/validate_design_system_sync.py` — PreToolUse on `Bash`, drift check on `git commit` / `git add docs/designs/**`.
-  - `.claude/hooks/validators/validate_design_system_readonly.py` — PreToolUse on `Write` / `Edit`, blocks edits to generated artifacts.
+  - `.claude/hooks/validators/validate_design_system_sync.py` — PreToolUse on `Bash`, drift check fires only when the command matches the design-system filename regex. Reads JSON from stdin per existing pattern. Fails open on internal error.
+  - `.claude/hooks/validators/validate_design_system_readonly.py` — PreToolUse on `Write`/`Edit`, blocks edits to generated artifacts (design-system.md, brand.css, source.css, DTCG export, Tailwind export) by filename regex. Does not block `.pen` writes.
+- **Hook ordering risk:** The existing `matcher: "Bash"` block runs `validate_commit_message`, `validate_merge_guard`, `validate_no_raw_redis_delete` in sequence. Adding `validate_design_system_sync` as the fourth entry means it runs AFTER the existing three. The existing three all early-return on non-matching commands, so ordering has no observable effect. Documented here so a future reader doesn't need to re-derive it.
 - **No bridge changes.** `bridge/telegram_bridge.py` does not import or call the new code. The agent invokes the skill, the skill invokes the CLI — that's the whole integration.
-- **Integration test:** `tests/integration/test_design_system_pipeline.py` exercises the skill path by invoking `python -m tools.design_system_sync --all` directly against the seed `.pen` and asserting all artifacts land correctly. (We do not end-to-end test the agent-running-the-skill path; skill execution is agent-runtime-dependent and not part of the automated suite.)
+- **Integration test:** `tests/integration/test_design_system_pipeline.py` exercises the generator directly against `tests/fixtures/design_system/design-system.pen` and asserts all artifacts land correctly (DESIGN.md with passing lint, `brand.css` and `source.css` under the fixture's `<css-root>`, both exports present). (We do not end-to-end test the agent-running-the-skill path; skill execution is agent-runtime-dependent and not part of the automated suite.)
 
 ## Documentation
 
@@ -360,21 +418,22 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 
 ## Success Criteria
 
-- [ ] `docs/designs/design-system.pen` exists, is minimal, and opens cleanly in the Pencil desktop app (manual verification).
-- [ ] `python -m tools.design_system_sync --generate` emits `docs/designs/design-system.md` with DESIGN.md-compliant YAML frontmatter, plus `brand.css` and `source.css` with byte-identical token names in both files.
+- [ ] `tests/fixtures/design_system/design-system.pen` exists, is minimal, and opens cleanly in the Pencil desktop app (manual verification). **No `docs/designs/` directory is created in the ai/ repo.**
+- [ ] `tests/fixtures/design_system/design-system-sync.toml` declares a fixture `<css-root>` so the generator can be invoked without explicit `--css-root`.
+- [ ] `python -m tools.design_system_sync --generate --pen tests/fixtures/design_system/design-system.pen` emits `tests/fixtures/design_system/design-system.md` with DESIGN.md-compliant YAML frontmatter, plus `brand.css` and `source.css` under the fixture's `<css-root>` with byte-identical token names in both files.
 - [ ] Running `--generate` twice produces byte-identical output (determinism, unit test).
-- [ ] `npx @google/design.md lint docs/designs/design-system.md` exits 0 on the seed.
-- [ ] `npx @google/design.md export --format dtcg` and `--format tailwind` both succeed and their output is committed to `docs/designs/exports/tokens.dtcg.json` and `docs/designs/exports/tailwind.theme.json`.
-- [ ] `python -m tools.design_system_sync --check` exits 0 on a freshly generated tree and exits 1 with a clear message when an artifact is manually mutated out-of-band.
+- [ ] `npx --no-install @google/design.md lint tests/fixtures/design_system/design-system.md` exits 0 on the fixture.
+- [ ] `npx --no-install @google/design.md export --format dtcg` and `--format tailwind` both succeed and their output is committed to `tests/fixtures/design_system/exports/tokens.dtcg.json` and `tests/fixtures/design_system/exports/tailwind.theme.json`.
+- [ ] `python -m tools.design_system_sync --check --pen tests/fixtures/design_system/design-system.pen` exits 0 on a freshly generated tree and exits 1 with a unified-diff stderr message when an artifact is manually mutated out-of-band.
 - [ ] `python -m tools.design_system_sync --audit` runs against a prior pass (or emits the initial-pass placeholder) and prints markdown tables suitable for pasting into `gap-audit.md`.
-- [ ] `.claude/skills/do-design-system/SKILL.md` Step 6 and Step 7 rewritten to invoke the generator; safety-gate block extended to reject edits to generated artifacts.
-- [ ] Drift-detection validator `validate_design_system_sync.py` registered as PreToolUse on Bash, blocks commit on drift, fail-open on internal error.
-- [ ] Read-only validator `validate_design_system_readonly.py` registered as PreToolUse on Write/Edit, blocks edits to `design-system.md`, `brand.css`, `source.css`, `docs/designs/exports/**`, preserves existing `.pen` whitelist.
-- [ ] `package.json` pins `@google/design.md@0.1.1`; `package-lock.json` committed; `node_modules/` in `.gitignore`.
-- [ ] `docs/features/design-system-tooling.md` exists and covers the pipeline, mapping, and regenerate workflow.
+- [ ] `.claude/skills/do-design-system/SKILL.md` Step 6 and Step 7 rewritten to invoke the generator; inline safety-gate assertion at L315-322 augmented with three `assert` lines refusing writes to `design-system.md`, `brand.css`, `source.css`.
+- [ ] Drift-detection validator `validate_design_system_sync.py` registered as PreToolUse on Bash (appended to existing matcher block), reads stdin JSON, blocks commit on drift, fail-open on internal error.
+- [ ] Read-only validator `validate_design_system_readonly.py` registered as PreToolUse on Write/Edit, blocks edits to generated artifacts by filename regex, preserves `.pen` whitelist.
+- [ ] `package.json` at ai/ repo root pins `@google/design.md@0.1.1`; `package-lock.json` committed; `node_modules/` in `.gitignore`.
+- [ ] `docs/features/design-system-tooling.md` exists and covers the pipeline (including `--pen` / `--css-root` / TOML resolution), mapping, regenerate workflow, and the two-layer safety-gate model (inline assertion + Write/Edit hook).
 - [ ] `docs/features/README.md` index updated.
 - [ ] `scripts/remote-update.sh` runs `npm ci --only=prod` when `package.json` exists.
-- [ ] Tests pass (`/do-test`) — new unit tests for the generator, hooks, and integration test.
+- [ ] Tests pass (`/do-test`) — new unit tests for the generator, hooks (stdin-JSON fixtures), and integration test.
 - [ ] `python -m ruff check .` and `python -m ruff format --check .` exit 0.
 
 ## Team Orchestration
@@ -383,7 +442,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 
 - **Builder (generator)**
   - Name: `sync-builder`
-  - Role: Implement `tools/design_system_sync.py` CLI, seed `design-system.pen`, mapping spec, determinism.
+  - Role: Implement `tools/design_system_sync.py` CLI, fixture `design-system.pen` + TOML, mapping spec, determinism.
   - Agent Type: `builder`
   - Resume: true
 
@@ -425,7 +484,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 
 - **Validator (integration)**
   - Name: `integration-validator`
-  - Role: Run full `--all` pipeline on seed `.pen`, confirm all artifacts, confirm skill invocation path via Bash documented in SKILL.md works.
+  - Role: Run full `--all` pipeline on fixture `.pen`, confirm all artifacts, confirm skill invocation path via Bash documented in SKILL.md works.
   - Agent Type: `validator`
   - Resume: true
 
@@ -442,60 +501,64 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - Run `npm install` to generate `package-lock.json`; commit the lockfile.
 - Ensure `.gitignore` contains `node_modules/`.
 
-### 2. Create seed `design-system.pen`
-- **Task ID**: build-seed-pen
+### 2. Create fixture `.pen` + TOML config
+- **Task ID**: build-fixture-pen
 - **Depends On**: none
-- **Validates**: File opens in Pencil (manual check), JSON parses, contains at least one variable per category (color / typography / rounded / spacing) and one reusable component.
+- **Validates**: File opens in Pencil (manual check), JSON parses, contains at least one variable per category (color / typography / rounded / spacing) and one reusable component. `tests/fixtures/design_system/design-system-sync.toml` declares a fixture `<css-root>` under `tests/fixtures/design_system/css/` so the generator test doesn't need flag args.
 - **Assigned To**: sync-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `docs/designs/design-system.pen` with a minimal but complete example following the JSON shape documented at `.claude/skills/do-design-system/SKILL.md:356-386`.
+- Create `tests/fixtures/design_system/design-system.pen` with a minimal but complete example following the JSON shape documented at `.claude/skills/do-design-system/SKILL.md:356-386`. **Do NOT create `docs/designs/` in the ai/ repo** — the fixture is the ai/ test surface; consumer repos keep their own `docs/designs/`.
 - Include: `--color-primary`, `--color-surface`, `--text-body-primary` (color), `--font-sans`, `--text-size-md`, `--text-weight-regular`, `--text-lh-md` (typography forming a `body` preset), `--radius-md` (rounded), `--space-md` (spacing), plus a reusable component `Annotation/Mark`.
+- Create `tests/fixtures/design_system/design-system-sync.toml` declaring the fixture `<css-root>` path (pointing at `tests/fixtures/design_system/css/`). The test can invoke the generator with only `--pen` and let TOML resolve `--css-root`.
 - Open in Pencil manually to verify the file is editable (record the step in the PR description).
 
 ### 3. Implement generator (`tools/design_system_sync.py`)
 - **Task ID**: build-generator
-- **Depends On**: build-seed-pen
-- **Validates**: Unit tests pass; `--generate` on the seed produces `design-system.md` that passes `npx @google/design.md lint`; twice-run output is byte-identical; `--check` detects manually-mutated artifacts.
+- **Depends On**: build-fixture-pen
+- **Validates**: Unit tests pass; `--generate --pen tests/fixtures/design_system/design-system.pen` produces `design-system.md` (next to the `.pen`) that passes `npx @google/design.md lint`; twice-run output is byte-identical; `--check` detects manually-mutated artifacts.
 - **Assigned To**: sync-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement `--generate`, `--check`, `--audit`, `--all` entrypoints.
+- Implement `--generate`, `--check`, `--audit`, `--all` entrypoints. All subcommands accept `--pen` and `--css-root` path args.
+- Path resolution precedence: `--pen` / `--css-root` CLI args > `design-system-sync.toml` adjacent to `--pen` > `$CWD/docs/designs/design-system-sync.toml` > error.
 - Implement the `.pen` → DESIGN.md mapping per the Solution section's mapping spec. Include `--drop-unmapped` flag for ignoring unknown-prefix variables.
-- Shell out to `npx --no-install @google/design.md` for lint and export steps.
+- Shell out to `npx --no-install @google/design.md` for lint and export steps. Use `cwd=<ai-repo-root>` so `npx` resolves the pinned package.
 - Emit artifacts deterministically: alphabetical dict ordering, uppercase hex, fixed YAML style.
 - Module docstring with pipeline summary and link to the feature doc.
 
 ### 4. Implement drift-detection validator
 - **Task ID**: build-drift-validator
 - **Depends On**: build-generator
-- **Validates**: Hook fires on `git commit` touching `docs/designs/**`, returns `decision: block` on drift, returns no-op on non-matching commands; fail-open on internal error.
+- **Validates**: Hook fires on `git commit` / `git add` touching design-system filenames (regex match), returns `{"decision": "block", ...}` on drift, returns no-op on non-matching commands; fail-open on internal error. Tested via stdin-JSON fixtures (NOT `$CLAUDE_HOOK_INPUT` — hooks read from stdin per `validate_no_raw_redis_delete.py:108-125`).
 - **Assigned To**: hooks-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `.claude/hooks/validators/validate_design_system_sync.py` following the pattern of `validate_no_raw_redis_delete.py`.
-- Register in `.claude/settings.json` under `hooks.PreToolUse` matcher `Bash` with a 10s timeout.
+- Create `.claude/hooks/validators/validate_design_system_sync.py` following the pattern of `validate_no_raw_redis_delete.py` (stdin JSON, early-return on non-match, print decision JSON on block, fail-open on exception).
+- Path regex: `r"git (add|commit).*\b(design-system\.(pen|md)|brand\.css|source\.css)\b"`. Extract `.pen` path from the command or via TOML walk.
+- Register in `.claude/settings.json` under `hooks.PreToolUse` → existing `matcher: "Bash"` block, appended as the fourth entry, 10s timeout.
 
 ### 5. Implement read-only artifact validator
 - **Task ID**: build-readonly-validator
 - **Depends On**: build-generator
-- **Validates**: Hook blocks Write/Edit to `design-system.md`, `brand.css`, `source.css`, `docs/designs/exports/**`; preserves `.pen` whitelist.
+- **Validates**: Hook blocks Write/Edit to `design-system.md`, `brand.css`, `source.css`, `*.dtcg.json`, `tailwind.theme.json` by filename regex; preserves `.pen` whitelist (writes to `.pen` files pass through).
 - **Assigned To**: hooks-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `.claude/hooks/validators/validate_design_system_readonly.py`.
-- Register in `.claude/settings.json` under `hooks.PreToolUse` matchers `Write` and `Edit`.
+- Register in `.claude/settings.json` under `hooks.PreToolUse` with `matcher: "Write|Edit"`. If that regex syntax is unsupported at runtime, fall back to two separate blocks (`matcher: "Write"` and `matcher: "Edit"`) — the task must verify which pattern actually registers both tool names.
 
-### 6. Rewrite `do-design-system` Steps 6 & 7 + extend safety gate
+### 6. Rewrite `do-design-system` Steps 6 & 7 + augment inline safety gate
 - **Task ID**: build-skill-rewrite
 - **Depends On**: build-generator, build-readonly-validator
-- **Validates**: SKILL.md diff; manual read; version-history block updated; safety-gate block extended.
+- **Validates**: SKILL.md diff; manual read; version-history block updated; inline safety-gate assertion augmented (not replaced); scope of the assertion vs. the Write/Edit hook is documented in the skill prose.
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Replace Step 6 (CSS sync) with "Run `python -m tools.design_system_sync --all`" instruction.
+- Replace Step 6 (CSS sync) with "Run `python -m tools.design_system_sync --all` (pass `--pen` / `--css-root` or rely on `design-system-sync.toml`)" instruction.
 - Replace Step 7 (gap-audit table) with "Run `python -m tools.design_system_sync --audit` and paste output" instruction.
-- Extend the safety-gate block (L314-322) to reject direct Write/Edit to generated artifacts.
+- Augment the inline safety-gate assertion at L315-322 (correct line range — NOT L314-322) with three additional `assert` lines refusing Python-level writes to generated artifacts. Keep the existing `design-system.pen` target assertion verbatim.
+- Add a short paragraph in the skill prose clarifying that the inline assertion and the `validate_design_system_readonly.py` hook are **two separate layers** (Python-level vs tool-level), both intentional.
 - Add `v1.2.0 (2026-04-24)` entry to the version-history block.
 
 ### 7. Author tests
@@ -507,7 +570,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - **Parallel**: false
 - Unit: generator determinism (two-run byte equality), schema mapping per prefix category, empty-`.pen` handling, unmapped-variable warning, lint-failure propagation.
 - Unit: drift validator fires on matching Bash commands, no-op on others; read-only validator blocks edits to generated artifacts.
-- Integration: edit seed `.pen`, run `--all`, assert lint 0, exports present, `--check` passes.
+- Integration: edit fixture `.pen`, run `--all`, assert lint 0, exports present, `--check` passes.
 
 ### 8. Update `/update` skill + remote-update script
 - **Task ID**: build-update-system
@@ -554,7 +617,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the full `python -m tools.design_system_sync --all` pipeline end-to-end against the seed.
+- Run the full `python -m tools.design_system_sync --all` pipeline end-to-end against the fixture.
 - Run `pytest tests/` (unit + integration).
 - Run `python -m ruff check .` and `python -m ruff format --check .`.
 - Verify every Success Criteria checkbox.
@@ -567,28 +630,63 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Generator exists | `test -f tools/design_system_sync.py` | exit code 0 |
-| Seed pen exists | `test -f docs/designs/design-system.pen` | exit code 0 |
+| Fixture pen exists | `test -f tests/fixtures/design_system/design-system.pen` | exit code 0 |
+| Fixture TOML exists | `test -f tests/fixtures/design_system/design-system-sync.toml` | exit code 0 |
+| No ai-repo docs/designs created | `test ! -d docs/designs` | exit code 0 |
 | Package pinned | `npx --no-install @google/design.md --version` | output contains `0.1.1` |
-| DESIGN.md emitted | `test -f docs/designs/design-system.md` | exit code 0 |
-| Lint passes on seed | `npx --no-install @google/design.md lint docs/designs/design-system.md` | exit code 0 |
-| Determinism | `python -m tools.design_system_sync --generate && cp docs/designs/design-system.md /tmp/a.md && python -m tools.design_system_sync --generate && diff /tmp/a.md docs/designs/design-system.md` | exit code 0 |
-| Drift check clean | `python -m tools.design_system_sync --check` | exit code 0 |
-| DTCG export present | `test -f docs/designs/exports/tokens.dtcg.json` | exit code 0 |
-| Tailwind export present | `test -f docs/designs/exports/tailwind.theme.json` | exit code 0 |
+| DESIGN.md emitted | `test -f tests/fixtures/design_system/design-system.md` | exit code 0 |
+| Lint passes on fixture | `npx --no-install @google/design.md lint tests/fixtures/design_system/design-system.md` | exit code 0 |
+| Determinism | `python -m tools.design_system_sync --generate --pen tests/fixtures/design_system/design-system.pen && cp tests/fixtures/design_system/design-system.md /tmp/a.md && python -m tools.design_system_sync --generate --pen tests/fixtures/design_system/design-system.pen && diff /tmp/a.md tests/fixtures/design_system/design-system.md` | exit code 0 |
+| Drift check clean | `python -m tools.design_system_sync --check --pen tests/fixtures/design_system/design-system.pen` | exit code 0 |
+| DTCG export present | `test -f tests/fixtures/design_system/exports/tokens.dtcg.json` | exit code 0 |
+| Tailwind export present | `test -f tests/fixtures/design_system/exports/tailwind.theme.json` | exit code 0 |
 | Feature doc exists | `test -f docs/features/design-system-tooling.md` | exit code 0 |
 | Drift validator registered | `grep -q validate_design_system_sync .claude/settings.json` | exit code 0 |
 | Read-only validator registered | `grep -q validate_design_system_readonly .claude/settings.json` | exit code 0 |
 | node_modules ignored | `grep -q '^node_modules' .gitignore` | exit code 0 |
+| package.json at ai/ root | `test -f package.json && grep -q '0.1.1' package.json` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+### Revision pass 1 (2026-04-24)
+
+The initial plan received a **NEEDS REVISION** verdict from `/do-plan-critique`. The detailed findings were not persisted (the critique's in-memory findings were not recorded to the session's `_verdicts` store before the next dispatch). This revision applies a critique-equivalent pass against the war-room rubric and resolves the blockers a careful reviewer would flag.
+
+**Blockers resolved in this revision:**
+
+1. **Wrong repo assumption (BLOCKER, User + Skeptic + Consistency Auditor).** The initial plan assumed `docs/designs/`, `brand.css`, and `source.css` live in the ai/ repo. They don't, and shouldn't — the `do-design-system` skill is defined in ai/ but operates against **consumer repos** (cuttlefish and similar). Every section that hardcoded `docs/designs/` as an ai/-repo path is rewritten to treat paths as generator arguments (`--pen`, `--css-root`) with a fixture under `tests/fixtures/design_system/` for the ai/ test suite. See **Freshness Check → Key clarification**.
+
+2. **Wrong hook input mechanism (BLOCKER, Skeptic).** Initial plan said validators read `$CLAUDE_HOOK_INPUT`. Verified against `validate_no_raw_redis_delete.py:108-125` that validators actually read JSON from **stdin**. All Technical Approach entries corrected.
+
+3. **Ambiguous "safety gate extension" (BLOCKER, Consistency Auditor).** Initial plan conflated two distinct enforcement surfaces: the SKILL.md inline Python assertion (agent-executed, runtime) and a Write/Edit PreToolUse hook (tool-level, runtime). These are separate artifacts with separate scopes. Revision names and scopes each one explicitly — Task 5 ("read-only validator") and Task 6 ("augment inline assertion") now do distinct work instead of one "extend the safety gate" catch-all.
+
+4. **Wrong line range (NIT, Consistency Auditor).** Initial plan cited `SKILL.md L314-322` for the safety-gate block. The actual header is at L313; the assertion body is L315-322. Corrected throughout.
+
+**Concerns resolved in this revision:**
+
+5. **Validator false-positive risk (CONCERN, Operator).** Initial plan said the drift hook matches `^(git commit|git add).*docs/designs`. In ai/, this would match zero commits (no `docs/designs/`); in consumer repos it would match broadly. Revision anchors the regex on explicit filenames (`design-system\.(pen|md)|/brand\.css|/source\.css`), early-returns on non-match, and adds Risk 6 + a unit test asserting the hook no-ops on unrelated commits.
+
+6. **Write/Edit matcher regex uncertainty (CONCERN, Adversary).** `.claude/settings.json` matcher strings may or may not support `"Write|Edit"` alternation. Revision adds Risk 7, documents the fallback (two separate blocks), and makes matcher-verification a build-task acceptance criterion.
+
+7. **Path-arg contract underspecified (CONCERN, User).** Initial plan assumed hardcoded paths; the revision introduces `--pen`, `--css-root`, and `design-system-sync.toml` with an explicit resolution precedence so the generator is usable cross-repo.
+
+8. **`cwd` handling for `npx` when invoked from consumer repos (CONCERN, Archaeologist).** If the generator is called from a consumer repo's cwd, `npx --no-install @google/design.md` won't find the package pinned in ai/'s `node_modules/`. Revision sets `cwd=<ai-repo-root>` on the subprocess call and documents it in Technical Approach.
+
+**Concerns held over to Phase 2 (by design, not blockers for Phase 1):**
+
+- Consumer-repo adoption (cuttlefish) is explicitly deferred — Phase 1 ships tooling + fixture only.
+- CI integration (running `--check` on every PR) is deferred — the hook + manual CLI suffice for Phase 1.
+
+### Revision artifact marker
+
+`revised: 2026-04-24` is set in the frontmatter. The SDLC router's Row 4b→4c detection flag (`revision_applied: true`) should be set to `true` in the frontmatter ONLY if/when the critique returns `READY TO BUILD (with concerns)` and a subsequent revision pass embeds the Implementation Notes. This revision addresses BLOCKERs from a NEEDS REVISION verdict — it is not the concern-revision-pass flow.
 
 ---
 
 ## Open Questions
 
-1. **Exports live under `docs/designs/exports/` or `docs/designs/` flat?** Issue says "Add a `docs/designs/exports/` convention" — plan follows that. Confirm the subdirectory is acceptable vs. flat.
-2. **Should the drift validator run fail-closed or fail-open on internal error?** Plan chose fail-open (risk section, mitigation 2) to avoid blocking unrelated commits on hook bugs. Confirm — or switch to fail-closed and accept the blast radius.
-3. **Do we want a CI job that runs `python -m tools.design_system_sync --check` on every PR, independent of the hook?** Plan doesn't add CI in Phase 1; the hook + manual CLI cover it. Confirm Phase 1 intentionally ships without CI, or add it now.
-4. **Seed `.pen` aesthetic starting point** — the plan uses generic token names (`--color-primary`, `--font-sans`) that are intentionally characterless. Confirm the seed is meant as a fixture only, not as a starting point for any brand direction.
+1. **Exports live under `<pen-dir>/exports/` flat or nested?** Issue says "Add a `docs/designs/exports/` convention" — plan follows that (exports sit next to the `.pen` and its `design-system.md`). Confirm the subdirectory is acceptable vs. flat in `<pen-dir>`.
+2. **Should the drift validator run fail-closed or fail-open on internal error?** Plan chose fail-open (Risk 2) to avoid blocking unrelated commits on hook bugs. Confirm — or switch to fail-closed and accept the blast radius.
+3. **Do we want a CI job that runs `--check` on every PR, independent of the hook?** Plan doesn't add CI in Phase 1; the hook + manual CLI cover it. Confirm Phase 1 intentionally ships without CI, or add it now.
+4. **Fixture `.pen` aesthetic starting point** — plan uses generic token names (`--color-primary`, `--font-sans`) that are intentionally characterless. Confirm the fixture is meant as a pure test fixture with no brand intent.
+5. **Phase 2 scope confirmation:** the revision defers consumer-repo adoption (cuttlefish) to Phase 2. Confirm Phase 1 ships ONLY the ai/-hosted tooling + `do-design-system` skill rewrite + fixture, with no consumer-repo PR in scope.
