@@ -1814,6 +1814,7 @@ async def get_response_via_harness(
     session_id: str | None = None,
     full_context_message: str | None = None,
     model: str | None = None,
+    system_prompt: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
 ) -> str:
@@ -1859,6 +1860,13 @@ async def get_response_via_harness(
             When None/empty, the CLI uses its own default. Part of the per-
             session model routing cascade (see
             ``agent/session_executor.py::_resolve_session_model``).
+        system_prompt: Optional persona/role text appended to Claude Code's
+            default system prompt via ``--append-system-prompt`` (issue #1148).
+            Use ``--append`` (not ``--system-prompt``) to preserve the default
+            tool-handling protocol — the persona is additive guidance. PM
+            sessions pass ``load_pm_system_prompt(working_dir)`` here; drafter
+            and dev sessions must keep this ``None``. Strings larger than
+            512KB are dropped with a warning to avoid ARG_MAX overflows.
     """
     # Validate prior_uuid format; treat empty or invalid as None
     if prior_uuid and not _UUID_PATTERN.match(prior_uuid):
@@ -1881,6 +1889,25 @@ async def get_response_via_harness(
     if model:
         harness_cmd.extend(["--model", model])
         logger.info(f"[harness] Using --model {model} for session_id={session_id}")
+
+    # System prompt injection (issue #1148). Use --append-system-prompt
+    # (NOT --system-prompt) so Claude Code's default tool-handling protocol is
+    # preserved — the PM persona is additive guidance, not a full replacement.
+    # Defensive size cap: macOS ARG_MAX is 1MB; we cap at 512KB to leave room
+    # for the rest of the argv. The current PM persona is ~25KB.
+    if system_prompt:
+        if len(system_prompt) > 512_000:
+            logger.warning(
+                f"[harness] system_prompt is {len(system_prompt)} bytes; "
+                "exceeds 512KB soft cap, omitting to avoid ARG_MAX (session_id="
+                f"{session_id})"
+            )
+        else:
+            harness_cmd.extend(["--append-system-prompt", system_prompt])
+            logger.info(
+                f"[harness] Appending {len(system_prompt)}-char system prompt for "
+                f"session_id={session_id}"
+            )
 
     # Build subprocess env: inherit current env, merge extras, strip API key
     proc_env = dict(os.environ)
