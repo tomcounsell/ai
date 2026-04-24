@@ -9,9 +9,6 @@ docs/plans/sdlc-1148.md.
 from __future__ import annotations
 
 import argparse
-import io
-import sys
-from contextlib import redirect_stderr
 
 import pytest
 
@@ -80,9 +77,7 @@ class TestCreateEnrichmentHeaderGuard:
             lambda cwd: "test-1148",
         )
 
-        args = _make_args(
-            "scope: database refactor\nLet's look at the connection pool config"
-        )
+        args = _make_args("scope: database refactor\nLet's look at the connection pool config")
         # We don't care if the downstream code raises (no Redis in this test);
         # we only care that the GUARD itself does not trip.
         try:
@@ -108,9 +103,7 @@ class TestCreateEnrichmentHeaderGuard:
             lambda cwd: "test-1148",
         )
 
-        args = _make_args(
-            "Fix the bug where SESSION_ID: prefix sometimes appears in logs"
-        )
+        args = _make_args("Fix the bug where SESSION_ID: prefix sometimes appears in logs")
         try:
             valor_session.cmd_create(args)
         except Exception:

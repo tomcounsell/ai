@@ -23,9 +23,7 @@ from pathlib import Path
 
 import pytest
 
-_COMPLETION_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "agent" / "session_completion.py"
-)
+_COMPLETION_PATH = Path(__file__).resolve().parent.parent.parent / "agent" / "session_completion.py"
 
 
 def test_drafter_calls_omit_system_prompt_via_grep():

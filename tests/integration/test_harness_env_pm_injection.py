@@ -16,7 +16,6 @@ match the contract.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -49,9 +48,7 @@ class TestPMHarnessFullChain:
     """End-to-end env + argv assembly for the PM harness path."""
 
     @pytest.mark.asyncio
-    async def test_pm_session_full_argv_contains_persona_and_env(
-        self, monkeypatch, tmp_path
-    ):
+    async def test_pm_session_full_argv_contains_persona_and_env(self, monkeypatch, tmp_path):
         """A PM session through get_response_via_harness produces the expected argv.
 
         Asserts:
@@ -103,10 +100,10 @@ class TestPMHarnessFullChain:
         # The current persona file mentions "project-manager" or "PM" content;
         # we require something distinctive so a future swap to the dev persona
         # would break this assertion loudly.
-        assert any(token in persona.lower() for token in ("pm", "project manager", "project-manager", "stub project claude.md")), (
-            f"Persona content must contain a PM-specific signal. First 200 chars: "
-            f"{persona[:200]!r}"
-        )
+        assert any(
+            token in persona.lower()
+            for token in ("pm", "project manager", "project-manager", "stub project claude.md")
+        ), f"Persona content must contain a PM-specific signal. First 200 chars: {persona[:200]!r}"
 
         # Capture the cmd + proc_env passed to the leaf subprocess invoker.
         captured: dict = {}
@@ -162,8 +159,14 @@ class TestPMHarnessFullChain:
         """Negative case: dev sessions get no persona, no PM-only env vars."""
         from agent.sdk_client import _resolve_sentry_auth_token, get_response_via_harness
 
-        # Even with the env var set, a dev session must not propagate it.
+        # Even with the source env vars set, a dev session must not perform
+        # the PM-only injection. We still need to clear the inherited
+        # SENTRY_AUTH_TOKEN (which may be set by the user's shell or other
+        # tests' monkeypatches) so the proc_env assertion isn't fooled by
+        # ambient state — the assertion's purpose is to confirm the dev path
+        # never INJECTS it via the executor's _harness_env logic.
         monkeypatch.setenv("SENTRY_PERSONAL_TOKEN", "should-not-leak")
+        monkeypatch.delenv("SENTRY_AUTH_TOKEN", raising=False)
 
         wd = _write_repo_persona(tmp_path)
 
@@ -224,9 +227,7 @@ class TestPMHarnessFullChain:
         assert cmd[cmd.index("--model") + 1] == "sonnet"
 
     @pytest.mark.asyncio
-    async def test_load_pm_system_prompt_failure_does_not_crash(
-        self, monkeypatch, tmp_path
-    ):
+    async def test_load_pm_system_prompt_failure_does_not_crash(self, monkeypatch, tmp_path):
         """If load_pm_system_prompt raises, the harness call still proceeds.
 
         Mirrors the [pm-persona-missing] fail-soft path in

@@ -131,9 +131,7 @@ class TestHarnessEnvPassthrough:
         from config.enums import SessionType
 
         for session_type in ("pm", "teammate", "dev"):
-            session = _make_session(
-                session_type, f"{session_type}-session-type-001", redis_test_db
-            )
+            session = _make_session(session_type, f"{session_type}-session-type-001", redis_test_db)
             _harness_env: dict[str, str] = {
                 "AGENT_SESSION_ID": session.agent_session_id or "",
                 "CLAUDE_CODE_TASK_LIST_ID": "",
