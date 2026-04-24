@@ -76,9 +76,22 @@ valor-telegram read --chat "Dev: Valor" --limit 10
 # Search messages
 valor-telegram read --chat "Dev: Valor" --search "keyword"
 
-# List chats
+# Explicit numeric chat ID — bypasses the name matcher
+valor-telegram read --chat-id -1001234567 --limit 10
+
+# DM via whitelisted username
+valor-telegram read --user tom --limit 10
+
+# Discover chats by name fragment
+valor-telegram chats --search "psy"
+
+# List all chats
 valor-telegram chats
 ```
+
+> **Freshness header**: every successful read prints `[chat_name · chat_id=N · last activity: T]` before the messages. If the age (`3m ago`, `2d ago`, etc.) is older than you expect, you likely resolved to the wrong chat — re-run with `--chat-id` or a more specific `--chat`.
+>
+> **Ambiguity errors**: if `--chat NAME` matches more than one chat, the CLI exits non-zero and prints a candidate list on stderr. Parse the first column as `chat_id` and re-run with `--chat-id <id>`.
 
 > **TOOL USAGE ONLY** — The `valor-telegram send` command is for programmatic tool
 > invocation only. Never include `valor-telegram send`, `--chat`, or CLI syntax
