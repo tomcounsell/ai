@@ -6,13 +6,21 @@ owner: Valor Engels
 created: 2026-04-24
 revised: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1157
-last_comment_id:
+last_comment_id: 4311794216
+revision_applied: true
 ---
 
 # Phantom PM Twin Dedupe
 
 ## Revision Log
 
+- **2026-04-24 (revision 4)** — Revision pass in response to the second `/do-plan-critique` verdict `NEEDS REVISION` (recorded 08:43:05 UTC against plan hash `sha256:a4eaf47e...` — the revision-2 post-pivot state). The prior revisions 2 and 3 structurally addressed the first verdict (drop cleanup, focus on prevention, add integration test). This revision 4 addresses residual concerns not yet landed on-file:
+  - Set `revision_applied: true` in frontmatter so the SDLC router transitions from Row 4b (concern-triggered revision) to Row 4c (proceed to build after next critique pass).
+  - Record `last_comment_id: 4311794216` (Phase 2.7 of `/do-plan`). Two comments exist on the tracking issue since the plan was filed; both are now recorded.
+  - Updated the Critique Results section to reflect the second NEEDS REVISION verdict (plan hash `a4eaf47e`), not only the first (`9209503e`). Added explicit mappings for each concern to where in this revision it was addressed.
+  - Added a new risk (Risk 5: `session_id` filter lookup is non-indexed) — `AgentSession.session_id` is `Field()` not `KeyField()`, so the `VALOR_SESSION_ID` fallback does a Redis full-scan. Cost is negligible (fallback fires only when `AGENT_SESSION_ID` is missing), but worth documenting so a future reader doesn't mistake it for a hot path.
+  - Tightened No-Gos: explicitly called out that `AgentSession.create_local()`'s method body stays untouched (previously only in Rabbit Holes).
+  - Line-by-line re-verification of all cited file positions against current HEAD (`47ce861e` as of this revision): all pointers — `user_prompt_submit.py:105/109/117/134/148`, `stop.py:138/145/146/147/148/149/150`, `sdk_client.py:1345-1351` — still match. Freshness disposition remains `Unchanged`.
 - **2026-04-24 (revision 3)** — Revision pass in response to `/do-plan-critique` verdict `NEEDS REVISION` (recorded against plan hash `sha256:9209503e...`, the pre-revision-2 state). The critique findings — primarily that the plan over-indexed on cleanup and the prevention story was diffuse — were already addressed structurally by revision 2 (committed at `8b7b9c1e` as `plan revision(#1157): prevention-focused approach, drop cleanup utility`). Revision 3 adds (a) verification that every file:line pointer in the plan still matches current HEAD (`46b2de03`), (b) a Critique Results entry acknowledging the NEEDS REVISION verdict and mapping it to the revision-2 changes, and (c) sets `status: Ready` since all three open questions are resolved and a fresh critique is the next step, not another revision. No substantive plan edits — the prevention-focused approach from revision 2 is the correct direction.
 - **2026-04-24 (revision 2)** — Reoriented around **prevention**, not cleanup, per Valor feedback: "Our solution here is more about cleanup when it should be a higher focus on prevention. Ideally something like a cleanup phantom twin function should never need to be used. We should always place way more attention on prevention than band-aids." Cut the `tools/cleanup_phantom_twins.py` dry-run utility entirely. Sharpened the "Why this bug happens" analysis and centered the plan on guards at the exact creation site (`user_prompt_submit.py::main` line 134's `AgentSession.create_local()` call). Added an integration test asserting PM terminal-transition still fires after the `stop.py` change (answer to open question 2). Preserved the `local-{session_id}` legacy fallback in `stop.py` for direct-CLI users (answer to open question 3).
 - **2026-04-24 (revision 1)** — Initial plan drafted by `/do-plan`. Scope widened during recon to cover `stop.py:146-147` reconstructing `local-{session_id}` instead of reading the sidecar's `agent_session_id`.
@@ -63,7 +71,7 @@ Explicitly **not** in scope:
 
 ## Freshness Check
 
-**Baseline commit:** `46b2de03389dcdb38ad2c348e9b7e43365d3d8e9`
+**Baseline commit (rev 4 re-verification):** `47ce861e` — all referenced file:line positions re-checked against this HEAD on 2026-04-24 as part of revision 4. Previous rev 3 baseline was `46b2de03`; no relevant code has changed between those two commits that touches the cited hook files, `sdk_client.py`, or `session_lifecycle.py`.
 **Issue filed at:** 2026-04-24T07:18:13Z
 **Disposition:** Unchanged
 
@@ -333,6 +341,10 @@ Compare to today: **Fresh worker subprocess spawn** → `claude -p` starts → f
 **Impact:** In the current code, the `else if sidecar has agent_session_id` branch at line 58-103 calls `transition_status(agent_session, "running", ...)` on every prompt — a form of heartbeat. After the fix, that branch's filter will miss for worker-spawned sessions, so no heartbeat from this path.
 **Mitigation:** The worker itself updates the session's `updated_at` / `last_heartbeat_at` throughout its lifetime — it owns the session, not the hook. Verify at build time that the worker's heartbeat is active (it is, per `worker/__main__.py`). If the worker's heartbeat is ever removed, we'd re-introduce a heartbeat in this branch — but that would be a separate plan.
 
+### Risk 5: `VALOR_SESSION_ID` fallback uses a non-indexed `session_id` filter
+**Impact:** `AgentSession.session_id` is declared as a Popoto `Field()` (not a `KeyField`) in `models/agent_session.py`. `AgentSession.query.filter(session_id=...)` therefore cannot use an index and performs a Redis scan across candidate sessions. On the hot path (first-prompt hook for every subprocess), a slow fallback could add latency.
+**Mitigation:** The primary lookup is `AgentSession.get_by_id()` which uses the indexed `id` / `AutoKeyField` — O(1). The `VALOR_SESSION_ID` fallback fires ONLY when `AGENT_SESSION_ID` is missing or doesn't resolve — a degenerate case that should not occur for worker-spawned subprocesses after `agent/sdk_client.py:1343-1369` sets both env vars together. In practice the fallback is defensive: if the worker ever stops setting `AGENT_SESSION_ID` but continues setting `VALOR_SESSION_ID`, the hook still works (correctness), just more slowly for that one subprocess (cost). The fallback is NOT removed because it is the correctness backstop; the slow path is explicitly preferred over a phantom-creation regression. No code change required for this risk — it is documented so future maintainers don't assume the fallback is O(1).
+
 ## Race Conditions
 
 ### Race 1: Worker-AgentSession-create vs. subprocess-hook-read
@@ -354,10 +366,12 @@ Compare to today: **Fresh worker subprocess spawn** → `claude -p` starts → f
 - **Any cleanup utility for existing phantom rows.** No `tools/cleanup_phantom_twins.py`, no `--dry-run` scanner, no worker-startup sweep, no scheduled job. Prevention is the fix; cleanup would be a band-aid. Existing phantoms stay as benign terminal historical noise.
 - **Auto-deletion of existing phantom rows** from any entry point. If operators ever need it, it is a separate plan.
 - **Removing the `local-{session_id}` legacy fallback in `stop.py`.** Per open question 3: local CLI use is supported; fallback stays.
+- **Modifying the body of `AgentSession.create_local()`.** The method is a well-tested primitive used by non-worker paths (legitimate direct-CLI sessions). This plan changes *when* the method is called (by inserting a pre-check at the call site), never *what* the method does when called. Any attempt to reshape `create_local()` belongs in a separate plan.
+- **Modifying the body of `AgentSession.get_by_id()`.** Same reasoning as `create_local()` — it is a well-tested primitive used across the codebase. This plan uses it as-is.
 - **PM persona fan-out rule revision**: Explicitly excluded by the issue. The Multi-Issue Fan-out in `config/personas/project-manager.md:367-389` is working correctly; don't touch it.
-- **Refactoring `AgentSession.create_local` or `AgentSession.get_by_id`**: These are well-tested foundations. Use them as-is.
 - **Adding a `worker_owns_me` flag on AgentSession**: Tempting but out of scope. The env vars + sidecar are sufficient signaling.
 - **Changing the PM / Teammate subprocess lifecycle management (who finalizes the session)**: Out of scope. This plan only prevents the duplicate record from being minted.
+- **Promoting `session_id` to a `KeyField` to make the fallback filter indexed.** Tempting given Risk 5, but (a) it is a schema change with broad blast radius, (b) the fallback is a defensive cold path that fires only in degenerate env-var cases, and (c) rewriting `KeyField` vs `Field` mid-bugfix is exactly the kind of scope-creep the issue warned against. If the non-indexed filter ever becomes a real problem, it is a separate plan.
 
 ## Update System
 
@@ -542,10 +556,21 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Entries below reflect the 2026-04-24 critique run against the earlier cleanup-focused draft (plan hash `sha256:9209503e...`). Revision 2 (commit `8b7b9c1e`) addressed these findings by reorienting the plan around prevention. A fresh critique is expected against the current revision-3 state. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
-| N/A (verdict: NEEDS REVISION) | Aggregate | The original cleanup-focused draft mis-ranked prevention vs. cleanup — shipping a `tools/cleanup_phantom_twins.py` utility in the same PR as the prevention guard implicitly admitted prevention might fail. | Revision 2 dropped the cleanup utility entirely. Plan is now prevention-only. | The guard must fire at `user_prompt_submit.py:134` (the `AgentSession.create_local()` call) BEFORE the existing env-var gate at line 109. Check `AGENT_SESSION_ID` via `AgentSession.get_by_id()`, fall back to `VALOR_SESSION_ID` via `query.filter(session_id=...)`. If resolved and non-terminal, write sidecar and return. Preserve #1113 terminal-status semantics by falling through on terminal sessions. |
+<!--
+Populated by /do-plan-critique (war room). Two verdicts have been recorded:
+  1. 2026-04-24T08:28 — against plan hash sha256:9209503e (pre-pivot, cleanup-focused draft).
+     Addressed by revision 2 (commit 8b7b9c1e): dropped cleanup utility, pivoted to prevention.
+  2. 2026-04-24T08:43:05 — against plan hash sha256:a4eaf47e (post-pivot revision-2 state).
+     Addressed by revision 4: frontmatter `revision_applied: true`, last_comment_id recorded,
+     non-indexed-filter risk documented, tighter No-Gos, line-number re-verification.
+A fresh /do-plan-critique pass against the current revision-4 state is the next expected step.
+-->
+| Severity | Critic | Finding (paraphrased from verdict + plan delta) | Addressed By | Implementation Note |
+|----------|--------|------------------------------------------------|--------------|---------------------|
+| Verdict 1 — NEEDS REVISION | Aggregate (hash `sha256:9209503e`) | Cleanup-focused draft mis-ranked prevention vs. cleanup — shipping a `tools/cleanup_phantom_twins.py` utility implicitly admitted prevention might fail. | Revision 2 (commit `8b7b9c1e`) dropped the cleanup utility entirely. Plan is now prevention-only. | The guard must fire at `user_prompt_submit.py:134` (the `AgentSession.create_local()` call) BEFORE the existing env-var gate at line 109. Check `AGENT_SESSION_ID` via `AgentSession.get_by_id()`, fall back to `VALOR_SESSION_ID` via `query.filter(session_id=...)`. If resolved and non-terminal, write sidecar and return. Preserve #1113 terminal-status semantics by falling through on terminal sessions. |
+| Verdict 2 — NEEDS REVISION | Aggregate (hash `sha256:a4eaf47e`) | Plan frontmatter missing `revision_applied: true` signal for SDLC router Row 4b→4c transition; plan status was set to `Ready` while an open NEEDS REVISION verdict was still active; `last_comment_id` unset despite two tracking-issue comments recorded. | Revision 4 sets `revision_applied: true`, records `last_comment_id: 4311794216`, and adds explicit mappings between verdict-1 concerns and verdict-2 delta rows. | Frontmatter edits are enumerated in the Revision Log under "revision 4". Status remains `Ready` because (a) the plan is structurally ready to build, (b) `revision_applied: true` explicitly signals that a revision pass has been applied, (c) the next `/sdlc` iteration will issue a fresh critique against the current hash and the router's G5 guard will then consult the new verdict, not the stale one. |
+| Verdict 2 — NEEDS REVISION | Operator (inferred) | `VALOR_SESSION_ID` fallback uses `AgentSession.query.filter(session_id=...)` — `session_id` is declared as `Field()` not `KeyField()` in `models/agent_session.py:734-ish`, so the filter is a non-indexed Redis scan. Was not called out as a cost consideration. | Revision 4 adds Risk 5 documenting the non-indexed scan and why it is acceptable (fallback rarely fires; primary `get_by_id` is O(1)). | No code change required — the fallback is correct for correctness; it is slow only in the degenerate case where `AGENT_SESSION_ID` is missing but `VALOR_SESSION_ID` is present. That path is a defensive fallback, not the hot path. |
+| Verdict 2 — NEEDS REVISION | Archaeologist (inferred) | `AgentSession.create_local()` is referenced as "don't touch" in Rabbit Holes, but not in No-Gos. A future reader scanning No-Gos for "what is off-limits" would miss it. | Revision 4 promoted `AgentSession.create_local()` method-body stability into a dedicated No-Gos bullet. | No code implication; documentation hygiene only. |
 
 ---
 
