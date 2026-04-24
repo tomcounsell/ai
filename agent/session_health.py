@@ -206,7 +206,9 @@ def _is_memory_tight() -> bool:
 
         available_bytes = psutil.virtual_memory().available
         result = available_bytes < 400 * 1024 * 1024  # 400 MB
-    except Exception:
+    except (
+        Exception
+    ):  # swallow-ok: fail-open — memory check failure must not stall session recovery
         result = False  # fail-open
     _MEMORY_CACHE = (now_mono, result)
     return result

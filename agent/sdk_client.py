@@ -444,7 +444,9 @@ def _log_context_usage_if_risky(
                 model,
                 input_tokens,
             )
-    except Exception:
+    except (
+        Exception
+    ):  # swallow-ok: observability-only; context-logging must never crash the session
         # Observability must never crash the turn. See issue #1099 Mode 2.
         return
 

@@ -36,8 +36,18 @@ def clean_sessions():
         pass
 
 
-def test_exit_returncode_field_defaults_to_none():
-    """The new field must default to None — no migration required for existing rows."""
+def test_exit_returncode_field_defaults_to_zero():
+    """The new field must default to 0 (= "no exit code recorded").
+
+    Rationale: ``IntField(null=True, default=None)`` crashes Popoto serialization
+    for pre-existing rows in Redis (the descriptor returns the ``IntField``
+    class itself instead of ``None``). All other IntFields on this model use
+    ``default=0``; ``exit_returncode`` follows the same convention. The only
+    reader (``agent/session_health.py``) checks for ``== -9`` (OS OOM kill),
+    so ``0`` and "healthy exit" are safely conflated with "not recorded".
+    See ``test_agent_session_exit_returncode_backcompat.py`` for the
+    serialization regression guard.
+    """
     s = AgentSession(
         project_key="test-resilience-mode-4-fielddefault",
         chat_id="x",
@@ -47,7 +57,7 @@ def test_exit_returncode_field_defaults_to_none():
         agent_session_id="x-default-test",
     )
     try:
-        assert s.exit_returncode is None
+        assert s.exit_returncode == 0
     finally:
         try:
             s.delete()
