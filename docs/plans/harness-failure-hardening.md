@@ -6,6 +6,7 @@ owner: Tom Counsell
 created: 2026-04-24
 tracking: https://github.com/tomcounsell/ai/issues/1099
 last_comment_id:
+revision_applied: true
 ---
 
 # Harness Failure Hardening (four known modes)
@@ -131,24 +132,32 @@ The four fixes touch three distinct paths. Each fix is independent — no orderi
    via the return tuple.
 2. New: non-blocking best-effort write of `AgentSession.exit_returncode = -9`
    via `save(update_fields=["exit_returncode"])` inside try/except.
-3. In the health-check recovery branch (`session_health.py:921-947` where
-   `transition_status(entry, "pending", ...)` is called), before the
-   transition: if `entry.exit_returncode == -9` AND `entry.recovery_attempts == 0`
-   AND `psutil.virtual_memory().available < 400MB`, skip the immediate re-queue
-   and instead set `entry.started_at = time.time() + 120` as a delayed retry.
-   (The worker's pending-scan logic already honors future `started_at` on some
-   paths; if not, we add a `retry_after_ts` field — see Spike spike-1 below.)
+3. In the health-check recovery branch (`session_health.py:872-947` where
+   `entry.recovery_attempts` is bumped and `transition_status(entry, "pending", ...)`
+   is called), BEFORE the recovery_attempts bump at line 873, capture the pre-bump
+   value (`pre_bump_attempts = entry.recovery_attempts or 0`) and evaluate:
+   if `entry.exit_returncode == -9` AND `pre_bump_attempts == 0`
+   AND `_is_memory_tight()`:
+     - Set `entry.scheduled_at = datetime.now(UTC) + timedelta(seconds=120)`
+     - Save the session (partial-save of `scheduled_at` + `recovery_attempts`)
+     - STILL bump recovery_attempts (or skip the bump — see ordering note below)
+     - Still transition to `pending` (or skip the transition this tick — see below)
+   The pending-scan in `agent/session_pickup.py:231-235` and `:396-400`
+   already honors `scheduled_at > now` by skipping the session. No new field
+   is needed; `scheduled_at` already serves as the "not before" timestamp.
 ```
 
 ### Spike Results
 
-#### spike-1: Does the existing pending-scan honor a future `started_at`?
+#### spike-1: Which existing field, if any, does the pending-scan honor as a "not before" timestamp?
 
-- **Assumption**: We can implement the 120s OOM backoff by setting `started_at` to a future epoch.
-- **Method**: code-read — `agent/agent_session_queue.py` + `worker/__main__.py` scan of pending sessions.
-- **Finding**: `started_at` is set to `None` on recovery-to-pending (`session_health.py:926`) and written at execution start. It is NOT polled as a "not before" timestamp in the pending scan. **Setting it to a future time would be a silent no-op at best and a correctness bug at worst** (health check could re-trigger re-queue on a "legacy session" branch because `started_ts is None` is its "no progress" signal for legacy sessions).
+- **Assumption**: We need a way to defer a re-queued session's eligibility for pickup by 120s.
+- **Method**: code-read — `agent/session_pickup.py` (`_pop_agent_session` and `_pop_agent_session_with_fallback`), `agent/agent_session_queue.py`, `models/agent_session.py`.
+- **Finding (revised post-critique)**: Two fields were inspected.
+  1. `started_at` is set to `None` on recovery-to-pending (`session_health.py:926`) and written at execution start. It is NOT polled as a "not before" timestamp. Repurposing it would be a silent no-op / correctness bug.
+  2. `scheduled_at = DatetimeField(null=True)` (models/agent_session.py:139) IS honored by the pending-scan. Both `_pop_agent_session` (session_pickup.py:231-235) and `_pop_agent_session_with_fallback` (session_pickup.py:396-400) filter out sessions whose `scheduled_at` is in the future (`if sa and sa > now: skip`). The model docstring on line 139 literally says: "`_pop_job()` skips if > now()". The field supports both `datetime` and `float` (float is auto-converted via `_DATETIME_FIELDS` coercion at line 355).
 - **Confidence**: high
-- **Impact on plan**: Add a new `retry_after_ts = FloatField(default=None)` on `AgentSession`. Pending-scan + recovery path checks it before promoting to `running`. This is a minimal (1 field, 2 read sites) addition — simpler than repurposing `started_at`.
+- **Impact on plan (REVISED)**: Do NOT introduce a new `retry_after_ts` field. Use the existing `scheduled_at` field — set `entry.scheduled_at = datetime.now(UTC) + timedelta(seconds=120)` on OOM-deferred re-queues. This eliminates one new field + two new read-site edits from the scope. The pending-scan paths at `session_pickup.py:231-235` and `:396-400` already honor it; no additional guards needed in `_ensure_worker` or the worker pending-drain loop.
 
 #### spike-2: Is `stderr_text` truncation at 2000 chars safe for sentinel matching?
 
@@ -165,7 +174,7 @@ The four fixes touch three distinct paths. Each fix is independent — no orderi
   - `_run_harness_subprocess` return tuple widens from 5 to 6 elements: adds `stderr_snippet: str | None`. All three call sites in `get_response_via_harness` must unpack accordingly.
   - `get_response_via_harness` public signature unchanged (still `-> str`). On thinking-block corruption it raises `HarnessThinkingBlockCorruption` (new typed exception); the caller is responsible for catching and finalizing to `failed`.
 - **Coupling**: Mode 3 couples `session_health.py` to `last_compaction_ts` (new read). Already coupled to `last_stdout_at`, `last_heartbeat_at`, etc. — low additional coupling.
-- **Data ownership**: `pre_compact_hook` owns writes to `last_compaction_ts` (already wired). `_run_harness_subprocess` owns writes to `exit_returncode` (new). Health check owns writes to `retry_after_ts` (new) + reads of `last_compaction_ts` + `exit_returncode`.
+- **Data ownership**: `pre_compact_hook` owns writes to `last_compaction_ts` (already wired). `_run_harness_subprocess` / `get_response_via_harness` owns writes to `exit_returncode` (new, best-effort). Health check owns writes to `scheduled_at` (existing field, new writer) + reads of `last_compaction_ts` + `exit_returncode` + `recovery_attempts` (pre-bump). No new field introduced for Mode 4 — only `exit_returncode`.
 - **Reversibility**: All four fixes are independently reversible. Each behind an env-flag gate would be trivial; we instead use unconditional code with behavioral tests asserting both fire-and-don't-fire paths.
 
 ## Appetite
@@ -191,7 +200,7 @@ No prerequisites — all required infrastructure (Popoto ORM, `psutil`, `asyncio
 - **Mode 1 — Thinking block sentinel**: A new `THINKING_BLOCK_SENTINEL` constant + `HarnessThinkingBlockCorruption` exception in `agent/sdk_client.py`. `_run_harness_subprocess` returns `stderr_snippet`; `get_response_via_harness` raises when it matches.
 - **Mode 2 — Context usage warning log**: A new `_log_context_usage_if_risky(session_id, model, usage_input_tokens)` helper in `agent/sdk_client.py`, called once per turn from `get_response_via_harness` after the subprocess exits. No state change.
 - **Mode 3 — Tier 2 `compacting` reprieve gate**: Add a `compacting` branch to `_tier2_reprieve_signal` in `agent/session_health.py`. Reads `entry.last_compaction_ts`.
-- **Mode 4 — OOM backoff**: New `AgentSession` fields `exit_returncode: IntField(null=True, default=None)` and `retry_after_ts: FloatField(default=None)`. Harness writes `exit_returncode`. Health check's recovery branch checks the OOM condition and defers by setting `retry_after_ts = now + 120`. Pending-scan and recovery-to-pending logic respect `retry_after_ts`.
+- **Mode 4 — OOM backoff**: One new `AgentSession` field: `exit_returncode: IntField(null=True, default=None)`. Harness writes it best-effort after subprocess exit. Health check's recovery branch checks the OOM condition (using a pre-bump-captured `recovery_attempts` value, before the line 873 increment) and defers the next eligibility by setting the existing `scheduled_at` field to `now + 120s`. The pending-scan (`agent/session_pickup.py:231-235` and `:396-400`) already skips sessions whose `scheduled_at` is in the future — no new read sites needed.
 
 ### Flow
 
@@ -217,9 +226,24 @@ Operator opens Telegram → Dev session → Claude session hits
 - After the stale-UUID fallback completes, before returning: if the final `stderr_snippet` contains `THINKING_BLOCK_SENTINEL` AND `returncode != 0`, raise `HarnessThinkingBlockCorruption("Session context corrupted — please start a new thread")`.
 - In `agent/session_executor.py` (wherever `get_response_via_harness` is awaited in the main execute path — identified during build by grep), catch `HarnessThinkingBlockCorruption` and call `finalize_session(session, "failed", reason=str(exc))`.
 
+**Implementation Note (concern #1 — sentinel confidence)**: The `"redacted_thinking"` string is derived from the amux blog post ("Every way Claude Code crashes") and has not been confirmed against Anthropic's published API error taxonomy. To detect false positives in production and provide an escape hatch:
+
+1. On every sentinel match, emit a structured log BEFORE raising: `logger.warning("[harness] THINKING_BLOCK_SENTINEL matched: session_id=%s returncode=%d stderr_prefix=%r", session_id, returncode, stderr_snippet[:200])`. This gives operators a grep-able signal (`grep "THINKING_BLOCK_SENTINEL matched"`) to audit for false positives during the first weeks of deployment.
+2. Add a feature flag: read `os.environ.get("DISABLE_THINKING_SENTINEL", "")` at module load. If truthy (`"1"`, `"true"`, etc.), the sentinel check becomes a no-op and `get_response_via_harness` returns its normal fallback result. The env var lets operators disable the check at runtime without a code rollback if it misfires.
+3. Document the flag in the feature doc update (`docs/features/session-recovery-mechanisms.md`) so operators know how to opt out.
+
 #### Mode 2
 
-- In `config/models.py`, `MODELS[name]["context_window"]` already exists (lines 161, 178, 196, 214). Confirm the public reader signature by grep — likely `get_model_context_window(model_name)` or direct dict access.
+- In `config/models.py`, `MODELS[name]["context_window"]` already exists as a dict key (grep confirmed: lines 161, 178, 196, 214 all have `"context_window": 200_000` or `128_000`). The data layout is `MODELS[model_name]` -> dict with `"context_window"` key (integer number of tokens). There is no `ModelConfig` dataclass or `context_window_tokens` attribute — just a nested dict.
+- Add a public accessor in `config/models.py` to keep `sdk_client.py` decoupled from the dict layout:
+  ```python
+  def get_model_context_window(model_name: str) -> int | None:
+      """Return the context window (in tokens) for a registered model, or None if unknown."""
+      entry = MODELS.get(model_name)
+      if entry is None:
+          return None
+      return entry.get("context_window")
+  ```
 - In `agent/sdk_client.py`, add a module-level helper:
   ```python
   def _log_context_usage_if_risky(session_id, model, usage) -> None:
@@ -227,8 +251,14 @@ Operator opens Telegram → Dev session → Claude session hits
       try:
           input_tokens = int((usage or {}).get("input_tokens", 0) or 0)
           if input_tokens <= 0: return
-          window = _get_model_context_window(model)  # from config/models.py
-          if not window: return
+          from config.models import get_model_context_window
+          window = get_model_context_window(model)
+          if not window:
+              logger.warning(
+                  "[harness] context_usage: unknown model=%r, skipping pct calc (session_id=%s)",
+                  model, session_id,
+              )
+              return
           pct = input_tokens / window
           if pct > 0.75:
               logger.warning("context_usage pct=%.2f session_id=%s model=%s input_tokens=%d",
@@ -239,15 +269,29 @@ Operator opens Telegram → Dev session → Claude session hits
 - Call it from `get_response_via_harness` after `accumulate_session_tokens` (existing line 1990), using the same `usage` dict and the `model` argument already in scope.
 - Note: the emitted log record is `logger.warning` at the string level, NOT a raw JSON dict. This matches the rest of the codebase's logging conventions (grep-friendly structured-prefix style). Dashboard/grep can pick it up via `grep "context_usage"`.
 
+**Implementation Note (concern #2 — model context window lookup)**: The lookup path was verified by grep. `config/models.py` stores context windows in `MODELS[name]["context_window"]` (int, in tokens). No dataclass exists — the storage is plain dicts. The new `get_model_context_window(model_name)` accessor (added in this plan) takes a string model name and returns `int | None`. If the model name is not in `MODELS` (e.g., a new model added to the project without being registered, or a caller passing an alias), the helper returns `None` and `_log_context_usage_if_risky` logs a WARNING with the unknown-model signal but does not raise and does not emit the `context_usage` log. Test case `test_harness_context_usage_log.py::test_unknown_model_no_crash` covers this.
+
 #### Mode 3
 
+- In `agent/session_health.py`, add a module-level constant (distinct from `STDOUT_FRESHNESS_WINDOW`, even though both currently default to 600s):
+  ```python
+  # Post-compaction grace period: after a successful compaction, the session
+  # often returns to idle briefly before the next turn. During this window
+  # the Tier 2 gate reprieves rather than killing. Separate from
+  # STDOUT_FRESHNESS_WINDOW so the two can evolve independently.
+  # Env-tunable via COMPACT_REPRIEVE_WINDOW_SECS. (Issue #1099.)
+  COMPACT_REPRIEVE_WINDOW_SEC = int(os.environ.get("COMPACT_REPRIEVE_WINDOW_SECS", 600))
+  ```
 - In `agent/session_health.py::_tier2_reprieve_signal`, PREPEND a `compacting` gate before the existing (c)/(d)/(e) gates:
   ```python
-  # (b) compacting — reprieve if a compaction completed in the last 600s.
+  # (b) compacting — reprieve if a compaction completed in the last
+  # COMPACT_REPRIEVE_WINDOW_SEC seconds. Companion writer: pre_compact_hook
+  # updates AgentSession.last_compaction_ts on every successful backup.
+  # See issue #1099 Mode 3.
   lct = getattr(entry, "last_compaction_ts", None)
   if lct is not None:
       try:
-          if (time.time() - float(lct)) < STDOUT_FRESHNESS_WINDOW:
+          if (time.time() - float(lct)) < COMPACT_REPRIEVE_WINDOW_SEC:
               return "compacting"
       except (TypeError, ValueError):
           pass
@@ -255,14 +299,18 @@ Operator opens Telegram → Dev session → Claude session hits
 - Order: `compacting` → `children` → `alive` → `stdout`. Telemetry counter string extends: `tier2_reprieve_total:compacting`.
 - Add an `import time` if not already present at the top of `session_health.py`. (It is — confirmed via grep.)
 
+**Implementation Note (concern #3 — `last_compaction_ts` writer race with subprocess context)**: `pre_compact_hook` fires from the Claude Code hooks subsystem, which is a subprocess spawned by the Claude harness (not the worker process). The hook has access to `AGENT_SESSION_ID` via its environment (set by the SDK client when spawning `claude -p`). The existing `_update_session_cooldown()` in `agent/hooks/pre_compact.py:131-175` already looks up the `AgentSession` by `claude_session_uuid` (which is in scope for the hook via the hook payload). That function uses the Popoto ORM (`AgentSession.query.filter(...)` + `s.save(update_fields=["last_compaction_ts", ...])`) — no raw Redis. This infrastructure is already in place from PR #1135. For Mode 3, we do NOT add a new writer; we only add the reader in `session_health.py`. The race between hook-write and health-check-read is addressed in the Race Conditions section (Race 2 — field write is atomic via single Redis HSET). Test `test_session_health_compacting_reprieve.py` simulates the read side by creating an `AgentSession` with `last_compaction_ts` already populated (the hook is not actually run); a separate test (`test_pre_compact_hook_updates_session_cooldown.py`, which already exists from PR #1135) covers the writer.
+
+**Implementation Note (concern #4 — distinct constant, no window collision)**: `STDOUT_FRESHNESS_WINDOW` governs how long a silent subprocess is considered "still alive" before Tier 1 flags it for kill. `COMPACT_REPRIEVE_WINDOW_SEC` governs how long after a compaction the Tier 2 gate reprieves a kill candidate. Both happen to default to 600s today, but they answer different questions and may drift apart in the future (e.g., if compaction legitimately takes longer than 10 minutes in some configurations, or if the stdout-freshness threshold is tightened). Having two named constants makes the relationship explicit and self-documenting. Environment overrides: `STDOUT_FRESHNESS_WINDOW_SECS` (existing) and `COMPACT_REPRIEVE_WINDOW_SECS` (new, introduced by this plan).
+
 #### Mode 4
 
-- `models/agent_session.py`: add two fields
+- `models/agent_session.py`: add **one** field (we reuse the existing `scheduled_at` for the deferred-eligibility timestamp):
   ```python
-  exit_returncode = IntField(null=True, default=None)   # last subprocess exit code, for OOM detection
-  retry_after_ts = FloatField(default=None)             # epoch second at which a deferred re-queue becomes eligible
+  exit_returncode = IntField(null=True, default=None)   # last subprocess exit code, for OOM detection (issue #1099)
   ```
-  Add them to the safe-to-save list at line 361 if that list is the update-fields allowlist. (Confirmed — see lines 361-365 in recon. Add `exit_returncode`, `retry_after_ts`.)
+  Add it to the safe-to-save list at line 361 if that list is the update-fields allowlist. (Confirmed — see lines 361-365 in recon. Add `exit_returncode`.)
+
 - In `agent/sdk_client.py::get_response_via_harness`, right after the final `_run_harness_subprocess` call completes (after the stale-UUID fallback), if `session_id` is non-None and `returncode is not None`:
   ```python
   try:
@@ -275,30 +323,83 @@ Operator opens Telegram → Dev session → Claude session hits
       logger.debug("exit_returncode store failed for session_id=%s: %s", session_id, _e)
   ```
   This follows the same best-effort pattern as `_store_claude_session_uuid` and `accumulate_session_tokens`.
-- In `agent/session_health.py`, in the recovery-to-pending branch (around line 921-947), before calling `transition_status(entry, "pending", ...)`:
+
+- **Ordering fix (resolves critique B2)**: In `agent/session_health.py`, the recovery-to-pending branch at line 872-947 currently bumps `entry.recovery_attempts` at line 873 BEFORE any re-queue logic runs. If the OOM-defer check reads `entry.recovery_attempts` after that bump, the condition `== 0` can never be true for a first-time OS kill, and the defer would never fire. The fix: capture the pre-bump value into a local variable BEFORE the increment on line 873, and use the local variable in the OOM check. Concretely, replace lines 872-873:
+
   ```python
-  # Mode 4: OOM defer — if the OS killed the subprocess AND this is not a
-  # health-check kill AND memory is tight, defer the re-queue by 120s.
+  # BEFORE (current):
+  # Bump recovery_attempts counter only on actual kill (#1036).
+  entry.recovery_attempts = (entry.recovery_attempts or 0) + 1
+  ```
+
+  ```python
+  # AFTER (issue #1099):
+  # Capture pre-bump recovery_attempts for Mode 4 OOM-defer check below.
+  # The increment must happen AFTER the OOM check so we can distinguish
+  # first-time OS kills (pre_bump_attempts == 0) from health-check kills
+  # (pre_bump_attempts >= 1).
+  pre_bump_attempts = entry.recovery_attempts or 0
+  entry.recovery_attempts = pre_bump_attempts + 1
+  ```
+
+  Then, in the recovery branch body (around line 921-947) where `transition_status(entry, "pending", ...)` is called, insert the OOM-defer check BEFORE the `transition_status` call:
+
+  ```python
+  # Mode 4: OOM defer — if the OS killed the subprocess (not the health check)
+  # AND this is the first recovery attempt AND memory is currently tight,
+  # defer the next eligibility by 120s via the existing scheduled_at field.
+  # The pending-scan at session_pickup.py:231-235 honors scheduled_at.
   if (entry.exit_returncode == -9
-          and entry.recovery_attempts == 0
+          and pre_bump_attempts == 0
           and _is_memory_tight()):
-      entry.retry_after_ts = time.time() + 120.0
-      entry.save(update_fields=["retry_after_ts"])
+      entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
+      try:
+          entry.save(update_fields=["scheduled_at", "recovery_attempts"])
+      except Exception as _sa_err:
+          logger.debug("[session-health] scheduled_at save failed: %s", _sa_err)
       logger.warning(
           "[session-health] OOM backoff: deferring %s for 120s "
-          "(exit_returncode=-9, memory<400MB)",
+          "(exit_returncode=-9, recovery_attempts now=%d, memory<400MB)",
           entry.agent_session_id,
+          entry.recovery_attempts,
       )
   ```
-  where `_is_memory_tight()` wraps `psutil.virtual_memory().available < 400 * 1024 * 1024` inside try/except (returning False on any error — fail-open so the backoff is skipped if psutil misbehaves).
 
-  **Guard**: the increment `entry.recovery_attempts = ...` at line 873 happens BEFORE this block. This means by the time we read `entry.recovery_attempts`, it is always `>= 1` (never 0) — making the condition `recovery_attempts == 0` impossible to hit by the health check itself. The correct reading: the issue's "recovery_attempts == 0" means "no prior recovery has run." So we must consult `entry.recovery_attempts` BEFORE it is incremented (or compare against 1 since this is the first increment). Resolution: move the OOM-defer check to BEFORE the `entry.recovery_attempts = (entry.recovery_attempts or 0) + 1` bump, or explicitly use `(entry.recovery_attempts or 0) - 1 == 0` which is equivalent to "this is the first recovery attempt." We'll use the former — move the check before the bump — because it is clearer.
-- In the pending-scan (`_agent_session_health_check` RUNNING + PENDING branches) and in the recovery-to-pending branch, respect `retry_after_ts`:
-  - If `entry.retry_after_ts` is set and `time.time() < entry.retry_after_ts`, skip the session this tick. Log at `debug`.
+  Note: the deferred session is STILL transitioned to `pending` by the subsequent `transition_status()` call. `scheduled_at > now` then keeps it dormant in the queue until the 120s elapses — the pending-scan skips it (`session_pickup.py:_is_eligible`). This avoids introducing a new "queued but not transitioned" intermediate state.
+
+- `_is_memory_tight()` helper (new, in `agent/session_health.py`):
+  ```python
+  _MEMORY_CACHE: tuple[float, bool] | None = None  # (checked_at_monotonic, result)
+  _MEMORY_CACHE_TTL_SEC = 5.0
+
+  def _is_memory_tight() -> bool:
+      """Return True if available memory is below the OOM-backoff threshold.
+
+      Wraps psutil.virtual_memory() in try/except (fail-open: returns False on
+      any error). Caches the result for 5 seconds to avoid repeated
+      psutil syscalls on hot paths (e.g., when many sessions recover in the
+      same tick). psutil is already a project dependency (monitoring/orphan_cleanup.py,
+      agent/session_health.py imports).
+      """
+      global _MEMORY_CACHE
+      now_mono = time.monotonic()
+      if _MEMORY_CACHE is not None and (now_mono - _MEMORY_CACHE[0]) < _MEMORY_CACHE_TTL_SEC:
+          return _MEMORY_CACHE[1]
+      try:
+          import psutil
+          available_bytes = psutil.virtual_memory().available
+          result = available_bytes < 400 * 1024 * 1024  # 400 MB
+      except Exception:
+          result = False  # fail-open
+      _MEMORY_CACHE = (now_mono, result)
+      return result
+  ```
+
+  This addresses critique concern #5 (psutil cost on hot path) with a 5-second in-process cache. The cache is module-global; no cross-process coordination needed because each health-check tick runs in one process.
 
 ### Thread-safety note (Mode 4)
 
-The OOM backoff logic is a single-write, single-read sequence entirely inside the health check's own coroutine. No concurrent writes from other processes touch `retry_after_ts`. No locking needed beyond Popoto's default `save(update_fields=...)` partial-save.
+The OOM backoff logic is a single-write, single-read sequence entirely inside the health check's own coroutine. The only write to `scheduled_at` from the health check comes from the Mode 4 OOM-defer branch; external writes to `scheduled_at` happen only at session-creation time (see `agent/agent_session_queue.py:216-250`) and do not race with the recovery path (a session being recovered is already past creation). No locking needed beyond Popoto's default `save(update_fields=...)` partial-save, which writes only the specified fields atomically via Redis `HSET`.
 
 ## Failure Path Test Strategy
 
@@ -322,15 +423,35 @@ The OOM backoff logic is a single-write, single-read sequence entirely inside th
 - [ ] `tests/unit/test_sdk_client_image_sentinel.py` — **UPDATE**: tuple unpacking tests must shift from 5-tuple to 6-tuple (`stderr_snippet` added). The existing tests mock `_run_harness_subprocess` return — update all mocks to return 6-tuples.
 - [ ] `tests/unit/test_session_watchdog.py` — **no change expected**: this file tests the bridge-hosted watchdog. Mode 3 touches worker-hosted `session_health.py`, which has its own test file.
 - [ ] `tests/unit/test_session_health_phantom_guard.py` — **no change expected**: we add a new reprieve gate; existing phantom-guard tests exercise an unrelated branch.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — **UPDATE**: if it constructs an `AgentSession` via the finalize path, the new fields (`exit_returncode`, `retry_after_ts`) have `default=None` so no test break is expected. Verify at build time that adding new fields doesn't break `to_dict()` / `from_dict()` assumptions.
+- [ ] `tests/unit/test_health_check_recovery_finalization.py` — **UPDATE**: if it constructs an `AgentSession` via the finalize path, the new field (`exit_returncode`) has `default=None` so no test break is expected. Verify at build time that adding the new field doesn't break `to_dict()` / `from_dict()` assumptions. Also verify this test does not assert the exact ordering of the `recovery_attempts` bump relative to `transition_status()` — if it does, update to match the revised ordering (pre-bump capture).
+- [ ] `tests/unit/test_message_drafter.py` — **UPDATE (regression guard)**: no behavioral change expected from any of the four modes. The drafter pathway is independent of the harness subprocess / health-check changes. This entry is a guard: if the drafter test regresses after this build, a harness change has leaked into drafting logic and must be reverted. Run as part of the Verification step. (Related: `tests/unit/test_drafter_validators.py`, `tests/unit/test_message_drafter_linkify.py`, `tests/integration/test_message_drafter_integration.py` — same regression-guard expectation.)
 
-Greenfield tests to add (4 new test files):
-- `tests/unit/test_harness_thinking_block_sentinel.py` (Mode 1) — 4 cases
-- `tests/unit/test_harness_context_usage_log.py` (Mode 2) — 3 cases
-- `tests/unit/test_session_health_compacting_reprieve.py` (Mode 3) — 3 cases
-- `tests/unit/test_harness_oom_backoff.py` (Mode 4) — 4 cases
+Greenfield tests to add (4 new test files, one per mode — each uses the `test-resilience-{mode}` `project_key` prefix as required by the acceptance criteria):
 
-All new tests use `project_key="test-harness-hardening-{mode}"` and clean up via `AgentSession.query.filter(project_key=...).delete()` in a pytest fixture teardown (pattern from existing `test_session_watchdog.py`).
+| # | File | Cases | `project_key` |
+|---|---|---|---|
+| 1 | `tests/unit/test_harness_thinking_block_sentinel.py` (Mode 1) | 4 | `test-resilience-mode-1` |
+| 2 | `tests/unit/test_harness_context_usage_log.py` (Mode 2) | 3 + 1 (unknown-model case, concern #2) | `test-resilience-mode-2` |
+| 3 | `tests/unit/test_session_health_compacting_reprieve.py` (Mode 3) | 3 + 1 (distinct-window constant, concern #4) | `test-resilience-mode-3` |
+| 4 | `tests/unit/test_harness_oom_backoff.py` (Mode 4) | 4 + 1 (ordering case, blocker B2) | `test-resilience-mode-4` |
+
+All new test files MUST:
+1. Use a `project_key` with the `test-resilience-` prefix (enforced by manual testing hygiene — see CLAUDE.md).
+2. Use pytest fixture teardown with Popoto ORM cleanup: `AgentSession.query.filter(project_key=k).delete()`. **No raw Redis** — the `.claude/hooks/validators/validate_no_raw_redis_delete.py` hook blocks that.
+3. Clean up in a `finally` block or `tearDown` method so crashed tests still clean up.
+
+The cleanup pattern (copied from `tests/unit/test_session_watchdog.py`):
+```python
+@pytest.fixture
+def clean_sessions():
+    project_key = "test-resilience-mode-1"
+    yield project_key
+    try:
+        for s in AgentSession.query.filter(project_key=project_key):
+            s.delete()
+    except Exception:
+        pass  # best-effort cleanup
+```
 
 ## Rabbit Holes
 
@@ -338,7 +459,7 @@ All new tests use `project_key="test-harness-hardening-{mode}"` and clean up via
 - **Proactive `/compact` injection at 20% context**. Also explicitly deferred. Observability log (Mode 2) is the full scope.
 - **Rewriting the Tier 2 gate into a registry pattern** to make adding new reprieves easier. Tempting but over-engineering for one new gate. Keep the imperative if-chain.
 - **Adding a full OOM dashboard (metrics, alerts, auto-scaling hooks)**. Deferred — single `exit_returncode` field + 120s backoff is the entire scope.
-- **Introducing a new `retry_after_ts` scheduler loop to "wake up" pending sessions at exactly the right time**. We piggyback on the existing health check tick — it re-evaluates pending sessions every cycle, and deferral naturally times out when `time.time() >= retry_after_ts`. No new scheduler.
+- **Introducing a new `retry_after_ts` field or a new scheduler loop to "wake up" pending sessions**. We piggyback on the existing `scheduled_at` field and the existing pending-scan — both already support deferred execution. Adding a new field would be redundant with `scheduled_at`. No new field, no new scheduler.
 - **Measuring `total_input_tokens / context_window` (cumulative) in Mode 2**. Wrong denominator — cumulative tokens exceed context window after many turns. Use per-turn `usage.input_tokens` only.
 
 ## Risks
@@ -353,11 +474,11 @@ All new tests use `project_key="test-harness-hardening-{mode}"` and clean up via
 
 ### Risk 3: Mode 4 OOM defer loops (persistent memory pressure)
 **Impact:** If the machine stays under 400MB of available memory, every re-queue gets deferred 120s. Session could be delayed indefinitely.
-**Mitigation:** The defer is conditioned on `recovery_attempts == 0` (first attempt only). A second recovery attempt bypasses the OOM defer and proceeds normally. At MAX_RECOVERY_ATTEMPTS, session finalizes as `failed` — same backstop as today. Test asserts `recovery_attempts >= 1` → no defer.
+**Mitigation:** The defer is conditioned on `pre_bump_attempts == 0` (first attempt only). A second recovery attempt has `pre_bump_attempts == 1` and bypasses the OOM defer, proceeding to normal recovery. At MAX_RECOVERY_ATTEMPTS, session finalizes as `failed` — same backstop as today. Test `test_harness_oom_backoff.py::test_second_attempt_no_defer` asserts the ordering (pre_bump value captured before increment, second recovery attempt does NOT defer).
 
-### Risk 4: `retry_after_ts` is not consulted by all re-queue paths
-**Impact:** If a code path promotes a session to `running` without consulting `retry_after_ts`, the defer is silently lost.
-**Mitigation:** Grep during build for every call site that moves a session from `pending` → `running`. Confirmed paths from recon: `_ensure_worker` + the worker's pending drain loop. Build task explicitly enumerates them. A validator subagent confirms the field is consulted at each site.
+### Risk 4: `scheduled_at` not consulted by some re-queue path (Mode 4)
+**Impact:** If a code path promotes a session to `running` without going through the pending-scan (which already honors `scheduled_at`), the defer is silently lost.
+**Mitigation:** The pending-scan paths (`agent/session_pickup.py:_pop_agent_session` at line 231-235 and `_pop_agent_session_with_fallback` at line 396-400) are the ONLY paths that move sessions from `pending` to `running` — both already honor `scheduled_at`. This is the whole point of using the existing field instead of adding a new one. Grep-verify during build: `grep -n 'status="running"\|status = "running"' agent/ worker/` should show only the session_pickup paths writing `running` via the pop flow. No new read sites to add.
 
 ## Race Conditions
 
@@ -409,15 +530,16 @@ No agent integration required — these are bridge-internal / worker-internal ch
 - [ ] Docstrings on `_log_context_usage_if_risky`, `HarnessThinkingBlockCorruption`, `_is_memory_tight` explaining trigger conditions and failure handling.
 - [ ] Docstring on the new `compacting` gate in `_tier2_reprieve_signal` citing the issue number (#1099) and the `pre_compact_hook` as the companion writer.
 - [ ] Code comments on the three `_run_harness_subprocess` call sites noting the 6-tuple return.
-- [ ] `models/agent_session.py` field comments explaining `exit_returncode` = last subprocess exit code (for OOM detection) and `retry_after_ts` = epoch second for deferred re-queue eligibility.
+- [ ] `models/agent_session.py` field comment explaining `exit_returncode` = last subprocess exit code (for OOM detection, issue #1099). No other new fields — deferred eligibility uses existing `scheduled_at`.
 
 ## Success Criteria
 
 - [ ] Mode 1: `THINKING_BLOCK_SENTINEL` in stderr + non-zero returncode → `HarnessThinkingBlockCorruption` raised → session finalized as `failed` with user-visible error. Healthy run (returncode=0, no sentinel) returns a non-empty result and status `completed`. (Test: `test_harness_thinking_block_sentinel.py`)
 - [ ] Mode 2: `usage.input_tokens / context_window > 0.75` → a single `logger.warning("context_usage ...")` record emitted per turn. Result text, session status, returncode, and all other behavior unchanged. (Test: `test_harness_context_usage_log.py`)
 - [ ] Mode 3: `last_compaction_ts` within 600s → Tier 2 returns `"compacting"` → kill skipped. `last_compaction_ts` stale (>600s) or None → existing gate chain runs unchanged. (Test: `test_session_health_compacting_reprieve.py`)
-- [ ] Mode 4: `exit_returncode == -9` AND `recovery_attempts == 0` AND `psutil.virtual_memory().available < 400MB` → `retry_after_ts = now + 120`. Any condition unmet → normal recovery. (Test: `test_harness_oom_backoff.py`)
-- [ ] All new fields (`exit_returncode`, `retry_after_ts`) default to sensible values (`None`). Existing sessions loaded from Redis deserialize correctly without migration.
+- [ ] Mode 4: `exit_returncode == -9` AND `pre_bump_attempts == 0` AND `_is_memory_tight()` → `scheduled_at = now + 120s`. Any condition unmet → normal recovery. `pre_bump_attempts` is captured BEFORE line 873's `recovery_attempts` increment, ensuring first-time OS kills actually trigger the defer. (Test: `test_harness_oom_backoff.py`)
+- [ ] The one new field (`exit_returncode`) defaults to `None`. Existing sessions loaded from Redis deserialize correctly without migration. No other new AgentSession fields are added — Mode 4 reuses the existing `scheduled_at`.
+- [ ] Drafter tests (`test_message_drafter.py`, `test_drafter_validators.py`, `test_message_drafter_linkify.py`) remain green — no behavioral regression. (Regression guard per Test Impact section.)
 - [ ] No raw Redis operations introduced. All AgentSession writes use `save(update_fields=[...])` pattern. (Enforced by `validate_no_raw_redis_delete.py` hook.)
 - [ ] `python -m ruff format --check .` passes.
 - [ ] Affected test files green: `pytest tests/unit/test_sdk_client_image_sentinel.py tests/unit/test_harness_thinking_block_sentinel.py tests/unit/test_harness_context_usage_log.py tests/unit/test_session_health_compacting_reprieve.py tests/unit/test_harness_oom_backoff.py` all pass.
@@ -442,7 +564,7 @@ No agent integration required — these are bridge-internal / worker-internal ch
 
 - **Validator (harness hardening)**
   - Name: `harness-validator`
-  - Role: Read-only verification — all call sites of `_run_harness_subprocess` updated, all `retry_after_ts` read sites present, documentation updated, no raw Redis introduced.
+  - Role: Read-only verification — all call sites of `_run_harness_subprocess` updated (now 6-tuple), `pre_bump_attempts` capture present before line 873 increment, `scheduled_at` used for OOM defer, `COMPACT_REPRIEVE_WINDOW_SEC` is a distinct constant, `DISABLE_THINKING_SENTINEL` env var gate present, no raw Redis, documentation updated.
   - Agent Type: validator
   - Resume: true
 
@@ -454,17 +576,16 @@ No agent integration required — these are bridge-internal / worker-internal ch
 
 ### Step by Step Tasks
 
-### 1. Add two fields to AgentSession
+### 1. Add exit_returncode field to AgentSession
 - **Task ID**: build-agentsession-fields
 - **Depends On**: none
 - **Validates**: `tests/unit/test_harness_oom_backoff.py` (create), existing unit tests still green
 - **Assigned To**: `harness-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `exit_returncode = IntField(null=True, default=None)` to `models/agent_session.py`.
-- Add `retry_after_ts = FloatField(default=None)` to `models/agent_session.py`.
-- Add both to any update-fields allowlist (reference: lines 361-365, currently whitelists `last_heartbeat_at` etc.).
-- Add explanatory inline comments citing issue #1099 and the OOM-backoff design.
+- Add `exit_returncode = IntField(null=True, default=None)` to `models/agent_session.py`. (Only one new field — Mode 4 reuses the existing `scheduled_at` for deferred eligibility.)
+- Add `exit_returncode` to any update-fields allowlist (reference: lines 361-365, currently whitelists `last_heartbeat_at` etc.). Confirm `scheduled_at` is already in the allowlist (it is — line 155 of agent_session_queue.py `ALLOWED_CREATE_FIELDS` and `_DATETIME_FIELDS` in models/agent_session.py:355).
+- Add explanatory inline comment citing issue #1099 and the Mode 4 OOM-backoff design.
 
 ### 2. Mode 1 — Thinking block sentinel in sdk_client
 - **Task ID**: build-mode-1
@@ -503,21 +624,41 @@ No agent integration required — these are bridge-internal / worker-internal ch
 - Ensure `import time` is present at top of file (already is — verify).
 - Extend the telemetry docstring for `_tier2_reprieve_signal` to include `compacting` in the gate list + reference issue #1099 + companion writer `pre_compact_hook`.
 
-### 5. Mode 4 — OOM backoff + retry_after_ts reads
+### 5. Mode 4 — OOM backoff via scheduled_at
 - **Task ID**: build-mode-4
 - **Depends On**: build-agentsession-fields
 - **Validates**: `tests/unit/test_harness_oom_backoff.py` (create)
 - **Assigned To**: `harness-builder`
 - **Agent Type**: builder
 - **Parallel**: false (needs fields first)
-- In `agent/sdk_client.py::get_response_via_harness` (right after the stale-UUID fallback path finishes), add the best-effort `exit_returncode` write as described in Technical Approach.
-- In `agent/session_health.py`, add `_is_memory_tight()` helper (top-level function; wraps psutil.virtual_memory inside try/except; threshold 400MB).
-- In the recovery-to-pending branch (around current line 920), BEFORE `entry.recovery_attempts = (entry.recovery_attempts or 0) + 1`, check: if `entry.exit_returncode == -9` AND `entry.recovery_attempts == 0` AND `_is_memory_tight()`: set `entry.retry_after_ts = time.time() + 120.0`, save, log warning, skip to next session (do NOT bump recovery_attempts, do NOT transition).
-- Identify every path that moves a session from `pending` → `running`:
-  - `_ensure_worker` in `agent/agent_session_queue.py`
-  - worker pending-drain loop in `worker/__main__.py` (grep for `status="pending"`)
-  - Any recovery-to-pending write in `session_health.py` (just added)
-- At each such path, add a guard: if `entry.retry_after_ts is not None and time.time() < entry.retry_after_ts`: skip this session this tick (logger.debug).
+- In `agent/sdk_client.py::get_response_via_harness` (right after the stale-UUID fallback path finishes), add the best-effort `exit_returncode` write as described in Technical Approach (Mode 4 section).
+- In `agent/session_health.py`:
+  - Add `_is_memory_tight()` helper at module scope with a 5s in-process cache (wraps `psutil.virtual_memory()` inside try/except; threshold 400MB; fail-open). See Technical Approach for the full implementation. Addresses concern #5.
+  - Ensure `from datetime import datetime, timedelta; from datetime import UTC` imports are present at top of file.
+- **Ordering fix (B2, critical)**: In `agent/session_health.py:872-873`, capture the pre-bump value BEFORE incrementing `recovery_attempts`:
+  ```python
+  # OLD: entry.recovery_attempts = (entry.recovery_attempts or 0) + 1
+  # NEW:
+  pre_bump_attempts = entry.recovery_attempts or 0
+  entry.recovery_attempts = pre_bump_attempts + 1
+  ```
+- In the recovery-to-pending branch (the `else` branch around current line 921-947), BEFORE `transition_status(entry, "pending", ...)` is called, add the OOM-defer block:
+  ```python
+  if (entry.exit_returncode == -9
+          and pre_bump_attempts == 0
+          and _is_memory_tight()):
+      entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
+      try:
+          entry.save(update_fields=["scheduled_at", "recovery_attempts"])
+      except Exception as _sa_err:
+          logger.debug("[session-health] scheduled_at save failed: %s", _sa_err)
+      logger.warning(
+          "[session-health] OOM backoff: deferring %s for 120s",
+          entry.agent_session_id,
+      )
+  ```
+  The session STILL transitions to `pending` via the subsequent `transition_status()` call — the deferral works by making the session ineligible for pickup until `scheduled_at > now` becomes false (after 120s).
+- **No new read sites needed.** The pending-scan in `agent/session_pickup.py:_pop_agent_session` (line 231-235) and `_pop_agent_session_with_fallback` (line 396-400) already filter out sessions with `scheduled_at > now`. Grep-verify during validation that these are the only paths that move sessions from `pending` → `running`. (If a new bypass path has been introduced since the recon, it would need an explicit `scheduled_at` guard added.)
 
 ### 6. Tests (4 new files + 1 update)
 - **Task ID**: build-tests
@@ -529,9 +670,9 @@ No agent integration required — these are bridge-internal / worker-internal ch
 - Create `tests/unit/test_harness_thinking_block_sentinel.py` — 4 cases: (a) sentinel in stderr + returncode=1 → HarnessThinkingBlockCorruption raised; (b) caller sees non-empty error message (not `""`); (c) AgentSession.status == "failed" after caller handling; (d) healthy run (returncode=0, no sentinel) → no raise, normal return.
 - Create `tests/unit/test_harness_context_usage_log.py` — 3 cases: (a) mock usage with input_tokens=160000 and context_window=200000 → logger.warning emitted with "context_usage"; (b) input_tokens=50000 → no warning; (c) usage=None → no warning, no raise.
 - Create `tests/unit/test_session_health_compacting_reprieve.py` — 3 cases: (a) last_compaction_ts = now - 60s, last_stdout_at = now - 700s → reprieve returns "compacting"; (b) last_compaction_ts = now - 700s → no compacting reprieve, falls through; (c) last_compaction_ts = None → no compacting reprieve, falls through.
-- Create `tests/unit/test_harness_oom_backoff.py` — 4 cases: (a) exit_returncode=-9, recovery_attempts=0, memory<400MB → retry_after_ts set to ~now+120; (b) exit_returncode=-9, recovery_attempts=1, memory<400MB → no defer, normal recovery; (c) exit_returncode=-9, recovery_attempts=0, memory>1GB → no defer; (d) exit_returncode=0, recovery_attempts=0, memory<400MB → no defer.
+- Create `tests/unit/test_harness_oom_backoff.py` — 5 cases: (a) **ordering test** `test_first_attempt_defers` — create an AgentSession with `recovery_attempts=0`, `exit_returncode=-9`, mock `_is_memory_tight` returning True; run the health-check recovery branch; assert `scheduled_at` is set to approximately `now+120s` (tolerance ±10s); assert `recovery_attempts` was bumped to 1 (the capture-before-bump ordering works). (b) **ordering test** `test_second_attempt_no_defer` — create session with `recovery_attempts=1` (already bumped by a prior health-check kill), `exit_returncode=-9`, memory tight; run recovery branch; assert `scheduled_at` is NOT updated (defer condition fails because `pre_bump_attempts == 1`). (c) `test_memory_ok_no_defer` — `exit_returncode=-9`, `recovery_attempts=0`, but `_is_memory_tight` returns False; assert no deferral. (d) `test_non_oom_returncode_no_defer` — `exit_returncode=0`, `recovery_attempts=0`, memory tight; assert no deferral. (e) `test_pending_scan_skips_deferred` — create an AgentSession with `status="pending"` and `scheduled_at = now + 60s`; call `_pop_agent_session`; assert the session is skipped (returns None or picks a different session). This is the end-to-end verification that the deferral actually prevents pickup.
 - Update `tests/unit/test_sdk_client_image_sentinel.py` — replace all 5-tuple mocks with 6-tuple mocks (add `None` as the stderr_snippet element).
-- All new tests use `project_key="test-harness-hardening-{mode}"` and clean up AgentSession records via Popoto ORM in a fixture teardown (pattern: `AgentSession.query.filter(project_key=k).delete()`). NO raw Redis.
+- All new tests use `project_key="test-resilience-mode-{N}"` (see Test Impact table above) and clean up AgentSession records via Popoto ORM in a fixture teardown (pattern: `AgentSession.query.filter(project_key=k).delete()`). NO raw Redis.
 
 ### 7. Documentation updates
 - **Task ID**: document-feature
@@ -540,7 +681,7 @@ No agent integration required — these are bridge-internal / worker-internal ch
 - **Assigned To**: `harness-documentarian`
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/agent-session-health-monitor.md` with the `compacting` Tier 2 gate (Mode 3) and a brief OOM-backoff subsection (Mode 4) noting `exit_returncode`/`retry_after_ts`.
+- Update `docs/features/agent-session-health-monitor.md` with the `compacting` Tier 2 gate (Mode 3) and a brief OOM-backoff subsection (Mode 4) noting `exit_returncode` (new field), the `pre_bump_attempts` capture pattern, and the use of `scheduled_at` for deferred re-queue.
 - Update `docs/features/session-recovery-mechanisms.md` with a "Thinking-block corruption" subsection (Mode 1) and a "Context-usage observability" subsection (Mode 2).
 - Add a one-line entry to `docs/features/README.md` under the harness or session-health row linking back to the updated feature docs.
 
@@ -552,10 +693,14 @@ No agent integration required — these are bridge-internal / worker-internal ch
 - **Parallel**: false
 - Run the Verification table below.
 - Grep-verify all three `_run_harness_subprocess` call sites unpack a 6-tuple.
-- Grep-verify every `pending` → `running` path checks `retry_after_ts`.
+- Grep-verify the only `pending` → `running` paths are `_pop_agent_session` and `_pop_agent_session_with_fallback` in `agent/session_pickup.py` — both already honor `scheduled_at`. No new guards required.
+- Grep-verify `pre_bump_attempts` is captured BEFORE `entry.recovery_attempts` is incremented in `agent/session_health.py`.
 - Confirm no new raw Redis operations (`r.hget`, `r.hset`, `r.delete` on AgentSession keys) introduced.
 - Confirm `logger.warning("context_usage ...")` format is grep-friendly.
 - Confirm the `compacting` gate is the first branch of `_tier2_reprieve_signal`.
+- Confirm `COMPACT_REPRIEVE_WINDOW_SEC` constant is a distinct module-level symbol (not an alias of `STDOUT_FRESHNESS_WINDOW`).
+- Confirm `DISABLE_THINKING_SENTINEL` env var gate is read at module load in `sdk_client.py`.
+- Confirm `_is_memory_tight()` has a 5s in-process cache.
 
 ## Verification
 
@@ -564,27 +709,48 @@ No agent integration required — these are bridge-internal / worker-internal ch
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | New tests pass | `pytest tests/unit/test_harness_thinking_block_sentinel.py tests/unit/test_harness_context_usage_log.py tests/unit/test_session_health_compacting_reprieve.py tests/unit/test_harness_oom_backoff.py -q` | exit code 0 |
 | Updated image-sentinel test passes | `pytest tests/unit/test_sdk_client_image_sentinel.py -q` | exit code 0 |
+| Drafter regression guard | `pytest tests/unit/test_message_drafter.py tests/unit/test_drafter_validators.py tests/unit/test_message_drafter_linkify.py -q` | exit code 0 |
 | Full unit suite green | `pytest tests/unit/ -n auto -q` | exit code 0 |
 | 6-tuple unpacking complete | `grep -n '_run_harness_subprocess' agent/sdk_client.py` | output contains 3+ call sites all unpacking 6 values |
-| `retry_after_ts` consulted in recovery | `grep -n 'retry_after_ts' agent/session_health.py agent/agent_session_queue.py worker/__main__.py` | output > 2 |
+| `scheduled_at` used for OOM defer | `grep -n 'scheduled_at' agent/session_health.py` | output contains OOM-defer assignment |
+| `pre_bump_attempts` capture present | `grep -n 'pre_bump_attempts' agent/session_health.py` | output contains `pre_bump_attempts = entry.recovery_attempts or 0` |
+| Only session_pickup promotes pending → running | `grep -rn 'status\s*=\s*.running.\|status=.running.' agent/ worker/` | only session_pickup.py writes `running` via pop flow |
 | `compacting` gate first in reprieve | `grep -n 'compacting' agent/session_health.py` | output contains `return "compacting"` |
+| Distinct reprieve window constant | `grep -n 'COMPACT_REPRIEVE_WINDOW_SEC' agent/session_health.py` | defines constant and uses it in the compacting gate |
+| Thinking sentinel gate | `grep -n 'DISABLE_THINKING_SENTINEL\|THINKING_BLOCK_SENTINEL' agent/sdk_client.py` | both symbols present; env var read at module load |
+| Memory cache TTL | `grep -n '_MEMORY_CACHE_TTL_SEC' agent/session_health.py` | 5.0 |
 | No raw Redis on AgentSession | `python .claude/hooks/validators/validate_no_raw_redis_delete.py agent/ models/ worker/` | exit code 0 |
 | Docs updated | `git diff --name-only main -- docs/features/` | output contains `agent-session-health-monitor.md` and `session-recovery-mechanisms.md` |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Verdict: NEEDS REVISION (2 blockers, 6 concerns). Revision applied 2026-04-24 — see `revision_applied: true` in frontmatter.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Operator | B1: `retry_after_ts` never honored by worker — no consumer reads the proposed field. | Technical Approach § Mode 4; Spike spike-1 (revised) | Dropped `retry_after_ts` entirely. Reuse existing `scheduled_at` field which IS honored by `agent/session_pickup.py:231-235` and `:396-400` (`_is_eligible` filters sessions with `scheduled_at > now`). |
+| BLOCKER | Archaeologist | B2: OOM-defer condition `recovery_attempts == 0` never fires because line 873 increments BEFORE the re-queue logic. | Technical Approach § Mode 4 ordering; Step 5 task instructions | Capture `pre_bump_attempts = entry.recovery_attempts or 0` BEFORE the line 873 increment; use the local in the OOM check. Added test `test_second_attempt_no_defer` to lock in the ordering. |
+| CONCERN | Skeptic | 1. Sentinel `"redacted_thinking"` unconfirmed from Anthropic docs — false-positive risk. | Technical Approach § Mode 1 Implementation Note | Emit `logger.warning("THINKING_BLOCK_SENTINEL matched: ...")` on every match for production audit; add `DISABLE_THINKING_SENTINEL=1` env-var escape hatch. |
+| CONCERN | Adversary | 2. `config/models.py` context window lookup path unverified. | Technical Approach § Mode 2; `get_model_context_window` helper | Verified via grep: `MODELS[name]["context_window"]` (dict key, not dataclass attribute). Added public accessor. Unknown-model fallback logs WARNING and skips. Test case covers. |
+| CONCERN | Archaeologist | 3. `pre_compact_hook` runs in subprocess — confirm ORM access. | Technical Approach § Mode 3 Implementation Note | Verified: hook uses `AGENT_SESSION_ID`/`claude_session_uuid` from env + hook payload; `_update_session_cooldown` at `agent/hooks/pre_compact.py:131-175` already uses Popoto ORM. No new writer needed — reader-only work in this plan. |
+| CONCERN | Simplifier | 4. Reprieve window shares `STDOUT_FRESHNESS_WINDOW` coincidentally. | Technical Approach § Mode 3 Implementation Note | Introduced `COMPACT_REPRIEVE_WINDOW_SEC = 600` as a distinct module-level constant with its own env override (`COMPACT_REPRIEVE_WINDOW_SECS`). Prevents future drift from coupling. |
+| CONCERN | Operator | 5. `psutil.virtual_memory()` on hot path. | `_is_memory_tight()` helper (Mode 4 Technical Approach) | Added 5s in-process cache. Module-global `_MEMORY_CACHE` + `_MEMORY_CACHE_TTL_SEC = 5.0`. |
+| CONCERN | User | 6. Test file paths and `project_key` convention not enumerated. | Test Impact table | Enumerated 4 test files with exact paths, `test-resilience-mode-{N}` project_key prefix, and ORM teardown fixture. |
+
 
 ---
 
 ## Open Questions
 
-None. The issue is self-contained, the scope is well-bounded (four independent fixes, each <60 LOC + one test file), and all infrastructure needed (Popoto ORM, `psutil`, existing Tier 2 gate, `pre_compact_hook` writer, `accumulate_session_tokens` helper) is in place.
+None. The issue is self-contained, the scope is well-bounded (four independent fixes, each <60 LOC + one test file), and all infrastructure needed (Popoto ORM, `psutil`, existing Tier 2 gate, `pre_compact_hook` writer, `accumulate_session_tokens` helper, existing `scheduled_at` deferral field) is in place.
 
-Two minor design choices were resolved inline in the Technical Approach without needing Tom's input:
+Design choices resolved inline in the Technical Approach without needing Tom's input:
 
-1. Should the OOM defer use a new `retry_after_ts` field or repurpose `started_at`? — spike-1 confirmed `started_at` is NOT polled as a "not before" signal by the pending-scan, so repurposing would be a silent no-op / correctness bug. Use a new field. (Decision: new field `retry_after_ts`.)
-2. Should Mode 3 use a new `last_compact_at` `DatetimeField` or the existing `last_compaction_ts` `FloatField` set by `pre_compact_hook`? — PR #1135 already added `last_compaction_ts` and wired the hook. Reuse it. (Decision: reuse existing field.)
+1. **OOM defer mechanism** — initially spike-1 assumed we would need a new `retry_after_ts` field. Post-critique re-inspection confirmed the existing `scheduled_at` field IS polled by the pending-scan (`agent/session_pickup.py:231-235` and `:396-400`) as a "not before" timestamp. Decision: reuse `scheduled_at`, no new field. (Resolves critique blocker B1.)
+2. **Recovery-attempts ordering** — the health check at `agent/session_health.py:873` bumps `recovery_attempts` BEFORE any re-queue logic runs. Naively reading `entry.recovery_attempts == 0` after that point would never succeed. Decision: capture the pre-bump value into a local variable `pre_bump_attempts` before line 873's increment; use the local for the OOM check. (Resolves critique blocker B2.)
+3. **`last_compaction_ts` vs. a new field** — PR #1135 already added `last_compaction_ts` and wired `pre_compact_hook`. Reuse it.
+4. **Sentinel false-positive mitigation** — add a grep-able WARNING log on every sentinel match (for production audit) + `DISABLE_THINKING_SENTINEL` env var escape hatch. (Resolves critique concern #1.)
+5. **Context window lookup** — verified by grep: `MODELS[name]["context_window"]` dict key. Added a dedicated accessor `get_model_context_window` for decoupling. (Resolves critique concern #2.)
+6. **Compaction reprieve window constant** — distinct symbol `COMPACT_REPRIEVE_WINDOW_SEC` (not an alias of `STDOUT_FRESHNESS_WINDOW`) so the two can evolve independently. (Resolves critique concern #4.)
+7. **psutil cost** — cached for 5s in-process in `_is_memory_tight()`. (Resolves critique concern #5.)
+8. **Test file enumeration and cleanup** — 4 new test files listed in Test Impact table with `test-resilience-mode-{N}` project_key and Popoto ORM teardown fixture. (Resolves critique concern #6.)
