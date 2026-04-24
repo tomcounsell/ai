@@ -54,6 +54,8 @@ PR #1039 exposed five recurring patterns where each layer of the SDLC pipeline's
 
 **File:** `.claude/commands/do-merge.md`
 
+> **Superseded by #1084 (2026-04-24):** The flat baseline + `comm -23` comparison described above has been replaced with a categorised schema-v2 baseline (`real` / `flaky` / `hung` / `import_error`) and a dedicated comparison script (`scripts/baseline_gate.py`). The gate now compares failures by identity per-category rather than by count, closing the count-coincident regression hole observed on PRs #1054 and #1070. Pattern 4 still holds as the high-level fix — "validate the full suite at merge time" — but the implementation mechanics have evolved. See [Merge-Gate Baseline](merge-gate-baseline.md) for the current contract.
+
 ---
 
 ### Pattern 5 — Deterministic Pre-Verdict Checklist (do-pr-review)

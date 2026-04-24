@@ -72,3 +72,4 @@ Step 6-7: Cleanup + return JSON
 - Plan: `docs/plans/476_test_reliability.md`
 - Prior art: Issue #363, PR #369 (original baseline verification)
 - Spec files: `.claude/skills/do-test/SKILL.md`, `.claude/agents/baseline-verifier.md`
+- [Merge-Gate Baseline](merge-gate-baseline.md) — sibling layer at `/do-merge`. This filter operates on the **PR branch** during `/do-test`; the merge-gate baseline records pre-existing failures on **`main`**. The two layers are independent and must not be conflated — see `tests/README.md` for the side-by-side contrast.

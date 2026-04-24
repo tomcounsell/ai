@@ -133,6 +133,10 @@ The project's pytest configuration is in `pyproject.toml` under `[tool.pytest.in
 
 The `-p no:postgresql` flag prevents the `pytest-postgresql` plugin (installed at the system level) from auto-loading. Without this flag, the plugin attempts to import `psycopg` which fails with an `ImportError` when `libpq` is not available, crashing the entire test runner before any tests execute. See [issue #265](https://github.com/valorengels/ai/issues/265).
 
+### `pytest-timeout`: installed but deliberately not registered
+
+`pytest-timeout>=2.3` is declared as a **dev** dep in `pyproject.toml` and locked in `uv.lock`, but it is **NOT** registered in `addopts` and must not be added there. The plugin only activates when `scripts/refresh_test_baseline.py` invokes pytest with `-p pytest_timeout --timeout=60` to classify `hung` tests for the merge-gate baseline (see [Merge-Gate Baseline](merge-gate-baseline.md)). Regular `pytest tests/unit/` runs, `/do-test`, CI, and `/do-merge`'s Full Suite Gate are unaffected. Registering the plugin globally would change every test run's behavior and is out of scope for this layer.
+
 ## Design Decisions
 
 | Decision | Rationale |
