@@ -358,11 +358,26 @@ def _update_agent_session(hook_input: dict) -> None:
 
         from models.agent_session import AgentSession
 
-        local_sid = f"local-{session_id}"
-        matches = list(AgentSession.query.filter(session_id=local_sid))
-        if not matches:
-            return
-        agent_session = matches[0]
+        # Primary: resolve via sidecar's agent_session_id through the indexed
+        # id lookup. After #1157, worker-spawned subprocesses have sidecars
+        # pointing at the real worker record (not a local-* twin).
+        agent_session = None
+        try:
+            agent_session = AgentSession.get_by_id(agent_session_id)
+        except Exception:
+            agent_session = None
+
+        if agent_session is None:
+            # Legacy fallback: reconstruct local-{session_id} for direct-CLI
+            # paths that still create local-* records.
+            local_sid = f"local-{session_id}"
+            try:
+                matches = list(AgentSession.query.filter(session_id=local_sid))
+            except Exception:
+                matches = []
+            if not matches:
+                return
+            agent_session = matches[0]
 
         agent_session.updated_at = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
