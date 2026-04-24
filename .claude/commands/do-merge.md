@@ -295,8 +295,10 @@ else
     # Delegate to scripts/baseline_gate.py for categorised comparison.
     # Exit 0 when no new blocking regressions. Exit 1 otherwise.
     # Prints a JSON verdict to stdout plus any staleness warning to stderr.
-    GATE_OUTPUT=$(python -m scripts.baseline_gate --pr-junitxml /tmp/pr_run.xml --baseline "$BASELINE_FILE" 2> /tmp/baseline_gate_stderr.txt)
-    GATE_EXIT=$?
+    # Capture $? on the SAME line as the assignment: otherwise an
+    # intermediate command (e.g. a debug `echo`) would clobber $? and this
+    # gate would silently read the wrong exit code.
+    GATE_OUTPUT=$(python -m scripts.baseline_gate --pr-junitxml /tmp/pr_run.xml --baseline "$BASELINE_FILE" 2> /tmp/baseline_gate_stderr.txt); GATE_EXIT=$?
     if [ -s /tmp/baseline_gate_stderr.txt ]; then
         cat /tmp/baseline_gate_stderr.txt
     fi

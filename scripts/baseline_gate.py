@@ -79,7 +79,9 @@ def load_baseline(path: str | Path) -> dict:
         return {"schema_version": SCHEMA_VERSION, "tests": {}}
 
     # Schema v2 -- already in canonical shape.
-    if data.get("schema_version") == SCHEMA_VERSION and isinstance(data.get("tests"), dict):
+    if data.get("schema_version") == SCHEMA_VERSION and isinstance(
+        data.get("tests"), dict
+    ):
         # Defensive: strip tests whose category is not valid.
         valid_tests: dict[str, dict] = {}
         for node_id, record in data["tests"].items():
@@ -263,7 +265,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     verdict = compute_gate_verdict(baseline, pr_failures)
-    now = datetime.fromisoformat(args.now) if args.now else datetime.now(UTC)
+    if args.now:
+        now = datetime.fromisoformat(args.now)
+        # Normalise a naive ISO string (e.g. "2026-04-24T12:00:00") to UTC.
+        # Without this, ``format_staleness_warning`` compares a naive ``now``
+        # against a tz-aware ``generated_at`` and raises ``TypeError: can't
+        # subtract offset-naive and offset-aware datetimes``.
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+    else:
+        now = datetime.now(UTC)
     warning = format_staleness_warning(baseline, now=now)
     if warning is not None:
         verdict["staleness_warning"] = warning

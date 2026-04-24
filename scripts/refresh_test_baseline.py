@@ -63,6 +63,12 @@ DEFAULT_BASELINE_PATH = PROJECT_DIR / "data" / "main_test_baseline.json"
 # Cap the default global timeout at 2h regardless of estimated test count.
 DEFAULT_GLOBAL_TIMEOUT_CAP = 7200
 
+# Fallback test-count estimate when ``pytest --collect-only`` cannot be
+# parsed (e.g. collection itself errors, or the summary line is missing).
+# Matches the current suite size order-of-magnitude; only used to size the
+# default ``--global-timeout``, so a rough number is sufficient.
+_FALLBACK_TEST_COUNT_ESTIMATE = 1500
+
 
 def classify(
     outcomes_per_run: list[str],
@@ -166,36 +172,53 @@ def run_pytest_once(
 ) -> bool:
     """Invoke pytest one time, writing junitxml to ``junitxml_path``.
 
-    Returns True on a completed run (regardless of pytest's own exit code --
-    failures are expected and get classified).  Returns False if the outer
-    ``subprocess.run(timeout=...)`` safety net fired, meaning the whole run is
-    UNCLASSIFIABLE and the caller should discard it.
+    Returns True on a completed run that produced a junitxml file
+    (regardless of pytest's own exit code -- failures are expected and get
+    classified).  Returns False in any of these cases:
+
+    - the outer ``subprocess.run(timeout=...)`` safety net fired
+    - pytest crashed before writing junitxml (plugin registration errors,
+      option-parse errors, conftest import failures, etc.)
+
+    Either way the whole run is UNCLASSIFIABLE and the caller should
+    discard it.  Before BLOCKER fix: a startup crash returned True and the
+    downstream ParseError path masked the root cause as "all N runs
+    failed" without any signal that pytest never wrote a file.  Now the
+    missing-junitxml case is surfaced with captured stderr so the user
+    sees what actually went wrong.
     """
+    # pytest-timeout registers itself via setuptools entry points as the
+    # short name ``timeout``.  Passing ``-p pytest_timeout`` here attempts a
+    # second registration under the fully-qualified module name and raises
+    # ``ValueError: Plugin already registered under a different name``.  The
+    # ``--timeout=...`` flag alone is enough to activate the plugin -- if
+    # ``pytest-timeout`` is not installed, pytest exits with a clear
+    # "unrecognised option" error, which is the correct failure mode.
     cmd = [
         "pytest",
-        "tests/",
         "-q",
         "--tb=no",
         f"--junitxml={junitxml_path}",
-        "-p",
-        "pytest_timeout",
         f"--timeout={test_timeout}",
         "--timeout-method=thread",
     ]
     if pytest_args:
         cmd.extend(pytest_args)
+    else:
+        cmd.append("tests/")
 
     if verbose:
         logger.info("[refresh] run %d: %s", run_index, " ".join(cmd))
 
     try:
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             cwd=PROJECT_DIR,
             check=False,
             timeout=global_timeout,
+            capture_output=True,
+            text=True,
         )
-        return True
     except subprocess.TimeoutExpired:
         logger.warning(
             "[refresh] run %d hit the outer --global-timeout (%ds); discarding",
@@ -203,6 +226,25 @@ def run_pytest_once(
             global_timeout,
         )
         return False
+
+    if not junitxml_path.exists():
+        # pytest completed but never produced junitxml -- a startup-time
+        # failure (plugin registration error, option parsing, conftest
+        # import).  Surface stderr so the cause is visible instead of
+        # being masked by the downstream JunitxmlParseError path.
+        stderr_tail = (result.stderr or "").strip().splitlines()[-10:]
+        stderr_blob = "\n".join(stderr_tail) if stderr_tail else "<no stderr>"
+        logger.warning(
+            "[refresh] run %d: pytest exited with code %d but did not write "
+            "junitxml (%s); discarding run. stderr tail:\n%s",
+            run_index,
+            result.returncode,
+            junitxml_path,
+            stderr_blob,
+        )
+        return False
+
+    return True
 
 
 def load_existing_notes(path: Path) -> dict[str, str]:
@@ -276,7 +318,12 @@ def format_summary(baseline: dict) -> str:
         f"runs           : {baseline.get('runs')}",
         f"total failing  : {len(tests)}",
     ]
-    for category in (CATEGORY_REAL, CATEGORY_FLAKY, CATEGORY_HUNG, CATEGORY_IMPORT_ERROR):
+    for category in (
+        CATEGORY_REAL,
+        CATEGORY_FLAKY,
+        CATEGORY_HUNG,
+        CATEGORY_IMPORT_ERROR,
+    ):
         lines.append(f"  {category:<14}: {counts.get(category, 0)}")
     return "\n".join(lines)
 
@@ -285,6 +332,10 @@ def estimate_test_count() -> int:
     """Return the approximate number of collected tests, or a safe fallback.
 
     Used only to size the default ``--global-timeout``; a rough answer is fine.
+    Logs a warning when the fallback fires so a user debugging a stalled
+    refresh can tell that collection itself failed (e.g. a broken
+    ``conftest.py`` import) rather than assuming the ``1500`` value was
+    measured.
     """
     try:
         result = subprocess.run(
@@ -295,8 +346,15 @@ def estimate_test_count() -> int:
             text=True,
             timeout=60,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return 1500  # Safe fallback matching current suite size order-of-magnitude.
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning(
+            "[refresh] pytest --collect-only could not run (%s); using "
+            "fallback estimate of %d tests for --global-timeout sizing.",
+            exc,
+            _FALLBACK_TEST_COUNT_ESTIMATE,
+        )
+        return _FALLBACK_TEST_COUNT_ESTIMATE
+
     # Pytest's `-q --collect-only` prints lines like "<module>::<test>" and
     # ends with "<N> tests collected".
     for line in reversed(result.stdout.splitlines()):
@@ -306,7 +364,15 @@ def estimate_test_count() -> int:
                 return int(line.split()[0])
             except (ValueError, IndexError):
                 break
-    return 1500
+    logger.warning(
+        "[refresh] pytest --collect-only did not print an 'N tests "
+        "collected' summary line (exit=%d); using fallback estimate of %d "
+        "tests for --global-timeout sizing. Collection may have errored -- "
+        "check the tree manually if this refresh stalls.",
+        result.returncode,
+        _FALLBACK_TEST_COUNT_ESTIMATE,
+    )
+    return _FALLBACK_TEST_COUNT_ESTIMATE
 
 
 def compute_default_global_timeout(test_timeout: int) -> int:
@@ -401,15 +467,18 @@ def main(argv: list[str] | None = None) -> int:
         format="%(message)s",
     )
 
-    global_timeout = args.global_timeout or compute_default_global_timeout(args.test_timeout)
+    global_timeout = args.global_timeout or compute_default_global_timeout(
+        args.test_timeout
+    )
     output_path = resolve_output_path(args)
     invocation_argv = sys.argv[1:] if argv is None else argv
 
     successful_runs: list[dict[str, str]] = []
     failed_runs = 0
-    with tempfile.TemporaryDirectory(prefix="baseline-runs-") as parent_tmp:
+    with tempfile.TemporaryDirectory(prefix="baseline-runs-") as parent_tmp_str:
+        parent_tmp = Path(parent_tmp_str)
         for run_index in range(args.runs):
-            per_run_tmp = Path(parent_tmp) / f"run-{run_index}"
+            per_run_tmp = parent_tmp / f"run-{run_index}"
             per_run_tmp.mkdir()
             xml_path = per_run_tmp / "junit.xml"
 

@@ -12,6 +12,7 @@ import json
 import subprocess
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -30,6 +31,7 @@ from scripts.refresh_test_baseline import (
     classify,
     load_existing_notes,
     resolve_output_path,
+    run_pytest_once,
 )
 
 # ---------------------------------------------------------------------------
@@ -208,7 +210,9 @@ def test_aggregate_outcomes_handles_missing_tests() -> None:
 def _init_tmp_repo(tmp_path: Path) -> Path:
     """Initialise a fresh git repo in ``tmp_path`` with a single commit."""
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True
+    )
     subprocess.run(["git", "config", "user.name", "Tester"], cwd=tmp_path, check=True)
     seed = tmp_path / "seed.txt"
     seed.write_text("hello\n")
@@ -342,5 +346,181 @@ def test_resolve_output_path_normal_defaults_to_baseline_path() -> None:
 
 
 def test_resolve_output_path_explicit_override_wins() -> None:
-    assert resolve_output_path(_NS(output="/tmp/custom.json", dry_run=True)) == "/tmp/custom.json"
-    assert resolve_output_path(_NS(output="/tmp/custom.json", dry_run=False)) == "/tmp/custom.json"
+    assert (
+        resolve_output_path(_NS(output="/tmp/custom.json", dry_run=True))
+        == "/tmp/custom.json"
+    )
+    assert (
+        resolve_output_path(_NS(output="/tmp/custom.json", dry_run=False))
+        == "/tmp/custom.json"
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_pytest_once subprocess boundary
+#
+# Historically the ``run_pytest_once`` subprocess boundary had zero unit-test
+# coverage -- every other function was tested but this one was "mostly
+# plumbing" and skipped.  That's how the ``-p pytest_timeout`` blocker
+# (PR #1154 review) landed invisible: the command would raise
+# ``ValueError: Plugin already registered`` at startup, pytest exited before
+# writing junitxml, ``run_pytest_once`` returned True on completion, and the
+# downstream ``JunitxmlParseError`` path swallowed every run.  Tests below
+# close that gap by exercising (a) a real pytest invocation against a minimal
+# fixture tree and (b) a mocked startup-failure that never writes junitxml.
+# ---------------------------------------------------------------------------
+
+
+def test_run_pytest_once_writes_junitxml_for_real_minimal_tree(
+    tmp_path: Path,
+) -> None:
+    """A minimal tests/ tree makes run_pytest_once write junitxml and return True.
+
+    This verifies the entire subprocess boundary end-to-end: pytest is actually
+    invoked against a single-test tree and must produce a parseable junitxml
+    with the expected outcome.  If the BLOCKER regresses (e.g. by re-adding
+    ``-p pytest_timeout``), this test fails because pytest never writes the
+    file -- we assert ``True`` AND ``junitxml_path.exists()`` AND that the
+    parsed outcomes include the seeded test.
+    """
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_seed.py").write_text(
+        textwrap.dedent(
+            """
+            def test_passing():
+                assert 1 == 1
+            """
+        ).strip()
+        + "\n"
+    )
+    junitxml_path = tmp_path / "junit.xml"
+
+    # Override PROJECT_DIR so pytest picks up our tiny fixture tree, not the
+    # real repo's sprawling tests/.  We patch on the module the function is
+    # imported from so the patched value is the one run_pytest_once reads.
+    import scripts.refresh_test_baseline as refresh_module
+
+    with patch.object(refresh_module, "PROJECT_DIR", tmp_path):
+        ok = run_pytest_once(
+            run_index=0,
+            junitxml_path=junitxml_path,
+            test_timeout=30,
+            global_timeout=120,
+            pytest_args=None,
+            verbose=False,
+        )
+
+    assert ok is True, "run_pytest_once must return True on a completed run"
+    assert junitxml_path.exists(), (
+        "pytest produced no junitxml -- a startup-time crash is hiding. "
+        "Check that no second pytest-timeout registration was re-introduced."
+    )
+
+    outcomes = parse_junitxml(junitxml_path)
+    assert outcomes == {"tests/test_seed.py::test_passing": "pass"}
+
+
+def test_run_pytest_once_returns_false_when_pytest_crashes_before_junitxml(
+    tmp_path: Path,
+) -> None:
+    """A pytest startup crash must surface as False, not silently pass.
+
+    Before the fix, ``run_pytest_once`` returned True on any completed
+    subprocess call -- including plugin-registration errors where pytest
+    exits before writing junitxml.  The downstream ``JunitxmlParseError``
+    path masked this as "all N runs failed" with no signal of why.
+    """
+    junitxml_path = tmp_path / "junit.xml"
+
+    # Simulate a subprocess that exits non-zero WITHOUT writing junitxml.
+    fake_result = subprocess.CompletedProcess(
+        args=["pytest", "..."],
+        returncode=4,  # pytest's "internal error" exit code
+        stdout="",
+        stderr=(
+            "ValueError: Plugin already registered under a different name: "
+            "timeout=<module 'pytest_timeout'>"
+        ),
+    )
+
+    with patch("scripts.refresh_test_baseline.subprocess.run", return_value=fake_result):
+        ok = run_pytest_once(
+            run_index=0,
+            junitxml_path=junitxml_path,
+            test_timeout=30,
+            global_timeout=120,
+            pytest_args=None,
+            verbose=False,
+        )
+
+    assert ok is False, (
+        "A pytest startup crash must return False so the caller discards the "
+        "run; returning True would let the downstream JunitxmlParseError path "
+        "silently mask the root cause."
+    )
+    assert not junitxml_path.exists()
+
+
+def test_run_pytest_once_returns_false_on_outer_timeout(tmp_path: Path) -> None:
+    """The --global-timeout safety net must still return False."""
+    junitxml_path = tmp_path / "junit.xml"
+
+    with patch(
+        "scripts.refresh_test_baseline.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["pytest"], timeout=1),
+    ):
+        ok = run_pytest_once(
+            run_index=0,
+            junitxml_path=junitxml_path,
+            test_timeout=30,
+            global_timeout=1,
+            pytest_args=None,
+            verbose=False,
+        )
+
+    assert ok is False
+
+
+def test_run_pytest_once_logs_stderr_tail_on_startup_crash(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Captured stderr must appear in the warning so the operator sees why pytest crashed."""
+    junitxml_path = tmp_path / "junit.xml"
+    tell_tale_stderr = (
+        "ValueError: Plugin already registered under a different name: "
+        "timeout=<module 'pytest_timeout'>"
+    )
+    fake_result = subprocess.CompletedProcess(
+        args=["pytest"],
+        returncode=4,
+        stdout="",
+        stderr=tell_tale_stderr,
+    )
+
+    import logging
+
+    with (
+        caplog.at_level(logging.WARNING, logger="scripts.refresh_test_baseline"),
+        patch(
+            "scripts.refresh_test_baseline.subprocess.run",
+            return_value=fake_result,
+        ),
+    ):
+        ok = run_pytest_once(
+            run_index=0,
+            junitxml_path=junitxml_path,
+            test_timeout=30,
+            global_timeout=120,
+            pytest_args=None,
+            verbose=False,
+        )
+
+    assert ok is False
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Plugin already registered" in joined, (
+        "stderr contents must appear in the warning so the operator can see "
+        "what caused the crash -- otherwise the signal is just 'all N runs "
+        "failed' again."
+    )

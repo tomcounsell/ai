@@ -149,7 +149,9 @@ def test_real_baseline_entry_is_preexisting_not_blocking() -> None:
 def test_hung_baseline_entry_is_preexisting_not_blocking() -> None:
     """The ``hung`` category is treated as pre-existing (BLOCKER resolution verified)."""
     baseline = _baseline({"tests/integration/test_wedge.py::test_deadlock": "hung"})
-    verdict = compute_gate_verdict(baseline, {"tests/integration/test_wedge.py::test_deadlock"})
+    verdict = compute_gate_verdict(
+        baseline, {"tests/integration/test_wedge.py::test_deadlock"}
+    )
     assert verdict["new_blocking_regressions"] == []
     assert verdict["preexisting_failures_present"] == 1
 
@@ -194,7 +196,9 @@ def test_baseline_keys_no_longer_failing_flagged_as_advisory() -> None:
     )
     pr_failures = {"tests/unit/test_a.py::test_real_still"}
     verdict = compute_gate_verdict(baseline, pr_failures)
-    assert verdict["baseline_keys_no_longer_failing"] == ["tests/unit/test_a.py::test_real_gone"]
+    assert verdict["baseline_keys_no_longer_failing"] == [
+        "tests/unit/test_a.py::test_real_gone"
+    ]
     assert verdict["new_blocking_regressions"] == []
 
 
@@ -212,7 +216,9 @@ def test_multiple_flakies_and_one_new_regression_blocks_only_new() -> None:
         "tests/unit/test_a.py::test_new_regression",
     }
     verdict = compute_gate_verdict(baseline, pr_failures)
-    assert verdict["new_blocking_regressions"] == ["tests/unit/test_a.py::test_new_regression"]
+    assert verdict["new_blocking_regressions"] == [
+        "tests/unit/test_a.py::test_new_regression"
+    ]
     assert verdict["new_flaky_occurrences"] == ["tests/unit/test_a.py::test_flaky1"]
 
 
