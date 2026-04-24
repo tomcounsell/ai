@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -13,6 +13,7 @@ last_comment_id:
 
 ## Revision Log
 
+- **2026-04-24 (revision 3)** — Revision pass in response to `/do-plan-critique` verdict `NEEDS REVISION` (recorded against plan hash `sha256:9209503e...`, the pre-revision-2 state). The critique findings — primarily that the plan over-indexed on cleanup and the prevention story was diffuse — were already addressed structurally by revision 2 (committed at `8b7b9c1e` as `plan revision(#1157): prevention-focused approach, drop cleanup utility`). Revision 3 adds (a) verification that every file:line pointer in the plan still matches current HEAD (`46b2de03`), (b) a Critique Results entry acknowledging the NEEDS REVISION verdict and mapping it to the revision-2 changes, and (c) sets `status: Ready` since all three open questions are resolved and a fresh critique is the next step, not another revision. No substantive plan edits — the prevention-focused approach from revision 2 is the correct direction.
 - **2026-04-24 (revision 2)** — Reoriented around **prevention**, not cleanup, per Valor feedback: "Our solution here is more about cleanup when it should be a higher focus on prevention. Ideally something like a cleanup phantom twin function should never need to be used. We should always place way more attention on prevention than band-aids." Cut the `tools/cleanup_phantom_twins.py` dry-run utility entirely. Sharpened the "Why this bug happens" analysis and centered the plan on guards at the exact creation site (`user_prompt_submit.py::main` line 134's `AgentSession.create_local()` call). Added an integration test asserting PM terminal-transition still fires after the `stop.py` change (answer to open question 2). Preserved the `local-{session_id}` legacy fallback in `stop.py` for direct-CLI users (answer to open question 3).
 - **2026-04-24 (revision 1)** — Initial plan drafted by `/do-plan`. Scope widened during recon to cover `stop.py:146-147` reconstructing `local-{session_id}` instead of reading the sidecar's `agent_session_id`.
 
@@ -541,9 +542,10 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). Entries below reflect the 2026-04-24 critique run against the earlier cleanup-focused draft (plan hash `sha256:9209503e...`). Revision 2 (commit `8b7b9c1e`) addressed these findings by reorienting the plan around prevention. A fresh critique is expected against the current revision-3 state. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| N/A (verdict: NEEDS REVISION) | Aggregate | The original cleanup-focused draft mis-ranked prevention vs. cleanup — shipping a `tools/cleanup_phantom_twins.py` utility in the same PR as the prevention guard implicitly admitted prevention might fail. | Revision 2 dropped the cleanup utility entirely. Plan is now prevention-only. | The guard must fire at `user_prompt_submit.py:134` (the `AgentSession.create_local()` call) BEFORE the existing env-var gate at line 109. Check `AGENT_SESSION_ID` via `AgentSession.get_by_id()`, fall back to `VALOR_SESSION_ID` via `query.filter(session_id=...)`. If resolved and non-terminal, write sidecar and return. Preserve #1113 terminal-status semantics by falling through on terminal sessions. |
 
 ---
 
