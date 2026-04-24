@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, field_validator
@@ -779,3 +780,380 @@ class PipelineStateMachine:
             "current_stage": self.current_stage(),
             "has_remaining": self.has_remaining_stages(),
         }
+
+    @classmethod
+    def derive_from_durable_signals(cls, session) -> dict[str, str]:
+        """FALLBACK: Derive pipeline progress from durable artifacts.
+
+        This is a FALLBACK path, not the primary signal source. It is only
+        consulted by ``/do-merge`` when ``get_display_progress()`` returns
+        an empty/all-``pending`` dict on a cold Redis (fresh machine, eviction,
+        cleared Popoto session). The primary path remains Redis-backed
+        ``stage_states`` written by the PipelineStateMachine itself.
+
+        Signals consulted (per stage):
+        - **PLAN** — plan file exists at ``origin/{branch}:docs/plans/{slug}.md``
+          with a ``tracking:`` URL.
+        - **BUILD** — ``gh pr list --search "#{issue}" --state open`` returns
+          at least one PR whose ``headRefName`` equals ``session/{slug}``.
+        - **TEST** — ``gh pr view --json statusCheckRollup`` shows all
+          checks passing (no ``FAILURE``/``TIMED_OUT``/``CANCELLED``).
+        - **REVIEW** — most recent ``## Review:`` issue comment on the PR
+          starts with ``## Review: Approved``. Stale reviews are filtered
+          using the commit-SHA filter (comments before the latest commit's
+          ``committer_date`` are dropped), consistent with item 2's filter.
+        - **DOCS** — **tri-OR derivation**: returns ``completed`` if ANY of:
+          (a) ``gh pr diff --name-only`` shows at least one ``docs/`` file,
+          (b) every ``- [ ]`` checkbox in the plan's ``## Documentation``
+          section is ticked (``- [x]``),
+          (c) the latest ``## Review:`` comment body matches
+          ``docs (complete|updated|verified|reviewed)`` case-insensitively.
+          If none of the three fire, DOCS returns ``pending``.
+
+        **Note on downstream routing**: ``/do-merge`` is a terminal gate,
+        NOT a router. When this function returns ``pending`` for a stage,
+        the gate prints that state and returns GATES_FAILED; the PM session
+        then reads the output and dispatches the appropriate remediation
+        skill on its next turn. This is a two-step loop through the PM
+        session — this function never dispatches anything.
+
+        **Failure semantics**: Any subprocess error (``gh api``/``git show``
+        failure, network error, JSON parse error, missing binaries) is
+        caught at the top level and the corresponding stage is recorded as
+        ``pending`` — equivalent to cold-Redis behavior. The function never
+        raises. A warning is logged for each swallowed error.
+
+        Args:
+            session: AgentSession instance. The ``slug`` attribute is the
+                sole required field; everything else is read via the
+                subprocess helpers.
+
+        Returns:
+            Dict mapping DISPLAY_STAGES to one of ``"completed"``,
+            ``"pending"``, or ``"failed"``. On complete subprocess failure,
+            returns ``{}`` (matches the cold-Redis return shape).
+        """
+        slug = getattr(session, "slug", None)
+        if not slug:
+            logger.debug("derive_from_durable_signals: session has no slug")
+            return {}
+
+        states: dict[str, str] = {stage: "pending" for stage in DISPLAY_STAGES}
+        states["ISSUE"] = "completed"  # Session exists → ISSUE has completed
+
+        branch = f"session/{slug}"
+        plan_path = f"docs/plans/{slug}.md"
+
+        try:
+            # --- PLAN ----------------------------------------------------
+            plan_text = _durable_git_show(f"origin/{branch}:{plan_path}")
+            if plan_text is None:
+                plan_text = _durable_git_show(f"origin/main:{plan_path}")
+            if plan_text and "tracking:" in plan_text:
+                states["PLAN"] = "completed"
+
+            # CRITIQUE: we treat CRITIQUE as completed if PLAN is completed
+            # and the plan text contains a ``## Critique Results`` section
+            # with any content (matches Rule 1 of the PM persona's artifact
+            # verification table).
+            if states["PLAN"] == "completed" and plan_text:
+                if _plan_has_critique_results(plan_text):
+                    states["CRITIQUE"] = "completed"
+
+            # --- BUILD: look for an open PR on session/{slug} -------------
+            pr_info = _durable_gh_pr_for_branch(branch)
+            if pr_info:
+                states["BUILD"] = "completed"
+
+            # --- TEST: check statusCheckRollup on the PR -----------------
+            latest_commit_date: str | None = None
+            if pr_info:
+                pr_number = pr_info.get("number")
+                check_verdict = _durable_pr_checks_verdict(pr_number)
+                if check_verdict == "success":
+                    states["TEST"] = "completed"
+                elif check_verdict == "failure":
+                    states["TEST"] = "failed"
+                # "pending"/"unknown" stays as pending
+
+                latest_commit_date = _durable_pr_latest_commit_date(pr_number)
+
+            # --- REVIEW: latest ``## Review:`` comment, SHA-filtered ------
+            latest_review_body: str | None = None
+            if pr_info:
+                latest_review_body = _durable_latest_review_comment(
+                    pr_info.get("number"), latest_commit_date
+                )
+                if latest_review_body:
+                    if latest_review_body.startswith("## Review: Approved"):
+                        states["REVIEW"] = "completed"
+                    elif latest_review_body.startswith("## Review: Changes Requested"):
+                        states["REVIEW"] = "failed"
+
+            # --- DOCS: tri-OR derivation ---------------------------------
+            # (a) docs/ files in PR diff
+            # (b) all ## Documentation checkboxes ticked in plan
+            # (c) latest ## Review: comment body mentions docs
+            docs_completed = False
+            if pr_info:
+                if _durable_pr_diff_has_docs(pr_info.get("number")):
+                    docs_completed = True
+
+            if not docs_completed and plan_text and _plan_docs_checkboxes_all_ticked(plan_text):
+                docs_completed = True
+
+            if not docs_completed and latest_review_body:
+                if _review_comment_mentions_docs(latest_review_body):
+                    docs_completed = True
+
+            if docs_completed:
+                states["DOCS"] = "completed"
+
+        except Exception as exc:  # top-level fail-closed guard
+            logger.warning(
+                "derive_from_durable_signals: unexpected error deriving signals for slug %s: %s",
+                slug,
+                exc,
+            )
+            # Leave any already-populated states in place; the rest stays
+            # ``pending`` so the gate treats them as unknown-not-completed.
+        return states
+
+
+# ---------------------------------------------------------------------------
+# Durable-signal helpers (item 1 of sdlc-1155)
+#
+# These helpers are NOT part of the PipelineStateMachine contract — they are
+# private subprocess-based readers consulted only from
+# ``PipelineStateMachine.derive_from_durable_signals``. Each helper returns a
+# plain Python value (or ``None``) and catches every exception internally; the
+# caller treats ``None`` as "signal absent" and marks the corresponding stage
+# as ``pending``. No function here writes anything to disk or Redis.
+# ---------------------------------------------------------------------------
+
+
+def _durable_run(cmd: list[str], timeout: int = 15) -> str | None:
+    """Run a subprocess, return stdout on exit 0, ``None`` on any failure.
+
+    Never raises. All errors (missing binary, non-zero exit, timeout, decode
+    failure) are caught and logged at WARNING/DEBUG and result in ``None``.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        logger.warning("derive_from_durable_signals: binary not found: %s", exc)
+        return None
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("derive_from_durable_signals: timeout running %s: %s", cmd[:2], exc)
+        return None
+    except Exception as exc:  # defensive catch-all; must never raise upward
+        logger.warning("derive_from_durable_signals: unexpected error running %s: %s", cmd[:2], exc)
+        return None
+
+    if result.returncode != 0:
+        logger.debug(
+            "derive_from_durable_signals: %s exited %d (%s)",
+            cmd[:2],
+            result.returncode,
+            (result.stderr or "").strip()[:200],
+        )
+        return None
+    return result.stdout
+
+
+def _durable_git_show(spec: str) -> str | None:
+    """Return the contents of ``git show {spec}`` or ``None``."""
+    return _durable_run(["git", "show", spec])
+
+
+def _durable_gh_pr_for_branch(branch: str) -> dict | None:
+    """Return a dict describing the (most recent) PR on ``branch``, or None.
+
+    Reads open PRs first; if no open PR exists, falls back to any state so
+    that closed/merged PRs still signal BUILD completion (they demonstrate
+    the artifact was produced).
+    """
+    for state in ("open", "all"):
+        out = _durable_run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                state,
+                "--json",
+                "number,headRefName,state",
+                "--limit",
+                "5",
+            ]
+        )
+        if out is None:
+            continue
+        try:
+            parsed = json.loads(out)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list) and parsed:
+            return parsed[0]
+    return None
+
+
+def _durable_pr_checks_verdict(pr_number) -> str:
+    """Return ``"success"``/``"failure"``/``"pending"``/``"unknown"``."""
+    if pr_number is None:
+        return "unknown"
+    out = _durable_run(["gh", "pr", "view", str(pr_number), "--json", "statusCheckRollup"])
+    if out is None:
+        return "unknown"
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError:
+        return "unknown"
+    checks = parsed.get("statusCheckRollup") or []
+    if not checks:
+        # PRs without CI configured default to success (no checks to fail).
+        return "success"
+    seen_failure = False
+    seen_pending = False
+    for check in checks:
+        conclusion = (check.get("conclusion") or "").upper()
+        state = (check.get("state") or "").upper()
+        if conclusion in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
+            seen_failure = True
+        elif conclusion in {"", "PENDING", "IN_PROGRESS", "QUEUED"} and state in {
+            "",
+            "PENDING",
+            "IN_PROGRESS",
+            "QUEUED",
+        }:
+            # No conclusion yet → still running.
+            seen_pending = True
+    if seen_failure:
+        return "failure"
+    if seen_pending:
+        return "pending"
+    return "success"
+
+
+def _durable_pr_latest_commit_date(pr_number) -> str | None:
+    """Return the ISO-8601 ``committer.date`` of the PR's latest commit, or None."""
+    if pr_number is None:
+        return None
+    out = _durable_run(
+        [
+            "gh",
+            "api",
+            f"repos/:owner/:repo/pulls/{pr_number}/commits",
+            "--jq",
+            ".[-1].commit.committer.date",
+        ]
+    )
+    if out is None:
+        return None
+    date = out.strip()
+    return date or None
+
+
+def _durable_latest_review_comment(pr_number, latest_commit_date: str | None) -> str | None:
+    """Return the body of the most recent ``## Review:`` issue comment.
+
+    If ``latest_commit_date`` is provided, comments with ``created_at`` strictly
+    older than that are dropped (matches item 2's commit-SHA filter semantics
+    so the durable fallback and the gate's comment check agree). Exact-time
+    ties are kept (``>=`` comparison).
+    """
+    if pr_number is None:
+        return None
+    out = _durable_run(
+        [
+            "gh",
+            "api",
+            f"repos/:owner/:repo/issues/{pr_number}/comments",
+            "--paginate",
+            "--jq",
+            ".[] | {body: .body, created_at: .created_at}",
+        ]
+    )
+    if out is None:
+        return None
+    candidate_body: str | None = None
+    for raw_line in out.splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        body = entry.get("body") or ""
+        if not body.startswith("## Review:"):
+            continue
+        created_at = entry.get("created_at") or ""
+        if latest_commit_date and created_at and created_at < latest_commit_date:
+            continue  # stale review, drop
+        candidate_body = body  # gh api returns in ASC order → last kept = newest
+    return candidate_body
+
+
+def _durable_pr_diff_has_docs(pr_number) -> bool:
+    """Return True if the PR diff touches at least one ``docs/`` file."""
+    if pr_number is None:
+        return False
+    out = _durable_run(["gh", "pr", "diff", str(pr_number), "--name-only"])
+    if out is None:
+        return False
+    for line in out.splitlines():
+        if line.strip().startswith("docs/"):
+            return True
+    return False
+
+
+def _plan_has_critique_results(plan_text: str) -> bool:
+    """Return True if the plan contains a non-empty ``## Critique Results`` section."""
+    match = re.search(r"(?m)^##\s+Critique Results\s*$", plan_text)
+    if not match:
+        return False
+    tail = plan_text[match.end() :]
+    # Non-empty = some non-whitespace content before next ## heading
+    next_heading = re.search(r"(?m)^##\s+\S", tail)
+    body = tail[: next_heading.start()] if next_heading else tail
+    return bool(body.strip())
+
+
+def _plan_docs_checkboxes_all_ticked(plan_text: str) -> bool:
+    """Return True if every ``- [ ]`` in the plan's ``## Documentation`` section is ticked."""
+    match = re.search(r"(?m)^##\s+Documentation\s*$", plan_text)
+    if not match:
+        return False
+    tail = plan_text[match.end() :]
+    next_heading = re.search(r"(?m)^##\s+\S", tail)
+    body = tail[: next_heading.start()] if next_heading else tail
+    # Any unticked checkbox → False
+    if re.search(r"^\s*-\s+\[\s\]\s", body, flags=re.MULTILINE):
+        return False
+    # Must have at least one ticked checkbox to count as "all ticked"
+    return bool(re.search(r"^\s*-\s+\[x\]\s", body, flags=re.MULTILINE | re.IGNORECASE))
+
+
+_DOCS_REVIEW_ACK_RE = re.compile(
+    r"docs\s+(complete|completed|updated|verified|reviewed)",
+    re.IGNORECASE,
+)
+
+
+def _review_comment_mentions_docs(comment_body: str) -> bool:
+    """Return True if the ``## Review:`` comment body acknowledges docs.
+
+    Matches ``docs (complete|completed|updated|verified|reviewed)``
+    case-insensitively (per Open Question #5 resolution).
+    """
+    if not comment_body:
+        return False
+    return bool(_DOCS_REVIEW_ACK_RE.search(comment_body))
