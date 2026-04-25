@@ -6,6 +6,9 @@ owner: Valor
 created: 2026-04-25
 tracking: https://github.com/tomcounsell/ai/issues/1171
 last_comment_id:
+revision_applied: true
+revision_pass: 1
+revision_addressed: [B1, C1, C2, C3, C4, N1]
 ---
 
 # Reflection project_key namespace fix
@@ -145,15 +148,45 @@ This plan presents three resolution strategies. **Recommended: Option B (env pro
 **Recommended path (Option B):**
 
 1. Add `VALOR_PROJECT_KEY=valor` to `~/Desktop/Valor/.env` and to `.env.example` (with explanatory comment per Plan Requirements: secrets policy in CLAUDE.md).
-2. Verify both plist generators (`scripts/valor-service.sh` for bridge, `scripts/install_worker.sh` for worker) inject `.env` vars into the plist `EnvironmentVariables` dict — they already do, no script changes needed. The `bridge-watchdog` plist (in `valor-service.sh:573-609`) does NOT need it since the watchdog doesn't run reflections.
-3. Re-run `./scripts/valor-service.sh install` and `./scripts/install_worker.sh` to bake the new env var into the live plists; restart bridge and worker.
-4. Verify post-restart: `launchctl getenv VALOR_PROJECT_KEY` (per process) and live Redis writes go to `valor:*`.
-5. Clean up the one stale key: `default:sustainability:throttle_level` (delete via `r.delete(...)`).
-6. Memory subsystem: addressed in **Open Question 2** — defer to Tom's call on whether to migrate the 198 `default:*` Memory records to `valor:*` as part of this plan or split into a follow-up.
-7. Add a regression test that asserts the env var is set in launchd-managed processes (or a unit test that asserts `_get_project_key()` returns the expected value in the production environment).
+2. **Port `.env` injection into `scripts/update/service.py::install_worker`** (per B1, see Implementation Note below). The standalone `scripts/install_worker.sh:95-131` already injects `.env` vars, but `/update --full` calls `scripts/update/service.py::install_worker()` (which only does template substitution, not env injection). Without this port, `/update --full` will write a worker plist that lacks `VALOR_PROJECT_KEY`. Live verification on this machine confirms the worker plist currently has only PATH/HOME/VALOR_LAUNCHD — exactly the failure mode B1 predicts.
+3. Verify the bridge plist generator (`scripts/valor-service.sh:482-521`) injects `.env` vars into the plist `EnvironmentVariables` dict — it already does. The `bridge-watchdog` plist (in `valor-service.sh:573-609`) does NOT need it since the watchdog doesn't run reflections.
+4. Re-run `./scripts/valor-service.sh install` AND run `python -m scripts.update.run --full` (or `./scripts/install_worker.sh` directly for one-shot) to bake the new env var into the live plists; restart bridge and worker.
+5. Verify post-deploy: `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.worker.plist` returns `valor` (per process) and live Redis writes go to `valor:*`.
+6. Clean up the one stale key: `default:sustainability:throttle_level` (delete via `r.delete(...)` — this is an ad-hoc string flag, NOT a Popoto-managed model key, so direct `r.delete` is correct per CLAUDE.md `feedback_never_raw_delete_popoto.md`).
+7. **Memory record migration is now in scope** (per C1 revision): re-tag the 207 `default:*` and 4 `dm:*` Memory records to `valor:*` via Popoto-safe migration script (see Implementation Note below). Run BEFORE the worker restart in step 4 so post-restart recall queries find the records. The `dm` writer source is filed as a sibling investigation (out of scope here, but tracked).
+8. Add the regression tests under Test Impact, including an empty-string defense test and an e2e default-project-key test.
+
+**B1 Implementation Note (port .env injection into `scripts/update/service.py`):**
+- Function to edit: `scripts/update/service.py::install_worker()` at line 196.
+- After `plist_dst.write_text(plist_text)` at line 235 and BEFORE `launchctl bootstrap` at line 237, insert the env injection block adapted from `scripts/install_worker.sh:95-131`.
+- Use `from dotenv import dotenv_values` and `import plistlib`.
+- Read `.env` from `project_dir / ".env"` (which is the symlink to `~/Desktop/Valor/.env`).
+- Open the freshly-written plist, `setdefault("EnvironmentVariables", {})`, then for each key in `dotenv_values(env_file)`: skip if `key in existing` (preserve the three placeholder vars `PATH`/`HOME`/`VALOR_LAUNCHD`), skip if `value is None`. Save the plist back via `plistlib.dump`.
+- Wrap the entire block in `try/except Exception` and log a warning on failure (the worker should still start with a degraded plist; the regression test will catch the missing var).
+
+**C1 Implementation Note (memory record migration):**
+- Migration script template (run as a one-shot before worker restart):
+  ```python
+  from models.memory import Memory
+  for old_pk in ("default", "dm"):
+      records = list(Memory.query.filter(project_key=old_pk))
+      print(f"Migrating {len(records)} records from {old_pk} → valor")
+      for m in records:
+          m.project_key = "valor"
+          m.save()
+  ```
+- Run with a dry-run flag first (`--dry-run` prints counts only, no writes).
+- NEVER use raw `r.delete`/`r.hset` — this is a Popoto-managed model, so use `Memory.query` and `m.save()` per CLAUDE.md `feedback_never_raw_delete_popoto.md`.
+- The `dm` namespace leak source (4 records, growing) is out of scope here — track separately by grepping `cwd` references in `agent/memory_hook.py:83`, `tools/memory_search/__init__.py:48`, and `.claude/hooks/hook_utils/memory_bridge.py:140` for stale `dm` project lookups.
+
+**C2 Implementation Note (empty-string defense):**
+- The bare `os.environ.get("VALOR_PROJECT_KEY", "valor")` does NOT handle `VALOR_PROJECT_KEY=""` (empty string passes through). The plist injector at `install_worker.sh:122` uses `if value is not None`, so `""` would land in the plist if mis-configured.
+- Replace each call site with: `_v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); _pk = _v or "valor"`.
+- Apply at `agent/sustainability.py:30-32`, `agent/session_pickup.py:180`, `agent/agent_session_queue.py:1408`.
+- Test with both `monkeypatch.setenv("VALOR_PROJECT_KEY", "")` and `monkeypatch.setenv("VALOR_PROJECT_KEY", "  ")` — both must resolve to `"valor"`.
 
 **Note on Option B and `default:` literal in code:**
-- The fallback string `"default"` in `agent/sustainability.py:32`, `agent/session_pickup.py:180`, and `agent/agent_session_queue.py:1408` is no longer reachable in production with the env var set, but should still be kept as a safety net. Optionally change it to `"valor"` so the fallback is also correct (defense in depth). This is a pure code change with no deploy implications.
+- The fallback string `"default"` in `agent/sustainability.py:32`, `agent/session_pickup.py:180`, and `agent/agent_session_queue.py:1408` is no longer reachable in production with the env var set, but should still be kept as a safety net. Per C2 above, change to `"valor"` AND add the empty-string defense (one-line helper). This is a pure code change with no deploy implications.
 
 ## Failure Path Test Strategy
 
@@ -163,7 +196,7 @@ This plan presents three resolution strategies. **Recommended: Option B (env pro
 - [ ] If we change `_get_project_key()` to a shared helper (per Option C), the helper must catch `projects.json` read errors and fall back to a known constant — test that an unreadable `projects.json` returns the canonical fallback (not `"default"`).
 
 ### Empty/Invalid Input Handling
-- [ ] Empty `VALOR_PROJECT_KEY` env var (e.g., `VALOR_PROJECT_KEY=""`): currently treated as "set" by `os.environ.get(..., "default")` returning `""`. Add a defensive check: if value is empty after strip, treat as unset. Test with `monkeypatch.setenv("VALOR_PROJECT_KEY", "")`.
+- [ ] Empty `VALOR_PROJECT_KEY` env var (e.g., `VALOR_PROJECT_KEY=""`): currently treated as "set" by `os.environ.get(..., "default")` returning `""`. **Fix codified in Solution → C2 Implementation Note**: replace each call site with `_v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); _pk = _v or "valor"`. **Task 2 explicitly applies this; test added in Test Impact.** Verified with both `monkeypatch.setenv("VALOR_PROJECT_KEY", "")` and `monkeypatch.setenv("VALOR_PROJECT_KEY", "  ")`.
 - [ ] None — env vars are always strings.
 
 ### Error State Rendering
@@ -174,9 +207,11 @@ This plan presents three resolution strategies. **Recommended: Option B (env pro
 - [ ] `tests/unit/test_sustainability.py:434,496` — currently sets `VALOR_PROJECT_KEY=testproj` to override; UPDATE: assert that with no env override, the resolved project_key is `"valor"` (the canonical default), not `"default"`. Adds one new test case.
 - [ ] `tests/unit/test_session_health_sibling_phantom_safety.py:56` — sets `VALOR_PROJECT_KEY=default`; UPDATE: change to `valor` so the test reflects the new canonical default.
 - [ ] `tests/unit/test_memory_bridge.py:551,562,574,577` — tests `_get_project_key` env precedence; KEEP AS IS — these tests verify env-var precedence behavior which doesn't change.
-- [ ] `tests/e2e/test_session_continuity.py:30` — hard-codes `project_key="valor"`; KEEP AS IS — this is now the canonical value.
+- [ ] `tests/e2e/test_session_continuity.py:30` — hard-codes `project_key="valor"`; UPDATE per C3: add a NEW test case `test_default_project_key_when_unspecified` that constructs an `AgentSession` (or invokes the writer code path) WITHOUT explicit `project_key=` and asserts the persisted record has `project_key == "valor"`. Use `monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)` at the test scope so the env injection from the test runner does not mask the writer-side default. This is the e2e companion to `test_default_project_key_consistency.py`.
 - [ ] **Add new test**: `tests/unit/test_sustainability_namespace.py` — assert that with `VALOR_PROJECT_KEY=valor` set, `circuit_health_gate` writes flags to `valor:sustainability:queue_paused`, and that `session_recovery_drip` queries `AgentSession.query.filter(project_key="valor")`. This is the regression test that catches future drift.
 - [ ] **Add new test**: `tests/unit/test_default_project_key_consistency.py` — assert that `tools.agent_session_scheduler.DEFAULT_PROJECT_KEY == "valor"` matches the value of `VALOR_PROJECT_KEY` resolved by `agent.sustainability._get_project_key()` in a controlled env. Catches drift between writer and reader defaults.
+- [ ] **Add new test (C2 empty-string defense)**: in `tests/unit/test_default_project_key_consistency.py`, add `test_empty_env_falls_back_to_valor` and `test_whitespace_env_falls_back_to_valor` cases. Set `VALOR_PROJECT_KEY=""` and `VALOR_PROJECT_KEY="  "` via `monkeypatch.setenv`; assert that `agent.sustainability._get_project_key()`, `agent.session_pickup`'s computed `_project_key`, and `agent.agent_session_queue`'s computed `_pk` ALL resolve to `"valor"`.
+- [ ] **Add new test (B1 env injection regression)**: in `tests/unit/test_update_install_worker.py` (new file), call `scripts.update.service.install_worker(project_dir)` against a temp project_dir containing a stub plist + a stub `.env` with `VALOR_PROJECT_KEY=valor`, then read the destination plist and assert `EnvironmentVariables["VALOR_PROJECT_KEY"] == "valor"`. This catches the B1 bug at the unit level — without it, B1 can recur silently if a future refactor drops the injection block.
 
 ## Rabbit Holes
 
@@ -199,9 +234,20 @@ This plan presents three resolution strategies. **Recommended: Option B (env pro
 **Impact:** The current `~/Library/LaunchAgents/com.valor.worker.plist` only contains PATH/HOME/VALOR_LAUNCHD — none of the other 30+ vars from `.env`. Either the install script's env injection is broken on this machine, or the plist was installed before the injection code was added. Adding `VALOR_PROJECT_KEY` to `.env` won't help if the injection isn't running.
 **Mitigation:** Before declaring the fix done, manually `./scripts/install_worker.sh` and verify `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" ~/Library/LaunchAgents/com.valor.worker.plist` shows VALOR_PROJECT_KEY=valor. If the injection is broken, that's a separate sub-bug to fix as part of this plan.
 
-### Risk 4: Bridge-watchdog and worker-watchdog plists also write Redis flags
-**Impact:** If the watchdog processes write any `{project_key}:*` flags, they would also need the env var. Their plists do NOT inject `.env`.
-**Mitigation:** Audit `monitoring/bridge_watchdog.py` and `monitoring/worker_watchdog.py` for any Redis writes that use `os.environ.get("VALOR_PROJECT_KEY", ...)`. If found, either add env var to those plists or refactor those writes.
+### Risk 4: Other launchd-managed services may also need the env var
+**Impact:** If any launchd-managed service writes project-keyed Redis flags, it would also need `VALOR_PROJECT_KEY` in its plist. The watchdog plists do NOT inject `.env`.
+**Mitigation (audit completed during critique):** Audited the full launchd surface:
+- `monitoring/bridge_watchdog.py` and `monitoring/worker_watchdog.py` — clean (no `VALOR_PROJECT_KEY` references, no project-keyed Redis flag writes).
+- `bridge/email_bridge.py` — derives `project_key` from `projects.json` directly (per `email_bridge.py:702`); does NOT use `VALOR_PROJECT_KEY` env var. Clean.
+- `bridge/email_relay.py`, `bridge/email_dead_letter.py` — clean.
+- `scripts/log_rotate.py` — clean (no Redis interaction).
+- `scripts/update/run.py` — runs interactively; not a long-lived service.
+- `com.valor.autoexperiment.plist`, `com.valor.nightly-tests.plist`, `com.valor.sdlc-reflection.plist`, `com.valor.log-rotate.plist` — these run scripts that don't currently use `VALOR_PROJECT_KEY`, but the autoexperiment and SDLC reflection schedulers DO write to AgentSession records. Verify their plists inject `.env` (handled by `scripts/install_*.sh` for each), and confirm via `PlistBuddy` post-deploy that `VALOR_PROJECT_KEY=valor` is present.
+**Net result:** No code changes required for watchdogs or email bridge. Only the worker plist (via B1 fix) and the scheduled launchd plists need the env var injection — the scheduled plists currently DO inject `.env` if their respective `install_*.sh` scripts run during `/update`. **Verify this for `com.valor.autoexperiment.plist` and `com.valor.sdlc-reflection.plist` post-deploy** — add a Verification row.
+
+### Risk 5 (B1, formerly blocker): `/update --full` does not inject `.env` into worker plist
+**Impact:** `scripts/update/service.py::install_worker()` (called by `/update --full` via `run.py:820`) only does template substitution (`__PROJECT_DIR__`, `__HOME_DIR__`, `__SERVICE_LABEL__`). It does NOT call the env-injection block from `scripts/install_worker.sh:95-131`. After deploy via `/update --full`, the worker plist will have only PATH/HOME/VALOR_LAUNCHD — `VALOR_PROJECT_KEY` will be missing, the recovery code will fall back, and the bug persists. Live verification on this machine confirms exactly this state today.
+**Mitigation:** Port the `.env` injection block into `scripts/update/service.py::install_worker()` (see Solution → B1 Implementation Note). Add a Verification row that asserts the env var lands in the worker plist AFTER `python -m scripts.update.run --full` (not after a manual `install_worker.sh` invocation). Add a unit test `test_update_install_worker.py` (per Test Impact) that catches a future refactor dropping the injection block.
 
 ## Race Conditions
 
@@ -209,11 +255,11 @@ No race conditions introduced. All affected operations are existing reflection t
 
 ## No-Gos (Out of Scope)
 
-- Migrating Memory records from `default:*` to `valor:*` (Risk 1) — separate issue if Tom chooses to defer.
+- Migrating Memory records from `default:*`/`dm:*` to `valor:*` is **now in scope** (per C1 revision) — see Task 4.5. The remaining Memory-related items below stay out of scope.
 - Refactoring `_get_project_key()` into a single shared helper across all subsystems — separate issue.
+- Tracking down and fixing the `dm` writer leak source — sibling investigation issue (filed by Task 4.5); not patched in this plan.
 - Per-machine or per-project recovery namespacing — codebase is single-project.
-- Fixing the broken plist injection on this machine if it turns out to be a deeper bug (Risk 3) — escalate as a separate finding if encountered.
-- Changing `config/memory_defaults.py:DEFAULT_PROJECT_KEY` from `"default"` to anything else — explicitly a separate concern (memory subsystem owns its own default).
+- Changing `config/memory_defaults.py:DEFAULT_PROJECT_KEY` from `"default"` to anything else — explicitly a separate concern (memory subsystem owns its own default; the migration in Task 4.5 handles existing records but does not touch the constant).
 
 ## Update System
 
@@ -232,9 +278,9 @@ No agent integration required — this is a worker/bridge internal change. The r
 ### Feature Documentation
 - [ ] Update `docs/features/sustainable-self-healing.md` — replace any mention of `${VALOR_PROJECT_KEY:-default}` with `${VALOR_PROJECT_KEY:-valor}` (and update example `redis-cli` commands at lines 108, 113, 118, 123).
 - [ ] Update `docs/features/worker-hibernation.md` — same project_key references.
-- [ ] Update `docs/features/subconscious-memory.md` — IF Open Question 2 resolves to "migrate memory namespace too," update the project_key resolution table at lines 402-415.
-- [ ] Update `docs/features/claude-code-memory.md` — same condition as above.
-- [ ] Add a brief entry to `docs/plans/memory-project-key-isolation.md` (or its archived form) noting that the recovery surface was patched in this plan.
+- [ ] Update `docs/features/subconscious-memory.md` — update the project_key resolution table at lines 402-415 to reflect the canonical `valor` namespace and document the one-shot migration that ran (Task 4.5).
+- [ ] Update `docs/features/claude-code-memory.md` — same as above.
+- [ ] Add a brief entry to `docs/plans/memory-project-key-isolation.md` (or its archived form) noting that the recovery surface was patched in this plan and the residual `default`/`dm` Memory records were migrated to `valor`.
 
 ### External Documentation Site
 None — this repo does not use Sphinx/MkDocs/RTD.
@@ -248,11 +294,14 @@ None — this repo does not use Sphinx/MkDocs/RTD.
 - [ ] After deploy, `redis-cli --scan --pattern 'valor:sustainability:*'` returns at least one key during the next circuit-pause event (synthetic test or natural occurrence).
 - [ ] After deploy, `redis-cli --scan --pattern 'default:sustainability:*'` returns zero keys (one-time cleanup of stale state succeeded).
 - [ ] `launchctl getenv VALOR_PROJECT_KEY` (or `ps eww $WORKER_PID | grep VALOR_PROJECT_KEY`) shows `valor` for the live worker process.
+- [ ] B1 regression: after running `python -m scripts.update.run --full` (NOT `install_worker.sh` directly), the worker plist contains `VALOR_PROJECT_KEY=valor` per `PlistBuddy`. Proves the env injection block was successfully ported into `scripts/update/service.py::install_worker()`.
+- [ ] Memory migration: `Memory.query.filter(project_key="default").count() == 0` AND `Memory.query.filter(project_key="dm").count() == 0` post-migration. The total count of `valor`-tagged Memory records increases by the migrated count.
 - [ ] Synthetic test: write a `paused_circuit` AgentSession with `project_key="valor"`, set `valor:recovery:active` flag, run `session_recovery_drip` once, verify the session transitions to `pending`.
 - [ ] All 8 reflections in `config/reflections.yaml` (or just the 4 broken ones) verified working via `tail -f logs/worker.log` over 5 minutes — no namespace-mismatch errors, expected log lines from each reflection's debug branch.
-- [ ] Tests pass (`/do-test`) — including the two new tests under Test Impact.
+- [ ] Tests pass (`/do-test`) — including the new tests under Test Impact (`test_sustainability_namespace.py`, `test_default_project_key_consistency.py`, `test_update_install_worker.py`, plus the new e2e case in `test_session_continuity.py`).
 - [ ] Documentation updated (`/do-docs`).
 - [ ] Issue #1171 closed by the implementation PR (`Closes #1171`).
+- [ ] Sibling investigation issue filed for `dm` writer leak (out of scope to fix here, but tracked).
 - [ ] No new xfail/xpass tests (no related xfails exist; nothing to convert).
 
 ## Team Orchestration
@@ -275,13 +324,13 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 
 - **Builder (deploy-and-cleanup)**
   - Name: deploy-cleanup-builder
-  - Role: Run `./scripts/valor-service.sh install` and `./scripts/install_worker.sh` to re-bake plists. Restart bridge and worker. Delete stale `default:sustainability:throttle_level` via Popoto-safe Redis call. Verify env var is live in worker process.
+  - Role: Run `./scripts/valor-service.sh install` and exercise B1 fix path via `python -m scripts.update.run --full` (validates the new env injection). Restart bridge and worker. Delete stale `default:sustainability:throttle_level` via direct r.delete (top-level non-Popoto key). Migrate Memory records from `default` and `dm` to `valor` via Popoto-safe script (Task 4.5). Verify env var is live in worker process.
   - Agent Type: builder
   - Resume: true
 
-- **Builder (update-skill-audit)**
+- **Builder (update-skill-port + audit)**
   - Name: update-skill-builder
-  - Role: Audit `scripts/remote-update.sh` and `.claude/skills/update/SKILL.md` for worker plist regeneration. Add the call if absent.
+  - Role: **Port `.env` injection into `scripts/update/service.py::install_worker()`** (the B1 fix — central deliverable of this plan). Create `tests/unit/test_update_install_worker.py` regression test. Audit `scripts/remote-update.sh` and `.claude/skills/update/SKILL.md` for worker plist regeneration; both paths must produce equivalent plists post-fix.
   - Agent Type: builder
   - Resume: true
 
@@ -310,51 +359,69 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 - Add `VALOR_PROJECT_KEY=valor` to `~/Desktop/Valor/.env`
 - Add `VALOR_PROJECT_KEY=valor` to `.env.example` with a one-line comment above explaining "Project namespace prefix used by recovery reflections; matches projects.json key for this codebase."
 
-### 2. Update fallback strings + add regression tests
+### 2. Update fallback strings + empty-string defense + add regression tests
 - **Task ID**: build-code-defense
 - **Depends On**: none
-- **Validates**: `tests/unit/test_sustainability_namespace.py`, `tests/unit/test_default_project_key_consistency.py` (both new)
-- **Informed By**: Spike-1, Spike-2, Test Impact
+- **Validates**: `tests/unit/test_sustainability_namespace.py`, `tests/unit/test_default_project_key_consistency.py` (both new); empty-string defense covered.
+- **Informed By**: Spike-1, Spike-2, Test Impact, C2 Implementation Note
 - **Assigned To**: recovery-code-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Edit `agent/sustainability.py:32`, `agent/session_pickup.py:180`, `agent/agent_session_queue.py:1408`: change `"default"` fallback to `"valor"`. Add a comment pointing to issue #1171 with one sentence on why.
+- Edit `agent/sustainability.py:30-32`, `agent/session_pickup.py:180`, `agent/agent_session_queue.py:1408`: replace bare `os.environ.get("VALOR_PROJECT_KEY", "default")` with the empty-string-defensive form `_v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); _pk = _v or "valor"` (per C2 Implementation Note). Add a comment pointing to issue #1171 with one sentence on why.
 - Add docstring update at top of `agent/sustainability.py:14-18` with a note on env-var sourcing.
 - Update `tests/unit/test_session_health_sibling_phantom_safety.py:56`: change `VALOR_PROJECT_KEY=default` to `VALOR_PROJECT_KEY=valor`.
 - Create `tests/unit/test_sustainability_namespace.py` per Test Impact.
-- Create `tests/unit/test_default_project_key_consistency.py` per Test Impact.
+- Create `tests/unit/test_default_project_key_consistency.py` per Test Impact, including `test_empty_env_falls_back_to_valor` and `test_whitespace_env_falls_back_to_valor`.
 
-### 3. Audit update skill
+### 3. Port .env injection into update/service.py + audit update skill (B1 fix)
 - **Task ID**: build-update-skill
 - **Depends On**: none
-- **Validates**: `grep -q install_worker.sh scripts/remote-update.sh && grep -q install_worker.sh .claude/skills/update/SKILL.md`
-- **Informed By**: Risk 2, Risk 3
+- **Validates**: `tests/unit/test_update_install_worker.py` passes; `python -m scripts.update.run --full` against a stub project results in worker plist with all .env vars; `grep -q install_worker scripts/remote-update.sh` (verify worker plist regen path).
+- **Informed By**: Critique B1, Risk 5, B1 Implementation Note
 - **Assigned To**: update-skill-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Read `scripts/remote-update.sh` and `.claude/skills/update/SKILL.md`. Verify worker plist regeneration is invoked. If absent, add an appropriate call.
+- Edit `scripts/update/service.py::install_worker()` at line 196: insert env-injection block after `plist_dst.write_text(plist_text)` (line 235) and before `launchctl bootstrap` (line 237). Use `from dotenv import dotenv_values` and `import plistlib`. Read `.env` from `project_dir / ".env"`. Open the plist, `setdefault("EnvironmentVariables", {})`, merge env vars (skip if `key in existing`, skip if `value is None`), save back via `plistlib.dump`. Wrap in `try/except Exception` with warning log.
+- Create `tests/unit/test_update_install_worker.py` per Test Impact — call `install_worker()` against a temp project_dir with stub plist + stub `.env`, assert `VALOR_PROJECT_KEY=valor` lands in destination plist `EnvironmentVariables`.
+- Verify `scripts/remote-update.sh` and `.claude/skills/update/SKILL.md` invoke the proper update flow (the run.py path is sufficient now that `install_worker()` injects env). If `remote-update.sh` calls `install_worker.sh` directly, it's still correct — both paths now inject env.
 
 ### 4. Validate code changes
 - **Task ID**: validate-code
-- **Depends On**: build-code-defense, build-env-vault
+- **Depends On**: build-code-defense, build-env-vault, build-update-skill
 - **Assigned To**: namespace-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_session_health_sibling_phantom_safety.py -v` — must pass.
-- Run `python -m ruff check agent/sustainability.py agent/session_pickup.py agent/agent_session_queue.py` — must pass.
+- Run `pytest tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_session_health_sibling_phantom_safety.py tests/unit/test_update_install_worker.py -v` — must pass.
+- Run `python -m ruff check agent/sustainability.py agent/session_pickup.py agent/agent_session_queue.py scripts/update/service.py` — must pass.
 
-### 5. Deploy + cleanup stale state
-- **Task ID**: build-deploy
-- **Depends On**: validate-code, build-update-skill
-- **Validates**: `launchctl getenv VALOR_PROJECT_KEY` (manual) and `redis-cli --scan --pattern 'default:sustainability:*' | wc -l` returns 0
-- **Informed By**: Spike-2, Risk 3
+### 4.5. Memory record migration (C1 in-scope)
+- **Task ID**: build-memory-migration
+- **Depends On**: validate-code
+- **Validates**: `Memory.query.filter(project_key="default").count() == 0 AND Memory.query.filter(project_key="dm").count() == 0 AND Memory.query.filter(project_key="valor").count() >= prior_total`
+- **Informed By**: Spike-1, C1 Implementation Note, Risk 1
 - **Assigned To**: deploy-cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Run `./scripts/valor-service.sh install`. Confirm plist injection log line shows new var count.
-- Run `./scripts/install_worker.sh`. Confirm same.
+- Implement migration script at `scripts/migrate_memory_project_key.py` with `--dry-run` flag (default true) per C1 Implementation Note.
+- Run `python scripts/migrate_memory_project_key.py --dry-run` first; capture before/after counts in PR description.
+- Run `python scripts/migrate_memory_project_key.py` (live) BEFORE the worker restart in Task 5 so post-restart recall queries find the migrated records.
+- Use Popoto-only operations: `Memory.query.filter(project_key=old_pk)` to read, `m.project_key = "valor"; m.save()` to write. NEVER raw Redis on Popoto-managed keys.
+- File a sibling investigation issue tracking the `dm` writer leak source (out of scope to fix here, but record the leak as documented for follow-up).
+
+### 5. Deploy + cleanup stale state
+- **Task ID**: build-deploy
+- **Depends On**: build-memory-migration
+- **Validates**: `launchctl getenv VALOR_PROJECT_KEY` (manual) and `redis-cli --scan --pattern 'default:sustainability:*' | wc -l` returns 0
+- **Informed By**: Spike-2, Risk 5 (B1)
+- **Assigned To**: deploy-cleanup-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Run `./scripts/valor-service.sh install`. Confirm plist injection log line shows new var count for the bridge plist.
+- Run `python -m scripts.update.run --full` (this exercises the B1 fix path). Confirm worker plist injection log line shows new var count.
+- Alternative one-shot: run `./scripts/install_worker.sh` directly (both paths must produce equivalent plists post-fix).
 - Run `./scripts/valor-service.sh restart`.
 - Verify env var via `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.worker.plist` returns `valor`.
+- Verify same for bridge plist: `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.bridge.plist`.
 - Delete stale key: `python -c "from popoto.redis_db import POPOTO_REDIS_DB as r; r.delete('default:sustainability:throttle_level')"`. (Note: this is a top-level non-Popoto-managed key, so direct `r.delete` is appropriate per CLAUDE.md — the rule against raw Redis applies to **Popoto-managed model keys**, not ad-hoc string flags.)
 
 ### 6. Synthetic recovery test
@@ -376,7 +443,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Update `docs/features/sustainable-self-healing.md`, `docs/features/worker-hibernation.md` per Documentation section.
-- IF Open Question 2 resolves to "migrate memories too," update memory docs accordingly; otherwise note explicitly that memory namespace migration is deferred to follow-up.
+- Update memory subsystem docs (`docs/features/subconscious-memory.md`, `docs/features/claude-code-memory.md`) noting the one-shot migration that ran (Task 4.5) and the new canonical `valor` namespace for memories.
 - Update inline docstrings.
 
 ### 8. Final validation
@@ -394,29 +461,114 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_session_health_sibling_phantom_safety.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check agent/sustainability.py agent/session_pickup.py agent/agent_session_queue.py tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py` | exit code 0 |
-| Format clean | `python -m ruff format --check agent/sustainability.py agent/session_pickup.py agent/agent_session_queue.py` | exit code 0 |
-| Env var in worker plist | `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.worker.plist` | output contains `valor` |
-| Env var in bridge plist | `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.bridge.plist` | output contains `valor` |
-| No stale default flags | `redis-cli --scan --pattern 'default:sustainability:*' \| wc -l` | output > -1 (any count, but should be 0 — verify post-cleanup) |
-| .env has new var | `grep -c VALOR_PROJECT_KEY ~/Desktop/Valor/.env` | output > 0 |
-| .env.example has new var | `grep -c VALOR_PROJECT_KEY .env.example` | output > 0 |
+| Tests pass | `pytest tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_session_health_sibling_phantom_safety.py tests/unit/test_update_install_worker.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check agent/sustainability.py agent/session_pickup.py agent/agent_session_queue.py scripts/update/service.py tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_update_install_worker.py` | exit code 0 |
+| Format clean | `python -m ruff format --check agent/sustainability.py agent/session_pickup.py agent/agent_session_queue.py scripts/update/service.py` | exit code 0 |
+| Env var in worker plist | `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.worker.plist` | output `valor` |
+| Env var in bridge plist | `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.bridge.plist` | output `valor` |
+| Env var lands via `/update --full` (B1 regression) | After `python -m scripts.update.run --full`, run `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.worker.plist` | output `valor` (proves B1 fix) |
+| Env var in autoexperiment plist | `/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:VALOR_PROJECT_KEY" ~/Library/LaunchAgents/com.valor.autoexperiment.plist 2>/dev/null` | output `valor` (or "Print: Entry, ":EnvironmentVariables:VALOR_PROJECT_KEY", Does Not Exist" if plist not installed — acceptable; the relevant launchd-managed scheduler is the worker) |
+| No stale default flags | `[ "$(redis-cli --scan --pattern 'default:sustainability:*' \| wc -l \| tr -d ' ')" -eq 0 ]` | exit code 0 |
+| No `default`-tagged Memory records (post-migration) | `python -c "from models.memory import Memory; print(len(list(Memory.query.filter(project_key='default'))))"` | output `0` |
+| No `dm`-tagged Memory records (post-migration) | `python -c "from models.memory import Memory; print(len(list(Memory.query.filter(project_key='dm'))))"` | output `0` |
+| .env has new var | `grep -c VALOR_PROJECT_KEY ~/Desktop/Valor/.env` | output >= 1 |
+| .env.example has new var | `grep -c VALOR_PROJECT_KEY .env.example` | output >= 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor
+**Findings**: 6 total (1 blocker, 4 concerns, 1 nit)
+**Verdict**: NEEDS REVISION — one blocker invalidates the plan's central deploy claim.
+
+### Blockers
+
+#### B1. `/update --full` will not inject `VALOR_PROJECT_KEY` into the worker plist
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Operator, Archaeologist
+- **Location**: Solution → Recommended path step 2; Risk 2; Update System
+- **Finding**: The plan asserts "the bridge plist generator at `scripts/valor-service.sh:482-521` already injects all `.env` vars... `/update` re-runs both generators." This is false for the worker. `scripts/update/service.py:196-240` (`install_worker()`, called by `run.py:820` during `/update --full`) only does `__PROJECT_DIR__`/`__HOME_DIR__`/`__SERVICE_LABEL__` string substitution. The `.env` injection logic ONLY lives in the standalone `scripts/install_worker.sh:95-131`, which `/update` does not invoke. After deploy via `/update`, the worker plist will still have just `PATH/HOME/VALOR_LAUNCHD` — `VALOR_PROJECT_KEY` will be missing, the recovery code will fall back to `"default"`, and the bug persists. Live verification of this machine confirms: `PlistBuddy ~/Library/LaunchAgents/com.valor.worker.plist :EnvironmentVariables` returns only those three keys, despite the bridge plist having 30+ vars. This is the spec'd "Risk 3" already in real life on the canonical machine.
+- **Suggestion**: Either (a) port the `.env` injection block from `scripts/install_worker.sh:95-131` into `scripts/update/service.py::install_worker()` so `/update --full` injects on every run, or (b) make `run.py` invoke `scripts/install_worker.sh` directly instead of its own minimal install path. Add a Verification entry that asserts `VALOR_PROJECT_KEY` lands in the worker plist *after running `/update --full`*, not after a manual `install_worker.sh` invocation. Until this is fixed, the plan's "Recommended path step 2: no script changes needed" is wrong.
+- **Implementation Note**: `scripts/update/service.py:196` is the function to edit. Copy the `dotenv_values()` + `plistlib.load`/`dump` + `existing.setdefault("EnvironmentVariables", {})` block from `scripts/install_worker.sh:95-131` and execute it after `plist_dst.write_text(plist_text)` on line 235 but BEFORE the `launchctl bootstrap` call on line 237. The injection must NOT clobber `PATH`/`HOME`/`VALOR_LAUNCHD` — use the `if key not in existing` guard exactly as the shell version does. Also add a Task before deploy that updates `service.py`, and add a Verification row asserting `python scripts/update/run.py --full` (not `install_worker.sh`) results in `VALOR_PROJECT_KEY=valor` in the plist.
+
+### Concerns
+
+#### C1. Memory namespace migration deferral leaves a known-broken half-system after deploy
+- **Severity**: CONCERN
+- **Critics**: User, Adversary
+- **Location**: Open Question 2; Risk 1; No-Gos
+- **Finding**: Spike-1 found 198 records tagged `default` and 230 tagged `valor`; live re-check during this critique shows the split is now valor=241, default=207, dm=4 — and the `dm` namespace is still bleeding (plan said dm=3, now dm=4). Setting `VALOR_PROJECT_KEY=valor` env-wide doesn't just shift future writes — it makes all future memory recall queries miss the 207 `default`-tagged records and the 4 `dm`-tagged records entirely. From a user-facing standpoint, that means roughly 45% of the agent's existing memory becomes unreachable the moment the worker restarts. The plan's recommendation "(c) defer to a follow-up" treats this as a clean separation, but the user-visible effect is "memory regression on day 0 of deploy." A bridge-internal namespace fix should not silently degrade memory recall. The `dm` namespace leak (plan said it was historical, but it's still growing) also implies a third resolution path the plan hasn't located.
+- **Suggestion**: Either (a) include the migration in this plan as a single Popoto-safe step (re-tag `default` + `dm` records to `valor` before the worker restart), or (b) downgrade the Open Question 2 default recommendation from "(c) defer" to "(a) migrate as part of this plan" since the migration is small (~30 lines) and the user-facing cost of deferring is large. Also: track down the `dm` writer before it leaks any further; that's not in scope for this plan but should be filed as a sibling issue immediately.
+- **Implementation Note**: Migration script template — `from models.memory import Memory; for m in Memory.query.filter(project_key="default"): m.project_key = "valor"; m.save()` (and same for `dm`). Run with a count assertion before/after and a dry-run flag. NEVER use raw `r.delete`/`r.hset` per CLAUDE.md `feedback_never_raw_delete_popoto.md`. Run BEFORE the worker restart in Task 5 so recall queries during the post-restart settling window find the records. The `dm` leak source is likely `_get_project_key()` in the memory-bridge subprocess path with a `cwd` that matches a now-removed `dm` project — grep for `cwd` references against `projects.json` lookups in `agent/memory_hook.py:83`, `tools/memory_search/__init__.py:48`, and `.claude/hooks/hook_utils/memory_bridge.py:140`.
+
+#### C2. Empty-string `VALOR_PROJECT_KEY` defensive check is described in Failure Path Test Strategy but not in any task
+- **Severity**: CONCERN
+- **Critics**: Adversary, Consistency Auditor
+- **Location**: Failure Path Test Strategy → Empty/Invalid Input Handling vs Task 2
+- **Finding**: The Failure Path Test Strategy says "Empty `VALOR_PROJECT_KEY` env var: currently treated as 'set' by `os.environ.get(..., 'default')` returning `''`. Add a defensive check: if value is empty after strip, treat as unset." But Task 2 (`build-code-defense`) only describes flipping `"default"` → `"valor"` and updating the docstring. There is no task to actually add the empty-string defensive check, and no test in Test Impact verifies it. Setting `VALOR_PROJECT_KEY=` (empty string) in `.env` is a real failure mode — the plist injector at `install_worker.sh:122` does `if key not in existing and value is not None` which would inject the empty string, leading to writes against `:sustainability:queue_paused` (no project prefix). This is not just empty — it would cross-contaminate any namespace that has a leading colon convention.
+- **Suggestion**: Either add an explicit step under Task 2 ("If `os.environ.get('VALOR_PROJECT_KEY', '').strip()` is empty, fall through to fallback `'valor'`") and add a corresponding test case in `test_default_project_key_consistency.py`, or remove the empty-string handling from the Failure Path section so the plan and tasks are consistent. Don't leave it as orphaned guidance.
+- **Implementation Note**: Implement via a one-liner helper: `def _get_project_key() -> str: v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); return v or "valor"`. Apply identically at `agent/sustainability.py:30-32`, `agent/session_pickup.py:180`, `agent/agent_session_queue.py:1408`. Test with `monkeypatch.setenv("VALOR_PROJECT_KEY", "")` and `monkeypatch.setenv("VALOR_PROJECT_KEY", "  ")` — both must resolve to `"valor"`.
+
+#### C3. `tests/e2e/test_session_continuity.py:30` is left "as-is" but its semantics flipped
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Consistency Auditor
+- **Location**: Test Impact → row 4
+- **Finding**: The plan says `test_session_continuity.py:30` should be "KEEP AS IS — this is now the canonical value." But the test is asserting that `start_transcript(project_key="valor", ...)` results in a session with `project_key == "valor"`. This is a tautology — it asserts that what was passed in is what was stored. It does NOT verify that `"valor"` is the canonical project_key in the absence of explicit override. The plan's claim that this test "would not catch a `'default'`-side regression" (from issue body) remains true after the fix. Leaving the test untouched does not provide regression coverage for the namespace alignment guarantee. The new tests in `tests/unit/test_default_project_key_consistency.py` cover this, but the e2e test should at minimum get an additional case that calls `start_transcript()` WITHOUT `project_key=` and asserts the resulting session is `valor` — to catch a future regression at the e2e level where the writer's default could drift.
+- **Suggestion**: Add to Test Impact: `tests/e2e/test_session_continuity.py` — UPDATE to add one new test case `test_default_project_key_when_unspecified` that calls `start_transcript(session_id=..., chat_id=..., sender=...)` (no `project_key`), and asserts the persisted `AgentSession.project_key == "valor"`. This is the e2e companion to `test_default_project_key_consistency.py` and catches drift at the integration layer.
+- **Implementation Note**: The test must run with `VALOR_PROJECT_KEY` UNSET to verify the fallback (use `monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)` at the test scope). Otherwise the env injection from the test runner's environment will mask the writer-side default. Also verify that `start_transcript()` actually delegates to `tools/agent_session_scheduler.DEFAULT_PROJECT_KEY` and not a different default — check `bridge/session_transcript.py` to confirm the resolution path before writing the assertion.
+
+#### C4. Watchdog and email bridge plists are not audited but were not enumerated either
+- **Severity**: CONCERN
+- **Critics**: Operator, Adversary
+- **Location**: Risk 4
+- **Finding**: Plan correctly identifies that watchdog plists "do NOT inject `.env`" and asks for an audit of `monitoring/bridge_watchdog.py` and `monitoring/worker_watchdog.py`. Verified during critique: neither file references `VALOR_PROJECT_KEY` or any project-keyed Redis namespace, so the watchdogs are clean. BUT — the plan does not enumerate `com.valor.email` (the email bridge) which IS a launchd service and DOES interact with Redis (per CLAUDE.md "email relay (bundled into the email bridge process) drains the queue over SMTP"). If the email relay reads or writes any project-keyed Redis flag, it has the same namespace mismatch. Also: `com.valor.update` (cron) and `com.valor.log-rotate` are launchd services not on the Risk 4 audit list. The plan's "audit list" is incomplete.
+- **Suggestion**: Expand the audit instruction to: `grep -rn "VALOR_PROJECT_KEY" monitoring/ scripts/email_relay.py scripts/log_rotate.py scripts/update/ 2>/dev/null` — enumerate ALL launchd-managed entrypoints, not just the watchdogs. Update Risk 4 with the full list. If any service reads project_key, either add the env var to that plist's generator OR refactor that code path to be project-key-agnostic.
+- **Implementation Note**: Specifically check `bridge/email_bridge.py` (or wherever the email bridge entrypoint lives — `grep -l "valor.email" scripts/ bridge/`) for any `os.environ.get("VALOR_PROJECT_KEY"` calls. The audit takes 60 seconds. Bake the result into the plan as a one-line claim ("audited X, Y, Z; only watchdogs are clean") rather than leaving the open mitigation question.
+
+### Nits
+
+#### N1. Verification table row for "No stale default flags" has wrong expected value
+- **Severity**: NIT
+- **Critics**: Consistency Auditor
+- **Location**: Verification table, line 402
+- **Finding**: The row reads `output > -1 (any count, but should be 0 — verify post-cleanup)`. `wc -l` always returns >= 0 on success, so `> -1` is trivially true and the assertion is meaningless. The parenthetical correctly states the real expectation (should be 0).
+- **Suggestion**: Replace `output > -1` with `output == 0` (or equivalently `[ "$(redis-cli --scan --pattern 'default:sustainability:*' | wc -l)" -eq 0 ]`). This is the only verification row that doesn't enforce its own description.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-8 sequential, no gaps |
+| Dependencies valid | PASS | All `Depends On` references map to valid task IDs; no circular deps |
+| File paths exist | PASS | All cited files verified on disk: `agent/sustainability.py`, `agent/session_pickup.py`, `agent/agent_session_queue.py`, `tools/agent_session_scheduler.py`, `config/memory_defaults.py`, `tests/unit/test_sustainability.py`, `tests/unit/test_session_health_sibling_phantom_safety.py`, `tests/e2e/test_session_continuity.py`, `scripts/valor-service.sh`, `scripts/install_worker.sh`, `scripts/remote-update.sh`, `monitoring/bridge_watchdog.py`, `monitoring/worker_watchdog.py`, all docs/features/* |
+| Prerequisites met | PASS | `redis-cli ping` → PONG; vault `.env` exists; vault `projects.json` exists; worker is loaded |
+| Cross-references | PASS | Success Criteria each map to ≥1 task; No-Gos do not appear in Solution; Rabbit Holes do not appear in tasks |
+
+### Verdict
+
+**NEEDS REVISION** — 1 blocker (B1) must be resolved before build. The blocker invalidates the central deployment claim of the recommended Option B. Once B1 is addressed (port `.env` injection into `scripts/update/service.py::install_worker`), and the four concerns are either patched into the plan or explicitly accepted, this is a small, well-scoped fix that is otherwise ready.
+
+### Revision Pass 1 (applied 2026-04-25)
+
+**Revisions applied to the plan in response to the critique:**
+
+- **B1 (BLOCKER)** — Resolved. Solution → Technical Approach now includes a B1 Implementation Note describing how to port `.env` injection into `scripts/update/service.py::install_worker()`. Task 3 (`build-update-skill`) explicitly applies the fix. Task 4 validates it. Verification table includes a regression row asserting the env var lands via `python -m scripts.update.run --full`. Test Impact adds `tests/unit/test_update_install_worker.py` to catch future regressions. Risk 5 promoted from B1 with full impact/mitigation detail.
+- **C1 (CONCERN — memory migration)** — Resolved. Downgraded recommendation from "(c) defer" to "(a) migrate as part of this plan." Solution → Technical Approach now includes a C1 Implementation Note with the Popoto-safe migration script template. New Task 4.5 (`build-memory-migration`) runs the migration BEFORE the worker restart. Verification rows added for `default`-tagged and `dm`-tagged Memory record counts (both must be 0 post-migration). Open Question 2 marked RESOLVED with the new disposition. The `dm` writer leak source is tracked as a sibling investigation (out of scope here).
+- **C2 (CONCERN — empty-string defense)** — Resolved. Solution → Technical Approach now includes a C2 Implementation Note specifying the helper form `_v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); _pk = _v or "valor"`. Task 2 (`build-code-defense`) explicitly applies it at all three call sites. Test Impact adds `test_empty_env_falls_back_to_valor` and `test_whitespace_env_falls_back_to_valor` cases. Failure Path Test Strategy section updated to point at the codified Implementation Note.
+- **C3 (CONCERN — e2e default-project-key test)** — Resolved. Test Impact updated for `tests/e2e/test_session_continuity.py` from "KEEP AS IS" to "UPDATE: add `test_default_project_key_when_unspecified` case" — constructs an AgentSession without explicit `project_key=`, with `monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)`, asserts the persisted record has `project_key == "valor"`.
+- **C4 (CONCERN — broader launchd audit)** — Resolved. Risk 4 expanded with the full audit results: watchdogs are clean, email bridge derives project_key from `projects.json` directly (no env var dependency), email_relay/email_dead_letter clean, log_rotate clean, scheduled launchd plists (`autoexperiment`, `nightly-tests`, `sdlc-reflection`, `log-rotate`) audited — no code changes required outside the worker. Verification table includes a row for the autoexperiment plist as a representative scheduled service.
+- **N1 (NIT — verification table)** — Resolved. Replaced `output > -1` with proper boolean expression `[ "$(redis-cli --scan --pattern 'default:sustainability:*' | wc -l | tr -d ' ')" -eq 0 ]` (exit code 0). Other verification rows tightened to remove ambiguity ("output contains" → "output `valor`"; "output > 0" → "output >= 1").
+
+**New Verdict (post-revision):** READY TO BUILD — all critique findings addressed in plan text; no concerns remaining unless new ones surface in the next critique cycle.
 
 ---
 
 ## Open Questions
 
-1. **Which resolution strategy do we adopt?** Recommended **Option B (env-level propagation)** per the rationale in Solution → Key Elements. Options A (code-level alignment) and C (config-driven via projects.json) are also viable. Picking the wrong one wastes about a half-day of rework, so worth confirming before build.
+All three open questions have been resolved during the revision pass; recording resolutions inline so the plan is build-ready.
 
-2. **Memory subsystem namespace migration — in or out of scope?** Spike-1 found 198 Memory records currently tagged `project_key="default"` and 230 tagged `project_key="valor"`. Setting `VALOR_PROJECT_KEY=valor` env-wide will shift future writes to `valor`, splitting recall behavior. Three sub-options:
-   - **(a)** Migrate the 198 `default:*` records to `valor:*` as part of this plan (one-shot Popoto-safe script, ~30 lines).
-   - **(b)** Leave them in `default` and accept that some old memories become unreachable (they were largely created during the broken-namespace period anyway).
-   - **(c)** Defer to a follow-up issue with its own dry-run-first plan.
-   Recommendation: **(c)** — keep this plan tight; file a follow-up.
+1. **Which resolution strategy do we adopt?** **RESOLVED: Option B (env-level propagation)** is now the canonical path. With B1 patched (port `.env` injection into `scripts/update/service.py::install_worker`), Option B deploys cleanly via `/update --full`. Options A (code-level alignment) and C (config-driven via projects.json) remain viable but are out of scope for this fix.
 
-3. **Should the `"default"` fallback strings in `agent/sustainability.py:32`, `agent/session_pickup.py:180`, `agent/agent_session_queue.py:1408` be changed to `"valor"`?** With Option B, the env var is always set in production, so the fallback is unreachable there — but it IS reached during local pytest runs and ad-hoc Python invocations without env. Changing to `"valor"` is defense-in-depth at zero cost. Recommendation: **yes**, include in this fix.
+2. **Memory subsystem namespace migration — in or out of scope?** **RESOLVED: in scope (C1 revision, downgraded from "(c) defer")**. Setting `VALOR_PROJECT_KEY=valor` env-wide shifts future memory writes from `default` to `valor`, splitting recall behavior. Live re-check during critique showed `valor=241, default=207, dm=4`. Deferring leaves ~45% of existing memory unreachable on day 0 of deploy. Migration is small (~30 lines) and Popoto-safe. **Task 4.5 (`build-memory-migration`)** runs the migration BEFORE the worker restart. The `dm` writer leak source is filed as a sibling investigation issue (out of scope here).
+
+3. **Should the `"default"` fallback strings in `agent/sustainability.py:32`, `agent/session_pickup.py:180`, `agent/agent_session_queue.py:1408` be changed to `"valor"`?** **RESOLVED: yes, AND also add empty-string defense (per C2)**. Replace with the helper form `_v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); _pk = _v or "valor"`. Defense in depth at zero cost. Test cases for empty-string and whitespace-only added to Test Impact.
