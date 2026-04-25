@@ -81,10 +81,34 @@ freshness header says `3d ago` but you expect recent activity, that is a
 signal you resolved to the wrong chat -- re-run with `--chat-id` or a more
 specific `--chat`.
 
-### Handling Ambiguity Errors
+### Handling Ambiguity (default: pick most recent + warn)
 
-If `--chat` matches more than one chat, the CLI exits non-zero and prints a
-candidate list on stderr. Example:
+If `--chat` matches more than one chat, the **default** behavior is to pick
+the **most recently active** candidate, log a warning to stderr listing all
+candidates, and proceed with exit 0. The freshness header is still printed,
+so you can tell which chat was actually used:
+
+```
+WARNING: Ambiguous chat name 'PsyOptimal' matched 2 candidates; picking most recent:
+  -1001234567  PM: PsyOptimal       last: 3m ago   <-- selected
+  -1009876543  PsyOptimal           last: 2d ago
+[PM: PsyOptimal · chat_id=-1001234567 · last activity: 3m ago]
+... messages ...
+```
+
+**Always read the freshness header** before trusting the messages. If the
+selected chat is not the one you wanted, re-run with `--chat-id <id>` or a
+more specific `--chat` string.
+
+#### Strict mode (`--strict`): exit 1 with candidate list
+
+For scripted callers that need a hard failure on ambiguity, pass `--strict`
+to the `read` subcommand. Under `--strict`, the CLI exits non-zero and
+prints the candidate list on stderr instead of picking:
+
+```
+valor-telegram read --chat "PsyOptimal" --strict --limit 10
+```
 
 ```
 Ambiguous chat name. 2 candidates (most recent first):
@@ -95,6 +119,7 @@ Re-run with --chat-id <id> or a more specific --chat string.
 
 **Parsing tip**: the first column is the `chat_id` (leading `-` for groups,
 no prefix for users). Pick the right row and re-run with `--chat-id <id>`.
+`--strict` is only on `read`; `send` always uses the most-recent default.
 
 ### Handling Zero-Match ("did you mean")
 

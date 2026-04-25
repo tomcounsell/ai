@@ -52,12 +52,29 @@ Age format: `<1m ago`, `5m ago`, `3h ago`, `2d ago`, or `never` (chat
 registered but never updated). When `--chat-id` points to a chat with no
 stored metadata, the header falls back to `[chat_id=N · last activity: never]`.
 
-#### Ambiguity Errors
+#### Ambiguity Handling
 
-If a `--chat` name matches more than one chat, the tool exits non-zero with
-a stderr candidate list rather than silently picking one:
+If a `--chat` name matches more than one chat, the **default** behavior is
+to pick the **most recently active** candidate, log a stderr warning listing
+all candidates, and proceed with exit 0:
 
 ```
+WARNING: Ambiguous chat name 'PsyOptimal' matched 2 candidates; picking most recent:
+  -1001234567  PM: PsyOptimal       last: 3m ago   <-- selected
+  -1009876543  PsyOptimal           last: 2d ago
+[PM: PsyOptimal · chat_id=-1001234567 · last activity: 3m ago]
+... messages ...
+```
+
+The freshness header that follows confirms which chat was selected; always
+read it before trusting the messages.
+
+For scripted callers that need a hard failure on ambiguity, pass `--strict`
+to the `read` subcommand. Under `--strict`, the CLI exits non-zero with a
+stderr candidate list instead of picking:
+
+```
+$ valor-telegram read --chat "PsyOptimal" --strict --limit 10
 Ambiguous chat name. 2 candidates (most recent first):
   -1001234567  PM: PsyOptimal       last: 3m ago
   -1009876543  PsyOptimal           last: 2d ago
@@ -66,8 +83,10 @@ Re-run with --chat-id <id> or a more specific --chat string.
 
 This replaces the previous silent first-match behavior (issue #1163). The
 resolver now collects all candidates through a 3-stage cascade (exact →
-case-insensitive exact → normalized substring), sorts them by last activity
-desc, and raises `AmbiguousChatError` when more than one survives.
+case-insensitive exact → normalized substring) and sorts them by last
+activity desc; the default path picks the head of that sorted list and
+warns, while `--strict` raises `AmbiguousChatError`. `--strict` is only on
+`read`; `send` always uses the most-recent default.
 
 #### Zero-Match "Did You Mean"
 

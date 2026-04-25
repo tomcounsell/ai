@@ -102,7 +102,7 @@ valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 ```
 
-`--chat`, `--chat-id`, and `--user` on `read` are mutually exclusive. Every successful read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages — trust that header over your intuition about which chat you asked for. If a `--chat` name is ambiguous, the CLI exits non-zero with a candidate list (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation UX).
+`--chat`, `--chat-id`, and `--user` on `read` are mutually exclusive. Every successful read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages — trust that header over your intuition about which chat you asked for. If a `--chat` name is ambiguous, the **default** is to pick the most recently active candidate, log a warning listing all candidates to stderr, and proceed (exit 0); pass `--strict` to opt into a non-zero exit with a stderr candidate list instead (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation UX).
 
 ## Reading Email
 
