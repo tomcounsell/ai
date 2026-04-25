@@ -70,7 +70,8 @@ class TestResolveChat:
     def test_resolves_from_history(self, mock_resolve):
         result = resolve_chat("Dev: Valor")
         assert result == "-123456"
-        mock_resolve.assert_called_once_with("Dev: Valor")
+        # resolve_chat forwards strict= to resolve_chat_id. Default is False.
+        mock_resolve.assert_called_once_with("Dev: Valor", strict=False)
 
     def test_returns_none_for_unknown(self):
         result = resolve_chat("nonexistent_chat_xyz_12345")
@@ -351,6 +352,7 @@ class TestCmdReadFlags:
         search=None,
         since=None,
         json_out=False,
+        strict=False,
     ):
         return argparse.Namespace(
             chat=chat,
@@ -360,10 +362,59 @@ class TestCmdReadFlags:
             search=search,
             since=since,
             json=json_out,
+            strict=strict,
         )
 
-    def test_ambiguity_error_rendered_and_exit_1(self, capsys):
-        """`AmbiguousChatError` from the resolver produces a formatted stderr message."""
+    def test_default_ambiguity_picks_most_recent_and_exits_0(self, capsys):
+        """Default (non-strict) path: resolver returns a chat_id, CLI exits 0.
+
+        Under the hotfixed plan (Q2 = pick-most-recent-with-warning), the
+        ambiguity warning is emitted by the resolver's logger — the CLI
+        just receives a chat_id and proceeds. No stderr error from the
+        CLI layer, no exit 1.
+        """
+        from tools.valor_telegram import cmd_read
+
+        with (
+            patch(
+                "tools.valor_telegram.resolve_chat",
+                return_value="-100123",  # most-recent winner picked by resolver
+            ),
+            patch(
+                "tools.valor_telegram._lookup_chat_metadata",
+                return_value={"chat_name": "PM: PsyOptimal", "last_activity_ts": None},
+            ),
+            patch(
+                "tools.telegram_history.get_recent_messages",
+                return_value={"messages": []},
+            ),
+        ):
+            result = cmd_read(self._read_args(chat="PsyOptimal"))
+
+        assert result == 0
+        captured = capsys.readouterr()
+        # CLI layer must NOT print an ambiguity error block on the default path.
+        assert "Ambiguous chat name" not in captured.out
+        assert "Ambiguous chat name" not in captured.err
+
+    def test_default_path_passes_strict_false_to_resolver(self):
+        """Verify cmd_read passes strict=False when --strict is not set."""
+        from tools.valor_telegram import cmd_read
+
+        with (
+            patch("tools.valor_telegram.resolve_chat") as mock_resolve,
+            patch("tools.valor_telegram._lookup_chat_metadata", return_value=None),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
+        ):
+            mock_resolve.return_value = "-100"
+            cmd_read(self._read_args(chat="X", strict=False))
+
+        # Assert strict kwarg was False (pick-most-recent + warn).
+        call = mock_resolve.call_args
+        assert call.kwargs.get("strict") is False
+
+    def test_strict_ambiguity_prints_stdout_and_exits_1(self, capsys):
+        """--strict path catches AmbiguousChatError, renders stdout, exits 1."""
         from tools.telegram_history import AmbiguousChatError
         from tools.valor_telegram import cmd_read
 
@@ -373,14 +424,65 @@ class TestCmdReadFlags:
         ]
 
         with patch("tools.valor_telegram.resolve_chat", side_effect=AmbiguousChatError(candidates)):
-            result = cmd_read(self._read_args(chat="PsyOptimal"))
+            result = cmd_read(self._read_args(chat="PsyOptimal", strict=True))
 
         assert result == 1
+        captured = capsys.readouterr()
+        # Candidates go to stdout (scripted callers parse stdout), not stderr.
+        assert "Ambiguous chat name" in captured.out
+        assert "-100123" in captured.out and "PM: PsyOptimal" in captured.out
+        assert "-100456" in captured.out and "PsyOptimal" in captured.out
+        assert "--chat-id" in captured.out  # advice line
+
+    def test_strict_flag_passes_to_resolver(self):
+        """Verify cmd_read passes strict=True when --strict is set."""
+        from tools.valor_telegram import cmd_read
+
+        with (
+            patch("tools.valor_telegram.resolve_chat") as mock_resolve,
+            patch("tools.valor_telegram._lookup_chat_metadata", return_value=None),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
+        ):
+            mock_resolve.return_value = "-100"
+            cmd_read(self._read_args(chat="X", strict=True))
+
+        call = mock_resolve.call_args
+        assert call.kwargs.get("strict") is True
+
+    def test_empty_chat_rejected_before_resolver(self, capsys):
+        """Empty --chat is rejected with exit 1 BEFORE hitting the resolver (C3)."""
+        from tools.valor_telegram import cmd_read
+
+        with patch(
+            "tools.valor_telegram.resolve_chat",
+            side_effect=AssertionError("resolver must not be called for empty --chat"),
+        ):
+            result = cmd_read(self._read_args(chat=""))
+        assert result == 1
         err = capsys.readouterr().err
-        assert "Ambiguous chat name" in err
-        assert "-100123" in err and "PM: PsyOptimal" in err
-        assert "-100456" in err and "PsyOptimal" in err
-        assert "--chat-id" in err  # advice line
+        assert "--chat cannot be empty" in err
+
+        with patch(
+            "tools.valor_telegram.resolve_chat",
+            side_effect=AssertionError("resolver must not be called for whitespace --chat"),
+        ):
+            result = cmd_read(self._read_args(chat="   "))
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--chat cannot be empty" in err
+
+    def test_empty_user_rejected_before_resolver(self, capsys):
+        """Empty --user is rejected with exit 1 BEFORE hitting resolve_username (C3)."""
+        from tools.valor_telegram import cmd_read
+
+        with patch(
+            "tools.telegram_users.resolve_username",
+            side_effect=AssertionError("resolve_username must not be called for empty --user"),
+        ):
+            result = cmd_read(self._read_args(user=""))
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--user cannot be empty" in err
 
     def test_chat_id_bypasses_matcher(self, capsys):
         """--chat-id skips resolve_chat entirely and reads the id directly."""
@@ -631,6 +733,29 @@ class TestCmdChatsSearch:
         assert result == 0
         out = capsys.readouterr().out
         assert "No chats matched" in out
+
+    def test_empty_search_rejected(self, capsys):
+        """Empty --search is rejected (C3 concern) — no silent match-all."""
+        from tools.valor_telegram import cmd_chats
+
+        # Should NOT call list_chats at all; reject empty before any work.
+        with patch(
+            "tools.telegram_history.list_chats",
+            side_effect=AssertionError("list_chats must not be called for empty --search"),
+        ):
+            result = cmd_chats(self._chats_args(search=""))
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--search cannot be empty" in err
+
+        with patch(
+            "tools.telegram_history.list_chats",
+            side_effect=AssertionError("list_chats must not be called for whitespace --search"),
+        ):
+            result = cmd_chats(self._chats_args(search="   "))
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--search cannot be empty" in err
 
     def test_search_json_output(self, capsys):
         """--search with --json produces JSON output containing only matches."""

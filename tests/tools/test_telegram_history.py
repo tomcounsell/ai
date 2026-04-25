@@ -685,49 +685,124 @@ class TestResolveChatCandidates:
 
 
 class TestResolveChatIdAmbiguity:
-    """Test `resolve_chat_id` ambiguity handling (issue #1163)."""
+    """Test `resolve_chat_id` ambiguity handling (issue #1163).
 
-    def test_raises_on_ambiguous(self):
-        register_chat(chat_id="801", chat_name="Psy Team A")
-        register_chat(chat_id="802", chat_name="Psy Team B")
+    Semantics under the hotfixed plan (Q2 = pick-most-recent-with-warning):
+      - Default (strict=False): >1 candidates → returns most-recent chat_id
+        and emits a logger.warning listing all candidates.
+      - strict=True: >1 candidates → raises AmbiguousChatError.
+      - Defensive invariant: regardless of strict, if the chosen candidate
+        is NOT the max-last_activity_ts one, raises AmbiguousChatError.
+    """
+
+    def test_default_returns_most_recent_and_warns(self, caplog):
+        """Default (non-strict) path picks most-recent + emits logger.warning."""
+        register_chat(chat_id="801", chat_name="Psy Older")
+        time.sleep(0.01)
+        register_chat(chat_id="802", chat_name="Psy Newer")
+
+        with caplog.at_level("WARNING", logger="tools.telegram_history"):
+            resolved = resolve_chat_id("Psy")
+
+        assert resolved == "802"  # Most-recent winner.
+        # Warning must name both candidates for audit.
+        messages = [r.message for r in caplog.records]
+        combined = " ".join(messages)
+        assert "ambiguous" in combined.lower()
+        assert "801" in combined
+        assert "802" in combined
+
+    def test_strict_raises_on_ambiguous(self):
+        """strict=True re-enables the hard-error path for scripted callers."""
+        register_chat(chat_id="811", chat_name="Psy Team A")
+        register_chat(chat_id="812", chat_name="Psy Team B")
         with pytest.raises(AmbiguousChatError) as exc_info:
-            resolve_chat_id("Psy")
+            resolve_chat_id("Psy", strict=True)
         err = exc_info.value
         assert len(err.candidates) == 2
         ids = {c.chat_id for c in err.candidates}
-        assert ids == {"801", "802"}
+        assert ids == {"811", "812"}
 
-    def test_ambiguous_candidates_sorted_by_recency(self):
+    def test_strict_candidates_sorted_by_recency(self):
         register_chat(chat_id="901", chat_name="Psy First")
         time.sleep(0.01)
         register_chat(chat_id="902", chat_name="Psy Second")
         with pytest.raises(AmbiguousChatError) as exc_info:
-            resolve_chat_id("Psy")
+            resolve_chat_id("Psy", strict=True)
         candidates = exc_info.value.candidates
         # Most recent first.
         assert candidates[0].chat_id == "902"
         assert candidates[1].chat_id == "901"
 
-    def test_allow_ambiguous_returns_most_recent_and_warns(self, caplog):
-        register_chat(chat_id="1001", chat_name="Psy Older")
-        time.sleep(0.01)
-        register_chat(chat_id="1002", chat_name="Psy Newer")
+    def test_deterministic_tiebreak_on_chat_id(self, caplog, monkeypatch):
+        """When last_activity_ts ties, tiebreak is deterministic on chat_id.
+
+        Two candidates with identical timestamps must always pick the same
+        winner across test runs. Tiebreak is chat_id ascending (lexicographic
+        string compare) so `"100"` wins over `"200"`.
+        """
+        # Freeze two chats at the same updated_at by monkeypatching time.time
+        # during registration. This is more deterministic than sleeping.
+        import tools.telegram_history as _th
+
+        frozen_ts = 1_700_000_500.0
+        monkeypatch.setattr(_th.time, "time", lambda: frozen_ts)
+        register_chat(chat_id="200", chat_name="Psy Two Hundred")
+        register_chat(chat_id="100", chat_name="Psy One Hundred")
+        monkeypatch.undo()
 
         with caplog.at_level("WARNING", logger="tools.telegram_history"):
-            resolved = resolve_chat_id("Psy", allow_ambiguous=True)
+            resolved = resolve_chat_id("Psy")
+        # "100" < "200" lexicographically, so 100 wins on tiebreak.
+        assert resolved == "100"
 
-        assert resolved == "1002"
-        # Must have emitted a logger.warning recording the ambiguity.
-        messages = [r.message for r in caplog.records]
-        assert any("ambiguous" in m.lower() for m in messages)
-
-    def test_three_candidate_ambiguity(self):
+    def test_default_three_candidate_ambiguity(self, caplog):
+        """Three-way ambiguity under default path picks newest, warns."""
         register_chat(chat_id="1101", chat_name="Psy Alpha")
+        time.sleep(0.005)
         register_chat(chat_id="1102", chat_name="Psy Beta")
+        time.sleep(0.005)
         register_chat(chat_id="1103", chat_name="Psy Gamma")
+        with caplog.at_level("WARNING", logger="tools.telegram_history"):
+            resolved = resolve_chat_id("Psy")
+        assert resolved == "1103"  # Most recent of the three.
+        # Warning must list all three candidates.
+        combined = " ".join(r.message for r in caplog.records)
+        assert "1101" in combined
+        assert "1102" in combined
+        assert "1103" in combined
+
+    def test_strict_three_candidate_ambiguity(self):
+        register_chat(chat_id="1111", chat_name="Psy Alpha"),
+        register_chat(chat_id="1112", chat_name="Psy Beta"),
+        register_chat(chat_id="1113", chat_name="Psy Gamma"),
         with pytest.raises(AmbiguousChatError) as exc_info:
-            resolve_chat_id("Psy")
+            resolve_chat_id("Psy", strict=True)
         assert len(exc_info.value.candidates) == 3
+
+    def test_invariant_guard_raises_regardless_of_strict(self, monkeypatch):
+        """If the selection logic picks a non-max candidate, raise unconditionally.
+
+        This is a defensive assertion against a broken sort or a race.
+        strict=False would normally swallow ambiguity with a warning, but the
+        invariant guard fires BEFORE the warning path — regardless of strict.
+        """
+        import tools.telegram_history as _th
+        from tools.telegram_history import ChatCandidate
+
+        # Inject a candidate list where the first element is NOT the max-ts
+        # one. resolve_chat_id must detect this and raise.
+        broken = [
+            ChatCandidate(chat_id="B", chat_name="Broken Winner", last_activity_ts=1000.0),
+            ChatCandidate(chat_id="A", chat_name="Real Winner", last_activity_ts=9999.0),
+        ]
+        monkeypatch.setattr(_th, "resolve_chat_candidates", lambda name: broken)
+
+        with pytest.raises(AmbiguousChatError):
+            resolve_chat_id("anything")  # Default path — still raises.
+
+        with pytest.raises(AmbiguousChatError):
+            resolve_chat_id("anything", strict=True)  # Strict also raises.
 
     def test_ambiguous_chat_error_is_exception_subclass(self):
         # Ensures the exception is catchable as Exception by surrounding code.
