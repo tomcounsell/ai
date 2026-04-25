@@ -733,7 +733,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         )
 
     # Step 4.5: Telegram auth check (warn only — bridge is optional, worker runs without it)
-    if config.do_service_restart:
+    # Skipped on machines with no projects assigned (no bridge to authorize).
+    if config.do_service_restart and machine_check.get("projects"):
         log("Checking Telegram session...", v)
         telegram_check = verify.check_telegram_session(project_dir)
         if telegram_check.available:
@@ -768,29 +769,42 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Wait for bridge to start after launchctl unload+load cycle.
         # Polling window: 10 x 2s = 20s covers ThrottleInterval (10s)
         # + bridge startup (~5s) + safety margin (~5s).
-        import time
+        # Skipped on machines with no projects assigned (valor-service.sh
+        # install gates bridge install on the same signal).
+        has_bridge = bool(machine_check.get("projects"))
+        if has_bridge:
+            import time
 
-        for _ in range(10):
-            time.sleep(2)
-            result.service_status = service.get_service_status(project_dir)
+            for _ in range(10):
+                time.sleep(2)
+                result.service_status = service.get_service_status(project_dir)
+                if result.service_status.running:
+                    break
+
+            result.caffeinate_status = service.get_caffeinate_status()
+
             if result.service_status.running:
-                break
-
-        result.caffeinate_status = service.get_caffeinate_status()
-
-        if result.service_status.running:
-            log(f"Bridge running (PID: {result.service_status.pid})", v)
+                log(f"Bridge running (PID: {result.service_status.pid})", v)
+            else:
+                log(
+                    "WARN: Bridge not running after restart (worker and web UI unaffected)",
+                    v,
+                    always=True,
+                )
+                result.warnings.append("Bridge not running after restart")
         else:
-            log(
-                "WARN: Bridge not running after restart (worker and web UI unaffected)",
-                v,
-                always=True,
-            )
-            result.warnings.append("Bridge not running after restart")
+            log("Bridge: skipped (no projects assigned to this machine)", v)
+            result.caffeinate_status = service.get_caffeinate_status()
 
-        # Always restart web UI to pick up code/dep changes
-        if service.restart_webui(project_dir):
-            log("Web UI restarted (port 8500)", v)
+        # Ensure web UI is running. Force-restart only when new commits were
+        # pulled (so it picks up code changes); otherwise leave the running
+        # process alone so /update is idempotent across repeated runs.
+        force_webui = bool(result.git_result and result.git_result.commit_count > 0)
+        if service.restart_webui(project_dir, force=force_webui):
+            if force_webui:
+                log("Web UI restarted (port 8500)", v)
+            else:
+                log("Web UI running (port 8500)", v)
         else:
             log("WARN: Web UI failed to start", v, always=True)
             result.warnings.append("Web UI failed to start")

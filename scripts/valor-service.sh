@@ -358,6 +358,34 @@ health_check() {
 # name but only one of which runs the bridge.
 # Falls back to "true" (return 0) on any error (no python venv, no config,
 # etc.) so existing bridge machines keep working without disruption.
+# Writes plist content and reloads in launchd. If the file already matches
+# the rendered content AND the label is currently loaded, this is a no-op.
+# Lets `install` be idempotent across repeated /update runs.
+# Args: plist_path, label, rendered_content
+bootstrap_plist_idempotent() {
+    local plist_path="$1"
+    local label="$2"
+    local rendered="$3"
+
+    local existing=""
+    if [ -f "$plist_path" ]; then
+        existing=$(cat "$plist_path")
+    fi
+    local already_loaded=false
+    if launchctl list 2>/dev/null | awk -v l="$label" '$NF==l{found=1} END{exit !found}'; then
+        already_loaded=true
+    fi
+
+    if [ "$rendered" = "$existing" ] && $already_loaded; then
+        echo "  $label already up to date"
+        return 0
+    fi
+
+    printf '%s' "$rendered" > "$plist_path"
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$plist_path"
+}
+
 has_bridge_role() {
     local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
     if [ ! -f "$config" ]; then
@@ -507,7 +535,8 @@ install_update_polling() {
     # Install update polling (runs remote-update.sh every 30 minutes)
     echo ""
     echo "Installing update polling..."
-    cat > "$UPDATE_PLIST_PATH" << UPDATEEOF
+    local rendered
+    rendered=$(cat <<UPDATEEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -537,16 +566,16 @@ install_update_polling() {
 </dict>
 </plist>
 UPDATEEOF
-    launchctl bootout "gui/$(id -u)/$UPDATE_PLIST_NAME" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$UPDATE_PLIST_PATH"
-    echo "Update polling installed (runs every 30 minutes)"
+)
+    bootstrap_plist_idempotent "$UPDATE_PLIST_PATH" "$UPDATE_PLIST_NAME" "$rendered"
 }
 
 install_bridge_watchdog() {
     # Install bridge watchdog (runs every 60 seconds)
     echo ""
     echo "Installing bridge watchdog..."
-    cat > "$WATCHDOG_PLIST_PATH" << WATCHDOGEOF
+    local rendered
+    rendered=$(cat <<WATCHDOGEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -576,9 +605,8 @@ install_bridge_watchdog() {
 </dict>
 </plist>
 WATCHDOGEOF
-    launchctl bootout "gui/$(id -u)/$WATCHDOG_PLIST_NAME" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$WATCHDOG_PLIST_PATH"
-    echo "Bridge watchdog installed (runs every 60 seconds)"
+)
+    bootstrap_plist_idempotent "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_NAME" "$rendered"
 
     # Log rotation is handled by the user-space log-rotate LaunchAgent
     # (com.valor.log-rotate.plist, scripts/log_rotate.py). Installed by
