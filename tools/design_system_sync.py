@@ -563,19 +563,35 @@ _AI_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _probe_npx() -> bool:
-    """Return True when ``npx --version`` returns 0, else False."""
+    """Return True only when ``@google/design.md`` is invocable via npx.
+
+    Checking ``npx --version`` alone is not enough: ``scripts/remote-update.sh``
+    runs ``npm ci --only=prod`` so any package in ``devDependencies`` is
+    skipped, leaving ``npx`` itself present but the design-system package
+    absent. Probing the package end-to-end via ``--no-install`` short-circuits
+    to non-zero in that case so callers can degrade cleanly instead of
+    raising ``CalledProcessError`` from a deeper ``_run_npx`` invocation.
+    """
     if shutil.which("npx") is None:
         return False
     try:
         result = subprocess.run(
-            ["npx", "--version"],
+            ["npx", "--no-install", "@google/design.md", "--version"],
             capture_output=True,
             text=True,
             timeout=10,
+            cwd=str(_AI_REPO_ROOT),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        sys.stderr.write(
+            "[design_system_sync] @google/design.md not installed — "
+            "skipping lint/export. Run `npm install` (or move "
+            "`scripts/remote-update.sh` off `--only=prod`) to enable.\n"
+        )
+        return False
+    return True
 
 
 def _run_npx(args: list[str], *, required: bool = True) -> subprocess.CompletedProcess:
@@ -723,33 +739,49 @@ def cmd_check(paths: ResolvedPaths, *, drop_unmapped: bool, no_node: bool) -> in
     if no_node:
         return 0
     if not _probe_npx():
-        # Without Node we cannot verify exports; succeed on CSS / md parity.
+        # Without Node (or the design-system package) we cannot verify
+        # exports; succeed on CSS / md parity.
         return 0
     exports_dir = paths.pen.parent / "exports"
     md_path = paths.pen.parent / "design-system.md"
     if not exports_dir.is_dir():
         return 0
-    with tempfile.TemporaryDirectory() as td:
-        tmpdir = Path(td)
-        dtcg_result = _run_npx(["export", str(md_path), "--format", "dtcg"])
-        tailwind_result = _run_npx(["export", str(md_path), "--format", "tailwind"])
-        (tmpdir / "tokens.dtcg.json").write_text(
-            _normalize_export_json(dtcg_result.stdout), encoding="utf-8"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmpdir = Path(td)
+            dtcg_result = _run_npx(["export", str(md_path), "--format", "dtcg"])
+            tailwind_result = _run_npx(["export", str(md_path), "--format", "tailwind"])
+            (tmpdir / "tokens.dtcg.json").write_text(
+                _normalize_export_json(dtcg_result.stdout), encoding="utf-8"
+            )
+            (tmpdir / "tailwind.theme.json").write_text(
+                _normalize_export_json(tailwind_result.stdout), encoding="utf-8"
+            )
+            for name in ("tokens.dtcg.json", "tailwind.theme.json"):
+                actual_path = exports_dir / name
+                expected_path = tmpdir / name
+                actual = actual_path.read_text(encoding="utf-8") if actual_path.is_file() else ""
+                expected = expected_path.read_text(encoding="utf-8")
+                if actual != expected:
+                    sys.stderr.write(
+                        f"{actual_path} differs from generated export — run "
+                        f"`python -m tools.design_system_sync --all`\n"
+                    )
+                    return 1
+    except subprocess.CalledProcessError as exc:
+        # A non-zero exit from the third-party CLI is not drift. Surface the
+        # diagnostic and degrade to "CSS / md parity passed" rather than
+        # blocking commits on a tooling fault.
+        sys.stderr.write(
+            "[design_system_sync] export comparison skipped — "
+            f"`npx @google/design.md export` exited {exc.returncode}. "
+            "Stderr follows.\n"
         )
-        (tmpdir / "tailwind.theme.json").write_text(
-            _normalize_export_json(tailwind_result.stdout), encoding="utf-8"
-        )
-        for name in ("tokens.dtcg.json", "tailwind.theme.json"):
-            actual_path = exports_dir / name
-            expected_path = tmpdir / name
-            actual = actual_path.read_text(encoding="utf-8") if actual_path.is_file() else ""
-            expected = expected_path.read_text(encoding="utf-8")
-            if actual != expected:
-                sys.stderr.write(
-                    f"{actual_path} differs from generated export — run "
-                    f"`python -m tools.design_system_sync --all`\n"
-                )
-                return 1
+        if exc.stderr:
+            sys.stderr.write(exc.stderr)
+            if not exc.stderr.endswith("\n"):
+                sys.stderr.write("\n")
+        return 0
     return 0
 
 

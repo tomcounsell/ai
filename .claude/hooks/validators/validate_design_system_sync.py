@@ -30,11 +30,24 @@ import sys
 import time
 from pathlib import Path
 
-# Path-anchored regex: ``(?:^|/)`` prefix on brand.css / source.css prevents
-# false positives on ``my-brand.css`` / ``source.css.bak``. See Risk 6 in
-# the plan. Any change here MUST be mirrored in Risk 6.
+# Path-anchored regex. Two boundary fixes vs. the original:
+#
+#   * Prefix uses zero-width lookbehind ``(?:(?<=^)|(?<=[/\s]))`` instead of
+#     ``(?:^|/)``. The old form rejected ``git add design-system.pen`` (bare
+#     filename after a space) because it required either string-start or
+#     ``/``. A user who ``cd``-ed into ``docs/designs/`` could silently
+#     commit drift. The lookbehind accepts whitespace (the typical
+#     ``git add `` separator) as well.
+#   * Suffix uses ``(?![A-Za-z0-9.])`` instead of ``\b``. ``\b`` matches
+#     between ``css`` and ``.``, which made ``foo/source.css.bak`` look
+#     like a hit. The negative lookahead refuses any letter / digit / dot
+#     so backup suffixes (``.bak``, ``.tmp``, ``.orig``) don't false-fire.
+#
+# See Risk 6 in the plan. Any change here MUST be mirrored in Risk 6.
 _COMMAND_REGEX = re.compile(
-    r"git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b"
+    r"git (add|commit).*(?:(?<=^)|(?<=[/\s]))"
+    r"(design-system\.(pen|md)|brand\.css|source\.css)"
+    r"(?![A-Za-z0-9.])"
 )
 
 _LOG_PATH = Path("logs/validate_design_system_sync.jsonl")

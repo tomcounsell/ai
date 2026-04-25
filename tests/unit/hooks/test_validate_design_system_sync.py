@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -12,6 +13,15 @@ HOOK = (
     Path(__file__).resolve().parents[3] / ".claude/hooks/validators/validate_design_system_sync.py"
 )
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _load_hook_module():
+    """Import the hook module by path so we can probe its compiled regex."""
+    spec = importlib.util.spec_from_file_location("_dss_hook_under_test", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _run_hook(payload: dict, env_extra: dict | None = None) -> tuple[int, str, str]:
@@ -43,17 +53,37 @@ def test_unrelated_commit_is_no_op():
 
 
 def test_path_anchored_regex_rejects_false_positive_suffixes():
-    """my-brand.css / source.css.bak must NOT match (Risk 6)."""
-    rc, stdout, _ = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "git add my-brand.css"}}
-    )
-    assert rc == 0
-    assert stdout == ""
-    rc, stdout, _ = _run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "git add foo/source.css.bak"}}
-    )
-    assert rc == 0
-    assert stdout == ""
+    """my-brand.css / source.css.bak must NOT match (Risk 6).
+
+    Asserts at the regex-compile level so the rejection is locked in
+    even if `_find_pen_path` short-circuits earlier in the hook flow
+    (which is what made the v1 test pass for the wrong reason).
+    """
+    pattern = _load_hook_module()._COMMAND_REGEX
+    assert pattern.search("git add my-brand.css") is None
+    assert pattern.search("git add foo/source.css.bak") is None
+    assert pattern.search("git add foo/source.css.tmp") is None
+    assert pattern.search("git add foo/source.css.orig") is None
+    assert pattern.search("git add report.md") is None
+
+
+def test_regex_matches_bare_filename_after_git_add():
+    """`git add design-system.pen` (no leading dir) must match (Risk 6 fix).
+
+    Regression: the prior `(?:^|/)` prefix only matched when the file
+    sat under a subdirectory; users who `cd`-ed into the design-system
+    folder could silently commit drift.
+    """
+    pattern = _load_hook_module()._COMMAND_REGEX
+    for cmd in (
+        "git add design-system.pen",
+        "git add design-system.md",
+        "git add brand.css",
+        "git add source.css",
+        "git add tests/fixtures/design_system/design-system.pen",
+        "git commit -am 'update brand.css'",
+    ):
+        assert pattern.search(cmd) is not None, f"expected match: {cmd!r}"
 
 
 def test_matching_clean_state_allows_commit():

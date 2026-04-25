@@ -405,7 +405,13 @@ Moodboard URL → agent runs skill → agent edits consumer-repo `design-system.
 
 ### Risk 6: Validator hook fires in ai/ commits that never touch the design system
 **Impact:** If the filename regex is too loose, every `git commit` in ai/ runs the drift check — adding 100-500ms per commit even when nothing to validate. A too-loose regex also produces false positives on unrelated files whose names happen to contain `brand.css` or `source.css` as a suffix (e.g. `my-brand.css`, `source.css.bak`).
-**Mitigation:** Regex is **path-anchored**: `r"git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b"`. The `(?:^|/)` prefix group requires `brand.css` and `source.css` to appear at the start of a path segment — `my-brand.css` fails the match; `static/css/brand.css` succeeds. The generic pattern `docs/designs/` is deliberately NOT matched — we match filenames, not directories, so unrelated commits in ai/ early-return. This spec is the single source of truth for the hook's match pattern; Task 4 cites it directly and any change to one MUST be mirrored in the other. Unit test asserts the hook no-ops on commands like `git add README.md`, `git commit -m "foo"`, `git add tests/unit/test_unrelated.py`, and specifically on `git add my-brand.css` and `git add source.css.bak` (path-anchoring false-positive cases).
+**Mitigation:** Regex is **path-anchored** with both boundaries enforced as zero-width assertions:
+
+```
+git (add|commit).*(?:(?<=^)|(?<=[/\s]))(design-system\.(pen|md)|brand\.css|source\.css)(?![A-Za-z0-9.])
+```
+
+The prefix `(?:(?<=^)|(?<=[/\s]))` is a lookbehind that accepts string-start, `/`, or whitespace — so both `git add design-system.pen` (bare filename, post-`cd` into the design-system folder) and `git add static/css/brand.css` (subdirectory) match, while `my-brand.css` (preceded by `-`) does not. The earlier `(?:^|/)` form rejected the bare-filename case and let users silently commit drift. The trailing `(?![A-Za-z0-9.])` is a negative lookahead that refuses any letter / digit / dot — so `foo/source.css.bak`, `foo/source.css.tmp`, and `foo/source.css.orig` no longer false-fire the way the prior `\b` boundary allowed (`\b` matches between `s` and `.`). The generic pattern `docs/designs/` is deliberately NOT matched — we match filenames, not directories, so unrelated commits in ai/ early-return. This spec is the single source of truth for the hook's match pattern; Task 4 cites it directly and any change to one MUST be mirrored in the other. Unit tests assert at the regex-compile level (independent of `_find_pen_path`) that the bare-filename forms match and the `*.bak`/`*.tmp`/`*.orig` suffixes do not.
 
 ### Risk 7: Write/Edit hook matcher regex may not parse `Write|Edit` syntax
 **Impact:** If `.claude/settings.json` matcher strings don't support `|` alternation, registering the read-only hook with `matcher: "Write|Edit"` silently fails to match either. The hook never fires.
@@ -445,7 +451,7 @@ The `/update` skill (`scripts/remote-update.sh`) currently syncs Python deps, en
   fi
   ```
   The non-pipefail subshell + `|| echo` trailer guarantees a missing-Node or `npm ci` failure does not propagate up the update script's exit status. Machines without `npm` simply skip the block silently; machines with `npm` but a transient failure (registry hiccup, lockfile stale) log a non-fatal warning and continue. This avoids the "update script aborts at step N+1 because Node isn't installed" failure mode.
-- **New deps to propagate:** `@google/design.md@0.1.1` via `package.json` + `package-lock.json`. Committed to the repo; `npm ci` on update pulls them.
+- **New deps to propagate:** `@google/design.md@0.1.1` via `package.json` + `package-lock.json`. The package lives under `dependencies` (not `devDependencies`) because `python -m tools.design_system_sync --check` needs it at runtime to verify exports — `scripts/remote-update.sh` runs `npm ci --only=prod`, so a devDependency would be skipped on every machine that runs `/update`, leaving the drift hook unable to check exports. Committed to the repo; `npm ci` on update pulls them.
 - **Migration for existing installations:** On first `/update` after this lands, `npm ci` runs fresh — idempotent, no manual step.
 - **Docs update:** `/update` skill's SKILL.md gets a short addendum noting that Node + npm are now soft prerequisites for machines that run the `do-design-system` skill. Machines that only run the bridge/worker are unaffected (the skill is the only path that needs `npx`).
 - **Fallback:** Behaviour specified in Technical Approach's `_run_npx` / `--no-node` section. Specifically: `python -m tools.design_system_sync --generate` auto-detects missing Node (via the `_probe_npx` precheck) and falls back to Python-only emission (`design-system.md`, `brand.css`, `source.css`) with a stderr warning. Every other subcommand (`--all`, `--audit`, `--check` when exports are part of the comparison set) exits 2 with an actionable "Node required" message unless the user explicitly passes `--no-node`. Full pipeline (lint + exports) requires Node; the fallback is only for the core emission path. This ensures `check=True` never silently propagates — the fallback is explicit and tested.
@@ -565,7 +571,7 @@ Not needed for Phase 1. One new devDependency (`@google/design.md@0.1.1`, alpha,
 - **Assigned To**: sync-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `package.json` at repo root with `@google/design.md@0.1.1` in `devDependencies` only.
+- Create `package.json` at repo root with `@google/design.md@0.1.1` in `dependencies` (post-build correction — initially shipped as `devDependencies`, but `npm ci --only=prod` skipped it, so `--check` could not verify exports).
 - Run `npm install` to generate `package-lock.json`; commit the lockfile.
 - Ensure `.gitignore` contains `node_modules/`.
 

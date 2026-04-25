@@ -292,3 +292,67 @@ def test_fixture_generator_produces_stable_output():
     # --check passes on the committed fixture state.
     rc = dss.cmd_check(paths, drop_unmapped=False, no_node=True)
     assert rc == 0, "fixture drift: regenerate and commit."
+
+
+# ---------------------------------------------------------------------------
+# Probe + cmd_check graceful degradation when @google/design.md is missing
+# ---------------------------------------------------------------------------
+
+
+def test_probe_npx_returns_false_when_package_missing(monkeypatch, capsys):
+    """`npx --version` succeeds but the package isn't installed → False."""
+    import subprocess as _sp
+
+    monkeypatch.setattr(dss.shutil, "which", lambda _name: "/usr/bin/npx")
+
+    def fake_run(*args, **kwargs):
+        return _sp.CompletedProcess(
+            args=args[0] if args else kwargs.get("args"),
+            returncode=1,
+            stdout="",
+            stderr="npm error npx canceled due to missing packages",
+        )
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    assert dss._probe_npx() is False
+    assert "@google/design.md not installed" in capsys.readouterr().err
+
+
+def test_cmd_check_succeeds_when_package_missing(tmp_path: Path, monkeypatch):
+    """When the package is absent, `--check` must NOT raise CalledProcessError.
+
+    Regression for the false-block bug: cmd_check raising on missing
+    `@google/design.md` caused the drift validator hook to surface a fake
+    `decision: block` on every git operation post-`npm ci --only=prod`.
+    """
+    pen = _write_minimal_pen(tmp_path)
+    paths = dss.ResolvedPaths(pen=pen, css_root=tmp_path / "css")
+    dss.cmd_generate(paths, no_node=True, drop_unmapped=False)
+    monkeypatch.setattr(dss, "_probe_npx", lambda: False)
+
+    rc = dss.cmd_check(paths, drop_unmapped=False, no_node=False)
+    assert rc == 0
+
+
+def test_cmd_check_handles_calledprocesserror_defense_in_depth(tmp_path: Path, monkeypatch, capsys):
+    """If `_probe_npx` lies and `_run_npx` then raises, degrade to 0.
+
+    The probe is the first line of defense; this test exercises the
+    second line (try/except wrapping the npx export comparison).
+    """
+    import subprocess as _sp
+
+    pen = _write_minimal_pen(tmp_path)
+    paths = dss.ResolvedPaths(pen=pen, css_root=tmp_path / "css")
+    dss.cmd_generate(paths, no_node=True, drop_unmapped=False)
+    # Place an exports/ dir so the export-comparison block runs.
+    (pen.parent / "exports").mkdir(exist_ok=True)
+    monkeypatch.setattr(dss, "_probe_npx", lambda: True)
+
+    def boom(*_args, **_kwargs):
+        raise _sp.CalledProcessError(returncode=1, cmd=["npx"], stderr="npm error missing")
+
+    monkeypatch.setattr(dss, "_run_npx", boom)
+    rc = dss.cmd_check(paths, drop_unmapped=False, no_node=False)
+    assert rc == 0
+    assert "export comparison skipped" in capsys.readouterr().err

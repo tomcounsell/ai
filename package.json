@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "description": "Design-system tooling scoped to the do-design-system skill. Pins @google/design.md for invocation via npx.",
-  "devDependencies": {
+  "dependencies": {
     "@google/design.md": "0.1.1"
   }
 }
