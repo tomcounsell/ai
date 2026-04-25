@@ -51,12 +51,20 @@ class ChatCandidate:
 
 
 class AmbiguousChatError(Exception):
-    """Raised when `resolve_chat_id` finds >1 candidate and `allow_ambiguous=False`.
+    """Raised when `resolve_chat_id` finds >1 candidate and `strict=True`.
 
     Carries the full `list[ChatCandidate]` so CLI callers can render a
     "did you mean" style disambiguation message. Candidates are ordered
     by `last_activity_ts` desc with `None` sorting last (i.e., most recently
-    active chat first).
+    active chat first), with `chat_id` as the deterministic tiebreaker.
+
+    Under the default (non-strict) path this exception is NOT raised —
+    `resolve_chat_id` returns the most-recent candidate's `chat_id` and
+    emits a `logger.warning` listing all candidates instead. The exception
+    is also raised unconditionally (regardless of `strict`) when the
+    defensive invariant in `resolve_chat_id` fails — i.e., the chosen
+    candidate is not the one with the maximum `last_activity_ts`. That
+    case is a fail-loud guard against a broken sort.
     """
 
     def __init__(self, candidates: list["ChatCandidate"]):
@@ -123,20 +131,24 @@ def _chat_to_candidate(chat) -> ChatCandidate:
 
 
 def _sort_candidates(candidates: list[ChatCandidate]) -> list[ChatCandidate]:
-    """Sort candidates by `last_activity_ts` desc with `None` sorting last.
+    """Sort candidates by `last_activity_ts` desc, deterministic on ties.
 
-    A candidate with `last_activity_ts=None` represents a chat that has never
-    been updated and should never outrank one with a real timestamp.
+    Primary key: `last_activity_ts` desc, with `None` sorting last (a chat
+    that has never been updated never outranks one with a real timestamp).
+
+    Deterministic tiebreak (per the hotfixed plan): when two candidates
+    share `last_activity_ts`, break on `chat_id` ascending — lexicographic
+    string compare, so a numeric-prefix chat_id is still stable. This
+    makes the warn-and-pick-most-recent default path reproducible: the
+    same inputs always pick the same candidate, and tests don't have to
+    race sleep-jitter timings to get a deterministic winner.
     """
-    # Secondary sort by chat_name for deterministic ordering when ts is equal
-    # or both None (relevant under Popoto iteration-order non-determinism —
-    # Risk 4 in the plan).
     return sorted(
         candidates,
         key=lambda c: (
             0 if c.last_activity_ts is not None else 1,
             -(c.last_activity_ts or 0.0),
-            c.chat_name,
+            c.chat_id,
         ),
     )
 
@@ -1125,49 +1137,100 @@ def resolve_chat_id(
     chat_name: str,
     db_path=None,  # Ignored — kept for API compatibility
     *,
-    allow_ambiguous: bool = False,
+    strict: bool = False,
 ) -> str | None:
     """Resolve a chat name to its chat_id.
 
-    Runs the 3-stage cascade via `resolve_chat_candidates` and returns the
-    single most-recent candidate when unambiguous.
+    Runs the 3-stage cascade via `resolve_chat_candidates` and returns a
+    single `chat_id` under every path except a failed defensive invariant.
+
+    Default (non-strict) path:
+      - Zero candidates → returns None.
+      - One candidate   → returns that candidate's `chat_id`.
+      - Multiple        → returns the most-recent candidate's `chat_id` AND
+                          emits `logger.warning` listing the chosen candidate
+                          plus all alternatives (chat_id, chat_name, last-age).
+                          Callers do not need to catch anything.
+
+    Strict path (`strict=True`):
+      - Zero / one → same as default.
+      - Multiple   → raises `AmbiguousChatError(candidates)`.
+
+    Defensive invariant (both paths):
+      After candidate selection, the chosen candidate MUST have the maximum
+      `last_activity_ts` in the returned set. If this ever fails (a sort bug
+      or race), `AmbiguousChatError` is raised unconditionally regardless of
+      `strict`. This is fail-loud, not fail-silent-with-wrong-answer.
 
     Args:
         chat_name: Chat name to search for.
         db_path: Ignored — kept for backward-compatibility signature.
-        allow_ambiguous: If True (keyword-only), silently returns the first
-            (most-recently-active) candidate when multiple match and emits a
-            `logger.warning`. If False (default), raises `AmbiguousChatError`.
-            This exists as a back-compat escape hatch; production CLI callers
-            never set it — they surface the exception to the user.
+        strict: Keyword-only. Default False = pick-most-recent + warn; True
+            = raise `AmbiguousChatError` on >1 candidate. Exists as an
+            opt-in escape hatch for scripted callers that need hard-error
+            semantics (cannot parse stderr warnings reliably).
 
     Returns:
-        chat_id if a unique match is found (or the most-recent candidate when
-        `allow_ambiguous=True`); None when no candidates match.
+        chat_id on single-match, or the most-recent candidate's chat_id on
+        multi-match in non-strict mode. None when no candidates match.
 
     Raises:
-        AmbiguousChatError: when >1 candidate matches and `allow_ambiguous`
-            is False.
+        AmbiguousChatError: when >1 candidate matches and `strict=True`, OR
+            when the defensive invariant fails (regardless of `strict`).
     """
     candidates = resolve_chat_candidates(chat_name)
     if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0].chat_id
-    # >1 candidate
-    if allow_ambiguous:
-        winner = candidates[0]
-        runner_up = candidates[1]
-        logger.warning(
-            "ambiguous chat %r resolved to %s (%s); runner-up %s (%s)",
-            chat_name,
-            winner.chat_name,
-            winner.chat_id,
-            runner_up.chat_name,
-            runner_up.chat_id,
-        )
-        return winner.chat_id
-    raise AmbiguousChatError(candidates)
+
+    # >1 candidate.
+    if strict:
+        raise AmbiguousChatError(candidates)
+
+    chosen = candidates[0]  # _sort_candidates guarantees most-recent first.
+
+    # Defensive invariant: chosen MUST have the max last_activity_ts.
+    # If any candidate has a strictly greater timestamp than chosen, the
+    # sort is broken — raise unconditionally (this path ignores `strict`).
+    # None timestamps are treated as -inf for this comparison.
+    def _ts_or_neg_inf(ts: float | None) -> float:
+        return ts if ts is not None else float("-inf")
+
+    chosen_ts = _ts_or_neg_inf(chosen.last_activity_ts)
+    max_ts = max(_ts_or_neg_inf(c.last_activity_ts) for c in candidates)
+    if chosen_ts != max_ts:
+        raise AmbiguousChatError(candidates)
+
+    # Build greppable warning: chosen=(id,name,last:age); also=[(id,name,last:age),...]
+    def _age(ts: float | None) -> str:
+        if ts is None:
+            return "never"
+        delta = max(0.0, time.time() - float(ts))
+        if delta < 60:
+            return "<1m"
+        if delta < 3600:
+            return f"{int(delta // 60)}m"
+        if delta < 86400:
+            return f"{int(delta // 3600)}h"
+        return f"{int(delta // 86400)}d"
+
+    alts = [
+        f"({c.chat_id},{c.chat_name!r},last:{_age(c.last_activity_ts)})"
+        for c in candidates
+        if c.chat_id != chosen.chat_id
+    ]
+    logger.warning(
+        'ambiguous chat "%s" — %d candidates, chose %s: chose=(%s,%r,last:%s); also=[%s]',
+        chat_name,
+        len(candidates),
+        chosen.chat_id,
+        chosen.chat_id,
+        chosen.chat_name,
+        _age(chosen.last_activity_ts),
+        ", ".join(alts),
+    )
+    return chosen.chat_id
 
 
 def search_all_chats(

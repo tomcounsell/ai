@@ -50,27 +50,36 @@ def parse_since(text: str) -> datetime | None:
     return None
 
 
-def resolve_chat(name: str) -> str | None:
+def resolve_chat(name: str, *, strict: bool = False) -> str | None:
     """Resolve a chat name to a chat_id.
 
     Tries the history database first (groups), then the DM whitelist (users).
 
+    Args:
+        name: The chat name to resolve.
+        strict: Passed through to `resolve_chat_id`. When True, >1 ambiguous
+            candidates raises `AmbiguousChatError`. When False (default),
+            the resolver picks the most-recent candidate and emits a
+            `logger.warning` — callers never see the exception on the
+            ambiguity path.
+
     Raises:
-        AmbiguousChatError: when the history resolver finds >1 candidate.
-            Callers (e.g., `cmd_read`, `cmd_send`) MUST catch this and render
-            a disambiguation message. Silent first-match was the original
-            defect (issue #1163).
+        AmbiguousChatError: only when `strict=True` and the history resolver
+            finds >1 candidate, OR when the resolver's defensive invariant
+            fails (regardless of `strict`). Callers using `strict=True`
+            (e.g., `cmd_read` / `cmd_send` under `--strict`) MUST catch
+            this and render a disambiguation message.
     """
     from tools.telegram_history import AmbiguousChatError  # noqa: F401 — re-export
 
     try:
         from tools.telegram_history import resolve_chat_id
 
-        chat_id = resolve_chat_id(name)
+        chat_id = resolve_chat_id(name, strict=strict)
         if chat_id:
             return chat_id
     except AmbiguousChatError:
-        # Intentionally propagate — CLI callers must disambiguate.
+        # Intentionally propagate — strict-mode callers must disambiguate.
         raise
     except Exception:
         # Other failures (Redis down, etc.) fall through to the DM path.
@@ -315,7 +324,28 @@ def cmd_read(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # C3 concern from critique: empty / whitespace-only --chat must be rejected
+    # BEFORE reaching the resolver, so it never hits the normalizer's
+    # "returns []" path (which would be reported as a plain zero-match) or
+    # sneaks into substring match-all logic elsewhere. We also reject empty
+    # --user for the same reason (whitespace is never a valid username).
+    raw_chat = getattr(args, "chat", None)
+    if raw_chat is not None and not raw_chat.strip():
+        print(
+            "Error: --chat cannot be empty or whitespace-only.",
+            file=sys.stderr,
+        )
+        return 1
+    raw_user = getattr(args, "user", None)
+    if raw_user is not None and not raw_user.strip():
+        print(
+            "Error: --user cannot be empty or whitespace-only.",
+            file=sys.stderr,
+        )
+        return 1
+
     chat_id = None
+    strict_mode = bool(getattr(args, "strict", False))
 
     # Explicit numeric --chat-id bypasses the resolver.
     if getattr(args, "chat_id", None):
@@ -342,9 +372,15 @@ def cmd_read(args: argparse.Namespace) -> int:
     # Default path — resolve by name.
     elif args.chat:
         try:
-            chat_id = resolve_chat(args.chat)
+            # strict=False (default): ambiguity yields a logger.warning + picks
+            # the most-recent candidate. The CLI prints no error and exits 0.
+            # strict=True: ambiguity raises AmbiguousChatError (caught below).
+            chat_id = resolve_chat(args.chat, strict=strict_mode)
         except AmbiguousChatError as e:
-            print(_format_ambiguity_error(e.candidates), file=sys.stderr)
+            # Only reachable under --strict (or the defensive invariant guard
+            # inside resolve_chat_id). Print candidates to stdout so scripted
+            # callers can parse without needing stderr capture; exit 1.
+            print(_format_ambiguity_error(e.candidates))
             return 1
         if not chat_id:
             # Try raw value (might be a numeric chat ID typed via --chat).
@@ -520,11 +556,27 @@ def cmd_send(args: argparse.Namespace) -> int:
         Payload: {chat_id, reply_to, text, file_paths, session_id, timestamp}
         TTL: 1 hour
     """
+    # C3 concern: empty --chat is rejected before resolution on both
+    # read and send paths. Send has no --strict flag (Q2 resolved: pick-
+    # most-recent-with-warning is the default for both read and send);
+    # a scripted sender that needs hard-error semantics should pass the
+    # numeric chat_id directly.
+    if args.chat is not None and not args.chat.strip():
+        print(
+            "Error: --chat cannot be empty or whitespace-only.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Resolve chat name to numeric ID
     from tools.telegram_history import AmbiguousChatError
 
     try:
-        chat_id = resolve_chat(args.chat)
+        # strict=False: send matches read's default — pick most-recent +
+        # logger.warning on ambiguity. The AmbiguousChatError branch below
+        # is still reachable via the defensive invariant guard inside
+        # resolve_chat_id, which raises unconditionally on a broken sort.
+        chat_id = resolve_chat(args.chat, strict=False)
     except AmbiguousChatError as e:
         print(_format_ambiguity_error(e.candidates), file=sys.stderr)
         return 1
@@ -608,6 +660,19 @@ def cmd_send(args: argparse.Namespace) -> int:
 def cmd_chats(args: argparse.Namespace) -> int:
     """List known chats."""
     from tools.telegram_history import _normalize_chat_name, list_chats
+
+    # C3 concern: empty --search is rejected, same as empty --chat on read
+    # and send. An empty-string substring matches every chat, which is
+    # indistinguishable from "no filter" and silently produces the full
+    # list — confusing. Require the caller to drop the flag entirely for
+    # unfiltered listing.
+    raw_search = getattr(args, "search", None)
+    if raw_search is not None and not raw_search.strip():
+        print(
+            "Error: --search cannot be empty or whitespace-only.",
+            file=sys.stderr,
+        )
+        return 1
 
     result = list_chats()
 
@@ -693,6 +758,16 @@ def main() -> int:
     read_parser.add_argument("--search", "-s", help="Search keyword")
     read_parser.add_argument("--since", help="Time filter, e.g. '1 hour ago', '2 days ago'")
     read_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    read_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Opt into hard error on ambiguous --chat. Default behavior picks "
+            "the most-recently-active candidate and logs a warning. Use "
+            "--strict for scripted callers that need a non-zero exit when "
+            "the name matches >1 chat; the candidate list is printed on stdout."
+        ),
+    )
 
     # send subcommand
     send_parser = subparsers.add_parser("send", help="Send a message")
