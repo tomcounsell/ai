@@ -197,28 +197,28 @@ Discovery path:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `resolve_chat_id` at lines 978–979 has an `except Exception: return None` — this must be kept narrow (catch only the Popoto/Redis error we actually anticipate) or replaced with a logger.warning + re-raise in the new code. Test must assert the log/metric when the underlying query fails, not just that None is returned.
-- [ ] New `resolve_chat_candidates` must have the same try/except discipline; test both the success path and the Redis-unavailable path.
+- [x] `resolve_chat_id` at lines 978–979 has an `except Exception: return None` — this must be kept narrow (catch only the Popoto/Redis error we actually anticipate) or replaced with a logger.warning + re-raise in the new code. Test must assert the log/metric when the underlying query fails, not just that None is returned.
+- [x] New `resolve_chat_candidates` must have the same try/except discipline; test both the success path and the Redis-unavailable path.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty string `--chat ""` → clear error message, not silent None.
-- [ ] Whitespace-only `--chat "   "` → treated same as empty.
-- [ ] Non-ASCII / emoji-containing chat names → normalization preserves them; matching still works.
-- [ ] Very long chat names (>200 chars) → no crash; either match or clean no-match.
+- [x] Empty string `--chat ""` → clear error message, not silent None.
+- [x] Whitespace-only `--chat "   "` → treated same as empty.
+- [x] Non-ASCII / emoji-containing chat names → normalization preserves them; matching still works.
+- [x] Very long chat names (>200 chars) → no crash; either match or clean no-match.
 
 ### Error State Rendering
-- [ ] Ambiguity (default) renders warning to stderr listing chosen + all alternate candidates, proceeds with most-recent chat messages on stdout, exit 0.
-- [ ] Ambiguity (`--strict`) renders candidate list to stdout with exit code 1, does not print any chat messages.
-- [ ] Zero-match "did you mean" renders top-3 to stdout with exit code 1.
-- [ ] `--chat-id` with numeric input that has no messages → renders "no messages found for chat -100123" (clear), not a raw empty list.
-- [ ] Defensive guard: assertion failure on sort-invariant violation raises `AmbiguousChatError` regardless of `strict` — test with a monkeypatched sort.
+- [x] Ambiguity (default) renders warning to stderr listing chosen + all alternate candidates, proceeds with most-recent chat messages on stdout, exit 0.
+- [x] Ambiguity (`--strict`) renders candidate list to stdout with exit code 1, does not print any chat messages.
+- [x] Zero-match "did you mean" renders top-3 to stdout with exit code 1.
+- [x] `--chat-id` with numeric input that has no messages → renders "no messages found for chat -100123" (clear), not a raw empty list.
+- [x] Defensive guard: assertion failure on sort-invariant violation raises `AmbiguousChatError` regardless of `strict` — test with a monkeypatched sort.
 
 ## Test Impact
 
-- [ ] `tests/tools/test_telegram_history.py` — UPDATE: add tests for `_normalize_chat_name` (whitespace collapse, punctuation stripping including `_`, case folding, emoji/non-ASCII preservation, empty and whitespace-only input), `resolve_chat_candidates` (zero/one/many matches, ordering by `last_activity_ts` desc with None-last, deterministic `chat_id` tiebreak, stage cascade exact→ci→substring), and `resolve_chat_id` (default returns most-recent `chat_id` and emits `logger.warning` on >1 candidate via `caplog`, `strict=True` raises `AmbiguousChatError` on >1 candidate, `None` on zero, narrow exception handling on Redis error, defensive guard raises on monkeypatched invariant violation). Add a fixture that seeds two `Chat` records with overlapping names (`PsyOptimal` + `PM: PsyOptimal`) and assert both default and strict paths.
-- [ ] `tests/unit/test_valor_telegram.py` — UPDATE: existing `TestResolveChat` tests pass through `resolve_chat_id` as a mock; add new tests that assert (a) default `cmd_read` on ambiguity prints the stderr warning block (chosen + also entries), continues with message output on stdout, exits 0; (b) `--strict` `cmd_read` on ambiguity prints the stdout error block, does not print messages, exits 1; (c) the stderr warning format is greppable (assert via a regex fixture). Add tests for the new `--chat-id`, `--user`, `--strict`, and `chats --search` flags. Add a test for the freshness header format (`last activity: Xh ago` vs `last activity: never`).
-- [ ] `tests/unit/test_valor_telegram.py::TestResolveChat::test_returns_none_for_unknown` — UPDATE: current behavior returns None; new behavior should still return None (for legacy API preservation) but the CLI caller should print the "did you mean" candidates. Test both the function-level None return and the CLI-level did-you-mean output.
-- [ ] `scripts/get-telegram-message-history` tests (if any) — DELETE when the script is removed. Audit `tests/` for references first (`grep -rln "get-telegram-message-history" tests/`).
+- [x] `tests/tools/test_telegram_history.py` — UPDATE: add tests for `_normalize_chat_name` (whitespace collapse, punctuation stripping including `_`, case folding, emoji/non-ASCII preservation, empty and whitespace-only input), `resolve_chat_candidates` (zero/one/many matches, ordering by `last_activity_ts` desc with None-last, deterministic `chat_id` tiebreak, stage cascade exact→ci→substring), and `resolve_chat_id` (default returns most-recent `chat_id` and emits `logger.warning` on >1 candidate via `caplog`, `strict=True` raises `AmbiguousChatError` on >1 candidate, `None` on zero, narrow exception handling on Redis error, defensive guard raises on monkeypatched invariant violation). Add a fixture that seeds two `Chat` records with overlapping names (`PsyOptimal` + `PM: PsyOptimal`) and assert both default and strict paths.
+- [x] `tests/unit/test_valor_telegram.py` — UPDATE: existing `TestResolveChat` tests pass through `resolve_chat_id` as a mock; add new tests that assert (a) default `cmd_read` on ambiguity prints the stderr warning block (chosen + also entries), continues with message output on stdout, exits 0; (b) `--strict` `cmd_read` on ambiguity prints the stdout error block, does not print messages, exits 1; (c) the stderr warning format is greppable (assert via a regex fixture). Add tests for the new `--chat-id`, `--user`, `--strict`, and `chats --search` flags. Add a test for the freshness header format (`last activity: Xh ago` vs `last activity: never`).
+- [x] `tests/unit/test_valor_telegram.py::TestResolveChat::test_returns_none_for_unknown` — UPDATE: current behavior returns None; new behavior should still return None (for legacy API preservation) but the CLI caller should print the "did you mean" candidates. Test both the function-level None return and the CLI-level did-you-mean output.
+- [x] `scripts/get-telegram-message-history` tests (if any) — DELETE when the script is removed. Audit `tests/` for references first (`grep -rln "get-telegram-message-history" tests/`).
 
 ## Rabbit Holes
 
@@ -304,20 +304,20 @@ Integration test: a smoke test that the skill's documented invocation pattern (`
 
 ## Success Criteria
 
-- [ ] `valor-telegram read --chat "PsyOptimal"` with both `PsyOptimal` and `PM: PsyOptimal` in Redis prints a stderr ambiguity warning listing both candidates ordered by `updated_at` desc, then proceeds with the most-recent chat's messages on stdout, exit 0.
-- [ ] `valor-telegram read --chat "PsyOptimal" --strict` with the same data prints an ambiguity error block to stdout listing both candidates, exits 1, prints no messages.
-- [ ] `valor-telegram read --chat "PM PsyOptimal"` (missing colon) resolves to `PM: PsyOptimal` via normalization.
-- [ ] `valor-telegram read --chat-id -100123` bypasses the matcher entirely and reads that chat unconditionally.
-- [ ] `valor-telegram read --user lewis` reads DM messages from a whitelisted username (replacing the orphan script's behavior).
-- [ ] `valor-telegram read` output includes a header line with chat name, chat_id, and last-activity age.
-- [ ] `valor-telegram chats --search "psy"` returns only chats whose normalized name contains `psy`, sorted by recency desc.
-- [ ] `scripts/get-telegram-message-history` is deleted; no remaining in-tree callers.
-- [ ] `.claude/skills/telegram/SKILL.md` documents the new flags and ambiguity-error format.
-- [ ] `docs/features/telegram-messaging.md` and related docs reflect the new behavior.
-- [ ] All new and modified tests pass (`pytest tests/tools/test_telegram_history.py tests/unit/test_valor_telegram.py -q`).
-- [ ] Full test suite green (`/do-test`).
-- [ ] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`).
-- [ ] `grep -r "get-telegram-message-history"` returns no matches outside git history.
+- [x] `valor-telegram read --chat "PsyOptimal"` with both `PsyOptimal` and `PM: PsyOptimal` in Redis prints a stderr ambiguity warning listing both candidates ordered by `updated_at` desc, then proceeds with the most-recent chat's messages on stdout, exit 0.
+- [x] `valor-telegram read --chat "PsyOptimal" --strict` with the same data prints an ambiguity error block to stdout listing both candidates, exits 1, prints no messages.
+- [x] `valor-telegram read --chat "PM PsyOptimal"` (missing colon) resolves to `PM: PsyOptimal` via normalization.
+- [x] `valor-telegram read --chat-id -100123` bypasses the matcher entirely and reads that chat unconditionally.
+- [x] `valor-telegram read --user lewis` reads DM messages from a whitelisted username (replacing the orphan script's behavior).
+- [x] `valor-telegram read` output includes a header line with chat name, chat_id, and last-activity age.
+- [x] `valor-telegram chats --search "psy"` returns only chats whose normalized name contains `psy`, sorted by recency desc.
+- [x] `scripts/get-telegram-message-history` is deleted; no remaining in-tree callers.
+- [x] `.claude/skills/telegram/SKILL.md` documents the new flags and ambiguity-error format.
+- [x] `docs/features/telegram-messaging.md` and related docs reflect the new behavior.
+- [x] All new and modified tests pass (`pytest tests/tools/test_telegram_history.py tests/unit/test_valor_telegram.py -q`).
+- [x] Full test suite green (`/do-test`).
+- [x] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`).
+- [x] `grep -r "get-telegram-message-history"` returns no matches outside git history.
 
 ## Team Orchestration
 
