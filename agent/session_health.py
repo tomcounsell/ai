@@ -757,8 +757,8 @@ async def _agent_session_health_check() -> None:
             ):
                 should_recover = True
                 reason = (
-                    f"worker alive but no progress signal, running for "
-                    f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, "
+                    f"no progress signal observed in last {int(running_seconds)}s "
+                    f"(>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, worker future not yet resolved, "
                     f"turn_count={entry.turn_count}, log_path={entry.log_path!r}, "
                     f"claude_session_uuid={entry.claude_session_uuid!r})"
                 )
@@ -901,7 +901,7 @@ async def _agent_session_health_check() -> None:
 
                 is_local = worker_key.startswith("local")
                 logger.warning(
-                    "[session-health] Recovering stuck session %s "
+                    "[session-health] Recovering session %s with no recent progress evidence "
                     "(chat=%s, session=%s, local=%s): %s",
                     entry.agent_session_id,
                     worker_key,
@@ -967,7 +967,7 @@ async def _agent_session_health_check() -> None:
                             entry,
                             "abandoned",
                             reason=(
-                                f"health check: local session stuck "
+                                f"health check: local session showed no progress evidence "
                                 f"(chat={worker_key}, attempts={entry.recovery_attempts})"
                             ),
                             skip_auto_tag=True,
@@ -1046,7 +1046,7 @@ async def _agent_session_health_check() -> None:
                             entry,
                             "pending",
                             reason=(
-                                f"health check: recovered stuck session "
+                                f"health check: recovered no-progress session "
                                 f"(chat={worker_key}, attempt {entry.recovery_attempts})"
                             ),
                         )

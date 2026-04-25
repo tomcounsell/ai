@@ -147,6 +147,18 @@ def main():
                         ):
                             sidecar["agent_session_id"] = attached.agent_session_id
                             save_agent_session_sidecar(session_id, sidecar)
+                            # Capture the Claude Code session UUID onto the parent
+                            # if it isn't already set. Without this, PM/Teammate
+                            # sessions that never trigger SDK auth or post_compact
+                            # paths leave `claude_session_uuid` as None — defeating
+                            # any downstream code that filters by that index
+                            # (PreCompact cooldown lookups, etc.).
+                            if not getattr(attached, "claude_session_uuid", None):
+                                try:
+                                    attached.claude_session_uuid = session_id
+                                    attached.save(update_fields=["claude_session_uuid"])
+                                except Exception:
+                                    pass
                             return
                         # If attached is terminal, fall through to the existing
                         # gate (preserves #1113 semantics: terminal sessions are
