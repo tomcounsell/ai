@@ -238,14 +238,18 @@ def _inject_env_into_plist(plist_path: Path, env_file: Path) -> int:
     try:
         env_vars = dotenv_values(env_file)
     except Exception as e:
-        logger.warning("install_worker: could not parse %s (%s) — skipping env injection", env_file, e)
+        logger.warning(
+            "install_worker: could not parse %s (%s) — skipping env injection", env_file, e
+        )
         return 0
 
     try:
         with open(plist_path, "rb") as f:
             plist = plistlib.load(f)
     except Exception as e:
-        logger.warning("install_worker: could not load plist %s (%s) — skipping env injection", plist_path, e)
+        logger.warning(
+            "install_worker: could not load plist %s (%s) — skipping env injection", plist_path, e
+        )
         return 0
 
     existing = plist.setdefault("EnvironmentVariables", {})
@@ -260,10 +264,16 @@ def _inject_env_into_plist(plist_path: Path, env_file: Path) -> int:
         with open(plist_path, "wb") as f:
             plistlib.dump(plist, f)
     except Exception as e:
-        logger.warning("install_worker: could not write plist %s (%s) — env injection rolled back", plist_path, e)
+        logger.warning(
+            "install_worker: could not write plist %s (%s) — env injection rolled back",
+            plist_path,
+            e,
+        )
         return 0
 
-    logger.info("install_worker: injected %d env vars from %s into %s", injected, env_file, plist_path)
+    logger.info(
+        "install_worker: injected %d env vars from %s into %s", injected, env_file, plist_path
+    )
     return injected
 
 

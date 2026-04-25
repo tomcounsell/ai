@@ -73,9 +73,7 @@ class TestInjectEnvIntoPlist:
 
         _write_stub_plist(plist_path)
         env_path.write_text(
-            "VALOR_PROJECT_KEY=valor\n"
-            "ANTHROPIC_API_KEY=sk-test\n"
-            "REDIS_URL=redis://localhost:6379\n"
+            "VALOR_PROJECT_KEY=valor\nANTHROPIC_API_KEY=sk-test\nREDIS_URL=redis://localhost:6379\n"
         )
 
         injected = _inject_env_into_plist(plist_path, env_path)

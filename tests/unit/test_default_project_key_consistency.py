@@ -68,7 +68,8 @@ class TestWriterReaderConsistency(unittest.TestCase):
             asq = _resolve_agent_session_queue_pk()
 
         assert sust == sp == asq == "valor", (
-            f"fallback drift: sustainability={sust!r}, session_pickup={sp!r}, agent_session_queue={asq!r}"
+            "fallback drift: "
+            f"sustainability={sust!r}, session_pickup={sp!r}, agent_session_queue={asq!r}"
         )
 
 
