@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor
@@ -287,20 +287,20 @@ Integration test: a smoke test that the skill's documented invocation pattern (`
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update [`docs/features/telegram-messaging.md`](../features/telegram-messaging.md) to reflect the new flags and error format.
-- [ ] Update [`docs/features/telegram-history.md`](../features/telegram-history.md) if it documents `resolve_chat_id` semantics.
-- [ ] Update [`docs/features/bridge-message-query.md`](../features/bridge-message-query.md) if it references `scripts/get-telegram-message-history`.
-- [ ] Update [`docs/features/README.md`](../features/README.md) index if any file names change.
+- [x] Update [`docs/features/telegram-messaging.md`](../features/telegram-messaging.md) to reflect the new flags and error format.
+- [x] Update [`docs/features/telegram-history.md`](../features/telegram-history.md) if it documents `resolve_chat_id` semantics.
+- [x] Update [`docs/features/bridge-message-query.md`](../features/bridge-message-query.md) if it references `scripts/get-telegram-message-history`.
+- [x] Update [`docs/features/README.md`](../features/README.md) index if any file names change.
 
 ### Skill Documentation
-- [ ] Update [`.claude/skills/telegram/SKILL.md`](../../.claude/skills/telegram/SKILL.md) to document new flags and the ambiguity-error format the agent should handle.
-- [ ] Remove references to `scripts/get-telegram-message-history` from the `telegram` skill and any other skill that mentions it.
-- [ ] Update [`CLAUDE.md`](../../CLAUDE.md) "Reading Telegram Messages" section to include the new flags.
+- [x] Update [`.claude/skills/telegram/SKILL.md`](../../.claude/skills/telegram/SKILL.md) to document new flags and the ambiguity-error format the agent should handle.
+- [x] Remove references to `scripts/get-telegram-message-history` from the `telegram` skill and any other skill that mentions it.
+- [x] Update [`CLAUDE.md`](../../CLAUDE.md) "Reading Telegram Messages" section to include the new flags.
 
 ### Inline Documentation
-- [ ] Docstring on `resolve_chat_candidates` documents the ordering guarantee (by `updated_at` desc) and the normalization rules.
-- [ ] Docstring on `AmbiguousChatError` documents the candidate list shape and that it's raised only under `strict=True` or defensive-guard violation.
-- [ ] One-line comment on the `strict` kwarg explaining why it exists (opt-in hard error for scripted callers).
+- [x] Docstring on `resolve_chat_candidates` documents the ordering guarantee (by `updated_at` desc) and the normalization rules.
+- [x] Docstring on `AmbiguousChatError` documents the candidate list shape and that it's raised only under `strict=True` or defensive-guard violation.
+- [x] One-line comment on the `strict` kwarg explaining why it exists (opt-in hard error for scripted callers).
 
 ## Success Criteria
 
