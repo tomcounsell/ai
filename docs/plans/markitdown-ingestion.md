@@ -193,31 +193,31 @@ PDF dropped in vault → watcher detects convertible extension → converter wri
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Converter subprocess failure path: assert `ConversionFailed` is raised AND logged via `logger.warning` with the source path and stderr
-- [ ] Watcher catches converter exceptions: assert a converter raise does not propagate out of `_DebouncedHandler._schedule` (matches existing watcher "never crash the bridge" contract)
-- [ ] `_is_convertible` path in watcher — if converter is missing (`markitdown` not installed), log once at WARNING and skip the file rather than looping on every event
-- [ ] Existing `except Exception: pass` blocks in `knowledge_watcher.py` are kept — add one test asserting the watcher thread keeps running after a converter exception
+- [x] Converter subprocess failure path: assert `ConversionFailed` is raised AND logged via `logger.warning` with the source path and stderr
+- [x] Watcher catches converter exceptions: assert a converter raise does not propagate out of `_DebouncedHandler._schedule` (matches existing watcher "never crash the bridge" contract)
+- [x] `_is_convertible` path in watcher — if converter is missing (`markitdown` not installed), log once at WARNING and skip the file rather than looping on every event
+- [x] Existing `except Exception: pass` blocks in `knowledge_watcher.py` are kept — add one test asserting the watcher thread keeps running after a converter exception
 
 ### Empty/Invalid Input Handling
-- [ ] Zero-byte PDF: assert converter returns without writing a sidecar (no empty `.md` files)
-- [ ] Source path with whitespace/unicode: assert subprocess call quotes correctly
+- [x] Zero-byte PDF: assert converter returns without writing a sidecar (no empty `.md` files)
+- [x] Source path with whitespace/unicode: assert subprocess call quotes correctly
 - [ ] URL input to CLI when offline: assert a clean error message, not a crash
-- [ ] `valor-ingest` with missing argument: argparse prints usage, exit code 2
+- [x] `valor-ingest` with missing argument: argparse prints usage, exit code 2
 
 ### Error State Rendering
-- [ ] Conversion failure in CLI context: assert the user sees the stderr snippet (truncated to 500 chars), not a Python traceback
-- [ ] Watcher context: assert failures are logged but do not produce user-visible output (the bridge is non-interactive)
+- [x] Conversion failure in CLI context: assert the user sees the stderr snippet (truncated to 500 chars), not a Python traceback
+- [x] Watcher context: assert failures are logged but do not produce user-visible output (the bridge is non-interactive)
 
 ## Test Impact
 
 - [ ] `tests/unit/test_knowledge_indexer.py` (if it exists) — UPDATE: add tests for sidecar `.md` files being indexed identically to hand-written `.md` files
-- [ ] `tests/unit/test_knowledge_watcher.py` (if it exists) — UPDATE: add tests for `CONVERTIBLE_EXTENSIONS` triggering the converter path
-- [ ] `tests/integration/test_knowledge_pipeline.py` (if it exists) — UPDATE: add end-to-end test: drop PDF → watcher → converter → indexer → KnowledgeDocument exists
+- [x] `tests/unit/test_knowledge_watcher.py` (if it exists) — UPDATE: add tests for `CONVERTIBLE_EXTENSIONS` triggering the converter path
+- [x] `tests/integration/test_knowledge_pipeline.py` (if it exists) — UPDATE: add end-to-end test: drop PDF → watcher → converter → indexer → KnowledgeDocument exists
 
 If the existing test files above do not exist, the builder creates them:
-- [ ] `tests/unit/test_knowledge_converter.py` — CREATE: unit tests for the new converter module (subprocess path, Python API path, idempotency via hash)
-- [ ] `tests/unit/test_valor_ingest_cli.py` — CREATE: unit tests for CLI arg parsing and error messages
-- [ ] `tests/integration/test_markitdown_ingestion.py` — CREATE: real end-to-end integration using a fixture PDF
+- [x] `tests/unit/test_knowledge_converter.py` — CREATE: unit tests for the new converter module (subprocess path, Python API path, idempotency via hash)
+- [x] `tests/unit/test_valor_ingest_cli.py` — CREATE: unit tests for CLI arg parsing and error messages
+- [x] `tests/integration/test_markitdown_ingestion.py` — CREATE: real end-to-end integration using a fixture PDF
 
 **Verification before build:** run `grep -l "knowledge_indexer\|knowledge_watcher" tests/` to find the actual existing test files and confirm their dispositions above.
 
@@ -310,49 +310,49 @@ No new MCP registration. No agent-facing behavior change beyond: the agent now r
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/markitdown-ingestion.md` — describes the feature, the sidecar pattern, the LLM config, and the audio exclusion rationale
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/subconscious-memory.md` — note that knowledge recall now includes converted binary formats
-- [ ] Update `CLAUDE.md` — add a "Knowledge Ingestion" section in the Quick Commands table with `valor-ingest` usage
+- [x] Create `docs/features/markitdown-ingestion.md` — describes the feature, the sidecar pattern, the LLM config, and the audio exclusion rationale
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update `docs/features/subconscious-memory.md` — note that knowledge recall now includes converted binary formats
+- [x] Update `CLAUDE.md` — add a "Knowledge Ingestion" section in the Quick Commands table with `valor-ingest` usage
 
 ### External Documentation Site
 - Not applicable — this repo does not use Sphinx/MkDocs/Read the Docs.
 
 ### Inline Documentation
-- [ ] Module docstring on `tools/knowledge/converter.py` describing the two code paths, idempotency model, and the sidecar frontmatter schema
-- [ ] Module docstring on `tools/valor_ingest.py` describing the CLI contract
-- [ ] Comment above `CONVERTIBLE_EXTENSIONS` in watcher explaining the rationale for the specific extension set (and why audio is excluded)
+- [x] Module docstring on `tools/knowledge/converter.py` describing the two code paths, idempotency model, and the sidecar frontmatter schema
+- [x] Module docstring on `tools/valor_ingest.py` describing the CLI contract
+- [x] Comment above `CONVERTIBLE_EXTENSIONS` in watcher explaining the rationale for the specific extension set (and why audio is excluded)
 
 ## Success Criteria
 
-- [ ] `tools/knowledge/converter.py` exists with `convert_to_sidecar(source_path) -> Path` function
-- [ ] `bridge/knowledge_watcher.py` routes convertible extensions through the converter
-- [ ] `valor-ingest` CLI registered in `pyproject.toml` `[project.scripts]` and installed via `uv sync`
-- [ ] `valor-ingest <local-path>` produces a sidecar and returns exit code 0
-- [ ] `valor-ingest <youtube-url>` produces a transcript sidecar by delegating to the existing `youtube-transcript-api` path (not markitdown's `[youtube-transcription]` extra, which is deliberately excluded per N2)
-- [ ] `MARKITDOWN_LLM_MODEL` env var controls the LLM path; unset → subprocess only; set → Python API for image-benefit formats
-- [ ] Default LLM is Haiku (resolved from `config.models.HAIKU`, not hardcoded) via Anthropic OpenAI-compat endpoint when set
-- [ ] No `OPENAI_API_KEY` references in converter/CLI code — gpt-4o-mini fallback eliminated per C5
-- [ ] Python API path has a probe-and-cache mechanism: first-call probe, cached `_llm_path_available` flag, single WARNING log on failure, silent subprocess routing thereafter (per C5 Implementation Note)
-- [ ] Image files over 20MB are skipped with a WARNING log (per C4 Implementation Note)
-- [ ] `CONVERTIBLE_EXTENSIONS` includes `.png, .jpg, .jpeg, .gif, .webp` so standalone images in the vault are auto-described (per C4 Implementation Note)
-- [ ] `valor-ingest --scan <dir>` is implemented as a mutually exclusive alternative to the `source` positional via argparse (per C2 Implementation Note)
-- [ ] Watcher flush handler converts-then-indexes in the same `_flush()` iteration — no re-entrant `_schedule` call for sidecars (per C3 Implementation Note)
-- [ ] Subprocess call uses `check=False, text=True` (per C1 Implementation Note) — explicit returncode + stderr inspection, stderr snippet truncated to 500 chars on failure
-- [ ] Backfill reminder is emitted by `scripts/update/run.py` Telegram summary (not just the skill) on the run that first installs `markitdown`, gated by `~/.cache/valor/markitdown-backfill-reminded` (per C6 Implementation Note)
-- [ ] Pre-Task-2 `uv.lock` diff shows pypdf resolved to `>=6.10.2` or pdfminer.six — documented in `pyproject.toml` comment (per C7 Implementation Note)
-- [ ] Audio formats (`.mp3`, `.wav`, `.m4a`) are NOT in `CONVERTIBLE_EXTENSIONS` and NOT in the installed extras
-- [ ] Sidecar frontmatter contains `source_hash`, `source_path`, `generated_by`, `generated_at`, `regenerated_at`, `llm_model`
-- [ ] Re-running converter on unchanged source skips (hash match), logs at DEBUG only; regeneration on hash-mismatch updates only `regenerated_at`
-- [ ] `valor-ingest --scan <dir>` backfills all convertible files in the directory (recursive)
-- [ ] `/update` skill prints a one-line backfill reminder on first install; suppressed thereafter via flag file
-- [ ] `do-xref-audit` skips files with `generated_by: markitdown` frontmatter
-- [ ] Haiku-via-Anthropic-compat vision probe test (`tests/integration/test_markitdown_haiku_vision.py`) passes using a small fixture PNG; falls back to gpt-4o-mini only if that test fails (documented in the test file)
-- [ ] Integration test: drop `tests/fixtures/sample.pdf` → sidecar → `KnowledgeDocument` row present
-- [ ] Bridge starts cleanly when the `[knowledge]` extra is NOT installed (lazy import verified by test)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] `grep -r "recognize_google\|audio-transcription" tools/ bridge/ pyproject.toml` returns empty — audio path is nowhere in scope
+- [x] `tools/knowledge/converter.py` exists with `convert_to_sidecar(source_path) -> Path` function
+- [x] `bridge/knowledge_watcher.py` routes convertible extensions through the converter
+- [x] `valor-ingest` CLI registered in `pyproject.toml` `[project.scripts]` and installed via `uv sync`
+- [x] `valor-ingest <local-path>` produces a sidecar and returns exit code 0
+- [x] `valor-ingest <youtube-url>` produces a transcript sidecar by delegating to the existing `youtube-transcript-api` path (not markitdown's `[youtube-transcription]` extra, which is deliberately excluded per N2)
+- [x] `MARKITDOWN_LLM_MODEL` env var controls the LLM path; unset → subprocess only; set → Python API for image-benefit formats
+- [x] Default LLM is Haiku (resolved from `config.models.HAIKU`, not hardcoded) via Anthropic OpenAI-compat endpoint when set
+- [x] No `OPENAI_API_KEY` references in converter/CLI code — gpt-4o-mini fallback eliminated per C5
+- [x] Python API path has a probe-and-cache mechanism: first-call probe, cached `_llm_path_available` flag, single WARNING log on failure, silent subprocess routing thereafter (per C5 Implementation Note)
+- [x] Image files over 20MB are skipped with a WARNING log (per C4 Implementation Note)
+- [x] `CONVERTIBLE_EXTENSIONS` includes `.png, .jpg, .jpeg, .gif, .webp` so standalone images in the vault are auto-described (per C4 Implementation Note)
+- [x] `valor-ingest --scan <dir>` is implemented as a mutually exclusive alternative to the `source` positional via argparse (per C2 Implementation Note)
+- [x] Watcher flush handler converts-then-indexes in the same `_flush()` iteration — no re-entrant `_schedule` call for sidecars (per C3 Implementation Note)
+- [x] Subprocess call uses `check=False, text=True` (per C1 Implementation Note) — explicit returncode + stderr inspection, stderr snippet truncated to 500 chars on failure
+- [x] Backfill reminder is emitted by `scripts/update/run.py` Telegram summary (not just the skill) on the run that first installs `markitdown`, gated by `~/.cache/valor/markitdown-backfill-reminded` (per C6 Implementation Note)
+- [x] Pre-Task-2 `uv.lock` diff shows pypdf resolved to `>=6.10.2` or pdfminer.six — documented in `pyproject.toml` comment (per C7 Implementation Note)
+- [x] Audio formats (`.mp3`, `.wav`, `.m4a`) are NOT in `CONVERTIBLE_EXTENSIONS` and NOT in the installed extras
+- [x] Sidecar frontmatter contains `source_hash`, `source_path`, `generated_by`, `generated_at`, `regenerated_at`, `llm_model`
+- [x] Re-running converter on unchanged source skips (hash match), logs at DEBUG only; regeneration on hash-mismatch updates only `regenerated_at`
+- [x] `valor-ingest --scan <dir>` backfills all convertible files in the directory (recursive)
+- [x] `/update` skill prints a one-line backfill reminder on first install; suppressed thereafter via flag file
+- [x] `do-xref-audit` skips files with `generated_by: markitdown` frontmatter
+- [x] Haiku-via-Anthropic-compat vision probe test (`tests/integration/test_markitdown_haiku_vision.py`) passes using a small fixture PNG; falls back to gpt-4o-mini only if that test fails (documented in the test file)
+- [x] Integration test: drop `tests/fixtures/sample.pdf` → sidecar → `KnowledgeDocument` row present
+- [x] Bridge starts cleanly when the `[knowledge]` extra is NOT installed (lazy import verified by test)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] `grep -r "recognize_google\|audio-transcription" tools/ bridge/ pyproject.toml` returns empty — audio path is nowhere in scope
 
 ## Team Orchestration
 
