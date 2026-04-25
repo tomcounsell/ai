@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Planning
 type: bug
 appetite: Medium
 owner: Valor
@@ -49,6 +49,26 @@ This revision incorporates critique findings (verdict: NEEDS REVISION). Specific
 
 The issues below drove these fixes; the sections that follow have been updated to match.
 
+## Hotfix Revision Notes (2026-04-24, post-ship)
+
+The prior revision landed an ambiguity policy (hard error + exit 1) that contradicted the user's explicit Q2 lean. This hotfix restores the original decision. All other post-critique changes from the 2026-04-24 revision (ChatCandidate dataclass, caller recon findings, narrow exception handling, task reorder, test layout simplification) are preserved.
+
+**What changed:**
+
+1. **Ambiguity policy: pick-most-recent + stderr warning is the default** (Q2 = option b, per user). `resolve_chat_id` no longer raises by default when >1 candidate survives. Instead it:
+   - Returns the `chat_id` of the most-recently-updated candidate.
+   - Emits a machine-parseable warning to `stderr` listing ALL candidates with `chat_id`, `chat_name`, and `last activity: X ago` for each — chosen AND non-chosen.
+   - Deterministic tiebreak on `chat_id` when two candidates share `updated_at`, so the same query always returns the same result.
+2. **`--strict` flag opts into hard error** on the CLI, flipping the default. Callers that want the previous "exit 1 with candidate list" behavior pass `--strict`. Scripted callers that can't parse stderr use `--strict` (hard failure) or `--chat-id NUMBER` (unambiguous bypass).
+3. **`AmbiguousChatError` remains** but is only raised when `strict=True`. Still carries `list[ChatCandidate]`. Same dataclass shape as before.
+4. **Signature rename:** `resolve_chat_id(chat_name: str, *, allow_ambiguous: bool = False)` → `resolve_chat_id(chat_name: str, *, strict: bool = False)`. The old kwarg name inverted in meaning under the new default and was confusing; renaming makes the semantics obvious. Since recon confirms exactly one in-tree caller (`tools/valor_telegram.py:61`), the rename has no blast radius.
+5. **Defensive guard:** if the most-recent-candidate sort produces a result where the "chosen" candidate is NOT the most-recently-updated (shouldn't be possible given the ordering rule, but defense-in-depth), the function raises `AmbiguousChatError` unconditionally to fail loud rather than silently return a wrong answer.
+6. **No change to zero-match, single-match, or non-ambiguity paths.**
+
+**Why:** the silent wrong-match was the bug, but "wrong match" is different from "most-recent match." Under the new default, the result is always the most-recently-active candidate (per defect 8's recency-ranked intent), AND the warning carries the full candidate list — so the failure mode the user hit (agent confidently reports stale group-chat data while fresher DM chat goes unread) cannot recur: the fresher candidate is always chosen by default, and the warning makes the alternative visible. `--strict` is the escape hatch for contexts where "wrong answer with warning" is unacceptable.
+
+The sections below have been updated to match. The pre-hotfix "hard error" rationale lives only in git history — no shadow text left in this plan.
+
 ## Prior Art
 
 Prior issue/PR searches surfaced adjacent work on Telegram tooling but nothing that previously attempted to fix chat-name resolution, so "Why Previous Fixes Failed" is omitted below.
@@ -70,7 +90,7 @@ No relevant external findings — proceeding with codebase context. The work is 
 End-to-end flow for `valor-telegram read --chat NAME`, with the current break points highlighted:
 
 1. **Entry point** — `tools/valor_telegram.py:cmd_read` (line 181).
-2. **Name → chat_id resolution** — `resolve_chat()` at line 53 delegates to `tools.telegram_history.resolve_chat_id` (line 940). **Current break:** returns the first arbitrary match across 3 stages, no ambiguity signal, no recency tiebreak. **New behavior:** collect all candidates surviving normalization+comparison at each stage, sort by `Chat.updated_at` desc, if >1 remain then raise `AmbiguousChatError` carrying the candidate list up to the CLI.
+2. **Name → chat_id resolution** — `resolve_chat()` at line 53 delegates to `tools.telegram_history.resolve_chat_id` (line 940). **Current break:** returns the first arbitrary match across 3 stages, no ambiguity signal, no recency tiebreak. **New behavior:** collect all candidates surviving normalization+comparison at each stage, sort by `Chat.updated_at` desc (tiebreak on `chat_id`). If >1 remain: default path returns the most-recent candidate's `chat_id` and emits a machine-parseable stderr warning listing all candidates; `strict=True` raises `AmbiguousChatError` instead.
 3. **DM fallback** — if `resolve_chat_id` returns None, falls back to `resolve_username` against `projects.json`. Unchanged by this plan *except* that we'll also accept an explicit `--user USERNAME` flag on `read` to enable folding in `scripts/get-telegram-message-history`.
 4. **Message fetch** — `_fetch_messages_from_redis` (via `get_recent_messages` in `telegram_history`) reads the Redis message store for the resolved `chat_id`. **Current break:** output does not surface freshness. **New behavior:** include the `Chat.updated_at` timestamp in the CLI output header ("last activity: 2h ago").
 5. **Telethon fallback** — `_fetch_from_telegram_api` at line 258 only triggers when Redis returns zero messages. Unchanged.
@@ -84,13 +104,13 @@ The orphan path — `scripts/get-telegram-message-history "username" COUNT` — 
 - **Interface changes:**
   - New `ChatCandidate` dataclass in `tools/telegram_history/__init__.py`: `@dataclass(frozen=True) class ChatCandidate: chat_id: str; chat_name: str; last_activity_ts: float | None`. Serializable, decoupled from Popoto schema.
   - New `resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]` returns all matches ordered by `last_activity_ts` desc (None sorts last).
-  - New `AmbiguousChatError(candidates: list[ChatCandidate])` exception class.
-  - `resolve_chat_id(chat_name: str, allow_ambiguous: bool = False) -> str | None` signature extends with `allow_ambiguous` kwarg (default False). Behavior change: when `>1` candidate survives and `allow_ambiguous=False`, raises `AmbiguousChatError` instead of silently picking the first. Default remains `str | None` return for the single/zero/`allow_ambiguous=True` cases.
-  - `valor-telegram read` gains optional `--chat-id ID` flag (numeric bypass) and `--user USERNAME` flag (DM bypass, folds in orphan script).
+  - New `AmbiguousChatError(candidates: list[ChatCandidate])` exception class. Raised only when `strict=True`.
+  - `resolve_chat_id(chat_name: str, *, strict: bool = False) -> str | None` signature adds `strict` keyword-only kwarg (default False). Default behavior on ambiguity: return the most-recently-updated candidate's `chat_id` and emit a `logger.warning` with the full candidate list. `strict=True`: raise `AmbiguousChatError` instead. Return type `str | None` preserved across all paths (None on zero-match).
+  - `valor-telegram read` gains optional `--chat-id ID` flag (numeric bypass), `--user USERNAME` flag (DM bypass, folds in orphan script), and `--strict` flag (opt into hard error on ambiguity).
   - `valor-telegram chats` gains optional `--search PATTERN` flag.
 - **Coupling:** slight decrease. Consolidating the orphan script removes a second identity space. `AmbiguousChatError` carries plain dataclass — callers that format it are not coupled to Popoto.
 - **Data ownership:** unchanged. `Chat` model still owned by the bridge.
-- **Reversibility:** high. All changes are additive at the API layer. The `resolve_chat_id` signature extension is keyword-only (`allow_ambiguous=False` default) — the single caller site (`tools/valor_telegram.py:61`) is updated in the same PR to wrap with a `try/except AmbiguousChatError` block. Rollback is a single revert.
+- **Reversibility:** high. All changes are additive at the API layer. The `resolve_chat_id` signature extension is keyword-only (`strict=False` default) — the single caller site (`tools/valor_telegram.py:61`) is updated in the same PR to pass `strict=True` when `--strict` is on the CLI, and to wrap with a `try/except AmbiguousChatError` block for that path only. Rollback is a single revert.
 - **Behavioral change risk:** the single in-tree caller of `resolve_chat_id` is `tools/valor_telegram.py:61`. Recon (`grep -rn "resolve_chat_id" --include="*.py" .`) confirms zero other non-test callers. The "silent behavior change in bridge hot path" scenario does not apply here — the bridge registers chats but does not *resolve* them by name.
 
 ## Appetite
@@ -100,7 +120,7 @@ The orphan path — `scripts/get-telegram-message-history "username" COUNT` — 
 **Team:** Solo dev (builder + validator via Task pattern), 1 code-reviewer pass.
 
 **Interactions:**
-- PM check-ins: 1 — to confirm the ambiguity policy (error vs. pick-most-recent-with-warning) in Open Questions before implementation.
+- PM check-ins: 0 — all Open Questions resolved (see Hotfix Revision Notes).
 - Review rounds: 1 — single code review pass after validator confirms tests pass.
 
 Rationale: 8 defects but tightly coupled around one function family and one model. Scope is bounded; defect 7 (cross-chat project-level stitching) is deferred to a No-Go. Interface changes are additive.
@@ -121,12 +141,12 @@ No prerequisites beyond normal dev environment.
 
 - **`ChatCandidate`** (new): `@dataclass(frozen=True) class ChatCandidate: chat_id: str; chat_name: str; last_activity_ts: float | None`. Plain dataclass; not tied to Popoto schema.
 - **`resolve_chat_candidates`** (new): returns all matches as `list[ChatCandidate]`, ordered by `last_activity_ts` desc (None sorts last). Empty list for no match, single item for unique, multiple for ambiguous.
-- **`AmbiguousChatError`** (new): exception carrying `candidates: list[ChatCandidate]`. Raised by `resolve_chat_id` when >1 candidate survives and `allow_ambiguous=False`. Callers format it into user-facing "did you mean" output.
+- **`AmbiguousChatError`** (new): exception carrying `candidates: list[ChatCandidate]`. Raised by `resolve_chat_id` only when `strict=True`. Default path does not raise.
 - **Name normalization** (new): helper that lowercases, collapses whitespace, and strips a small, conservative punctuation set (`: - | _`) from both sides of the comparison. Preserves emoji and non-ASCII; conservative by design. Underscore IS included (resolves Q2; rationale in Technical Approach).
 - **`valor-telegram read` output header** (new): one-line activity marker derived from `Chat.updated_at`.
-- **`--chat-id`, `--user` flags on `read`** (new): escape hatches for scripted/unambiguous use; `--user` also folds in the orphan script's sole use case.
+- **`--chat-id`, `--user`, `--strict` flags on `read`** (new): escape hatches. `--chat-id` bypasses the matcher entirely. `--user` folds in the orphan script's DM-only path. `--strict` flips ambiguity handling from warn-and-pick-most-recent to raise-and-exit-1.
 - **`--search PATTERN` on `chats`** (new): substring filter, still sorted by recency.
-- **Resolution-failure UX**: `cmd_read` catches `AmbiguousChatError` and prints a formatted candidate list with `chat_id` values for direct reuse. On zero-match, prints top-3 nearest candidates ordered by `updated_at` (same normalization, with a lower similarity bar).
+- **Resolution-failure UX**: on ambiguity, the default CLI path prints a stderr warning listing all candidates and proceeds with the most-recent candidate's messages (exit 0). `--strict` converts ambiguity into a stdout error + exit 1. On zero-match, `cmd_read` prints top-3 "did you mean" candidates from full `Chat` list ordered by `updated_at` (exit 1).
 - **Orphan script removal**: delete `scripts/get-telegram-message-history`, update any in-tree callers, update `telegram` skill doc.
 
 ### Flow
@@ -134,8 +154,18 @@ No prerequisites beyond normal dev environment.
 Happy path (unique match):
 `valor-telegram read --chat "PM: PsyOptimal" --limit 20` → resolver finds 1 candidate → header `[PM: PsyOptimal · chat_id=-100123 · last activity: 3m ago]` → message list.
 
-Ambiguous path:
-`valor-telegram read --chat "PsyOptimal"` → resolver finds 2 candidates → exits non-zero with:
+Ambiguous path (default):
+`valor-telegram read --chat "PsyOptimal"` → resolver finds 2 candidates → emits to stderr:
+```
+WARN: ambiguous chat "PsyOptimal" — 2 candidates, chose most recent:
+  chose    -100123  PM: PsyOptimal       last: 3m ago
+  also     -100456  PsyOptimal           last: 2d ago
+Use --chat-id <id> or --strict to change behavior.
+```
+…then continues on stdout with the `-100123` chat's header + messages, exit 0.
+
+Ambiguous path (`--strict`):
+`valor-telegram read --chat "PsyOptimal" --strict` → same resolution but raises `AmbiguousChatError` which `cmd_read` catches; prints an error block to stdout and exits 1:
 ```
 Ambiguous chat name "PsyOptimal". 2 candidates (most recent first):
   -100123  PM: PsyOptimal       last: 3m ago
@@ -155,8 +185,10 @@ Discovery path:
   - **Underscore handling (Q2 resolved):** `_` IS stripped. Rationale: in practice, chat names with underscores (`dev_valor`, `backup_logs`) mirror slug/channel conventions; users typing them interactively are likely to type space or nothing. Name collisions where `dev_valor` and `dev valor` mean *different* chats are vanishingly rare in this workspace — and if they ever occur, the ambiguity detector is the safety net: both would show up in the candidate list for the user to disambiguate. Being conservative on `_` would trade a real UX win for a hypothetical edge case.
 - **Candidate collection** changes the cascade semantics: at each of the three stages (exact → case-insensitive exact → substring), collect ALL hits before returning. Only move to the next stage if the current stage yields zero hits. This preserves the "prefer exact over fuzzy" ordering but within a stage never silently picks one of N. Each hit is projected to a `ChatCandidate` at collection time — `Chat` model instances never leak past this boundary.
 - **Recency ranking** sorts `ChatCandidate`s by `last_activity_ts` desc with `None` sorting last (i.e., chats that have never been updated). Popoto's `SortedField` on `Chat.updated_at` already indexes this; we read all candidates for a stage (small N — there are hundreds of chats, not thousands) and sort in Python. If this becomes a performance concern in the future, we can use Popoto's sorted query API — not needed now.
-- **`AmbiguousChatError`** carries `list[ChatCandidate]`. Internal callers that set `allow_ambiguous=True` get the first (most-recent) candidate's `chat_id` and a `logger.warning` recording the ambiguity plus the runner-up chat_name; the CLI never sets this flag.
-- **Ambiguity policy (Q1 resolved):** hard error with candidate list (exit 1). The silent wrong-match was the bug. Scripted callers that want the old "pick first" behavior opt in explicitly via `--chat-id NUMBER` (unambiguous) or accept the ambiguity error and shell-parse it. We do NOT add `--allow-ambiguous` to the CLI surface — the only supported path to bypass ambiguity is explicit `--chat-id`.
+- **`AmbiguousChatError`** carries `list[ChatCandidate]`. Raised only in `strict=True` mode — the CLI sets this kwarg when `--strict` is passed. Default (non-strict) callers never see it; they get the most-recent candidate's `chat_id` back from the function plus a `logger.warning` with the full candidate list (rendered to stderr by default Python logging config).
+- **Ambiguity policy (Q1/Q2 resolved):** default = pick-most-recent + stderr warning listing all candidates (chosen AND non-chosen); opt into hard error via `--strict`. Rationale: the silent wrong-match was the bug, but "wrong" specifically meant "the matcher silently picked a less-active chat while fresher messages lived elsewhere." Picking-most-recent inverts that failure mode — the active chat wins by default — and the warning makes the alternative visible for audit. `--strict` is available for scripted callers that can't parse stderr and need non-zero exit on ambiguity; `--chat-id NUMBER` remains the unambiguous bypass for both modes.
+- **Defensive guard:** `resolve_chat_id` asserts that the chosen candidate is the one with the maximum `last_activity_ts` (with `chat_id` tiebreak). If this invariant is ever violated — a bug in the sort or a race — the function raises `AmbiguousChatError` unconditionally regardless of `strict`, to fail loud rather than silently return the wrong answer.
+- **Tiebreak:** when two candidates share `last_activity_ts` (including both being `None`), deterministic secondary sort on `chat_id` ensures the same query returns the same result across runs.
 - **Freshness in output** reads `Chat.updated_at` once per read and formats as relative time (`format_timestamp` already exists in `valor_telegram.py`). Header format: `[chat_name · chat_id=N · last activity: T]`. If `updated_at` is None (chat registered but no messages yet), format as `last activity: never`.
 - **No new `last_sync_ts` field.** The original defect 3 suggested adding one, but recon confirmed `updated_at` is updated on every inbound message — which is what "freshness" practically means for a reader ("is this chat active or quiet?"). Adding a second timestamp field would require bridge changes and migration for marginal benefit. Surfacing `updated_at` closes the information gap without the schema churn.
 - **Narrow exception handling.** The current `except Exception: return None` at `tools/telegram_history/__init__.py:978` is replaced by an explicit `except (redis.RedisError, popoto.errors.PopotoError): logger.warning(...); return None` (or equivalent — exact exception classes confirmed at implementation time). A test asserts the log is emitted when Redis is unavailable.
@@ -175,14 +207,16 @@ Discovery path:
 - [ ] Very long chat names (>200 chars) → no crash; either match or clean no-match.
 
 ### Error State Rendering
-- [ ] Ambiguity error renders candidate list to stdout with exit code 1 (not silent selection).
+- [ ] Ambiguity (default) renders warning to stderr listing chosen + all alternate candidates, proceeds with most-recent chat messages on stdout, exit 0.
+- [ ] Ambiguity (`--strict`) renders candidate list to stdout with exit code 1, does not print any chat messages.
 - [ ] Zero-match "did you mean" renders top-3 to stdout with exit code 1.
 - [ ] `--chat-id` with numeric input that has no messages → renders "no messages found for chat -100123" (clear), not a raw empty list.
+- [ ] Defensive guard: assertion failure on sort-invariant violation raises `AmbiguousChatError` regardless of `strict` — test with a monkeypatched sort.
 
 ## Test Impact
 
-- [ ] `tests/tools/test_telegram_history.py` — UPDATE: add tests for `_normalize_chat_name` (whitespace collapse, punctuation stripping including `_`, case folding, emoji/non-ASCII preservation, empty and whitespace-only input), `resolve_chat_candidates` (zero/one/many matches, ordering by `last_activity_ts` desc with None-last, stage cascade exact→ci→substring), and `resolve_chat_id` (`AmbiguousChatError` on >1 candidate, `allow_ambiguous=True` returns first and logs, `None` on zero, narrow exception handling on Redis error). Add a fixture that seeds two `Chat` records with overlapping names (`PsyOptimal` + `PM: PsyOptimal`) and assert the ambiguity-detection path. Normalization tests live alongside resolver tests (same file, same failure-domain).
-- [ ] `tests/unit/test_valor_telegram.py` — UPDATE: existing `TestResolveChat` tests pass through `resolve_chat_id` as a mock; add new tests that assert `cmd_read` handles the new `AmbiguousChatError` by printing candidates and exiting non-zero. Add tests for the new `--chat-id`, `--user`, and `chats --search` flags. Add a test for the freshness header format (`last activity: Xh ago` vs `last activity: never`).
+- [ ] `tests/tools/test_telegram_history.py` — UPDATE: add tests for `_normalize_chat_name` (whitespace collapse, punctuation stripping including `_`, case folding, emoji/non-ASCII preservation, empty and whitespace-only input), `resolve_chat_candidates` (zero/one/many matches, ordering by `last_activity_ts` desc with None-last, deterministic `chat_id` tiebreak, stage cascade exact→ci→substring), and `resolve_chat_id` (default returns most-recent `chat_id` and emits `logger.warning` on >1 candidate via `caplog`, `strict=True` raises `AmbiguousChatError` on >1 candidate, `None` on zero, narrow exception handling on Redis error, defensive guard raises on monkeypatched invariant violation). Add a fixture that seeds two `Chat` records with overlapping names (`PsyOptimal` + `PM: PsyOptimal`) and assert both default and strict paths.
+- [ ] `tests/unit/test_valor_telegram.py` — UPDATE: existing `TestResolveChat` tests pass through `resolve_chat_id` as a mock; add new tests that assert (a) default `cmd_read` on ambiguity prints the stderr warning block (chosen + also entries), continues with message output on stdout, exits 0; (b) `--strict` `cmd_read` on ambiguity prints the stdout error block, does not print messages, exits 1; (c) the stderr warning format is greppable (assert via a regex fixture). Add tests for the new `--chat-id`, `--user`, `--strict`, and `chats --search` flags. Add a test for the freshness header format (`last activity: Xh ago` vs `last activity: never`).
 - [ ] `tests/unit/test_valor_telegram.py::TestResolveChat::test_returns_none_for_unknown` — UPDATE: current behavior returns None; new behavior should still return None (for legacy API preservation) but the CLI caller should print the "did you mean" candidates. Test both the function-level None return and the CLI-level did-you-mean output.
 - [ ] `scripts/get-telegram-message-history` tests (if any) — DELETE when the script is removed. Audit `tests/` for references first (`grep -rln "get-telegram-message-history" tests/`).
 
@@ -202,7 +236,7 @@ Discovery path:
 
 **Status:** Recon completed. The only in-tree caller outside the test suite is `tools/valor_telegram.py:61` (via `resolve_chat` wrapper at line 53). The bridge does NOT call `resolve_chat_id` — it calls `register_chat` (the writer). No hot-path caller exists.
 
-**Mitigation:** `resolve_chat_id` retains the `str | None` return signature by default; the new kwarg `allow_ambiguous=False` is keyword-only. The single caller (`valor_telegram.py`) is updated in the same PR to catch `AmbiguousChatError` and format it for the CLI. Task 1 (audit-callers) re-confirms at build time — if a new caller has appeared since recon, it's recorded and handled explicitly. The `allow_ambiguous=True` opt-in is only used for callers that explicitly want the old pick-first semantics with a logged warning — not as a silent fallback.
+**Mitigation:** `resolve_chat_id` retains the `str | None` return signature under the default (non-strict) path — the existing behavior of "never raises, always returns a chat_id or None" is preserved by the most-recent-with-warning default. The only call site that observes a behavior change is one where ambiguity previously returned an arbitrary `chat_id` silently; it now returns the most-recent one and logs a warning. Callers that want strict behavior opt in via the new keyword-only `strict=True` kwarg. Task 1 (audit-callers) re-confirms at build time — if a new caller has appeared since recon, it's recorded and handled explicitly. The single caller (`valor_telegram.py:61`) is updated in the same PR to pass `strict=True` through to the function when the CLI `--strict` flag is set, and to catch `AmbiguousChatError` only in that path.
 
 ### Risk 2: Normalization over-matches, silently resolving to the wrong chat
 
@@ -265,12 +299,13 @@ Integration test: a smoke test that the skill's documented invocation pattern (`
 
 ### Inline Documentation
 - [ ] Docstring on `resolve_chat_candidates` documents the ordering guarantee (by `updated_at` desc) and the normalization rules.
-- [ ] Docstring on `AmbiguousChatError` documents the candidate list shape.
-- [ ] One-line comment on the `allow_ambiguous` kwarg explaining why it exists (back-compat escape hatch).
+- [ ] Docstring on `AmbiguousChatError` documents the candidate list shape and that it's raised only under `strict=True` or defensive-guard violation.
+- [ ] One-line comment on the `strict` kwarg explaining why it exists (opt-in hard error for scripted callers).
 
 ## Success Criteria
 
-- [ ] `valor-telegram read --chat "PsyOptimal"` with both `PsyOptimal` and `PM: PsyOptimal` in Redis prints an ambiguity error with both candidates, ordered by `updated_at` desc, and exits non-zero.
+- [ ] `valor-telegram read --chat "PsyOptimal"` with both `PsyOptimal` and `PM: PsyOptimal` in Redis prints a stderr ambiguity warning listing both candidates ordered by `updated_at` desc, then proceeds with the most-recent chat's messages on stdout, exit 0.
+- [ ] `valor-telegram read --chat "PsyOptimal" --strict` with the same data prints an ambiguity error block to stdout listing both candidates, exits 1, prints no messages.
 - [ ] `valor-telegram read --chat "PM PsyOptimal"` (missing colon) resolves to `PM: PsyOptimal` via normalization.
 - [ ] `valor-telegram read --chat-id -100123` bypasses the matcher entirely and reads that chat unconditionally.
 - [ ] `valor-telegram read --user lewis` reads DM messages from a whitelisted username (replacing the orphan script's behavior).
@@ -323,7 +358,7 @@ Standard tier 1 agents — no specialists needed.
 - **Parallel**: true
 - Run `grep -rln "get-telegram-message-history" --include="*.py" --include="*.md" --include="*.sh" .` and enumerate callers.
 - Run `grep -rln "resolve_chat_id" --include="*.py" .` and enumerate every call site (excluding tests and the definition itself).
-- Produce a checklist: for `get-telegram-message-history` callers, note whether each migrates to `valor-telegram read --user`. For `resolve_chat_id` callers, note whether each (a) lets the `AmbiguousChatError` propagate, or (b) needs `allow_ambiguous=True`. (Recon already establishes the only in-tree caller is `tools/valor_telegram.py:61`; this task confirms and catches anything new.)
+- Produce a checklist: for `get-telegram-message-history` callers, note whether each migrates to `valor-telegram read --user`. For `resolve_chat_id` callers, note whether each (a) accepts the new default (pick-most-recent + logged warning) or (b) needs `strict=True` for hard-error semantics. (Recon already establishes the only in-tree caller is `tools/valor_telegram.py:61`; this task confirms and catches anything new.)
 - The checklist output lives in the PR description for reviewer visibility.
 
 ### 2. Implement normalization helper
@@ -348,9 +383,10 @@ Standard tier 1 agents — no specialists needed.
 - Add `@dataclass(frozen=True) class ChatCandidate: chat_id: str; chat_name: str; last_activity_ts: float | None` to `tools/telegram_history/__init__.py`.
 - Add `AmbiguousChatError(Exception)` with `__init__(self, candidates: list[ChatCandidate])` storing `self.candidates`.
 - Add `resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]` — runs the 3-stage cascade, collects ALL matches per stage (project each to `ChatCandidate` at collection), only advances to next stage on zero hits, returns candidates sorted by `last_activity_ts` desc with None sorting last.
-- Refactor `resolve_chat_id(chat_name: str, allow_ambiguous: bool = False) -> str | None` to delegate to `resolve_chat_candidates`. Raise `AmbiguousChatError` when `>1` candidates and `allow_ambiguous=False`. Return the first candidate's `chat_id` when `allow_ambiguous=True` with a `logger.warning("ambiguous chat %r resolved to %s (%s); runner-up %s (%s)", ...)`.
+- Refactor `resolve_chat_id(chat_name: str, *, strict: bool = False) -> str | None` to delegate to `resolve_chat_candidates`. On `>1` candidates: if `strict=True`, raise `AmbiguousChatError(candidates)`. Otherwise, emit a single `logger.warning("ambiguous chat %r: chose %s (%s, last %s); alternatives=%s", chat_name, chosen.chat_id, chosen.chat_name, chosen_age_str, alt_list)` and return the most-recent candidate's `chat_id` (tiebreak on `chat_id`). Zero-match returns None regardless. Single-match returns that chat_id regardless.
+- **Defensive guard:** after sorting candidates, assert the chosen candidate is the one with max `last_activity_ts` (tiebreak on max `chat_id`). On violation (shouldn't happen), raise `AmbiguousChatError` unconditionally — this is fail-loud, not fail-silent-with-wrong-answer.
 - **Replace the bare `except Exception: return None`** at line 978–979 with a narrow `except (redis.RedisError, popoto.errors.PopotoError) as e: logger.warning("resolve_chat_candidates failed: %s", e); return None` (exact exception classes confirmed at implementation time — may be `popoto.exceptions.PopotoError` or similar; adjust to the actual package layout).
-- Tests: ambiguity with 2 candidates (raises + candidates ordered), ambiguity with 3 candidates, zero-match (returns `[]` / None), unique match, ordering by recency with a None-last case, `allow_ambiguous=True` returning most-recent and emitting `logger.warning` (assert via `caplog`), narrow exception on simulated Redis error.
+- Tests: ambiguity with 2 candidates (default path returns most-recent + emits warning via `caplog`; `strict=True` raises with candidates ordered), ambiguity with 3 candidates (default + strict both), zero-match (returns `[]` / None), unique match, ordering by recency with a None-last case, deterministic tiebreak when two candidates share `updated_at` (sorted by `chat_id`), defensive guard raises `AmbiguousChatError` when sort invariant violated (use `monkeypatch` on `sorted` or inject a stub list), narrow exception on simulated Redis error.
 
 ### 4. Wire CLI read command
 - **Task ID**: build-cli-read
@@ -361,16 +397,18 @@ Standard tier 1 agents — no specialists needed.
 - **Parallel**: false
 - Add `--chat-id ID` flag to `read` subcommand (numeric passthrough; bypasses matcher; mutually exclusive with `--chat` and `--user`).
 - Add `--user USERNAME` flag (forces DM path via `resolve_username`; mutually exclusive with `--chat` and `--chat-id`).
-- In `cmd_read`, catch `AmbiguousChatError` from the `resolve_chat` wrapper and format candidates to stdout, exit 1. Format (example):
+- Add `--strict` flag (opt into hard error on ambiguity; default is pick-most-recent + stderr warning).
+- In `cmd_read`, pass `strict=args.strict` into the `resolve_chat` wrapper. Default path: ambiguity results in a `logger.warning` already emitted by `resolve_chat_id` — `cmd_read` does not need to re-print; Python's default logging config emits warnings to stderr. `cmd_read` then proceeds to fetch and render messages for the returned `chat_id`. `--strict` path: catch `AmbiguousChatError` and format candidates to stdout with exit 1. Format (example):
   ```
   Ambiguous chat name "PsyOptimal". 2 candidates (most recent first):
     -100123  PM: PsyOptimal       last: 3m ago
     -100456  PsyOptimal           last: 2d ago
   Re-run with --chat-id <id> or a more specific --chat string.
   ```
+- The `logger.warning` format in the default path must be greppable: `WARN: ambiguous chat "<NAME>" — N candidates, chose <CHOSEN_CHAT_ID>: chose=(<id>,<name>,last:<age>); also=[(<id>,<name>,last:<age>), ...]`. This is the contract a scripted caller can parse; documented in the `telegram` skill.
 - On zero-match (`resolve_chat` returns None AND no `--chat-id`/`--user`), print top-3 did-you-mean candidates from full Chat list sorted by `updated_at` desc, exit 1.
 - Prepend successful read output with header: `[chat_name · chat_id=N · last activity: T]` using `Chat.updated_at` and existing `format_timestamp`. If `updated_at` is None, format as `last activity: never`.
-- Tests: new flag behaviors (happy path + mutex violation), ambiguity handling in CLI, zero-match did-you-mean, freshness header (Xh-ago case and never case).
+- Tests: new flag behaviors (happy path + mutex violation for `--chat-id`/`--user`/`--chat`; `--strict` is compatible with `--chat` only), default ambiguity handling in CLI (warning to stderr via `capfd`/`caplog`, messages to stdout, exit 0), `--strict` ambiguity handling (candidates to stdout, exit 1, no messages), zero-match did-you-mean, freshness header (Xh-ago case and never case).
 
 ### 5. Wire CLI chats search
 - **Task ID**: build-cli-chats-search
@@ -443,7 +481,7 @@ Standard tier 1 agents — no specialists needed.
 
 **All resolved in the post-critique revision.** Recorded decisions:
 
-1. **Ambiguity policy (Q1):** RESOLVED — hard error with candidate list (exit 1). Silent pick was the original defect; re-introducing it behind a flag would re-open the same bug class. The CLI does NOT expose `--allow-ambiguous`. Scripted callers that want unambiguous reads use `--chat-id NUMBER`. The Python-layer `allow_ambiguous=True` remains for programmatic opt-in with a logged warning, but is not surfaced in the CLI.
+1. **Ambiguity policy (Q1/Q2):** RESOLVED — default path returns the most-recently-updated candidate with a machine-parseable stderr warning listing chosen + alternates; `--strict` flag flips to hard error + exit 1. Rationale: the silent wrong-match was the bug, but "wrong" specifically meant the matcher picked a less-active chat while fresher messages lived elsewhere. Pick-most-recent inverts that failure mode (active chat wins), and the stderr warning makes the alternative visible for audit. Scripted callers that can't parse stderr use `--strict` (hard error) or `--chat-id NUMBER` (unambiguous bypass). A defensive invariant assertion raises `AmbiguousChatError` unconditionally if the sort ever violates its ordering guarantee — fail loud, never return silently-wrong.
 
 2. **Underscore handling (Q2):** RESOLVED — strip `_`. Real-world chat names with underscores mirror slug/channel conventions and users typing them interactively are likely to type space or nothing. The ambiguity detector is the safety net for the rare collision case. Conservative-on-`_` trades a real UX win for a hypothetical edge case.
 
@@ -451,6 +489,6 @@ Standard tier 1 agents — no specialists needed.
 
 4. **Defect 7 follow-up issue (Q4):** RESOLVED — file the follow-up issue at `validate-all` time (Task 8), not deferred to a separate coordination step. See No-Gos for details.
 
-5. **`allow_ambiguous=True` rigor (Q5):** RESOLVED — PR-body disposition checklist is sufficient. Recon shows only ONE in-tree caller; the disposition for that one site goes in the PR body (expected: the CLI caller does NOT set `allow_ambiguous=True`; it catches the exception). We do not file tracking issues per-site because there is no "per-site" plural to track.
+5. **`strict=True` caller rigor (Q5):** RESOLVED — PR-body disposition checklist is sufficient. Recon shows only ONE in-tree caller; the disposition for that one site goes in the PR body (expected: the CLI caller passes `strict=True` only when `--strict` is on the command line; otherwise it accepts the default pick-most-recent behavior and relies on the logger.warning to surface the ambiguity). We do not file tracking issues per-site because there is no "per-site" plural to track.
 
 Leave this section in place as the historical record of decisions — do not remove during finalize.
