@@ -310,7 +310,29 @@ proceed on assumed approval.
 
 ## Step 5 — Apply edits to `design-system.pen`
 
-### Safety gate (required before any write)
+### Safety-gate updates (two parts)
+
+The skill's safety gate has two distinct enforcement layers, both
+intentional:
+
+- **Layer A — inline Python assertion (agent-level, runtime).** Paste and
+  execute the block below before any `.pen` write. It pins the write
+  target to `design-system.pen` and refuses any other path. **Scope: the
+  `.pen` source only.** It is intentionally not a guard for the
+  generated artifacts (`design-system.md`, `brand.css`, `source.css`) —
+  the assertion's `target` is hardcoded to the `.pen`, so an additional
+  `endswith("brand.css")` check on the same `target` would be vacuous.
+- **Layer B — `validate_design_system_readonly.py` PreToolUse hook
+  (tool-level, runtime).** Registered in `.claude/settings.json` against
+  the `Write`/`Edit` matchers. **Scope: the generated artifacts.** It
+  blocks any direct Write/Edit tool call against `design-system.md`,
+  `brand.css`, or `source.css` regardless of whether this skill is
+  active. This is the real enforcement for the generated-artifact case.
+
+The two layers are complementary, not redundant: Layer A discriminates
+the correct `.pen` write path from a wrong `.pen` write path; Layer B
+discriminates a write to a generated artifact from a write to anything
+else. Do NOT remove either; they cover different call paths.
 
 ```python
 from pathlib import Path
@@ -407,39 +429,80 @@ doc2 = json.loads(p.read_text())
 You can then re-open in Pencil (`mcp__pencil__open_document`) — the
 editor will reload the on-disk state.
 
-## Step 6 — Sync downstream CSS
+## Step 6 — Run the generator
 
-For each token added/changed in `design-system.pen`, mirror in the
-downstream CSS:
+CSS files, `design-system.md`, and DTCG / Tailwind exports are GENERATED
+from `design-system.pen`. Do NOT hand-edit `brand.css`, `source.css`, or
+`design-system.md` — the `validate_design_system_readonly.py` PreToolUse
+hook will block the Write/Edit tool call, and the
+`validate_design_system_sync.py` hook will block the commit if drift is
+detected.
 
-- **`brand.css`** — CSS custom properties under `:root`. Include Google
-  Fonts `@import` if you added a font.
-- **`source.css`** (Tailwind) — under `@theme`. Token names MUST match
-  `brand.css` exactly, or the system diverges silently.
+Run the generator:
+
+```bash
+python -m tools.design_system_sync --all \
+    --pen <consumer-repo>/docs/designs/design-system.pen \
+    --css-root <consumer-repo>/<css-root>
+```
+
+Or rely on `design-system-sync.toml` adjacent to the `.pen`:
+
+```bash
+python -m tools.design_system_sync --all \
+    --pen <consumer-repo>/docs/designs/design-system.pen
+```
+
+Verify lint exits 0:
+
+```bash
+npx --no-install @google/design.md lint \
+    <consumer-repo>/docs/designs/design-system.md
+```
+
+The generator is deterministic: running twice produces byte-identical
+output. If you need to force regeneration (e.g. after a `.pen` pattern
+change), re-run `--all` and stage the resulting artifacts.
 
 For each new component, decide whether to ship a CSS class now or defer
 until a template needs it. Speculative classes rot; defer is usually
 right.
 
-## Step 7 — Update the gap audit
+**Note on Node:** `--all` requires `node` + `npx` (for lint + exports).
+`--generate` alone auto-falls back to Python-only emission when Node is
+absent (pass `--no-node` to be explicit). See
+`docs/features/design-system-tooling.md` for the full Node-absent
+fallback semantics.
 
-Append a dated section to `docs/designs/gap-audit.md`:
+## Step 7 — Produce the gap-audit diff (before commit)
+
+Run `--audit` BEFORE `git commit`. The audit diffs against
+`HEAD:<pen-dir>/design-system.md`, so `HEAD` must still hold the PRIOR
+pass's `design-system.md`. Running `--audit` after commit produces an
+empty diff; the generator emits a stderr `--stale-warn` when it detects
+that case.
+
+Canonical sequence:
+
+```bash
+# 1. Regenerate every artifact from the updated .pen
+python -m tools.design_system_sync --all --pen <path-to>/design-system.pen
+
+# 2. Produce the diff table (goes to stdout)
+python -m tools.design_system_sync --audit --pen <path-to>/design-system.pen
+
+# 3. Paste the audit output into gap-audit.md under a new dated heading,
+#    THEN `git add` + `git commit`.
+```
+
+Append the audit output to `<pen-dir>/gap-audit.md` under:
 
 ```markdown
 ## YYYY-MM-DD — <theme slug>
 
 **Moodboard:** `inspiration/YYYY-MM-DD-<theme>/` (source: <URL>)
 
-### Variables
-| Token | Before | After | Principle |
-|---|---|---|---|
-| --font-serif | — | Lora | Editorial over marketing |
-| --status-operational | #4CAF50 | #5C7A3E | Honest, not clever |
-
-### New components
-| Name | Node ID | Purpose | Moodboard ref |
-|---|---|---|---|
-| Annotation/Crosshair | wiM0R | Pairs with Mark, overlay indicator | #07, #09 |
+<paste the output of `--audit` here>
 
 ### Still open
 - Card consolidation (deferred — 5 near-duplicate variants)
@@ -498,6 +561,18 @@ Commit `a702484` on `yudame/cuttlefish` main (moodboard pass,
 
 ## Version history
 
+- v1.2.1 (2026-04-25): Clarified the safety-gate two-layer scope.
+  Layer A (inline Python assertion) covers the `.pen` source path only;
+  Layer B (PreToolUse `validate_design_system_readonly.py` hook) covers
+  generated artifacts. Removed three vacuous `endswith()` asserts that
+  would never fire because Layer A's `target` is hardcoded to the
+  `.pen` file.
+- v1.2.0 (2026-04-24): Steps 6 and 7 rewritten to invoke
+  `python -m tools.design_system_sync` (`--all` for regeneration,
+  `--audit` for the gap-audit diff). Added
+  `validate_design_system_readonly.py` PreToolUse hook for tool-level
+  writes to generated artifacts (Layer B of the safety gate). See
+  `docs/features/design-system-tooling.md`.
 - v1.1.0 (2026-04-20): Added `charter.md` enforcement, file-organization
   Step 0, `product/` subfolder for non-system `.pen` files, safety gate
   on `.pen` writes, dated inspiration folders with per-pass READMEs,

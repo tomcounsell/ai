@@ -39,6 +39,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |
+| [Design-System Tooling](design-system-tooling.md) | One-way `.pen` → DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports generator (`tools.design_system_sync`), drift + read-only PreToolUse validators with escape-hatch env var, `@google/design.md@0.1.1` pin | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
 | [Do-Build AI Evaluator](do-build-ai-evaluator.md) | AI semantic evaluator step in /do-build pipeline: reads plan Acceptance Criteria, compares against git diff, returns PASS/PARTIAL/FAIL verdicts with evidence | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |

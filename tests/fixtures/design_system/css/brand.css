@@ -1,0 +1,11 @@
+:root {
+  --color-primary: #111827;
+  --color-surface: #FFFFFF;
+  --color-text-body-primary: #FFFFFF;
+  --font-body: Inter;
+  --radius-md: 8px;
+  --space-md: 16px;
+  --text-lh-body: 24px;
+  --text-size-body: 16px;
+  --text-weight-body: 400;
+}

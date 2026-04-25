@@ -1,0 +1,72 @@
+{
+  "$description": "fixture",
+  "$schema": "https://www.designtokens.org/schemas/2025.10/format.json",
+  "color": {
+    "$type": "color",
+    "primary": {
+      "$value": {
+        "colorSpace": "srgb",
+        "components": [
+          0.067,
+          0.094,
+          0.153
+        ],
+        "hex": "#111827"
+      }
+    },
+    "surface": {
+      "$value": {
+        "colorSpace": "srgb",
+        "components": [
+          1,
+          1,
+          1
+        ],
+        "hex": "#ffffff"
+      }
+    },
+    "text.body.primary": {
+      "$value": {
+        "colorSpace": "srgb",
+        "components": [
+          1,
+          1,
+          1
+        ],
+        "hex": "#ffffff"
+      }
+    }
+  },
+  "rounded": {
+    "$type": "dimension",
+    "md": {
+      "$value": {
+        "unit": "px",
+        "value": 8
+      }
+    }
+  },
+  "spacing": {
+    "$type": "dimension",
+    "md": {
+      "$value": {
+        "unit": "px",
+        "value": 16
+      }
+    }
+  },
+  "typography": {
+    "body": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "Inter",
+        "fontSize": {
+          "unit": "px",
+          "value": 16
+        },
+        "fontWeight": 400,
+        "lineHeight": 24
+      }
+    }
+  }
+}
