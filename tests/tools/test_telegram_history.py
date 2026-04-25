@@ -773,9 +773,9 @@ class TestResolveChatIdAmbiguity:
         assert "1103" in combined
 
     def test_strict_three_candidate_ambiguity(self):
-        register_chat(chat_id="1111", chat_name="Psy Alpha"),
-        register_chat(chat_id="1112", chat_name="Psy Beta"),
-        register_chat(chat_id="1113", chat_name="Psy Gamma"),
+        register_chat(chat_id="1111", chat_name="Psy Alpha")
+        register_chat(chat_id="1112", chat_name="Psy Beta")
+        register_chat(chat_id="1113", chat_name="Psy Gamma")
         with pytest.raises(AmbiguousChatError) as exc_info:
             resolve_chat_id("Psy", strict=True)
         assert len(exc_info.value.candidates) == 3
