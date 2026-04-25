@@ -177,7 +177,11 @@ async def _pop_agent_session(
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R
 
-        _project_key = os.environ.get("VALOR_PROJECT_KEY", "default")
+        # Empty/whitespace VALOR_PROJECT_KEY falls back to "valor" so writers and
+        # readers agree on the namespace (issue #1171). Production ships
+        # VALOR_PROJECT_KEY=valor via plist injection.
+        _v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
+        _project_key = _v or "valor"
         _pause_key = f"{_project_key}:sustainability:queue_paused"
         _hibernating_key = f"{_project_key}:worker:hibernating"
         _throttle_key = f"{_project_key}:sustainability:throttle_level"

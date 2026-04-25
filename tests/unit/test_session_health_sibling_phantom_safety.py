@@ -27,7 +27,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def _seed_phantom(project_key: str = "default", status: str = "pending") -> str:
+def _seed_phantom(project_key: str = "valor", status: str = "pending") -> str:
     """Seed a phantom hash and register it in the class + status + project indexes.
 
     The fake id is 32 chars (matches AutoKeyField uuid4 expected length). We
@@ -52,8 +52,12 @@ def _seed_phantom(project_key: str = "default", status: str = "pending") -> str:
 
 @pytest.fixture(autouse=True)
 def _force_project_key(monkeypatch):
-    """Make sure sustainability's default project_key matches what we seed."""
-    monkeypatch.setenv("VALOR_PROJECT_KEY", "default")
+    """Make sure sustainability's default project_key matches what we seed.
+
+    Uses the canonical ``valor`` namespace (issue #1171) — was previously
+    ``default`` before the project_key fallback was unified.
+    """
+    monkeypatch.setenv("VALOR_PROJECT_KEY", "valor")
     yield
 
 
@@ -68,11 +72,11 @@ class TestRecoverInterruptedStartup:
         from agent.session_health import _recover_interrupted_agent_sessions_startup
         from models.agent_session import AgentSession
 
-        live = AgentSession(session_id="live-1", project_key="default", status="running")
+        live = AgentSession(session_id="live-1", project_key="valor", status="running")
         live.save()
         live_id = live.agent_session_id
 
-        _seed_phantom(project_key="default", status="running")
+        _seed_phantom(project_key="valor", status="running")
 
         # Pre-assertion: seeding produced a phantom.
         raw = list(AgentSession.query.filter(status="running"))
@@ -99,11 +103,11 @@ class TestAgentSessionHealthCheck:
         from agent.session_health import _agent_session_health_check
         from models.agent_session import AgentSession
 
-        live = AgentSession(session_id="live-2", project_key="default", status="running")
+        live = AgentSession(session_id="live-2", project_key="valor", status="running")
         live.save()
         live_id = live.agent_session_id
 
-        _seed_phantom(project_key="default", status="running")
+        _seed_phantom(project_key="valor", status="running")
 
         raw = list(AgentSession.query.filter(status="running"))
         assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
@@ -131,13 +135,13 @@ class TestSessionRecoveryDrip:
         # Set recovery flag so the function does work rather than early-returning.
         POPOTO_REDIS_DB.set("default:recovery:active", "1", ex=60)
 
-        live = AgentSession(session_id="live-3", project_key="default", status="paused_circuit")
+        live = AgentSession(session_id="live-3", project_key="valor", status="paused_circuit")
         live.save()
         live_id = live.agent_session_id
 
-        _seed_phantom(project_key="default", status="paused_circuit")
+        _seed_phantom(project_key="valor", status="paused_circuit")
 
-        raw = list(AgentSession.query.filter(project_key="default", status="paused_circuit"))
+        raw = list(AgentSession.query.filter(project_key="valor", status="paused_circuit"))
         assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
 
         # Must not raise.
@@ -156,12 +160,12 @@ class TestSessionCountThrottle:
         from agent.sustainability import session_count_throttle
         from models.agent_session import AgentSession
 
-        live = AgentSession(session_id="live-4", project_key="default", status="pending")
+        live = AgentSession(session_id="live-4", project_key="valor", status="pending")
         live.save()
 
-        _seed_phantom(project_key="default", status="pending")
+        _seed_phantom(project_key="valor", status="pending")
 
-        raw = list(AgentSession.query.filter(project_key="default"))
+        raw = list(AgentSession.query.filter(project_key="valor"))
         assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
 
         # Must not raise.
@@ -174,12 +178,12 @@ class TestFailureLoopDetector:
         from agent.sustainability import failure_loop_detector
         from models.agent_session import AgentSession
 
-        live = AgentSession(session_id="live-5", project_key="default", status="failed")
+        live = AgentSession(session_id="live-5", project_key="valor", status="failed")
         live.save()
 
-        _seed_phantom(project_key="default", status="failed")
+        _seed_phantom(project_key="valor", status="failed")
 
-        raw = list(AgentSession.query.filter(project_key="default"))
+        raw = list(AgentSession.query.filter(project_key="valor"))
         assert any(not isinstance(getattr(s, "agent_session_id", None), str) for s in raw)
 
         # Must not raise.
