@@ -147,11 +147,17 @@ Fires only when a `git add` / `git commit` command path-anchors on a
 design-system filename. The path-anchored regex is:
 
 ```
-git (add|commit).*(?:^|/)(design-system\.(pen|md)|brand\.css|source\.css)\b
+git (add|commit).*(?:(?<=^)|(?<=[/\s]))(design-system\.(pen|md)|brand\.css|source\.css)(?![A-Za-z0-9.])
 ```
 
-The `(?:^|/)` prefix prevents false positives on unrelated files like
-`my-brand.css` or `source.css.bak`.
+Both boundaries are zero-width assertions. The lookbehind
+`(?:(?<=^)|(?<=[/\s]))` accepts string-start, `/`, or whitespace, so
+both `git add design-system.pen` (bare filename) and
+`git add static/css/brand.css` (subdirectory) match while
+`git add my-brand.css` (preceded by `-`) does not. The trailing
+`(?![A-Za-z0-9.])` rejects letter / digit / dot continuations, so
+`git add foo/source.css.bak`, `.tmp`, and `.orig` no longer false-fire
+the way the prior `\b` boundary did.
 
 On match, the hook re-runs `python -m tools.design_system_sync --check`
 and returns `{"decision": "block", "reason": <diff>}` on drift. **Fails
