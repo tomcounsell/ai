@@ -316,16 +316,23 @@ The skill's safety gate has two distinct enforcement layers, both
 intentional:
 
 - **Layer A — inline Python assertion (agent-level, runtime).** Paste and
-  execute the block below in your session before any `.pen` write. It
-  catches agent-authored `Path.write_text()` calls.
+  execute the block below before any `.pen` write. It pins the write
+  target to `design-system.pen` and refuses any other path. **Scope: the
+  `.pen` source only.** It is intentionally not a guard for the
+  generated artifacts (`design-system.md`, `brand.css`, `source.css`) —
+  the assertion's `target` is hardcoded to the `.pen`, so an additional
+  `endswith("brand.css")` check on the same `target` would be vacuous.
 - **Layer B — `validate_design_system_readonly.py` PreToolUse hook
   (tool-level, runtime).** Registered in `.claude/settings.json` against
-  the `Write`/`Edit` matchers. It blocks direct Write/Edit tool calls to
-  generated artifacts regardless of whether this skill is active.
+  the `Write`/`Edit` matchers. **Scope: the generated artifacts.** It
+  blocks any direct Write/Edit tool call against `design-system.md`,
+  `brand.css`, or `source.css` regardless of whether this skill is
+  active. This is the real enforcement for the generated-artifact case.
 
-The inline assertion is belt-and-braces alongside the hook — the hook
-provides the real enforcement for tool-level writes; the assertion
-catches raw Python. Do NOT remove either; they cover different call paths.
+The two layers are complementary, not redundant: Layer A discriminates
+the correct `.pen` write path from a wrong `.pen` write path; Layer B
+discriminates a write to a generated artifact from a write to anything
+else. Do NOT remove either; they cover different call paths.
 
 ```python
 from pathlib import Path
@@ -334,15 +341,6 @@ target = Path("docs/designs/design-system.pen")
 assert target.name == "design-system.pen", \
     "do-design-system only edits design-system.pen — refuse"
 assert target.exists(), f"design-system.pen not found at {target}"
-
-# Augmented: refuse Python-level writes to generated artifacts. These
-# MUST flow through `python -m tools.design_system_sync --generate`.
-assert not str(target).endswith("design-system.md"), \
-    "design-system.md is generated — run tools.design_system_sync, never write directly"
-assert not str(target).endswith("brand.css"), \
-    "brand.css is generated — run tools.design_system_sync, never write directly"
-assert not str(target).endswith("source.css"), \
-    "source.css is generated — run tools.design_system_sync, never write directly"
 ```
 
 If the Pencil MCP is connected, also verify the open editor is the
@@ -563,13 +561,18 @@ Commit `a702484` on `yudame/cuttlefish` main (moodboard pass,
 
 ## Version history
 
+- v1.2.1 (2026-04-25): Clarified the safety-gate two-layer scope.
+  Layer A (inline Python assertion) covers the `.pen` source path only;
+  Layer B (PreToolUse `validate_design_system_readonly.py` hook) covers
+  generated artifacts. Removed three vacuous `endswith()` asserts that
+  would never fire because Layer A's `target` is hardcoded to the
+  `.pen` file.
 - v1.2.0 (2026-04-24): Steps 6 and 7 rewritten to invoke
   `python -m tools.design_system_sync` (`--all` for regeneration,
-  `--audit` for the gap-audit diff). Inline Safety gate augmented with
-  three `assert` lines refusing Python-level writes to
-  `design-system.md`, `brand.css`, `source.css` (Layer A); added
+  `--audit` for the gap-audit diff). Added
   `validate_design_system_readonly.py` PreToolUse hook for tool-level
-  writes (Layer B). See `docs/features/design-system-tooling.md`.
+  writes to generated artifacts (Layer B of the safety gate). See
+  `docs/features/design-system-tooling.md`.
 - v1.1.0 (2026-04-20): Added `charter.md` enforcement, file-organization
   Step 0, `product/` subfolder for non-system `.pen` files, safety gate
   on `.pen` writes, dated inspiration folders with per-pass READMEs,
