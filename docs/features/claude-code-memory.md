@@ -183,17 +183,22 @@ The fallback value `"default"` is a neutral sentinel. It was previously `"dm"`, 
 
 ### One-time Migration
 
-If you have existing Memory records with `project_key="dm"` that were actually created by Claude Code hooks (not Telegram DMs), run the migration script:
+If you have existing Memory records under the obsolete `project_key="default"` or `project_key="dm"` partitions, run the migration script:
 
 ```bash
 # Preview -- no writes
-python scripts/migrate_memory_project_key.py --dry-run
+python scripts/migrate_memory_project_key.py
 
 # Apply
-python scripts/migrate_memory_project_key.py
+python scripts/migrate_memory_project_key.py --apply
 ```
 
-The script identifies genuine Telegram DM records by requiring both `source="human"` AND `agent_id="dm"`. All other `"dm"` records are re-keyed to `"valor"` (the key for `~/src/ai`). The migration is idempotent and safe to run while the bridge is running.
+The script handles BOTH legacy buckets:
+
+- `project_key="default"` — all records (legacy SDK-spawned-session writes that fell through to `config/memory_defaults.DEFAULT_PROJECT_KEY`).
+- `project_key="dm"` — only mislabeled hook-source records. Genuine Telegram DM records (identified by `source="human"` AND `agent_id="dm"`) stay under `"dm"`.
+
+All migrated records are re-keyed to `"valor"` (the canonical project_key for `~/src/ai`) via Popoto's supported `save(migrate_key=True)` path — no raw Redis. The migration is idempotent and safe to run while the bridge is running. After the issue #1171 plist deploy, this script was run once on the canonical machine: 222 records (218 default + 4 mislabeled dm) re-tagged to `valor`.
 
 ## Configuration
 

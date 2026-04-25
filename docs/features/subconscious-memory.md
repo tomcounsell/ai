@@ -418,6 +418,14 @@ Prior to PR #820, `DEFAULT_PROJECT_KEY = "dm"` in `config/memory_defaults.py`. T
 
 The default was changed to `"default"` to ensure misconfigured callers are identifiable rather than silently merging with DM memories. A migration script (`scripts/migrate_memory_project_key.py`) re-keys the mislabeled records — see [Claude Code Memory](claude-code-memory.md) for migration instructions.
 
+### Issue #1171: Recovery-Surface Migration to `valor`
+
+When `VALOR_PROJECT_KEY=valor` was promoted to a baked plist env var (issue #1171) so the recovery reflections (`circuit_health_gate`, `session_recovery_drip`) could find AgentSession records tagged `project_key="valor"`, the memory subsystem's reads also shifted to `valor`. At that point the production memory store held 262 records under `valor`, 218 under `default`, and 4 under `dm` (mislabeled hook records, not genuine Telegram DMs).
+
+To prevent ~45% memory regression on day 0 of deploy, `scripts/migrate_memory_project_key.py` was extended to handle BOTH `default` and `dm` buckets and re-tag obsolete records via Popoto's supported `save(migrate_key=True)` path. Running once on the canonical machine migrated 222 records (218 default + 4 dm), leaving 484 valor / 0 default / 0 dm.
+
+The genuine-DM preservation rule (`source=human AND agent_id=dm`) is intact — those records stay under `dm`. The `dm`-namespace writer leak source is tracked separately as issue #1173 (sibling investigation).
+
 ## Configuration
 
 All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()` before defining the Memory model (this happens automatically on import).
