@@ -124,14 +124,30 @@ Flags:
 
 ## Node-absent fallback
 
-The `_probe_npx()` precheck runs `npx --version` up front. If it fails
-(no `node` / `npx` on PATH, or the subprocess returns non-zero):
+The `_probe_npx()` precheck runs `npx --no-install @google/design.md
+--version` up front — verifying both that `npx` is on PATH AND that the
+package itself is installed. (The earlier `npx --version` form passed
+on machines where `scripts/remote-update.sh` had run `npm ci
+--only=prod` and skipped the package, then later raised
+`CalledProcessError` from inside `_run_npx` and tripped the drift
+hook into a fake `decision: block`. The end-to-end probe short-circuits
+that path.)
+
+If the probe fails (no `node` / `npx` on PATH, or the package isn't
+installed):
 
 - `--generate` auto-enables `--no-node`, emits a stderr warning, and
   produces `design-system.md` / `brand.css` / `source.css` only.
-- Every other subcommand exits 2 with
-  "Node required for --all (lint + export). Install Node + npm and
-  rerun, or use --generate --no-node for Python-only emission."
+- `--check` succeeds on CSS / md parity (export comparison is
+  skipped) so a missing-package state never surfaces as drift.
+- Every other subcommand exits 2 with "Node required for --all
+  (lint + export). Install Node + npm and rerun, or use
+  --generate --no-node for Python-only emission."
+
+`cmd_check` additionally wraps the export-comparison block in
+`try/except subprocess.CalledProcessError` as defense-in-depth — a
+third-party CLI returning non-zero for any reason is not reported as
+drift; the diagnostic surfaces on stderr and `--check` returns 0.
 
 This means machines without Node still get the core CSS / markdown
 emission; they simply don't produce the linted DTCG / Tailwind exports
