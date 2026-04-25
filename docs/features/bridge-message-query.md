@@ -1,127 +1,68 @@
 # Bridge Message Query Tool
 
-**Status**: Implemented
+**Status**: Consolidated into `valor-telegram` (issue #1163)
 **Created**: 2026-02-09
 **Implemented**: 2026-02-09
+**Consolidated**: 2026-04-24
 
 ---
 
-## Overview
+## Status Update
 
-The Bridge Message Query Tool provides a command-line interface to fetch Telegram message history from whitelisted users. It solves the problem of accessing Telegram messages when the Telegram session is exclusively held by the running bridge process.
+The standalone DM-history CLI script has been **removed** as part of issue
+[#1163](https://github.com/tomcounsell/ai/issues/1163) — it duplicated the
+name-resolution surface of `valor-telegram` with a second identity space and
+was a known source of silent wrong-matches. The bridge-side IPC handler
+(`check_message_query_request` in `bridge/telegram_bridge.py`) remains in
+place for back-compat (see No-Gos in the consolidation plan) but is no longer
+invoked by any in-tree CLI.
 
-## Problem Statement
-
-The Telegram bridge maintains an exclusive connection to Telegram using Telethon. This means:
-
-- Only one process can access the Telegram session at a time
-- Direct database queries are limited to metadata, not actual Telegram content
-- Fetching recent messages requires coordinating with the bridge process
-
-Previously, there was no way to query actual message content from Telegram without stopping the bridge or building complex session-sharing mechanisms.
-
-## Solution
-
-A lightweight file-based IPC system allows CLI tools to request data from the bridge:
-
-1. **CLI writes request** to `data/message_query_request.json`
-2. **Bridge polls** for requests every second
-3. **Bridge queries** Telegram API using its active connection
-4. **Bridge writes result** to `data/message_query_result.json`
-5. **CLI reads result** and displays formatted output
-
-## Usage
-
-### Basic Examples
+**Migration path**: use `valor-telegram read --user USERNAME` for all DM
+message-history queries. The `--user` flag forces resolution through the DM
+whitelist (`tools/telegram_users.resolve_username`) and reads from Redis /
+Telethon like any other `read` invocation, with the same ambiguity safety net
+and freshness header.
 
 ```bash
-# Show help with available usernames
-get-telegram-message-history --help
+# Before (removed)
+# scripts/<removed-cli> tom 10
 
-# Get last 5 messages from Tom (default)
-get-telegram-message-history tom
-
-# Get last 10 messages from Kevin
-get-telegram-message-history kevin 10
-
-# Case-insensitive username matching
-get-telegram-message-history TOM
+# After (current)
+valor-telegram read --user tom --limit 10
 ```
 
-### Output Format
+See [`docs/features/telegram-messaging.md`](telegram-messaging.md) for the
+canonical `valor-telegram` reference, including the new `--chat-id`, `--user`,
+and `--search` flags and the `AmbiguousChatError` disambiguation UX.
 
-```
-Querying 5 messages for tom...
+## Legacy Implementation (retained for bridge-IPC context)
 
-Found 5 messages:
+The sections below describe the bridge-side IPC handler that still exists in
+`bridge/telegram_bridge.py` but is no longer actively exercised. This
+documentation is preserved so readers tracing IPC code in the bridge can find
+historical context.
 
-[2026-02-09 14:23:15] Tom: Hey, can you check that PR?
-[2026-02-09 13:45:02] Valor: Sure, looking at it now
-[2026-02-09 12:30:44] Tom: I pushed the latest changes
-[2026-02-09 11:15:23] Valor: Thanks for the update
-[2026-02-09 10:05:12] Tom: Morning!
-```
+### Overview
 
-## How It Works
+The Bridge Message Query Tool originally provided a command-line interface
+(now removed) to fetch Telegram message history from whitelisted users. It
+solved the problem of accessing Telegram messages when the Telegram session
+is exclusively held by the running bridge process.
 
-### Architecture
+### How the Bridge IPC Works
 
-```
-┌─────────────────┐         ┌──────────────────┐         ┌──────────────┐
-│  CLI Tool       │         │  File-Based IPC  │         │    Bridge    │
-│  (scripts/)     │         │  (data/*.json)   │         │  (asyncio)   │
-└─────────────────┘         └──────────────────┘         └──────────────┘
-         │                            │                            │
-         │  1. Write request          │                            │
-         ├───────────────────────────>│                            │
-         │                            │                            │
-         │  2. Poll for result        │    3. Poll for requests    │
-         │    (every 0.5s)            │<───────────────────────────┤
-         │                            │                            │
-         │                            │    4. Read request         │
-         │                            ├───────────────────────────>│
-         │                            │                            │
-         │                            │    5. Query Telegram API   │
-         │                            │                            │
-         │                            │    6. Write result         │
-         │                            │<───────────────────────────┤
-         │                            │                            │
-         │  7. Read result            │                            │
-         │<───────────────────────────┤                            │
-         │                            │                            │
-         │  8. Display & cleanup      │                            │
-         │                            │                            │
-```
+A lightweight file-based IPC system allows a CLI tool to request data from
+the bridge:
 
-### Components
+1. CLI writes request to `data/message_query_request.json`
+2. Bridge polls for requests every second
+3. Bridge queries Telegram API using its active connection
+4. Bridge writes result to `data/message_query_result.json`
+5. CLI reads result and displays formatted output
 
-**1. CLI Tool** (`scripts/get-telegram-message-history`)
-- Validates username using `tools/telegram_users.py`
-- Writes request JSON
-- Polls for result with 10-second timeout
-- Formats and displays messages
-- Cleans up IPC files
+### Request/Response Format
 
-**2. User Lookup** (`tools/telegram_users.py`)
-- Loads whitelist from the `dms.whitelist` array in `projects.json`
-- Maps names to Telegram user IDs (case-insensitive)
-- Provides validation before making requests
-
-**3. Bridge Handler** (`bridge/telegram_bridge.py::check_message_query_request()`)
-- Polls `data/message_query_request.json` every second
-- Executes `client.get_messages(user_id, limit=N)` using active Telegram client
-- Formats messages with sender, date, and text
-- Writes result to `data/message_query_result.json`
-- Removes request file after processing
-
-**4. Bridge Main Loop** (`bridge/telegram_bridge.py::message_query_loop()`)
-- Background asyncio task
-- Calls `check_message_query_request()` every second
-- Runs continuously alongside message handling
-
-## Request/Response Format
-
-### Request JSON (`data/message_query_request.json`)
+**Request JSON (`data/message_query_request.json`)**:
 
 ```json
 {
@@ -132,9 +73,8 @@ Found 5 messages:
 }
 ```
 
-### Response JSON (`data/message_query_result.json`)
+**Response JSON (`data/message_query_result.json`)** — success:
 
-Success:
 ```json
 {
   "success": true,
@@ -147,164 +87,33 @@ Success:
       "sender": "Tom",
       "date": "2026-02-09T14:23:15",
       "text": "Hey, can you check that PR?"
-    },
-    {
-      "id": 12344,
-      "sender": "Valor",
-      "date": "2026-02-09T13:45:02",
-      "text": "Sure, looking at it now"
     }
   ],
   "processed_at": "2026-02-09T14:23:16.789012"
 }
 ```
 
-Error:
-```json
-{
-  "success": false,
-  "error": "Failed to fetch messages: User not found",
-  "username": "unknown",
-  "processed_at": "2026-02-09T14:23:16.789012"
-}
-```
+### Bridge Components (still in code)
 
-## Error Cases & Troubleshooting
+**Bridge Handler** (`bridge/telegram_bridge.py::check_message_query_request()`):
 
-### Unknown Username
+- Polls `data/message_query_request.json` every second
+- Executes `client.get_messages(user_id, limit=N)` using active Telegram client
+- Formats messages with sender, date, and text
+- Writes result to `data/message_query_result.json`
+- Removes request file after processing
 
-```bash
-$ get-telegram-message-history unknown
-Error: Unknown username 'unknown'
+**Bridge Main Loop** (`bridge/telegram_bridge.py::message_query_loop()`):
 
-Available usernames:
-  - kevin
-  - tom
-```
-
-**Fix**: Use a valid name from the whitelist (`dms.whitelist` in `projects.json`)
-
-### Bridge Not Running
-
-```bash
-$ get-telegram-message-history tom
-
-Querying 5 messages for tom...
-
-Error: Bridge not responding - is it running?
-Check bridge status: ./scripts/valor-service.sh status
-```
-
-**Fix**: Start or restart the bridge:
-```bash
-./scripts/valor-service.sh status
-./scripts/valor-service.sh start
-```
-
-### Permission Issues
-
-```bash
-Error writing request file: [Errno 13] Permission denied
-```
-
-**Fix**: Ensure `data/` directory exists and is writable:
-```bash
-mkdir -p data/
-chmod 755 data/
-```
-
-### Timeout with Running Bridge
-
-If bridge is running but not responding:
-
-1. **Check bridge logs**:
-   ```bash
-   tail -20 logs/bridge.log
-   ```
-
-2. **Look for errors** in message query polling loop
-
-3. **Restart bridge**:
-   ```bash
-   ./scripts/valor-service.sh restart
-   ```
-
-## Technical Details
-
-### Polling Parameters
-
-**CLI polling**:
-- Interval: 0.5 seconds
-- Timeout: 10 seconds (20 attempts)
-- Action on timeout: Error message + exit
-
-**Bridge polling**:
-- Interval: 1 second
-- Continuous: Runs until bridge stops
-- Error handling: Logs exceptions, continues polling
-
-### File Cleanup
-
-The CLI tool ensures cleanup in all cases:
-- On success: Removes both request and result files
-- On error: Removes request file to prevent stale requests
-- On timeout: Removes request file before exit
-
-The bridge removes the request file after processing to signal completion.
-
-### Message Formatting
-
-Messages include:
-- **Date**: ISO format converted to human-readable timestamp
-- **Sender**: Display name from Telegram
-- **Text**: Message content (empty for media-only messages)
-
-Media messages show empty text; future enhancement could add media type indicators.
-
-## Integration Points
-
-### Whitelist Configuration
-
-The tool uses the existing DM whitelist system:
-- **Location**: `dms.whitelist` array in `~/Desktop/Valor/projects.json`
-- **Format**: Array of objects with `id`, `name`, and `username` fields
-- **Shared**: Both bridge and CLI use `tools/telegram_users.py`
-
-### Data Directory
-
-All IPC files live in `data/`:
-- `data/message_query_request.json` - CLI writes, bridge reads
-- `data/message_query_result.json` - Bridge writes, CLI reads
-
-This directory is `.gitignore`d and local to each machine.
-
-## Future Enhancements
-
-Potential improvements (not yet implemented):
-
-- **Search queries**: Full-text search instead of just recent messages
-- **Date range filtering**: Fetch messages within specific time windows
-- **Media support**: Include media type and file references in output
-- **JSON output mode**: Machine-readable output for scripting
-- **Multiple users**: Query messages from multiple users in one call
-- **Conversation threads**: Fetch entire conversation context
-- **Export formats**: Save to CSV, Markdown, or other formats
+- Background asyncio task
+- Calls `check_message_query_request()` every second
+- Runs continuously alongside message handling
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `scripts/get-telegram-message-history` | CLI tool entry point |
-| `tools/telegram_users.py` | Username resolution and whitelist loading |
-| `bridge/telegram_bridge.py` | Message query handler and polling loop |
-| `data/message_query_request.json` | IPC request file (transient) |
-| `data/message_query_result.json` | IPC result file (transient) |
-
-## Design Principles
-
-Per CLAUDE.md development principles:
-
-- **Intelligent over rigid**: Uses existing Telegram session intelligently
-- **No legacy tolerance**: Clean file-based IPC, no complex infrastructure
-- **Context collection**: Messages provide context for agent conversations
-- **Minimal tooling**: Simple CLI, no new dependencies or services
+| `tools/telegram_users.py` | Username resolution and whitelist loading (still used by `valor-telegram`) |
+| `bridge/telegram_bridge.py` | Message query IPC handler and polling loop (retained, dormant) |
+| `data/message_query_request.json` | IPC request file (no longer written by any CLI) |
+| `data/message_query_result.json` | IPC result file (no longer written by any CLI) |

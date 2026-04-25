@@ -8,9 +8,13 @@ Backend: Redis/Popoto (replaced SQLite as of 2026-02-24).
 All data is stored in Redis via Popoto models (TelegramMessage, Link, Chat).
 """
 
+import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramHistoryError(Exception):
@@ -20,6 +24,198 @@ class TelegramHistoryError(Exception):
         self.message = message
         self.category = category
         super().__init__(message)
+
+
+# =============================================================================
+# Chat resolution (issue #1163)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class ChatCandidate:
+    """A candidate chat match from name resolution.
+
+    Plain dataclass that is decoupled from the Popoto `Chat` model — callers
+    that format ambiguity errors are not coupled to model-field churn.
+
+    Attributes:
+        chat_id: The chat identifier (string, may be numeric with '-' prefix).
+        chat_name: The stored chat name as registered by the bridge.
+        last_activity_ts: Unix timestamp of last chat activity (`Chat.updated_at`),
+            or None if never updated. Used for recency ordering.
+    """
+
+    chat_id: str
+    chat_name: str
+    last_activity_ts: float | None
+
+
+class AmbiguousChatError(Exception):
+    """Raised when `resolve_chat_id` finds >1 candidate and `strict=True`.
+
+    Carries the full `list[ChatCandidate]` so CLI callers can render a
+    "did you mean" style disambiguation message. Candidates are ordered
+    by `last_activity_ts` desc with `None` sorting last (i.e., most recently
+    active chat first), with `chat_id` as the deterministic tiebreaker.
+
+    Under the default (non-strict) path this exception is NOT raised —
+    `resolve_chat_id` returns the most-recent candidate's `chat_id` and
+    emits a `logger.warning` listing all candidates instead. The exception
+    is also raised unconditionally (regardless of `strict`) when the
+    defensive invariant in `resolve_chat_id` fails — i.e., the chosen
+    candidate is not the one with the maximum `last_activity_ts`. That
+    case is a fail-loud guard against a broken sort.
+    """
+
+    def __init__(self, candidates: list["ChatCandidate"]):
+        self.candidates = candidates
+        names = ", ".join(f"{c.chat_name!r} ({c.chat_id})" for c in candidates)
+        super().__init__(f"Ambiguous chat name matched {len(candidates)} candidates: {names}")
+
+
+# Conservative punctuation set stripped from both sides during name comparison.
+# `_` IS stripped (Q2 resolved — see plan): slug/channel naming conventions
+# make underscore-vs-space collisions rare enough that the ambiguity detector
+# is the appropriate safety net. Keep emoji / non-ASCII intact.
+_NORMALIZE_STRIP_CHARS = ":-|_"
+
+
+def _normalize_chat_name(s: str) -> str:
+    """Normalize a chat name for comparison.
+
+    Rules:
+      - lowercase
+      - collapse any run of whitespace to a single space
+      - strip leading/trailing `:`, `-`, `|`, `_` characters
+      - preserve emoji and non-ASCII text
+
+    Examples:
+      "PM: PsyOptimal"   -> "pm psyoptimal"
+      "PM PsyOptimal"    -> "pm psyoptimal"
+      "dev_valor"        -> "dev valor"  (note: underscore stripped internally too)
+      ""                 -> ""
+      "   "              -> ""
+      ":::"              -> ""
+
+    Empty/whitespace/all-punctuation inputs normalize to "".
+    """
+    if not s:
+        return ""
+    # Lowercase first so downstream comparisons are case-insensitive.
+    lowered = s.lower()
+    # Replace the conservative punctuation set with a space so we collapse
+    # alongside whitespace in one pass. Example: "pm: psyoptimal" -> "pm  psyoptimal".
+    for ch in _NORMALIZE_STRIP_CHARS:
+        lowered = lowered.replace(ch, " ")
+    # Collapse whitespace runs.
+    collapsed = " ".join(lowered.split())
+    return collapsed
+
+
+def _chat_to_candidate(chat) -> ChatCandidate:
+    """Project a Popoto `Chat` instance to a `ChatCandidate` dataclass.
+
+    Defensive about missing/None attributes — returns a candidate even when
+    the chat has never been updated.
+    """
+    raw_ts = getattr(chat, "updated_at", None)
+    try:
+        ts = float(raw_ts) if raw_ts is not None else None
+    except (TypeError, ValueError):
+        ts = None
+    return ChatCandidate(
+        chat_id=str(chat.chat_id),
+        chat_name=str(chat.chat_name or ""),
+        last_activity_ts=ts,
+    )
+
+
+def _sort_candidates(candidates: list[ChatCandidate]) -> list[ChatCandidate]:
+    """Sort candidates by `last_activity_ts` desc, deterministic on ties.
+
+    Primary key: `last_activity_ts` desc, with `None` sorting last (a chat
+    that has never been updated never outranks one with a real timestamp).
+
+    Deterministic tiebreak (per the hotfixed plan): when two candidates
+    share `last_activity_ts`, break on `chat_id` ascending — lexicographic
+    string compare, so a numeric-prefix chat_id is still stable. This
+    makes the warn-and-pick-most-recent default path reproducible: the
+    same inputs always pick the same candidate, and tests don't have to
+    race sleep-jitter timings to get a deterministic winner.
+    """
+    return sorted(
+        candidates,
+        key=lambda c: (
+            0 if c.last_activity_ts is not None else 1,
+            -(c.last_activity_ts or 0.0),
+            c.chat_id,
+        ),
+    )
+
+
+def resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]:
+    """Return all chat candidates matching `chat_name`, ordered by recency.
+
+    Runs a 3-stage cascade (exact → case-insensitive exact → normalized
+    substring) and collects ALL hits at each stage. Only advances to the
+    next stage on zero hits. Candidates are projected to `ChatCandidate`
+    at collection time — Popoto model instances never escape this function.
+
+    Ordering: `last_activity_ts` desc, with `None` sorting last.
+
+    Args:
+        chat_name: The name to resolve. Empty/whitespace-only returns [].
+
+    Returns:
+        List of `ChatCandidate`s. Empty if no match.
+
+    Failure mode: Redis / Popoto errors are logged and an empty list is
+    returned. No bare-except swallowing (see plan Task 3 exception-handling
+    note).
+    """
+    if not chat_name or not chat_name.strip():
+        return []
+
+    from models.chat import Chat
+
+    try:
+        import popoto as _popoto_pkg
+        import redis as _redis_pkg  # local import — the module is optional at import time
+
+        # Stage 1: exact match on the stored chat_name (uses Popoto KeyField index).
+        exact = list(Chat.query.filter(chat_name=chat_name))
+        if exact:
+            return _sort_candidates([_chat_to_candidate(c) for c in exact])
+
+        # For stages 2 and 3 we need the full chat list (there are hundreds,
+        # not thousands — acceptable at this scale; see plan Rabbit Holes).
+        all_chats = list(Chat.query.all())
+        if not all_chats:
+            return []
+
+        chat_name_lower = chat_name.lower()
+        normalized_query = _normalize_chat_name(chat_name)
+
+        # Stage 2: case-insensitive exact match.
+        ci_hits = [c for c in all_chats if c.chat_name and c.chat_name.lower() == chat_name_lower]
+        if ci_hits:
+            return _sort_candidates([_chat_to_candidate(c) for c in ci_hits])
+
+        # Stage 3: normalized substring match (covers `PM PsyOptimal` → `PM: PsyOptimal`).
+        if not normalized_query:
+            return []
+        substring_hits = [
+            c
+            for c in all_chats
+            if c.chat_name and normalized_query in _normalize_chat_name(c.chat_name)
+        ]
+        if substring_hits:
+            return _sort_candidates([_chat_to_candidate(c) for c in substring_hits])
+
+        return []
+    except (_redis_pkg.RedisError, _popoto_pkg.ModelException, _popoto_pkg.QueryException) as e:
+        logger.warning("resolve_chat_candidates failed: %s", e)
+        return []
 
 
 # =============================================================================
@@ -940,43 +1136,101 @@ def list_chats(
 def resolve_chat_id(
     chat_name: str,
     db_path=None,  # Ignored — kept for API compatibility
+    *,
+    strict: bool = False,
 ) -> str | None:
     """Resolve a chat name to its chat_id.
 
-    Supports partial matching and case-insensitive search.
+    Runs the 3-stage cascade via `resolve_chat_candidates` and returns a
+    single `chat_id` under every path except a failed defensive invariant.
+
+    Default (non-strict) path:
+      - Zero candidates → returns None.
+      - One candidate   → returns that candidate's `chat_id`.
+      - Multiple        → returns the most-recent candidate's `chat_id` AND
+                          emits `logger.warning` listing the chosen candidate
+                          plus all alternatives (chat_id, chat_name, last-age).
+                          Callers do not need to catch anything.
+
+    Strict path (`strict=True`):
+      - Zero / one → same as default.
+      - Multiple   → raises `AmbiguousChatError(candidates)`.
+
+    Defensive invariant (both paths):
+      After candidate selection, the chosen candidate MUST have the maximum
+      `last_activity_ts` in the returned set. If this ever fails (a sort bug
+      or race), `AmbiguousChatError` is raised unconditionally regardless of
+      `strict`. This is fail-loud, not fail-silent-with-wrong-answer.
 
     Args:
         chat_name: Chat name to search for.
         db_path: Ignored — kept for backward-compatibility signature.
+        strict: Keyword-only. Default False = pick-most-recent + warn; True
+            = raise `AmbiguousChatError` on >1 candidate. Exists as an
+            opt-in escape hatch for scripted callers that need hard-error
+            semantics (cannot parse stderr warnings reliably).
 
     Returns:
-        chat_id if found, None otherwise.
+        chat_id on single-match, or the most-recent candidate's chat_id on
+        multi-match in non-strict mode. None when no candidates match.
+
+    Raises:
+        AmbiguousChatError: when >1 candidate matches and `strict=True`, OR
+            when the defensive invariant fails (regardless of `strict`).
     """
-    from models.chat import Chat
-
-    try:
-        # Exact match via KeyField
-        exact = list(Chat.query.filter(chat_name=chat_name))
-        if exact:
-            return exact[0].chat_id
-
-        # Fall back to Python case-insensitive/partial matching
-        all_chats = list(Chat.query.all())
-        chat_name_lower = chat_name.lower()
-
-        # Case-insensitive exact
-        for chat in all_chats:
-            if chat.chat_name and chat.chat_name.lower() == chat_name_lower:
-                return chat.chat_id
-
-        # Partial contains
-        for chat in all_chats:
-            if chat.chat_name and chat_name_lower in chat.chat_name.lower():
-                return chat.chat_id
-
+    candidates = resolve_chat_candidates(chat_name)
+    if not candidates:
         return None
-    except Exception:
-        return None
+    if len(candidates) == 1:
+        return candidates[0].chat_id
+
+    # >1 candidate.
+    if strict:
+        raise AmbiguousChatError(candidates)
+
+    chosen = candidates[0]  # _sort_candidates guarantees most-recent first.
+
+    # Defensive invariant: chosen MUST have the max last_activity_ts.
+    # If any candidate has a strictly greater timestamp than chosen, the
+    # sort is broken — raise unconditionally (this path ignores `strict`).
+    # None timestamps are treated as -inf for this comparison.
+    def _ts_or_neg_inf(ts: float | None) -> float:
+        return ts if ts is not None else float("-inf")
+
+    chosen_ts = _ts_or_neg_inf(chosen.last_activity_ts)
+    max_ts = max(_ts_or_neg_inf(c.last_activity_ts) for c in candidates)
+    if chosen_ts != max_ts:
+        raise AmbiguousChatError(candidates)
+
+    # Build greppable warning: chosen=(id,name,last:age); also=[(id,name,last:age),...]
+    def _age(ts: float | None) -> str:
+        if ts is None:
+            return "never"
+        delta = max(0.0, time.time() - float(ts))
+        if delta < 60:
+            return "<1m"
+        if delta < 3600:
+            return f"{int(delta // 60)}m"
+        if delta < 86400:
+            return f"{int(delta // 3600)}h"
+        return f"{int(delta // 86400)}d"
+
+    alts = [
+        f"({c.chat_id},{c.chat_name!r},last:{_age(c.last_activity_ts)})"
+        for c in candidates
+        if c.chat_id != chosen.chat_id
+    ]
+    logger.warning(
+        'ambiguous chat "%s" — %d candidates, chose %s: chose=(%s,%r,last:%s); also=[%s]',
+        chat_name,
+        len(candidates),
+        chosen.chat_id,
+        chosen.chat_id,
+        chosen.chat_name,
+        _age(chosen.last_activity_ts),
+        ", ".join(alts),
+    )
+    return chosen.chat_id
 
 
 def search_all_chats(

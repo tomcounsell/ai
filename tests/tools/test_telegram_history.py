@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 import pytest
 
 from tools.telegram_history import (
+    AmbiguousChatError,
+    ChatCandidate,
+    _normalize_chat_name,
     get_chat_stats,
     get_link_by_url,
     get_link_stats,
@@ -18,6 +21,7 @@ from tools.telegram_history import (
     list_chats,
     list_links,
     register_chat,
+    resolve_chat_candidates,
     resolve_chat_id,
     search_all_chats,
     search_history,
@@ -548,6 +552,282 @@ class TestResolveChatId:
     def test_resolve_not_found(self):
         resolved = resolve_chat_id("NonexistentChatXYZ")
         assert resolved is None
+
+
+class TestNormalizeChatName:
+    """Test the `_normalize_chat_name` helper (issue #1163)."""
+
+    def test_empty_string(self):
+        assert _normalize_chat_name("") == ""
+
+    def test_whitespace_only(self):
+        assert _normalize_chat_name("   ") == ""
+
+    def test_all_punctuation(self):
+        assert _normalize_chat_name(":::") == ""
+        assert _normalize_chat_name("---") == ""
+        assert _normalize_chat_name("|||") == ""
+
+    def test_lowercase(self):
+        assert _normalize_chat_name("DEV VALOR") == "dev valor"
+
+    def test_collapse_whitespace(self):
+        assert _normalize_chat_name("dev   valor") == "dev valor"
+        assert _normalize_chat_name("dev\tvalor") == "dev valor"
+        assert _normalize_chat_name("dev\n\nvalor") == "dev valor"
+
+    def test_strip_colon_and_dash(self):
+        assert _normalize_chat_name("PM: PsyOptimal") == "pm psyoptimal"
+        assert _normalize_chat_name("PM PsyOptimal") == "pm psyoptimal"
+        assert _normalize_chat_name("dev-valor") == "dev valor"
+
+    def test_strip_pipe(self):
+        assert _normalize_chat_name("dev|valor") == "dev valor"
+
+    def test_strip_underscore(self):
+        # Q2 policy: `_` IS stripped. The ambiguity detector is the safety net
+        # for the rare `dev_valor` vs `dev valor` collision case.
+        assert _normalize_chat_name("dev_valor") == "dev valor"
+
+    def test_underscore_vs_space_collide(self):
+        # Q2 decision: dev_valor and dev valor MUST normalize equal.
+        assert _normalize_chat_name("dev_valor") == _normalize_chat_name("dev valor")
+
+    def test_preserves_emoji(self):
+        # Emoji and non-ASCII must survive normalization.
+        assert _normalize_chat_name("Project 🚀") == "project 🚀"
+        assert _normalize_chat_name("café: mocha") == "café mocha"
+
+    def test_preserves_non_ascii(self):
+        assert _normalize_chat_name("日本語") == "日本語"
+
+    def test_symmetric(self):
+        # Applying normalization to an already-normalized string is a no-op.
+        once = _normalize_chat_name("PM: Psy_Optimal")
+        twice = _normalize_chat_name(once)
+        assert once == twice
+
+    def test_very_long(self):
+        # >200 chars should not crash.
+        long = "a" * 500
+        result = _normalize_chat_name(long)
+        assert result == long
+
+
+class TestResolveChatCandidates:
+    """Test `resolve_chat_candidates` — the candidate-collection resolver."""
+
+    def test_empty_query_returns_empty_list(self):
+        assert resolve_chat_candidates("") == []
+        assert resolve_chat_candidates("   ") == []
+
+    def test_zero_candidates(self):
+        # No chats registered → empty list.
+        assert resolve_chat_candidates("AnythingXYZ") == []
+
+    def test_single_exact_candidate(self):
+        register_chat(chat_id="100", chat_name="Alpha Team")
+        result = resolve_chat_candidates("Alpha Team")
+        assert len(result) == 1
+        assert isinstance(result[0], ChatCandidate)
+        assert result[0].chat_id == "100"
+        assert result[0].chat_name == "Alpha Team"
+
+    def test_ambiguous_substring(self):
+        register_chat(chat_id="201", chat_name="PsyOptimal")
+        register_chat(chat_id="202", chat_name="PM: PsyOptimal")
+        result = resolve_chat_candidates("PsyOptimal")
+        # Exact match on "PsyOptimal" wins stage 1 (substring PM: PsyOptimal doesn't
+        # exact-match); stage 1 returns just the exact hit.
+        ids = {c.chat_id for c in result}
+        assert "201" in ids
+
+    def test_ambiguous_at_substring_stage(self):
+        # Two chats that both contain "Psy" but neither is an exact match.
+        register_chat(chat_id="301", chat_name="Psy Team A")
+        register_chat(chat_id="302", chat_name="Psy Team B")
+        result = resolve_chat_candidates("Psy")
+        ids = {c.chat_id for c in result}
+        assert ids == {"301", "302"}
+
+    def test_ordering_by_recency(self):
+        # Older first, then newer — resolver must sort newer first.
+        register_chat(chat_id="401", chat_name="Psy Older")
+        time.sleep(0.01)
+        register_chat(chat_id="402", chat_name="Psy Newer")
+        result = resolve_chat_candidates("Psy")
+        assert [c.chat_id for c in result] == ["402", "401"]
+
+    def test_normalization_matches_missing_colon(self):
+        register_chat(chat_id="501", chat_name="PM: PsyOptimal")
+        # Query missing colon should still match via stage 3 (normalized substring).
+        result = resolve_chat_candidates("PM PsyOptimal")
+        assert len(result) == 1
+        assert result[0].chat_id == "501"
+
+    def test_stage_cascade_prefers_exact_over_substring(self):
+        # If both an exact AND substring match exist, stage 1 wins.
+        register_chat(chat_id="601", chat_name="foo")
+        register_chat(chat_id="602", chat_name="foobar")
+        result = resolve_chat_candidates("foo")
+        assert len(result) == 1
+        assert result[0].chat_id == "601"
+
+    def test_candidate_is_dataclass_not_model(self):
+        # The returned candidate must be a ChatCandidate instance (dataclass),
+        # not a Popoto Chat model — prevents model-field churn leaks.
+        register_chat(chat_id="701", chat_name="Canary")
+        result = resolve_chat_candidates("Canary")
+        from models.chat import Chat
+
+        assert isinstance(result[0], ChatCandidate)
+        assert not isinstance(result[0], Chat)
+
+
+class TestResolveChatIdAmbiguity:
+    """Test `resolve_chat_id` ambiguity handling (issue #1163).
+
+    Semantics under the hotfixed plan (Q2 = pick-most-recent-with-warning):
+      - Default (strict=False): >1 candidates → returns most-recent chat_id
+        and emits a logger.warning listing all candidates.
+      - strict=True: >1 candidates → raises AmbiguousChatError.
+      - Defensive invariant: regardless of strict, if the chosen candidate
+        is NOT the max-last_activity_ts one, raises AmbiguousChatError.
+    """
+
+    def test_default_returns_most_recent_and_warns(self, caplog):
+        """Default (non-strict) path picks most-recent + emits logger.warning."""
+        register_chat(chat_id="801", chat_name="Psy Older")
+        time.sleep(0.01)
+        register_chat(chat_id="802", chat_name="Psy Newer")
+
+        with caplog.at_level("WARNING", logger="tools.telegram_history"):
+            resolved = resolve_chat_id("Psy")
+
+        assert resolved == "802"  # Most-recent winner.
+        # Warning must name both candidates for audit.
+        messages = [r.message for r in caplog.records]
+        combined = " ".join(messages)
+        assert "ambiguous" in combined.lower()
+        assert "801" in combined
+        assert "802" in combined
+
+    def test_strict_raises_on_ambiguous(self):
+        """strict=True re-enables the hard-error path for scripted callers."""
+        register_chat(chat_id="811", chat_name="Psy Team A")
+        register_chat(chat_id="812", chat_name="Psy Team B")
+        with pytest.raises(AmbiguousChatError) as exc_info:
+            resolve_chat_id("Psy", strict=True)
+        err = exc_info.value
+        assert len(err.candidates) == 2
+        ids = {c.chat_id for c in err.candidates}
+        assert ids == {"811", "812"}
+
+    def test_strict_candidates_sorted_by_recency(self):
+        register_chat(chat_id="901", chat_name="Psy First")
+        time.sleep(0.01)
+        register_chat(chat_id="902", chat_name="Psy Second")
+        with pytest.raises(AmbiguousChatError) as exc_info:
+            resolve_chat_id("Psy", strict=True)
+        candidates = exc_info.value.candidates
+        # Most recent first.
+        assert candidates[0].chat_id == "902"
+        assert candidates[1].chat_id == "901"
+
+    def test_deterministic_tiebreak_on_chat_id(self, caplog, monkeypatch):
+        """When last_activity_ts ties, tiebreak is deterministic on chat_id.
+
+        Two candidates with identical timestamps must always pick the same
+        winner across test runs. Tiebreak is chat_id ascending (lexicographic
+        string compare) so `"100"` wins over `"200"`.
+        """
+        # Freeze two chats at the same updated_at by monkeypatching time.time
+        # during registration. This is more deterministic than sleeping.
+        import tools.telegram_history as _th
+
+        frozen_ts = 1_700_000_500.0
+        monkeypatch.setattr(_th.time, "time", lambda: frozen_ts)
+        register_chat(chat_id="200", chat_name="Psy Two Hundred")
+        register_chat(chat_id="100", chat_name="Psy One Hundred")
+        monkeypatch.undo()
+
+        with caplog.at_level("WARNING", logger="tools.telegram_history"):
+            resolved = resolve_chat_id("Psy")
+        # "100" < "200" lexicographically, so 100 wins on tiebreak.
+        assert resolved == "100"
+
+    def test_default_three_candidate_ambiguity(self, caplog):
+        """Three-way ambiguity under default path picks newest, warns."""
+        register_chat(chat_id="1101", chat_name="Psy Alpha")
+        time.sleep(0.005)
+        register_chat(chat_id="1102", chat_name="Psy Beta")
+        time.sleep(0.005)
+        register_chat(chat_id="1103", chat_name="Psy Gamma")
+        with caplog.at_level("WARNING", logger="tools.telegram_history"):
+            resolved = resolve_chat_id("Psy")
+        assert resolved == "1103"  # Most recent of the three.
+        # Warning must list all three candidates.
+        combined = " ".join(r.message for r in caplog.records)
+        assert "1101" in combined
+        assert "1102" in combined
+        assert "1103" in combined
+
+    def test_strict_three_candidate_ambiguity(self):
+        register_chat(chat_id="1111", chat_name="Psy Alpha")
+        register_chat(chat_id="1112", chat_name="Psy Beta")
+        register_chat(chat_id="1113", chat_name="Psy Gamma")
+        with pytest.raises(AmbiguousChatError) as exc_info:
+            resolve_chat_id("Psy", strict=True)
+        assert len(exc_info.value.candidates) == 3
+
+    def test_invariant_guard_raises_regardless_of_strict(self, monkeypatch):
+        """If the selection logic picks a non-max candidate, raise unconditionally.
+
+        This is a defensive assertion against a broken sort or a race.
+        strict=False would normally swallow ambiguity with a warning, but the
+        invariant guard fires BEFORE the warning path — regardless of strict.
+        """
+        import tools.telegram_history as _th
+        from tools.telegram_history import ChatCandidate
+
+        # Inject a candidate list where the first element is NOT the max-ts
+        # one. resolve_chat_id must detect this and raise.
+        broken = [
+            ChatCandidate(chat_id="B", chat_name="Broken Winner", last_activity_ts=1000.0),
+            ChatCandidate(chat_id="A", chat_name="Real Winner", last_activity_ts=9999.0),
+        ]
+        monkeypatch.setattr(_th, "resolve_chat_candidates", lambda name: broken)
+
+        with pytest.raises(AmbiguousChatError):
+            resolve_chat_id("anything")  # Default path — still raises.
+
+        with pytest.raises(AmbiguousChatError):
+            resolve_chat_id("anything", strict=True)  # Strict also raises.
+
+    def test_ambiguous_chat_error_is_exception_subclass(self):
+        # Ensures the exception is catchable as Exception by surrounding code.
+        assert issubclass(AmbiguousChatError, Exception)
+        err = AmbiguousChatError([])
+        assert hasattr(err, "candidates")
+        assert err.candidates == []
+
+    def test_narrow_exception_handling_returns_empty_list(self, monkeypatch):
+        # Simulate a Redis connectivity failure deep in Popoto.
+        import redis
+
+        class _FakeQuery:
+            def filter(self, **kwargs):
+                raise redis.RedisError("connection refused")
+
+            def all(self):
+                raise redis.RedisError("connection refused")
+
+        from models.chat import Chat
+
+        monkeypatch.setattr(Chat, "query", _FakeQuery())
+        # resolve_chat_candidates returns [] on failure (logged).
+        result = resolve_chat_candidates("anything")
+        assert result == []
 
 
 class TestSearchAllChats:
