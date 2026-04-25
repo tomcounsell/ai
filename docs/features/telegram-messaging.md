@@ -152,18 +152,35 @@ Chat names are resolved in order:
 1. **Chat model** (Redis `Chat` Popoto model) — matches group names through
    `resolve_chat_candidates`, a 3-stage cascade (exact → case-insensitive
    exact → normalized substring) that collects **all** candidates per stage
-   and sorts by `Chat.updated_at` desc. When more than one candidate
-   survives, raises `AmbiguousChatError` (see above).
+   and sorts by `Chat.updated_at` desc (deterministic tiebreak on `chat_id`).
+   When more than one candidate survives, the **default path returns the
+   most-recently-active candidate and emits a `logger.warning` listing all
+   candidates**; `strict=True` (CLI `--strict`) raises `AmbiguousChatError`
+   instead.
 2. **DM whitelist** (`tools/telegram_users.py`) — matches user names. The
    `--user` flag forces this path exclusively.
 3. **Raw numeric ID** — used directly when `--chat` looks like a number, or
    explicitly via `--chat-id`.
 
-`resolve_chat_id(name, *, allow_ambiguous=False)` is a thin wrapper that
-delegates to `resolve_chat_candidates` and returns the chat_id when a unique
-match is found. `allow_ambiguous=True` returns the most-recent candidate and
-emits a `logger.warning`; the CLI never sets this flag (production callers
-surface the exception so the user disambiguates explicitly).
+`resolve_chat_id(name, *, strict=False)` is a thin wrapper that delegates
+to `resolve_chat_candidates` and returns a `chat_id`:
+- Zero match → `None`.
+- Single match → that `chat_id`.
+- Multiple matches, `strict=False` (default) → the most-recent candidate's
+  `chat_id`, plus a `logger.warning` listing all candidates for audit.
+- Multiple matches, `strict=True` → raises `AmbiguousChatError(candidates)`.
+
+A defensive invariant also raises `AmbiguousChatError` **regardless of
+`strict`** if the selection logic ever picks a non-max candidate — fail
+loud rather than silently return the wrong answer. Production CLI callers
+pass `strict=True` only when `--strict` is on the command line; they let
+the `logger.warning` surface the ambiguity to the user on the default
+path and exit 0.
+
+Empty or whitespace-only values for `--chat`, `--user`, and
+`chats --search` are rejected at the CLI layer before reaching the
+resolver — an empty string is never a valid chat reference and would
+either substring-match all records or pass through silently.
 
 ### Data Sources
 

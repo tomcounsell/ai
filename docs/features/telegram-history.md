@@ -127,18 +127,28 @@ chats = list_chats()
 candidates = resolve_chat_candidates("Dev: Valor")
 # candidates -> [ChatCandidate(chat_id="-100...", chat_name="Dev: Valor", last_activity_ts=...)]
 
-# Resolve chat name to a single chat ID (strict)
-# Raises AmbiguousChatError when >1 candidates match.
+# Resolve chat name to a single chat ID.
+#
+# Default (strict=False, Q2 = pick-most-recent-with-warning):
+#   - Zero match → returns None.
+#   - Single match → returns that chat_id.
+#   - Multiple matches → returns the most-recent candidate's chat_id and
+#     emits a logger.warning listing all candidates. No exception raised.
+chat_id = resolve_chat_id("Dev: Valor")
+
+# Strict mode: opt into AmbiguousChatError on >1 candidate. Used by the
+# CLI when --strict is on the command line; scripted callers that need a
+# non-zero exit code on ambiguity also use this path.
 try:
-    chat_id = resolve_chat_id("Dev: Valor")
+    chat_id = resolve_chat_id("Dev: Valor", strict=True)
 except AmbiguousChatError as e:
     # e.candidates is list[ChatCandidate]; render to the user.
     ...
 
-# Back-compat escape hatch: returns the most-recent candidate and logs a
-# WARNING when >1 candidates match. Never used by the CLI — production
-# callers surface the exception.
-chat_id = resolve_chat_id("Dev: Valor", allow_ambiguous=True)
+# Defensive invariant (both paths): if the selection logic ever returns
+# a candidate that is NOT the one with the maximum last_activity_ts,
+# resolve_chat_id raises AmbiguousChatError unconditionally regardless
+# of strict. This is a fail-loud guard against a broken sort or race.
 
 # Narrow exception handling: resolve_chat_candidates catches only
 # redis.RedisError / popoto.ModelException / popoto.QueryException,
