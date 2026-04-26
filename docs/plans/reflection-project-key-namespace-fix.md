@@ -9,6 +9,7 @@ last_comment_id:
 revision_applied: true
 revision_pass: 1
 revision_addressed: [B1, C1, C2, C3, C4, N1]
+allow_unchecked: true  # Post-deploy success criteria (redis-cli scans, launchctl getenv, plist re-bake verification, 5-min reflection observation) cannot be ticked pre-merge by definition; they're verified after `./scripts/install_worker.sh` runs on the canonical machine.
 ---
 
 # Reflection project_key namespace fix
@@ -191,27 +192,27 @@ This plan presents three resolution strategies. **Recommended: Option B (env pro
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `agent/sustainability.py:circuit_health_gate` wraps the entire body in `try/except Exception` (line ~55-110) and logs without raising. **No new exception handlers introduced** by this fix. Existing handler is fine.
-- [ ] `agent/sustainability.py:session_recovery_drip` same pattern. **No new exception handlers introduced.**
-- [ ] If we change `_get_project_key()` to a shared helper (per Option C), the helper must catch `projects.json` read errors and fall back to a known constant — test that an unreadable `projects.json` returns the canonical fallback (not `"default"`).
+- [x] `agent/sustainability.py:circuit_health_gate` wraps the entire body in `try/except Exception` (line ~55-110) and logs without raising. **No new exception handlers introduced** by this fix. Existing handler is fine.
+- [x] `agent/sustainability.py:session_recovery_drip` same pattern. **No new exception handlers introduced.**
+- [x] If we change `_get_project_key()` to a shared helper (per Option C), the helper must catch `projects.json` read errors and fall back to a known constant — test that an unreadable `projects.json` returns the canonical fallback (not `"default"`). N/A — Option C not taken; defenses applied at all three call sites instead.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty `VALOR_PROJECT_KEY` env var (e.g., `VALOR_PROJECT_KEY=""`): currently treated as "set" by `os.environ.get(..., "default")` returning `""`. **Fix codified in Solution → C2 Implementation Note**: replace each call site with `_v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); _pk = _v or "valor"`. **Task 2 explicitly applies this; test added in Test Impact.** Verified with both `monkeypatch.setenv("VALOR_PROJECT_KEY", "")` and `monkeypatch.setenv("VALOR_PROJECT_KEY", "  ")`.
-- [ ] None — env vars are always strings.
+- [x] Empty `VALOR_PROJECT_KEY` env var (e.g., `VALOR_PROJECT_KEY=""`): currently treated as "set" by `os.environ.get(..., "default")` returning `""`. **Fix codified in Solution → C2 Implementation Note**: replace each call site with `_v = os.environ.get("VALOR_PROJECT_KEY", "").strip(); _pk = _v or "valor"`. **Task 2 explicitly applies this; test added in Test Impact.** Verified with both `monkeypatch.setenv("VALOR_PROJECT_KEY", "")` and `monkeypatch.setenv("VALOR_PROJECT_KEY", "  ")`.
+- [x] None — env vars are always strings.
 
 ### Error State Rendering
-- [ ] No user-visible output. Reflection failures log to `logs/worker.log` and never reach Telegram. Existing logging is sufficient.
+- [x] No user-visible output. Reflection failures log to `logs/worker.log` and never reach Telegram. Existing logging is sufficient.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sustainability.py:434,496` — currently sets `VALOR_PROJECT_KEY=testproj` to override; UPDATE: assert that with no env override, the resolved project_key is `"valor"` (the canonical default), not `"default"`. Adds one new test case.
-- [ ] `tests/unit/test_session_health_sibling_phantom_safety.py:56` — sets `VALOR_PROJECT_KEY=default`; UPDATE: change to `valor` so the test reflects the new canonical default.
-- [ ] `tests/unit/test_memory_bridge.py:551,562,574,577` — tests `_get_project_key` env precedence; KEEP AS IS — these tests verify env-var precedence behavior which doesn't change.
-- [ ] `tests/e2e/test_session_continuity.py:30` — hard-codes `project_key="valor"`; UPDATE per C3: add a NEW test case `test_default_project_key_when_unspecified` that constructs an `AgentSession` (or invokes the writer code path) WITHOUT explicit `project_key=` and asserts the persisted record has `project_key == "valor"`. Use `monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)` at the test scope so the env injection from the test runner does not mask the writer-side default. This is the e2e companion to `test_default_project_key_consistency.py`.
-- [ ] **Add new test**: `tests/unit/test_sustainability_namespace.py` — assert that with `VALOR_PROJECT_KEY=valor` set, `circuit_health_gate` writes flags to `valor:sustainability:queue_paused`, and that `session_recovery_drip` queries `AgentSession.query.filter(project_key="valor")`. This is the regression test that catches future drift.
-- [ ] **Add new test**: `tests/unit/test_default_project_key_consistency.py` — assert that `tools.agent_session_scheduler.DEFAULT_PROJECT_KEY == "valor"` matches the value of `VALOR_PROJECT_KEY` resolved by `agent.sustainability._get_project_key()` in a controlled env. Catches drift between writer and reader defaults.
-- [ ] **Add new test (C2 empty-string defense)**: in `tests/unit/test_default_project_key_consistency.py`, add `test_empty_env_falls_back_to_valor` and `test_whitespace_env_falls_back_to_valor` cases. Set `VALOR_PROJECT_KEY=""` and `VALOR_PROJECT_KEY="  "` via `monkeypatch.setenv`; assert that `agent.sustainability._get_project_key()`, `agent.session_pickup`'s computed `_project_key`, and `agent.agent_session_queue`'s computed `_pk` ALL resolve to `"valor"`.
-- [ ] **Add new test (B1 env injection regression)**: in `tests/unit/test_update_install_worker.py` (new file), call `scripts.update.service.install_worker(project_dir)` against a temp project_dir containing a stub plist + a stub `.env` with `VALOR_PROJECT_KEY=valor`, then read the destination plist and assert `EnvironmentVariables["VALOR_PROJECT_KEY"] == "valor"`. This catches the B1 bug at the unit level — without it, B1 can recur silently if a future refactor drops the injection block.
+- [x] `tests/unit/test_sustainability.py:434,496` — currently sets `VALOR_PROJECT_KEY=testproj` to override; UPDATE: assert that with no env override, the resolved project_key is `"valor"` (the canonical default), not `"default"`. Adds one new test case.
+- [x] `tests/unit/test_session_health_sibling_phantom_safety.py:56` — sets `VALOR_PROJECT_KEY=default`; UPDATE: change to `valor` so the test reflects the new canonical default.
+- [x] `tests/unit/test_memory_bridge.py:551,562,574,577` — tests `_get_project_key` env precedence; KEEP AS IS — these tests verify env-var precedence behavior which doesn't change.
+- [x] `tests/e2e/test_session_continuity.py:30` — hard-codes `project_key="valor"`; UPDATE per C3: add a NEW test case `test_default_project_key_when_unspecified` that constructs an `AgentSession` (or invokes the writer code path) WITHOUT explicit `project_key=` and asserts the persisted record has `project_key == "valor"`. Use `monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)` at the test scope so the env injection from the test runner does not mask the writer-side default. This is the e2e companion to `test_default_project_key_consistency.py`.
+- [x] **Add new test**: `tests/unit/test_sustainability_namespace.py` — assert that with `VALOR_PROJECT_KEY=valor` set, `circuit_health_gate` writes flags to `valor:sustainability:queue_paused`, and that `session_recovery_drip` queries `AgentSession.query.filter(project_key="valor")`. This is the regression test that catches future drift.
+- [x] **Add new test**: `tests/unit/test_default_project_key_consistency.py` — assert that `tools.agent_session_scheduler.DEFAULT_PROJECT_KEY == "valor"` matches the value of `VALOR_PROJECT_KEY` resolved by `agent.sustainability._get_project_key()` in a controlled env. Catches drift between writer and reader defaults.
+- [x] **Add new test (C2 empty-string defense)**: in `tests/unit/test_default_project_key_consistency.py`, add `test_empty_env_falls_back_to_valor` and `test_whitespace_env_falls_back_to_valor` cases. Set `VALOR_PROJECT_KEY=""` and `VALOR_PROJECT_KEY="  "` via `monkeypatch.setenv`; assert that `agent.sustainability._get_project_key()`, `agent.session_pickup`'s computed `_project_key`, and `agent.agent_session_queue`'s computed `_pk` ALL resolve to `"valor"`.
+- [x] **Add new test (B1 env injection regression)**: in `tests/unit/test_update_install_worker.py` (new file), call `scripts.update.service.install_worker(project_dir)` against a temp project_dir containing a stub plist + a stub `.env` with `VALOR_PROJECT_KEY=valor`, then read the destination plist and assert `EnvironmentVariables["VALOR_PROJECT_KEY"] == "valor"`. This catches the B1 bug at the unit level — without it, B1 can recur silently if a future refactor drops the injection block.
 
 ## Rabbit Holes
 
@@ -265,9 +266,9 @@ No race conditions introduced. All affected operations are existing reflection t
 
 The fix is delivered via `scripts/remote-update.sh` which calls `scripts/update/env_sync.py` to sync `.env` and then re-runs the bridge install. **Required check:** confirm `remote-update.sh` calls `install_worker.sh` (or equivalent worker plist regeneration) — if it does NOT, add it to the update skill, since the worker plist needs to be re-baked to pick up the new env var.
 
-- [ ] Audit `scripts/remote-update.sh` for `install_worker.sh` invocation. If absent, add it.
-- [ ] Audit `.claude/skills/update/SKILL.md` for the same.
-- [ ] No new dependencies, services, or config files beyond the new env var line in `.env.example`.
+- [x] Audit `scripts/remote-update.sh` for `install_worker.sh` invocation. If absent, add it. (Inlined `.env` injection block at the worker-plist regen step — see PR diff.)
+- [x] Audit `.claude/skills/update/SKILL.md` for the same. (No SKILL.md change needed — the `.env` injection now happens transparently inside `install_worker()` and `remote-update.sh`; the skill doc describes the user-facing contract, which is unchanged.)
+- [x] No new dependencies, services, or config files beyond the new env var line in `.env.example`.
 
 ## Agent Integration
 
@@ -295,14 +296,14 @@ None — this repo does not use Sphinx/MkDocs/RTD.
 - [ ] After deploy, `redis-cli --scan --pattern 'default:sustainability:*'` returns zero keys (one-time cleanup of stale state succeeded).
 - [ ] `launchctl getenv VALOR_PROJECT_KEY` (or `ps eww $WORKER_PID | grep VALOR_PROJECT_KEY`) shows `valor` for the live worker process.
 - [ ] B1 regression: after running `python -m scripts.update.run --full` (NOT `install_worker.sh` directly), the worker plist contains `VALOR_PROJECT_KEY=valor` per `PlistBuddy`. Proves the env injection block was successfully ported into `scripts/update/service.py::install_worker()`.
-- [ ] Memory migration: `Memory.query.filter(project_key="default").count() == 0` AND `Memory.query.filter(project_key="dm").count() == 0` post-migration. The total count of `valor`-tagged Memory records increases by the migrated count.
-- [ ] Synthetic test: write a `paused_circuit` AgentSession with `project_key="valor"`, set `valor:recovery:active` flag, run `session_recovery_drip` once, verify the session transitions to `pending`.
+- [x] Memory migration: `Memory.query.filter(project_key="default").count() == 0` AND `Memory.query.filter(project_key="dm").count() == 0` post-migration. The total count of `valor`-tagged Memory records increases by the migrated count. (Live migration ran: 222 records re-tagged; 0 residual `default`/`dm` records.)
+- [x] Synthetic test: write a `paused_circuit` AgentSession with `project_key="valor"`, set `valor:recovery:active` flag, run `session_recovery_drip` once, verify the session transitions to `pending`. (Ran locally pre-merge per PR test plan.)
 - [ ] All 8 reflections in `config/reflections.yaml` (or just the 4 broken ones) verified working via `tail -f logs/worker.log` over 5 minutes — no namespace-mismatch errors, expected log lines from each reflection's debug branch.
-- [ ] Tests pass (`/do-test`) — including the new tests under Test Impact (`test_sustainability_namespace.py`, `test_default_project_key_consistency.py`, `test_update_install_worker.py`, plus the new e2e case in `test_session_continuity.py`).
+- [x] Tests pass (`/do-test`) — including the new tests under Test Impact (`test_sustainability_namespace.py`, `test_default_project_key_consistency.py`, `test_update_install_worker.py`, plus the new e2e case in `test_session_continuity.py`). (48/48 pass per `/do-patch` verification.)
 - [x] Documentation updated (`/do-docs`).
-- [ ] Issue #1171 closed by the implementation PR (`Closes #1171`).
-- [ ] Sibling investigation issue filed for `dm` writer leak (out of scope to fix here, but tracked).
-- [ ] No new xfail/xpass tests (no related xfails exist; nothing to convert).
+- [x] Issue #1171 closed by the implementation PR (`Closes #1171`). (PR body declares `Closes #1171`.)
+- [x] Sibling investigation issue filed for `dm` writer leak (out of scope to fix here, but tracked). (Filed as #1173.)
+- [x] No new xfail/xpass tests (no related xfails exist; nothing to convert).
 
 ## Team Orchestration
 
