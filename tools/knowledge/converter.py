@@ -317,21 +317,28 @@ def _run_llm_api(source: Path) -> str:
     return text
 
 
-def convert_to_sidecar(
+def convert_to_sidecar_with_status(
     source_path: Path | str,
     *,
     force: bool = False,
-) -> Path | None:
-    """Convert a binary/non-markdown source into a ``.md`` sidecar.
+) -> tuple[Path | None, str]:
+    """Convert a source and return (sidecar, status).
 
-    Returns the sidecar ``Path`` on success. Returns ``None`` when the
-    source is itself a ``.md`` (no conversion needed), the source has no
-    convertible extension, an image exceeds the 20MB guard, or the
-    existing sidecar already matches the source hash.
+    ``status`` is one of:
 
-    Raises :class:`ConversionError` when markitdown errors out. Callers
-    running inside the watcher must wrap this in try/except to honor the
-    "never crash the bridge" contract.
+    - ``"written"`` — markitdown ran and a fresh sidecar was atomically
+      written. ``sidecar`` is the resulting path.
+    - ``"skipped_hash"`` — an existing sidecar already matched the source
+      hash, so no work was done. ``sidecar`` is the existing path.
+    - ``"skipped_other"`` — nothing was attempted: ``.md`` input, an
+      unconvertible extension, source missing, zero-byte source, or an
+      image over the size guard. ``sidecar`` is ``None``.
+
+    Used by callers like ``valor-ingest --scan`` that need to distinguish
+    "actually converted N files" from "found N hash-matched sidecars".
+
+    Raises :class:`ConversionError` when markitdown errors out, identical
+    to :func:`convert_to_sidecar`.
     """
     source = Path(source_path).resolve()
     ext = source.suffix.lower()
@@ -339,24 +346,24 @@ def convert_to_sidecar(
     # Loop-prevention guard: any .md input is itself a sidecar or a
     # hand-written note — never feed back through the converter.
     if ext == ".md":
-        return None
+        return None, "skipped_other"
 
     if ext not in CONVERTIBLE_EXTENSIONS:
-        return None
+        return None, "skipped_other"
 
     if not source.exists():
         logger.debug("convert: source vanished: %s", source)
-        return None
+        return None, "skipped_other"
 
     try:
         size = source.stat().st_size
     except OSError as exc:
         logger.warning("convert: stat failed on %s: %s", source, exc)
-        return None
+        return None, "skipped_other"
 
     if size == 0:
         logger.debug("convert: skipping zero-byte source: %s", source)
-        return None
+        return None, "skipped_other"
 
     if ext in _IMAGE_EXTENSIONS and size > _IMAGE_MAX_BYTES:
         logger.warning(
@@ -365,7 +372,7 @@ def convert_to_sidecar(
             size,
             _IMAGE_MAX_BYTES,
         )
-        return None
+        return None, "skipped_other"
 
     sidecar = source.with_name(source.name + ".md")
 
@@ -375,7 +382,7 @@ def convert_to_sidecar(
     existing = _read_existing_frontmatter(sidecar)
     if not force and existing and existing.get("source_hash") == source_hash:
         logger.debug("convert: hash unchanged, skipping %s", source)
-        return sidecar
+        return sidecar, "skipped_hash"
 
     # Choose path.
     use_llm = _llm_enabled(ext)
@@ -410,6 +417,33 @@ def convert_to_sidecar(
     )
     _atomic_write(sidecar, frontmatter + body)
     logger.info("markitdown: wrote %s (llm=%s)", sidecar, llm_model)
+    return sidecar, "written"
+
+
+def convert_to_sidecar(
+    source_path: Path | str,
+    *,
+    force: bool = False,
+) -> Path | None:
+    """Convert a binary/non-markdown source into a ``.md`` sidecar.
+
+    Returns the sidecar ``Path`` on success or hash-match skip. Returns
+    ``None`` when the source is itself a ``.md`` (no conversion needed),
+    the source has no convertible extension, an image exceeds the 20MB
+    guard, or the source is missing/zero-byte.
+
+    Backward-compatible thin wrapper over
+    :func:`convert_to_sidecar_with_status` — collapses the (path, status)
+    pair into the original ``Path | None`` return shape. Callers that
+    need to distinguish "actually wrote" from "skipped due to hash"
+    (``--scan`` reporting) should call
+    :func:`convert_to_sidecar_with_status` directly.
+
+    Raises :class:`ConversionError` when markitdown errors out. Callers
+    running inside the watcher must wrap this in try/except to honor the
+    "never crash the bridge" contract.
+    """
+    sidecar, _status = convert_to_sidecar_with_status(source_path, force=force)
     return sidecar
 
 

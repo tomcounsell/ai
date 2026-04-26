@@ -135,6 +135,31 @@ class TestScanMode:
         assert rc == 1
         assert "not a directory" in capsys.readouterr().err
 
+    def test_scan_rerun_reports_skipped_separately(self, tmp_path: Path, capsys):
+        """Re-running --scan must NOT re-count hash-unchanged files as 'converted'.
+
+        First run: 1 converted, 0 skipped. Second run: 0 converted, 1 skipped
+        (hash unchanged). The CLI output must distinguish the two so users see
+        accurate counts on subsequent runs.
+        """
+        (tmp_path / "doc.html").write_text("<html><body>once</body></html>")
+
+        rc1 = valor_ingest.main(["--scan", str(tmp_path)])
+        assert rc1 == 0
+        first_out = capsys.readouterr().out
+        assert "1 converted" in first_out
+        # First run wrote the sidecar — nothing to skip via hash.
+        assert "0 skipped" in first_out
+
+        # Sidecar exists and source is unchanged. Second scan must skip it.
+        assert (tmp_path / "doc.html.md").exists()
+
+        rc2 = valor_ingest.main(["--scan", str(tmp_path)])
+        assert rc2 == 0
+        second_out = capsys.readouterr().out
+        assert "0 converted" in second_out
+        assert "1 skipped" in second_out
+
 
 @pytest.mark.unit
 class TestUrlDispatch:

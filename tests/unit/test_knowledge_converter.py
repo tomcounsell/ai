@@ -159,6 +159,45 @@ class TestHashIdempotency:
 
 
 @pytest.mark.unit
+class TestConvertWithStatus:
+    """Internal helper exposes write/skip distinction so callers can report counts."""
+
+    def test_first_call_returns_written(self, html_source: Path):
+        from tools.knowledge.converter import convert_to_sidecar_with_status
+
+        sidecar, status = convert_to_sidecar_with_status(html_source)
+        assert sidecar is not None
+        assert sidecar.exists()
+        assert status == "written"
+
+    def test_second_call_with_unchanged_hash_returns_skipped_hash(self, html_source: Path):
+        from tools.knowledge.converter import convert_to_sidecar_with_status
+
+        first_sidecar, first_status = convert_to_sidecar_with_status(html_source)
+        assert first_status == "written"
+        second_sidecar, second_status = convert_to_sidecar_with_status(html_source)
+        assert second_sidecar == first_sidecar
+        assert second_status == "skipped_hash"
+
+    def test_force_flag_returns_written_even_when_hash_matches(self, html_source: Path):
+        from tools.knowledge.converter import convert_to_sidecar_with_status
+
+        convert_to_sidecar_with_status(html_source)
+        sidecar, status = convert_to_sidecar_with_status(html_source, force=True)
+        assert sidecar is not None
+        assert status == "written"
+
+    def test_unconvertible_extension_returns_none_other(self, tmp_path: Path):
+        from tools.knowledge.converter import convert_to_sidecar_with_status
+
+        src = tmp_path / "data.json"
+        src.write_text("{}")
+        sidecar, status = convert_to_sidecar_with_status(src)
+        assert sidecar is None
+        assert status == "skipped_other"
+
+
+@pytest.mark.unit
 class TestImageSizeGuard:
     def test_oversized_image_is_skipped(self, tmp_path: Path, caplog):
         """Images over 20MB must not be routed to markitdown (C4)."""

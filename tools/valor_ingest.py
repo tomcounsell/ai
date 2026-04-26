@@ -41,6 +41,7 @@ from tools.knowledge.converter import (
     CONVERTIBLE_EXTENSIONS,
     ConversionError,
     convert_to_sidecar,
+    convert_to_sidecar_with_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,7 +184,19 @@ def _ingest_single(
 def _ingest_scan(root: str, *, force: bool) -> tuple[int, int, int]:
     """Recursively scan ``root`` and convert every convertible file.
 
-    Returns (converted, skipped, failed).
+    Returns ``(converted, skipped, failed)`` where:
+
+    - ``converted`` counts files for which a sidecar was actually written
+      (``status == "written"``)
+    - ``skipped`` counts files where an existing sidecar already matched
+      the source hash (``status == "skipped_hash"``) — i.e. idempotent
+      no-ops that the user should know weren't real conversions
+    - ``failed`` counts files where markitdown raised an error
+
+    The ``skipped_other`` bucket from the converter (zero-byte sources,
+    oversized images, vanished files) is silently dropped from the totals
+    because those candidates were filtered out before any meaningful work
+    was attempted, so reporting them confuses the user.
     """
     base = Path(root).expanduser().resolve()
     if not base.is_dir():
@@ -206,7 +219,7 @@ def _ingest_scan(root: str, *, force: bool) -> tuple[int, int, int]:
                 continue
             source = Path(dirpath) / name
             try:
-                sidecar = convert_to_sidecar(source, force=force)
+                _sidecar, status = convert_to_sidecar_with_status(source, force=force)
             except ConversionError as exc:
                 logger.warning("valor-ingest: %s: %s", source, exc)
                 failed += 1
@@ -215,10 +228,11 @@ def _ingest_scan(root: str, *, force: bool) -> tuple[int, int, int]:
                 logger.warning("valor-ingest: %s: unexpected error: %s", source, exc)
                 failed += 1
                 continue
-            if sidecar is None:
-                skipped += 1
-            else:
+            if status == "written":
                 converted += 1
+            elif status == "skipped_hash":
+                skipped += 1
+            # status == "skipped_other": silent (filtered before any work)
     return converted, skipped, failed
 
 
@@ -291,7 +305,10 @@ def main(argv: list[str] | None = None) -> int:
         except ConversionError as exc:
             print(f"valor-ingest: {exc}", file=sys.stderr)
             return 1
-        print(f"valor-ingest: {converted} converted, {skipped} skipped, {failed} failed")
+        print(
+            f"valor-ingest: {converted} converted, "
+            f"{skipped} skipped (hash unchanged), {failed} failed"
+        )
         return 0 if failed == 0 else 1
 
     # Single-source path.
