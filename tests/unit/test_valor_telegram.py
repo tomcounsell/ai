@@ -348,6 +348,7 @@ class TestCmdReadFlags:
         chat=None,
         chat_id=None,
         user=None,
+        project=None,
         limit=10,
         search=None,
         since=None,
@@ -358,6 +359,7 @@ class TestCmdReadFlags:
             chat=chat,
             chat_id=chat_id,
             user=user,
+            project=project,
             limit=limit,
             search=search,
             since=since,
@@ -636,7 +638,7 @@ class TestCmdReadFlags:
 
 
 class TestCmdReadArgparseMutex:
-    """argparse-level enforcement of --chat / --chat-id / --user mutex."""
+    """argparse-level enforcement of --chat / --chat-id / --user / --project mutex."""
 
     def test_chat_and_chat_id_both_rejected(self):
         """Passing both --chat and --chat-id raises SystemExit (argparse)."""
@@ -654,12 +656,341 @@ class TestCmdReadArgparseMutex:
         with pytest.raises(SystemExit):
             main()
 
+    def test_project_and_chat_both_rejected(self):
+        """Passing both --project and --chat raises SystemExit (argparse mutex)."""
+        from tools.valor_telegram import main
+
+        sys.argv = ["valor-telegram", "read", "--project", "psyoptimal", "--chat", "foo"]
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_project_and_chat_id_both_rejected(self):
+        """Passing both --project and --chat-id raises SystemExit (argparse mutex)."""
+        from tools.valor_telegram import main
+
+        sys.argv = ["valor-telegram", "read", "--project", "psyoptimal", "--chat-id", "-1"]
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_project_and_user_both_rejected(self):
+        """Passing both --project and --user raises SystemExit (argparse mutex)."""
+        from tools.valor_telegram import main
+
+        sys.argv = ["valor-telegram", "read", "--project", "psyoptimal", "--user", "tom"]
+        with pytest.raises(SystemExit):
+            main()
+
+
+class TestCmdReadProject:
+    """Cross-chat project-level reads via `--project` (issue #1169)."""
+
+    def _read_args(
+        self,
+        chat=None,
+        chat_id=None,
+        user=None,
+        project=None,
+        limit=10,
+        search=None,
+        since=None,
+        json_out=False,
+        strict=False,
+    ):
+        return argparse.Namespace(
+            chat=chat,
+            chat_id=chat_id,
+            user=user,
+            project=project,
+            limit=limit,
+            search=search,
+            since=since,
+            json=json_out,
+            strict=strict,
+        )
+
+    def test_zero_matching_chats_exits_1(self, capsys):
+        """`--project unknown` with no matching chats exits 1 with a stderr hint."""
+        from tools.valor_telegram import cmd_read
+
+        with patch("tools.valor_telegram.resolve_chats_by_project", return_value=[]):
+            result = cmd_read(self._read_args(project="unknown"))
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "No chats found for project 'unknown'" in err
+        assert "valor-telegram chats --project" in err
+
+    def test_single_matching_chat_renders_header_and_messages(self, capsys):
+        """One matching chat → project header + per-line `[chat_name]` tag."""
+        from tools.valor_telegram import cmd_read
+
+        candidates = [_CandidateStub("100", "PsyOPTIMAL", 1_700_000_500.0)]
+        msgs = {
+            "messages": [
+                {
+                    "id": "m1",
+                    "message_id": 1,
+                    "sender": "alice",
+                    "content": "hello",
+                    "timestamp": "2026-04-25T10:00:00",
+                    "message_type": "text",
+                }
+            ]
+        }
+        with (
+            patch("tools.valor_telegram.resolve_chats_by_project", return_value=candidates),
+            patch("tools.telegram_history.get_recent_messages", return_value=msgs),
+        ):
+            result = cmd_read(self._read_args(project="psyoptimal", limit=10))
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "[project=psyoptimal" in out
+        assert "1 chats" in out
+        assert "PsyOPTIMAL" in out
+        assert "[PsyOPTIMAL]" in out
+        assert "alice: hello" in out
+
+    def test_many_chats_merge_chronological_and_trim_total(self, capsys):
+        """Messages from all matching chats are interleaved by ts desc and trimmed total."""
+        from tools.valor_telegram import cmd_read
+
+        candidates = [
+            _CandidateStub("100", "ChatA", 1_700_000_500.0),
+            _CandidateStub("200", "ChatB", 1_700_000_400.0),
+        ]
+
+        # ChatA has 3 messages, ChatB has 3 messages, all at different times
+        msgs_a = {
+            "messages": [
+                {
+                    "id": "a1",
+                    "message_id": 1,
+                    "sender": "alice",
+                    "content": "A-newest",
+                    "timestamp": "2026-04-25T12:00:00",
+                    "message_type": "text",
+                },
+                {
+                    "id": "a2",
+                    "message_id": 2,
+                    "sender": "alice",
+                    "content": "A-middle",
+                    "timestamp": "2026-04-25T10:00:00",
+                    "message_type": "text",
+                },
+                {
+                    "id": "a3",
+                    "message_id": 3,
+                    "sender": "alice",
+                    "content": "A-oldest",
+                    "timestamp": "2026-04-25T08:00:00",
+                    "message_type": "text",
+                },
+            ]
+        }
+        msgs_b = {
+            "messages": [
+                {
+                    "id": "b1",
+                    "message_id": 1,
+                    "sender": "bob",
+                    "content": "B-newest",
+                    "timestamp": "2026-04-25T11:00:00",
+                    "message_type": "text",
+                },
+                {
+                    "id": "b2",
+                    "message_id": 2,
+                    "sender": "bob",
+                    "content": "B-middle",
+                    "timestamp": "2026-04-25T09:00:00",
+                    "message_type": "text",
+                },
+                {
+                    "id": "b3",
+                    "message_id": 3,
+                    "sender": "bob",
+                    "content": "B-oldest",
+                    "timestamp": "2026-04-25T07:00:00",
+                    "message_type": "text",
+                },
+            ]
+        }
+
+        def fake_get_recent(chat_id, limit):
+            if str(chat_id) == "100":
+                return msgs_a
+            return msgs_b
+
+        with (
+            patch("tools.valor_telegram.resolve_chats_by_project", return_value=candidates),
+            patch("tools.telegram_history.get_recent_messages", side_effect=fake_get_recent),
+        ):
+            # limit=4 → top 4 across the union after merge.
+            result = cmd_read(self._read_args(project="proj", limit=4))
+
+        assert result == 0
+        out = capsys.readouterr().out
+
+        # Output is chronological (oldest first) — bridge prints in chronological
+        # order historically; the merge is timestamp-desc then displayed oldest-first
+        # to match single-chat behavior.
+        # Either ordering is fine as long as exactly 4 of the 6 lines made it
+        # and the OLDEST 2 were dropped (B-oldest 07:00 and A-oldest 08:00).
+        assert "A-newest" in out
+        assert "B-newest" in out
+        assert "A-middle" in out
+        assert "B-middle" in out
+        assert "A-oldest" not in out
+        assert "B-oldest" not in out
+
+    def test_json_output_includes_chat_id_and_chat_name(self, capsys):
+        """`--project --json` enriches each message dict with chat_id + chat_name."""
+        from tools.valor_telegram import cmd_read
+
+        candidates = [_CandidateStub("100", "ChatA", 1_700_000_500.0)]
+        msgs = {
+            "messages": [
+                {
+                    "id": "m1",
+                    "message_id": 1,
+                    "sender": "alice",
+                    "content": "hi",
+                    "timestamp": "2026-04-25T10:00:00",
+                    "message_type": "text",
+                }
+            ]
+        }
+        with (
+            patch("tools.valor_telegram.resolve_chats_by_project", return_value=candidates),
+            patch("tools.telegram_history.get_recent_messages", return_value=msgs),
+        ):
+            result = cmd_read(self._read_args(project="proj", json_out=True))
+
+        assert result == 0
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["chat_id"] == "100"
+        assert data[0]["chat_name"] == "ChatA"
+        # Existing fields still present
+        assert data[0]["sender"] == "alice"
+        assert data[0]["content"] == "hi"
+
+    def test_project_freshness_header_format(self, capsys):
+        """Header format: `[project=KEY · N chats: name1, name2 · last activity: T]`."""
+        import re
+
+        from tools.valor_telegram import cmd_read
+
+        candidates = [
+            _CandidateStub("100", "ChatA", 1_700_000_500.0),
+            _CandidateStub("200", "ChatB", 1_700_000_400.0),
+        ]
+        with (
+            patch("tools.valor_telegram.resolve_chats_by_project", return_value=candidates),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
+        ):
+            cmd_read(self._read_args(project="psyoptimal"))
+
+        out = capsys.readouterr().out
+        # Match: [project=psyoptimal · 2 chats: ChatA, ChatB · last activity: ...]
+        pattern = r"\[project=psyoptimal · 2 chats: ChatA, ChatB · last activity: .+\]"
+        assert re.search(pattern, out), f"Header pattern not matched in: {out!r}"
+
+    def test_project_strict_rejected(self, capsys):
+        """`--project` + `--strict` is rejected with explicit error."""
+        from tools.valor_telegram import cmd_read
+
+        result = cmd_read(self._read_args(project="psyoptimal", strict=True))
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--strict has no effect with --project" in err
+
+    def test_empty_project_rejected(self, capsys):
+        """`--project ''` and `--project '   '` are rejected as empty."""
+        from tools.valor_telegram import cmd_read
+
+        result = cmd_read(self._read_args(project=""))
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--project cannot be empty" in err
+
+        result = cmd_read(self._read_args(project="   "))
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--project cannot be empty" in err
+
+    def test_project_mutex_in_cmd_read(self, capsys):
+        """Direct cmd_read invocation with --project + --chat exits 1."""
+        from tools.valor_telegram import cmd_read
+
+        result = cmd_read(self._read_args(project="psyoptimal", chat="foo"))
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "mutually exclusive" in err
+
+    def test_long_chat_name_truncated_in_per_line_tag(self, capsys):
+        """Per-line `[chat_name]` tag truncates names >25 chars with ellipsis."""
+        from tools.valor_telegram import cmd_read
+
+        long_name = "PsyOPTIMAL Engineering Daily Standup"  # 36 chars
+        candidates = [_CandidateStub("100", long_name, 1_700_000_500.0)]
+        msgs = {
+            "messages": [
+                {
+                    "id": "m1",
+                    "message_id": 1,
+                    "sender": "alice",
+                    "content": "hello",
+                    "timestamp": "2026-04-25T10:00:00",
+                    "message_type": "text",
+                }
+            ]
+        }
+        with (
+            patch("tools.valor_telegram.resolve_chats_by_project", return_value=candidates),
+            patch("tools.telegram_history.get_recent_messages", return_value=msgs),
+        ):
+            cmd_read(self._read_args(project="proj"))
+
+        out = capsys.readouterr().out
+        # The 36-char name must be truncated to 25 chars (+ ellipsis) in the
+        # per-line tag, but the FULL name appears in the project header.
+        assert long_name in out  # Header has the full name
+        # Per-line tag truncates: first 22 chars + "..." = 25 visible chars.
+        truncated = long_name[:22] + "..."
+        assert f"[{truncated}]" in out
+
+    def test_empty_results_prints_header_then_no_messages(self, capsys):
+        """Project header prints BEFORE any 'no messages' text on empty results."""
+        from tools.valor_telegram import cmd_read
+
+        candidates = [_CandidateStub("100", "ChatA", 1_700_000_500.0)]
+        with (
+            patch("tools.valor_telegram.resolve_chats_by_project", return_value=candidates),
+            patch("tools.telegram_history.get_recent_messages", return_value={"messages": []}),
+        ):
+            result = cmd_read(self._read_args(project="proj"))
+
+        assert result == 0
+        out = capsys.readouterr().out
+        header_idx = out.find("[project=proj")
+        nomsg_idx = out.find("No messages found for project 'proj'")
+        assert header_idx >= 0
+        assert nomsg_idx >= 0
+        assert header_idx < nomsg_idx
+
 
 class TestCmdChatsSearch:
     """`valor-telegram chats --search` filter (Task 5)."""
 
-    def _chats_args(self, search=None, json_out=False):
-        return argparse.Namespace(search=search, json=json_out)
+    def _chats_args(self, search=None, project=None, json_out=False):
+        return argparse.Namespace(search=search, project=project, json=json_out)
 
     def test_search_filter_matches(self, capsys):
         from tools.valor_telegram import cmd_chats
@@ -778,6 +1109,162 @@ class TestCmdChatsSearch:
         assert "PM: Psy" in names
         assert "Dev" not in names
         assert data["count"] == 1
+
+
+class TestCmdChatsProject:
+    """`valor-telegram chats --project` filter (issue #1169)."""
+
+    def _chats_args(self, search=None, project=None, json_out=False):
+        return argparse.Namespace(search=search, project=project, json=json_out)
+
+    def test_project_filter_matches(self, capsys):
+        """`chats --project psyoptimal` returns only matching chats."""
+        from tools.valor_telegram import cmd_chats
+
+        fake = {
+            "chats": [
+                {
+                    "chat_id": "1",
+                    "chat_name": "PsyOPTIMAL",
+                    "project_key": "psyoptimal",
+                    "message_count": 3,
+                    "last_message": "2026-04-24T10:00",
+                },
+                {
+                    "chat_id": "2",
+                    "chat_name": "Dev: Valor",
+                    "project_key": "valor",
+                    "message_count": 5,
+                    "last_message": "2026-04-24T09:00",
+                },
+                {
+                    "chat_id": "3",
+                    "chat_name": "PM: PsyOptimal",
+                    "project_key": "psyoptimal",
+                    "message_count": 7,
+                    "last_message": "2026-04-24T11:00",
+                },
+            ],
+            "count": 3,
+        }
+        with patch("tools.telegram_history.list_chats", return_value=fake):
+            result = cmd_chats(self._chats_args(project="psyoptimal"))
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "PsyOPTIMAL" in out
+        assert "PM: PsyOptimal" in out
+        assert "Dev: Valor" not in out
+        assert "matching project 'psyoptimal'" in out
+
+    def test_project_and_search_combined(self, capsys):
+        """`chats --project psyoptimal --search 'pm'` applies BOTH filters."""
+        from tools.valor_telegram import cmd_chats
+
+        fake = {
+            "chats": [
+                {
+                    "chat_id": "1",
+                    "chat_name": "PsyOPTIMAL",
+                    "project_key": "psyoptimal",
+                    "message_count": 3,
+                    "last_message": "2026-04-24T10:00",
+                },
+                {
+                    "chat_id": "2",
+                    "chat_name": "PM: PsyOptimal",
+                    "project_key": "psyoptimal",
+                    "message_count": 7,
+                    "last_message": "2026-04-24T11:00",
+                },
+                {
+                    "chat_id": "3",
+                    "chat_name": "PM: Valor",
+                    "project_key": "valor",
+                    "message_count": 4,
+                    "last_message": "2026-04-24T12:00",
+                },
+            ],
+            "count": 3,
+        }
+        with patch("tools.telegram_history.list_chats", return_value=fake):
+            result = cmd_chats(self._chats_args(project="psyoptimal", search="pm"))
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "PM: PsyOptimal" in out
+        assert "PsyOPTIMAL" not in out.replace("PM: PsyOptimal", "")  # exclude PM line
+        assert "PM: Valor" not in out
+
+    def test_project_unknown_returns_empty(self, capsys):
+        """`chats --project unknown` returns empty with no-match message."""
+        from tools.valor_telegram import cmd_chats
+
+        fake = {
+            "chats": [
+                {
+                    "chat_id": "1",
+                    "chat_name": "PsyOPTIMAL",
+                    "project_key": "psyoptimal",
+                    "message_count": 3,
+                    "last_message": None,
+                },
+            ],
+            "count": 1,
+        }
+        with patch("tools.telegram_history.list_chats", return_value=fake):
+            result = cmd_chats(self._chats_args(project="unknown"))
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "No chats" in out
+
+    def test_empty_project_rejected(self, capsys):
+        """`chats --project ''` is rejected."""
+        from tools.valor_telegram import cmd_chats
+
+        with patch(
+            "tools.telegram_history.list_chats",
+            side_effect=AssertionError("list_chats must not be called for empty --project"),
+        ):
+            result = cmd_chats(self._chats_args(project=""))
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "--project cannot be empty" in err
+
+    def test_project_json_includes_project_key(self, capsys):
+        """`chats --project --json` returns filtered list with project_key field."""
+        from tools.valor_telegram import cmd_chats
+
+        fake = {
+            "chats": [
+                {
+                    "chat_id": "1",
+                    "chat_name": "PsyOPTIMAL",
+                    "project_key": "psyoptimal",
+                    "message_count": 3,
+                    "last_message": None,
+                },
+                {
+                    "chat_id": "2",
+                    "chat_name": "Dev: Valor",
+                    "project_key": "valor",
+                    "message_count": 5,
+                    "last_message": None,
+                },
+            ],
+            "count": 2,
+        }
+        with patch("tools.telegram_history.list_chats", return_value=fake):
+            result = cmd_chats(self._chats_args(project="psyoptimal", json_out=True))
+
+        assert result == 0
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert data["count"] == 1
+        names = [c["chat_name"] for c in data["chats"]]
+        assert names == ["PsyOPTIMAL"]
+        assert data["chats"][0]["project_key"] == "psyoptimal"
 
 
 class TestFormatRelativeAge:
