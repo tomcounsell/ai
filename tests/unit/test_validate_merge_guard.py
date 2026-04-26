@@ -162,18 +162,13 @@ def test_commit_heredoc_body_with_substitution_patterns_allowed(guard):
     """
     body = (
         f"Fix describes patterns:\n"
-        f"  X=\"$({MERGE} 42)\" && echo ok\n"
-        f"  eval \"$({MERGE} 42)\"\n"
+        f'  X="$({MERGE} 42)" && echo ok\n'
+        f'  eval "$({MERGE} 42)"\n'
         f"  eval `{MERGE} 42`\n"
         f"And prose with stray tokens: encounters $( or backtick "
         f"(whether quoted or unquoted), same result.\n"
     )
-    cmd = (
-        f"git add file && git commit -m \"$(cat <<'EOF'\n"
-        f"{body}"
-        f"EOF\n"
-        f")\" && git push"
-    )
+    cmd = f"git add file && git commit -m \"$(cat <<'EOF'\n{body}EOF\n)\" && git push"
     # The entire merge-token content is inside the heredoc body, so the
     # guard must NOT block this commit.
     assert guard._merge_cmd_in_command(cmd) is False

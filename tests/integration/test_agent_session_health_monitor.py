@@ -195,7 +195,7 @@ class TestJobHealthCheck:
         from agent.agent_session_queue import _agent_session_health_check
 
         # Simulate a 4-hour-old session — far beyond any prior wall-clock cap.
-        _create_test_session(
+        s = _create_test_session(
             status="running",
             started_at=datetime.now(tz=UTC) - timedelta(hours=4),
             last_heartbeat_at=datetime.now(tz=UTC) - timedelta(seconds=30),
@@ -204,15 +204,20 @@ class TestJobHealthCheck:
         )
 
         # Worker is alive — fresh heartbeat is the dispositive evidence.
+        # Worker is keyed by the session's worker_key (project_key for a
+        # default test session, since session_type is unset).
         live_task = asyncio.Future()
-        _active_workers[self.WORKER_KEY] = live_task
+        _active_workers[s.worker_key] = live_task
 
-        await _agent_session_health_check()
+        try:
+            await _agent_session_health_check()
 
-        # Must remain running — no timeout-based recovery any more.
-        running = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running) == 1
-        assert running[0].session_id == "long_running_session"
+            # Must remain running — no timeout-based recovery any more.
+            running = AgentSession.query.filter(project_key="test", status="running")
+            assert len(running) == 1
+            assert running[0].session_id == "long_running_session"
+        finally:
+            _active_workers.pop(s.worker_key, None)
 
     @pytest.mark.asyncio
     async def test_skips_recently_started_job_with_dead_worker(self):
