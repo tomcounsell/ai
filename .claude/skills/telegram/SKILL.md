@@ -63,9 +63,12 @@ valor-telegram read --chat-id -1001234567 --limit 10
 
 # Force DM path with a whitelisted username
 valor-telegram read --user tom --limit 10
+
+# Cross-chat project read -- unions every chat tagged with project_key
+valor-telegram read --project psyoptimal --limit 20
 ```
 
-`--chat`, `--chat-id`, and `--user` are **mutually exclusive** -- pick one.
+`--chat`, `--chat-id`, `--user`, and `--project` are **mutually exclusive** -- pick one.
 
 ### Freshness Header
 
@@ -131,6 +134,37 @@ No chat matched 'PsyTeem'. Did you mean:
   -1009876543  PsyArchive             last: 2d ago
 ```
 
+### Cross-Chat Project Reads (`--project`)
+
+A project (e.g. PsyOPTIMAL) often spans multiple Telegram chats. Pass
+`--project PROJECT_KEY` to union messages across every chat with the
+matching `Chat.project_key`, interleaved chronologically:
+
+```
+valor-telegram read --project psyoptimal --limit 20
+```
+
+Output starts with a one-line **project freshness header** summarizing the
+unioned chat set:
+
+```
+[project=psyoptimal · 3 chats: PsyOPTIMAL, PM: PsyOptimal, Dev: PsyOPTIMAL · last activity: 3m ago]
+[2026-04-25 09:30] [PsyOPTIMAL] alice: kicking off the sprint
+[2026-04-25 09:32] [PM: PsyOptimal] tom: I'll grab the standup notes
+[2026-04-25 10:15] [Dev: PsyOPTIMAL] bob: shipped the auth fix
+```
+
+Each line is tagged with the originating `[chat_name]` (truncated to 25
+chars for long names). `--limit` applies to the **merged total**, not per
+chat — `--limit 20` returns the 20 most recent across the union.
+
+`--json` output enriches each message dict with `chat_id` and `chat_name`.
+The single-chat JSON shape is unchanged — these fields appear only under
+`--project`.
+
+`--strict` is rejected with `--project` (it has no name to resolve). To
+discover which chats would be unioned, run `valor-telegram chats --project KEY`.
+
 ## Sending Messages (CLI -- Dev session only)
 
 ```bash
@@ -159,7 +193,13 @@ valor-telegram chats --search "psy"
 # Normalization-aware: "PM psy" matches "PM: PsyOptimal"
 valor-telegram chats --search "PM psy"
 
-# JSON output
+# Filter by project_key (every chat that --project would union)
+valor-telegram chats --project psyoptimal
+
+# Combine both filters
+valor-telegram chats --project psyoptimal --search "dev"
+
+# JSON output (always includes project_key)
 valor-telegram chats --search "psy" --json
 ```
 
@@ -168,9 +208,11 @@ valor-telegram chats --search "psy" --json
 - **Check what someone said**: `valor-telegram read --chat "Tom" --limit 10`
 - **Find a past discussion**: `valor-telegram read --chat "Dev: Valor" --search "authentication"`
 - **Get recent context**: `valor-telegram read --chat "Dev: Valor" --since "2 hours ago"`
+- **Project-wide situational awareness**: `valor-telegram read --project psyoptimal --limit 20`
 - **Send a status update (Dev session)**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
 - **Share a file (Dev session)**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
 - **Discover chats by fragment**: `valor-telegram chats --search "psy"`
+- **List chats in a project**: `valor-telegram chats --project psyoptimal`
 
 ## Notes
 

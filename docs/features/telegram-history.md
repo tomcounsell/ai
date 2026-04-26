@@ -83,6 +83,7 @@ from tools.telegram_history import (
     list_chats,
     resolve_chat_candidates,
     resolve_chat_id,
+    resolve_chats_by_project,
     search_all_chats,
 )
 
@@ -153,6 +154,17 @@ except AmbiguousChatError as e:
 # Narrow exception handling: resolve_chat_candidates catches only
 # redis.RedisError / popoto.ModelException / popoto.QueryException,
 # logs a warning, and returns []. It does NOT swallow arbitrary exceptions.
+
+# Resolve a project_key to its set of chats (issue #1169).
+# Scans Chat.query.all() and filters by Chat.project_key == project_key
+# (project_key is a plain Field, not a KeyField — no indexed lookup).
+# Returns list[ChatCandidate] sorted by last_activity_ts desc with
+# chat_id ascending tiebreak. Chats with project_key=None are NEVER
+# returned. Empty/whitespace project_key returns []. Failure returns []
+# and logs a warning. Used by `valor-telegram read --project KEY` to
+# union messages across every chat in the project.
+project_chats = resolve_chats_by_project("psyoptimal")
+# project_chats -> [ChatCandidate(...), ChatCandidate(...), ...]
 
 # Search across all chats
 results = search_all_chats(query="python", max_results=20)
@@ -236,7 +248,7 @@ Tests use Redis db=1 (isolated via the `redis_test_db` autouse fixture) and cove
 - Filtering by domain, sender, and status
 - Pagination
 - Statistics
-- Chat registration and resolution
+- Chat registration and resolution (single-chat and project-level)
 
 ## Future Enhancements (Not Yet Implemented)
 
