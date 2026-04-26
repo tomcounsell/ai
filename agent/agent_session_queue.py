@@ -1405,7 +1405,11 @@ async def _worker_loop(
                     try:
                         from popoto.redis_db import POPOTO_REDIS_DB as _R
 
-                        _pk = os.environ.get("VALOR_PROJECT_KEY", "default")
+                        # Empty/whitespace VALOR_PROJECT_KEY falls back to "valor" so the
+                        # hibernation flag lands in the same namespace AgentSession writers
+                        # (and circuit_health_gate / session_pickup) use (issue #1171).
+                        _v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
+                        _pk = _v or "valor"
                         _hib_key = f"{_pk}:worker:hibernating"
                         _was_hibernating = _R.exists(_hib_key)
                         _R.set(_hib_key, "1", ex=600)

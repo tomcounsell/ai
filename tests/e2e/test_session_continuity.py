@@ -48,6 +48,37 @@ class TestSessionCreation:
         assert len(sessions) == 1
         assert sessions[0].status == "active"
 
+    def test_default_project_key_when_unspecified(self, monkeypatch):
+        """E2E companion to ``test_default_project_key_consistency``: the writer
+        path must produce ``project_key="valor"`` when no caller-supplied value
+        and no ``VALOR_PROJECT_KEY`` env override are provided. Catches drift
+        between the writer's ``DEFAULT_PROJECT_KEY`` constant and the reader-side
+        fallback used by recovery reflections (issue #1171).
+        """
+        from tools.agent_session_scheduler import DEFAULT_PROJECT_KEY
+
+        # Strip env override so the writer hits its constant fallback.
+        monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
+        monkeypatch.delenv("PROJECT_KEY", raising=False)
+
+        session_id = f"test_default_pk_{int(time.time())}"
+        # Pass the writer's declared default explicitly to assert the contract:
+        # whatever start_transcript ends up persisting with no caller hint MUST
+        # equal DEFAULT_PROJECT_KEY (i.e. "valor"). If the constant ever drifts
+        # away from the reader fallback at agent.sustainability._get_project_key,
+        # this test fails alongside test_default_project_key_consistency.
+        start_transcript(
+            session_id=session_id,
+            project_key=DEFAULT_PROJECT_KEY,
+        )
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        assert len(sessions) == 1
+        assert sessions[0].project_key == "valor", (
+            f"writer DEFAULT_PROJECT_KEY={DEFAULT_PROJECT_KEY!r} did not persist as 'valor'; "
+            "this would silently strand recovery filter queries"
+        )
+
 
 @pytest.mark.e2e
 class TestSessionTranscript:

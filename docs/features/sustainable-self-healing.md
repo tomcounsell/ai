@@ -65,7 +65,9 @@ All keys are scoped under `{project_key}:sustainability:*` except the recovery f
 | `{pk}:sustainability:seen_fingerprints` | set | 7 days | Deduplicate failure-loop issues |
 | `{pk}:recovery:active` | string | 3600s | Drip resume in progress |
 
-`{pk}` = `$VALOR_PROJECT_KEY` (default: `"default"`)
+`{pk}` = `$VALOR_PROJECT_KEY` (default: `"valor"`).
+
+The env var is injected into the worker and bridge launchd plists by the install scripts (`scripts/install_worker.sh`, `scripts/update/service.py::install_worker`, and `scripts/remote-update.sh`). Empty/whitespace values fall back to `"valor"` (the canonical AgentSession writer default at `tools/agent_session_scheduler.DEFAULT_PROJECT_KEY`). See issue #1171.
 
 ## Session Lifecycle
 
@@ -105,22 +107,22 @@ In `config/reflections.yaml`:
 
 **Check queue pause state:**
 ```bash
-redis-cli GET "${VALOR_PROJECT_KEY:-default}:sustainability:queue_paused"
+redis-cli GET "${VALOR_PROJECT_KEY:-valor}:sustainability:queue_paused"
 ```
 
 **Check throttle level:**
 ```bash
-redis-cli GET "${VALOR_PROJECT_KEY:-default}:sustainability:throttle_level"
+redis-cli GET "${VALOR_PROJECT_KEY:-valor}:sustainability:throttle_level"
 ```
 
 **Check seen failure fingerprints:**
 ```bash
-redis-cli SMEMBERS "${VALOR_PROJECT_KEY:-default}:sustainability:seen_fingerprints"
+redis-cli SMEMBERS "${VALOR_PROJECT_KEY:-valor}:sustainability:seen_fingerprints"
 ```
 
 **Check recovery flag:**
 ```bash
-redis-cli EXISTS "${VALOR_PROJECT_KEY:-default}:recovery:active"
+redis-cli EXISTS "${VALOR_PROJECT_KEY:-valor}:recovery:active"
 ```
 
 **Run reflections manually:**
