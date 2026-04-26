@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -147,3 +148,49 @@ class TestUrlDispatch:
         assert valor_ingest._looks_like_url("http://localhost:8000/doc")
         assert not valor_ingest._looks_like_url("/absolute/path/to/file.pdf")
         assert not valor_ingest._looks_like_url("./relative/file.html")
+
+    def test_offline_url_clean_error(self, monkeypatch, capsys):
+        """Offline URL fetch raises URLError; main() should print a clean
+        stderr message and return exit code 1 — not a Python traceback.
+        """
+
+        def fake_download(url, *, dest_dir):
+            raise urllib.error.URLError("Network is unreachable")
+
+        monkeypatch.setattr(valor_ingest, "_download_url_to_tempfile", fake_download)
+
+        rc = valor_ingest.main(["https://example.com/somefile.pdf"])
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        # Clean error message on stderr.
+        assert "Network error" in captured.err
+        assert "https://example.com/somefile.pdf" in captured.err
+        assert "Network is unreachable" in captured.err
+        # No Python traceback.
+        assert "Traceback" not in captured.err
+        assert "URLError" not in captured.err
+
+    def test_offline_url_http_error_clean_message(self, monkeypatch, capsys):
+        """HTTPError (subclass of URLError) gets a clearer message that
+        includes the HTTP status code, with no traceback.
+        """
+
+        def fake_download(url, *, dest_dir):
+            raise urllib.error.HTTPError(
+                url=url,
+                code=404,
+                msg="Not Found",
+                hdrs=None,
+                fp=None,
+            )
+
+        monkeypatch.setattr(valor_ingest, "_download_url_to_tempfile", fake_download)
+
+        rc = valor_ingest.main(["https://example.com/missing.pdf"])
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        assert "HTTP error" in captured.err
+        assert "404" in captured.err
+        assert "Traceback" not in captured.err

@@ -32,6 +32,7 @@ import logging
 import os
 import shutil
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -303,6 +304,23 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ConversionError as exc:
         print(f"valor-ingest: {exc}", file=sys.stderr)
+        return 1
+    except urllib.error.HTTPError as exc:
+        # Specialize HTTPError (subclass of URLError) for clearer messaging
+        # — surfaces the HTTP status code so users distinguish 404 from
+        # network unreachable.
+        print(
+            f"valor-ingest: HTTP error fetching {args.source}: {exc.code} {exc.reason}",
+            file=sys.stderr,
+        )
+        return 1
+    except urllib.error.URLError as exc:
+        # Offline / DNS / connection-refused / timeout. Reason can be an
+        # OSError or a string; str() handles both cleanly.
+        print(
+            f"valor-ingest: Network error fetching {args.source}: {exc.reason}",
+            file=sys.stderr,
+        )
         return 1
 
     if sidecar is None:

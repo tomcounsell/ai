@@ -201,7 +201,7 @@ PDF dropped in vault → watcher detects convertible extension → converter wri
 ### Empty/Invalid Input Handling
 - [x] Zero-byte PDF: assert converter returns without writing a sidecar (no empty `.md` files)
 - [x] Source path with whitespace/unicode: assert subprocess call quotes correctly
-- [ ] URL input to CLI when offline: assert a clean error message, not a crash
+- [x] URL input to CLI when offline: assert a clean error message, not a crash
 - [x] `valor-ingest` with missing argument: argparse prints usage, exit code 2
 
 ### Error State Rendering
@@ -210,7 +210,7 @@ PDF dropped in vault → watcher detects convertible extension → converter wri
 
 ## Test Impact
 
-- [ ] `tests/unit/test_knowledge_indexer.py` (if it exists) — UPDATE: add tests for sidecar `.md` files being indexed identically to hand-written `.md` files
+- [x] `tests/unit/test_knowledge_indexer.py` (if it exists) — UPDATE: add tests for sidecar `.md` files being indexed identically to hand-written `.md` files
 - [x] `tests/unit/test_knowledge_watcher.py` (if it exists) — UPDATE: add tests for `CONVERTIBLE_EXTENSIONS` triggering the converter path
 - [x] `tests/integration/test_knowledge_pipeline.py` (if it exists) — UPDATE: add end-to-end test: drop PDF → watcher → converter → indexer → KnowledgeDocument exists
 
