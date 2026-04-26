@@ -282,10 +282,10 @@ Additional coverage in `tests/integration/test_session_heartbeat_progress.py` (i
 | Test class | What it proves |
 |------------|---------------|
 | `TestHeartbeatFreshness` | Tier 1: fresh queue-only / SDK-only heartbeat is progress; both stale flags stuck |
-| `TestTier2ReprieveIntegration` | Tier 2: recent `last_stdout_at` reprieves; all-stale proceeds to kill |
+| `TestTier2ReprieveIntegration` | Tier 2: `compacting` reprieves; `stdout` gate retired by #1172 (recent stdout no longer reprieves) |
 | `TestRecoveryAttemptsIntegration` | `recovery_attempts` and `reprieve_count` fields round-trip through Popoto; `MAX_RECOVERY_ATTEMPTS` constant |
 | `TestDisableProgressKillIntegration` | `DISABLE_PROGRESS_KILL=1` suppresses kill; unset by default |
-| `TestFreshnessWindowConstants` | `HEARTBEAT_FRESHNESS_WINDOW` and `STDOUT_FRESHNESS_WINDOW` are 90s |
+| `TestFreshnessWindowConstants` | `HEARTBEAT_FRESHNESS_WINDOW` is 90s (`STDOUT_FRESHNESS_WINDOW` retired by #1172) |
 
 ## Related
 

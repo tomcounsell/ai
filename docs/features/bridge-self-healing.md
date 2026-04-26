@@ -143,7 +143,7 @@ Both the delivery stamp and the health-check guard are wrapped in `try/except` s
 
 #### 8a. No-Progress Recovery for Shared-Worker-Key Sessions (#944)
 
-**Problem**: A slugless dev session shares `worker_key` with any co-running PM session under the same project (both resolve to `project_key` via `AgentSession.worker_key`). `_agent_session_health_check` determined liveness via `worker_alive = _active_workers.get(worker_key) is not None and not worker.done()`. When a PM was alive under the same project, `worker_alive = True` even though the stuck dev session was not actually being handled — so the `not worker_alive` branch was skipped, and the dev session was only recovered after the 45-minute timeout (`AGENT_SESSION_TIMEOUT_DEFAULT` / `AGENT_SESSION_TIMEOUT_BUILD`) — 9x the intended 5-minute cadence.
+**Problem**: A slugless dev session shares `worker_key` with any co-running PM session under the same project (both resolve to `project_key` via `AgentSession.worker_key`). `_agent_session_health_check` determined liveness via `worker_alive = _active_workers.get(worker_key) is not None and not worker.done()`. When a PM was alive under the same project, `worker_alive = True` even though the stuck dev session was not actually being handled — so the `not worker_alive` branch was skipped, and the dev session was only recovered after the wall-clock cap fired (since retired by issue #1172). The fix below — own-progress fields evaluated under `_has_progress` — remains the canonical answer; with the wall-clock cap gone, the no-progress path is the only inference-free recovery branch and runs at the 5-minute health-check cadence.
 
 **Solution**: A new `elif` branch in `_agent_session_health_check` recovers sessions that are `worker_alive=True`, past the `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) startup guard, AND have no progress signal. Progress is evaluated by `_has_progress(entry)` which returns True if ANY of three fields is set: `turn_count > 0`, a non-empty `log_path`, or a non-empty `claude_session_uuid`. Together these cover the full SDK subprocess warmup arc:
 
@@ -443,42 +443,24 @@ Two independent 60-second writers update separate AgentSession fields:
 | `last_sdk_heartbeat_at` | Messenger-layer `BackgroundTask._watchdog` via `on_heartbeat_tick` callback | Every 60s while SDK subprocess runs |
 
 `_has_progress()` returns `True` if **either** heartbeat is within
-`HEARTBEAT_FRESHNESS_WINDOW` (90s) **and** stdout is fresh. Tier 1 flags a
-session as potentially stuck when **both** heartbeats are stale, OR when both
-heartbeats are fresh but stdout has been absent for too long (see below).
+`HEARTBEAT_FRESHNESS_WINDOW` (90s), or any own-progress field
+(`turn_count`, `log_path`, `claude_session_uuid`) is set, or the session
+has at least one non-terminal child. Tier 1 flags a session as potentially
+stuck when ALL of those signals are absent.
 
-**Stdout-stale kill signal (#1046):** The `_has_progress()` function includes a
-Tier 1 extension to catch the **alive-but-silent failure mode**: a `claude -p`
-subprocess can emit heartbeats every 60s (appearing healthy) yet produce zero
-stdout for hours — e.g. when the Claude API hangs or an MCP tool blocks. Even
-with both heartbeats fresh, `_has_progress()` returns `False` when:
+> **Retired by issue #1172:** the stdout-stale Tier 1 extension from #1046
+> (`STDOUT_FRESHNESS_WINDOW`, `FIRST_STDOUT_DEADLINE`) has been removed
+> along with the per-session wall-clock cap (`AGENT_SESSION_TIMEOUT_*`,
+> `_get_agent_session_timeout`). Stdout silence is no longer a kill signal
+> — long-thinking turns and large tool outputs produce legitimate stdout
+> silence. See [PM Session Liveness](pm-session-liveness.md) for the
+> evidence-only philosophy and cost-monitoring backstop.
 
-1. **`last_stdout_at` is set and stale** — `(now - last_stdout_at) >=
-   STDOUT_FRESHNESS_WINDOW` (600s = 10 min). The session is flagged even with
-   fresh heartbeats; Tier 2 gate (c) "alive" will typically reprieve it while
-   the subprocess is still running. Once the process goes non-alive, all Tier 2
-   gates fail and the kill path executes.
-
-2. **`last_stdout_at` is None** (session never produced stdout) **and `started_at`
-   is older than `FIRST_STDOUT_DEADLINE`** (300s = 5 min) — the session has not
-   emitted any stdout for 5+ minutes of runtime. This preserves warmup tolerance
-   from #1036 (young sessions with no stdout are fine) while bounding the
-   "silent from the start" failure case.
-
-**Constants** (both env-tunable):
+**Constants:**
 
 | Constant | Default | Env var | Purpose |
 |----------|---------|---------|---------|
-| `STDOUT_FRESHNESS_WINDOW` | 600s | `STDOUT_FRESHNESS_WINDOW_SECS` | Tier 1 stdout-stale threshold; also Tier 2 gate (e) reprieve window |
-| `FIRST_STDOUT_DEADLINE` | 300s | `FIRST_STDOUT_DEADLINE_SECS` | Tier 1 deadline for sessions that have never produced stdout |
-| `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 gate (b) `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
-
-**Reprieve behavior for alive-but-silent sessions:** When Tier 1 stdout-stale
-fires, `_tier2_reprieve_signal()` is called. Gate (c) "alive" will reprieve the
-session as long as the subprocess is running — this is intentional; a running
-process should not be killed prematurely. The actual kill latency for a hung-
-but-alive process is bounded to `STDOUT_FRESHNESS_WINDOW + one health-check tick`
-after the process eventually goes non-alive or the absolute session timeout fires.
+| `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
 
 **Operator alert:** After 3 Tier 2 reprieves, the reprieve log message is
 escalated from `INFO` to `WARNING`, signaling that the session may be in an
@@ -487,30 +469,28 @@ indefinite alive-but-silent reprieve loop.
 ### Tier 2 — activity-positive reprieve gates
 
 When Tier 1 flags a session, the health check calls `_tier2_reprieve_signal()`
-which evaluates four gates — one compaction-aware and three OS-level liveness
-checks via `psutil`:
+which evaluates three gates — one compaction-aware and two OS-level liveness
+checks via `psutil`. The previous fourth `stdout` gate was retired by issue
+#1172 along with `STDOUT_FRESHNESS_WINDOW`.
 
 | Gate | Check | Return |
 |------|-------|--------|
-| (b) compacting | `AgentSession.last_compaction_ts` within `COMPACT_REPRIEVE_WINDOW_SEC` (600s). Evaluated first so post-compaction idle periods are never misread as hangs. Companion writer: `agent/hooks/pre_compact.py::pre_compact_hook` (PR #1135). Added by issue #1099 Mode 3. | `"compacting"` |
-| (c) alive    | `psutil.Process(pid).status()` not in `{zombie, dead, stopped}` | `"alive"` |
-| (d) children | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred over `"alive"`) |
-| (e) stdout   | `last_stdout_at` within `STDOUT_FRESHNESS_WINDOW` (600s) | `"stdout"` |
+| compacting | `AgentSession.last_compaction_ts` within `COMPACT_REPRIEVE_WINDOW_SEC` (600s). Evaluated first so post-compaction idle periods are never misread as hangs. Companion writer: `agent/hooks/pre_compact.py::pre_compact_hook` (PR #1135). Added by issue #1099 Mode 3. | `"compacting"` |
+| children   | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred over `"alive"`) |
+| alive      | `psutil.Process(pid).status()` not in `{zombie, dead, stopped}` | `"alive"` |
 
 Any **one** passing gate reprieves the kill. The reprieve signal is logged and
 `reprieve_count` on the AgentSession is incremented for post-hoc analysis.
 `recovery_attempts` is NOT incremented on reprieve.
 
 **Scope:** Tier 2 reprieve applies **only** to `no_progress` recoveries.
-`worker_dead` and `timeout` recoveries skip Tier 2 entirely and proceed
-directly to the kill path. The rationale:
+`worker_dead` recoveries skip Tier 2 entirely and proceed directly to the
+kill path — there is no live worker to deliver any future progress signal,
+so an "active children" reprieve would only prolong a hung session.
 
-* `worker_dead` — there is no live worker to deliver any future progress
-  signal, so an "active children" reprieve would only prolong a hung session.
-* `timeout` — the configured session timeout is an absolute cap. Allowing an
-  activity-positive gate to defeat the timeout would make the cap
-  unenforceable; a runaway session that keeps spawning child processes would
-  never be killed.
+> The previous `timeout` recovery branch (and its skip-Tier-2 carve-out)
+> was retired by issue #1172 along with the wall-clock cap. Only
+> `no_progress` and `worker_dead` reason kinds remain.
 
 The pid is populated via the `on_sdk_started` callback that the messenger
 invokes once the SDK subprocess spawns; see "Messenger callbacks" below.
@@ -543,14 +523,17 @@ behavior before enabling kills during rollout.
 
 Redis counters keyed by `<project_key>:session-health:`:
 
-* `tier1_flagged_total` — every time both heartbeats were stale (heartbeat-stale path).
-* `tier1_flagged_stdout_stale` — every time Tier 1 fired due to stale stdout or missed `FIRST_STDOUT_DEADLINE` (stdout-stale path, #1046). Use this counter to distinguish the alive-but-silent failure mode from dead-heartbeat kills in dashboards.
-* `tier2_reprieve_total:{compacting|alive|children|stdout}` — reprieve by signal. The `compacting` suffix was added by issue #1099 Mode 3; the three OS-level gates were introduced in #1036.
+* `tier1_flagged_total` — every time `_has_progress` returned False (no
+  fresh heartbeats AND no own-progress AND no live children). The
+  previous `tier1_flagged_stdout_stale` counter was retired by issue
+  #1172 with the stdout-stale path itself.
+* `tier2_reprieve_total:{compacting|alive|children}` — reprieve by signal. The `compacting` gate was added by issue #1099 Mode 3; the two OS-level gates were introduced in #1036. The previous fourth `stdout` gate was retired by #1172.
 * `kill_total` — actual kills (after Tier 2 failed and kill-switch off).
+* `recoveries:{worker_dead|no_progress}` — recoveries by reason kind.
+  The previous `timeout` reason was retired by #1172.
 
 **Distinguishing kill causes in dashboards:**
-- `tier1_flagged_total` high, `tier1_flagged_stdout_stale` low → heartbeat writers are dying (clock/event-loop issue)
-- `tier1_flagged_stdout_stale` high → sessions hang silently (API/MCP tool issue)
+- `tier1_flagged_total` high → heartbeat writers are dying (clock/event-loop issue) OR sessions are genuinely stuck
 - `tier2_reprieve_total:alive` high → processes alive but silent; monitor `reprieve_count` for operator warnings
 
 ### Per-session fields
@@ -559,10 +542,15 @@ Redis counters keyed by `<project_key>:session-health:`:
 |-------|------|---------|
 | `last_heartbeat_at` | DatetimeField | Queue-layer heartbeat |
 | `last_sdk_heartbeat_at` | DatetimeField | Messenger watchdog heartbeat |
-| `last_stdout_at` | DatetimeField | Last SDK stdout event; Tier 1 stdout-stale input (#1046) |
-| `started_at` | DatetimeField | Session start time; `FIRST_STDOUT_DEADLINE` anchor (#1046) |
+| `last_stdout_at` | DatetimeField | Last SDK stdout event — informational only since #1172 (no longer a kill or reprieve signal) |
+| `started_at` | DatetimeField | Session start time |
 | `recovery_attempts` | IntField | Kills only; finalizes at `MAX_RECOVERY_ATTEMPTS` |
 | `reprieve_count` | IntField | Tier 2 saves — diagnostic only; triggers WARNING log after 3 |
+| `current_tool_name` | Field (str, null) | Pillar A (#1172): name of the tool currently in flight, or None between tools |
+| `last_tool_use_at` | DatetimeField | Pillar A (#1172): bumped at every tool boundary by pre/post tool-use hooks |
+| `last_turn_at` | DatetimeField | Pillar A (#1172): bumped on every SDK `result` event |
+| `recent_thinking_excerpt` | Field (str, null) | Pillar A (#1172): last 280 chars of extended-thinking content |
+| `self_report_sent_at` | DatetimeField | Pillar B (#1172): frequency cap state for the PM mid-work self-report |
 
 All fields are included in `_AGENT_SESSION_FIELDS` so they round-trip
 through delete-and-recreate paths (retry, orphan-fix, continuation fallback).
