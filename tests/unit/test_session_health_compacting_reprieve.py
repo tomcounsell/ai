@@ -71,23 +71,18 @@ def test_no_compaction_falls_through(clean_sessions):
     assert _tier2_reprieve_signal(handle=None, entry=s) is None
 
 
-def test_constant_distinct_from_stdout_window():
-    """COMPACT_REPRIEVE_WINDOW_SEC must be a distinct module symbol from STDOUT_FRESHNESS_WINDOW.
+def test_compact_reprieve_window_constant_still_exists():
+    """COMPACT_REPRIEVE_WINDOW_SEC remains the post-compaction grace constant.
 
-    Both happen to default to 600s today but they answer different questions.
-    Concern #4 in the plan critique — locking in the separate-symbol invariant
-    so future drift doesn't accidentally couple the two windows.
+    The companion ``STDOUT_FRESHNESS_WINDOW`` was retired by issue #1172 along
+    with all other inference-based kill paths. ``COMPACT_REPRIEVE_WINDOW_SEC``
+    survives because compaction is real evidence (a hook fired) — not an
+    inference from absence.
     """
     from agent import session_health
 
     assert hasattr(session_health, "COMPACT_REPRIEVE_WINDOW_SEC")
-    assert hasattr(session_health, "STDOUT_FRESHNESS_WINDOW")
-    # Identity (not value) — they must be two distinct attributes even when
-    # the values match. ``is not`` on Python ints is ambiguous due to small-int
-    # caching, so compare the attribute names indirectly via the module dict.
-    sh = vars(session_health)
-    assert "COMPACT_REPRIEVE_WINDOW_SEC" in sh
-    assert "STDOUT_FRESHNESS_WINDOW" in sh
+    assert isinstance(session_health.COMPACT_REPRIEVE_WINDOW_SEC, int)
 
 
 def test_malformed_timestamp_does_not_crash(clean_sessions):

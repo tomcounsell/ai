@@ -337,6 +337,39 @@ class AgentSession(Model):
     # against this failure mode.
     exit_returncode = IntField(default=0)
 
+    # === In-flight visibility fields (issue #1172, Pillar A) ===
+    # Name of the tool currently being executed by the SDK subprocess, written
+    # by `agent/hooks/pre_tool_use.py::pre_tool_use_hook` and cleared by
+    # `agent/hooks/post_tool_use.py::post_tool_use_hook`. Read by the dashboard
+    # `_session_to_json()` in `ui/app.py` so operators see live tool activity
+    # without inferring from staleness. Nullable; sessions running across the
+    # deploy boundary keep this None until their next tool boundary.
+    current_tool_name = Field(null=True, default=None)
+    # Timestamp of the last tool boundary (PreToolUse OR PostToolUse, whichever
+    # fired most recently). Bumped by both hooks. Read by the dashboard for the
+    # `last_evidence_at` derivation. Replaces stdout-staleness inference for
+    # operator-facing liveness signal.
+    last_tool_use_at = DatetimeField(null=True)
+    # Timestamp of the most recent SDK `result` event (turn boundary). Written
+    # by `agent/sdk_client.py::_run_harness_subprocess` when `event_type ==
+    # "result"`. Read by the dashboard for the `last_evidence_at` derivation.
+    last_turn_at = DatetimeField(null=True)
+    # Last 280 chars of extended-thinking content from the SDK stream. Written
+    # by the SDK client's stream-event handler when accumulating thinking
+    # deltas. Capped at 280 chars (tweet length) — small enough to render,
+    # large enough to be informative. Throttled to one save per 5s.
+    recent_thinking_excerpt = Field(null=True, default=None)
+
+    # === PM self-report behavior (issue #1172, Phase 1) ===
+    # Timestamp the PM session emitted its single mid-work self-report via
+    # `valor-telegram send`. Set by `agent/session_completion.py::
+    # _emit_pm_self_report` after a successful subprocess invocation
+    # (`returncode == 0`). The `is None` check on this field is the
+    # frequency-cap state: at most one self-report per session lifetime.
+    # Failure to send leaves this None — retry is bounded by the next
+    # dev-child completion event firing, never by the detector.
+    self_report_sent_at = DatetimeField(null=True)
+
     class Meta:
         ttl = 2592000  # 30 days — hard backstop for retain_for_resume BUILD sessions
 

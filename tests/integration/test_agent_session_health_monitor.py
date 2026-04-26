@@ -2,9 +2,13 @@
 
 Tests cover:
 - started_at field on AgentSession (set when session transitions to running)
-- _get_agent_session_timeout() returning correct timeouts based on message_text
-- _agent_session_health_check() detecting and recovering dead workers and timed-out jobs
+- _agent_session_health_check() detecting and recovering dead workers
 - CLI functions: format_duration, show_status, flush_stuck, flush_session
+
+The previous wall-clock per-session timeout (``_get_agent_session_timeout`` +
+``AGENT_SESSION_TIMEOUT_DEFAULT``/``BUILD``) was retired by issue #1172 — the
+detector no longer kills on inferred staleness. Cost monitoring is the
+long-run backstop for genuinely runaway sessions.
 """
 
 import asyncio
@@ -78,56 +82,6 @@ class TestStartedAtField:
         fields = _extract_agent_session_fields(session)
         assert "started_at" in fields
         assert fields["started_at"] is not None
-
-
-class TestGetJobTimeout:
-    """Tests for _get_agent_session_timeout()."""
-
-    def test_standard_job_timeout(self):
-        """Regular jobs should get the default 45-minute timeout."""
-        from agent.agent_session_queue import (
-            AGENT_SESSION_TIMEOUT_DEFAULT,
-            _get_agent_session_timeout,
-        )
-
-        session = _create_test_session(message_text="hello, please fix the bug")
-        timeout = _get_agent_session_timeout(session)
-        assert timeout == AGENT_SESSION_TIMEOUT_DEFAULT
-
-    def test_build_job_timeout(self):
-        """Jobs containing /do-build should get the 2.5-hour timeout."""
-        from agent.agent_session_queue import (
-            AGENT_SESSION_TIMEOUT_BUILD,
-            _get_agent_session_timeout,
-        )
-
-        session = _create_test_session(message_text="/do-build docs/plans/my-feature.md")
-        timeout = _get_agent_session_timeout(session)
-        assert timeout == AGENT_SESSION_TIMEOUT_BUILD
-
-    def test_build_job_timeout_case_sensitive(self):
-        """The /do-build check should be exact (not case-insensitive)."""
-        from agent.agent_session_queue import (
-            AGENT_SESSION_TIMEOUT_DEFAULT,
-            _get_agent_session_timeout,
-        )
-
-        session = _create_test_session(message_text="/DO-BUILD something")
-        timeout = _get_agent_session_timeout(session)
-        # /do-build is lowercase in the plan, so uppercase shouldn't match
-        assert timeout == AGENT_SESSION_TIMEOUT_DEFAULT
-
-    def test_none_message_text_returns_default(self):
-        """Jobs with None message_text should get default timeout."""
-        from agent.agent_session_queue import (
-            AGENT_SESSION_TIMEOUT_DEFAULT,
-            _get_agent_session_timeout,
-        )
-
-        session = _create_test_session(message_text="")
-        # Override message_text to empty/None after creation
-        timeout = _get_agent_session_timeout(session)
-        assert timeout == AGENT_SESSION_TIMEOUT_DEFAULT
 
 
 class TestJobHealthCheck:
@@ -235,32 +189,30 @@ class TestJobHealthCheck:
         assert len(pending) == 0
 
     @pytest.mark.asyncio
-    async def test_recovers_timed_out_job_with_alive_worker(self):
-        """A session that exceeded timeout should be recovered even if worker is alive."""
-        from agent.agent_session_queue import (
-            AGENT_SESSION_TIMEOUT_DEFAULT,
-            _agent_session_health_check,
-        )
+    async def test_long_running_session_with_fresh_heartbeat_survives(self):
+        """Issue #1172: a session with a fresh heartbeat is NOT killed regardless
+        of wall-clock duration. The previous wall-clock cap is gone."""
+        from agent.agent_session_queue import _agent_session_health_check
 
+        # Simulate a 4-hour-old session — far beyond any prior wall-clock cap.
         _create_test_session(
             status="running",
-            started_at=datetime.now(tz=UTC)
-            - timedelta(seconds=AGENT_SESSION_TIMEOUT_DEFAULT + 100),  # past timeout
-            session_id="timeout_session",
+            started_at=datetime.now(tz=UTC) - timedelta(hours=4),
+            last_heartbeat_at=datetime.now(tz=UTC) - timedelta(seconds=30),
+            turn_count=12,
+            session_id="long_running_session",
         )
 
-        # Worker is alive but session has exceeded timeout
+        # Worker is alive — fresh heartbeat is the dispositive evidence.
         live_task = asyncio.Future()
         _active_workers[self.WORKER_KEY] = live_task
 
         await _agent_session_health_check()
 
+        # Must remain running — no timeout-based recovery any more.
         running = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running) == 0
-
-        pending = AgentSession.query.filter(project_key="test", status="pending")
-        assert len(pending) == 1
-        assert pending[0].session_id == "timeout_session"
+        assert len(running) == 1
+        assert running[0].session_id == "long_running_session"
 
     @pytest.mark.asyncio
     async def test_skips_recently_started_job_with_dead_worker(self):
@@ -423,17 +375,13 @@ class TestJobHealthConstants:
     """Tests for health check constants."""
 
     def test_constants_exist(self):
-        """Health check constants should be defined."""
+        """Health check constants that survived the #1172 simplification."""
         from agent.agent_session_queue import (
             AGENT_SESSION_HEALTH_CHECK_INTERVAL,
             AGENT_SESSION_HEALTH_MIN_RUNNING,
-            AGENT_SESSION_TIMEOUT_BUILD,
-            AGENT_SESSION_TIMEOUT_DEFAULT,
         )
 
         assert AGENT_SESSION_HEALTH_CHECK_INTERVAL == 300
-        assert AGENT_SESSION_TIMEOUT_DEFAULT == 2700
-        assert AGENT_SESSION_TIMEOUT_BUILD == 9000
         assert AGENT_SESSION_HEALTH_MIN_RUNNING == 300
 
 

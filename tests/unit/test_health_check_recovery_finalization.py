@@ -341,14 +341,14 @@ class TestHasProgressDualHeartbeat:
         assert _has_progress(entry) is True
 
 
-class TestStdoutStaleTier1:
-    """Tests for the stdout-stale Tier 1 kill signal (#1046).
+class TestStdoutStaleRetired:
+    """The stdout-stale Tier 1 kill signal (#1046) was retired by #1172.
 
-    Even with fresh heartbeats, _has_progress() returns False when:
-    - last_stdout_at is stale beyond STDOUT_FRESHNESS_WINDOW (600s), or
-    - last_stdout_at is None and started_at is older than FIRST_STDOUT_DEADLINE (300s).
-
-    Sessions with fresh stdout or young started_at are NOT flagged.
+    Fresh heartbeats are now sufficient evidence of progress regardless of
+    stdout cadence. These regression tests assert the removal held —
+    long-thinking turns and large tool outputs no longer false-kill PM work.
+    See ``tests/unit/test_session_health_inference_removed.py`` for the
+    structural guards on the deleted constants.
     """
 
     @staticmethod
@@ -357,7 +357,7 @@ class TestStdoutStaleTier1:
             "turn_count": 0,
             "log_path": "",
             "claude_session_uuid": None,
-            "last_heartbeat_at": _ago(30),  # fresh heartbeat — Tier 1 would normally pass
+            "last_heartbeat_at": _ago(30),  # fresh heartbeat
             "last_sdk_heartbeat_at": None,
             "last_stdout_at": None,
             "started_at": None,
@@ -367,68 +367,26 @@ class TestStdoutStaleTier1:
         entry.get_children = lambda: []
         return entry
 
-    def test_fresh_heartbeats_stale_stdout_returns_false(self):
-        """Fresh heartbeats + stale stdout (> 600s) → Tier 1 flags → False."""
+    def test_fresh_heartbeats_stale_stdout_returns_true(self):
+        """Fresh heartbeats + stale stdout → progress (deleted path must NOT fire)."""
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(last_stdout_at=_ago(700))
-        assert _has_progress(entry) is False
+        assert _has_progress(entry) is True
 
-    def test_fresh_heartbeats_fresh_stdout_returns_true(self):
-        """Fresh heartbeats + fresh stdout (< 600s) → no flag → True."""
+    def test_fresh_heartbeats_no_stdout_old_started_at_returns_true(self):
+        """Fresh heartbeats + no stdout + old started_at → progress (deleted path)."""
         from agent.agent_session_queue import _has_progress
 
-        entry = self._make_entry(last_stdout_at=_ago(60))
+        entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
         assert _has_progress(entry) is True
 
     def test_fresh_heartbeats_no_stdout_young_started_at_returns_true(self):
-        """Fresh heartbeats + no stdout + young started_at (< 300s) → warmup tolerance → True."""
+        """Fresh heartbeats + young session: warmup tolerance preserved."""
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(120))
         assert _has_progress(entry) is True
-
-    def test_fresh_heartbeats_no_stdout_old_started_at_returns_false(self):
-        """Fresh heartbeats + no stdout + old started_at (>300s) → FIRST_STDOUT_DEADLINE → False."""
-        from agent.agent_session_queue import _has_progress
-
-        entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
-        assert _has_progress(entry) is False
-
-    def test_last_progress_reason_set_on_stdout_stale(self):
-        """_last_progress_reason is 'stdout_stale' when stdout-stale flag fires.
-
-        _last_progress_reason lives in agent.session_health after extraction.
-        """
-        import agent.session_health as q
-
-        entry = self._make_entry(last_stdout_at=_ago(700))
-        q._has_progress(entry)
-        assert q._last_progress_reason == "stdout_stale"
-
-    def test_last_progress_reason_set_on_first_stdout_deadline(self):
-        """_last_progress_reason is 'first_stdout_deadline' when deadline flag fires.
-
-        _last_progress_reason lives in agent.session_health after extraction.
-        """
-        import agent.session_health as q
-
-        entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
-        q._has_progress(entry)
-        assert q._last_progress_reason == "first_stdout_deadline"
-
-    def test_last_progress_reason_reset_on_true_return(self):
-        """_last_progress_reason is reset to '' when _has_progress() returns True.
-
-        _last_progress_reason lives in agent.session_health after extraction.
-        """
-        import agent.session_health as q
-
-        q._last_progress_reason = "leftover"
-        entry = self._make_entry(last_stdout_at=_ago(60))
-        result = q._has_progress(entry)
-        assert result is True
-        assert q._last_progress_reason == ""
 
 
 class TestTier2ReprieveGates:
@@ -515,34 +473,26 @@ class TestTier2ReprieveGates:
         handle = self._make_handle(pid=999999)
         assert _tier2_reprieve_signal(handle, self._make_entry()) is None
 
-    def test_reprieve_on_recent_stdout(self):
-        """No pid, recent stdout → 'stdout'."""
+    def test_no_reprieve_on_recent_stdout(self):
+        """The "stdout" gate was retired by #1172 — recent stdout no longer reprieves."""
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         handle = self._make_handle(pid=None)
         entry = self._make_entry(last_stdout_at=_ago(30))
-        assert _tier2_reprieve_signal(handle, entry) == "stdout"
-
-    def test_no_reprieve_on_stale_stdout(self):
-        """No pid, stale stdout (>600s) → None (STDOUT_FRESHNESS_WINDOW raised to 600s, #1046)."""
-        from agent.agent_session_queue import _tier2_reprieve_signal
-
-        handle = self._make_handle(pid=None)
-        entry = self._make_entry(last_stdout_at=_ago(700))
         assert _tier2_reprieve_signal(handle, entry) is None
 
     def test_no_reprieve_on_handle_none(self):
-        """handle=None, no stdout → None."""
+        """handle=None and no other evidence → None."""
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         assert _tier2_reprieve_signal(None, self._make_entry()) is None
 
-    def test_reprieve_on_stdout_when_handle_none(self):
-        """handle=None but fresh stdout → 'stdout' (Tier 2 gate still works)."""
+    def test_no_reprieve_on_stdout_when_handle_none(self):
+        """handle=None and no compaction → None even if stdout is fresh (#1172)."""
         from agent.agent_session_queue import _tier2_reprieve_signal
 
         entry = self._make_entry(last_stdout_at=_ago(30))
-        assert _tier2_reprieve_signal(None, entry) == "stdout"
+        assert _tier2_reprieve_signal(None, entry) is None
 
 
 class TestRecoveryCancellation:
@@ -861,13 +811,15 @@ class TestReprieveScopedToNoProgress:
         )
 
     def test_no_progress_handle_none_debug_log_present(self):
-        """Source audit: debug log fires when handle is None, regardless
-        of reason_kind (NIT 1 from #1039 review)."""
+        """Source audit: a debug log is emitted when handle is None so
+        operators know the Tier 2 evaluation is degraded (the stdout gate
+        was retired by #1172, so without a pid only the compaction gate
+        can fire)."""
         import inspect
 
         from agent import agent_session_queue as q
 
         src = inspect.getsource(q._agent_session_health_check)
-        assert "Tier 2 will use stdout gate only" in src, (
-            "Expected debug log 'Tier 2 will use stdout gate only' when handle is None"
+        assert "Tier 2 reprieve will only see compaction state" in src, (
+            "Expected a degraded-Tier-2 debug log when handle is None"
         )
