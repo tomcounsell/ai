@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: feature
 appetite: Small
 owner: Valor
