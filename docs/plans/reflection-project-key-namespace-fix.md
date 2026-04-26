@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -276,18 +276,18 @@ No agent integration required — this is a worker/bridge internal change. The r
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/sustainable-self-healing.md` — replace any mention of `${VALOR_PROJECT_KEY:-default}` with `${VALOR_PROJECT_KEY:-valor}` (and update example `redis-cli` commands at lines 108, 113, 118, 123).
-- [ ] Update `docs/features/worker-hibernation.md` — same project_key references.
-- [ ] Update `docs/features/subconscious-memory.md` — update the project_key resolution table at lines 402-415 to reflect the canonical `valor` namespace and document the one-shot migration that ran (Task 4.5).
-- [ ] Update `docs/features/claude-code-memory.md` — same as above.
-- [ ] Add a brief entry to `docs/plans/memory-project-key-isolation.md` (or its archived form) noting that the recovery surface was patched in this plan and the residual `default`/`dm` Memory records were migrated to `valor`.
+- [x] Update `docs/features/sustainable-self-healing.md` — replace any mention of `${VALOR_PROJECT_KEY:-default}` with `${VALOR_PROJECT_KEY:-valor}` (and update example `redis-cli` commands at lines 108, 113, 118, 123).
+- [x] Update `docs/features/worker-hibernation.md` — same project_key references.
+- [x] Update `docs/features/subconscious-memory.md` — update the project_key resolution table at lines 402-415 to reflect the canonical `valor` namespace and document the one-shot migration that ran (Task 4.5).
+- [x] Update `docs/features/claude-code-memory.md` — same as above.
+- [x] Add a brief entry to `docs/plans/memory-project-key-isolation.md` (or its archived form) noting that the recovery surface was patched in this plan and the residual `default`/`dm` Memory records were migrated to `valor`.
 
 ### External Documentation Site
 None — this repo does not use Sphinx/MkDocs/RTD.
 
 ### Inline Documentation
-- [ ] Add a comment near `agent/sustainability.py:30` explaining why the fallback is `"valor"` (or `"default"`) — point at this plan/issue so future readers don't drift it back.
-- [ ] Update the docstring at the top of `agent/sustainability.py:14-18` (Redis key schema) to mention that `{project_key}` resolves to `valor` in production, set via `VALOR_PROJECT_KEY` env var injected by plist generators.
+- [x] Add a comment near `agent/sustainability.py:30` explaining why the fallback is `"valor"` (or `"default"`) — point at this plan/issue so future readers don't drift it back.
+- [x] Update the docstring at the top of `agent/sustainability.py:14-18` (Redis key schema) to mention that `{project_key}` resolves to `valor` in production, set via `VALOR_PROJECT_KEY` env var injected by plist generators.
 
 ## Success Criteria
 
@@ -299,7 +299,7 @@ None — this repo does not use Sphinx/MkDocs/RTD.
 - [ ] Synthetic test: write a `paused_circuit` AgentSession with `project_key="valor"`, set `valor:recovery:active` flag, run `session_recovery_drip` once, verify the session transitions to `pending`.
 - [ ] All 8 reflections in `config/reflections.yaml` (or just the 4 broken ones) verified working via `tail -f logs/worker.log` over 5 minutes — no namespace-mismatch errors, expected log lines from each reflection's debug branch.
 - [ ] Tests pass (`/do-test`) — including the new tests under Test Impact (`test_sustainability_namespace.py`, `test_default_project_key_consistency.py`, `test_update_install_worker.py`, plus the new e2e case in `test_session_continuity.py`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] Documentation updated (`/do-docs`).
 - [ ] Issue #1171 closed by the implementation PR (`Closes #1171`).
 - [ ] Sibling investigation issue filed for `dm` writer leak (out of scope to fix here, but tracked).
 - [ ] No new xfail/xpass tests (no related xfails exist; nothing to convert).

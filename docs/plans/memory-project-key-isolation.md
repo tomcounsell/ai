@@ -337,3 +337,17 @@ See plan template for full list.
 ## Open Questions
 
 None — root cause is fully understood, scope is narrow, all decisions are straightforward.
+
+---
+
+## Follow-up: Recovery-Surface Patch (Issue #1171, PR #1174)
+
+The original isolation fix (PR #820) changed `config.memory_defaults.DEFAULT_PROJECT_KEY` from `"dm"` to `"default"` and threaded `cwd` through hook entry points so Claude Code memory recall would land on the `"valor"` partition. That patch did not touch the queue-governance reflections — those continued to read/write `default:*` Redis keys while AgentSession records were tagged `project_key="valor"`, silently disabling `circuit_health_gate`, `session_recovery_drip`, the queue-pop pause check, and hibernation flag writes.
+
+Issue #1171 closed that gap on the recovery surface:
+
+- `agent/sustainability.py`, `agent/session_pickup.py`, and `agent/agent_session_queue.py` now resolve `VALOR_PROJECT_KEY` defensively (empty/whitespace falls back to `"valor"`) so all four reflections agree on the namespace where AgentSessions live.
+- `scripts/update/service.py::install_worker()` and `scripts/remote-update.sh` now inject `.env` values into the worker plist (matching the long-standing behaviour in `scripts/install_worker.sh`), so `VALOR_PROJECT_KEY=valor` survives a `/update --full` regen.
+- `scripts/migrate_memory_project_key.py` was extended to handle BOTH `"default"` and `"dm"` obsolete buckets via Popoto's supported `save(migrate_key=True)` path. One live run migrated 222 residual records (218 `"default"` + 4 mislabeled `"dm"`) to `"valor"`, leaving 484 valor / 0 default / 0 dm. Genuine Telegram DM records (`source="human"` AND `agent_id="dm"`) remained untouched.
+
+After PR #1174 deploy the recovery reflections and the memory subsystem read from the same partition the writers populate. The `dm`-namespace writer leak source surfaced during the migration was filed as sibling investigation issue #1173.
