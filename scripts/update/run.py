@@ -1230,6 +1230,23 @@ def main() -> int:
         else:
             status = "update successful"
 
+        # One-time valor-ingest backfill reminder, fired on the run that
+        # actually installed the [knowledge] extra. Gated by a per-machine
+        # flag file so cron updates don't re-nag. See plan C6 / Task 6.5.
+        if result.dep_result and result.dep_result.backfill_reminder_needed:
+            flag = Path.home() / ".cache" / "valor" / "markitdown-backfill-reminded"
+            if not flag.exists():
+                status += (
+                    "\n\nTip: run 'valor-ingest --scan ~/work-vault/' to "
+                    "backfill existing binary files into sidecars."
+                )
+                try:
+                    flag.parent.mkdir(parents=True, exist_ok=True)
+                    flag.touch()
+                except OSError:
+                    # Flag-file failure is not worth blocking the run.
+                    pass
+
         # Only attach log file if there were problems; clean success = simple message
         if not result.success or result.warnings:
             log_file = args.project_dir / "data" / "update.txt"

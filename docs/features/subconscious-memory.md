@@ -138,7 +138,7 @@ Agents can deliberately persist high-level concepts using `python -m tools.memor
 
 The knowledge document integration system indexes work-vault files as companion memories. See [Knowledge Document Integration](knowledge-document-integration.md) for full details.
 
-1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog
+1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog. Markdown/text sources flow directly to step 2; **binary sources (PDF, DOCX, PPTX, XLSX, HTML, images)** are converted into `.md` sidecars in the same `_flush()` iteration via `tools/knowledge/converter.py` — see [Markitdown Ingestion](markitdown-ingestion.md). Audio formats are deliberately excluded (privacy disqualifier).
 2. `index_file()` reads content, resolves project scope, upserts `KnowledgeDocument` (Redis + filesystem)
 3. After upsert, `_sync_chunks()` splits the content into overlapping `DocumentChunk` records (each with its own embedding) for fine-grained semantic search
 4. Haiku summarizes the document content (fallback: first 500 chars)

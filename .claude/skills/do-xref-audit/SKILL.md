@@ -84,6 +84,14 @@ Produce a structured list:
   <filepath> | <title> | <topics> | <existing xrefs to docs/> | <app/feature>
 
 Skip files that are purely personal (no relation to the codebase).
+
+SKIP markitdown-generated sidecars: files whose YAML frontmatter contains
+`generated_by: markitdown` are derivative artifacts — the authoritative
+content is the original source (e.g. `report.pdf` next to `report.pdf.md`).
+Indexing the sidecar is correct (the searchable proxy is the sidecar) but
+adding bidirectional xrefs to sidecars is not — they regenerate whenever
+their source changes, and `regenerated_at` in the frontmatter is the
+canonical change-detection field for future tooling.
 ```
 
 ### Agent B — Docs Inventory

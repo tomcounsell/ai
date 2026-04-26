@@ -44,6 +44,22 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
 ]
+# Multi-format document ingestion for the knowledge pipeline.
+# Deliberate exclusions (documented in docs/features/markitdown-ingestion.md):
+# - markitdown audio extra: uses unauthenticated Google Web Speech API key;
+#   privacy-unacceptable for consulting material (see plan spike-2)
+# - markitdown YouTube extra: tools/valor_youtube_search already uses
+#   youtube-transcript-api (see line 16); valor-ingest delegates to that path
+# PDF backend resolution (Task 1a result, 2026-04-24 uv lock on Python 3.14):
+#   - pdfminer-six 20251230 (primary extractor for markitdown[pdf])
+#   - pypdfium2 5.7.1 (transitive via pdfplumber)
+#   - pypdf 6.10.2 (our direct CVE-safe pin, line 22 — no conflict)
+# onnxruntime>=1.25.0 is required because magika (transitive) pulls older
+# onnxruntime that lacks cp314 wheels; 1.25.0 ships Python 3.14 wheels.
+knowledge = [
+    "markitdown[pdf,docx,pptx,xlsx,outlook]>=0.1.0",
+    "onnxruntime>=1.25.0",
+]
 
 [project.scripts]
 valor-telegram = "tools.valor_telegram:main"
@@ -57,6 +73,7 @@ valor-fetch = "tools.web:cli_fetch"
 valor-sms-reader = "tools.sms_reader.cli:main"
 valor-image-tagging = "tools.image_tagging:main"
 valor-youtube-search = "tools.youtube_search.cli:main"
+valor-ingest = "tools.valor_ingest:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -19,6 +19,16 @@ class DepSyncResult:
     method: str  # "uv", "pip", or "skipped"
     output: str
     error: str | None = None
+    # True iff `markitdown` was NOT importable in the project venv before
+    # this sync AND IS importable after. Used by scripts/update/run.py to
+    # append a one-time valor-ingest --scan backfill reminder to the
+    # Telegram summary on the run that actually installs the [knowledge]
+    # extra (per plan C6). Probing the venv (rather than diffing uv.lock)
+    # survives the run.py ordering — by the time we sync, git pull has
+    # already updated uv.lock so the lockfile diff is always empty.
+    # Not set on pip/skipped paths — those are fallback code paths that
+    # don't own the venv state machine.
+    backfill_reminder_needed: bool = False
 
 
 @dataclass
@@ -74,8 +84,36 @@ def install_uv() -> bool:
         return False
 
 
+def _markitdown_importable(project_dir: Path) -> bool:
+    """Return True if `import markitdown` succeeds inside the project venv.
+
+    Probes actual environment state, not lockfile artifacts — the lockfile
+    is rewritten by `git pull` before sync_with_uv runs, so a lockfile diff
+    can never see a first-time install. We invoke the venv's python
+    explicitly (not `sys.executable`) so this works correctly when the
+    update script itself is launched from the system python.
+
+    Returns False when no venv python exists yet (fresh clone, pre-sync).
+    """
+    python_path = project_dir / ".venv" / "bin" / "python"
+    if not python_path.exists():
+        return False
+    try:
+        result = run_cmd(
+            [str(python_path), "-c", "import markitdown"],
+            cwd=project_dir,
+            check=False,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
 def sync_with_uv(project_dir: Path, reinstall: bool = False) -> DepSyncResult:
     """Sync dependencies using uv."""
+    had_markitdown_before = _markitdown_importable(project_dir)
+
     cmd = ["uv", "sync", "--all-extras"]
     if reinstall:
         cmd.append("--reinstall")
@@ -86,10 +124,13 @@ def sync_with_uv(project_dir: Path, reinstall: bool = False) -> DepSyncResult:
         # Also install in editable mode
         run_cmd(["uv", "pip", "install", "-e", "."], cwd=project_dir)
 
+        has_markitdown_after = _markitdown_importable(project_dir)
+
         return DepSyncResult(
             success=True,
             method="uv",
             output=result.stdout + result.stderr,
+            backfill_reminder_needed=(not had_markitdown_before and has_markitdown_after),
         )
     except subprocess.CalledProcessError as e:
         return DepSyncResult(
