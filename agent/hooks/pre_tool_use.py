@@ -383,9 +383,19 @@ async def pre_tool_use_hook(
     Inspects Write and Edit tool calls for sensitive file paths
     and blocks them before execution. Detects Skill tool invocations to
     wire PipelineStateMachine.start_stage() for PM session stage tracking.
+    Also records the tool boundary on the in-flight AgentSession so the
+    dashboard can show ``current_tool_name`` (issue #1172, Pillar A).
     """
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
+
+    # Pillar A liveness write — fire-and-forget, never blocks the hook.
+    try:
+        from agent.hooks.liveness_writers import record_tool_boundary
+
+        record_tool_boundary(tool_name=tool_name, clear=False)
+    except Exception as _liveness_err:
+        logger.debug("[pre_tool_use] liveness write failed (non-fatal): %s", _liveness_err)
 
     # Detect Skill tool invocations and map to pipeline stage start
     if tool_name == "Skill":

@@ -278,6 +278,15 @@ def create_app() -> FastAPI:
             "total_output_tokens": s.total_output_tokens,
             "total_cache_read_tokens": s.total_cache_read_tokens,
             "total_cost_usd": s.total_cost_usd,
+            # In-flight visibility (issue #1172, Pillar A). Operators see
+            # what the agent is doing right now without inferring from
+            # staleness. ``last_evidence_at`` is the max of every evidence
+            # timestamp (heartbeats, stdout, tool, turn, compaction).
+            "current_tool_name": s.current_tool_name,
+            "last_tool_use_at": s.last_tool_use_at,
+            "last_turn_at": s.last_turn_at,
+            "recent_thinking_excerpt": s.recent_thinking_excerpt,
+            "last_evidence_at": s.last_evidence_at,
             "children": [_session_to_json(c) for c in s.children],
             "events": [
                 {

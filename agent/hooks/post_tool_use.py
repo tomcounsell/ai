@@ -59,12 +59,21 @@ async def post_tool_use_hook(
 ) -> dict[str, Any]:
     """Run watchdog health check and handle Skill tool stage completion.
 
-    For every tool call: runs the watchdog health check.
+    For every tool call: runs the watchdog health check and clears the
+    in-flight ``current_tool_name`` on the AgentSession (issue #1172, Pillar A).
     For Skill tool calls specifically: calls _complete_pipeline_stage() to
     advance the pipeline state machine after the skill finishes.
     """
     from agent.health_check import watchdog_hook
     from agent.hooks.pre_tool_use import _SKILL_TO_STAGE
+
+    # Pillar A liveness write — fire-and-forget, clear the current tool name.
+    try:
+        from agent.hooks.liveness_writers import record_tool_boundary
+
+        record_tool_boundary(tool_name=None, clear=True)
+    except Exception as _liveness_err:
+        logger.debug("[post_tool_use] liveness write failed (non-fatal): %s", _liveness_err)
 
     # Always run watchdog
     result = await watchdog_hook(input_data, tool_use_id, context)

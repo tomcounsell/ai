@@ -2317,6 +2317,15 @@ async def _run_harness_subprocess(
         if event_type == "result":
             result_text = data.get("result", "")
             session_id_from_harness = data.get("session_id")
+            # Pillar A turn boundary (issue #1172). Bumps last_turn_at on
+            # the in-flight AgentSession so the dashboard can show how
+            # recently the SDK completed a turn. Best-effort, never raises.
+            try:
+                from agent.hooks.liveness_writers import record_turn_boundary
+
+                record_turn_boundary()
+            except Exception as _liveness_err:
+                logger.debug("liveness turn-boundary write failed: %s", _liveness_err)
             # Extract per-turn token + cost counts (issue #1128). These
             # are the harness-side counterpart of `ResultMessage.usage`
             # and `ResultMessage.total_cost_usd` from the SDK path. The
@@ -2339,13 +2348,27 @@ async def _run_harness_subprocess(
             event = data.get("event", {})
             if event.get("type") == "content_block_start":
                 full_text = ""
-            elif (
-                event.get("type") == "content_block_delta"
-                and event.get("delta", {}).get("type") == "text_delta"
-            ):
-                chunk = event["delta"].get("text", "")
-                if chunk:
-                    full_text += chunk
+            elif event.get("type") == "content_block_delta":
+                delta = event.get("delta", {}) or {}
+                delta_type = delta.get("type")
+                if delta_type == "text_delta":
+                    chunk = delta.get("text", "")
+                    if chunk:
+                        full_text += chunk
+                elif delta_type == "thinking_delta":
+                    # Pillar A (issue #1172): bubble extended-thinking content
+                    # to the dashboard so operators can see what the agent is
+                    # mulling. Best-effort; throttled in liveness_writers.
+                    chunk = delta.get("thinking", "") or delta.get("text", "")
+                    if chunk:
+                        try:
+                            from agent.hooks.liveness_writers import (
+                                record_thinking_excerpt,
+                            )
+
+                            record_thinking_excerpt(chunk)
+                        except Exception as _liveness_err:
+                            logger.debug("liveness thinking-delta write failed: %s", _liveness_err)
 
     _, stderr_data = await proc.communicate()
     returncode = proc.returncode if proc.returncode is not None else 0

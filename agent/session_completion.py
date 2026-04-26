@@ -4,10 +4,12 @@ handling, and continuation-PM creation."""
 import asyncio
 import logging
 import os
+import subprocess
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from config.enums import SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -832,6 +834,118 @@ async def drain_pending_completions(timeout: float = 15.0) -> None:
         )
 
 
+# Maximum length of the templated self-report message, in chars. Keeps the
+# Telegram payload small and predictable.
+_SELF_REPORT_MESSAGE_MAX = 200
+_SELF_REPORT_SUBPROCESS_TIMEOUT_SEC = 30
+
+
+def _self_report_message_for(parent: AgentSession) -> str:
+    """Compose the templated self-report body from the PM's initial message.
+
+    Templated, not LLM-generated. The plan rejects LLM-composed content here
+    because past experiments (#1159 spam mode) drift into chatty cadence.
+    A short, predictable string keeps the goldilocks shape.
+    """
+    raw = (getattr(parent, "message_text", None) or "").strip()
+    if not raw:
+        return "Working on PM session — Dev session running."
+    snippet = raw[:_SELF_REPORT_MESSAGE_MAX].rstrip()
+    return f"Working on: {snippet} — Dev session running."
+
+
+def _emit_pm_self_report(parent: AgentSession, *, project_name: str | None) -> bool:
+    """Send the PM session's single mid-work self-report (issue #1172).
+
+    Trigger gates (all must hold):
+
+    1. ``parent.session_type == "pm"`` — only PM sessions self-report.
+    2. ``parent.self_report_sent_at is None`` — frequency cap (one per
+       session lifetime).
+    3. ``project_name`` is a non-empty string — used to address the chat
+       (``PM: {project_name}``). When None, the send is skipped (the wrong
+       channel is worse than no message).
+
+    Channel: ``PM: {project_name}`` via ``valor-telegram send``. Reuses the
+    subprocess pattern from ``agent/sustainability.py:_send_telegram``.
+
+    Side effects on success: writes
+    ``self_report_sent_at = datetime.now(tz=UTC)`` and saves the field. On
+    any failure path (rc != 0, subprocess raise) the state stays None so
+    the next dev-child completion can retry — but the cap is bounded by
+    completion events, never by the detector.
+
+    Returns True iff a Telegram message was sent successfully.
+    """
+    # Gate 1: session type must be PM.
+    if getattr(parent, "session_type", None) != SessionType.PM:
+        return False
+
+    # Gate 2: frequency cap — already sent.
+    if getattr(parent, "self_report_sent_at", None) is not None:
+        logger.debug(
+            "[pm-self-report] Cap hit for %s — already sent at %s",
+            getattr(parent, "session_id", "?"),
+            parent.self_report_sent_at,
+        )
+        return False
+
+    # Gate 3: project_name must be present (no fallback channel).
+    if not project_name or not isinstance(project_name, str):
+        logger.warning(
+            "[pm-self-report] Skipping send for %s — no project_name available",
+            getattr(parent, "session_id", "?"),
+        )
+        return False
+
+    chat = f"PM: {project_name}"
+    body = _self_report_message_for(parent)
+    cmd = ["valor-telegram", "send", "--chat", chat, body]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_SELF_REPORT_SUBPROCESS_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[pm-self-report] valor-telegram subprocess raised for %s: %s",
+            getattr(parent, "session_id", "?"),
+            exc,
+        )
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            "[pm-self-report] valor-telegram exited rc=%d for %s: %s",
+            result.returncode,
+            getattr(parent, "session_id", "?"),
+            (result.stderr or "").strip()[:200],
+        )
+        return False
+
+    try:
+        parent.self_report_sent_at = datetime.now(tz=UTC)
+        parent.save(update_fields=["self_report_sent_at", "updated_at"])
+    except Exception as save_err:
+        logger.warning(
+            "[pm-self-report] Saved send but failed to persist self_report_sent_at "
+            "for %s (will retry on next dev completion): %s",
+            getattr(parent, "session_id", "?"),
+            save_err,
+        )
+        return True  # message went out — caller treats this as success.
+
+    logger.info(
+        "[pm-self-report] Sent mid-work status for %s to chat %r",
+        getattr(parent, "session_id", "?"),
+        chat,
+    )
+    return True
+
+
 async def _handle_dev_session_completion(
     session: Any,
     agent_session: Any,
@@ -1013,6 +1127,21 @@ async def _handle_dev_session_completion(
                 parent, summary_context, send_cb, chat_id, telegram_message_id
             )
             return  # runner owns final delivery + parent transition
+
+        # Pipeline NOT yet complete — emit the PM mid-work self-report (#1172).
+        # Capped at one per session lifetime via parent.self_report_sent_at.
+        # Fire-and-forget; failures never block steering.
+        try:
+            project_name = None
+            pc = getattr(parent, "project_config", None)
+            if isinstance(pc, dict):
+                project_name = pc.get("name") or pc.get("display_name")
+            _emit_pm_self_report(parent, project_name=project_name)
+        except Exception as _self_report_err:
+            logger.warning(
+                "[harness] PM self-report invocation failed (non-fatal): %s",
+                _self_report_err,
+            )
 
         # Steer parent PM session with pipeline state update.
         # Check the return value — if steering fails (parent already terminal),
