@@ -260,7 +260,7 @@ On resolver failure: message marked `\Seen` + labeled `valor-retry` + counter in
 
 ### Single-machine-per-project operation
 
-This plan assumes one bridge machine polls any given Gmail account at a time — operator's responsibility (machine/project assignment in `projects.json` and per-host gating via `machine_exclude` or equivalent). With single-machine operation:
+This plan assumes one bridge machine polls any given Gmail account at a time — enforced by `projects.<key>.machine` in `projects.json` (each project is owned by exactly one machine; whitelist entries inherit ownership via their `project` field). The bridge fails fast at startup if a contact would route to multiple machines. With single-machine operation:
 - No concurrent-poll race on `\Seen` marking.
 - No concurrent resolver dispatch for the same sender (cache stampede trivially avoided).
 - No concurrent `find_coalescing_session_id` races.

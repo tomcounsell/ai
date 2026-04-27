@@ -569,9 +569,15 @@ def log_event(event_type: str, **kwargs) -> None:
 
 # Load config at startup (propagate ACTIVE_PROJECTS to routing module first)
 import bridge.routing as _routing_module  # noqa: E402
+from bridge.config_validation import validate_dm_whitelist  # noqa: E402
 
 _routing_module.ACTIVE_PROJECTS = ACTIVE_PROJECTS
 CONFIG = load_config()
+# Validate the full config (not just the per-machine subset) so misconfiguration
+# fails the same way on every machine. Bridge will not start with an invalid
+# whitelist — this is the safety net that prevents one contact from being
+# routed to multiple machines simultaneously.
+validate_dm_whitelist(CONFIG)
 DEFAULTS = CONFIG.get("defaults", {})
 GROUP_TO_PROJECT = build_group_to_project_map(CONFIG)
 
@@ -585,31 +591,25 @@ RESPOND_TO_DMS = any(
     for p in ACTIVE_PROJECTS
 )
 
-# DM whitelist - only respond to DMs from these Telegram user IDs
-# Loaded from projects.json dms.whitelist array
-# All DM users get uniform qa_only access (no per-user permission levels)
-# Entries may include "machine_exclude": ["Machine Name"] to skip on specific machines
+# DM whitelist - only respond to DMs from these Telegram user IDs.
+# Loaded from projects.json dms.whitelist array. Each entry must declare
+# a "project" field; the entry only loads on the machine that owns that
+# project (per projects.<key>.machine in projects.json). Default-deny:
+# entries with no project, or a project not owned by this machine, are
+# silently skipped. Adding a new machine costs zero edits to existing
+# whitelist entries — they migrate automatically with their project.
 DM_WHITELIST: set[int] = set()
 DM_USER_TO_PROJECT: dict[int, dict] = {}
-_whitelist_entries = CONFIG.get("dms", {}).get("whitelist", [])
-try:
-    _current_machine = (
-        subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip().lower()
-    )
-except Exception:
-    _current_machine = ""
-for _entry in _whitelist_entries:
-    if isinstance(_entry, dict) and "id" in _entry:
-        _excluded_machines = [m.lower() for m in _entry.get("machine_exclude", [])]
-        if _current_machine.lower() in _excluded_machines:
-            continue
-        DM_WHITELIST.add(int(_entry["id"]))
-        if "project" in _entry:
-            _proj_key = _entry["project"]
-            _proj_cfg = CONFIG.get("projects", {}).get(_proj_key, {})
-            _proj_cfg = dict(_proj_cfg)
-            _proj_cfg["_key"] = _proj_key
-            DM_USER_TO_PROJECT[int(_entry["id"])] = _proj_cfg
+for _entry in CONFIG.get("dms", {}).get("whitelist", []):
+    if not (isinstance(_entry, dict) and "id" in _entry):
+        continue
+    _proj_key = _entry.get("project")
+    if not _proj_key or _proj_key not in ACTIVE_PROJECTS:
+        continue
+    DM_WHITELIST.add(int(_entry["id"]))
+    _proj_cfg = dict(CONFIG.get("projects", {}).get(_proj_key, {}))
+    _proj_cfg["_key"] = _proj_key
+    DM_USER_TO_PROJECT[int(_entry["id"])] = _proj_cfg
 
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
