@@ -965,6 +965,67 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     return result
 
 
+def check_projects_json(project_dir: Path) -> ToolCheck:
+    """Validate ~/Desktop/Valor/projects.json before allowing a service restart.
+
+    Acts as the green-light gate for bridge startup: if the iCloud-synced
+    config is malformed (e.g. one Telegram contact mapped to multiple
+    machines), the update script must not bounce the bridge — the existing
+    process keeps running on the old (validated) config until the operator
+    fixes the file.
+
+    Returns ToolCheck.available=True on pass; available=False with an
+    error string on failure. Also returns True with version="skipped" when
+    the file is missing (fresh machine; bridge install gates separately).
+    """
+    import json
+    import sys
+
+    config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+    if not config_path.exists():
+        return ToolCheck(
+            name="projects.json",
+            available=True,
+            version="skipped (file not present)",
+        )
+
+    try:
+        cfg = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        return ToolCheck(
+            name="projects.json",
+            available=False,
+            error=f"Failed to read/parse: {e}",
+        )
+
+    # Import the validator from the bridge package. Add project root to
+    # sys.path defensively in case verify.py is invoked outside the venv.
+    sys.path.insert(0, str(project_dir))
+    try:
+        from bridge.config_validation import (
+            ConfigValidationError,
+            validate_dm_whitelist,
+        )
+    except ImportError as e:
+        return ToolCheck(
+            name="projects.json",
+            available=False,
+            error=f"Could not import validator: {e}",
+        )
+
+    try:
+        validate_dm_whitelist(cfg)
+    except ConfigValidationError as e:
+        return ToolCheck(name="projects.json", available=False, error=str(e))
+
+    whitelist_count = len(cfg.get("dms", {}).get("whitelist", []))
+    return ToolCheck(
+        name="projects.json",
+        available=True,
+        version=f"valid ({whitelist_count} whitelist entries)",
+    )
+
+
 def check_machine_identity(project_dir: Path) -> dict:
     """Verify this machine's identity against projects.json config.
 

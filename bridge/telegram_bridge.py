@@ -569,15 +569,9 @@ def log_event(event_type: str, **kwargs) -> None:
 
 # Load config at startup (propagate ACTIVE_PROJECTS to routing module first)
 import bridge.routing as _routing_module  # noqa: E402
-from bridge.config_validation import validate_dm_whitelist  # noqa: E402
 
 _routing_module.ACTIVE_PROJECTS = ACTIVE_PROJECTS
 CONFIG = load_config()
-# Validate the full config (not just the per-machine subset) so misconfiguration
-# fails the same way on every machine. Bridge will not start with an invalid
-# whitelist — this is the safety net that prevents one contact from being
-# routed to multiple machines simultaneously.
-validate_dm_whitelist(CONFIG)
 DEFAULTS = CONFIG.get("defaults", {})
 GROUP_TO_PROJECT = build_group_to_project_map(CONFIG)
 

@@ -14,7 +14,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # Add project root to path for imports
@@ -116,6 +116,7 @@ class UpdateResult:
     calendar_config: cal_integration.CalendarConfigResult | None = None
     service_status: service.ServiceStatus | None = None
     caffeinate_status: service.CaffeinateStatus | None = None
+    projects_json_check: verify.ToolCheck | None = None
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
     env_sync_result: env_sync.EnvSyncResult | None = None
     reflections_sync_result: env_sync.ReflectionsSyncResult | None = None
@@ -746,6 +747,29 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 always=True,
             )
             result.warnings.append(f"Telegram auth: {telegram_check.error}")
+
+    # Step 4.6: Validate projects.json — green-light gate for service restart.
+    # If the iCloud-synced config maps any contact to multiple machines (or
+    # is otherwise malformed), abort the restart so the running bridge keeps
+    # serving on the old, validated config.
+    if config.do_service_restart and machine_check.get("projects"):
+        log("Validating projects.json...", v)
+        result.projects_json_check = verify.check_projects_json(project_dir)
+        if result.projects_json_check.available:
+            log(f"  projects.json: {result.projects_json_check.version}", v)
+        else:
+            log(
+                f"FAIL: projects.json validation failed — skipping service restart\n"
+                f"  {result.projects_json_check.error}",
+                v,
+                always=True,
+            )
+            result.warnings.append(
+                f"projects.json invalid; bridge restart skipped: {result.projects_json_check.error}"
+            )
+            # Suppress restart for the rest of this run. The existing bridge
+            # process keeps running on the previously validated config.
+            config = replace(config, do_service_restart=False)
 
     # Step 5: Service management
     if config.do_service_restart:
