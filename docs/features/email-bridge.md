@@ -52,9 +52,11 @@ The IMAP poller never fetches messages from unknown senders. Before each poll cy
 - Exact addresses from `email.contacts` (e.g. `"tom@yuda.me"`)
 - Domain tokens from `email.domains` (e.g. `"@psyoptimal.com"`)
 
-`_build_imap_sender_query()` assembles these into an IMAP OR tree, and `_poll_imap()` issues a single `UNSEEN FROM ...` UID search. Messages from senders not in any project config are never fetched — they remain `UNSEEN` in the inbox so other machines polling the same shared inbox can still pick them up.
+`_build_imap_sender_query()` assembles these into an IMAP OR tree, and `_poll_imap()` issues a single `UNSEEN FROM ...` UID search. Messages from senders not in any project config are never fetched — they remain `UNSEEN` in the inbox so a machine that *does* own the relevant project (now or later) can still pick them up.
 
-Messages that do match are marked `SEEN` immediately on fetch (before parsing) to prevent duplicate processing on concurrent polls on the same machine.
+**Single-machine ownership.** Each `email.contacts` entry and each `email.domains` wildcard must resolve to exactly one machine across the full config — enforced by the validator (`bridge/config_validation.py::validate_email_routing`) and gated by the update script. The cross-shape check also fails the gate when one machine owns an explicit address (`alice@psy.com`) while a different machine owns the matching domain wildcard (`psy.com`); without it, both bridges would race on the same incoming email. See [Single-Machine Ownership](single-machine-ownership.md).
+
+Within a machine, messages that match are marked `SEEN` immediately on fetch (before parsing) to prevent duplicate processing on concurrent polls on the same machine.
 
 ### Transport-Keyed Callbacks
 

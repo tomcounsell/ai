@@ -585,31 +585,25 @@ RESPOND_TO_DMS = any(
     for p in ACTIVE_PROJECTS
 )
 
-# DM whitelist - only respond to DMs from these Telegram user IDs
-# Loaded from projects.json dms.whitelist array
-# All DM users get uniform qa_only access (no per-user permission levels)
-# Entries may include "machine_exclude": ["Machine Name"] to skip on specific machines
+# DM whitelist - only respond to DMs from these Telegram user IDs.
+# Loaded from projects.json dms.whitelist array. Each entry must declare
+# a "project" field; the entry only loads on the machine that owns that
+# project (per projects.<key>.machine in projects.json). Default-deny:
+# entries with no project, or a project not owned by this machine, are
+# silently skipped. Adding a new machine costs zero edits to existing
+# whitelist entries — they migrate automatically with their project.
 DM_WHITELIST: set[int] = set()
 DM_USER_TO_PROJECT: dict[int, dict] = {}
-_whitelist_entries = CONFIG.get("dms", {}).get("whitelist", [])
-try:
-    _current_machine = (
-        subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip().lower()
-    )
-except Exception:
-    _current_machine = ""
-for _entry in _whitelist_entries:
-    if isinstance(_entry, dict) and "id" in _entry:
-        _excluded_machines = [m.lower() for m in _entry.get("machine_exclude", [])]
-        if _current_machine.lower() in _excluded_machines:
-            continue
-        DM_WHITELIST.add(int(_entry["id"]))
-        if "project" in _entry:
-            _proj_key = _entry["project"]
-            _proj_cfg = CONFIG.get("projects", {}).get(_proj_key, {})
-            _proj_cfg = dict(_proj_cfg)
-            _proj_cfg["_key"] = _proj_key
-            DM_USER_TO_PROJECT[int(_entry["id"])] = _proj_cfg
+for _entry in CONFIG.get("dms", {}).get("whitelist", []):
+    if not (isinstance(_entry, dict) and "id" in _entry):
+        continue
+    _proj_key = _entry.get("project")
+    if not _proj_key or _proj_key not in ACTIVE_PROJECTS:
+        continue
+    DM_WHITELIST.add(int(_entry["id"]))
+    _proj_cfg = dict(CONFIG.get("projects", {}).get(_proj_key, {}))
+    _proj_cfg["_key"] = _proj_key
+    DM_USER_TO_PROJECT[int(_entry["id"])] = _proj_cfg
 
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
@@ -1991,6 +1985,11 @@ async def main():
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
         )
 
+    # Dedup cache for edit events: (chat_id, message_id, text_hash) -> timestamp
+    # Telegram frequently delivers the same edit event 2-3x in rapid succession.
+    _edit_dedup: dict[tuple, float] = {}
+    _edit_dedup_ttl = 5.0  # seconds
+
     @client.on(events.MessageEdited)
     async def edit_handler(event):
         """Handle edited messages.
@@ -2003,7 +2002,18 @@ async def main():
         if event.out or SHUTTING_DOWN:
             return
 
+        import time as _time
+
+        _now = _time.monotonic()
         message = event.message
+        _dedup_key = (event.chat_id, message.id, hash((message.text or "").strip()))
+        if _now - _edit_dedup.get(_dedup_key, 0) < _edit_dedup_ttl:
+            return
+        _edit_dedup[_dedup_key] = _now
+        # Prune stale entries to avoid unbounded growth
+        for _k in [k for k, t in _edit_dedup.items() if _now - t > _edit_dedup_ttl * 10]:
+            del _edit_dedup[_k]
+
         chat = await event.get_chat()
         chat_title = getattr(chat, "title", None)
         is_dm = event.is_private
@@ -2042,6 +2052,15 @@ async def main():
             logger.debug(f"[edit] No session found for msg {message.id}, ignoring edit")
             return
 
+        # Ignore metadata-only updates (reactions, link previews, etc.) where
+        # Telegram fires UpdateEditMessage but the text itself didn't change.
+        original_text = (
+            (session.initial_telegram_message or {}).get("message_text", "") or ""
+        ).strip()
+        if edited_text == original_text:
+            logger.debug(f"[edit] Ignoring no-op edit on msg {message.id} (text unchanged)")
+            return
+
         if session.status in ("running", "active", "pending"):
             # Agent is still working — steer with the updated text
             from agent.steering import push_steering_message
@@ -2064,25 +2083,47 @@ async def main():
             working_dir_str = project.get("working_dir", "")
             new_session_id = f"tg_{project_key}_{event.chat_id}_{message.id}_edit"
 
-            depth = await dispatch_telegram_session(
-                project_key=project_key,
-                session_id=new_session_id,
-                working_dir=working_dir_str,
-                message_text=edited_text,
-                sender_name=sender_name,
-                chat_id=telegram_chat_id,
-                telegram_message_id=message.id,
-                chat_title=chat_title,
-                priority="normal",
-                sender_id=sender_id,
-                session_type=None,
-                project_config=project,
-            )
-            logger.info(
-                f"[edit] Spawned fresh session {new_session_id} for completed-session edit "
-                f"(msg {message.id}, depth={depth})"
-            )
-            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+            # Idempotency guard: if an _edit session already exists and is
+            # active, steer it rather than spawning another. Prevents cascade
+            # when Telegram delivers duplicate edit events for the same message.
+            try:
+                from agent.steering import push_steering_message
+
+                edit_sessions = list(AgentSession.query.filter(session_id=new_session_id))
+                active_edit = next(
+                    (s for s in edit_sessions if s.status in ("pending", "running", "active")),
+                    None,
+                )
+            except Exception:
+                active_edit = None
+
+            if active_edit:
+                push_steering_message(new_session_id, f"[Edit] {edited_text}", sender_name)
+                logger.info(
+                    f"[edit] Steered duplicate edit into existing session {new_session_id} "
+                    f"(msg {message.id}, status={active_edit.status})"
+                )
+                await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+            else:
+                depth = await dispatch_telegram_session(
+                    project_key=project_key,
+                    session_id=new_session_id,
+                    working_dir=working_dir_str,
+                    message_text=edited_text,
+                    sender_name=sender_name,
+                    chat_id=telegram_chat_id,
+                    telegram_message_id=message.id,
+                    chat_title=chat_title,
+                    priority="normal",
+                    sender_id=sender_id,
+                    session_type=None,
+                    project_config=project,
+                )
+                logger.info(
+                    f"[edit] Spawned fresh session {new_session_id} for completed-session edit "
+                    f"(msg {message.id}, depth={depth})"
+                )
+                await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
         else:
             # killed/abandoned/failed — ignore

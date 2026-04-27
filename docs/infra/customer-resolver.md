@@ -31,7 +31,7 @@ Infra considerations for the customer-resolver feature (see `docs/plans/customer
 
 ## Rules & Constraints
 
-- **Single-machine-per-project operation.** The plan assumes only one bridge machine polls any given Gmail account at a time. Operator's responsibility via `projects.json` + `machine_exclude` gating. Multi-machine polling for the same inbox is out of scope; introducing it later requires a design revisit (poll-cursor locks etc.).
+- **Single-machine-per-project operation.** The plan assumes only one bridge machine polls any given Gmail account at a time. Enforced by `projects.<key>.machine` in `projects.json`: each project is owned by exactly one machine, and DM whitelist entries inherit that machine via their `project` field. The bridge refuses to start with a config that maps one contact to multiple machines (validated by `bridge.config_validation.validate_dm_whitelist`). Multi-machine polling for the same inbox is out of scope; introducing it later requires a design revisit (poll-cursor locks etc.).
 - **Resolver timeout**: hard cap 5s by default (configurable per project via `customer_resolver.timeout_seconds`, future knob). On timeout: fail-closed, label `valor-retry`, increment failure counter.
 - **Sender pre-validation**: any address not matching a conservative email regex is rejected before subprocess dispatch. Defense against shell-injection and malformed payloads.
 - **Subprocess form**: `asyncio.create_subprocess_exec` (argv form only). Never `create_subprocess_shell`. Environment inheritance is minimal — inherit `PATH` + `HOME` only, not secrets.

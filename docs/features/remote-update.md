@@ -56,6 +56,23 @@ Launchd fires every 12 hours → Runs `scripts/remote-update.sh` → Logs result
 4. Launchd's `KeepAlive` (or `valor-service.sh restart`) brings bridge back with new code
 5. On startup, bridge deletes the flag file if still present
 
+### projects.json validation gate
+
+Before bouncing any services, the update orchestrator validates `~/Desktop/Valor/projects.json` against the single-machine-ownership rule (every bridge-contact identifier resolves to exactly one machine). Implemented as Step 4.6 in `scripts/update/run.py`:
+
+```python
+result.projects_json_check = verify.check_projects_json(project_dir)
+if not result.projects_json_check.available:
+    # Log the validator error and suppress the rest of Step 5
+    config = replace(config, do_service_restart=False)
+```
+
+**On pass:** logs `projects.json: valid (N DM contacts, M groups, K email patterns)` and proceeds to restart.
+
+**On fail:** logs the full validator error, records a warning, and suppresses the service restart for the rest of the run. The running bridge keeps serving on the previously-validated config until the operator fixes the file. A bad push fails *forward*: the new config is rejected, the old config keeps working.
+
+Bridge code does *not* validate on its own startup — that would crash the live process when a bad config lands on disk via iCloud sync. The gate is exclusively in the update path. See [Single-Machine Ownership](single-machine-ownership.md) for the full validator scope.
+
 ### Technical Approach
 
 #### 1. `scripts/remote-update.sh`

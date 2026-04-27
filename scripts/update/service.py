@@ -393,6 +393,58 @@ def is_update_cron_installed() -> bool:
         return False
 
 
+def get_email_pid() -> int | None:
+    """Get PID of running email bridge process."""
+    try:
+        result = run_cmd(["pgrep", "-f", "bridge.email_bridge"])
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip().split()[0])
+    except Exception:
+        pass
+    return None
+
+
+def is_email_running() -> bool:
+    """Check if email bridge is running."""
+    return get_email_pid() is not None
+
+
+def is_email_configured(project_dir: Path) -> bool:
+    """Return True if IMAP_PASSWORD is set (non-placeholder) in .env."""
+    env_file = project_dir / ".env"
+    if not env_file.exists():
+        return False
+    try:
+        text = env_file.read_text()
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("IMAP_PASSWORD="):
+                value = line.split("=", 1)[1].strip()
+                return bool(value) and "your-gmail" not in value and value != "placeholder"
+    except Exception:
+        pass
+    return False
+
+
+def ensure_email_running(project_dir: Path) -> bool:
+    """Start email bridge if configured and not already running. Returns True if running."""
+    if not is_email_configured(project_dir):
+        return False
+    if is_email_running():
+        return True
+    service_script = project_dir / "scripts" / "valor-service.sh"
+    if not service_script.exists():
+        return False
+    try:
+        run_cmd([str(service_script), "email-start"], cwd=project_dir, timeout=30)
+        import time
+
+        time.sleep(3)
+        return is_email_running()
+    except Exception:
+        return False
+
+
 def get_caffeinate_status() -> CaffeinateStatus:
     """Get caffeinate service status."""
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_PREFIX}.caffeinate.plist"

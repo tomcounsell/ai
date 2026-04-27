@@ -132,11 +132,15 @@ def check_venv_tool(project_dir: Path, tool: str) -> ToolCheck:
 
 
 def check_python_alias() -> ToolCheck:
-    """Check that 'python' resolves to python3.
+    """Check that 'python' resolves to python3 3.12+.
 
-    Many hooks and scripts use bare 'python'. On macOS, this may not exist
-    or may point to an old Python 2. If python3 exists but python doesn't,
-    report with a fix command.
+    Claude Code hooks invoke bare 'python' under /bin/sh, which does not
+    honor zsh aliases. If 'python' is not on PATH, every hook that uses it
+    silently fails with 'command not found' and surfaces errors in the UI.
+    Require a real 'python' binary on PATH that is Python 3.12+.
+
+    Fix on macOS:
+      ln -sf "$(command -v python3)" /opt/homebrew/bin/python
     """
     python_path = shutil.which("python")
     python3_path = shutil.which("python3")
@@ -144,37 +148,37 @@ def check_python_alias() -> ToolCheck:
     if not python3_path:
         return ToolCheck(name="python", available=False, error="python3 not found")
 
-    if python_path:
-        # Check it's actually python 3.12+
-        try:
-            result = run_cmd([python_path, "--version"], timeout=5)
-            version = result.stdout.strip()
-            # Parse "Python X.Y.Z" and compare properly
-            import re as _re
+    if not python_path:
+        return ToolCheck(
+            name="python",
+            available=False,
+            error=(
+                "bare 'python' not on PATH — Claude Code hooks fail under /bin/sh. "
+                'Fix: ln -sf "$(command -v python3)" /opt/homebrew/bin/python'
+            ),
+        )
 
-            m = _re.search(r"(\d+)\.(\d+)", version)
-            ok = m and (int(m.group(1)), int(m.group(2))) >= (3, 12)
-            if ok:
-                return ToolCheck(name="python", available=True, version=version)
-            else:
-                return ToolCheck(
-                    name="python",
-                    available=False,
-                    version=version,
-                    error=f"python is {version}, expected 3.12+. "
-                    f"Fix: brew install python@3.12 && brew link python@3.12",
-                )
-        except Exception:
-            pass
-
-    # python not found but python3 exists — acceptable, all our scripts use python3
-    python3_version = ""
     try:
-        r = run_cmd([python3_path, "--version"], timeout=5)
-        python3_version = r.stdout.strip()
-    except Exception:
-        pass
-    return ToolCheck(name="python", available=True, version=python3_version or "python3")
+        result = run_cmd([python_path, "--version"], timeout=5)
+        version = result.stdout.strip()
+        import re as _re
+
+        m = _re.search(r"(\d+)\.(\d+)", version)
+        ok = m and (int(m.group(1)), int(m.group(2))) >= (3, 12)
+        if ok:
+            return ToolCheck(name="python", available=True, version=version)
+        return ToolCheck(
+            name="python",
+            available=False,
+            version=version,
+            error=(
+                f"python is {version}, expected 3.12+. "
+                f"Fix: brew install python@3.12 && "
+                f'ln -sf "$(command -v python3.12)" /opt/homebrew/bin/python'
+            ),
+        )
+    except Exception as e:
+        return ToolCheck(name="python", available=False, error=f"python --version failed: {e}")
 
 
 def check_system_tools() -> list[ToolCheck]:
@@ -963,6 +967,82 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.gitignore_issues = check_gitignore_issues()
 
     return result
+
+
+def check_projects_json(project_dir: Path) -> ToolCheck:
+    """Validate ~/Desktop/Valor/projects.json before allowing a service restart.
+
+    Acts as the green-light gate for bridge startup: if the iCloud-synced
+    config is malformed (e.g. one Telegram contact mapped to multiple
+    machines), the update script must not bounce the bridge — the existing
+    process keeps running on the old (validated) config until the operator
+    fixes the file.
+
+    Returns ToolCheck.available=True on pass; available=False with an
+    error string on failure. Also returns True with version="skipped" when
+    the file is missing (fresh machine; bridge install gates separately).
+    """
+    import json
+    import sys
+
+    config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+    if not config_path.exists():
+        return ToolCheck(
+            name="projects.json",
+            available=True,
+            version="skipped (file not present)",
+        )
+
+    try:
+        cfg = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        return ToolCheck(
+            name="projects.json",
+            available=False,
+            error=f"Failed to read/parse: {e}",
+        )
+
+    # Import the validator from the bridge package. Add project root to
+    # sys.path defensively in case verify.py is invoked outside the venv.
+    sys.path.insert(0, str(project_dir))
+    try:
+        from bridge.config_validation import (
+            ConfigValidationError,
+            validate_projects_config,
+        )
+    except ImportError as e:
+        return ToolCheck(
+            name="projects.json",
+            available=False,
+            error=f"Could not import validator: {e}",
+        )
+
+    try:
+        validate_projects_config(cfg)
+    except ConfigValidationError as e:
+        return ToolCheck(name="projects.json", available=False, error=str(e))
+
+    projects = cfg.get("projects", {})
+    whitelist_count = len(cfg.get("dms", {}).get("whitelist", []))
+    group_count = sum(
+        len((p.get("telegram") or {}).get("groups") or {})
+        for p in projects.values()
+        if isinstance(p, dict)
+    )
+    email_count = sum(
+        len((p.get("email") or {}).get("contacts") or [])
+        + len((p.get("email") or {}).get("domains") or [])
+        for p in projects.values()
+        if isinstance(p, dict)
+    )
+    return ToolCheck(
+        name="projects.json",
+        available=True,
+        version=(
+            f"valid ({whitelist_count} DM contacts, "
+            f"{group_count} groups, {email_count} email patterns)"
+        ),
+    )
 
 
 def check_machine_identity(project_dir: Path) -> dict:

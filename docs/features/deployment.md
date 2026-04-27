@@ -1,15 +1,15 @@
 # Multi-Instance Deployment
 
-Valor runs on every machine as a service. Each machine is configured to monitor specific Telegram groups.
+Valor runs on every machine as a service. Each machine owns a subset of projects defined in `~/Desktop/Valor/projects.json`, identified by the `projects.<key>.machine` field matching the local `ComputerName`.
 
 ## How It Works
 
 When a message arrives:
-1. Bridge checks if the group matches any active project
+1. Bridge checks if the group/sender/contact matches any *active* project (one owned by this machine)
 2. If yes, injects that project's context and responds
-3. If no, ignores the message
+3. If no, ignores the message — the machine that owns it will pick it up
 
-This allows multiple machines to run Valor, each monitoring different groups.
+**Strict ownership invariant:** every bridge-contact identifier (Telegram DM contact id, Telegram group name, email contact, email domain) is owned by exactly one machine. Two machines must never both initiate work on the same incoming message. See [Single-Machine Ownership](single-machine-ownership.md) for the full rule and validator behavior.
 
 ## Setup
 
@@ -103,8 +103,11 @@ Multiple machines can monitor different groups, or one machine can monitor all.
 3. Check `tail -f logs/bridge.log` for routing decisions
 
 ### Wrong project context
-1. Ensure only one project maps to each Telegram group
+1. Ensure only one project maps to each Telegram group (validator catches this — see [Single-Machine Ownership](single-machine-ownership.md))
 2. Check `~/Desktop/Valor/projects.json` for duplicate group entries
+
+### "projects.json validation failed" in update logs
+The update script's green-light gate (Step 4.6 in `scripts/update/run.py`) blocked the service restart because two machines now claim the same bridge-contact identifier. Read the logged error — it lists the conflicting entries — and either remove the duplicate or change the `machine` field on one of the projects. Full failure-mode table: [Single-Machine Ownership](single-machine-ownership.md#failure-modes--responses).
 
 ### Session isolation issues
 1. Sessions are scoped by project - `tg_{project}_{chat_id}`

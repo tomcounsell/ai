@@ -31,10 +31,13 @@ valor-telegram read --chat-id -1001234567 --limit 10
 
 # DM user by whitelisted username (replaces the removed bridge-IPC script)
 valor-telegram read --user tom --limit 10
+
+# Cross-chat project read — unions every chat tagged with project_key="psyoptimal"
+valor-telegram read --project psyoptimal --limit 20
 ```
 
-The three target flags `--chat`, `--chat-id`, and `--user` are **mutually
-exclusive**. Pick one.
+The four target flags `--chat`, `--chat-id`, `--user`, and `--project` are
+**mutually exclusive**. Pick one.
 
 #### Output Header (freshness signal)
 
@@ -106,6 +109,102 @@ strip `: - | _`. That means `PM PsyOptimal` resolves to `PM: PsyOptimal`
 (missing colon tolerated), and `dev_valor` / `dev valor` are treated as the
 same name. Emoji and non-ASCII text are preserved.
 
+### Cross-Chat Project Reads
+
+A single project (e.g. PsyOPTIMAL) often spans multiple Telegram chats — a
+main group, a PM sidebar, a Dev channel. Use `--project PROJECT_KEY` to read
+the most-recent N messages **across every chat** with that `project_key`,
+interleaved chronologically:
+
+```bash
+valor-telegram read --project psyoptimal --limit 20
+```
+
+Output begins with a one-line **project freshness header** summarizing the
+unioned chat set and last activity across the union, followed by each
+message tagged with the originating chat name:
+
+```
+[project=psyoptimal · 3 chats: PsyOPTIMAL, PM: PsyOptimal, Dev: PsyOPTIMAL · last activity: 3m ago]
+[2026-04-25 09:30] [PsyOPTIMAL] alice: kicking off the sprint
+[2026-04-25 09:32] [PM: PsyOptimal] tom: I'll grab the standup notes
+[2026-04-25 10:15] [Dev: PsyOPTIMAL] bob: shipped the auth fix
+...
+```
+
+Per-line `[chat_name]` tags are truncated to 25 characters with an
+ellipsis when longer; the full name is in the header (and in JSON output).
+If the project header would list more than 5 chats, it truncates to the 5
+most-recent and appends `... +M more`.
+
+#### `--limit` semantics
+
+`--limit` applies to the **merged total**, NOT per chat. `--limit 20`
+returns the 20 most-recent messages across the entire union. To bias
+coverage toward each chat, run a single-chat `read` per chat instead.
+
+#### JSON output
+
+`--project --json` emits a list of message dicts, each enriched with
+`chat_id` and `chat_name` so downstream consumers can re-attribute messages
+to their source chat:
+
+```bash
+valor-telegram read --project psyoptimal --json
+```
+
+```json
+[
+  {
+    "id": "...",
+    "message_id": 1234,
+    "chat_id": "-1001234567",
+    "chat_name": "PsyOPTIMAL",
+    "sender": "alice",
+    "content": "kicking off the sprint",
+    "timestamp": "2026-04-25T09:30:00",
+    "message_type": "text"
+  },
+  ...
+]
+```
+
+The single-chat JSON shape is **unchanged** — `chat_id` and `chat_name` are
+added only under `--project`.
+
+#### Zero-match path
+
+If no chats are tagged with the requested `project_key`, the CLI exits 1
+with a stderr hint:
+
+```
+$ valor-telegram read --project unknown
+No chats found for project 'unknown'. Run `valor-telegram chats --project unknown` to verify.
+```
+
+Use `valor-telegram chats --project PROJECT_KEY` to list every chat that
+would be unioned (see [Listing Chats](#listing-chats) below).
+
+#### Mutex with `--strict`
+
+`--strict` is a **name-resolution** flag — it has no meaning under
+`--project` (which never goes through name resolution). Combining the two
+is rejected explicitly:
+
+```
+$ valor-telegram read --project psyoptimal --strict
+Error: --strict has no effect with --project; remove one of them.
+```
+
+#### Project tagging
+
+`Chat.project_key` is written by the bridge on every message receipt, so
+any active chat will have a current value. Chats with `project_key=None`
+(never tagged, or registered before the bridge gained the writes) are
+**never** matched by `--project` — they appear only in unfiltered
+`chats` output. No cleanup script is needed; inactive stale rows naturally
+fall out of the project set.
+
 ### Sending Messages
 
 Requires the bridge to be running (`./scripts/valor-service.sh status`).
@@ -139,9 +238,20 @@ valor-telegram chats --search "psy"
 # Normalization-aware: "PM psy" matches "PM: PsyOptimal"
 valor-telegram chats --search "PM psy"
 
-# JSON output
-valor-telegram chats --search "psy" --json
+# Filter by project_key (every chat that --project psyoptimal would union)
+valor-telegram chats --project psyoptimal
+
+# Both filters apply when combined
+valor-telegram chats --project psyoptimal --search "dev"
+
+# JSON output (always includes `project_key` per chat)
+valor-telegram chats --json
+valor-telegram chats --project psyoptimal --json
 ```
+
+`--project` filters by exact match on `Chat.project_key`. `--json` output
+includes `project_key` on every chat dict regardless of whether `--project`
+is set. Empty/whitespace `--project` is rejected with exit 1.
 
 ## Architecture
 
@@ -188,6 +298,13 @@ to `resolve_chat_candidates` and returns a `chat_id`:
 - Multiple matches, `strict=False` (default) → the most-recent candidate's
   `chat_id`, plus a `logger.warning` listing all candidates for audit.
 - Multiple matches, `strict=True` → raises `AmbiguousChatError(candidates)`.
+
+For the cross-chat project path, `resolve_chats_by_project(project_key)`
+scans `Chat.query.all()` and returns `list[ChatCandidate]` for every chat
+whose `Chat.project_key` matches exactly. Sorted by `last_activity_ts`
+desc with the same `chat_id` ascending tiebreak as the single-chat
+resolver. Chats with `project_key=None` are never returned. Failure
+returns `[]` and logs a warning.
 
 A defensive invariant also raises `AmbiguousChatError` **regardless of
 `strict`** if the selection logic ever picks a non-max candidate — fail

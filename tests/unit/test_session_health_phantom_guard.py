@@ -240,6 +240,86 @@ class TestCleanupCorruptedAgentSessions:
         # No exception expected.
         cleanup_corrupted_agent_sessions()
 
+    def test_cleanup_removes_record_with_drifted_key_format(self, caplog):
+        """Stored hash key format != current schema -> cleanup must still delete it.
+
+        Repro for the production case where two ``update_fix_*`` sessions
+        survived every ``/update`` run because the stored hash key reflects
+        an older ``KeyField`` composition order. Popoto's ``delete()`` falls
+        back to ``db_key.redis_key`` (the NEW order), HDELs a non-existent
+        key, returns False — and the previous cleanup logic counted False
+        as success. The fix re-resolves the actual key from the class set
+        via ``Model.query.keys()`` and retries.
+        """
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from agent.session_health import cleanup_corrupted_agent_sessions
+        from models.agent_session import AgentSession
+
+        # Construct an instance with a non-saveable response_delivered_at —
+        # mirrors the unhydrated DatetimeField descriptor seen in production
+        # records that were saved before a schema change. Save it normally
+        # first so we end up with both a class-set membership AND a real
+        # hash, then renumber the hash key to simulate schema drift.
+        sess = AgentSession(session_id="drift-test", project_key="drift", status="completed")
+        sess.save()
+        current_key = sess._redis_key
+
+        # Simulate schema drift by moving the hash to a key that doesn't
+        # match db_key.redis_key (swap two trailing components). The class
+        # set still tracks the moved key, so query.all() will find it but
+        # delete() will compute the wrong fallback path.
+        parts = current_key.split(":")
+        # Swap the project_key segment with a trailing None — same shape of
+        # drift the production records suffered (a non-None segment ends up
+        # in a position where the current schema expects None and vice versa).
+        # The two production keys had ``:None:None:ai:pm`` (old order) where
+        # the current schema produces ``:None:ai:pm:None``.
+        # Find the project_key segment ("drift") and swap it with the last "None".
+        drift_idx = parts.index("drift")
+        last_none_idx = len(parts) - 1 - parts[::-1].index("None")
+        parts[drift_idx], parts[last_none_idx] = parts[last_none_idx], parts[drift_idx]
+        drifted_key = ":".join(parts)
+        assert drifted_key != current_key, (
+            f"Drift swap produced same key — schema may have only None segments: {current_key}"
+        )
+        # Move the hash and update class-set membership atomically.
+        pipe = POPOTO_REDIS_DB.pipeline()
+        for field, val in POPOTO_REDIS_DB.hgetall(current_key).items():
+            pipe.hset(drifted_key, field, val)
+        pipe.delete(current_key)
+        pipe.srem("$Class:AgentSession", current_key)
+        pipe.sadd("$Class:AgentSession", drifted_key)
+        pipe.execute()
+
+        # Force the cleanup to flag the record as corrupt by stubbing save().
+        # Without this, our drifted record is otherwise valid; the production
+        # case had `response_delivered_at` as an unbound Field descriptor that
+        # makes save() raise. We don't need to reproduce that exact failure
+        # — only the post-flag delete path.
+        original_save = AgentSession.save
+
+        def _failing_save(self):
+            if getattr(self, "session_id", None) == "drift-test":
+                raise ValueError("validation invalid: simulated drifted record")
+            return original_save(self)
+
+        AgentSession.save = _failing_save
+        try:
+            with caplog.at_level(logging.WARNING, logger="agent.session_health"):
+                cleaned = cleanup_corrupted_agent_sessions()
+        finally:
+            AgentSession.save = original_save
+
+        assert cleaned == 1, "Drifted record must be counted as cleaned"
+        # And actually removed from Redis.
+        assert not POPOTO_REDIS_DB.exists(drifted_key), (
+            f"Hash {drifted_key} still present after cleanup"
+        )
+        assert drifted_key.encode() not in POPOTO_REDIS_DB.smembers("$Class:AgentSession"), (
+            "Class-set membership not cleared"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Module-level source-code invariants (policy checks)

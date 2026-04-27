@@ -297,6 +297,129 @@ def _fetch_from_telegram_api(
     return asyncio.run(_fetch())
 
 
+_PROJECT_PER_LINE_NAME_MAX = 25
+_PROJECT_HEADER_NAME_CAP = 5
+
+
+def _truncate_chat_name(name: str, limit: int = _PROJECT_PER_LINE_NAME_MAX) -> str:
+    """Truncate a chat_name for the per-line `[chat_name]` tag.
+
+    Names longer than `limit` are cut to (limit - 3) chars + "..." so the
+    final visible width is exactly `limit` characters. The full name is
+    always available in the project header and JSON output.
+    """
+    if len(name) <= limit:
+        return name
+    return name[: max(0, limit - 3)] + "..."
+
+
+def _cmd_read_project(
+    args: argparse.Namespace,
+    resolve_chats_by_project,
+    get_recent_messages,
+) -> int:
+    """Cross-chat project-level read path (issue #1169).
+
+    Resolves chats by `project_key`, fetches up to `args.limit` recent
+    messages per chat, merges by `timestamp` desc, trims to `args.limit`
+    total, and renders with a project freshness header plus per-line
+    `[chat_name]` tag. JSON mode enriches each message dict with `chat_id`
+    and `chat_name` fields.
+    """
+    project_key = args.project.strip()
+    candidates = resolve_chats_by_project(project_key)
+
+    if not candidates:
+        print(
+            f"No chats found for project {project_key!r}. "
+            f"Run `valor-telegram chats --project {project_key}` to verify.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Per-chat fetch budget = args.limit so the merge candidate pool is at
+    # least N (avoids missing recent messages from one chat behind a flood
+    # from another). Worst case K chats × N each before merge-and-trim.
+    merged: list[dict] = []
+    for c in candidates:
+        result = get_recent_messages(chat_id=c.chat_id, limit=args.limit)
+        if "error" in result:
+            # Surface per-chat errors but keep going — partial results are
+            # still useful for cross-chat situational awareness.
+            print(
+                f"Warning: failed to fetch chat {c.chat_id}: {result['error']}",
+                file=sys.stderr,
+            )
+            continue
+        for msg in result.get("messages", []):
+            enriched = dict(msg)
+            enriched["chat_id"] = c.chat_id
+            enriched["chat_name"] = c.chat_name
+            merged.append(enriched)
+
+    # Sort by timestamp desc with chat_id then message_id tiebreakers for
+    # deterministic ordering. ISO-8601 strings sort lexicographically the
+    # same as chronologically, so string compare is correct.
+    merged.sort(
+        key=lambda m: (
+            m.get("timestamp") or "",
+            str(m.get("chat_id") or ""),
+            m.get("message_id") or 0,
+        ),
+        reverse=True,
+    )
+    merged = merged[: max(0, args.limit)]
+
+    # Display oldest-first to match the single-chat path's chronological order.
+    display_msgs = list(reversed(merged))
+
+    if args.json:
+        print(json.dumps(display_msgs, indent=2, default=str))
+        return 0
+
+    # --- Project freshness header --------------------------------------------
+    chat_names = [c.chat_name or "(unnamed)" for c in candidates]
+    if len(chat_names) > _PROJECT_HEADER_NAME_CAP:
+        visible = chat_names[:_PROJECT_HEADER_NAME_CAP]
+        more = len(chat_names) - _PROJECT_HEADER_NAME_CAP
+        names_str = ", ".join(visible) + f", ... +{more} more"
+    else:
+        names_str = ", ".join(chat_names)
+    last_ts = max(
+        (c.last_activity_ts for c in candidates if c.last_activity_ts is not None),
+        default=None,
+    )
+    age = _format_relative_age(last_ts)
+    print(f"[project={project_key} · {len(candidates)} chats: {names_str} · last activity: {age}]")
+
+    if not display_msgs:
+        print(f"No messages found for project {project_key!r}.")
+        return 0
+
+    for msg in display_msgs:
+        ts = format_timestamp(msg.get("timestamp"))
+        sender = msg.get("sender", "unknown")
+        content = msg.get("content", "") or ""
+        if len(content) > 500:
+            content = content[:497] + "..."
+        chat_tag = _truncate_chat_name(msg.get("chat_name", "") or "")
+        print(f"[{ts}] [{chat_tag}] {sender}: {content}")
+
+    return 0
+
+
+def resolve_chats_by_project(project_key: str):
+    """Module-level wrapper around `tools.telegram_history.resolve_chats_by_project`.
+
+    Exposed at module level so tests can patch
+    `tools.valor_telegram.resolve_chats_by_project` directly (mirrors the
+    existing `resolve_chat` wrapper pattern).
+    """
+    from tools.telegram_history import resolve_chats_by_project as _impl
+
+    return _impl(project_key)
+
+
 def cmd_read(args: argparse.Namespace) -> int:
     """Read messages from a chat."""
     from tools.telegram_history import (
@@ -314,12 +437,22 @@ def cmd_read(args: argparse.Namespace) -> int:
             getattr(args, "chat", None),
             getattr(args, "chat_id", None),
             getattr(args, "user", None),
+            getattr(args, "project", None),
         )
         if v
     )
     if flag_count > 1:
         print(
-            "Error: --chat, --chat-id, and --user are mutually exclusive.",
+            "Error: --chat, --chat-id, --user, and --project are mutually exclusive.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --strict only makes sense for name-resolution paths (--chat). It is a
+    # footgun under --project (which never resolves a name) — reject explicitly.
+    if getattr(args, "project", None) and getattr(args, "strict", False):
+        print(
+            "Error: --strict has no effect with --project; remove one of them.",
             file=sys.stderr,
         )
         return 1
@@ -328,7 +461,7 @@ def cmd_read(args: argparse.Namespace) -> int:
     # BEFORE reaching the resolver, so it never hits the normalizer's
     # "returns []" path (which would be reported as a plain zero-match) or
     # sneaks into substring match-all logic elsewhere. We also reject empty
-    # --user for the same reason (whitespace is never a valid username).
+    # --user / --project for the same reason.
     raw_chat = getattr(args, "chat", None)
     if raw_chat is not None and not raw_chat.strip():
         print(
@@ -343,6 +476,18 @@ def cmd_read(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    raw_project = getattr(args, "project", None)
+    if raw_project is not None and not raw_project.strip():
+        print(
+            "Error: --project cannot be empty or whitespace-only.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Cross-chat project-level read (issue #1169). Branches off before the
+    # single-chat path so it does not interact with name resolution / fallback. ---
+    if raw_project:
+        return _cmd_read_project(args, resolve_chats_by_project, get_recent_messages)
 
     chat_id = None
     strict_mode = bool(getattr(args, "strict", False))
@@ -674,6 +819,14 @@ def cmd_chats(args: argparse.Namespace) -> int:
         )
         return 1
 
+    raw_project = getattr(args, "project", None)
+    if raw_project is not None and not raw_project.strip():
+        print(
+            "Error: --project cannot be empty or whitespace-only.",
+            file=sys.stderr,
+        )
+        return 1
+
     result = list_chats()
 
     if "error" in result:
@@ -681,6 +834,12 @@ def cmd_chats(args: argparse.Namespace) -> int:
         return 1
 
     chats = result.get("chats", [])
+
+    # Optional --project filter: exact-match on Chat.project_key. Combinable
+    # with --search; both filters apply when both are set.
+    project_filter = raw_project
+    if project_filter:
+        chats = [c for c in chats if c.get("project_key") == project_filter]
 
     # Optional --search filter: normalized substring match, keeps existing sort.
     search_pattern = getattr(args, "search", None)
@@ -694,26 +853,43 @@ def cmd_chats(args: argparse.Namespace) -> int:
                 for c in chats
                 if c.get("chat_name") and normalized_pattern in _normalize_chat_name(c["chat_name"])
             ]
-        # Preserve `count` invariant by updating the returned dict.
-        result = {"chats": chats, "count": len(chats), "search": search_pattern}
+
+    # Preserve `count` invariant by rebuilding the returned dict whenever a
+    # filter ran.
+    if project_filter or search_pattern:
+        result = {"chats": chats, "count": len(chats)}
+        if search_pattern:
+            result["search"] = search_pattern
+        if project_filter:
+            result["project"] = project_filter
 
     if args.json:
         print(json.dumps(result, indent=2, default=str))
         return 0
 
     if not chats:
-        if search_pattern:
+        if search_pattern and project_filter:
+            print(f"No chats matched project {project_filter!r} and search {search_pattern!r}.")
+        elif project_filter:
+            print(f"No chats matched project {project_filter!r}.")
+        elif search_pattern:
             print(f"No chats matched {search_pattern!r}.")
         else:
             print("No chats found in history database.")
             print("Chats are registered as messages are received by the bridge.")
         return 0
 
-    header = (
-        f"Known chats matching {search_pattern!r} ({len(chats)}):"
-        if search_pattern
-        else f"Known chats ({len(chats)}):"
-    )
+    if project_filter and search_pattern:
+        header = (
+            f"Known chats matching project {project_filter!r} "
+            f"and search {search_pattern!r} ({len(chats)}):"
+        )
+    elif project_filter:
+        header = f"Known chats matching project {project_filter!r} ({len(chats)}):"
+    elif search_pattern:
+        header = f"Known chats matching {search_pattern!r} ({len(chats)}):"
+    else:
+        header = f"Known chats ({len(chats)}):"
     print(header)
     print()
     print(f"{'Chat Name':<35} {'Messages':>10} {'Last Activity':<20}")
@@ -740,8 +916,9 @@ def main() -> int:
 
     # read subcommand
     read_parser = subparsers.add_parser("read", help="Read messages from a chat")
-    # --chat / --chat-id / --user are mutually exclusive — the user picks ONE.
-    # We still allow not specifying any when --search is set (cross-chat search).
+    # --chat / --chat-id / --user / --project are mutually exclusive — the user
+    # picks ONE. We still allow not specifying any when --search is set
+    # (cross-chat search).
     read_target_group = read_parser.add_mutually_exclusive_group()
     read_target_group.add_argument("--chat", "-c", help="Chat name (resolved against history)")
     read_target_group.add_argument(
@@ -751,6 +928,14 @@ def main() -> int:
     read_target_group.add_argument(
         "--user",
         help="Username from the DM whitelist — forces the DM path",
+    )
+    read_target_group.add_argument(
+        "--project",
+        help=(
+            "Project key — unions messages across all chats with this project_key, "
+            "interleaved chronologically. --limit applies to the merged total, NOT "
+            "per-chat. Mutually exclusive with --chat/--chat-id/--user/--strict."
+        ),
     )
     read_parser.add_argument(
         "--limit", "-n", type=int, default=10, help="Max messages (default: 10)"
@@ -789,6 +974,10 @@ def main() -> int:
         "--search",
         "-s",
         help="Filter by substring of chat name (normalized)",
+    )
+    chats_parser.add_argument(
+        "--project",
+        help="Filter by project_key (combinable with --search)",
     )
     chats_parser.add_argument("--json", action="store_true", help="Output as JSON")
 

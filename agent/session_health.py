@@ -1223,6 +1223,43 @@ def format_duration(seconds) -> str:
     return f"{hours}h{remaining_mins}m"
 
 
+def _delete_with_stale_key_lookup(session) -> bool:
+    """Force-delete a session whose stored Redis key has drifted from the schema.
+
+    When the model's ``KeyField`` composition order changes between releases,
+    records stored before the change live at the OLD key path, while
+    ``session.db_key.redis_key`` (and Popoto's ``delete()`` fallback)
+    computes the NEW key path. ``HDEL`` against the new key returns 0
+    and ``delete()`` reports False without doing anything.
+
+    This helper resolves the actual stored key from the class set
+    (``Model.query.keys()`` returns SMEMBERS of ``$Class:<name>``), matches
+    by ``agent_session_id``, sets ``_redis_key``, and retries delete.
+    Returns True if the second attempt succeeded.
+    """
+    aid = getattr(session, "agent_session_id", None)
+    if not isinstance(aid, str):
+        return False
+    try:
+        class_set_keys = AgentSession.query.keys()
+    except Exception:
+        return False
+    target = None
+    for k in class_set_keys:
+        ks = k.decode() if isinstance(k, bytes) else k
+        if aid in ks:
+            target = ks
+            break
+    if not target:
+        return False
+    session._redis_key = target
+    try:
+        return bool(session.delete())
+    except Exception as exc:
+        logger.warning("[agent-session-cleanup] Forced delete with %s raised: %s", target, exc)
+        return False
+
+
 def cleanup_corrupted_agent_sessions() -> int:
     """Delete AgentSession records with corrupted data that prevent .save().
 
@@ -1291,8 +1328,22 @@ def cleanup_corrupted_agent_sessions() -> int:
 
         if is_corrupt:
             try:
-                session.delete()
-                cleaned += 1
+                deleted = session.delete()
+                if deleted:
+                    cleaned += 1
+                elif _delete_with_stale_key_lookup(session):
+                    # Hash key format drift: the stored key reflects an older
+                    # KeyField composition order than the current model schema,
+                    # so Popoto's computed db_key.redis_key points at a
+                    # non-existent hash and HDEL returns 0. Resolve the actual
+                    # key from the class set, set _redis_key, retry delete.
+                    cleaned += 1
+                else:
+                    logger.warning(
+                        "[agent-session-cleanup] ORM delete returned False for %s "
+                        "and no class-set match found — record will reappear next tick",
+                        session_id_str[:20],
+                    )
             except Exception as del_err:
                 # ORM-only policy: no raw-Redis fallback. If ORM delete fails,
                 # log and move on — next reflection tick will retry.
