@@ -17,9 +17,26 @@ cd ~/src/ai && git checkout main && git pull
 ```
 
 Before starting, confirm the user has:
-- Python 3.11+ installed
+- Python 3.12+ installed
 - The `ai` repo cloned at `~/src/ai` **on the main branch with latest changes pulled**
 - Telegram API credentials (api_id and api_hash from https://my.telegram.org). If they don't have these, pause and explain how to get them before continuing.
+
+### Ensure bare `python` resolves to Python 3.12+
+
+Claude Code hooks invoke bare `python` under `/bin/sh`, which does not honor zsh aliases. macOS does not ship a `python` binary by default — only `python3`. Without this symlink every hook that uses `python` silently fails with `command not found`, surfacing errors in the UI and disabling validators (no-raw-redis-delete, plan-section checks, SDLC reminders, etc.).
+
+```bash
+# Verify python3 is 3.12+
+python3 --version
+
+# Create the symlink in a user-writable PATH dir (no sudo)
+ln -sf "$(command -v python3)" /opt/homebrew/bin/python
+
+# Confirm /bin/sh resolves it
+/bin/sh -c 'python --version'  # expected: Python 3.12.x or newer
+```
+
+The update orchestrator (`scripts/update/run.py`) verifies this via `check_python_alias()` and fails loudly if missing.
 
 ## Step 1: Install uv Package Manager
 
