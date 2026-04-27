@@ -49,6 +49,26 @@ MAX_RELAY_RETRIES = 3
 KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message"}
 
 
+def _safe_unlink(path: str) -> None:
+    """Unlink a temp file the relay was asked to clean up.
+
+    Wrapped in try/except so cleanup never raises into the send path: a
+    missing file just means another process beat us to it (or the file
+    was never written), which is harmless. Used by the voice-note send
+    path and by the DLQ placement path when the payload carries
+    ``cleanup_file: True``.
+    """
+    import os as _os
+
+    try:
+        _os.unlink(path)
+        logger.debug("Relay: cleaned up temp file %s", path)
+    except FileNotFoundError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Relay: cleanup_file unlink failed for %s: %s", path, e)
+
+
 def _get_redis_connection() -> redis.Redis:
     """Get a synchronous Redis connection for queue operations."""
     import os
@@ -257,7 +277,57 @@ async def _send_queued_message(
                     logger.warning(f"Relay: file not found at send time: {fp}")
 
             if available:
-                # Single file or album
+                # Voice-note branch: deliver as a native Telegram voice bubble.
+                # Requires payload `voice_note: True` and (optionally) `duration`.
+                # Falls back to the standard document-send path on attribute
+                # construction failure -- never crashes the relay.
+                if message.get("voice_note") and len(available) == 1:
+                    voice_path = available[0]
+                    duration = message.get("duration")
+                    try:
+                        from telethon.tl.types import DocumentAttributeAudio
+
+                        attr_duration = int(duration) if duration else 0
+                        attrs = [
+                            DocumentAttributeAudio(
+                                duration=attr_duration,
+                                voice=True,
+                                waveform=b"",
+                            )
+                        ]
+                        sent = await telegram_client.send_file(
+                            int(chat_id),
+                            voice_path,
+                            caption=text or None,
+                            reply_to=reply_to_id,
+                            voice_note=True,
+                            attributes=attrs,
+                        )
+                        msg_id = (
+                            getattr(sent[0], "id", None)
+                            if isinstance(sent, list) and sent
+                            else getattr(sent, "id", None)
+                        )
+                        logger.info(
+                            "Relay: sent voice note to chat %s (file=%s, duration=%ds, msg_id=%s)",
+                            chat_id,
+                            os.path.basename(voice_path),
+                            attr_duration,
+                            msg_id,
+                        )
+                        if message.get("cleanup_file"):
+                            _safe_unlink(voice_path)
+                        return msg_id
+                    except Exception as voice_err:
+                        logger.warning(
+                            "Relay: voice-note send failed (%s); "
+                            "falling back to document send for chat %s",
+                            voice_err,
+                            chat_id,
+                        )
+                        # Fall through to standard send path below.
+
+                # Single file or album (default path)
                 file_arg = available[0] if len(available) == 1 else available
                 sent = await telegram_client.send_file(
                     int(chat_id),
@@ -276,6 +346,9 @@ async def _send_queued_message(
                     f"(files={file_names}, "
                     f"caption={len(text)} chars, msg_id={msg_id})"
                 )
+                if message.get("cleanup_file"):
+                    for fp in available:
+                        _safe_unlink(fp)
                 return msg_id
             else:
                 # All files missing -- fall back to text-only
@@ -403,6 +476,16 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
     """
     msg_type = message.get("type")
     chat_id = message.get("chat_id")
+
+    # Honor cleanup_file flag at terminal failure: the producer trusted the
+    # relay to manage temp-file lifecycle, so retry exhaustion is one of the
+    # two completion points (the other is successful send).
+    if message.get("cleanup_file"):
+        for fp in message.get("file_paths") or []:
+            _safe_unlink(fp)
+        legacy = message.get("file_path")
+        if legacy:
+            _safe_unlink(legacy)
 
     if msg_type in ("reaction", "custom_emoji_message"):
         logger.warning(

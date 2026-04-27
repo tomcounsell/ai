@@ -481,11 +481,10 @@ The **## Update System** section should cover:
 
 ### ## Agent Integration (Required)
 
-Include an **## Agent Integration** section after **## Update System**. The agent receives Telegram messages via the bridge (`bridge/telegram_bridge.py`) and can only use tools exposed through MCP servers registered in `.mcp.json`. New Python functions in `tools/` are invisible to the agent unless wrapped.
+Include an **## Agent Integration** section after **## Update System**. The agent receives Telegram messages via the bridge (`bridge/telegram_bridge.py`) and reaches new functionality through one of two surfaces: a CLI entry point declared in `pyproject.toml [project.scripts]` (invoked via the agent's Bash tool), or a direct Python import the bridge calls internally. New Python functions in `tools/` are invisible to the agent until wired into one of those two paths.
 
 The **## Agent Integration** section should cover:
-- Whether a new or existing MCP server needs to expose the functionality
-- Changes to `.mcp.json` or `mcp_servers/` directory
+- Whether a new CLI entry point is required in `pyproject.toml [project.scripts]` (e.g. `valor-tts = "tools.tts.cli:main"`)
 - Whether the bridge itself needs to import/call the new code directly
 - Integration tests that verify the agent can actually invoke the new tools
 - If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")

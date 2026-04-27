@@ -772,7 +772,26 @@ def cmd_send(args: argparse.Namespace) -> int:
     }
     if file_path:
         # Relay expects file_paths as a list of absolute paths
-        payload["file_paths"] = [str(Path(file_path).resolve())]
+        resolved = str(Path(file_path).resolve())
+        payload["file_paths"] = [resolved]
+
+        # Voice-note delivery: tell the relay to send via Telethon's
+        # voice_note=True path so the file arrives as a Telegram voice
+        # bubble (waveform UI), not a generic audio document.
+        if getattr(args, "voice_note", False):
+            payload["voice_note"] = True
+            # Compute duration via tools.tts._compute_duration_opus so the
+            # relay can populate DocumentAttributeAudio(duration=...).
+            try:
+                from tools.tts import _compute_duration_opus
+
+                payload["duration"] = _compute_duration_opus(resolved)
+            except Exception:
+                payload["duration"] = 0.0
+
+        # Hand temp-file cleanup to the relay so it survives async retries.
+        if getattr(args, "cleanup_after_send", False):
+            payload["cleanup_file"] = True
 
     # Push to Redis outbox queue
     queue_key = f"telegram:outbox:{session_id}"
@@ -966,6 +985,23 @@ def main() -> int:
         type=int,
         default=None,
         help="Message ID to reply to (required for forum groups/topics)",
+    )
+    send_parser.add_argument(
+        "--voice-note",
+        action="store_true",
+        help=(
+            "Send the attached file as a native Telegram voice message "
+            "(waveform bubble). Requires an OGG/Opus file via --audio."
+        ),
+    )
+    send_parser.add_argument(
+        "--cleanup-after-send",
+        action="store_true",
+        help=(
+            "Ask the relay to delete the attached file after a successful "
+            "send (or after dead-letter placement on retry exhaustion). "
+            "Use this for ephemeral temp files; the relay owns lifecycle."
+        ),
     )
 
     # chats subcommand
