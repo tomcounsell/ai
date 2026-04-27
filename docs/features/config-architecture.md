@@ -97,6 +97,10 @@ All Google auth credentials and calendar config live in `~/Desktop/Valor/`:
 
 Note: The DM whitelist is stored in the `dms.whitelist` array within `projects.json`, not as a separate file.
 
+### Bridge-contact ownership validation
+
+`projects.json` is validated as a green-light gate by the update script before any service restart (`scripts/update/run.py` Step 4.6 → `scripts/update/verify.py::check_projects_json` → `bridge/config_validation.py::validate_projects_config`). The validator enforces that every bridge-contact identifier — Telegram DM contact id, Telegram group name, email contact, and email domain — resolves to exactly one machine. If the rule is broken, the running bridge keeps serving on the previously-validated config; only a clean config can roll out. See [Single-Machine Ownership](single-machine-ownership.md) for the full identifier list and failure modes.
+
 Override with `GOOGLE_CREDENTIALS_DIR` env var if needed.
 
 ## Adding New Config

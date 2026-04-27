@@ -424,6 +424,19 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 - `~/Desktop/Valor/projects.json` - Multi-project configuration (iCloud-synced, private)
 - `.claude/settings.local.json` - Claude Code settings
 
+### Single-Machine Ownership (Strict)
+
+Every bridge-contact identifier in `projects.json` is owned by exactly **one** machine. Two machines must never both pick up the same incoming bridge message. Applies to all bridge-contact shapes:
+
+- Telegram DM contact id (`dms.whitelist[].id`)
+- Telegram group name (`projects.<key>.telegram.groups.<name>`)
+- Email contact (`projects.<key>.email.contacts[]`)
+- Email domain wildcard (`projects.<key>.email.domains[]`)
+
+`projects.<key>.machine` is the source of truth — every other identifier inherits ownership from its project. Adding a new machine costs zero edits to existing whitelist entries, group declarations, or email patterns.
+
+Enforced by `bridge/config_validation.py::validate_projects_config` and gated by `scripts/update/run.py` Step 4.6 — the update script blocks the bridge restart on a malformed config and the running bridge keeps serving on the previously-validated config. Full reference: [docs/features/single-machine-ownership.md](docs/features/single-machine-ownership.md).
+
 ## Secrets
 
 All secrets go in **`~/Desktop/Valor/.env`**. Never write secrets to `repo/.env`.

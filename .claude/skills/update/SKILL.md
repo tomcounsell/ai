@@ -32,7 +32,8 @@ The orchestrator will:
 - Verify critical dependency versions
 - Check/pull Ollama summarizer model
 - Verify CLI tools and SDK authentication
-- Install/restart bridge, worker, caffeinate, and reflections services
+- **Validate `projects.json` (green-light gate)** — runs `bridge/config_validation.py::validate_projects_config` over the full config (Step 4.6). Enforces that every bridge-contact identifier (DM contact id, Telegram group, email contact, email domain wildcard) resolves to exactly one machine. On failure: log the error, skip the service restart, leave the running bridge serving on the previously-validated config. See [Single-Machine Ownership](../../../docs/features/single-machine-ownership.md).
+- Install/restart bridge, worker, caffeinate, and reflections services (skipped if the validation gate failed)
 - Set up global calendar hook and generate config
 - Check MCP server configuration
 

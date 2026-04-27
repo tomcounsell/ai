@@ -1008,7 +1008,7 @@ def check_projects_json(project_dir: Path) -> ToolCheck:
     try:
         from bridge.config_validation import (
             ConfigValidationError,
-            validate_dm_whitelist,
+            validate_projects_config,
         )
     except ImportError as e:
         return ToolCheck(
@@ -1018,15 +1018,30 @@ def check_projects_json(project_dir: Path) -> ToolCheck:
         )
 
     try:
-        validate_dm_whitelist(cfg)
+        validate_projects_config(cfg)
     except ConfigValidationError as e:
         return ToolCheck(name="projects.json", available=False, error=str(e))
 
+    projects = cfg.get("projects", {})
     whitelist_count = len(cfg.get("dms", {}).get("whitelist", []))
+    group_count = sum(
+        len((p.get("telegram") or {}).get("groups") or {})
+        for p in projects.values()
+        if isinstance(p, dict)
+    )
+    email_count = sum(
+        len((p.get("email") or {}).get("contacts") or [])
+        + len((p.get("email") or {}).get("domains") or [])
+        for p in projects.values()
+        if isinstance(p, dict)
+    )
     return ToolCheck(
         name="projects.json",
         available=True,
-        version=f"valid ({whitelist_count} whitelist entries)",
+        version=(
+            f"valid ({whitelist_count} DM contacts, "
+            f"{group_count} groups, {email_count} email patterns)"
+        ),
     )
 
 

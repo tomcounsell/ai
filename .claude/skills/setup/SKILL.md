@@ -228,10 +228,13 @@ Edit `~/Desktop/Valor/projects.json` for this machine's projects.
 **Critical rules when editing projects.json:**
 
 1. **Every project MUST have `working_directory`** -- absolute path to the repo on this machine
-2. **Always include the full `defaults` section** -- copy it from the example if missing
-3. **DO NOT set `respond_to_all: false`** -- the default is `true`, which is correct. Omit the field entirely from project-level telegram config.
-4. **Keep project telegram config minimal** -- usually just `"groups": {"Dev: ProjectName": {"persona": "developer"}}` is sufficient
-5. **Verify paths exist on disk** -- run `ls` on each `working_directory` to confirm
+2. **Every project MUST have `machine`** -- the exact `ComputerName` of the single machine that owns it (`scutil --get ComputerName`). This is the source of truth for ownership; whitelists, groups, and email patterns all inherit from it. Two projects on different machines must never share a Telegram group, email contact, or DM whitelist contact id — see [Single-Machine Ownership](../../../docs/features/single-machine-ownership.md).
+3. **Always include the full `defaults` section** -- copy it from the example if missing
+4. **DO NOT set `respond_to_all: false`** -- the default is `true`, which is correct. Omit the field entirely from project-level telegram config.
+5. **Keep project telegram config minimal** -- usually just `"groups": {"Dev: ProjectName": {"persona": "developer"}}` is sufficient
+6. **Verify paths exist on disk** -- run `ls` on each `working_directory` to confirm
+
+**No per-contact ownership edits.** When adding this machine, you do not edit `dms.whitelist`, individual `telegram.groups` entries, or `email.contacts/domains` to "exclude" other machines. Just set each project's `machine` field once. The validator (`bridge/config_validation.py`) and the update gate (`scripts/update/run.py` Step 4.6) will enforce that no contact is owned by two machines.
 
 Example minimal project entry:
 
