@@ -907,6 +907,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 result.warnings.append("Worker plist install failed")
 
+        # Ensure email bridge is running if configured
+        if service.is_email_configured(project_dir):
+            if service.is_email_running():
+                log(f"Email bridge running (PID: {service.get_email_pid()})", v)
+            else:
+                log("Email bridge configured but stopped — starting...", v, always=True)
+                if service.ensure_email_running(project_dir):
+                    log(f"Email bridge started (PID: {service.get_email_pid()})", v, always=True)
+                else:
+                    log("WARN: Email bridge failed to start", v, always=True)
+                    result.warnings.append("Email bridge configured but failed to start")
+        else:
+            log("Email bridge: skipped (IMAP_PASSWORD not configured)", v)
+
         # Install the user-space log-rotate LaunchAgent — replaces the prior
         # root-requiring newsyslog install. Runs every 30 minutes via launchd
         # under the user account, so `/update --full` never prompts for sudo.
