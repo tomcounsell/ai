@@ -23,6 +23,7 @@ from tools.telegram_history import (
     register_chat,
     resolve_chat_candidates,
     resolve_chat_id,
+    resolve_chats_by_project,
     search_all_chats,
     search_history,
     search_links,
@@ -530,6 +531,20 @@ class TestListChats:
         assert "error" not in result
         assert result["count"] == 2
 
+    def test_list_chats_includes_project_key_field(self):
+        """Each chat dict surfaces `project_key` (None when unset)."""
+        register_chat(chat_id="111", chat_name="Chat A", project_key="psyoptimal")
+        register_chat(chat_id="222", chat_name="Chat B")  # no project_key
+
+        result = list_chats()
+
+        assert "error" not in result
+        chats = {c["chat_id"]: c for c in result["chats"]}
+        assert "project_key" in chats["111"]
+        assert chats["111"]["project_key"] == "psyoptimal"
+        assert "project_key" in chats["222"]
+        assert chats["222"]["project_key"] is None
+
 
 class TestResolveChatId:
     """Test chat_id resolution by name."""
@@ -845,3 +860,107 @@ class TestSearchAllChats:
 
         assert "error" not in result
         assert result["total_matches"] == 2
+
+
+class TestResolveChatsByProject:
+    """Test `resolve_chats_by_project` — project_key → chat list resolver."""
+
+    def test_empty_project_returns_empty_list(self):
+        # Defensive guard: empty/whitespace-only project_key never matches.
+        assert resolve_chats_by_project("") == []
+        assert resolve_chats_by_project("   ") == []
+
+    def test_zero_matching_chats(self):
+        # Project_key with no matching Chat records → [].
+        register_chat(chat_id="100", chat_name="Other Chat", project_key="other")
+        result = resolve_chats_by_project("psyoptimal")
+        assert result == []
+
+    def test_single_matching_chat(self):
+        register_chat(chat_id="200", chat_name="PsyOPTIMAL", project_key="psyoptimal")
+        register_chat(chat_id="201", chat_name="Other", project_key="other")
+
+        result = resolve_chats_by_project("psyoptimal")
+
+        assert len(result) == 1
+        assert isinstance(result[0], ChatCandidate)
+        assert result[0].chat_id == "200"
+        assert result[0].chat_name == "PsyOPTIMAL"
+
+    def test_many_matching_chats_sorted_by_recency(self):
+        # Three chats tagged "psyoptimal" registered in order; resolver must
+        # return them most-recent-first.
+        register_chat(chat_id="301", chat_name="PsyOPTIMAL", project_key="psyoptimal")
+        time.sleep(0.01)
+        register_chat(chat_id="302", chat_name="PM: PsyOptimal", project_key="psyoptimal")
+        time.sleep(0.01)
+        register_chat(chat_id="303", chat_name="Dev: PsyOPTIMAL", project_key="psyoptimal")
+
+        result = resolve_chats_by_project("psyoptimal")
+
+        assert [c.chat_id for c in result] == ["303", "302", "301"]
+
+    def test_chats_with_none_project_key_never_returned(self):
+        """`project_key=None` chats must be filtered out, even when name matches."""
+        register_chat(chat_id="400", chat_name="PsyOPTIMAL", project_key=None)
+        register_chat(chat_id="401", chat_name="PsyOPTIMAL Other", project_key="psyoptimal")
+
+        result = resolve_chats_by_project("psyoptimal")
+        ids = {c.chat_id for c in result}
+        assert ids == {"401"}
+
+    def test_chats_with_different_project_key_excluded(self):
+        register_chat(chat_id="500", chat_name="Foo", project_key="psyoptimal")
+        register_chat(chat_id="501", chat_name="Bar", project_key="valor")
+        register_chat(chat_id="502", chat_name="Baz", project_key="ai")
+
+        result = resolve_chats_by_project("psyoptimal")
+        ids = {c.chat_id for c in result}
+        assert ids == {"500"}
+
+    def test_deterministic_tiebreak_on_chat_id(self, monkeypatch):
+        """Same `last_activity_ts` ties → tiebreak by chat_id ascending."""
+        import tools.telegram_history as _th
+
+        frozen_ts = 1_700_000_500.0
+        monkeypatch.setattr(_th.time, "time", lambda: frozen_ts)
+        register_chat(chat_id="700", chat_name="A", project_key="psyoptimal")
+        register_chat(chat_id="600", chat_name="B", project_key="psyoptimal")
+        monkeypatch.undo()
+
+        result = resolve_chats_by_project("psyoptimal")
+        # "600" < "700" lexicographically.
+        assert [c.chat_id for c in result] == ["600", "700"]
+
+    def test_redis_unavailable_returns_empty_and_logs(self, monkeypatch, caplog):
+        """Narrow exception handling: Redis errors yield [] with a warning."""
+        import redis
+
+        from models.chat import Chat
+
+        class _FakeQuery:
+            def filter(self, **kwargs):
+                raise redis.RedisError("connection refused")
+
+            def all(self):
+                raise redis.RedisError("connection refused")
+
+        monkeypatch.setattr(Chat, "query", _FakeQuery())
+
+        with caplog.at_level("WARNING", logger="tools.telegram_history"):
+            result = resolve_chats_by_project("psyoptimal")
+
+        assert result == []
+        # Warning must mention the failure for audit.
+        combined = " ".join(r.message for r in caplog.records)
+        assert "resolve_chats_by_project" in combined.lower()
+
+    def test_returns_chat_candidate_dataclass_not_model(self):
+        """Returned items are ChatCandidate dataclasses, not Popoto Chat instances."""
+        register_chat(chat_id="800", chat_name="Canary", project_key="psyoptimal")
+
+        result = resolve_chats_by_project("psyoptimal")
+        from models.chat import Chat
+
+        assert isinstance(result[0], ChatCandidate)
+        assert not isinstance(result[0], Chat)

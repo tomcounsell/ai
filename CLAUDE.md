@@ -96,13 +96,15 @@ valor-telegram read --chat "Tom" --search "deployment"
 valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 valor-telegram read --chat-id -1001234567 --limit 10       # numeric bypass
 valor-telegram read --user tom --limit 10                  # DM whitelist bypass
+valor-telegram read --project psyoptimal --limit 20        # union all chats with this project_key
 valor-telegram chats --search "psy"                        # discover by fragment
+valor-telegram chats --project psyoptimal                  # list every chat tagged with the project
 valor-telegram send --chat "Dev: Valor" "Hello world"
 valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 ```
 
-`--chat`, `--chat-id`, and `--user` on `read` are mutually exclusive. Every successful read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages — trust that header over your intuition about which chat you asked for. If a `--chat` name is ambiguous, the **default** is to pick the most recently active candidate, log a warning listing all candidates to stderr, and proceed (exit 0); pass `--strict` to opt into a non-zero exit with a stderr candidate list instead (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation UX).
+`--chat`, `--chat-id`, `--user`, and `--project` on `read` are mutually exclusive. Every successful single-chat read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages; cross-chat `--project` reads print `[project=KEY · N chats: name1, name2, ... · last activity: T]` and tag each line with `[chat_name]` so you can see which chat each message came from — trust those headers over your intuition about which chat you asked for. `--project --json` enriches each message dict with `chat_id` and `chat_name`. If a `--chat` name is ambiguous, the **default** is to pick the most recently active candidate, log a warning listing all candidates to stderr, and proceed (exit 0); pass `--strict` to opt into a non-zero exit with a stderr candidate list instead (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation and project-stitching UX).
 
 ## Reading Email
 

@@ -218,6 +218,49 @@ def resolve_chat_candidates(chat_name: str) -> list[ChatCandidate]:
         return []
 
 
+def resolve_chats_by_project(project_key: str) -> list[ChatCandidate]:
+    """Return all chats whose `project_key` matches, ordered by recency.
+
+    Scans `Chat.query.all()` and filters in Python because `Chat.project_key`
+    is a plain `Field` (not `KeyField`) — there is no indexed lookup. Chats
+    with `project_key=None` are NEVER returned (a chat that was never tagged
+    by the bridge is not part of any project).
+
+    Ordering: `last_activity_ts` desc, with `None` sorting last and a
+    deterministic `chat_id` ascending tiebreak (same as `_sort_candidates`).
+
+    Args:
+        project_key: The project key to match. Empty/whitespace-only returns [].
+
+    Returns:
+        List of `ChatCandidate`s. Empty if no match or on Redis/Popoto failure.
+
+    Failure mode: Redis / Popoto errors are logged and an empty list is
+    returned. Mirrors the narrow exception handling of `resolve_chat_candidates`.
+    """
+    if not project_key or not project_key.strip():
+        return []
+
+    from models.chat import Chat
+
+    try:
+        import popoto as _popoto_pkg
+        import redis as _redis_pkg
+
+        all_chats = list(Chat.query.all())
+        matches = [
+            c
+            for c in all_chats
+            if getattr(c, "project_key", None) is not None and c.project_key == project_key
+        ]
+        if not matches:
+            return []
+        return _sort_candidates([_chat_to_candidate(c) for c in matches])
+    except (_redis_pkg.RedisError, _popoto_pkg.ModelException, _popoto_pkg.QueryException) as e:
+        logger.warning("resolve_chats_by_project failed: %s", e)
+        return []
+
+
 # =============================================================================
 # Shared Utilities
 # =============================================================================
@@ -1118,6 +1161,7 @@ def list_chats(
                 "chat_id": chat.chat_id,
                 "chat_name": chat.chat_name,
                 "chat_type": chat.chat_type,
+                "project_key": getattr(chat, "project_key", None),
                 "updated_at": _ts_to_iso(chat.updated_at),
                 "message_count": msg_count,
                 "last_message": last_msg,
