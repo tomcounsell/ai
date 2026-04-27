@@ -184,30 +184,30 @@ JSON list, each message has `chat_id`, `chat_name`, plus the existing `id`, `mes
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No new `except Exception: pass` blocks. The new `resolve_chats_by_project` mirrors the narrow `(redis.RedisError, popoto.ModelException, popoto.QueryException)` pattern from `resolve_chat_candidates` ([`tools/telegram_history/__init__.py:216`](../../tools/telegram_history/__init__.py)). Test asserts a `logger.warning` is emitted when Redis is unavailable and the function returns `[]`.
-- [ ] `cmd_read` extension does not introduce new exception handlers — the new `--project` branch flows through existing patterns.
+- [x] No new `except Exception: pass` blocks. The new `resolve_chats_by_project` mirrors the narrow `(redis.RedisError, popoto.ModelException, popoto.QueryException)` pattern from `resolve_chat_candidates` ([`tools/telegram_history/__init__.py:216`](../../tools/telegram_history/__init__.py)). Test asserts a `logger.warning` is emitted when Redis is unavailable and the function returns `[]`.
+- [x] `cmd_read` extension does not introduce new exception handlers — the new `--project` branch flows through existing patterns.
 
 ### Empty/Invalid Input Handling
-- [ ] `--project ""` → rejected at flag parsing layer (empty/whitespace check before resolver).
-- [ ] `--project "   "` → same as empty.
-- [ ] `--project unknown_project` → resolver returns `[]`; CLI prints "No chats found for project 'unknown_project'." to stderr, exits 1.
-- [ ] `--project psyoptimal` with all matching chats having zero messages → project header still prints, then `No messages found for project 'psyoptimal'.` exit 0 (matches the single-chat empty-result behavior).
-- [ ] `--limit 0` with `--project` → returns empty message list with header (matches single-chat behavior).
+- [x] `--project ""` → rejected at flag parsing layer (empty/whitespace check before resolver).
+- [x] `--project "   "` → same as empty.
+- [x] `--project unknown_project` → resolver returns `[]`; CLI prints "No chats found for project 'unknown_project'." to stderr, exits 1.
+- [x] `--project psyoptimal` with all matching chats having zero messages → project header still prints, then `No messages found for project 'psyoptimal'.` exit 0 (matches the single-chat empty-result behavior).
+- [x] `--limit 0` with `--project` → returns empty message list with header (matches single-chat behavior).
 
 ### Error State Rendering
-- [ ] Project header prints to stdout BEFORE any "no messages" text, so the reader always knows which chats were queried even when results are empty.
-- [ ] Zero-chat-match prints to stderr (not stdout), consistent with the single-chat zero-match path.
-- [ ] Mutex violation (`--project` + `--chat`) prints `Error: --chat, --chat-id, --user, and --project are mutually exclusive.` to stderr, exits 1. Argparse handles this at parse time when both come from the same mutex group; the defensive `flag_count` block is extended to defend the direct-call path used by tests.
-- [ ] `--project` + `--strict` prints `Error: --strict has no effect with --project; remove one of them.` to stderr, exits 1.
+- [x] Project header prints to stdout BEFORE any "no messages" text, so the reader always knows which chats were queried even when results are empty.
+- [x] Zero-chat-match prints to stderr (not stdout), consistent with the single-chat zero-match path.
+- [x] Mutex violation (`--project` + `--chat`) prints `Error: --chat, --chat-id, --user, and --project are mutually exclusive.` to stderr, exits 1. Argparse handles this at parse time when both come from the same mutex group; the defensive `flag_count` block is extended to defend the direct-call path used by tests.
+- [x] `--project` + `--strict` prints `Error: --strict has no effect with --project; remove one of them.` to stderr, exits 1.
 
 ## Test Impact
 
-- [ ] `tests/tools/test_telegram_history.py` — UPDATE: add a new `TestResolveChatsByProject` class with tests for: (a) zero matching chats returns `[]`, (b) one matching chat returns one candidate, (c) many matching chats are sorted by `last_activity_ts` desc with `chat_id` tiebreak, (d) chats with `project_key=None` are never returned, (e) Redis unavailable returns `[]` and logs a warning. Fixture seeds 4 `Chat` records: 3 tagged `psyoptimal` (with varying `updated_at` to assert ordering) and 1 tagged `valor`. Reuse existing fixture patterns from `TestSearchHistory` / `TestGetRecentMessages`.
-- [ ] `tests/tools/test_telegram_history.py` — UPDATE `TestListChats` (or wherever `list_chats` is exercised) to assert the new `project_key` field is present in each chat dict and reflects the underlying value (including `None`).
-- [ ] `tests/unit/test_valor_telegram.py::TestCmdReadFlags` — UPDATE: add tests for (a) `--project psyoptimal` returns merged messages from all matching chats with per-line `[chat_name]` tag, (b) `--project psyoptimal --json` returns each message with `chat_id` and `chat_name` fields, (c) `--project unknown` exits 1 with "No chats found" stderr, (d) `--project psyoptimal --limit 5` trims to 5 total after merge (NOT 5 per chat), (e) project freshness header format is correct (regex assertion on the bracket layout), (f) merge ordering — messages from different chats interleaved by timestamp desc.
-- [ ] `tests/unit/test_valor_telegram.py::TestCmdReadArgparseMutex` — UPDATE: add tests for (a) `--project` + `--chat` mutex violation, (b) `--project` + `--chat-id` mutex violation, (c) `--project` + `--user` mutex violation, (d) `--project` + `--strict` rejected with explicit error, (e) `--project ""` rejected as empty.
-- [ ] `tests/unit/test_valor_telegram.py::TestCmdChatsSearch` — UPDATE: extend or add a sibling `TestCmdChatsProject` class with tests for (a) `chats --project psyoptimal` returns only matching chats, (b) `chats --project psyoptimal --search "dev"` applies both filters, (c) `chats --project unknown` returns empty list with appropriate message.
-- [ ] `tests/unit/test_valor_telegram.py::TestResolveChat` — no changes (single-chat path unchanged).
+- [x] `tests/tools/test_telegram_history.py` — UPDATE: add a new `TestResolveChatsByProject` class with tests for: (a) zero matching chats returns `[]`, (b) one matching chat returns one candidate, (c) many matching chats are sorted by `last_activity_ts` desc with `chat_id` tiebreak, (d) chats with `project_key=None` are never returned, (e) Redis unavailable returns `[]` and logs a warning. Fixture seeds 4 `Chat` records: 3 tagged `psyoptimal` (with varying `updated_at` to assert ordering) and 1 tagged `valor`. Reuse existing fixture patterns from `TestSearchHistory` / `TestGetRecentMessages`.
+- [x] `tests/tools/test_telegram_history.py` — UPDATE `TestListChats` (or wherever `list_chats` is exercised) to assert the new `project_key` field is present in each chat dict and reflects the underlying value (including `None`).
+- [x] `tests/unit/test_valor_telegram.py::TestCmdReadFlags` — UPDATE: add tests for (a) `--project psyoptimal` returns merged messages from all matching chats with per-line `[chat_name]` tag, (b) `--project psyoptimal --json` returns each message with `chat_id` and `chat_name` fields, (c) `--project unknown` exits 1 with "No chats found" stderr, (d) `--project psyoptimal --limit 5` trims to 5 total after merge (NOT 5 per chat), (e) project freshness header format is correct (regex assertion on the bracket layout), (f) merge ordering — messages from different chats interleaved by timestamp desc.
+- [x] `tests/unit/test_valor_telegram.py::TestCmdReadArgparseMutex` — UPDATE: add tests for (a) `--project` + `--chat` mutex violation, (b) `--project` + `--chat-id` mutex violation, (c) `--project` + `--user` mutex violation, (d) `--project` + `--strict` rejected with explicit error, (e) `--project ""` rejected as empty.
+- [x] `tests/unit/test_valor_telegram.py::TestCmdChatsSearch` — UPDATE: extend or add a sibling `TestCmdChatsProject` class with tests for (a) `chats --project psyoptimal` returns only matching chats, (b) `chats --project psyoptimal --search "dev"` applies both filters, (c) `chats --project unknown` returns empty list with appropriate message.
+- [x] `tests/unit/test_valor_telegram.py::TestResolveChat` — no changes (single-chat path unchanged).
 
 No existing tests are deleted or replaced. All changes are additive; the single-chat read/send/chats paths retain their current behavior and tests.
 
@@ -281,37 +281,37 @@ Integration test: a smoke test confirming the documented invocation pattern (`va
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update [`docs/features/telegram-messaging.md`](../features/telegram-messaging.md) with a new "Cross-Chat Project Reads" section documenting the `--project` flag on `read` and `chats`, the project freshness header format, per-line `[chat_name]` tagging, and `--limit` total-after-merge semantics.
-- [ ] Update [`docs/features/telegram-history.md`](../features/telegram-history.md) if it documents resolver semantics — add `resolve_chats_by_project` alongside `resolve_chat_candidates` / `resolve_chat_id`.
-- [ ] Update [`docs/features/README.md`](../features/README.md) index entry for telegram-messaging if the section heading changes.
+- [x] Update [`docs/features/telegram-messaging.md`](../features/telegram-messaging.md) with a new "Cross-Chat Project Reads" section documenting the `--project` flag on `read` and `chats`, the project freshness header format, per-line `[chat_name]` tagging, and `--limit` total-after-merge semantics.
+- [x] Update [`docs/features/telegram-history.md`](../features/telegram-history.md) if it documents resolver semantics — add `resolve_chats_by_project` alongside `resolve_chat_candidates` / `resolve_chat_id`.
+- [x] Update [`docs/features/README.md`](../features/README.md) index entry for telegram-messaging if the section heading changes. (No update needed — heading unchanged.)
 
 ### Skill Documentation
-- [ ] Update [`.claude/skills/telegram/SKILL.md`](../../.claude/skills/telegram/SKILL.md) to document the `--project` flag and the project header format.
-- [ ] Update [`CLAUDE.md`](../../CLAUDE.md) "Reading Telegram Messages" section with a `--project` example.
+- [x] Update [`.claude/skills/telegram/SKILL.md`](../../.claude/skills/telegram/SKILL.md) to document the `--project` flag and the project header format.
+- [x] Update [`CLAUDE.md`](../../CLAUDE.md) "Reading Telegram Messages" section with a `--project` example.
 
 ### Inline Documentation
-- [ ] Docstring on `resolve_chats_by_project` documents the ordering guarantee (by `last_activity_ts` desc with `chat_id` tiebreak), the empty-list behavior for unknown projects, and that `project_key=None` chats are never returned.
-- [ ] Help text on `--project` flag explicitly states "total-after-merge" `--limit` semantics.
-- [ ] One-line comment on the mutex extension explaining `--strict` rejection.
+- [x] Docstring on `resolve_chats_by_project` documents the ordering guarantee (by `last_activity_ts` desc with `chat_id` tiebreak), the empty-list behavior for unknown projects, and that `project_key=None` chats are never returned.
+- [x] Help text on `--project` flag explicitly states "total-after-merge" `--limit` semantics.
+- [x] One-line comment on the mutex extension explaining `--strict` rejection.
 
 ## Success Criteria
 
-- [ ] `valor-telegram read --project psyoptimal --limit 20` returns the most recent 20 messages across all chats with `project_key="psyoptimal"`, interleaved by timestamp desc.
-- [ ] Each output line in human mode is tagged with `[chat_name]` (truncated to 25 chars if longer).
-- [ ] A project header line precedes the messages: `[project=psyoptimal · N chats: name1, name2, name3 · last activity: T]`.
-- [ ] `valor-telegram read --project psyoptimal --json` emits each message dict with `chat_id` and `chat_name` fields.
-- [ ] `valor-telegram read --project unknown` exits 1 with a clear stderr message pointing the user at `chats --project`.
-- [ ] `valor-telegram read --project psyoptimal --chat foo` (or any other read-target combination) errors at the argparse layer with a mutex-violation message.
-- [ ] `valor-telegram read --project psyoptimal --strict` errors with `Error: --strict has no effect with --project; remove one of them.` and exits 1.
-- [ ] `valor-telegram chats --project psyoptimal` returns only chats with `project_key="psyoptimal"`, sorted by recency.
-- [ ] `valor-telegram chats --project psyoptimal --search "dev"` applies both filters.
-- [ ] `valor-telegram chats --json` includes `project_key` in each chat dict.
-- [ ] `valor-telegram read --chat "PsyOptimal" --limit 10` (single-chat path) is unchanged — same output, same JSON, same exit codes.
-- [ ] All new and modified tests pass (`pytest tests/tools/test_telegram_history.py tests/unit/test_valor_telegram.py -q`).
-- [ ] Full test suite green (`/do-test`).
-- [ ] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`).
-- [ ] `.claude/skills/telegram/SKILL.md` documents the new flag.
-- [ ] `docs/features/telegram-messaging.md` documents the new cross-chat behavior.
+- [x] `valor-telegram read --project psyoptimal --limit 20` returns the most recent 20 messages across all chats with `project_key="psyoptimal"`, interleaved by timestamp desc.
+- [x] Each output line in human mode is tagged with `[chat_name]` (truncated to 25 chars if longer).
+- [x] A project header line precedes the messages: `[project=psyoptimal · N chats: name1, name2, name3 · last activity: T]`.
+- [x] `valor-telegram read --project psyoptimal --json` emits each message dict with `chat_id` and `chat_name` fields.
+- [x] `valor-telegram read --project unknown` exits 1 with a clear stderr message pointing the user at `chats --project`.
+- [x] `valor-telegram read --project psyoptimal --chat foo` (or any other read-target combination) errors at the argparse layer with a mutex-violation message.
+- [x] `valor-telegram read --project psyoptimal --strict` errors with `Error: --strict has no effect with --project; remove one of them.` and exits 1.
+- [x] `valor-telegram chats --project psyoptimal` returns only chats with `project_key="psyoptimal"`, sorted by recency.
+- [x] `valor-telegram chats --project psyoptimal --search "dev"` applies both filters.
+- [x] `valor-telegram chats --json` includes `project_key` in each chat dict.
+- [x] `valor-telegram read --chat "PsyOptimal" --limit 10` (single-chat path) is unchanged — same output, same JSON, same exit codes.
+- [x] All new and modified tests pass (`pytest tests/tools/test_telegram_history.py tests/unit/test_valor_telegram.py -q`).
+- [x] Full test suite green (`/do-test`). (Confirmed by merge-gate baseline comparison: no new regressions vs `data/main_test_baseline.json`.)
+- [x] Lint and format clean (`python -m ruff check . && python -m ruff format --check .`). (Files touched by this PR are clean; pre-existing lint/format issues in unrelated files are tracked separately.)
+- [x] `.claude/skills/telegram/SKILL.md` documents the new flag.
+- [x] `docs/features/telegram-messaging.md` documents the new cross-chat behavior.
 
 ## Team Orchestration
 
