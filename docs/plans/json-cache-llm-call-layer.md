@@ -4,6 +4,8 @@ type: feature
 appetite: Small
 owner: Valor Engels
 created: 2026-04-27
+revised: 2026-04-27
+revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1182
 last_comment_id:
 ---
@@ -171,6 +173,20 @@ def get_or_compute(
 
 The helper stays at ~80 lines as the issue estimates. No type magic, no async layer (both call sites have their own threading concerns and the cache is synchronous — `intent_classifier.py` already wraps the API call in `asyncio.to_thread`, so the cache lookup runs in the thread alongside the API call when needed).
 
+### Serialization Contract
+
+`JsonCache.set/get` operate on **JSON-serializable values only** — `dict`, `list`, `str`, `int`, `float`, `bool`, `None`, or compositions thereof. The helper does NOT attempt to pickle/unpickle dataclasses or custom objects. This keeps the helper trivial and forces call sites to be explicit about wire format.
+
+**Implications for each call site:**
+
+- **`agent/intent_classifier.py` — `IntentResult` is a frozen dataclass.** The wire-up MUST convert in both directions:
+  - **Write path (cache miss):** after `_call_api()` returns the parsed `IntentResult`, convert to dict via `dataclasses.asdict(result)` and store the dict. The `compute_fn` passed to `get_or_compute` therefore returns a `dict`, not an `IntentResult`.
+  - **Read path (cache hit + cache miss return):** rehydrate by constructing `IntentResult(**cached_dict)`. The wire-up wraps `get_or_compute` and returns `IntentResult(**dict_from_cache)` regardless of hit/miss path.
+  - Frozen-dataclass `__init__` accepts only the dataclass fields (`intent`, `confidence`, `reasoning`); JSON round-trip naturally preserves these three primitive types. Computed `@property` accessors are recomputed on each access — they do not need to be persisted.
+- **`tools/knowledge/indexer.py` — `_summarize_content` returns `str`.** No conversion needed; `compute_fn` returns the summary string directly. Cache stores strings as-is.
+
+This contract is documented in the helper's module docstring with a one-line rule: "Cache values must be JSON-serializable. For dataclasses, store `dataclasses.asdict(...)` and rehydrate at the call site."
+
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
@@ -192,17 +208,12 @@ The helper stays at ~80 lines as the issue estimates. No type magic, no async la
 
 ## Test Impact
 
-- [ ] `tests/unit/test_intent_classifier.py::TestClassifyIntent::test_teammate_classification` — UPDATE: pass a `tmp_path`-rooted cache (via monkeypatch of the module-level `_cache` singleton) so the test does not share on-disk state with other tests or production. The assertion logic is unchanged.
-- [ ] `tests/unit/test_intent_classifier.py::TestClassifyIntent::test_work_classification` — UPDATE: same monkeypatch as above.
-- [ ] `tests/unit/test_intent_classifier.py::TestClassifyIntent::test_collaboration_classification` — UPDATE: same monkeypatch.
-- [ ] `tests/unit/test_intent_classifier.py::TestClassifyIntent::test_other_classification` — UPDATE: same monkeypatch.
-- [ ] `tests/unit/test_intent_classifier.py` — additionally, add a test verifying the cache is bypassed correctly by patching `_cache` to a `tmp_path` instance. (The existing tests rely on `mock_client.messages.create.return_value = ...`; if the cache is hot from a previous test run, that mock is never called and the test fails. The fix is per-test cache reset.)
-- [ ] `tests/unit/test_knowledge_indexer.py::TestSummarizeContent::test_summarize_uses_haiku_constant` — UPDATE: per-test cache reset via monkeypatch of the indexer module's `_cache` singleton.
-- [ ] `tests/unit/test_knowledge_indexer.py::TestSummarizeContent::test_summarize_fallback_on_api_failure` — UPDATE: per-test cache reset; assertion logic unchanged.
+- [ ] `tests/unit/test_intent_classifier.py::TestClassifyIntent` (entire class, 7 tests) — UPDATE: add an `autouse=True` `isolated_cache` fixture (see Step 5 for the full snippet) so every test runs against a `tmp_path`-rooted cold cache. Existing assertion logic is unchanged. **Affected tests:** `test_teammate_classification`, `test_work_classification`, `test_collaboration_classification`, `test_other_classification`, `test_no_api_key_defaults_to_work`, `test_api_error_defaults_to_work`, `test_context_passed_to_api`. The two tests that do NOT call the mocked Haiku client (`test_no_api_key_defaults_to_work` returns early before cache lookup; `test_api_error_defaults_to_work` raises before cache `set`) still benefit from the fixture for module-state hygiene.
+- [ ] `tests/unit/test_knowledge_indexer.py::TestSummarizeContent` (2 tests) — UPDATE: same autouse fixture pattern. **Affected tests:** `test_summarize_uses_haiku_constant`, `test_summarize_fallback_on_api_failure`. The fallback test still passes because the falsy/exception path bypasses cache write per the empty-result skip rule.
 - [ ] `tests/tools/test_classifier.py` — UNCHANGED. This file exercises `classify_request` (work-request classifier), which is out of scope per the No-Gos section.
-- [ ] **New test file** `tests/unit/test_json_cache.py` (CREATE): covers the helper's own behavior — hit, miss, fallback-on-corrupt-file, TTL expiry, LRU eviction at `max_entries`, atomic write semantics (no partial file visible after a simulated crash mid-save), version-key invalidation (different `version=` parameters produce different keys for identical input).
+- [ ] **New test file** `tests/unit/test_json_cache.py` (CREATE): covers the helper's own behavior — hit, miss, fallback-on-corrupt-file, TTL expiry, LRU eviction at `max_entries`, atomic write semantics (no partial file visible after a simulated crash mid-save), version-key invalidation (different `version=` parameters produce different keys for identical input), **falsy-result-not-cached** (compute_fn returns `""`, `None`, or `{}` → cache stays empty; subsequent calls re-invoke `compute_fn`).
 
-No DELETE or REPLACE dispositions. All existing impacts are UPDATE: per-test cache isolation via fixture.
+No DELETE or REPLACE dispositions. All existing impacts are UPDATE: autouse pytest fixture for cache isolation.
 
 ## Rabbit Holes
 
@@ -365,6 +376,30 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 (Standard tier 1 plus documentarian.)
 
+## Build Sequencing
+
+The build order is non-trivial because adding the cache layer to existing call sites WILL break their tests until the autouse fixture is in place. To avoid a window where `pytest tests/unit/` is broken on `main` or on a feature branch:
+
+```
+1. build-cache-helper          (creates utils/json_cache.py — no impact on existing tests)
+2. build-cache-tests           (validates the helper in isolation)
+3. update-existing-tests       (adds autouse isolated_cache fixture to test files)
+                               ↳ At this point fixtures reference _cache singletons that
+                                  do not yet exist. Use a guarded import + skip:
+                                  `pytest.importorskip("utils.json_cache")` at the top
+                                  of each fixture so the fixture is a no-op until wire-up
+                                  lands. After wire-up the fixture activates automatically.
+4. build-intent-wire           (adds _cache singleton to agent/intent_classifier.py;
+                                fixture activates; tests stay green)
+5. build-indexer-wire          (same for tools/knowledge/indexer.py)
+6. document-feature            (writes docs/features/json-cache-layer.md)
+7. validate-all                (full pytest + lint + smoke)
+```
+
+**Why this order matters:** if Steps 4-5 land before Step 3, every commit between them shows a red `pytest tests/unit/test_intent_classifier.py` because the second test in the class runs against a hot cache and the mock_client is bypassed. CI would block the PR until Step 3 lands. The order above keeps the tree green at every commit boundary.
+
+**Single-PR caveat:** since this entire feature ships in one PR, individual commits in the PR don't gate CI — only the final tip does. The order above is still recommended because (a) `git bisect` stays useful, and (b) if the PR is split or any commit is reverted, no commit leaves the tree red.
+
 ## Step by Step Tasks
 
 ### 1. Implement `utils/json_cache.py`
@@ -376,8 +411,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: true
 - Create `utils/json_cache.py` implementing `JsonCache` (init/load/save/get/set with `OrderedDict` LRU) and `get_or_compute` (hashing + analytics emission).
 - Wrap the `analytics.collector` import and `record_metric` call in try/except so analytics being unavailable never breaks caching.
+- **Empty-result skip:** Inside `get_or_compute`, after calling `compute_fn()` and before `cache.set()`, add a guard: if the result is falsy (`None`, empty string, empty dict, empty list, `False`, `0`), return it WITHOUT caching. This prevents permanent caching of transient API flakes that returned empty content. Document this contract in the docstring: "Falsy results are not cached." Cache hits still return cached values regardless — only the write path skips falsy values.
 - Stdlib imports only: `hashlib`, `json`, `os`, `time`, `collections.OrderedDict`, `pathlib.Path`, `typing.Any | Callable | TypeVar`.
-- Module docstring: state the contract and the single-writer-per-file invariant.
+- Module docstring: state the contract and the single-writer-per-file invariant. Specifically:
+  - "Cache values must be JSON-serializable. For dataclasses, store `dataclasses.asdict(...)` and rehydrate at the call site."
+  - "Single-writer-per-file invariant: each `JsonCache` instance must be written to by exactly one process. Multi-writer scenarios will silently lose writes (atomic `os.replace` guarantees no corruption, but last-write-wins). See `docs/features/json-cache-layer.md` for the upgrade path (`fcntl.flock`)."
+  - "Falsy results from `compute_fn` are not cached."
 - Confirm code style: `python -m ruff format utils/json_cache.py && python -m ruff check utils/json_cache.py`.
 
 ### 2. Author `tests/unit/test_json_cache.py`
@@ -392,37 +431,94 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ### 3. Wire `agent/intent_classifier.py`
 - **Task ID**: build-intent-wire
-- **Depends On**: build-cache-helper
-- **Validates**: tests/unit/test_intent_classifier.py (after update-existing-tests)
+- **Depends On**: build-cache-helper, update-existing-tests
+- **Validates**: tests/unit/test_intent_classifier.py (the autouse fixture activates as soon as the `_cache` singleton lands)
 - **Assigned To**: intent-wire-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: true (with build-indexer-wire)
 - Add module-level singleton: `_cache = JsonCache(Path("data/cache/intent_classifier.json"), max_entries=2000)` near the top of the module (under imports, with a documenting comment specifying TTL choice and version).
-- Inside `classify_intent()`, between the user-content build and the `_call_api` call, route through `get_or_compute`. Key input: `f"{message}|{recent_window}"` where `recent_window` is the joined `recent_messages[-3:]` string. TTL=7200, version="v1".
-- Preserve the existing `except Exception` graceful-degradation block at line 226 verbatim. Do not modify the existing logger calls.
+- Inside `classify_intent()`, route through `get_or_compute` AFTER `user_content` is built (line ~202) and BEFORE `_call_api()` is invoked (line ~214). The cache layer is inside the existing `try` block at line 183 so the existing `except Exception` at line 226 still catches any cache-helper raise (defense-in-depth — `get_or_compute` itself never raises, but the `try` boundary is preserved).
+- **Key input (canonical):** `f"{message}\n---\n{recent_window}"` where `recent_window` is the formatted multi-line `"Recent conversation:\n- msg1\n- msg2\n- msg3\n"` block (or the empty string if `context` is `None` or `recent_messages` is missing/empty). Using the same exact formatted block that gets sent to the API guarantees deterministic key derivation — any change to the prompt-building logic upstream is automatically reflected in the cache key. The `\n---\n` separator avoids ambiguity when message text itself contains newlines.
+- **Serialization (CRITICAL):** `IntentResult` is a frozen dataclass. The `compute_fn` passed to `get_or_compute` MUST return `dataclasses.asdict(result)` (a dict), NOT the dataclass itself. The wire-up rehydrates with `IntentResult(**cached_dict)` after `get_or_compute` returns. Without this, JSON serialization fails with `TypeError: Object of type IntentResult is not JSON serializable`.
+- Concrete sketch:
+  ```python
+  recent_window = ""  # or build the formatted block
+  # ... existing user_content assembly ...
+  cache_input = f"{message}\n---\n{recent_window}"
+  def _call_and_serialize() -> dict:
+      response = client.messages.create(...)  # existing _call_api body
+      raw_text = response.content[0].text.strip()
+      result = _parse_classifier_response(raw_text)
+      return dataclasses.asdict(result)
+  cached_dict = await asyncio.to_thread(
+      get_or_compute, _cache, cache_input, _call_and_serialize, ttl=7200, version="v1"
+  )
+  result = IntentResult(**cached_dict)
+  ```
+- TTL=7200 (2 hours), version="v1".
+- Preserve the existing `except Exception` graceful-degradation block at line 226 verbatim. Do not modify the existing logger calls. The elapsed-ms log at line 219 still runs whether the result came from cache or live API; this is intentional (a hot cache will show low ms; cold will show ~200ms).
 - Confirm `python -m ruff format agent/intent_classifier.py && python -m ruff check agent/intent_classifier.py`.
 
 ### 4. Wire `tools/knowledge/indexer.py`
 - **Task ID**: build-indexer-wire
-- **Depends On**: build-cache-helper
-- **Validates**: tests/unit/test_knowledge_indexer.py (after update-existing-tests)
+- **Depends On**: build-cache-helper, update-existing-tests
+- **Validates**: tests/unit/test_knowledge_indexer.py (the autouse fixture activates as soon as the `_cache` singleton lands)
 - **Assigned To**: indexer-wire-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: true (with build-intent-wire)
 - Add module-level singleton: `_cache = JsonCache(Path("data/cache/knowledge_summaries.json"), max_entries=5000)`.
-- Inside `_summarize_content()`, route the Haiku call through `get_or_compute` with key input `f"{content[:4000]}|{filename}"`, `ttl=None`, version="v1".
+- Inside `_summarize_content()`, the cache layer wraps the Haiku call but stays INSIDE the existing `try` block at line 75 so the existing truncation fallback at line 99 still catches any helper raise.
+- **Key input (canonical):** `f"{content[:4000]}\n---\n{filename}"`. Using `\n---\n` as separator (not `|`) for the same reason as intent: avoid ambiguity when content/filename contains pipes.
+- **Serialization:** `_summarize_content` returns a `str`. `compute_fn` returns the stripped summary string directly. No dataclass conversion needed.
+- Concrete sketch:
+  ```python
+  def _summarize_via_haiku() -> str:
+      response = client.messages.create(...)  # existing body
+      return response.content[0].text.strip()
+  cache_input = f"{content[:4000]}\n---\n{filename}"
+  summary = get_or_compute(_cache, cache_input, _summarize_via_haiku, ttl=None, version="v1")
+  if summary:
+      return summary
+  ```
+- The empty-string check after `get_or_compute` is preserved: if Haiku returned an empty string, it should NOT be cached (the cache would prevent retry). Action: skip caching when `compute_fn` returns falsy. **Implementation note:** add an `if not result: return result` guard inside `get_or_compute` BEFORE `cache.set()` so empty/None/False values bypass storage entirely. This avoids permanent caching of one-off Haiku flakes that returned empty content.
+- `ttl=None` (no TTL — content hash is the key, version handles invalidation), version="v1".
 - Preserve the existing truncation fallback at line 99 verbatim.
 - Confirm format and lint.
 
 ### 5. Update existing tests for cache isolation
 - **Task ID**: update-existing-tests
-- **Depends On**: build-intent-wire, build-indexer-wire
+- **Depends On**: build-cache-helper
+- **Required BEFORE**: build-intent-wire, build-indexer-wire (NOT after — see "Build Sequencing" note below)
 - **Assigned To**: existing-test-updater
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- For each test in `tests/unit/test_intent_classifier.py::TestClassifyIntent`, add a fixture or per-test monkeypatch that replaces the module's `_cache` with a `tmp_path`-rooted instance. Tests must still call `mock_client.messages.create.return_value = ...` and observe a real Haiku call at the mock layer (i.e., the cache should be cold for every test).
-- Same for `tests/unit/test_knowledge_indexer.py::TestSummarizeContent`.
+- **Use an `autouse=True` pytest fixture, NOT per-test monkeypatch.** Per-test monkeypatch is fragile: a developer adding a new test forgets the monkeypatch, the cache hot-loads from a previous test's data, the `mock_client.messages.create` mock is bypassed, and the test silently passes for the wrong reason. Autouse closes that hole structurally.
+- For `tests/unit/test_intent_classifier.py::TestClassifyIntent`, add at the top of the test class (or as a module-level fixture):
+  ```python
+  @pytest.fixture(autouse=True)
+  def isolated_cache(monkeypatch, tmp_path):
+      """Replace the module-level cache singleton with a tmp_path-rooted instance.
+      Runs before every test to guarantee a cold cache. Required because the
+      cache layer would otherwise short-circuit the mocked Haiku client.
+
+      Guarded with hasattr so this fixture is a no-op if the wire-up hasn't
+      landed yet (Build Sequencing step 4/5). Once the singleton exists, the
+      fixture activates automatically with no code change.
+      """
+      from agent import intent_classifier
+      if not hasattr(intent_classifier, "_cache"):
+          return  # wire-up hasn't landed; nothing to isolate
+      from utils.json_cache import JsonCache
+      monkeypatch.setattr(
+          intent_classifier,
+          "_cache",
+          JsonCache(tmp_path / "intent_cache.json", max_entries=10),
+      )
+  ```
+- Same pattern for `tests/unit/test_knowledge_indexer.py::TestSummarizeContent` (replacing `_cache` in the indexer module). The `monkeypatch` fixture's automatic teardown restores the original `_cache` after each test, so module-level state never leaks.
+- Verify the fix: temporarily comment out the autouse fixture and run `pytest tests/unit/test_intent_classifier.py::TestClassifyIntent -v`. Without the fixture, tests should pass on first run but the second run should show some tests failing because the cached results are returned instead of the mocked client being invoked. Re-enable the fixture; all tests should pass on every run.
 - Run `pytest tests/unit/test_intent_classifier.py tests/unit/test_knowledge_indexer.py -v`. Confirm all pass.
+- Confirm `mock_client.messages.create.assert_called_once()` (or `.assert_called()`) still passes for tests that assert it — the autouse fixture guarantees a cold cache, so the mock IS invoked.
 
 ### 6. Author feature doc
 - **Task ID**: document-feature
@@ -453,10 +549,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 |-------|---------|----------|
 | Tests pass | `pytest tests/unit/test_json_cache.py tests/unit/test_intent_classifier.py tests/unit/test_knowledge_indexer.py -x -q` | exit code 0 |
 | Full unit suite | `pytest tests/unit/ -x -q` | exit code 0 |
+| **Repeated test runs (pollution check)** | `pytest tests/unit/test_intent_classifier.py::TestClassifyIntent -v --count 3` (or run 3x consecutively) | exit code 0 every run; mock asserts always pass |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Helper importable | `python -c "from utils.json_cache import JsonCache, get_or_compute"` | exit code 0 |
 | Intent cache file format | `python -c "import json; json.load(open('data/cache/intent_classifier.json'))"` after one classify_intent call | exit code 0 |
+| **Intent cache round-trip** | python smoke: call `classify_intent("test")` twice → second call returns identical `IntentResult` and elapsed_ms < 50ms | second-call ms < 50ms |
 | Summary cache file format | `python -c "import json; json.load(open('data/cache/knowledge_summaries.json'))"` after one indexer run | exit code 0 |
 | Analytics emits namespace | `python -m tools.analytics summary` | output contains `cache.hit` |
 | Feature doc exists | `test -f docs/features/json-cache-layer.md` | exit code 0 |
@@ -464,10 +562,16 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique is run. -->
+The /do-plan-critique pass on 2026-04-27 returned the verdict **NEEDS REVISION** without populating per-finding details (the war-room session ran but the findings table was not written back to the plan). This revision pass synthesizes the most likely concerns based on a self-critique re-read of the plan, addresses them, and documents the resolutions below. If a fresh /do-plan-critique surfaces additional findings, they will be appended to this table.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | self (Adversary) | `IntentResult` is a frozen dataclass; the original plan stored it via `cache.set(value)` which would fail with `TypeError: Object of type IntentResult is not JSON serializable`. Build would crash on the first cache miss. | Solution → Serialization Contract; Step 3 wire-up | `compute_fn` returns `dataclasses.asdict(result)` (a dict). Wire-up rehydrates with `IntentResult(**cached_dict)` on every return. The helper itself is dataclass-agnostic — call sites own the conversion. |
+| BLOCKER | self (Operator) | Existing `tests/unit/test_intent_classifier.py` tests share process-level state. After wire-up, the second test in `TestClassifyIntent` runs against a hot cache; `mock_client.messages.create.assert_called_once()` fails because the mock is bypassed. Per-test monkeypatch (proposed in original plan) is fragile — a forgotten monkeypatch in a new test silently passes against stale cache. | Test Impact; Step 5 isolated_cache fixture | Use `@pytest.fixture(autouse=True)` `isolated_cache(monkeypatch, tmp_path)` that auto-replaces the module's `_cache` for every test. Includes a `hasattr` guard so it is a no-op until wire-up lands (avoids tree-red window during build sequencing). |
+| BLOCKER | self (Skeptic) | Build sequence (Steps 3-4 land before Step 5) leaves `pytest tests/unit/test_intent_classifier.py` red between commits. Even within a single PR, `git bisect` fails. | Build Sequencing section | Reorder: helper → cache tests → existing-tests fixture (with hasattr guard) → wire-ups → docs → validate. Document the rationale; `update-existing-tests` now depends on `build-cache-helper`, and wire-ups depend on `update-existing-tests`. |
+| CONCERN | self (Archaeologist) | Original key input string `f"{message}\|{recent_window}"` was ambiguous: the pipe character can appear in either component, two different values could collide. `recent_window` was also vaguely defined ("joined string") — small variations in formatting would generate different keys for identical semantic input. | Step 3 + Step 4 wire-ups | Use `\n---\n` as the separator (cannot appear by accident). Define `recent_window` precisely as the formatted multi-line block that is sent to the API itself, so prompt-builder changes auto-invalidate keys. |
+| CONCERN | self (Adversary) | If Haiku transiently returns an empty string, the original plan would cache the empty result permanently. Subsequent calls for that input would return empty content forever. | Step 1 (helper); Step 4 (indexer wire-up) | Add a guard inside `get_or_compute`: `if not result: return result` BEFORE `cache.set(...)`. Falsy results bypass storage. Documented in module docstring. |
+| CONCERN | self (Simplifier) | Verification section did not test the actual round-trip (write IntentResult → JSON → read → reconstruct). A unit test of the helper alone would not catch the dataclass-serialization bug. | Verification table | Added "Intent cache round-trip" smoke check: call classify_intent twice, assert second-call elapsed_ms < 50ms (proves cache hit AND deserialization succeeded). |
 
 ---
 
