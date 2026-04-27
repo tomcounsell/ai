@@ -42,6 +42,7 @@ A lightweight Haiku-based four-way classifier that determines message intent for
 - **Threshold**: teammate routing requires confidence above `TEAMMATE_CONFIDENCE_THRESHOLD` (0.90)
 - **Fail-safe**: any error, timeout, or low confidence defaults to Dev session (current behavior preserved)
 - **API**: uses the Anthropic API directly (not Claude Code SDK) for low-latency classification via `MODEL_FAST`
+- **Caching**: identical `(message, recent_messages[-3:])` inputs are served from a persistent JSON cache (TTL 2h, max 2000 entries) at `data/cache/intent_classifier.json`. See [JSON Cache Layer](json-cache-layer.md) for the contract and version-bump procedure.
 
 Classification signals:
 
