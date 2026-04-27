@@ -62,6 +62,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Hooks Best Practices & Audit](hooks-best-practices.md) | `/audit-hooks` skill, codified hook safety patterns, and daily reflections integration | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
+| [JSON Cache Layer](json-cache-layer.md) | Persistent JSON-on-disk cache for deterministic LLM call sites (intent classifier, knowledge summarizer); LRU eviction, optional TTL, version-prefixed sha256 keying, atomic snapshot via `os.replace`, falsy-result skip, hit/miss analytics per namespace | Shipped |
 | [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, companion memories for subconscious recall, and per-chunk embeddings for fine-grained semantic search over long documents | Shipped |
 | [Lifecycle CAS Authority](session-lifecycle.md#cas-conflict-detection) | Compare-and-set conflict detection in session lifecycle: `update_session()`, `get_authoritative_session()`, `StatusConflictError` prevent concurrent status mutation stomps | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
