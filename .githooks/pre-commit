@@ -45,6 +45,29 @@ if [ -n "$STAGED_PY_FILES" ]; then
     fi
 fi
 
+# ── Phase 1.5: Lockfile sync check ────────────────────────────────────
+# Verify `uv.lock` matches `pyproject.toml` so merges don't leave every
+# machine with a dirty working tree after `uv sync`. `uv lock --locked`
+# is read-only — it exits non-zero if regeneration would produce changes
+# and never modifies files. Skip this phase entirely when neither file
+# is staged (fast path for unrelated commits). Skip with a one-line
+# warning if `uv` is not installed on this machine.
+LOCKFILE_STAGED=$(git diff --cached --name-only | grep -E '^(pyproject\.toml|uv\.lock)$' || true)
+if [ -n "$LOCKFILE_STAGED" ]; then
+    if command -v uv >/dev/null 2>&1; then
+        if ! uv lock --locked >/dev/null 2>&1; then
+            echo ""
+            echo "COMMIT BLOCKED: uv.lock is out of sync with pyproject.toml."
+            echo "Fix: uv lock && git add uv.lock && git commit --amend --no-edit"
+            echo "     (or include 'git add uv.lock' before committing again)"
+            echo ""
+            exit 1
+        fi
+    else
+        echo "Warning: uv not found on PATH; skipping uv.lock sync check."
+    fi
+fi
+
 # ── Phase 2: Secret scan ──────────────────────────────────────────────
 SCRIPT="$REPO_ROOT/scripts/scan_secrets.py"
 

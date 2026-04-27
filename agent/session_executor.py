@@ -24,10 +24,111 @@ from agent.session_state import (
 )
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from config.enums import SessionType
+from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_session_model(session: AgentSession | None) -> str | None:
+    """D1 precedence cascade for session model.
+
+    Order (closest to LLM call wins):
+      1. ``session.model`` (explicit per-session, via
+         ``valor-session create --model <name>``)
+      2. ``settings.models.session_default_model`` (machine-local override,
+         env var ``MODELS__SESSION_DEFAULT_MODEL``)
+      3. codebase default ``"opus"`` (set on the pydantic Field default in
+         ``config/settings.py``)
+
+    Returns the resolved model alias (e.g. ``"opus"``, ``"sonnet"``), or
+    ``None`` if the cascade resolves to an empty string (operator-
+    misconfigured settings default to ``""``). ``None`` is treated by
+    ``get_response_via_harness()`` as "omit ``--model``, use CLI default."
+    """
+    explicit = getattr(session, "model", None) if session else None
+    if explicit:
+        return explicit
+    fallback = settings.models.session_default_model
+    return fallback or None
+
+
+def _tick_backstop_check_compaction(
+    session: AgentSession,
+    agent_session: AgentSession | None,
+) -> None:
+    """SDK-tick backstop for missed PreCompact hook events (issue #1127).
+
+    The primary compaction signal is the PreCompact hook
+    (``agent/hooks/pre_compact.py``), which writes
+    ``AgentSession.last_compaction_ts``. But hooks can fail: the SDK may skip
+    a hook under internal error conditions, a hook may be deregistered by an
+    unrelated code path, or a PreCompact event may fire so close to subprocess
+    termination that the hook's async task never completes.
+
+    This backstop detects compaction from the executor side by watching for a
+    *drop* in ``ResultMessage.num_turns`` across consecutive ticks. A turn-
+    count drop is the SDK's observable signature of a compaction that rewrote
+    the conversation history. On detection, we arm the 30s nudge guard by
+    writing ``last_compaction_ts`` + bumping ``compaction_skipped_count`` via
+    a partial save. We do NOT attempt a recovery-path JSONL snapshot — the
+    hook is the only place snapshots are taken.
+
+    All failures are swallowed. The backstop MUST NOT crash the executor.
+    """
+    try:
+        import time as _time
+
+        from agent.sdk_client import get_turn_count
+
+        if not session or not getattr(session, "session_id", None):
+            return
+        current_count = get_turn_count(session.session_id)
+        if current_count is None:
+            return  # No ResultMessage seen yet for this session — nothing to compare
+        prior_count = getattr(session, "_last_observed_message_count", None)
+        # Always update the tracker before early-returning so the next tick
+        # has a baseline to compare against.
+        session._last_observed_message_count = current_count
+        if prior_count is None or current_count >= prior_count:
+            return  # Steady or increasing — no compaction detected
+        # Drop observed — backstop-detected compaction.
+        if agent_session is None:
+            logger.warning(
+                "pre_compact hook appears to have missed a compaction for %s — "
+                "backstop detected num_turns drop %s -> %s but no AgentSession "
+                "available to arm the guard",
+                session.session_id,
+                prior_count,
+                current_count,
+            )
+            return
+        try:
+            agent_session.last_compaction_ts = _time.time()
+            current_skipped = int(getattr(agent_session, "compaction_skipped_count", 0) or 0)
+            agent_session.compaction_skipped_count = current_skipped + 1
+            agent_session.save(update_fields=["last_compaction_ts", "compaction_skipped_count"])
+            logger.warning(
+                "pre_compact hook appears to have missed a compaction for %s "
+                "(num_turns %s -> %s) — backstop armed nudge guard",
+                session.session_id,
+                prior_count,
+                current_count,
+            )
+        except Exception as exc:  # noqa: BLE001 - backstop must never crash executor
+            logger.warning(
+                "pre_compact backstop: AgentSession save failed for %s: %s",
+                session.session_id,
+                exc,
+            )
+    except Exception as exc:  # noqa: BLE001 - outer guard for any unexpected failure
+        logger.warning(
+            "pre_compact backstop: unexpected failure for %s: %s",
+            getattr(session, "session_id", "<unknown>"),
+            exc,
+        )
+
 
 # -----------------------------------------------------------------------------
 # Post-session memory extraction scheduling (hotfix #1055)
@@ -757,12 +858,25 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"unhealthy: {unhealthy_reason}"
                 )
 
+            # SDK-tick backstop for missed PreCompact hooks (issue #1127).
+            # Runs BEFORE the delivery-action decision so a backstop-detected
+            # compaction arms `last_compaction_ts` and the subsequent
+            # `determine_delivery_action` call sees the freshly-armed guard.
+            _tick_backstop_check_compaction(session, agent_session)
+
             # Resolve session type and classification for PM auto-continue
             _session_type = getattr(agent_session, "session_type", None) if agent_session else None
             _classification = getattr(session, "classification_type", None)
             _is_teammate = (
                 agent_session is not None
                 and getattr(agent_session, "session_type", None) == SessionType.TEAMMATE
+            )
+
+            # Read last_compaction_ts for the post-compact nudge guard (#1127).
+            _last_compaction_ts = (
+                getattr(agent_session, "last_compaction_ts", None)
+                if agent_session is not None
+                else None
             )
 
             # Delegate routing decision to output_router (call site preserved here)
@@ -778,6 +892,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 session_type=_session_type,
                 classification_type=_classification,
                 is_teammate=_is_teammate,
+                last_compaction_ts=_last_compaction_ts,
             )
 
             if action == "deliver_already_completed":
@@ -794,6 +909,49 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"(completion sent or nudged) "
                     f"({len(msg)} chars): {msg[:100]!r}"
                 )
+
+            elif action == "defer_post_compact":
+                # Post-compaction nudge guard (issue #1127). A compaction
+                # landed less than 30s ago — skip this tick entirely to let
+                # the SDK finish writing the compacted transcript and return
+                # cleanly to idle. Pure no-op: no `_enqueue_nudge` call, no
+                # `completion_sent` flip, no counter on `auto_continue_count`.
+                # The next SDK idle tick naturally re-invokes this callback;
+                # if the 30s window has expired, the normal nudge flow fires;
+                # if real SDK output arrived first, it routes via `"deliver"`.
+                # Uses local `import time as _time` matching the pattern in
+                # `_tick_backstop_check_compaction` for consistency across the
+                # two compaction-guard call sites (#1127 review nit).
+                try:
+                    import time as _time
+
+                    _age = (
+                        _time.time() - float(_last_compaction_ts)
+                        if _last_compaction_ts is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    _age = None
+                logger.info(
+                    "[%s] Post-compaction nudge guard active (%s) — deferring nudge for this tick",
+                    session.project_key,
+                    f"last_compaction_ts age={_age:.1f}s" if _age is not None else "age unknown",
+                )
+                # Bump `nudge_deferred_count` for observability (C4). Best-
+                # effort partial save; swallow any failure.
+                if agent_session is not None:
+                    try:
+                        _current_deferred = int(
+                            getattr(agent_session, "nudge_deferred_count", 0) or 0
+                        )
+                        agent_session.nudge_deferred_count = _current_deferred + 1
+                        agent_session.save(update_fields=["nudge_deferred_count"])
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.warning(
+                            "[%s] Failed to bump nudge_deferred_count: %s",
+                            session.project_key,
+                            _exc,
+                        )
 
             elif action == "nudge_rate_limited":
                 chat_state.auto_continue_count += 1
@@ -1108,9 +1266,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         # All session types route to CLI harness (claude -p)
         from agent.sdk_client import (
+            HarnessThinkingBlockCorruptionError,
             _get_prior_session_uuid,
+            _resolve_sentry_auth_token,
             build_harness_turn_input,
             get_response_via_harness,
+            load_pm_system_prompt,
         )
 
         project_key = project_config.get("_key", "valor") if project_config else "valor"
@@ -1167,26 +1328,74 @@ async def _execute_agent_session(session: AgentSession) -> None:
             "AGENT_SESSION_ID": session.agent_session_id or "",
             "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
         }
+        # SESSION_TYPE drives pre_tool_use hook behavior (_is_pm_session in
+        # agent/hooks/pre_tool_use.py:97-99). Without it, PM Bash restrictions
+        # are silently disabled in the harness subprocess (issue #1148).
+        if _session_type:
+            _harness_env["SESSION_TYPE"] = _session_type
         if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
             _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
+        # PM/Teammate need Telegram + Sentry auth so tools/send_telegram.py and
+        # sentry-cli work without manual export. Mirrors ValorAgent.env
+        # (sdk_client.py:1264, 1272). chat_id comes from the project config.
+        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+            if session.chat_id:
+                _harness_env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
+            _sentry_token = _resolve_sentry_auth_token()
+            if _sentry_token:
+                _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
 
         _harness_requeued = False
 
+        # D1 precedence cascade: session.model > settings > codebase default.
+        _effective_model = _resolve_session_model(agent_session)
+
+        # PM sessions get persona-level SDLC orchestration rules via
+        # --append-system-prompt (issue #1148). Dev and Teammate sessions have
+        # no harness-side persona loader; they keep the default Claude Code
+        # protocol. Drafter call sites in session_completion.py MUST also leave
+        # system_prompt at the default None — see Risk 4 in docs/plans/sdlc-1148.md.
+        _pm_system_prompt: str | None = None
+        if _session_type == SessionType.PM:
+            try:
+                _pm_system_prompt = load_pm_system_prompt(str(working_dir))
+            except Exception as e:
+                logger.warning(
+                    f"{log_prefix} [pm-persona-missing] Failed to load PM persona: {e}; "
+                    "session will run without SDLC orchestration rules"
+                )
+
         async def do_work() -> str:
             nonlocal _harness_requeued
-            raw = await get_response_via_harness(
-                message=_minimal_input if _prior_uuid else _harness_input,
-                working_dir=str(working_dir),
-                env=_harness_env,
-                prior_uuid=_prior_uuid,
-                session_id=session.session_id,
-                full_context_message=_harness_input,
-                # Two-tier no-progress detector callbacks (#1036). These route
-                # through messenger.notify_* wrappers so exceptions are caught
-                # and the queue-layer closures bump ORM fields on AgentSession.
-                on_sdk_started=messenger.notify_sdk_started,
-                on_stdout_event=messenger.notify_stdout_event,
-            )
+            try:
+                raw = await get_response_via_harness(
+                    message=_minimal_input if _prior_uuid else _harness_input,
+                    working_dir=str(working_dir),
+                    env=_harness_env,
+                    prior_uuid=_prior_uuid,
+                    session_id=session.session_id,
+                    full_context_message=_harness_input,
+                    model=_effective_model,
+                    system_prompt=_pm_system_prompt,
+                    # Two-tier no-progress detector callbacks (#1036). These route
+                    # through messenger.notify_* wrappers so exceptions are caught
+                    # and the queue-layer closures bump ORM fields on AgentSession.
+                    on_sdk_started=messenger.notify_sdk_started,
+                    on_stdout_event=messenger.notify_stdout_event,
+                )
+            except HarnessThinkingBlockCorruptionError as exc:
+                # Mode 1 of issue #1099 — extended-thinking + compaction has
+                # corrupted the transcript beyond in-process recovery. Surface a
+                # clean user-facing message and re-raise so BackgroundTask._run_work
+                # records the failure (task.error truthy → session finalizes as
+                # "failed"). No retry — the sentinel only fires after the stale-UUID
+                # fallback has already failed.
+                logger.warning(
+                    "[%s] Harness thinking-block corruption detected; finalizing as failed: %s",
+                    session.session_id,
+                    exc,
+                )
+                raise
             if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
                 result, requeued = await _handle_harness_not_found(raw, agent_session)
                 if requeued:

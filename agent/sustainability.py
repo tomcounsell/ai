@@ -16,6 +16,13 @@ Redis key schema:
 - {project_key}:worker:hibernating — set when worker enters hibernation (TTL 600s)
 - {project_key}:recovery:active — set when circuit recovers from queue_paused state (TTL 3600s)
 - {project_key}:worker:recovering — set when circuit recovers from hibernation (TTL 3600s)
+
+The {project_key} prefix resolves to ``valor`` in production, sourced from the
+``VALOR_PROJECT_KEY`` env var injected into worker/bridge launchd plists by
+the install scripts (``scripts/install_worker.sh`` and
+``scripts/update/service.py::install_worker``). When unset/empty, the fallback
+is ``"valor"`` (matching ``tools.agent_session_scheduler.DEFAULT_PROJECT_KEY``)
+to keep readers and AgentSession writers aligned. See issue #1171.
 """
 
 import hashlib
@@ -28,8 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_project_key() -> str:
-    """Return the project-scoped Redis key prefix."""
-    return os.environ.get("VALOR_PROJECT_KEY", "default")
+    """Return the project-scoped Redis key prefix.
+
+    Sources VALOR_PROJECT_KEY from env (injected by worker/bridge plist
+    generators). Empty or whitespace-only values fall back to ``"valor"`` so a
+    misconfigured ``VALOR_PROJECT_KEY=`` line in ``.env`` does not produce a
+    bare ``:sustainability:queue_paused`` key (issue #1171).
+    """
+    v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
+    return v or "valor"
 
 
 def _get_redis():

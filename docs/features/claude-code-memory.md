@@ -100,13 +100,18 @@ Worker-spawned Claude Code sessions create AgentSession records in Redis, provid
 
 > **Note:** Direct CLI sessions (developer running `claude` at the terminal) do **not** create AgentSession records. The UserPromptSubmit hook gates creation on the presence of `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` environment variables, which are only set by `sdk_client.py` for worker-spawned sessions (issue [#1001](https://github.com/tomcounsell/ai/issues/1001)). Memory extraction, transcript backup, and all other hook functionality continue to work normally for direct CLI sessions — they simply have no AgentSession record.
 
-1. **UserPromptSubmit hook**: On the first prompt of a worker-spawned session, creates an AgentSession via `AgentSession.create_local(session_type=..., ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The hook reads the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning subprocesses, so the record stores the actual persona (`teammate`, `pm`, or `dev`). The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
-2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
-3. **Stop hook**: Reads `agent_session_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
+1. **UserPromptSubmit hook**: On the first prompt of a session, the hook decides between two paths:
+   - **Worker-spawned subprocess (attach path, issue [#1157](https://github.com/tomcounsell/ai/issues/1157)):** if `AGENT_SESSION_ID` or `VALOR_SESSION_ID` resolves to a live (non-terminal) AgentSession, the hook writes that session's `agent_session_id` into the sidecar and returns. **No new record is created.** The worker has already created the authoritative AgentSession record before spawning the subprocess, and the env vars communicate "I already own you." Before this guard landed, the hook would mint a `local-*` phantom twin for every worker-spawned PM/Teammate subprocess, causing `wait-for-children` to terminate instantly on a self-referential phantom child.
+   - **Direct-CLI fallback (create path):** if neither env var resolves, the hook falls through to the existing gate and calls `AgentSession.create_local(session_type=..., ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. This path is reserved for direct-CLI users (developer running `claude` at the terminal with `SESSION_TYPE=dev` exported). The `SESSION_TYPE` env var determines the persona; `VALOR_PARENT_SESSION_ID` (if set) links to a parent.
+   - **Terminal-session safety (preserves [#1113](https://github.com/tomcounsell/ai/issues/1113)):** if the resolved env-var target is in a terminal state (killed/completed/failed/abandoned/cancelled), the hook falls through to the create path rather than re-activating. Terminal sessions are operator-resume-only.
+2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar. Primary lookup via `AgentSession.get_by_id()` (fast path for attached worker sessions); falls back to `query.filter(session_id=f"local-{claude_session_id}")` reconstruction for direct-CLI sessions. Updates `updated_at` timestamp and increments `tool_call_count` on the resolved record.
+3. **Stop hook**: Reads `agent_session_id` from the sidecar. Same primary/fallback lookup pattern as PostToolUse. Sets `completed_at` and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash") on the resolved record.
 
 The dashboard at `localhost:8500` picks up local sessions automatically via `AgentSession.query` -- no dashboard code changes were needed. Local sessions appear alongside Telegram sessions with correct status, timestamps, and project key.
 
 The `AgentSession.create_local(...)` call requires only `session_id`, `project_key`, and `working_dir`. The `session_type` defaults to `"dev"` but is overridden by the `SESSION_TYPE` env var when set. Local sessions omit all Telegram-specific fields (no `chat_id` or `parent_agent_session_id`).
+
+> **Attach-vs-create is strict prevention.** After issue #1157, worker-spawned subprocesses produce exactly ONE AgentSession row (the worker-created one). The UserPromptSubmit hook attaches via env vars; no phantom `local-*` twin is ever written to Redis. The `create_local()` method body is untouched — only the call-site precondition changed.
 
 ## State Management
 
@@ -178,17 +183,22 @@ The fallback value `"default"` is a neutral sentinel. It was previously `"dm"`, 
 
 ### One-time Migration
 
-If you have existing Memory records with `project_key="dm"` that were actually created by Claude Code hooks (not Telegram DMs), run the migration script:
+If you have existing Memory records under the obsolete `project_key="default"` or `project_key="dm"` partitions, run the migration script:
 
 ```bash
 # Preview -- no writes
-python scripts/migrate_memory_project_key.py --dry-run
+python scripts/migrate_memory_project_key.py
 
 # Apply
-python scripts/migrate_memory_project_key.py
+python scripts/migrate_memory_project_key.py --apply
 ```
 
-The script identifies genuine Telegram DM records by requiring both `source="human"` AND `agent_id="dm"`. All other `"dm"` records are re-keyed to `"valor"` (the key for `~/src/ai`). The migration is idempotent and safe to run while the bridge is running.
+The script handles BOTH legacy buckets:
+
+- `project_key="default"` — all records (legacy SDK-spawned-session writes that fell through to `config/memory_defaults.DEFAULT_PROJECT_KEY`).
+- `project_key="dm"` — only mislabeled hook-source records. Genuine Telegram DM records (identified by `source="human"` AND `agent_id="dm"`) stay under `"dm"`.
+
+All migrated records are re-keyed to `"valor"` (the canonical project_key for `~/src/ai`) via Popoto's supported `save(migrate_key=True)` path — no raw Redis. The migration is idempotent and safe to run while the bridge is running. After the issue #1171 plist deploy, this script was run once on the canonical machine: 222 records (218 default + 4 mislabeled dm) re-tagged to `valor`.
 
 ## Configuration
 
@@ -229,7 +239,7 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
 | Ingestion | `Memory.safe_save()` in bridge | `ingest()` called from UserPromptSubmit hook |
 | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
 | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |
-| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession created by UserPromptSubmit hook only for worker-spawned sessions (`AgentSession.create_local(session_type=SESSION_TYPE env var, ...)`); direct CLI sessions create no AgentSession (gated by `SESSION_TYPE`/`VALOR_PARENT_SESSION_ID` env vars) |
+| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession attached or created by UserPromptSubmit hook. Worker-spawned subprocesses **attach** to the worker's existing record via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no new record (issue #1157). Direct-CLI subprocesses fall through to `AgentSession.create_local(session_type=SESSION_TYPE env var, ...)` only if `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set; otherwise no AgentSession is created. |
 | Category re-ranking | `_apply_category_weights()` in `check_and_inject()` | `_apply_category_weights()` imported from `agent.memory_hook` in `recall()` |
 | Shared code | `extract_topic_keywords()`, `_apply_category_weights()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
 

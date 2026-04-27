@@ -279,11 +279,9 @@ Sends write the **unified outbox payload** to `email:outbox:{session_id}` with a
 }
 ```
 
-The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` emits the same shape so the relay has a single contract to drain. The `"to"` field is always `list[str]`; the relay's `_normalize_payload()` coerces any legacy single-string `"to"` value to `list[str]` for backward compatibility.
+The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` emits the same shape so the relay has a single contract to drain. The `"to"` field is canonically `list[str]`; the relay's `_normalize_payload()` also accepts a single comma-separated string and splits it into `list[str]`.
 
 The relay (`bridge/email_relay.py`) polls `email:outbox:*` every 100 ms. For each key it performs atomic `LPOP`, builds the MIME message via `_build_reply_mime()` (switching to `MIMEMultipart` when attachments are present), and dispatches over SMTP in `asyncio.to_thread`. On failure it increments `_relay_attempts`, `RPUSH`es back, and DLQs via `bridge.email_dead_letter.write_dead_letter()` after `MAX_EMAIL_RELAY_RETRIES` (default 3) attempts. The relay writes `email:relay:last_poll_ts` once per cycle (5-minute TTL) for operator liveness probes.
-
-**Transitional payload compat.** The relay's `_normalize_payload` accepts the prior `{session_id, to, text, timestamp}` shape (aliasing `text` → `body`) for one transitional release so in-flight entries from before this change never get stranded.
 
 **`EmailOutputHandler.send()` does NOT write to the outbox** — it sends directly from the worker. The relay and the handler do not race on the same session's output (Risk 3 in the plan).
 

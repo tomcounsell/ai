@@ -94,10 +94,15 @@ Use `valor-telegram` to read messages from any chat. It checks Redis first, then
 valor-telegram read --chat "Dev: Valor" --limit 10
 valor-telegram read --chat "Tom" --search "deployment"
 valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+valor-telegram read --chat-id -1001234567 --limit 10       # numeric bypass
+valor-telegram read --user tom --limit 10                  # DM whitelist bypass
+valor-telegram chats --search "psy"                        # discover by fragment
 valor-telegram send --chat "Dev: Valor" "Hello world"
 valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 ```
+
+`--chat`, `--chat-id`, and `--user` on `read` are mutually exclusive. Every successful read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages — trust that header over your intuition about which chat you asked for. If a `--chat` name is ambiguous, the **default** is to pick the most recently active candidate, log a warning listing all candidates to stderr, and proceed (exit 0); pass `--strict` to opt into a non-zero exit with a stderr candidate list instead (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation UX).
 
 ## Reading Email
 
@@ -172,8 +177,8 @@ valor-email threads
 | `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
 | `python -m tools.valor_session kill --id <ID>` | Kill a session |
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
-| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session (warns to stderr if no worker is running) |
-| `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation (warns to stderr if no worker is running) |
+| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session. `project_key` determines the repo via `projects.json`; there is no working-directory override flag. Precedence: `--project-key` > `--parent` inheritance > cwd match (raises on no match). Warns to stderr if no worker is running. |
+| `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation under the project's declared repo. Warns to stderr if no worker is running. |
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
 | `python -m tools.memory_search search "query"` | Search memories by query |
@@ -193,6 +198,8 @@ valor-email threads
 | `python -m tools.doctor --install-hook` | Install git pre-push hook running doctor --quick |
 | `valor-youtube-search "query"` | Search YouTube for videos by query |
 | `valor-youtube-search --limit N "query"` | Search YouTube with limited results |
+| `valor-ingest <path-or-url>` | Convert a PDF/DOCX/PPTX/XLSX/HTML/image/YouTube URL into a `.md` sidecar the knowledge indexer picks up (see `docs/features/markitdown-ingestion.md`) |
+| `valor-ingest --scan ~/work-vault/` | Backfill every convertible binary file in the vault recursively (audio formats deliberately excluded) |
 
 ## Manual Testing Hygiene
 
@@ -423,7 +430,7 @@ All secrets go in **`~/Desktop/Valor/.env`**. Never write secrets to `repo/.env`
 
 The repo `.env` is a symlink — writing to it writes to the vault, but the canonical workflow is to edit `~/Desktop/Valor/.env` directly. The symlink is created automatically by `scripts/remote-update.sh` and `scripts/update/env_sync.py` on each machine after iCloud syncs.
 
-**Adding a new secret:** add it to `~/Desktop/Valor/.env`, add a placeholder to `.env.example`, add a field to `config/settings.py`. That's it — no sync step needed.
+**Adding a new secret:** add it to `~/Desktop/Valor/.env`, add a placeholder to `.env.example` (with a comment line above the `KEY=` — required by the completeness check), add a field to `config/settings.py`. That's it — no sync step needed.
 
 ## Plan Requirements (This Repo Only)
 

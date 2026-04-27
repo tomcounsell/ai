@@ -223,7 +223,7 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 - **Accountability**: Each stage result is verified before progressing
 - **Visibility**: The PM surfaces questions and the final delivery summary to the stakeholder, not intermediate step-by-step narration
 - **Recovery**: If a stage fails, the PM can re-dispatch or escalate without losing prior work
-- **Judgment**: The PM decides whether trivial/docs-only work warrants the full pipeline
+- **No bypass**: All software changes route through the full pipeline — triviality is not an override. Docs-only work (no code, no PR) may skip BUILD/TEST/REVIEW but still requires an issue and DOCS stage.
 
 ### Spawn vs. Resume
 
@@ -268,6 +268,16 @@ The continuation PM is a new `AgentSession(session_type="pm", status="pending")`
 **Deduplication**: Redis `SETNX` on key `continuation-pm:{parent_id}` (300s TTL) ensures only one continuation PM per parent, even when multiple Dev sessions complete simultaneously.
 
 **Monitoring**: The `[continuation-pm-created]` structured log tag is searchable by `scripts/reflections.py`. Daily metrics are tracked at `metrics:continuation_pm_created:{date}`.
+
+**3. Transcript-boundary skip (issue #1156)**
+
+`complete_transcript` and the Claude Code Stop hook are both **no-ops** (status-wise) for PMs currently in `waiting_for_children` when the target is `completed`/`failed`. Without this skip, the PM's own transcript ending would force-finalize the PM via `finalize_session`, bypassing the child-liveness gate inside `_finalize_parent_sync` and stranding children.
+
+With the skip in place:
+- The `SESSION_END` transcript marker is still written (preserved for auditability).
+- The PM stays in `waiting_for_children` until one of the sanctioned channels finalizes it: `_finalize_parent_sync` after all children terminate, the completion runner after delivering the final summary, or — for genuinely wedged sessions — `_complete_agent_session`, health check, or watchdog recovery.
+
+See `docs/features/session-lifecycle.md#transcript-boundary-skip-issue-1156` for the full rationale and caller audit.
 
 ### Single-Issue Scoping
 
@@ -373,7 +383,7 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 | `PipelineStateMachine` | `agent/pipeline_state.py` | Manages stage_states on the parent AgentSession (moved from `bridge/` in Phase 3) |
 | `classify_outcome()` | `agent/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
 | `get_definition()` | `agent/agent_definitions.py` | Returns actionable error for stale callers requesting `"dev-session"` Agent tool dispatch |
-| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, creates the `local-*` AgentSession record; reads `SESSION_TYPE` and `VALOR_PARENT_SESSION_ID` env vars |
+| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, decides attach-vs-create: worker-spawned subprocesses attach the sidecar to the worker's existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars (no new record, issue #1157); direct-CLI subprocesses fall through to `create_local()` gated by `SESSION_TYPE` / `VALOR_PARENT_SESSION_ID` |
 
 ### Outcome Classification
 
@@ -462,7 +472,7 @@ The `dev-session` Agent tool entry has been removed from `agent/agent_definition
 | `agent/session_health.py` | Health monitor, startup recovery, orphan cleanup |
 | `agent/session_pickup.py` | Pop locking, steering drain, session selection |
 | `agent/session_state.py` | Shared globals: `_active_sessions`, `_global_session_semaphore`, `SessionHandle` |
-| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery), `FileOutputHandler` (logs to `logs/worker/`), and `LoggingOutputHandler` implementations |
+| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery) and `FileOutputHandler` (logs to `logs/worker/`) implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
 | `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |
 | `agent/sdk_client.py` | SDK client; uses `project_key` identity checks for cross-repo detection |

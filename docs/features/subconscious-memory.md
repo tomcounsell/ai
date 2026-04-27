@@ -138,7 +138,7 @@ Agents can deliberately persist high-level concepts using `python -m tools.memor
 
 The knowledge document integration system indexes work-vault files as companion memories. See [Knowledge Document Integration](knowledge-document-integration.md) for full details.
 
-1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog
+1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog. Markdown/text sources flow directly to step 2; **binary sources (PDF, DOCX, PPTX, XLSX, HTML, images)** are converted into `.md` sidecars in the same `_flush()` iteration via `tools/knowledge/converter.py` — see [Markitdown Ingestion](markitdown-ingestion.md). Audio formats are deliberately excluded (privacy disqualifier).
 2. `index_file()` reads content, resolves project scope, upserts `KnowledgeDocument` (Redis + filesystem)
 3. After upsert, `_sync_chunks()` splits the content into overlapping `DocumentChunk` records (each with its own embedding) for fine-grained semantic search
 4. Haiku summarizes the document content (fallback: first 500 chars)
@@ -167,7 +167,7 @@ The function is designed to be called from the SDLC merge stage or a post-merge 
 
 The memory system also runs in Claude Code CLI sessions via hooks. See [Claude Code Memory](claude-code-memory.md) for full details.
 
-- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and creates an AgentSession record for dashboard observability. The hook reads the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning subprocesses; the `local-*` Redis record stores the actual persona (`teammate`, `pm`, or `dev`) rather than always defaulting to `dev`.
+- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and ensures the sidecar is attached to an AgentSession for dashboard observability. For worker-spawned subprocesses, the hook attaches the sidecar to the worker's pre-existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no duplicate record is written (issue [#1157](https://github.com/tomcounsell/ai/issues/1157)). For direct-CLI subprocesses, the hook falls through to `AgentSession.create_local()` and creates a fresh `local-*` record; the `SESSION_TYPE` env var determines the persona (`teammate`, `pm`, or `dev`) rather than always defaulting to `dev`.
 - **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes) and updates AgentSession activity tracking
 - **Stop hook** runs Haiku extraction and outcome detection on the session transcript, completes the AgentSession lifecycle, and triggers post-merge learning extraction when applicable
 - **Novel territory signals** provide cues when the agent enters unfamiliar areas (zero bloom hits with many keywords). The vague recognition (deja vu) fallback was removed as it produced only noise -- see [Memory Hook Performance](memory-hook-performance.md)
@@ -417,6 +417,14 @@ The Telegram bridge path writes directly with `project_key="dm"` for human messa
 Prior to PR #820, `DEFAULT_PROJECT_KEY = "dm"` in `config/memory_defaults.py`. This caused all 2,376 Memory records created by Claude Code hooks between 2026-03-24 and 2026-04-07 to be stored under the Telegram DM partition, making recall completely broken for Claude Code sessions (which queried the `"valor"` partition and found nothing).
 
 The default was changed to `"default"` to ensure misconfigured callers are identifiable rather than silently merging with DM memories. A migration script (`scripts/migrate_memory_project_key.py`) re-keys the mislabeled records — see [Claude Code Memory](claude-code-memory.md) for migration instructions.
+
+### Issue #1171: Recovery-Surface Migration to `valor`
+
+When `VALOR_PROJECT_KEY=valor` was promoted to a baked plist env var (issue #1171) so the recovery reflections (`circuit_health_gate`, `session_recovery_drip`) could find AgentSession records tagged `project_key="valor"`, the memory subsystem's reads also shifted to `valor`. At that point the production memory store held 262 records under `valor`, 218 under `default`, and 4 under `dm` (mislabeled hook records, not genuine Telegram DMs).
+
+To prevent ~45% memory regression on day 0 of deploy, `scripts/migrate_memory_project_key.py` was extended to handle BOTH `default` and `dm` buckets and re-tag obsolete records via Popoto's supported `save(migrate_key=True)` path. Running once on the canonical machine migrated 222 records (218 default + 4 dm), leaving 484 valor / 0 default / 0 dm.
+
+The genuine-DM preservation rule (`source=human AND agent_id=dm`) is intact — those records stay under `dm`. The `dm`-namespace writer leak source is tracked separately as issue #1173 (sibling investigation).
 
 ## Configuration
 

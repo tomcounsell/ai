@@ -38,6 +38,8 @@ The orchestrator will:
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
+**First-install backfill reminder (markitdown):** When the update run is the first to install the `[knowledge]` extra on this machine (detected by `scripts/update/deps.py`'s lockfile-diff check), the Telegram summary appends a one-line tip: `run 'valor-ingest --scan ~/work-vault/' to backfill existing binary files into sidecars.` The reminder is gated by `~/.cache/valor/markitdown-backfill-reminded` and fires only once per machine. If the user asks why existing PDFs/docs in the vault are not yet indexed after update, point them at this command — the watcher only picks up files modified after it starts.
+
 **Log rotation:** The orchestrator installs the user-space log-rotate LaunchAgent on every `--full` run (`com.valor.log-rotate.plist` → `~/Library/LaunchAgents/`). No root/sudo needed; the LaunchAgent runs `scripts/log_rotate.py` every 30 minutes to rotate any `logs/*.log` file over 10 MB. The installer is content-idempotent — if the rendered plist matches the installed file, the bootout/bootstrap cycle is skipped entirely. If a stale `/etc/newsyslog.d/valor.conf` exists from prior releases, the orchestrator attempts `sudo -n rm` (non-interactive) to remove it; if sudo requires a password, the cleanup is skipped with a warning and retried next run.
 
 The orchestrator automatically cleans up sessions as part of Step 5.5:
@@ -225,3 +227,25 @@ worker = service.get_worker_status(project_dir)
 service.install_worker(project_dir)   # Installs standalone worker service
 service.restart_worker(project_dir)
 ```
+
+## Node toolchain (soft prerequisite)
+
+Machines that run the `do-design-system` skill also need Node + npm (for
+`npx @google/design.md`). `remote-update.sh` runs `npm ci --only=prod`
+guarded by:
+
+```bash
+if [ -f "$PROJECT_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --only=prod ) \
+        || echo "[update] npm ci failed (non-fatal); continuing"
+fi
+```
+
+The non-pipefail subshell + `|| echo` trailer guarantee a missing `npm`
+or a transient install failure never aborts the parent update. Machines
+without Node simply skip the block silently; design-system tooling then
+falls back to Python-only emission (`--generate --no-node`) for
+`design-system.md` / `brand.css` / `source.css`. Lint and DTCG / Tailwind
+exports still require Node and are only produced on Node-equipped
+machines. See `docs/features/design-system-tooling.md` for the full
+fallback semantics.

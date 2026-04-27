@@ -102,7 +102,10 @@ class TestMergeGuardHook:
         result = self._run_hook("Bash", "gh pr merge 42")
         assert result is not None
         assert result["decision"] == "block"
-        assert "human authorization" in result["reason"]
+        # Hotfix 1d67d81e reworded the block message away from "human
+        # authorization" framing. The block message now points to /do-merge
+        # as the authorization mechanism.
+        assert "/do-merge" in result["reason"]
 
     def test_blocks_gh_pr_merge_with_flags(self):
         result = self._run_hook("Bash", "gh pr merge 42 --squash")

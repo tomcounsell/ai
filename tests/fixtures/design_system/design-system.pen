@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "name": "fixture",
+  "children": [
+    {
+      "type": "frame",
+      "id": "VARfr",
+      "name": "variables",
+      "layout": "none",
+      "width": 1,
+      "height": 1,
+      "children": []
+    },
+    {
+      "type": "frame",
+      "id": "JFbpV",
+      "name": "components",
+      "layout": "none",
+      "width": 480,
+      "height": 320,
+      "children": [
+        {
+          "type": "frame",
+          "id": "AmarK",
+          "name": "Annotation/Mark",
+          "reusable": true,
+          "width": 16,
+          "height": 16,
+          "layout": "none",
+          "children": [
+            {
+              "type": "rectangle",
+              "id": "bg",
+              "fill": "$--color-primary",
+              "width": 16,
+              "height": 16,
+              "x": 0,
+              "y": 0,
+              "radius": "$--radius-md"
+            },
+            {
+              "type": "text",
+              "id": "lbl",
+              "text": "M",
+              "fill": "$--text-body-primary",
+              "font": "$--font-body",
+              "size": "$--text-size-body",
+              "weight": "$--text-weight-body",
+              "lineHeight": "$--text-lh-body",
+              "x": 4,
+              "y": 2
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "ScarD",
+          "name": "Surface/Card",
+          "reusable": true,
+          "width": 240,
+          "height": 120,
+          "layout": "none",
+          "children": [
+            {
+              "type": "rectangle",
+              "id": "cardbg",
+              "fill": "$--color-surface",
+              "width": 240,
+              "height": 120,
+              "x": 0,
+              "y": 0,
+              "radius": "$--radius-md"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variables": {
+    "--color-primary": {"type": "color", "value": "#111827"},
+    "--color-surface": {"type": "color", "value": "#FFFFFF"},
+    "--text-body-primary": {"type": "color", "value": "#FFFFFF"},
+    "--font-body": {"type": "string", "value": "Inter"},
+    "--text-size-body": {"type": "dimension", "value": "16px"},
+    "--text-weight-body": {"type": "number", "value": 400},
+    "--text-lh-body": {"type": "dimension", "value": "24px"},
+    "--radius-md": {"type": "dimension", "value": "8px"},
+    "--space-md": {"type": "dimension", "value": "16px"}
+  }
+}

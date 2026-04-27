@@ -57,7 +57,15 @@ For each step, use the appropriate command:
 agent-browser screenshot /tmp/frontend-test-<scenario-slug>.png
 ```
 
-### 5. Return structured results
+### 5. Close the browser
+
+```bash
+agent-browser close
+```
+
+Always run this before returning results — even on failure or error. The daemon persists indefinitely if not explicitly closed.
+
+### 6. Return structured results
 
 After completing the scenario, output **exactly** this structure:
 
@@ -81,8 +89,9 @@ ERRORS:
 - **Re-snapshot after every interaction** — DOM refs become stale
 - **Be literal** — report exactly what you see, not what you expect to see
 - **Screenshot always** — evidence is required even on failure
+- **Close always** — run `agent-browser close` before returning results, no exceptions; the daemon persists indefinitely if not explicitly closed
 - **FAIL clearly** — if the expected outcome is not met, FAIL with a specific reason
-- **ERROR on crash** — if agent-browser fails or the page is unreachable, use RESULT: ERROR
+- **ERROR on crash** — if agent-browser fails or the page is unreachable, close then use RESULT: ERROR
 
 ## Common Patterns
 

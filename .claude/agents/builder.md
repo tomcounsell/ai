@@ -168,6 +168,46 @@ ALWAYS commit partial work before exiting, whether due to failure, turn limits, 
 3. The `|| true` prevents the commit command itself from failing if there's nothing to commit
 4. This ensures partial work is recoverable even on abnormal exit — losing work is worse than a messy commit
 
+
+## Working-state externalization
+
+Long sessions cross context-compaction boundaries. Compaction replaces conversation history with a lossy summary. Externalize working state so you can re-orient after compaction without relying on the summary.
+
+**PROGRESS.md scratchpad (gitignored — never committed):**
+
+On session start, if `PROGRESS.md` does not exist at the worktree root, create it:
+
+```markdown
+## Done
+
+## In progress
+[first task from the plan]
+
+## Left
+[remaining tasks from the plan]
+```
+
+`PROGRESS.md` is a scratchpad only — gitignored, never committed, ephemeral. Ground truth for working state is the plan doc and `git log --oneline main..HEAD`. PROGRESS.md is a convenience aid only, not authoritative.
+
+**Commit code frequently:**
+
+After each meaningful unit of work — a completed task, a passing test, a validated sub-step — commit **code** to the session branch. Update `PROGRESS.md` in the same turn but do NOT add it to the commit (it is gitignored and will be silently omitted from `git add -A`).
+
+`[WIP]` commit prefix is allowed and encouraged for partial steps. Frequent small commits are preferred over large batched commits.
+
+**Re-orient after compaction:**
+
+On session start or resumption (including after context compaction), read `PROGRESS.md` and `git log --oneline main..HEAD` BEFORE acting on any other instruction:
+
+```bash
+cat PROGRESS.md 2>/dev/null || echo "PROGRESS.md absent"
+git log --oneline main..HEAD
+```
+
+If `PROGRESS.md` is absent, fall back to the plan doc and `git log` — both are directly readable from the worktree. The compacted summary may be lossy. Do NOT trust it over the plan doc and git log.
+
+Do NOT attempt to add `PROGRESS.md` to git commits — it is gitignored and the add will silently do nothing.
+
 ## Verification Before Completion (MANDATORY)
 
 Before claiming ANY work is complete, you MUST:

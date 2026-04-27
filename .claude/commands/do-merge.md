@@ -18,6 +18,7 @@ python3 -c "
 from bridge.pipeline_graph import DISPLAY_STAGES
 
 # Try programmatic state machine first
+derived = False
 try:
     from bridge.pipeline_state import PipelineStateMachine
     from models.agent_session import AgentSession
@@ -29,6 +30,20 @@ try:
         states = {}
 except Exception:
     states = {}
+    session = None
+
+# Fallback: derive from durable signals when Redis is cold (empty or all-pending).
+# This runs only when the primary path returned nothing useful -- it NEVER
+# overrides a populated state machine. See agent/pipeline_state.py for the
+# signal list and failure semantics.
+if session is not None and (not states or all(v in ('pending', 'ready') for v in states.values())):
+    try:
+        fallback = PipelineStateMachine.derive_from_durable_signals(session)
+        if fallback:
+            states = fallback
+            derived = True
+    except Exception:
+        pass
 
 # Show pipeline progress
 icons = {'completed': '✓', 'in_progress': '~', 'failed': '✗'}
@@ -44,6 +59,8 @@ for stage in DISPLAY_STAGES:
         skipped.append(stage)
 
 print('Pipeline: ' + '  '.join(stages_display))
+if derived:
+    print('INFO: Redis state cold -- derived from durable signals.')
 all_pending = all(s in ('pending', 'ready') for s in states.values())
 if all_pending and not states:
     print()
@@ -116,16 +133,34 @@ print('ALL_GATES_PASS' if all_pass else 'GATES_FAILED')
 
 ### Structured Review Comment Check
 
-Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment:
+Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment.
+Stale reviews are filtered by comparing each comment's `created_at` against the PR's latest
+commit `committer.date` — comments that predate the latest commit are treated as stale (a
+force-push would have superseded them) and are dropped from consideration.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# Read the latest commit's committer date for commit-SHA-aware filtering.
+# On transient API failure we fail the gate with a specific diagnostic rather
+# than silently regressing to unfiltered behavior -- a silent fallback would
+# defeat the exact class of bug this filter prevents (stale Approved after
+# force-push).
+LATEST_COMMIT_DATE=$(gh api repos/$REPO/pulls/$ARGUMENTS/commits --jq '.[-1].commit.committer.date' 2>/dev/null)
+if [ -z "$LATEST_COMMIT_DATE" ]; then
+  echo "REVIEW_COMMENT: FAIL — could not fetch latest commit date for review filter"
+  echo "Diagnose: gh api repos/$REPO/pulls/$ARGUMENTS/commits --jq '.[-1]'"
+  echo "GATES_FAILED"
+  exit 1
+fi
+
 LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
-  --jq '[.[] | select(.body | startswith("## Review:"))] | last | .body // ""' \
+  --jq "[.[] | select(.body | startswith(\"## Review:\")) | select(.created_at >= \"$LATEST_COMMIT_DATE\")] | last | .body // \"\"" \
   2>/dev/null) || { echo "REVIEW_COMMENT: FAIL — gh api call failed (network/auth error)"; echo "GATES_FAILED"; exit 1; }
 
 if [ -z "$LAST_REVIEW" ]; then
-  echo "REVIEW_COMMENT: FAIL — No '## Review:' comment found on PR #$ARGUMENTS"
+  echo "REVIEW_COMMENT: FAIL — No current '## Review:' comment found on PR #$ARGUMENTS"
+  echo "(Comments older than the latest commit at $LATEST_COMMIT_DATE were filtered as stale.)"
   echo "Run /do-pr-review before merging."
   echo "GATES_FAILED"
 elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
@@ -135,7 +170,7 @@ elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
   echo "$BLOCKERS"
   echo "GATES_FAILED"
 else
-  echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved'"
+  echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved' (post-latest-commit)"
 fi
 ```
 
@@ -149,15 +184,28 @@ Before merging, scan the plan document for unchecked items that indicate unfinis
 SLUG=$(echo "$BRANCH" | sed 's|^session/||')
 PLAN_PATH="docs/plans/${SLUG}.md"
 
-# Read plan from origin/main (authoritative copy), not from cwd (which may be a stale worktree)
-PLAN_TEXT=$(git show origin/main:${PLAN_PATH} 2>/dev/null) || { echo "WARN: No plan found at origin/main:${PLAN_PATH} -- skipping completion gate"; exit 0; }
+# Read plan from the PR branch HEAD (origin/$BRANCH), not origin/main.
+# The plan's checkoff commits live on the session branch and only reach main
+# VIA this merge — reading from origin/main creates a chicken-and-egg deadlock
+# where the gate refuses to merge because the commits that would satisfy it
+# are the ones being merged. Fall back to origin/main only if the PR branch
+# has no plan (greenfield work items without a plan doc).
+git fetch origin "$BRANCH" --quiet 2>/dev/null || true
+PLAN_TEXT=$(git show "origin/${BRANCH}:${PLAN_PATH}" 2>/dev/null)
+if [ -z "$PLAN_TEXT" ]; then
+  PLAN_TEXT=$(git show "origin/main:${PLAN_PATH}" 2>/dev/null)
+fi
+if [ -z "$PLAN_TEXT" ]; then
+  echo "WARN: No plan found at origin/${BRANCH}:${PLAN_PATH} or origin/main:${PLAN_PATH} -- skipping completion gate"
+  exit 0
+fi
 
 echo "$PLAN_TEXT" | python3 -c "
 import re, sys, yaml
 
 plan_text = sys.stdin.read()
 if not plan_text.strip():
-    print('WARN: Empty plan at origin/main:$PLAN_PATH -- skipping completion gate')
+    print('WARN: Empty plan at $PLAN_PATH -- skipping completion gate')
     sys.exit(0)
 
 # Parse frontmatter for allow_unchecked override
@@ -225,63 +273,109 @@ with the merge. Fix: `uv lock && git add uv.lock && git commit -m "Sync uv.lock"
 
 ### Full Suite Gate
 
-After the Lockfile Sync Check, run a full test suite gate to ensure the PR branch does not introduce new regressions.
+<!--
+    Gate logic lives in scripts/baseline_gate.py. See
+    docs/features/merge-gate-baseline.md for the full contract. The markdown
+    here only orchestrates: run pytest -> junitxml -> invoke the gate script
+    -> read its verdict. Every line of comparison logic is reachable from
+    tests/unit/test_do_merge_baseline.py via direct function import.
+-->
+
+After the Lockfile Sync Check, run a full test suite gate to ensure the PR branch does not introduce new regressions. PR failures are compared against a categorised baseline (`real`, `flaky`, `hung`, `import_error`) -- new `real`/`hung`/`import_error` failures block, new `flaky`-category re-occurrences are reported but non-blocking.
 
 ```bash
-# Run the full suite fail-fast on the PR branch (already checked out)
-pytest tests/ -q --tb=no 2>&1 | tee /tmp/pytest_output.txt
+# Run the full suite on the PR branch (already checked out) and emit junitxml.
+# No -p pytest_timeout flag here: the merge gate does not classify hangs per
+# test -- that is the refresh tool's job on main. do-test's existing retry
+# infrastructure handles flaky PR-branch failures before we reach this gate.
+rm -f /tmp/pr_run.xml
+pytest tests/ -q --tb=no --junitxml=/tmp/pr_run.xml 2>&1 | tee /tmp/pytest_output.txt
 PYTEST_EXIT=$?
 
-# Parse failure test IDs from output
-FAILING_TESTS=$(grep " FAILED" /tmp/pytest_output.txt | awk '{print $1}' | sort)
-FAILURE_COUNT=$(echo "$FAILING_TESTS" | grep -c "." 2>/dev/null || echo 0)
-
-# Load baseline (written by a previous clean merge)
 BASELINE_FILE="data/main_test_baseline.json"
-if [ -f "$BASELINE_FILE" ]; then
-    BASELINE_TESTS=$(python3 -c "import json; d=json.load(open('$BASELINE_FILE')); print('\n'.join(d.get('failing_tests', [])))" | sort)
-    NEW_REGRESSIONS=$(comm -23 <(echo "$FAILING_TESTS") <(echo "$BASELINE_TESTS") | grep -v '^$' || true)
-    REGRESSION_COUNT=$(echo "$NEW_REGRESSIONS" | grep -c "." 2>/dev/null || echo 0)
-else
-    # No baseline — bootstrap: all failures treated as pre-existing, write new baseline
-    NEW_REGRESSIONS=""
-    REGRESSION_COUNT=0
-    if [ $PYTEST_EXIT -ne 0 ]; then
-        echo "FULL_SUITE: BOOTSTRAP — no baseline exists; $FAILURE_COUNT failures logged as pre-existing baseline"
-        mkdir -p data
-        python3 -c "
-import json, sys
-lines = open('/tmp/pytest_output.txt').readlines()
-failures = [l.strip().split()[0] for l in lines if ' FAILED' in l]
-json.dump({'failing_tests': sorted(failures)}, open('data/main_test_baseline.json', 'w'))
-print(f'Baseline written with {len(failures)} pre-existing failures.')
-"
-    fi
-fi
 
 if [ $PYTEST_EXIT -eq 0 ]; then
     echo "FULL_SUITE: PASS"
     mkdir -p data
-    echo '{"failing_tests": []}' > data/main_test_baseline.json
-elif [ "${REGRESSION_COUNT:-0}" -eq 0 ]; then
-    PREEXISTING_COUNT=$(echo "$FAILING_TESTS" | grep -c "." 2>/dev/null || echo 0)
-    echo "FULL_SUITE: PASS (pre-existing $PREEXISTING_COUNT failure(s) noted — in baseline, non-blocking)"
-    echo "Pre-existing failures (first 20):"
-    echo "$FAILING_TESTS" | head -20
+    python3 -c "
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+import subprocess
+sha = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], text=True).strip()
+Path('data/main_test_baseline.json').write_text(json.dumps({
+    'schema_version': 2,
+    'generated_at': datetime.now(UTC).isoformat(),
+    'generated_by': 'do-merge.md post-merge reset',
+    'runs': 0,
+    'commit': sha,
+    'tests': {},
+}, indent=2, sort_keys=True) + '\n')
+"
+elif [ ! -f "$BASELINE_FILE" ]; then
+    # Bootstrap path: no baseline present and PR has failures.
+    # Write every PR failure as a `real` entry plus `bootstrap: true` so the
+    # staleness warning always fires until a real refresh runs.
+    echo "FULL_SUITE: BOOTSTRAP — no baseline exists; recording PR failures as pre-existing."
+    mkdir -p data
+    python3 -c "
+import json
+import subprocess, sys
+from datetime import UTC, datetime
+from pathlib import Path
+sys.path.insert(0, '.')
+from scripts._baseline_common import parse_junitxml, failing_node_ids
+failing = sorted(failing_node_ids(parse_junitxml('/tmp/pr_run.xml')))
+sha = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], text=True).strip()
+Path('data/main_test_baseline.json').write_text(json.dumps({
+    'schema_version': 2,
+    'generated_at': datetime.now(UTC).isoformat(),
+    'generated_by': 'do-merge.md bootstrap',
+    'runs': 1,
+    'commit': sha,
+    'bootstrap': True,
+    'tests': {n: {'category': 'real', 'fail_rate': 1.0, 'hung_count': 0} for n in failing},
+}, indent=2, sort_keys=True) + '\n')
+print(f'Bootstrap baseline written with {len(failing)} pre-existing failures (bootstrap=true).')
+"
+    echo "FULL_SUITE: PASS (bootstrap; run python scripts/refresh_test_baseline.py on main soon)"
 else
-    FIRST_REGRESSION=$(echo "$NEW_REGRESSIONS" | head -1)
-    echo "FULL_SUITE: FAIL — ${REGRESSION_COUNT} new regression(s) not in baseline:"
-    echo "$NEW_REGRESSIONS" | head -20
-    echo "First regression: $FIRST_REGRESSION"
-    echo "GATES_FAILED"
+    # Delegate to scripts/baseline_gate.py for categorised comparison.
+    # Exit 0 when no new blocking regressions. Exit 1 otherwise.
+    # Prints a JSON verdict to stdout plus any staleness warning to stderr.
+    # Capture $? on the SAME line as the assignment: otherwise an
+    # intermediate command (e.g. a debug `echo`) would clobber $? and this
+    # gate would silently read the wrong exit code.
+    GATE_OUTPUT=$(python -m scripts.baseline_gate --pr-junitxml /tmp/pr_run.xml --baseline "$BASELINE_FILE" 2> /tmp/baseline_gate_stderr.txt); GATE_EXIT=$?
+    if [ -s /tmp/baseline_gate_stderr.txt ]; then
+        cat /tmp/baseline_gate_stderr.txt
+    fi
+    if [ $GATE_EXIT -eq 0 ]; then
+        PREEXISTING=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(json.load(sys.stdin)['preexisting_failures_present'])")
+        FLAKY_COUNT=$(echo "$GATE_OUTPUT" | python3 -c "import json, sys; print(len(json.load(sys.stdin)['new_flaky_occurrences']))")
+        echo "FULL_SUITE: PASS (pre-existing=$PREEXISTING, flaky re-occurrences=$FLAKY_COUNT -- all non-blocking)"
+        # Baseline decay + quarantine hint emission (item 4 of sdlc-1155).
+        # Invokes the helpers added in scripts/baseline_gate.py so the gate
+        # can age out stale `real` entries and flag repeat flakes without a
+        # separate pass.
+        python3 scripts/_baseline_post_merge_update.py "$BASELINE_FILE" "$GATE_OUTPUT" /tmp/pr_run.xml || true
+    else
+        echo "FULL_SUITE: FAIL — new regression(s) not in baseline:"
+        echo "$GATE_OUTPUT" | python3 -c "import json, sys; [print(' -', n) for n in json.load(sys.stdin)['new_blocking_regressions'][:20]]"
+        echo "GATES_FAILED"
+    fi
 fi
 ```
 
-**Red-main recovery path:** If `data/main_test_baseline.json` does not exist and tests fail, write the current failure list as the new baseline (bootstrap mode). This allows the first merge after a red-main period to proceed, establishing the baseline for future comparisons. Log all pre-existing failures in the PR comment.
+**Red-main recovery path:** If `data/main_test_baseline.json` does not exist and tests fail, write the current failure list as a bootstrap schema-v2 baseline (`bootstrap: true`). This allows the first merge after a red-main period to proceed, establishing the baseline for future comparisons. The `bootstrap: true` flag makes the staleness warning fire on every subsequent gate invocation until `python scripts/refresh_test_baseline.py` writes a properly categorised baseline.
 
-**After a clean merge:** Update `data/main_test_baseline.json` to `{"failing_tests": []}` so future PRs are held to a fully green standard.
+**After a clean merge:** Update `data/main_test_baseline.json` to a schema-v2 shape with an empty `tests` map so future PRs are held to a fully green standard.
 
-**Note:** The full suite collects all failures before comparing against the baseline — this is required for the `comm -23` regression check to work correctly. Using `-x` (fail-fast) would stop after the first pre-existing failure and hide new regressions.
+**Categories:** The baseline is keyed by test node ID with a `category` field. Categories: `real` (deterministic failure on main), `flaky` (1-99% fail rate across N baseline runs), `hung` (pytest-timeout fired, delegated via `pytest-timeout` on refresh), `import_error` (collection failure). Only the refresh tool (`scripts/refresh_test_baseline.py`) writes categorised baselines. See `docs/features/merge-gate-baseline.md`.
+
+**Backwards compat:** The schema-v1 `{"failing_tests": [...]}` flat shape is promoted to schema v2 in memory (every entry becomes `category="real"`). No file write happens from the merge gate itself; only the refresh tool upgrades the on-disk format.
+
+**Note:** The full suite collects all failures into `/tmp/pr_run.xml` before comparison. Using `-x` (fail-fast) would stop after the first pre-existing failure and hide new regressions.
 
 Also verify the PR is mergeable:
 

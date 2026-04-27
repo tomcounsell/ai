@@ -83,6 +83,26 @@ for r in results:
     print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type}")
 ```
 
+### Design System Sync (`tools.design_system_sync`)
+
+Deterministic one-way generator from Pencil `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.
+
+```bash
+# Python-only emission (no Node required — auto-falls back when npx is missing)
+python -m tools.design_system_sync --generate --pen <path> --css-root <dir>
+
+# Full pipeline: generate + lint + DTCG / Tailwind exports (requires Node)
+python -m tools.design_system_sync --all --pen <path>
+
+# Drift check: regenerate to tempdir and byte-diff; exit 1 on drift
+python -m tools.design_system_sync --check --pen <path>
+
+# Gap-audit markdown tables for pasting into gap-audit.md (run BEFORE git commit)
+python -m tools.design_system_sync --audit --pen <path>
+```
+
+Paired with two PreToolUse validators (`validate_design_system_sync.py`, `validate_design_system_readonly.py`) that block drift at commit time and refuse direct Write/Edit of generated artifacts. Escape hatch: `DESIGN_SYSTEM_HOOK_DISABLED=1`.
+
 ### Emoji Embedding (`tools.emoji_embedding`)
 
 Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 73 standard Telegram reaction emojis and any available Premium custom emoji packs.
@@ -248,7 +268,7 @@ python -m tools.valor_session kill --all
 python -m tools.valor_session status --id <SESSION_ID> --json
 ```
 
-**Project key resolution (`create` subcommand):** The `project_key` is derived automatically by matching the current working directory against the `working_directory` field of each project in `~/Desktop/Valor/projects.json`. The most-specific match (longest path prefix) wins. Falls back to `"valor"` with a stderr warning if no match is found. Use `--project-key` to override explicitly (useful in scripts or CI where cwd may not match any project).
+**Project key resolution (`create` subcommand):** `project_key` is the only input that ties a session to a repo — `working_dir` is always derived from `projects.json[project_key].working_directory`, never supplied independently. There is **no** `--working-dir` flag. Resolution precedence: `--project-key <key>` > `--parent <id>` (inherits from parent session's `project_key`) > `resolve_project_key(os.getcwd())` (matches cwd against each project's `working_directory`, longest-prefix wins). On no match the CLI raises `ProjectKeyResolutionError` and exits non-zero — there is no silent `"valor"` fallback. See `docs/features/session-isolation.md#cli-level-project-scope-resolution-issue-1158` for the full rule.
 
 See `docs/features/session-steering.md` for full documentation.
 

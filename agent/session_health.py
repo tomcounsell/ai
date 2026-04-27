@@ -7,7 +7,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
@@ -138,6 +138,17 @@ HEARTBEAT_FRESHNESS_WINDOW = 90
 # fresh. 600s (10 min) accommodates long tool calls while bounding the
 # alive-but-silent failure mode. Env-tunable via STDOUT_FRESHNESS_WINDOW_SECS.
 STDOUT_FRESHNESS_WINDOW = int(os.environ.get("STDOUT_FRESHNESS_WINDOW_SECS", 600))
+# Post-compaction grace period (issue #1099 Mode 3). After a successful
+# compaction, the session often returns to idle briefly before the next turn
+# picks up. During this window the Tier 2 gate reprieves the kill rather than
+# treating the idle period as a stuck subprocess. Kept distinct from
+# ``STDOUT_FRESHNESS_WINDOW`` — the two answer different questions and may
+# evolve independently (e.g. if compaction legitimately takes longer than 10
+# minutes, or if the stdout-freshness threshold is tightened). The companion
+# writer is ``agent/hooks/pre_compact.py::pre_compact_hook``, which updates
+# ``AgentSession.last_compaction_ts`` on every successful backup. Env-tunable
+# via ``COMPACT_REPRIEVE_WINDOW_SECS``.
+COMPACT_REPRIEVE_WINDOW_SEC = int(os.environ.get("COMPACT_REPRIEVE_WINDOW_SECS", 600))
 # Deadline (seconds) after started_at before a session that has NEVER produced
 # stdout is also flagged by Tier 1. Preserves warmup tolerance (#1036) while
 # bounding the "silent from the start" case. Env-tunable via
@@ -160,6 +171,47 @@ TASK_CANCEL_TIMEOUT = 0.25
 # False to emit the tier1_flagged_stdout_stale counter. Reset to "" at the
 # top of _has_progress() on every call to avoid stale attribution.
 _last_progress_reason: str = ""
+
+
+# In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
+# ``(checked_at_monotonic, result)``. The cache amortizes psutil syscalls when
+# many sessions enter the recovery branch within the same health-check tick.
+_MEMORY_CACHE: tuple[float, bool] | None = None
+_MEMORY_CACHE_TTL_SEC: float = 5.0
+
+
+def _is_memory_tight() -> bool:
+    """Return True if available system memory is below the OOM-backoff threshold.
+
+    Used by the Mode 4 OOM-defer branch in the recovery path (issue #1099) to
+    distinguish "OS killed under memory pressure" from "health check intentionally
+    killed". Wraps ``psutil.virtual_memory().available`` in try/except so the
+    health check never crashes from a psutil edge case (fail-open: on any error
+    we return False, which means we do NOT defer — preserving today's behavior).
+
+    A 5-second in-process cache amortizes the syscall when many sessions enter
+    the recovery branch on the same tick (e.g. a worker restart that recovers a
+    queue of stuck sessions). The cache is module-global; no cross-process
+    coordination is needed because each health-check tick runs in one process.
+
+    Threshold: 400 MB. Below this, the machine is genuinely tight and a 120s
+    backoff is preferable to a thrash loop.
+    """
+    global _MEMORY_CACHE
+    now_mono = time.monotonic()
+    if _MEMORY_CACHE is not None and (now_mono - _MEMORY_CACHE[0]) < _MEMORY_CACHE_TTL_SEC:
+        return _MEMORY_CACHE[1]
+    try:
+        import psutil  # noqa: PLC0415
+
+        available_bytes = psutil.virtual_memory().available
+        result = available_bytes < 400 * 1024 * 1024  # 400 MB
+    except (
+        Exception
+    ):  # swallow-ok: fail-open — memory check failure must not stall session recovery
+        result = False  # fail-open
+    _MEMORY_CACHE = (now_mono, result)
+    return result
 
 
 def _recover_interrupted_agent_sessions_startup() -> int:
@@ -518,27 +570,34 @@ def _tier2_reprieve_signal(
     handle: "SessionHandle | None",
     entry: AgentSession,
 ) -> str | None:
-    """Evaluate Tier 2 activity-positive reprieve gates (issue #1036).
+    """Evaluate Tier 2 activity-positive reprieve gates (issue #1036, #1099).
 
     Called by the health check after Tier 1 has flagged a session as "both
     heartbeats stale". Any single positive signal reprieves the kill.
 
     Gates (order matters for telemetry — the first passing gate is returned):
-      (c) "alive"    — ``psutil.Process(pid).status()`` is not one of
-                       {zombie, dead, stopped}. Proves the SDK subprocess
-                       still exists and is not a zombie.
-      (d) "children" — ``psutil.Process(pid).children()`` is non-empty.
-                       Stronger signal than (c): tool-subprocess execution is
-                       actively happening right now. Returned in preference
-                       to "alive" so metrics highlight this case.
-      (e) "stdout"   — ``entry.last_stdout_at`` is within
-                       ``STDOUT_FRESHNESS_WINDOW``. Proves the SDK recently
-                       emitted stdout (stream-json event).
+      (b) "compacting" — ``entry.last_compaction_ts`` is within
+                         ``COMPACT_REPRIEVE_WINDOW_SEC``. Companion writer:
+                         ``agent/hooks/pre_compact.py::pre_compact_hook`` updates
+                         ``last_compaction_ts`` on every successful backup.
+                         Added for issue #1099 Mode 3 — prevents false kills on
+                         sessions that are legitimately idle post-compaction.
+      (c) "alive"      — ``psutil.Process(pid).status()`` is not one of
+                         {zombie, dead, stopped}. Proves the SDK subprocess
+                         still exists and is not a zombie.
+      (d) "children"   — ``psutil.Process(pid).children()`` is non-empty.
+                         Stronger signal than (c): tool-subprocess execution is
+                         actively happening right now. Returned in preference
+                         to "alive" so metrics highlight this case.
+      (e) "stdout"     — ``entry.last_stdout_at`` is within
+                         ``STDOUT_FRESHNESS_WINDOW``. Proves the SDK recently
+                         emitted stdout (stream-json event).
 
-    Returns the name of the first passing gate ("children", "alive", or
-    "stdout"), or ``None`` if every gate fails.
+    Returns the name of the first passing gate ("compacting", "children",
+    "alive", or "stdout"), or ``None`` if every gate fails.
 
     Failure handling:
+      * ``last_compaction_ts`` is ``None`` / non-numeric → (b) skipped.
       * ``handle is None`` → (c)(d) skipped; fall through to (e).
       * ``handle.pid is None`` → (c)(d) skipped; fall through to (e).
       * ``psutil.NoSuchProcess`` / ``psutil.AccessDenied`` / ``ImportError``
@@ -547,6 +606,19 @@ def _tier2_reprieve_signal(
     This helper NEVER raises. A genuinely dead session where every gate
     fails is preferable to crashing the health-check loop.
     """
+    # (b) compacting — reprieve when a compaction completed within
+    # COMPACT_REPRIEVE_WINDOW_SEC seconds. Evaluated FIRST so the telemetry
+    # counter (``tier2_reprieve_total:compacting``) distinguishes this case
+    # from the psutil-based gates. See issue #1099 Mode 3.
+    lct = getattr(entry, "last_compaction_ts", None)
+    if lct is not None:
+        try:
+            if (time.time() - float(lct)) < COMPACT_REPRIEVE_WINDOW_SEC:
+                return "compacting"
+        except (TypeError, ValueError):
+            # Defensive: malformed timestamp on the entry — skip this gate.
+            pass
+
     pid = handle.pid if handle is not None else None
     if pid is not None:
         try:
@@ -685,8 +757,8 @@ async def _agent_session_health_check() -> None:
             ):
                 should_recover = True
                 reason = (
-                    f"worker alive but no progress signal, running for "
-                    f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, "
+                    f"no progress signal observed in last {int(running_seconds)}s "
+                    f"(>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, worker future not yet resolved, "
                     f"turn_count={entry.turn_count}, log_path={entry.log_path!r}, "
                     f"claude_session_uuid={entry.claude_session_uuid!r})"
                 )
@@ -829,7 +901,7 @@ async def _agent_session_health_check() -> None:
 
                 is_local = worker_key.startswith("local")
                 logger.warning(
-                    "[session-health] Recovering stuck session %s "
+                    "[session-health] Recovering session %s with no recent progress evidence "
                     "(chat=%s, session=%s, local=%s): %s",
                     entry.agent_session_id,
                     worker_key,
@@ -869,8 +941,16 @@ async def _agent_session_health_check() -> None:
                     transition_status,
                 )
 
+                # Capture pre-bump recovery_attempts BEFORE the increment for the
+                # Mode 4 OOM-defer check below (issue #1099). The increment must
+                # happen AFTER the OOM check so we can distinguish first-time OS
+                # kills (``pre_bump_attempts == 0``) from health-check kills
+                # (``pre_bump_attempts >= 1``). Resolves critique blocker B2 in
+                # the plan: reading ``entry.recovery_attempts`` after the bump
+                # would mean the OOM defer never fires.
+                pre_bump_attempts = entry.recovery_attempts or 0
                 # Bump recovery_attempts counter only on actual kill (#1036).
-                entry.recovery_attempts = (entry.recovery_attempts or 0) + 1
+                entry.recovery_attempts = pre_bump_attempts + 1
                 try:
                     from popoto.redis_db import POPOTO_REDIS_DB as _MR
 
@@ -887,7 +967,7 @@ async def _agent_session_health_check() -> None:
                             entry,
                             "abandoned",
                             reason=(
-                                f"health check: local session stuck "
+                                f"health check: local session showed no progress evidence "
                                 f"(chat={worker_key}, attempts={entry.recovery_attempts})"
                             ),
                             skip_auto_tag=True,
@@ -924,18 +1004,49 @@ async def _agent_session_health_check() -> None:
                         # re-read. Save recovery_attempts along the way.
                         entry.priority = "high"
                         entry.started_at = None
-                        try:
-                            entry.save(update_fields=["recovery_attempts"])
-                        except Exception as _ra_err:
-                            logger.debug(
-                                "[session-health] recovery_attempts save failed: %s",
-                                _ra_err,
+                        # Mode 4 (issue #1099) — OOM backoff. If the OS killed the
+                        # subprocess (returncode == -9), AND this is the first
+                        # recovery attempt (pre_bump_attempts == 0), AND memory is
+                        # currently tight, defer the next pickup eligibility by
+                        # 120s via the existing ``scheduled_at`` field. The
+                        # session STILL transitions to ``pending`` below — the
+                        # defer works because the pending-scan in
+                        # ``agent/session_pickup.py`` skips sessions whose
+                        # ``scheduled_at > now``. No new "queued but not
+                        # transitioned" intermediate state is introduced.
+                        if (
+                            getattr(entry, "exit_returncode", None) == -9
+                            and pre_bump_attempts == 0
+                            and _is_memory_tight()
+                        ):
+                            entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
+                            try:
+                                entry.save(update_fields=["scheduled_at", "recovery_attempts"])
+                            except Exception as _sa_err:
+                                logger.debug(
+                                    "[session-health] scheduled_at save failed: %s",
+                                    _sa_err,
+                                )
+                            logger.warning(
+                                "[session-health] OOM backoff: deferring %s for 120s "
+                                "(exit_returncode=-9, recovery_attempts now=%d, "
+                                "memory<400MB)",
+                                entry.agent_session_id,
+                                entry.recovery_attempts,
                             )
+                        else:
+                            try:
+                                entry.save(update_fields=["recovery_attempts"])
+                            except Exception as _ra_err:
+                                logger.debug(
+                                    "[session-health] recovery_attempts save failed: %s",
+                                    _ra_err,
+                                )
                         transition_status(
                             entry,
                             "pending",
                             reason=(
-                                f"health check: recovered stuck session "
+                                f"health check: recovered no-progress session "
                                 f"(chat={worker_key}, attempt {entry.recovery_attempts})"
                             ),
                         )
@@ -1317,11 +1428,6 @@ def cleanup_corrupted_agent_sessions() -> int:
         logger.debug("[agent-session-cleanup] No corrupted sessions found")
 
     return cleaned
-
-
-def recover_orphaned_agent_sessions_all_projects() -> int:
-    """Backward-compat alias for cleanup_corrupted_agent_sessions."""
-    return cleanup_corrupted_agent_sessions()
 
 
 def _cleanup_orphaned_claude_processes() -> int:

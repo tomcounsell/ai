@@ -103,6 +103,7 @@ The worker's startup sequence is deterministic:
 | 5 | `_ensure_worker(worker_key)` for each pending session | Kick per-worker-key loops for queued sessions |
 | 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
+| 8 | `run_idle_sweep()` | Background task: proactively tears down idle persistent Claude SDK clients on dormant/paused sessions before the ~48h Anthropic silent-death window (issue #1128). See [Worker-Internal Idle Sweeper](#worker-internal-idle-sweeper-issue-1128). |
 
 ### Execution Harness Routing
 
@@ -152,6 +153,56 @@ PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abs
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 
+### Worker-Internal Idle Sweeper (issue #1128)
+
+The **worker process** owns the `_active_clients` registry at
+`agent/sdk_client.py:58`, which maps `session_id → ClaudeSDKClient` for
+interactive chat sessions (the SDK-path). These persistent SDK
+connections die silently after ~48h of idle (fleet-ops finding #1104),
+so the worker spawns an idle-sweeper background task
+(`worker/idle_sweeper.py::run_idle_sweep`) to proactively tear down
+clients well before that window.
+
+```
+worker/__main__.py startup
+    |
+    v
+asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
+    |
+    v
+loop every IDLE_SWEEP_INTERVAL seconds:
+    _sweep_once()
+      |
+      |-- snapshot = list(_active_clients.items())
+      |-- for (session_id, client) in snapshot:
+      |     load AgentSession.filter(session_id=session_id)
+      |     if status in {dormant, paused, paused_circuit}
+      |        AND updated_at age > IDLE_TEARDOWN_THRESHOLD:
+      |          await client.close()    -- idempotent
+      |          _active_clients.pop(session_id, None)
+      |          AgentSession.sdk_connection_torn_down_at = now
+      |          save(update_fields=["sdk_connection_torn_down_at"])
+      v
+cancel on worker SIGTERM shutdown
+```
+
+**Process locality** is the load-bearing design choice: the
+session-watchdog process (`monitoring/session_watchdog.py`) does NOT
+share memory with the worker, so it cannot reach `_active_clients`. The
+teardown MUST run inside the worker process. The watchdog remains
+responsible for repetition / error-cascade / token-alert detection and
+steering (see [Session Watchdog](session-watchdog.md)) but does not
+touch the SDK-client registry.
+
+**Harness-path sessions** (all production PM / Dev / Teammate work) are
+unaffected — `_run_harness_subprocess` spawns a short-lived `claude -p`
+subprocess per turn, leaving nothing in `_active_clients` to go stale.
+The sweeper is a no-op for harness-path sessions.
+
+**Configuration.** Defaults are generous (sweep every 30 min, tear down
+at 24h dormant); tune via env vars — see the [Session Watchdog env-var
+table](session-watchdog.md#configuration).
+
 ## Worker Key Routing (issues #831, #1085)
 
 Workers are keyed by `worker_key` — a computed property on `AgentSession` that reflects the session's actual isolation level, not its Telegram communication topology. This prevents PM sessions from different Telegram threads (different `chat_id`s) from racing each other when they share the same git working tree.
@@ -197,9 +248,7 @@ Because `_ensure_worker()` is a plain synchronous function (no `await`), the che
 **Lifecycle of `_starting_workers`:**
 
 1. Added immediately before `asyncio.create_task()`.
-2. Removed synchronously right after the task is registered in `_active_workers` (fast path — clears it before any re-entrant call can see it).
-3. Also removed via a `done_callback` as a safety net in case the task finishes before the synchronous removal runs (degenerate edge case).
-4. Cleared in the `except` block if `create_task()` itself raises, so the set never leaks.
+2. Cleared unconditionally in the enclosing `try/finally` block, so `_starting_workers.discard(worker_key)` runs on every exit path — success, `create_task()` failure, or any post-create statement failure — guaranteeing the guard never leaks. If a post-create statement raises after the task exists but before it is published to `_active_workers`, the task is cancelled in the `except` branch so no orphan runs.
 
 The `_worker_loop` removes itself from `_active_workers` in its `finally` block. After it exits, the next call to `_ensure_worker()` (triggered by the next enqueue or the health check) starts a fresh task.
 
@@ -248,7 +297,9 @@ A short-lived Redis lock (`SETNX worker:pop_lock:{worker_key}`) wraps the query�
 
 ### CLI Session Isolation (`create_local()`)
 
-Local CLI sessions created by `models/agent_session.py:create_local()` now use the **Claude Code session UUID** as `chat_id` instead of a collision-prone modulo timestamp:
+> **Scope after #1157:** `create_local()` is only called by the `UserPromptSubmit` hook for **direct-CLI subprocesses** (developer running `claude` at the terminal with `SESSION_TYPE` / `VALOR_PARENT_SESSION_ID` exported). Worker-spawned PM/Teammate/Dev subprocesses never reach this path — the hook attaches the sidecar to the worker's pre-existing AgentSession instead (see [Hook-Layer Session Attach](#hook-layer-session-attach-issue-1157) below).
+
+Direct-CLI sessions created by `models/agent_session.py:create_local()` use the **Claude Code session UUID** as `chat_id` instead of a collision-prone modulo timestamp:
 
 ```python
 # Before (collision-prone): same chat_id for sessions created within same 2.7-hour window
@@ -259,6 +310,27 @@ chat_id = session_id  # Claude Code UUID (e.g., "abc123-def456-...")
 ```
 
 This ensures that multiple CLI sessions (e.g., parallel `/do-build` runs) each get their own worker queue and never serialize with each other.
+
+### Hook-Layer Session Attach (issue #1157)
+
+Worker-spawned subprocesses produce exactly ONE `AgentSession` row — the worker-created record. The `UserPromptSubmit` hook at `.claude/hooks/user_prompt_submit.py` does NOT mint a duplicate `local-*` record when the worker has already created one.
+
+The worker communicates ownership by setting two env vars before `subprocess.Popen` (see `agent/sdk_client.py:1343-1369`):
+
+- `AGENT_SESSION_ID` — the worker's `agent_session_id` UUID (primary signal)
+- `VALOR_SESSION_ID` — the worker's bridge `session_id` (fallback signal)
+
+On the subprocess's first prompt, the hook:
+
+1. Reads `AGENT_SESSION_ID` and resolves it via `AgentSession.get_by_id()` (indexed, O(1)).
+2. Falls back to `VALOR_SESSION_ID` via `query.filter(session_id=...)` if the primary misses.
+3. If resolved and non-terminal: writes that `agent_session_id` into the sidecar and returns. **The `create_local()` call is never reached.**
+4. If the resolved target is terminal (killed/completed/failed/abandoned/cancelled): falls through to the existing `create_local` gate, preserving #1113 terminal-session semantics (no zombie revival).
+5. If neither env var resolves: falls through to the existing gate, which blocks the creation unless `SESSION_TYPE` or `VALOR_PARENT_SESSION_ID` is set (direct-CLI path from #1001).
+
+The `PostToolUse` and `Stop` hooks use the same sidecar-first lookup pattern: primary via `AgentSession.get_by_id(sidecar_agent_session_id)`, with a fallback via `query.filter(session_id=f"local-{claude_session_id}")`. The fallback is retained because direct-CLI sessions still write `local-*` records.
+
+**Race prevention invariant:** the worker's `AgentSession.create()/save()` must complete synchronously before `subprocess.Popen`. Python interpreter startup + hook import + Redis connection take hundreds of ms, while Redis commits are sub-ms; the race is theoretically possible but practically impossible. If the race ever fires, the hook falls through to `create_local()` (status quo, not worse than before).
 
 ## Session Pickup: Fast Path vs Safety Net
 

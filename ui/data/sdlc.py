@@ -241,6 +241,14 @@ class PipelineProgress(BaseModel):
     classification_type: str | None = None
     is_stale: bool = False
 
+    # Per-session token + cost accounting (issue #1128).
+    # Always emitted (default 0 / 0.0) for forward-compat with existing
+    # JSON consumers — never None, never omitted.
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cost_usd: float = 0.0
+
     # SDLC state
     stages: list[StageState] = []
     current_stage: str | None = None
@@ -586,6 +594,25 @@ def _session_to_pipeline(session) -> PipelineProgress:
         except (ValueError, TypeError):
             tool_call_count = None
 
+    # Per-session token + cost fields (issue #1128). Always coerced to
+    # numeric (0 / 0.0) so `/dashboard.json` never returns None here.
+    def _to_int(val, default: int = 0) -> int:
+        try:
+            return int(val or 0)
+        except (TypeError, ValueError):
+            return default
+
+    def _to_float(val, default: float = 0.0) -> float:
+        try:
+            return float(val or 0.0)
+        except (TypeError, ValueError):
+            return default
+
+    total_input_tokens = _to_int(getattr(session, "total_input_tokens", 0))
+    total_output_tokens = _to_int(getattr(session, "total_output_tokens", 0))
+    total_cache_read_tokens = _to_int(getattr(session, "total_cache_read_tokens", 0))
+    total_cost_usd = _to_float(getattr(session, "total_cost_usd", 0.0))
+
     # Resolve issue/PR links with a history fallback. When do-build /
     # do-issue run, they shell out to `gh` which emits the URL to stdout
     # but doesn't always make it back onto the AgentSession model fields.
@@ -632,6 +659,10 @@ def _session_to_pipeline(session) -> PipelineProgress:
         plan_url=_safe_str(session.plan_url),
         pr_url=pr_url,
         claude_session_uuid=_safe_str(getattr(session, "claude_session_uuid", None)),
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        total_cache_read_tokens=total_cache_read_tokens,
+        total_cost_usd=total_cost_usd,
     )
 
 

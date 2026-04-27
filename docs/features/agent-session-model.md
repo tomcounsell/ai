@@ -183,16 +183,121 @@ Only four fields change during continuation: `status` (reset to "pending"), `ini
 
 ## Per-Session Model Selection
 
-`model` (`Field(null=True)`) stores the Claude model name to use for a dev session (e.g., `"sonnet"`, `"opus"`).
-`None` inherits the environment or CLI default (backward-compatible — all pre-existing sessions have `model=None`).
+`model` (`Field(null=True)`) stores the Claude model alias (e.g. `"opus"`,
+`"sonnet"`, `"haiku"`) or full name (e.g. `"claude-opus-4-7"`) to use for this
+session. The value flows end-to-end to the `claude -p` subprocess via the
+CLI harness live path (not the dormant `ValorAgent → ClaudeAgentOptions` path
+from PR #909 — that wiring remains in place for unit-test fixtures but is
+unreachable in production).
 
-**How it flows:**
-1. PM calls `python -m tools.valor_session create --role dev --model sonnet --message "..."`.
-2. `_push_agent_session(model="sonnet")` stores the value on the `AgentSession` record.
-3. `sdk_client.get_agent_response_sdk()` reads `session.model` and passes it to `ValorAgent(model=...)`.
-4. `ValorAgent._create_options()` includes `model="sonnet"` in `ClaudeAgentOptions` when set.
+### Precedence Cascade (D1)
 
-See [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md) for the PM's per-stage model selection table.
+The value that applies is the one explicitly set closest to the LLM call.
+When nothing explicit is set, the cascade falls back with codebase defaults
+at the bottom:
+
+1. **`AgentSession.model`** (per-session, explicit) — set via
+   `valor-session create --model <name>`, persisted on the record.
+2. **`settings.models.session_default_model`** (machine-local override) —
+   pydantic-settings field, env var `MODELS__SESSION_DEFAULT_MODEL`, sourced
+   from `~/Desktop/Valor/.env` (iCloud-synced).
+3. **Codebase default `"opus"`** — hard-coded as the pydantic `Field`
+   default in `config/settings.py::ModelSettings`.
+
+Implemented in `agent.session_executor._resolve_session_model()`:
+
+```python
+explicit = getattr(session, "model", None) if session else None
+if explicit:
+    return explicit
+fallback = settings.models.session_default_model
+return fallback or None
+```
+
+When the cascade resolves to `None` (operator set
+`MODELS__SESSION_DEFAULT_MODEL=""`), `get_response_via_harness` omits the
+`--model` flag and the Claude CLI uses its own default — graceful
+degradation rather than a hard error.
+
+### How It Flows
+
+1. PM or human calls
+   `python -m tools.valor_session create --role dev --model sonnet --message "..."`.
+2. `tools/valor_session.py::cmd_create` constructs the AgentSession via
+   `enqueue_agent_session(model="sonnet")`; the value is persisted on the
+   Redis record.
+3. Worker pops the session; `agent/session_executor.py::_execute_agent_session`
+   resolves the effective model via `_resolve_session_model(agent_session)`.
+4. `agent/sdk_client.py::get_response_via_harness(model=...)` appends
+   `["--model", <value>]` into `harness_cmd` (before positional `message`
+   and before any `--resume <uuid>`).
+5. Subprocess argv: `claude -p ... --model sonnet [--resume UUID] <message>`.
+6. The Claude CLI honors the flag and the session runs on the requested
+   model. INFO log `[harness] Using --model <value> for session_id=<id>`
+   confirms the resolved value each turn.
+
+### Override via `.env`
+
+Operators can flip the default on a per-machine basis:
+
+```bash
+# ~/Desktop/Valor/.env
+MODELS__SESSION_DEFAULT_MODEL=sonnet
+```
+
+Short aliases (`opus`/`sonnet`/`haiku`) are preferred; full version names
+(`claude-opus-4-7`) also accepted and passed verbatim to the CLI.
+
+### PM Final-Delivery Drafter (2-Pass, Always-Opus)
+
+The PM-to-CEO final-delivery drafter in
+`agent/session_completion.py::_deliver_pipeline_completion` is hardened as
+a quality + reliability gate. It runs independently of the session cascade:
+
+- **Always Opus** — both harness calls pin `model="opus"` regardless of the
+  PM session's configured model. Quality trumps cost for this single call.
+- **Two passes** — Pass 1 drafts from `summary_context`; Pass 2 reviews and
+  refines Pass 1's draft against "short, dense, thoughtful" criteria. The
+  refined text is the message the user receives.
+- **No silent fail** — Pass 1 failures (empty, exception, or
+  `Error: CLI harness not found` sentinel) log at ERROR and deliver a
+  visible `[drafter unavailable — pipeline completed] <truncated context>`
+  fallback message. Pass 2 failures log at WARNING and fall back to the
+  Pass 1 draft. The `final_text` is guaranteed non-empty before `send_cb`.
+- **Always finalize** — the session always transitions to `completed` (via
+  `finalize_session` in a `finally` block) regardless of drafter or delivery
+  outcome. Cancellation during drafter execution is the one exception: the
+  shutdown path owns that transition via an "interrupted" message.
+- **UUID isolation** — Pass 1 uses `session_id=None` so the drafter's
+  Claude Code UUID is NOT written over the PM's `claude_session_uuid`.
+  Pass 2 uses `prior_uuid=None` + `session_id=None` — the review prompt is
+  self-contained (Pass 1's draft is embedded verbatim), so there's no need
+  to resume the PM session and polluting its history is undesirable.
+- **Ollama fallback deferred** — see issue #1137. Until that lands,
+  Anthropic-down manifests as a visible degraded-fallback message + ERROR
+  log + Redis counter
+  `completion_runner:degraded_fallback:daily:<YYYYMMDD>` (7-day TTL) so
+  operators can detect outage spikes.
+
+### PM Stage Dispatch Table
+
+The PM persona's Stage→Model Dispatch Table
+(`config/personas/project-manager.md`) assigns Sonnet to
+BUILD/TEST/PATCH/DOCS and Opus to PLAN/CRITIQUE/REVIEW. The PM explicitly
+passes `--model sonnet` (or `--model opus`) when spawning Dev sessions,
+which sets `session.model` on the Dev's AgentSession record and wins the
+cascade. This is the canonical way to vary models per stage — stage
+routing lives in PM persona prose, NOT in settings.
+
+See [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md) for the full
+stage table.
+
+### Regression Guard
+
+`tests/unit/test_harness_model_coverage.py` AST-walks `agent/*.py` and
+fails any `get_response_via_harness(...)` call site that lacks a `model=`
+kwarg — prevents the re-regression pattern that made PR #909's wiring
+dormant on the worker path.
 
 ## BUILD Session Retention (`retain_for_resume`)
 

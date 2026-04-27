@@ -17,7 +17,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) | Delivery-choice protocol (SEND/EDIT/REACT/SILENT/CONTINUE) with defense-in-depth filtering to prevent control signal text leaking to users | Shipped |
 | [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
 | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
-| [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
+| [Bridge Message Query](bridge-message-query.md) | Bridge-side IPC handler for DM history queries; its CLI front-end has been consolidated into `valor-telegram read --user` (issue #1163) | Consolidated |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
 | [Bridge Resilience](bridge-resilience.md) | Circuit breaker, unified recovery loop, degraded mode, structured logging | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
@@ -29,6 +29,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
+| [Compaction Hardening](compaction-hardening.md) | JSONL backup before SDK context compaction, 5-min per-session cooldown, 30s post-compact nudge guard, SDK-tick backstop for missed PreCompact hooks | Shipped |
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
 | [Config Architecture](config-architecture.md) | Unified config system: Pydantic Settings, path constants, zero hardcoded paths | Shipped |
 | [Config-Driven Chat Mode](config-driven-chat-mode.md) | Per-group persona field in projects.json controlling session type, classifier bypass, and passive listener behavior | Shipped |
@@ -38,6 +39,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |
+| [Design-System Tooling](design-system-tooling.md) | One-way `.pen` → DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports generator (`tools.design_system_sync`), drift + read-only PreToolUse validators with escape-hatch env var, `@google/design.md@0.1.1` pin | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
 | [Do-Build AI Evaluator](do-build-ai-evaluator.md) | AI semantic evaluator step in /do-build pipeline: reads plan Acceptance Criteria, compares against git diff, returns PASS/PARTIAL/FAIL verdicts with evidence | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
@@ -47,6 +49,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Emoji Embedding Reactions](emoji-embedding-reactions.md) | Embedding-based emoji reaction selection with standard and Premium custom emoji support, EmojiResult type, send_telegram --react and --emoji flags, and graceful degradation | Shipped |
 | [Enforce REVIEW/DOCS Stages](enforce-review-docs-stages.md) | Hard delivery gates in Observer preventing SDLC pipeline from skipping REVIEW and DOCS stages | Shipped |
 | [Enhanced Planning](enhanced-planning.md) | Spike Resolution (Phase 1.5), RFC Review (Phase 2.8), Infrastructure Documentation, and task validation fields for /do-plan | Shipped |
+| [Env Completeness Validation](env-completeness-validation.md) | Detects missing environment variables during `--verify` runs by diffing `.env` against `.env.example`; surfaces `WARN: env-completeness:` lines listing missing keys with descriptions | Shipped |
 | [Features README Sort Check](features-readme-sort-check.md) | PostToolUse hook enforcing alphabetical sort order in the feature index table with auto-fix | Shipped |
 | [Git State Guard](git-state-guard.md) | Detects and resolves dirty git state (merges, rebases, cherry-picks) before SDLC branch operations | Shipped |
 | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
@@ -65,8 +68,11 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Local Doctor](local-doctor.md) | Unified health check CLI consolidating environment, service, auth, and resource checks into `python -m tools.doctor` | Shipped |
 | [Log Rotation](log-rotation.md) | User-space log rotation via LaunchAgent (`com.valor.log-rotate`) replacing root-requiring newsyslog; 30-minute schedule, 10 MB/3 backups, self-exclusion, content-idempotent installer | Shipped |
+| [Long-Task Checkpointing](long-task-checkpointing.md) | PROGRESS.md scratchpad and frequent-commit guidance for dev sessions to survive context compaction without semantic drift | Shipped |
+| [Markitdown Ingestion](markitdown-ingestion.md) | Multi-format document ingestion (PDF, DOCX, PPTX, XLSX, HTML, images) for the knowledge pipeline via `.md` sidecars; subprocess-first with opt-in Haiku vision path for PPTX and standalone images; `valor-ingest` CLI with `--scan` backfill; audio deliberately excluded | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, forgetting, and health-checking memories from the Memory model (`status` subcommand: Redis ping, counts, superseded ratio, category breakdown) | Shipped |
+| [Merge-Gate Baseline](merge-gate-baseline.md) | Categorised per-test baseline (`real`/`flaky`/`hung`/`import_error`) for `/do-merge`'s Full Suite Gate; `scripts/refresh_test_baseline.py` regenerates from N pytest runs with `pytest-timeout`; `scripts/baseline_gate.py` implements the comparison logic | Shipped |
 | [Message Drafter](message-drafter.md) | Medium-aware drafting layer that owns wire-format compliance for every user-visible message — Telegram/email orthogonality, drafter-at-the-handler integration, relay length guard, tool-call delivery (planned) | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |
@@ -92,6 +98,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [PM/Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
 | [Popoto Index Hygiene](popoto-index-hygiene.md) | Automated cleanup of orphaned Popoto index entries, Meta.ttl on AgentSession, raw Redis migration to Popoto models, daily rebuild_indexes reflection | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
+| [Post-Compact Re-Grounding](post-compact-regrounding.md) | Short re-grounding nudge delivered after context compaction: re-read plan, check SDLC stage progress, review PROGRESS.md scratchpad, check TodoWrite task list; degrades gracefully to minimal nudge when no AgentSession context exists | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |
@@ -114,6 +121,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
 | [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
+| [Self-Healing Merge Gate](self-healing-merge-gate.md) | Seven hardenings to the MERGE stage: durable-signal fallback, commit-SHA review filter, `uv lock --locked` pre-commit phase, baseline decay + quarantine hint, PM gate-recovery rule, merge-troubleshooting playbook, merge-guard tokeniser | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured drafter output | Shipped |
 | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |

@@ -42,6 +42,8 @@ Anthropic API recovers
 | `{project_key}:worker:hibernating` | 600s | `_worker_loop()` catch, `circuit-health-gate` | `_pop_agent_session()`, `circuit-health-gate` |
 | `{project_key}:worker:recovering` | 3600s | `circuit-health-gate` | `session-recovery-drip` |
 
+`{project_key}` resolves to `$VALOR_PROJECT_KEY` (canonical: `"valor"`). The env var is injected into the worker plist by the install scripts (`scripts/install_worker.sh`, `scripts/update/service.py::install_worker`, and `scripts/remote-update.sh`). Empty/whitespace values fall back to `"valor"` so a misconfigured `.env` line never produces a bare-prefix key. See issue #1171.
+
 The 600s TTL on `worker:hibernating` is a safety valve: if the reflection scheduler stops running, the flag expires automatically and the worker resumes popping sessions rather than staying blocked indefinitely.
 
 ## `paused` Status Semantics

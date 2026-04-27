@@ -109,6 +109,22 @@ When a child session completes, `finalize_session()` checks if the parent should
 5. If all children terminal: finalize parent as `completed` (all succeeded) or `failed` (any failed)
 6. Uses `skip_parent=True` internally to prevent infinite recursion
 
+### Transcript-Boundary Skip (issue #1156)
+
+A PM session's own Claude transcript can end **before** its children terminate. Prior to this skip, the worker's end-of-task path called `complete_transcript(...)` unconditionally, which delegated to `finalize_session` and force-finalized the PM while children were still running. This bypassed the child-liveness gate inside `_finalize_parent_sync`.
+
+To close that gap, `complete_transcript` and the Claude Code Stop hook (`_complete_agent_session`) **skip the terminal transition** when the session is in `waiting_for_children` and the target is `completed` or `failed`:
+
+- `bridge/session_transcript.py:complete_transcript` — after the session re-read, if `s.status == "waiting_for_children"` and the target is terminal, it logs an INFO line citing issue #1156 and returns. The `SESSION_END` transcript marker is still written earlier in the function.
+- `.claude/hooks/stop.py:_complete_agent_session` — a silent early return under the same condition (hook-local silent-failure policy).
+
+The two sanctioned channels that **do** finalize `waiting_for_children` PMs after all children terminate:
+
+1. `_finalize_parent_sync` → `_transition_parent` with reason `"all children terminal"`.
+2. The completion runner (`agent/session_completion.py:_deliver_pipeline_completion`) with reason `"pipeline complete: final summary delivered"`, serialized against `_finalize_parent_sync` via the `pipeline_complete_pending:{parent_id}` Redis lock (#1058).
+
+The skip deliberately does **not** block legitimate recovery paths — `_complete_agent_session` crash finalizer, `session_health` recovery, and `session_watchdog` stale-session reaper may still finalize wedged `waiting_for_children` PMs with their respective reasons.
+
 ## Field Extraction (`_extract_agent_session_fields`)
 
 The `_AGENT_SESSION_FIELDS` list defines which fields are preserved during delete-and-recreate operations. The `status` field is included for defense-in-depth: any delete-and-recreate path preserves the original status instead of defaulting to `"pending"`.

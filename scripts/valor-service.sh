@@ -350,7 +350,93 @@ health_check() {
     return 0
 }
 
+# Returns 0 if this machine is assigned a bridge role: any project in
+# projects.json has a `machine` field that case-insensitively equals the
+# current ComputerName. Returns 1 if no project matches.
+# Apostrophe encoding (straight ASCII vs curly U+2019) is significant — that
+# is the intentional gating signal between two machines that share a display
+# name but only one of which runs the bridge.
+# Falls back to "true" (return 0) on any error (no python venv, no config,
+# etc.) so existing bridge machines keep working without disruption.
+# Writes plist content and reloads in launchd. If the file already matches
+# the rendered content AND the label is currently loaded, this is a no-op.
+# Lets `install` be idempotent across repeated /update runs.
+# Args: plist_path, label, rendered_content
+bootstrap_plist_idempotent() {
+    local plist_path="$1"
+    local label="$2"
+    local rendered="$3"
+
+    local existing=""
+    if [ -f "$plist_path" ]; then
+        existing=$(cat "$plist_path")
+    fi
+    local already_loaded=false
+    if launchctl list 2>/dev/null | awk -v l="$label" '$NF==l{found=1} END{exit !found}'; then
+        already_loaded=true
+    fi
+
+    if [ "$rendered" = "$existing" ] && $already_loaded; then
+        echo "  $label already up to date"
+        return 0
+    fi
+
+    printf '%s' "$rendered" > "$plist_path"
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$plist_path"
+}
+
+has_bridge_role() {
+    local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+    if [ ! -f "$config" ]; then
+        return 0
+    fi
+    if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
+        return 0
+    fi
+    "$PROJECT_DIR/.venv/bin/python" - "$config" <<'PYEOF'
+import json, subprocess, sys
+
+try:
+    host = subprocess.check_output(
+        ["scutil", "--get", "ComputerName"], text=True
+    ).strip()
+except Exception:
+    sys.exit(0)
+
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)
+
+target = host.lower()
+for proj in cfg.get("projects", {}).values():
+    if (proj.get("machine") or "").lower() == target:
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
 install_service() {
+    if has_bridge_role; then
+        install_bridge_components
+    else
+        host=$(scutil --get ComputerName 2>/dev/null || echo unknown)
+        echo "Skipping bridge install (no projects assigned to '$host' in projects.json)"
+        echo "Use 'uninstall' first if a stale bridge plist exists from a previous install."
+    fi
+
+    install_update_polling
+
+    if has_bridge_role; then
+        install_bridge_watchdog
+        sleep 2
+        status_bridge
+    fi
+}
+
+install_bridge_components() {
     echo "Installing launchd service..."
 
     # Create plist
@@ -443,11 +529,14 @@ PYEOF
 
     echo "Bridge service installed and started"
     echo "Bridge will auto-start on boot"
+}
 
+install_update_polling() {
     # Install update polling (runs remote-update.sh every 30 minutes)
     echo ""
     echo "Installing update polling..."
-    cat > "$UPDATE_PLIST_PATH" << UPDATEEOF
+    local rendered
+    rendered=$(cat <<UPDATEEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -477,14 +566,16 @@ PYEOF
 </dict>
 </plist>
 UPDATEEOF
-    launchctl bootout "gui/$(id -u)/$UPDATE_PLIST_NAME" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$UPDATE_PLIST_PATH"
-    echo "Update polling installed (runs every 30 minutes)"
+)
+    bootstrap_plist_idempotent "$UPDATE_PLIST_PATH" "$UPDATE_PLIST_NAME" "$rendered"
+}
 
+install_bridge_watchdog() {
     # Install bridge watchdog (runs every 60 seconds)
     echo ""
     echo "Installing bridge watchdog..."
-    cat > "$WATCHDOG_PLIST_PATH" << WATCHDOGEOF
+    local rendered
+    rendered=$(cat <<WATCHDOGEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -514,18 +605,14 @@ UPDATEEOF
 </dict>
 </plist>
 WATCHDOGEOF
-    launchctl bootout "gui/$(id -u)/$WATCHDOG_PLIST_NAME" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$WATCHDOG_PLIST_PATH"
-    echo "Bridge watchdog installed (runs every 60 seconds)"
+)
+    bootstrap_plist_idempotent "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_NAME" "$rendered"
 
     # Log rotation is handled by the user-space log-rotate LaunchAgent
     # (com.valor.log-rotate.plist, scripts/log_rotate.py). Installed by
     # `scripts/update/service.py::install_log_rotate_agent()` during
     # `/update --full`. No root/sudo required; between-restart coverage
     # runs every 30 minutes via launchd.
-
-    sleep 2
-    status_bridge
 }
 
 uninstall_service() {

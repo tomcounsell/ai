@@ -83,11 +83,46 @@ Observer Error Path
 - `tests/unit/test_observer.py` - Error classification, backoff schedule, circuit breaker state, import guard
 - `tests/unit/test_sdk_client_sdlc.py` - Activity tracking: record, get, clear, inactivity detection
 
+## Watchdog Hardening (issue #1128)
+
+Three additive reliability features layered on top of the detection
+signals documented above. None of them change the heartbeat or activity
+detection paths — they extend the actuator surface.
+
+1. **Automatic loop-break steering.** `detect_repetition` and
+   `detect_error_cascade` no longer log and return — they enqueue a
+   targeted steering message via `push_steering_message(...,
+   sender="watchdog")`. A per-reason atomic Redis `SET NX EX` cooldown
+   prevents flooding. Drain timing is the PostToolUse-hook turn
+   boundary. See [Session Watchdog](session-watchdog.md) for thresholds
+   and env-var gating.
+
+2. **Two-path per-session token tracking.** Every SDK ResultMessage AND
+   every harness `result` event feeds into a single
+   `agent/sdk_client.py::accumulate_session_tokens` helper, which
+   persists `total_input_tokens`, `total_output_tokens`,
+   `total_cache_read_tokens`, and `total_cost_usd` onto `AgentSession`.
+   Dashboards (`/dashboard.json`) surface the four fields. The watchdog
+   is READ-ONLY for these fields — writes happen only in the worker
+   process. A soft-threshold alert triggers a `token_alert` steer when
+   cumulative tokens cross `TOKEN_ALERT_THRESHOLD` on a running session.
+
+3. **Worker-internal idle SDK-client teardown.** A new
+   `worker/idle_sweeper.py` task runs inside the worker process,
+   snapshots `agent.sdk_client._active_clients`, and proactively closes
+   persistent SDK clients on dormant / paused / paused_circuit sessions
+   whose `updated_at` age exceeds `IDLE_TEARDOWN_THRESHOLD` (default 24h).
+   This sits well inside the ~48h Anthropic silent-death window (#1104).
+   The session-watchdog process is intentionally NOT involved — the
+   registry is worker-process-local.
+
 ## Related
 
 - [Session Watchdog](session-watchdog.md) - Base watchdog implementation
+- [Session Steering](session-steering.md) - Steering queue + `sender` attribution
+- [Bridge Worker Architecture](bridge-worker-architecture.md) - Process topology for idle teardown
+- [Bridge Self-Healing](bridge-self-healing.md) - Broader crash recovery system
 - [Stall Retry](stall-retry.md) - Retry mechanism for stalled sessions
 - [Chat Dev Session Architecture](pm-dev-session-architecture.md) - Session routing architecture
-- [Bridge Self-Healing](bridge-self-healing.md) - Broader crash recovery system
 - [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) - Worker post-completion stage state injection and pipeline state feedback
 - [Session Isolation: Raw-String Session Lookup](session-isolation.md#model-fields) - Canonical `AgentSession.get_by_id()` pattern (issue #765 systemic fix)

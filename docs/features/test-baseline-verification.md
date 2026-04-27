@@ -78,3 +78,4 @@ Skipped when: all tests pass, running on main, more than 50 failures (systemic i
 
 - [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) -- Flaky filter, junitxml parsing, and completeness validation details
 - [Do-Test](do-test.md) -- The orchestration skill that dispatches baseline verification
+- [Merge-Gate Baseline](merge-gate-baseline.md) -- The `/do-merge` counterpart: a categorised per-test baseline of failures expected on `main` (`real` / `flaky` / `hung` / `import_error`). Baseline verification here answers "did this PR regress a test relative to main?"; the merge-gate baseline answers "is this main failure a known pre-existing one or a new regression?" Different scopes, different files (`/tmp/baseline-results.xml` vs. `data/main_test_baseline.json`).

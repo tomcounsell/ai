@@ -32,7 +32,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 - `content` - Full message content (up to 50,000 chars, no truncation)
 - `timestamp` - Unix timestamp (SortedField, partitioned by chat_id)
 - `message_type` - text, photo, voice, response, etc. (KeyField)
-- TTL: 90 days (cleaned by reflections step 13)
+- TTL: 90 days (cleaned by the `redis-ttl-cleanup` reflection)
 
 **`Link`** (`models/link.py`) - URLs shared in chats
 - `link_id` - Auto-generated key
@@ -44,18 +44,18 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 - `timestamp` - Unix timestamp (SortedField)
 - `tags` - ListField for categorization
 - `ai_summary` - AI-generated summary (up to 50,000 chars)
-- TTL: 90 days (cleaned by reflections step 13)
+- TTL: 90 days (cleaned by the `redis-ttl-cleanup` reflection)
 
 **`Chat`** (`models/chat.py`) - Chat ID to name mapping
 - `chat_id` - Telegram chat ID (UniqueKeyField)
 - `chat_name` - Human-readable name (KeyField)
 - `chat_type` - private, group, supergroup, channel (KeyField)
 - `updated_at` - Unix timestamp (SortedField)
-- TTL: 90 days (cleaned by reflections step 13)
+- TTL: 90 days (cleaned by the `redis-ttl-cleanup` reflection)
 
 ### Data Retention
 
-- Redis models: 90-day TTL, cleaned by reflections `step_redis_cleanup()` (step 13)
+- Redis models: 90-day TTL, cleaned by the `redis-ttl-cleanup` reflection (`reflections.maintenance.run_redis_ttl_cleanup`)
 - No SQLite backup after 2026-02-24 migration
 
 ## Configuration
@@ -73,12 +73,15 @@ TELEGRAM_LINK_COLLECTORS=tomcounsell
 
 ```python
 from tools.telegram_history import (
+    AmbiguousChatError,
+    ChatCandidate,
     store_message,
     search_history,
     get_recent_messages,
     get_chat_stats,
     register_chat,
     list_chats,
+    resolve_chat_candidates,
     resolve_chat_id,
     search_all_chats,
 )
@@ -116,8 +119,40 @@ register_chat(chat_id="12345", chat_name="Dev: Valor", chat_type="group")
 # List all known chats with message counts
 chats = list_chats()
 
-# Resolve chat name to ID
-chat_id = resolve_chat_id("Dev: Valor")  # supports partial match
+# Resolve chat name to candidate list (issue #1163)
+# Runs a 3-stage cascade (exact → case-insensitive exact → normalized
+# substring), collects ALL matches per stage, returns them as
+# ChatCandidate(chat_id, chat_name, last_activity_ts) sorted by
+# last_activity_ts desc (None sorts last).
+candidates = resolve_chat_candidates("Dev: Valor")
+# candidates -> [ChatCandidate(chat_id="-100...", chat_name="Dev: Valor", last_activity_ts=...)]
+
+# Resolve chat name to a single chat ID.
+#
+# Default (strict=False, Q2 = pick-most-recent-with-warning):
+#   - Zero match → returns None.
+#   - Single match → returns that chat_id.
+#   - Multiple matches → returns the most-recent candidate's chat_id and
+#     emits a logger.warning listing all candidates. No exception raised.
+chat_id = resolve_chat_id("Dev: Valor")
+
+# Strict mode: opt into AmbiguousChatError on >1 candidate. Used by the
+# CLI when --strict is on the command line; scripted callers that need a
+# non-zero exit code on ambiguity also use this path.
+try:
+    chat_id = resolve_chat_id("Dev: Valor", strict=True)
+except AmbiguousChatError as e:
+    # e.candidates is list[ChatCandidate]; render to the user.
+    ...
+
+# Defensive invariant (both paths): if the selection logic ever returns
+# a candidate that is NOT the one with the maximum last_activity_ts,
+# resolve_chat_id raises AmbiguousChatError unconditionally regardless
+# of strict. This is a fail-loud guard against a broken sort or race.
+
+# Narrow exception handling: resolve_chat_candidates catches only
+# redis.RedisError / popoto.ModelException / popoto.QueryException,
+# logs a warning, and returns []. It does NOT swallow arbitrary exceptions.
 
 # Search across all chats
 results = search_all_chats(query="python", max_results=20)

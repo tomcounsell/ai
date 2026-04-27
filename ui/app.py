@@ -272,6 +272,12 @@ def create_app() -> FastAPI:
             "priority": s.priority,
             "classification_type": s.classification_type,
             "is_stale": s.is_stale,
+            # Per-session token + cost accounting (issue #1128). Always
+            # emitted as numeric defaults (never None, never omitted).
+            "total_input_tokens": s.total_input_tokens,
+            "total_output_tokens": s.total_output_tokens,
+            "total_cache_read_tokens": s.total_cache_read_tokens,
+            "total_cost_usd": s.total_cost_usd,
             "children": [_session_to_json(c) for c in s.children],
             "events": [
                 {

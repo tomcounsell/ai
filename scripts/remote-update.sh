@@ -94,6 +94,15 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
+# ── Sync design-system Node toolchain (soft dep) ─────────────────────
+# @google/design.md pinned in package.json powers `python -m tools.design_system_sync`.
+# Guarded: requires BOTH package.json AND `npm` on PATH. Wrapped in a
+# non-pipefail subshell so a missing npm or a transient install failure
+# cannot abort the parent update script.
+if [ -f "$PROJECT_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"
+fi
+
 # ── Run update in cron mode ──────────────────────────────────────────
 # Output goes directly to Telegram - keep it clean for PM-style summary
 # --no-pull: git pull already done above; orchestrator skips its own pull step
@@ -147,6 +156,45 @@ WORKER_LABEL="${SERVICE_LABEL_PREFIX}.worker"
 WORKER_DST="$HOME/Library/LaunchAgents/${WORKER_LABEL}.plist"
 if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
     sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$WORKER_LABEL|g" "$WORKER_PLIST" > "$WORKER_DST"
+
+    # Inject .env vars into EnvironmentVariables so launchd-spawned worker
+    # processes see VALOR_PROJECT_KEY and other secrets (issue #1171). Without
+    # this, the cron-driven /update path produces a worker plist with only the
+    # template placeholders (PATH/HOME/VALOR_LAUNCHD), breaking the recovery
+    # reflections' project_key namespace alignment. Mirrors the injection block
+    # in scripts/install_worker.sh and scripts/update/service.py::install_worker.
+    if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
+        PROJECT_DIR="$PROJECT_DIR" PLIST_DST="$WORKER_DST" \
+            "$PROJECT_DIR/.venv/bin/python" - <<'PYEOF' || echo "[update] WARNING: worker .env injection failed; plist unchanged"
+import os, sys, plistlib
+from pathlib import Path
+try:
+    from dotenv import dotenv_values
+except Exception as e:
+    print(f"[update] dotenv unavailable ({e}); skipping worker .env injection", file=sys.stderr)
+    sys.exit(0)
+project_dir = Path(os.environ["PROJECT_DIR"])
+plist_dst = Path(os.environ["PLIST_DST"])
+env_file = project_dir / ".env"
+if not env_file.exists() or not plist_dst.exists():
+    sys.exit(0)
+try:
+    env_vars = dotenv_values(env_file)
+    with open(plist_dst, "rb") as f:
+        plist = plistlib.load(f)
+    existing = plist.setdefault("EnvironmentVariables", {})
+    injected = 0
+    for key, value in env_vars.items():
+        if key not in existing and value is not None:
+            existing[key] = value
+            injected += 1
+    with open(plist_dst, "wb") as f:
+        plistlib.dump(plist, f)
+    print(f"[update] Injected {injected} env vars into worker plist")
+except Exception as e:
+    print(f"[update] worker .env injection error: {e}", file=sys.stderr)
+PYEOF
+    fi
 
     NEED_RESTART=false
     if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then

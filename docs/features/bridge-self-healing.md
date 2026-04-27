@@ -8,7 +8,7 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 
 **Solution**: The `_parse_api_id()` helper in `bridge/telegram_bridge.py` wraps the `int()` conversion and returns `0` on any invalid or missing input, logging a warning to stderr. Module import now always succeeds regardless of env contents. The existing runtime credential check (`if not API_ID or not API_HASH`) remains the authoritative "fail loudly and exit" path once the bridge actually tries to connect.
 
-The same defensive `try/except ValueError` pattern was applied to `tools/valor_telegram.py` and `scripts/reflections.py` where lazy `int(os.environ.get(...))` calls existed inside functions.
+The same defensive `try/except ValueError` pattern was applied to `tools/valor_telegram.py` where lazy `int(os.environ.get(...))` calls existed inside functions.
 
 ## Components
 
@@ -109,7 +109,6 @@ Log rotation uses a three-layer approach: Python-managed rotation for applicatio
 **Python-managed logs** (auto-rotate on write via `RotatingFileHandler`, 10MB max, 5 backups):
 - `bridge.log` — configured in `bridge/telegram_bridge.py`
 - `watchdog.log` — configured in `monitoring/bridge_watchdog.py`
-- `reflections.log` — configured in `scripts/reflections.py`
 
 **Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
 - `bridge.error.log`, `reflections_error.log`
@@ -374,6 +373,59 @@ tail -f logs/worker_watchdog.log
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 
+## Idle SDK Teardown (issue #1128)
+
+The Claude Agent SDK's persistent `ClaudeSDKClient` connections die
+silently after roughly 48 hours of idle (fleet-ops research, #1104). A
+dormant session waiting 2+ days on a human reply may be non-functional
+when resumed. The worker runs an idle sweeper
+(`worker/idle_sweeper.py::run_idle_sweep`) that proactively tears down
+those clients well inside the silent-death window, then rebuilds them
+from the stored `claude_session_uuid` via `--resume` on the next query.
+
+### Why this lives in the worker, not the watchdog
+
+The `_active_clients` registry in `agent/sdk_client.py:58` is
+**process-local** to the worker. The session-watchdog process
+(`monitoring/session_watchdog.py`) cannot reach it. So the sweeper must
+run INSIDE the worker process, alongside the registry it inspects. The
+watchdog process remains responsible for repetition / error-cascade /
+token-alert detection but never touches the registry.
+
+### Sweep loop
+
+- **Interval**: `WATCHDOG_IDLE_SWEEP_INTERVAL` (default 1800s = 30 min).
+- **Status filter**: `{dormant, paused, paused_circuit}`. Explicitly
+  excludes `running`, `pending`, `waiting_for_children`, `superseded`,
+  and all terminal states.
+- **Dormancy age**: `WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS` (default
+  86400s = 24h). Uses `AgentSession.updated_at` as the clock, falling
+  back to `started_at` then `created_at`.
+- **Teardown**: iterate a `list(...)` snapshot of `_active_clients`,
+  `await client.close()` (idempotent), `_active_clients.pop(session_id,
+  None)`, then set `AgentSession.sdk_connection_torn_down_at = now` via
+  `save(update_fields=["sdk_connection_torn_down_at"])`.
+- **Resume semantics**: on next query, `get_response_via_sdk` enters
+  its `async with ClaudeSDKClient(...)` block, repopulates
+  `_active_clients`, and re-establishes context from
+  `claude_session_uuid` via the existing `--resume` plumbing.
+
+### Harness path is a no-op
+
+Production PM / Dev / Teammate sessions use
+`agent/sdk_client.py::get_response_via_harness`, which spawns a
+short-lived `claude -p stream-json` subprocess per turn. No persistent
+connection lives in `_active_clients`; the sweeper finds nothing to tear
+down.
+
+### Feature gate
+
+`WATCHDOG_IDLE_TEARDOWN_ENABLED=false` disables the sweep loop entirely
+(early-return inside `_sweep_once`). The worker still starts the task —
+it just skips its work every tick. Enable again without worker restart
+by unsetting the env var and sending SIGHUP (not implemented today; a
+worker restart is the documented path).
+
 ## Two-tier no-progress detector
 
 The periodic `_agent_session_health_check` (every 5 minutes) decides whether a
@@ -419,6 +471,7 @@ with both heartbeats fresh, `_has_progress()` returns `False` when:
 |----------|---------|---------|---------|
 | `STDOUT_FRESHNESS_WINDOW` | 600s | `STDOUT_FRESHNESS_WINDOW_SECS` | Tier 1 stdout-stale threshold; also Tier 2 gate (e) reprieve window |
 | `FIRST_STDOUT_DEADLINE` | 300s | `FIRST_STDOUT_DEADLINE_SECS` | Tier 1 deadline for sessions that have never produced stdout |
+| `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 gate (b) `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
 
 **Reprieve behavior for alive-but-silent sessions:** When Tier 1 stdout-stale
 fires, `_tier2_reprieve_signal()` is called. Gate (c) "alive" will reprieve the
@@ -434,12 +487,14 @@ indefinite alive-but-silent reprieve loop.
 ### Tier 2 — activity-positive reprieve gates
 
 When Tier 1 flags a session, the health check calls `_tier2_reprieve_signal()`
-which evaluates three OS-level liveness checks via `psutil`:
+which evaluates four gates — one compaction-aware and three OS-level liveness
+checks via `psutil`:
 
 | Gate | Check | Return |
 |------|-------|--------|
+| (b) compacting | `AgentSession.last_compaction_ts` within `COMPACT_REPRIEVE_WINDOW_SEC` (600s). Evaluated first so post-compaction idle periods are never misread as hangs. Companion writer: `agent/hooks/pre_compact.py::pre_compact_hook` (PR #1135). Added by issue #1099 Mode 3. | `"compacting"` |
 | (c) alive    | `psutil.Process(pid).status()` not in `{zombie, dead, stopped}` | `"alive"` |
-| (d) children | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred) |
+| (d) children | `psutil.Process(pid).children()` non-empty (tool execution active) | `"children"` (preferred over `"alive"`) |
 | (e) stdout   | `last_stdout_at` within `STDOUT_FRESHNESS_WINDOW` (600s) | `"stdout"` |
 
 Any **one** passing gate reprieves the kill. The reprieve signal is logged and
@@ -490,7 +545,7 @@ Redis counters keyed by `<project_key>:session-health:`:
 
 * `tier1_flagged_total` — every time both heartbeats were stale (heartbeat-stale path).
 * `tier1_flagged_stdout_stale` — every time Tier 1 fired due to stale stdout or missed `FIRST_STDOUT_DEADLINE` (stdout-stale path, #1046). Use this counter to distinguish the alive-but-silent failure mode from dead-heartbeat kills in dashboards.
-* `tier2_reprieve_total:{alive|children|stdout}` — reprieve by signal.
+* `tier2_reprieve_total:{compacting|alive|children|stdout}` — reprieve by signal. The `compacting` suffix was added by issue #1099 Mode 3; the three OS-level gates were introduced in #1036.
 * `kill_total` — actual kills (after Tier 2 failed and kill-switch off).
 
 **Distinguishing kill causes in dashboards:**

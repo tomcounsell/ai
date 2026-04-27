@@ -201,6 +201,7 @@ Lint and formatting are handled automatically -- agents should never waste itera
 - **SDLC enforcement** - All builder agents follow Plan → Branch → Implement → Test → Review → Document → PR with fix-and-retry loops at Test and Review stages (up to 5 iterations)
 - **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Reviewed (review passes), Documented (docs created after review), Quality (lint/format pass)
 - **Commits at logical checkpoints** - Commits happen at logical checkpoints throughout Implement — not batched at end. The commit message hook enforces hygiene at each commit.
+- **PROGRESS.md is the standard in-session scratchpad** — dev sessions maintain it at the worktree root per builder.md's "Working-state externalization" section. It is gitignored (not committed). Missing PROGRESS.md is a warning, not a blocker. The plan doc and git log remain the authoritative progress record.
 
 ## Workflow
 
@@ -339,6 +340,15 @@ cd $(git rev-parse --show-toplevel) && pwd
 ```
 
 The output should be the main repo path, NOT a `.worktrees/` path. If the CWD is somehow inside the worktree, this resets it. All subsequent orchestrator commands depend on CWD being the repo root.
+
+
+### Step 5.6: PROGRESS.md Soft Check
+
+After validating Definition of Done, run a soft check for the working-state scratchpad. Missing PROGRESS.md is a warning, not a blocker — PR creation is not gated on this:
+
+```bash
+[ -f $TARGET_REPO/.worktrees/{slug}/PROGRESS.md ] || echo "[warn] No PROGRESS.md at worktree root — not blocking, but recovery from compaction may be degraded next run."
+```
 
 ### Step 6: Documentation Gate
 

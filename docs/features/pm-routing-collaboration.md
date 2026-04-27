@@ -52,7 +52,7 @@ else:
 
 ## Collaboration Mode Instructions
 
-When a PM session enters collaboration mode, it receives direct-action instructions listing available tools (Bash, GitHub CLI, Google Workspace, memory search, Office CLI, session management) with an explicit fallback: "If you determine this task requires code changes, spawn a dev-session via the Agent tool instead."
+When a PM session enters collaboration mode, it receives direct-action instructions listing available tools (Bash, GitHub CLI, Google Workspace, memory search, Office CLI, session management) with an explicit fallback: "If you determine this task requires code changes, route through the full SDLC pipeline — create a GitHub issue if one doesn't exist, then run SDLC. Never implement code directly."
 
 ## Safety
 

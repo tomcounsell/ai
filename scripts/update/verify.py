@@ -843,6 +843,105 @@ def check_google_token(project_dir: Path) -> ToolCheck:
         )
 
 
+_KEY_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")
+_SECTION_RE = re.compile(r"^#\s*={10,}")  # section separator lines (# ===...)
+
+
+def _parse_env_example(path: Path) -> list[tuple[str, str]]:
+    """Return list of (key, description) pairs from a .env.example file.
+
+    Description is the last non-blank, non-separator comment line immediately
+    above the key declaration. Blank lines reset the comment accumulator.
+    """
+    lines = path.read_text().splitlines()
+    result = []
+    comment_block: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if _SECTION_RE.match(stripped):
+            # Section separator — reset accumulator without contributing to description
+            comment_block = []
+        elif stripped.startswith("#"):
+            comment_block.append(stripped.lstrip("#").strip())
+        elif m := _KEY_RE.match(stripped):
+            key = m.group(1)
+            # Use last non-empty comment line as the description
+            description = next((c for c in reversed(comment_block) if c), "")
+            result.append((key, description))
+            comment_block = []
+        else:
+            comment_block = []  # blank line resets comment accumulation
+    return result
+
+
+def _parse_env_keys(path: Path) -> set[str]:
+    """Return set of all keys present in .env (blank values are present)."""
+    keys = set()
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key = line.split("=", 1)[0].strip()
+            if _KEY_RE.match(key + "="):
+                keys.add(key)
+    return keys
+
+
+def check_env_completeness(project_dir: Path) -> ToolCheck:
+    """Check that .env contains all keys declared in .env.example.
+
+    Returns a single ToolCheck:
+    - available=True, version="all N vars present" when .env has all declared keys
+    - available=False, error="N missing: KEY1 (desc); KEY2 (desc)" when gaps exist
+    - available=True, version="skipped (.env not found)" when .env doesn't exist
+    - available=True, version="skipped (read error)" on OSError
+    """
+    try:
+        env_example = project_dir / ".env.example"
+        env_file = project_dir / ".env"
+
+        if not env_example.exists():
+            return ToolCheck(
+                name="env-completeness",
+                available=True,
+                version="skipped (.env.example not found)",
+            )
+
+        declared = _parse_env_example(env_example)
+
+        if not env_file.exists():
+            return ToolCheck(
+                name="env-completeness",
+                available=True,
+                version="skipped (.env not found)",
+            )
+
+        present = _parse_env_keys(env_file)
+        declared_keys = {k for k, _ in declared}
+        missing_keys = declared_keys - present
+
+        if not missing_keys:
+            return ToolCheck(
+                name="env-completeness",
+                available=True,
+                version=f"all {len(declared_keys)} vars present",
+            )
+
+        desc_map = dict(declared)
+        parts = [
+            f"{k} ({desc_map.get(k, 'no description')})" if desc_map.get(k) else k
+            for k in sorted(missing_keys)
+        ]
+        error = f"{len(missing_keys)} missing: {'; '.join(parts)}"
+        return ToolCheck(name="env-completeness", available=False, error=error)
+
+    except OSError:
+        return ToolCheck(
+            name="env-completeness",
+            available=True,
+            version="skipped (read error)",
+        )
+
+
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
@@ -853,6 +952,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools = check_valor_tools(project_dir)
     result.valor_tools.append(check_telegram_session(project_dir))
     result.valor_tools.append(check_google_token(project_dir))
+    result.valor_tools.append(check_env_completeness(project_dir))
 
     if check_ollama_model:
         ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "gemma4:e2b")

@@ -300,3 +300,210 @@ class TestMainCallChain:
         call_kwargs = mock_create.call_args.kwargs
         assert call_kwargs.get("session_type") == "teammate"
         assert call_kwargs.get("parent_agent_session_id") == "agt_parent456"
+
+
+class TestPhantomTwinPrevention:
+    """Phantom PM twin prevention (issue #1157).
+
+    When the worker sets AGENT_SESSION_ID and/or VALOR_SESSION_ID to an
+    existing live AgentSession, the hook must attach to that record and
+    return WITHOUT calling AgentSession.create_local(). This guarantees
+    that worker-spawned subprocesses produce exactly ONE AgentSession row.
+    """
+
+    def test_attaches_to_worker_session_when_agent_session_id_set(self, monkeypatch):
+        """AGENT_SESSION_ID resolves to a live session -> create_local NOT called."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Worker-spawned first prompt",
+            "session_id": "claude-uuid-worker-1",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+
+        # Simulate a live worker-created AgentSession
+        fake_worker_session = MagicMock()
+        fake_worker_session.agent_session_id = "agt_real_worker"
+        fake_worker_session.status = "running"
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "agt_real_worker")
+        monkeypatch.setenv("SESSION_TYPE", "pm")  # worker also sets this
+        monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent_789")
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar") as mock_save_sidecar,
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.get_by_id", return_value=fake_worker_session
+            ) as mock_get_by_id,
+            patch("models.agent_session.AgentSession.create_local") as mock_create,
+        ):
+            hook.main()
+
+        mock_get_by_id.assert_called_with("agt_real_worker")
+        mock_create.assert_not_called()
+        # Sidecar was written with the worker session's agent_session_id
+        mock_save_sidecar.assert_called()
+        written_sidecar = mock_save_sidecar.call_args.args[1]
+        assert written_sidecar.get("agent_session_id") == "agt_real_worker"
+
+    def test_attaches_via_valor_session_id_fallback(self, monkeypatch):
+        """AGENT_SESSION_ID missing, VALOR_SESSION_ID resolves via filter lookup."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Fallback path",
+            "session_id": "claude-uuid-worker-2",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+
+        fake_worker_session = MagicMock()
+        fake_worker_session.agent_session_id = "agt_fallback_worker"
+        fake_worker_session.status = "running"
+
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        monkeypatch.setenv("VALOR_SESSION_ID", "0_1777000000000")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar") as mock_save_sidecar,
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch("models.agent_session.AgentSession.query") as mock_query,
+            patch("models.agent_session.AgentSession.create_local") as mock_create,
+        ):
+            mock_query.filter.return_value = [fake_worker_session]
+            hook.main()
+
+        mock_create.assert_not_called()
+        mock_save_sidecar.assert_called()
+        written_sidecar = mock_save_sidecar.call_args.args[1]
+        assert written_sidecar.get("agent_session_id") == "agt_fallback_worker"
+
+    def test_falls_through_when_worker_session_terminal(self, monkeypatch):
+        """AGENT_SESSION_ID -> TERMINAL session -> fall through, create_local called (#1113)."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Terminal worker session",
+            "session_id": "claude-uuid-terminal",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+
+        fake_terminal_session = MagicMock()
+        fake_terminal_session.agent_session_id = "agt_killed"
+        fake_terminal_session.status = "killed"  # terminal
+
+        fake_new_session = MagicMock()
+        fake_new_session.agent_session_id = "mock-new-id"
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "agt_killed")
+        monkeypatch.setenv("SESSION_TYPE", "pm")  # gate allows create_local to fire
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.get_by_id", return_value=fake_terminal_session
+            ),
+            patch(
+                "models.agent_session.AgentSession.create_local", return_value=fake_new_session
+            ) as mock_create,
+        ):
+            hook.main()
+
+        # Terminal session -> fall through to existing gate -> create_local IS called
+        mock_create.assert_called_once()
+
+    def test_falls_through_when_get_by_id_raises(self, monkeypatch):
+        """If get_by_id raises, hook does NOT propagate and falls through to existing gate."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "get_by_id raises",
+            "session_id": "claude-uuid-raise",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+
+        fake_new_session = MagicMock()
+        fake_new_session.agent_session_id = "mock-new-id-raise"
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "agt_boom")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.get_by_id",
+                side_effect=RuntimeError("redis unavailable"),
+            ),
+            patch(
+                "models.agent_session.AgentSession.create_local", return_value=fake_new_session
+            ) as mock_create,
+        ):
+            # Must not raise
+            hook.main()
+
+        # Fell through to create_local (gate allows since SESSION_TYPE is set)
+        mock_create.assert_called_once()
+
+    def test_subsequent_prompt_miss_on_worker_session_is_harmless(self, monkeypatch):
+        """Subsequent-prompt branch: sidecar has a real worker agent_session_id (not local-*).
+
+        The filter(session_id=f'local-{session_id}') at line 65 will miss, the
+        re-activation branch silently no-ops — that is correct behavior because
+        the worker owns the real session's status. Assert: no exception, no
+        create_local call, no sidecar re-write.
+        """
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Subsequent prompt in worker session",
+            "session_id": "claude-uuid-subseq",
+            "cwd": "/tmp",
+        }
+        # Sidecar already has a worker agent_session_id (not a local-* one)
+        fake_sidecar = {"agent_session_id": "agt_real_worker_subseq"}
+
+        monkeypatch.setenv("AGENT_SESSION_ID", "agt_real_worker_subseq")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar") as mock_save_sidecar,
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch("models.agent_session.AgentSession.query") as mock_query,
+            patch("models.agent_session.AgentSession.create_local") as mock_create,
+        ):
+            # filter returns [] -> re-activation branch silently no-ops
+            mock_query.filter.return_value = []
+            # Must not raise
+            hook.main()
+
+        mock_create.assert_not_called()
+        # Sidecar was not re-written (the re-activation branch didn't find anything)
+        mock_save_sidecar.assert_not_called()

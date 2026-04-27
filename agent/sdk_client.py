@@ -70,6 +70,14 @@ _session_stop_reasons: dict[str, str] = {}
 # In-memory only — reset on crash/reboot (new sessions start fresh).
 _updated_at_timestamps: dict[str, float] = {}
 
+# === Turn Count Tracking (issue #1127) ===
+# Tracks the most recent `ResultMessage.num_turns` observed per session. Used
+# by the SDK-tick backstop in `agent/session_executor.py` to detect compaction
+# events where the PreCompact hook was skipped — a drop in num_turns across
+# consecutive ResultMessages is the SDK's observable signature of a compaction
+# that rewrote conversation history. In-memory only; reset on process restart.
+_session_turn_counts: dict[str, int] = {}
+
 # Configurable inactivity threshold (seconds). Sessions idle longer than this
 # are considered stalled. Active sessions producing tool calls/logs are never
 # interrupted regardless of total runtime.
@@ -149,6 +157,33 @@ def clear_session_activity(session_id: str) -> None:
     _updated_at_timestamps.pop(session_id, None)
 
 
+def get_turn_count(session_id: str) -> int | None:
+    """Return the most recent ResultMessage.num_turns observed for a session.
+
+    Used by the SDK-tick backstop in the executor's output-callback path to
+    detect compaction-induced turn-count drops. Returns None if no
+    ResultMessage has been observed yet for this session. See issue #1127.
+    """
+    return _session_turn_counts.get(session_id)
+
+
+def record_turn_count(session_id: str, num_turns: int) -> None:
+    """Record the observed ResultMessage.num_turns for a session.
+
+    Called by the SDK query loop when a ResultMessage arrives. In-memory only.
+    """
+    if session_id and num_turns is not None:
+        try:
+            _session_turn_counts[session_id] = int(num_turns)
+        except (TypeError, ValueError):
+            pass
+
+
+def clear_turn_count(session_id: str) -> None:
+    """Remove turn-count tracking for a completed/abandoned session."""
+    _session_turn_counts.pop(session_id, None)
+
+
 def _get_prior_session_uuid(session_id: str) -> str | None:
     """Look up the stored Claude Code UUID for a prior session.
 
@@ -208,6 +243,240 @@ def _has_prior_session(session_id: str) -> bool:
     See issue #232 for the cross-wire bug this fixes.
     """
     return _get_prior_session_uuid(session_id) is not None
+
+
+def _env_flag_enabled(var_name: str, default: bool = True) -> bool:
+    """Return True unless the env var is explicitly set to a falsy string.
+
+    Used by watchdog-hardening feature gates (issue #1128). Falsy values
+    (case-insensitive): "0", "false", "no". Any other value — including
+    unset — means the flag is enabled.
+    """
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no"}
+
+
+def _usage_field(usage, name: str) -> int:
+    """Safely read a numeric field from a `usage` container.
+
+    Handles both SDK-style attribute access (dataclass-like objects) and
+    harness-style dict access on the same field name. Missing or None
+    values default to 0. Non-integer values default to 0 as well.
+
+    Accepted shapes:
+      * `None` → 0
+      * dict (harness `data["usage"]`)   → `.get(name, 0) or 0`
+      * object with attribute (SDK `msg.usage`) → `getattr(..., name, 0) or 0`
+    """
+    if usage is None:
+        return 0
+    raw: object
+    if isinstance(usage, dict):
+        raw = usage.get(name, 0)
+    else:
+        raw = getattr(usage, name, 0)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def accumulate_session_tokens(
+    session_id: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_read_tokens: int | None,
+    cost_usd: float | None,
+) -> None:
+    """Add per-turn token + cost counts to an AgentSession record.
+
+    Called as a side effect from BOTH execution paths so token accounting
+    works uniformly for every session type:
+
+      * SDK path: `ClaudeSDKClient` returns `ResultMessage.usage` + `.total_cost_usd`
+        inside the query loop (see the `ResultMessage` handler below).
+      * Harness path: `claude -p stream-json` emits `usage` + `total_cost_usd`
+        on the `result` event; `_run_harness_subprocess` extracts them and
+        threads them back to `get_response_via_harness`, which calls this
+        helper before returning (mirroring `_store_claude_session_uuid`).
+
+    Without the harness-path call, production PM/Dev/Teammate sessions —
+    which always use the harness — would report 0 tokens forever (the
+    critique B3 blocker).
+
+    Persistence: Popoto `save(update_fields=[...])` with explicit field list
+    so a concurrent write to other fields (e.g. `status`, `updated_at`) does
+    not clobber this update. Fail-quiet on any exception — token accounting
+    must never raise into the SDK / harness return path.
+
+    Gate: `WATCHDOG_TOKEN_TRACKING_ENABLED` (default on). Disabling is an
+    operator-only escape hatch for debugging or if a downstream issue is
+    traced to this helper.
+
+    Args:
+        session_id: Bridge/Telegram session_id. No-op when None.
+        input_tokens: Input token count for this turn (fallback 0 on None).
+        output_tokens: Output token count for this turn (fallback 0 on None).
+        cache_read_tokens: Cache-read input tokens for this turn (fallback 0).
+        cost_usd: Dollar cost for this turn, taken verbatim from the SDK/CLI.
+            Never recomputed. Fallback 0.0 on None.
+    """
+    if not session_id:
+        return
+    if not _env_flag_enabled("WATCHDOG_TOKEN_TRACKING_ENABLED"):
+        return
+
+    # Defensive coercion: SDK / harness occasionally omit fields on error
+    # paths or older CLI versions.
+    try:
+        in_delta = int(input_tokens or 0)
+        out_delta = int(output_tokens or 0)
+        cache_delta = int(cache_read_tokens or 0)
+        cost_delta = float(cost_usd or 0.0)
+    except (TypeError, ValueError):
+        logger.warning(
+            "accumulate_session_tokens: non-numeric inputs for session %s "
+            "(in=%r out=%r cache=%r cost=%r) — skipping",
+            session_id,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cost_usd,
+        )
+        return
+
+    # No-op when there is nothing to add (saves a Redis round-trip).
+    if in_delta == 0 and out_delta == 0 and cache_delta == 0 and cost_delta == 0.0:
+        return
+
+    try:
+        from popoto.exceptions import ModelException
+
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            logger.debug(
+                "accumulate_session_tokens: no AgentSession for session_id=%s — skipping",
+                session_id,
+            )
+            return
+        # Newest record wins — matches the pattern used by
+        # `_store_claude_session_uuid`.
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        session = sessions[0]
+        try:
+            session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
+            session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
+            session.total_cache_read_tokens = (session.total_cache_read_tokens or 0) + cache_delta
+            session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta
+            session.save(
+                update_fields=[
+                    "total_input_tokens",
+                    "total_output_tokens",
+                    "total_cache_read_tokens",
+                    "total_cost_usd",
+                ]
+            )
+        except ModelException as e:
+            logger.warning(
+                "accumulate_session_tokens: ModelException on save for session %s: %s",
+                session_id,
+                e,
+            )
+    except Exception as e:
+        logger.warning(
+            "accumulate_session_tokens(%s) failed: %s",
+            session_id,
+            e,
+            exc_info=False,
+        )
+
+
+def _log_context_usage_if_risky(
+    session_id: str | None,
+    model: str | None,
+    usage: dict | None,
+) -> None:
+    """Emit a single WARNING log when per-turn context usage exceeds 75%.
+
+    Observability-only helper for issue #1099 Mode 2. Reads ``usage.input_tokens``
+    from the harness ``result`` event and compares it against the model's
+    configured context window (via ``config.models.get_model_context_window``).
+    When the ratio exceeds 0.75, emits one structured ``logger.warning`` record
+    that dashboards and operators can grep for (``grep "context_usage"``).
+
+    No state change. No behavior change. The helper wraps its entire body in
+    ``try/except Exception: return`` so observability can never crash the turn.
+
+    Falls through silently when:
+      * ``usage`` is ``None`` (no ``result`` event fired)
+      * ``input_tokens`` is missing, zero, or non-numeric
+      * ``model`` is ``None`` or not registered in ``config/models.py``
+      * The ratio is at or below 0.75
+
+    When the model is registered but the context window is unknown, emits a
+    single WARNING flagging the unknown model so operators can fix the
+    registration.
+    """
+    try:
+        input_tokens = int((usage or {}).get("input_tokens", 0) or 0)
+        if input_tokens <= 0:
+            return
+        from config.models import get_model_context_window
+
+        window = get_model_context_window(model)
+        if not window:
+            logger.warning(
+                "[harness] context_usage: unknown model=%r, skipping pct calc (session_id=%s)",
+                model,
+                session_id,
+            )
+            return
+        pct = input_tokens / window
+        if pct > 0.75:
+            logger.warning(
+                "context_usage pct=%.2f session_id=%s model=%s input_tokens=%d",
+                pct,
+                session_id,
+                model,
+                input_tokens,
+            )
+    except (
+        Exception
+    ):  # swallow-ok: observability-only; context-logging must never crash the session
+        # Observability must never crash the turn. See issue #1099 Mode 2.
+        return
+
+
+def _store_exit_returncode(session_id: str | None, returncode: int | None) -> None:
+    """Persist the last subprocess exit code on the AgentSession record.
+
+    Best-effort writer for issue #1099 Mode 4. Used by the health check's
+    recovery branch to distinguish OS-initiated OOM kills (``returncode == -9``)
+    from health-check-initiated kills. See ``agent/session_health.py`` for the
+    OOM-defer logic that reads the persisted value.
+
+    Args:
+        session_id: Bridge/Telegram session_id. No-op when None.
+        returncode: Final subprocess exit code. No-op when None.
+
+    Failure policy: every exception is swallowed at DEBUG level. The harness
+    return path must never raise from this side effect.
+    """
+    if not session_id or returncode is None:
+        return
+    try:
+        from models.agent_session import AgentSession
+
+        for s in AgentSession.query.filter(session_id=session_id):
+            s.exit_returncode = int(returncode)
+            s.save(update_fields=["exit_returncode"])
+            break
+    except Exception as _e:
+        logger.debug("exit_returncode store failed for session_id=%s: %s", session_id, _e)
 
 
 def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
@@ -948,6 +1217,33 @@ def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -
     )
 
 
+def _resolve_sentry_auth_token() -> str | None:
+    """Resolve Sentry auth token for PM/Teammate session env injection.
+
+    Cascade: SENTRY_PERSONAL_TOKEN env var -> SENTRY_AUTH_TOKEN env var ->
+    ~/Desktop/Valor/.env file read (only in terminal mode; launchd blocks
+    ~/Desktop under TCC).
+
+    Returns:
+        The Sentry auth token, or None if no source resolves successfully.
+    """
+    token = os.environ.get("SENTRY_PERSONAL_TOKEN") or os.environ.get("SENTRY_AUTH_TOKEN")
+    if token:
+        return token
+    if os.environ.get("VALOR_LAUNCHD"):
+        return None  # launchd cannot read ~/Desktop (macOS TCC)
+    sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
+    try:
+        if not sentry_env.exists():
+            return None
+        for line in sentry_env.read_text().splitlines():
+            if line.startswith("SENTRY_PERSONAL_TOKEN="):
+                return line.split("=", 1)[1]
+    except (OSError, PermissionError):
+        return None
+    return None
+
+
 class ValorAgent:
     """
     Valor's Claude Agent SDK wrapper.
@@ -1080,23 +1376,13 @@ class ValorAgent:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
-        # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        # Under launchd (VALOR_LAUNCHD=1), macOS TCC blocks open() on ~/Desktop
-        # files, causing indefinite hangs. Prefer the env var injected by
-        # install_worker.sh; only fall back to file read in terminal mode.
+        # manual export. Token resolution is delegated to _resolve_sentry_auth_token,
+        # which encapsulates the env-var-then-file cascade and the VALOR_LAUNCHD
+        # short-circuit (macOS TCC blocks open() on ~/Desktop files under launchd).
         if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
-            sentry_token = os.environ.get("SENTRY_PERSONAL_TOKEN") or os.environ.get(
-                "SENTRY_AUTH_TOKEN"
-            )
+            sentry_token = _resolve_sentry_auth_token()
             if sentry_token:
                 env["SENTRY_AUTH_TOKEN"] = sentry_token
-            elif not os.environ.get("VALOR_LAUNCHD"):
-                sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
-                if sentry_env.exists():
-                    for line in sentry_env.read_text().splitlines():
-                        if line.startswith("SENTRY_PERSONAL_TOKEN="):
-                            env["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
-                            break
 
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
@@ -1230,6 +1516,13 @@ class ValorAgent:
                                         session_id,
                                     )
 
+                                # Record turn count for SDK-tick backstop
+                                # (issue #1127). Tracked per-session in an
+                                # in-memory registry, consulted by the
+                                # executor's output-callback.
+                                if session_id and msg.num_turns is not None:
+                                    record_turn_count(session_id, msg.num_turns)
+
                                 if msg.total_cost_usd is not None:
                                     cost = msg.total_cost_usd
                                     turns = msg.num_turns
@@ -1253,6 +1546,21 @@ class ValorAgent:
                                             record_metric("session.turns", float(turns), dims)
                                     except Exception:
                                         pass
+
+                                # Per-session token accumulation (issue #1128 —
+                                # SDK path). Harness path extracts the same
+                                # fields off the `result` event inside
+                                # `_run_harness_subprocess`; both call the
+                                # same `accumulate_session_tokens` helper.
+                                if session_id:
+                                    usage_obj = getattr(msg, "usage", None)
+                                    accumulate_session_tokens(
+                                        session_id,
+                                        _usage_field(usage_obj, "input_tokens"),
+                                        _usage_field(usage_obj, "output_tokens"),
+                                        _usage_field(usage_obj, "cache_read_input_tokens"),
+                                        msg.total_cost_usd,
+                                    )
                                 if msg.is_error and retries < max_retries:
                                     retries += 1
                                     error_text = msg.result or "(empty)"
@@ -1378,6 +1686,8 @@ class ValorAgent:
                 _active_clients.pop(session_id, None)
                 # Clean up activity tracking — session is done
                 clear_session_activity(session_id)
+                # Clean up turn-count tracking (issue #1127) — session is done
+                clear_turn_count(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
                 # by get_stop_reason() in session_queue after query returns. The pop()
                 # in get_stop_reason() handles cleanup. If the nudge loop never runs
@@ -1578,6 +1888,52 @@ _UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 IMAGE_DIMENSION_SENTINEL = "exceeds the dimension limit"
 
 
+# Thinking-block corruption sentinel (issue #1099, Mode 1).
+#
+# When extended-thinking + compaction interact pathologically, the Claude CLI
+# exits non-zero and its stderr contains the substring ``redacted_thinking``.
+# Both the primary harness call AND the stale-UUID fallback fail the same way,
+# so today the caller receives an empty ``""`` result text and the session is
+# marked ``completed`` with nothing to deliver — the user gets silence.
+#
+# Detection rule: stderr contains ``THINKING_BLOCK_SENTINEL`` AND the final
+# ``returncode != 0``. Both conditions are required; a healthy session exits
+# with code 0 and never triggers. The sentinel is matched as a substring
+# (``in`` operator), not a regex, to minimize false-positive surface.
+#
+# The string is taken from the amux "Every way Claude Code crashes" blog post
+# and is **not** yet confirmed against Anthropic's published error taxonomy.
+# To bound the blast radius during initial deployment:
+#   * Every sentinel match emits ``logger.warning("THINKING_BLOCK_SENTINEL matched: ...")``
+#     BEFORE raising, giving operators a grep-friendly audit trail.
+#   * Operators may disable the check at runtime via
+#     ``DISABLE_THINKING_SENTINEL=1`` (or any truthy value) without a code
+#     rollback. When disabled, corruption falls through to the existing empty-
+#     string behavior (still suboptimal, but no worse than today).
+THINKING_BLOCK_SENTINEL = "redacted_thinking"
+
+# Env-gated kill-switch for the Mode 1 sentinel check. Read once at module
+# load; operators must restart the process to toggle. See docstring above.
+_DISABLE_THINKING_SENTINEL = os.environ.get("DISABLE_THINKING_SENTINEL", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+class HarnessThinkingBlockCorruptionError(Exception):
+    """Raised by ``get_response_via_harness`` when the harness subprocess exits
+    non-zero AND its stderr contains ``THINKING_BLOCK_SENTINEL``.
+
+    Indicates the extended-thinking + compaction interaction has corrupted the
+    session's transcript beyond in-process recovery. The caller is expected to
+    catch this and finalize the session as ``failed`` with the exception's
+    message as the user-visible reason. See issue #1099 Mode 1 for the full
+    rationale and the ``DISABLE_THINKING_SENTINEL`` escape hatch.
+    """
+
+
 async def get_response_via_harness(
     message: str,
     working_dir: str,
@@ -1587,6 +1943,8 @@ async def get_response_via_harness(
     prior_uuid: str | None = None,
     session_id: str | None = None,
     full_context_message: str | None = None,
+    model: str | None = None,
+    system_prompt: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
 ) -> str:
@@ -1626,6 +1984,19 @@ async def get_response_via_harness(
         prior_uuid: Claude Code session UUID from a prior turn (enables --resume).
         session_id: Bridge/Telegram session ID for UUID storage after the turn.
         full_context_message: Full-context first-turn message for stale-UUID fallback.
+        model: Short alias (``opus``/``sonnet``/``haiku``) or full Claude model
+            name to pin this turn to. When truthy, ``--model <value>`` is
+            injected into ``harness_cmd`` so the Claude CLI honors the choice.
+            When None/empty, the CLI uses its own default. Part of the per-
+            session model routing cascade (see
+            ``agent/session_executor.py::_resolve_session_model``).
+        system_prompt: Optional persona/role text appended to Claude Code's
+            default system prompt via ``--append-system-prompt`` (issue #1148).
+            Use ``--append`` (not ``--system-prompt``) to preserve the default
+            tool-handling protocol — the persona is additive guidance. PM
+            sessions pass ``load_pm_system_prompt(working_dir)`` here; drafter
+            and dev sessions must keep this ``None``. Strings larger than
+            512KB are dropped with a warning to avoid ARG_MAX overflows.
     """
     # Validate prior_uuid format; treat empty or invalid as None
     if prior_uuid and not _UUID_PATTERN.match(prior_uuid):
@@ -1636,6 +2007,37 @@ async def get_response_via_harness(
 
     if harness_cmd is None:
         harness_cmd = list(_HARNESS_COMMANDS["claude-cli"])
+    else:
+        # Defensive copy — callers may hand us a shared constant (e.g. test
+        # fixtures sharing a module-level list). We must not mutate their
+        # list when appending --model below.
+        harness_cmd = list(harness_cmd)
+
+    # Inject per-session model when caller supplied one. --model must live
+    # inside harness_cmd so it precedes the positional message (and any
+    # --resume <uuid>) in the final argv assembly below.
+    if model:
+        harness_cmd.extend(["--model", model])
+        logger.info(f"[harness] Using --model {model} for session_id={session_id}")
+
+    # System prompt injection (issue #1148). Use --append-system-prompt
+    # (NOT --system-prompt) so Claude Code's default tool-handling protocol is
+    # preserved — the PM persona is additive guidance, not a full replacement.
+    # Defensive size cap: macOS ARG_MAX is 1MB; we cap at 512KB to leave room
+    # for the rest of the argv. The current PM persona is ~25KB.
+    if system_prompt:
+        if len(system_prompt) > 512_000:
+            logger.warning(
+                f"[harness] system_prompt is {len(system_prompt)} bytes; "
+                "exceeds 512KB soft cap, omitting to avoid ARG_MAX (session_id="
+                f"{session_id})"
+            )
+        else:
+            harness_cmd.extend(["--append-system-prompt", system_prompt])
+            logger.info(
+                f"[harness] Appending {len(system_prompt)}-char system prompt for "
+                f"session_id={session_id}"
+            )
 
     # Build subprocess env: inherit current env, merge extras, strip API key
     proc_env = dict(os.environ)
@@ -1661,7 +2063,15 @@ async def get_response_via_harness(
     else:
         cmd = harness_cmd + [message]
 
-    result_text, session_id_from_harness, returncode = await _run_harness_subprocess(
+    # Call site 1 of 3 — primary harness invocation. 6-tuple unpack (issue #1099 Mode 1).
+    (
+        result_text,
+        session_id_from_harness,
+        returncode,
+        usage,
+        cost_usd,
+        stderr_snippet,
+    ) = await _run_harness_subprocess(
         cmd,
         working_dir,
         proc_env,
@@ -1681,7 +2091,15 @@ async def get_response_via_harness(
         if full_context_message is not None:
             fallback_msg = _apply_context_budget(full_context_message)
             fallback_cmd = harness_cmd + [fallback_msg]
-            result_text, session_id_from_harness, _ = await _run_harness_subprocess(
+            # Call site 2 of 3 — image-dimension fallback. 6-tuple unpack (issue #1099 Mode 1).
+            (
+                result_text,
+                session_id_from_harness,
+                _,
+                usage,
+                cost_usd,
+                stderr_snippet,
+            ) = await _run_harness_subprocess(
                 fallback_cmd,
                 working_dir,
                 proc_env,
@@ -1716,7 +2134,19 @@ async def get_response_via_harness(
                     f"[harness] Fallback budget: {original_len} → {len(fallback_msg)} chars"
                 )
             fallback_cmd = harness_cmd + [fallback_msg]
-            result_text, session_id_from_harness, _ = await _run_harness_subprocess(
+            # Call site 3 of 3 — stale-UUID fallback. 6-tuple unpack (issue #1099 Mode 1).
+            # We now DO capture the final returncode + stderr_snippet because the
+            # Mode 1 sentinel check below inspects the LAST subprocess call's
+            # exit state (both primary and fallback must fail to declare
+            # thinking-block corruption).
+            (
+                result_text,
+                session_id_from_harness,
+                returncode,
+                usage,
+                cost_usd,
+                stderr_snippet,
+            ) = await _run_harness_subprocess(
                 fallback_cmd,
                 working_dir,
                 proc_env,
@@ -1734,6 +2164,54 @@ async def get_response_via_harness(
     if session_id and session_id_from_harness:
         _store_claude_session_uuid(session_id, session_id_from_harness)
 
+    # Accumulate tokens + cost on the AgentSession (issue #1128). Mirrors
+    # the SDK path's in-handler call in `get_response_via_sdk`. Invoked
+    # here as a side effect so the public signature stays `-> str` and
+    # no caller of `get_response_via_harness` has to change. `usage` /
+    # `cost_usd` may be None on harness error paths or older CLI
+    # versions — the helper treats missing fields as 0.
+    if session_id and (usage is not None or cost_usd is not None):
+        accumulate_session_tokens(
+            session_id,
+            _usage_field(usage, "input_tokens"),
+            _usage_field(usage, "output_tokens"),
+            _usage_field(usage, "cache_read_input_tokens"),
+            cost_usd,
+        )
+
+    # Mode 2 (issue #1099) — emit a single WARNING if per-turn context usage
+    # crosses 75%. Pure observability; no state change, no behavior change.
+    _log_context_usage_if_risky(session_id, model, usage)
+
+    # Mode 4 (issue #1099) — persist the last subprocess exit code best-effort
+    # so the health-check recovery branch can distinguish OS-initiated OOM
+    # kills from health-check-initiated kills. Fail-quiet.
+    _store_exit_returncode(session_id, returncode)
+
+    # Mode 1 (issue #1099) — thinking-block corruption sentinel. Fires only
+    # when BOTH (a) the final subprocess exited non-zero AND (b) its stderr
+    # contains ``THINKING_BLOCK_SENTINEL``. A healthy session exits 0 and
+    # never triggers. Disable at runtime with ``DISABLE_THINKING_SENTINEL=1``.
+    if (
+        not _DISABLE_THINKING_SENTINEL
+        and returncode is not None
+        and returncode != 0
+        and stderr_snippet
+        and THINKING_BLOCK_SENTINEL in stderr_snippet
+    ):
+        # Always log BEFORE raising so operators can grep for false positives
+        # during initial deployment. The WARNING is grep-friendly by design.
+        logger.warning(
+            "[harness] THINKING_BLOCK_SENTINEL matched: session_id=%s returncode=%d "
+            "stderr_prefix=%r",
+            session_id,
+            returncode,
+            stderr_snippet[:200],
+        )
+        raise HarnessThinkingBlockCorruptionError(
+            "Session context corrupted — please start a new thread"
+        )
+
     if result_text is not None:
         return result_text
     return ""
@@ -1746,13 +2224,34 @@ async def _run_harness_subprocess(
     *,
     on_sdk_started: Callable[[int], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
-) -> tuple[str | None, str | None, int | None]:
+) -> tuple[str | None, str | None, int | None, dict | None, float | None, str | None]:
     """Execute a harness subprocess and parse stream-json output.
 
-    Returns (result_text, session_id_from_harness, returncode). On binary-not-found,
-    returncode is None and result_text carries the error message. On stream-parse
-    success, result_text is the parsed result and returncode is the process exit
-    code (0 on success, non-zero on failure).
+    Returns ``(result_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)``.
+
+    * ``result_text``: parsed result string from the final `result` event, or
+      accumulated text from stream events when no result event fires, or
+      ``None`` when neither is available.
+    * ``session_id_from_harness``: Claude Code UUID for next-turn `--resume`.
+    * ``returncode``: process exit code (0 on success, non-zero on failure, or
+      ``None`` on binary-not-found).
+    * ``usage``: dict from the `result` event's `usage` field (keys include
+      ``input_tokens``, ``output_tokens``, ``cache_read_input_tokens``,
+      ``cache_creation_input_tokens``). ``None`` when no `result` event fired
+      or the event omitted it. Consumed by ``accumulate_session_tokens`` in
+      ``get_response_via_harness`` — this is the harness-side half of the
+      two-path token tracker introduced for issue #1128.
+    * ``cost_usd``: raw ``total_cost_usd`` from the `result` event, taken
+      verbatim and never recomputed locally so the value tracks upstream
+      Anthropic pricing automatically.
+    * ``stderr_snippet``: first 2000 chars of decoded stderr when
+      ``returncode != 0``; ``None`` otherwise. Issue #1099 Mode 1 uses this
+      for sentinel-based thinking-block corruption detection. Truncation
+      bounds memory usage; sentinel matches reliably fall within this window
+      per the amux report.
+
+    On binary-not-found, returncode is None and result_text carries the
+    error message (usage, cost_usd, stderr_snippet are all None).
 
     Optional callbacks (issue #1036):
         on_sdk_started(pid): fires once, immediately after the subprocess is
@@ -1776,7 +2275,7 @@ async def _run_harness_subprocess(
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
-        return (f"Error: CLI harness not found — {e}", None, None)
+        return (f"Error: CLI harness not found — {e}", None, None, None, None, None)
 
     # Fire SDK-started callback once the pid is known (#1036).
     if on_sdk_started is not None and proc.pid is not None:
@@ -1788,6 +2287,11 @@ async def _run_harness_subprocess(
     full_text = ""
     result_text = None
     session_id_from_harness = None
+    # Token + cost fields extracted off the `result` event (issue #1128).
+    # Mirrors the SDK path's `ResultMessage.usage` / `.total_cost_usd`
+    # so `accumulate_session_tokens` can be fed from either path.
+    usage: dict | None = None
+    cost_usd: float | None = None
 
     async for raw_line in proc.stdout:
         line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1813,6 +2317,20 @@ async def _run_harness_subprocess(
         if event_type == "result":
             result_text = data.get("result", "")
             session_id_from_harness = data.get("session_id")
+            # Extract per-turn token + cost counts (issue #1128). These
+            # are the harness-side counterpart of `ResultMessage.usage`
+            # and `ResultMessage.total_cost_usd` from the SDK path. The
+            # `claude -p stream-json` protocol emits them on the same
+            # `result` event. `usage` is a dict; missing fields default
+            # to 0 inside `accumulate_session_tokens`. `total_cost_usd`
+            # is taken verbatim so it tracks upstream Anthropic pricing
+            # without a local price table.
+            raw_usage = data.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = raw_usage
+            raw_cost = data.get("total_cost_usd")
+            if isinstance(raw_cost, (int, float)):
+                cost_usd = float(raw_cost)
             if session_id_from_harness:
                 logger.debug(f"Harness session_id for resume: {session_id_from_harness}")
             break
@@ -1831,20 +2349,25 @@ async def _run_harness_subprocess(
 
     _, stderr_data = await proc.communicate()
     returncode = proc.returncode if proc.returncode is not None else 0
+    # Capture first 2000 chars of stderr for Mode 1 sentinel checks (issue #1099).
+    # Bound the snippet at 2000 chars: ~4x the 500-char log-only window already
+    # used below, enough for sentinel matching while keeping memory tight.
+    stderr_snippet: str | None = None
     if returncode != 0:
         stderr_text = stderr_data.decode("utf-8", errors="replace") if stderr_data else ""
+        stderr_snippet = stderr_text[:2000]
         logger.warning(f"Harness exited with code {returncode}: {stderr_text[:500]}")
 
     if result_text is not None:
-        return (result_text, session_id_from_harness, returncode)
+        return (result_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)
     if full_text:
         logger.warning(
             "Harness exited without result event, returning %d chars of accumulated text",
             len(full_text),
         )
-        return (full_text, session_id_from_harness, returncode)
+        return (full_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)
     logger.error("Harness exited without a result event and no accumulated text")
-    return (None, session_id_from_harness, returncode)
+    return (None, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet)
 
 
 async def verify_harness_health(harness_name: str) -> bool:

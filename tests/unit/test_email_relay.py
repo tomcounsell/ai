@@ -1,8 +1,7 @@
 """Unit tests for ``bridge.email_relay``.
 
 Covers the unified payload drain path: atomic LPOP, requeue-with-counter on
-failure, DLQ after ``MAX_EMAIL_RELAY_RETRIES`` attempts, legacy ``text``
-field compatibility, and heartbeat writes.
+failure, DLQ after ``MAX_EMAIL_RELAY_RETRIES`` attempts, and heartbeat writes.
 
 Uses live local Redis via the xdist-aware ``redis_test_url`` fixture so
 ``pytest -n auto`` is safe (each worker gets its own db number).
@@ -38,17 +37,11 @@ def r(monkeypatch, redis_test_url):
 
 
 class TestNormalizePayload:
-    def test_text_aliases_to_body(self):
-        msg = {"session_id": "s", "to": "a@x", "text": "legacy", "timestamp": 1.0}
-        result = _normalize_payload(dict(msg))
-        assert result["body"] == "legacy"
-        assert "text" not in result
-
     def test_missing_to_rejected(self):
         msg = {"session_id": "s", "body": "hi", "timestamp": 1.0}
         assert _normalize_payload(dict(msg)) is None
 
-    def test_missing_body_and_text_rejected(self):
+    def test_missing_body_rejected(self):
         msg = {"session_id": "s", "to": "a@x", "timestamp": 1.0}
         assert _normalize_payload(dict(msg)) is None
 
@@ -175,8 +168,15 @@ class TestProcessOutboxSend:
         assert dl_calls[0]["session_id"] == "cli-dlq-1"
 
     @pytest.mark.asyncio
-    async def test_drains_legacy_text_payload(self, r):
-        """Legacy payload shape: {session_id, to, text, timestamp}."""
+    async def test_text_payload_dlqd_as_malformed(self, r):
+        """A legacy ``text``-only payload is DLQ'd — the compat shim is gone.
+
+        Pins ``body == ""`` on the DLQ record: ``_dead_letter_message`` reads
+        ``message.get("body", "")``, and with the shim removed the ``text``
+        content is dropped at the DLQ boundary rather than aliased to
+        ``body``. If a future change reintroduces ``text`` aliasing inside
+        the DLQ path, this assertion fails.
+        """
         key = "email:outbox:legacy-1"
         payload = {
             "session_id": "legacy-1",
@@ -186,23 +186,29 @@ class TestProcessOutboxSend:
         }
         r.rpush(key, json.dumps(payload))
 
-        captured = {}
+        dl_calls = []
 
-        def fake_send(to_addr, mime_msg, from_addr):
-            captured["to"] = to_addr
-            captured["body"] = mime_msg.get_payload(decode=True).decode("utf-8")
+        def fake_write_dead_letter(**kwargs):
+            dl_calls.append(kwargs)
 
-        with patch("bridge.email_relay._send_smtp_sync", side_effect=fake_send):
-            sent = await process_outbox()
+        with patch("bridge.email_relay._send_smtp_sync") as mock_send:
+            with patch("bridge.email_dead_letter.write_dead_letter", fake_write_dead_letter):
+                sent = await process_outbox()
 
-        assert sent == 1
-        assert captured["to"] == "alice@example.com"
-        assert "Legacy body via text field" in captured["body"]
+        assert sent == 0
+        # No SMTP send occurred — payload rejected before the network path.
+        assert mock_send.call_count == 0
+        # Queue is empty — LPOPped and not re-pushed.
+        assert r.llen(key) == 0
+        # DLQ invoked exactly once.
+        assert len(dl_calls) == 1
+        # Content-loss pin: ``text`` is not aliased to ``body`` on DLQ.
+        assert dl_calls[0]["body"] == ""
 
     @pytest.mark.asyncio
     async def test_malformed_payload_dlqd_without_retry(self, r):
         key = "email:outbox:malformed-1"
-        # Missing `to` AND missing body/text — not recoverable
+        # Missing `to` AND missing `body` — not recoverable
         r.rpush(key, json.dumps({"session_id": "malformed-1", "timestamp": 1.0}))
 
         dl_calls = []

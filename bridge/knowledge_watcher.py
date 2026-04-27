@@ -15,6 +15,16 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+# Convertible file extensions — sources that markitdown can turn into a
+# sidecar `.md` which the indexer then consumes. Audio formats
+# (`.mp3`, `.wav`, `.m4a`) are DELIBERATELY EXCLUDED because markitdown's
+# audio path uses an unauthenticated Google Web Speech API key, which is
+# unacceptable for consulting material (see plan spike-2). Imported from
+# the converter module so the two sets cannot drift. The converter is
+# import-safe even when the `[knowledge]` extra is not installed — the
+# actual `markitdown` import is lazy inside the conversion function.
+from tools.knowledge.converter import CONVERTIBLE_EXTENSIONS
+
 logger = logging.getLogger(__name__)
 
 # Supported file extensions (must match indexer)
@@ -39,9 +49,9 @@ class _DebouncedHandler(FileSystemEventHandler):
         self._lock = threading.Lock()
 
     def _is_relevant(self, path: str) -> bool:
-        """Check if a file event is relevant for indexing."""
+        """Check if a file event is relevant for indexing or conversion."""
         ext = os.path.splitext(path)[1].lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in SUPPORTED_EXTENSIONS and ext not in CONVERTIBLE_EXTENSIONS:
             return False
         # Skip hidden files/dirs
         parts = Path(path).parts
@@ -106,12 +116,38 @@ class _DebouncedHandler(FileSystemEventHandler):
                 logger.warning(f"Knowledge watcher: delete failed for {path}: {e}")
 
         for path in paths:
+            ext = os.path.splitext(path)[1].lower()
+            # Convertible extensions are routed through the markitdown
+            # converter first — the resulting `.md` sidecar is indexed in
+            # this same flush iteration (no re-entrant `_schedule` that
+            # would reset the 2s debounce under rapid drops, per plan C3).
+            # Any exception in either step stays contained to this loop
+            # iteration; the watcher must never crash the bridge.
+            if ext in CONVERTIBLE_EXTENSIONS:
+                try:
+                    from tools.knowledge.converter import convert_to_sidecar
+
+                    sidecar = convert_to_sidecar(Path(path))
+                except Exception as e:
+                    logger.warning(f"Knowledge watcher: convert failed for {path}: {e}")
+                    continue
+                if sidecar is None:
+                    # Converter declined (zero-byte, oversized image,
+                    # hash-unchanged). Nothing to index — but the sidecar
+                    # may already exist from a prior run.
+                    continue
+                index_target = str(sidecar)
+            elif ext in SUPPORTED_EXTENSIONS:
+                index_target = path
+            else:
+                continue
+
             try:
                 from tools.knowledge.indexer import index_file
 
-                index_file(path)
+                index_file(index_target)
             except Exception as e:
-                logger.warning(f"Knowledge watcher: index failed for {path}: {e}")
+                logger.warning(f"Knowledge watcher: index failed for {index_target}: {e}")
 
         total = len(paths) + len(deletes)
         if total > 0:

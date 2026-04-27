@@ -427,6 +427,14 @@ telegram_session.session
 .mcp.json
 !config/*.example.json
 !config/mcp_library.json
+
+# Design-system Node toolchain (do-design-system skill)
+!package.json
+!package-lock.json
+# Fixture exports for the design-system generator (committed snapshots)
+!tests/fixtures/design_system/exports/*.json
+# Hook test fixtures
+!tests/fixtures/hooks/*.json
 !tools/**/manifest.json
 
 # Telegram session files
@@ -453,3 +461,6 @@ config/personas/teammate.md
 
 # Happy path test evidence (screenshots, runtime artifacts)
 tests/happy-paths/evidence/
+
+# Working-state scratchpad (gitignored per long-task-checkpointing feature)
+PROGRESS.md

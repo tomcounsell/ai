@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "Write(.claude/hooks/**)",
+      "Edit(.claude/hooks/**)"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -44,6 +50,21 @@
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_no_raw_redis_delete.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_sync.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_design_system_readonly.py",
             "timeout": 5
           }
         ]
@@ -136,6 +157,18 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent_stop.py || true",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post_compact.py || true",
+            "timeout": 10
           }
         ]
       }

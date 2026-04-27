@@ -325,6 +325,99 @@ class TestJobHealthCheck:
         pending = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending) == 1
 
+    @pytest.mark.asyncio
+    async def test_recovers_orphan_pending_with_no_running_sessions(self, monkeypatch, caplog):
+        """Regression for #1124/#1126: orphan-PENDING recovery must reach _ensure_worker.
+
+        Topology: zero RUNNING sessions + one orphan PENDING session older than
+        AGENT_SESSION_HEALTH_MIN_RUNNING with a non-local worker_key.
+
+        Pre-fix, agent/session_health.py's orphan-PENDING branch raised
+        UnboundLocalError on the `from agent.agent_session_queue import _ensure_worker`
+        line at what is now line 1019 — Python treats the name as function-local due
+        to the RUNNING-branch import at line 948, so the import statement itself
+        raised before the call at line 1021 could execute. The per-entry
+        `except Exception: logger.exception(...)` at line 1023 caught the error and
+        logged it, so the function did not propagate — instead, _ensure_worker was
+        silently never invoked.
+
+        This test guards the fix by asserting the spy WAS called exactly once with
+        the seeded session's worker_key and is_project_keyed, AND that no log
+        record mentions UnboundLocalError.
+        """
+        import logging
+
+        from agent.agent_session_queue import (
+            AGENT_SESSION_HEALTH_MIN_RUNNING,
+            _active_workers,
+            _agent_session_health_check,
+        )
+
+        # Seed one PENDING session with a non-local worker_key (chat_id="789")
+        # and a created_at past the 5-minute age threshold.
+        seeded_session = _create_test_session(
+            status="pending",
+            chat_id="789",
+            session_id="orphan_pending_session",
+            created_at=time.time() - (AGENT_SESSION_HEALTH_MIN_RUNNING + 60),
+        )
+
+        # Pre-assertion: topology — zero RUNNING sessions.
+        running_pre = AgentSession.query.filter(project_key="test", status="running")
+        assert len(running_pre) == 0, (
+            f"topology drift: expected zero RUNNING sessions, got {len(running_pre)}"
+        )
+
+        # Pre-assertion: worker_key is non-local. If helper defaults ever change to
+        # produce a "local"-prefixed key, this test would exercise the abandoned-local
+        # branch at agent/session_health.py:994 instead of the orphan-PENDING-with-
+        # _ensure_worker branch, and the spy would silently never be called.
+        assert not seeded_session.worker_key.startswith("local"), (
+            f"topology drift: worker_key={seeded_session.worker_key!r} — this test "
+            "exercises the non-local orphan-PENDING branch"
+        )
+
+        # Pre-flight cleanup of _active_workers. Mirrors the pattern at
+        # test_recovers_job_with_no_worker (line 200). A leaked live worker for the
+        # same worker_key would set worker_alive=True at agent/session_health.py:977
+        # and cause the health check to skip the orphan-PENDING branch entirely.
+        _active_workers.pop(seeded_session.worker_key, None)
+
+        # Spy on _ensure_worker.
+        # Patch on the source module — session_health re-imports _ensure_worker
+        # locally on each call (agent/session_health.py:1019).
+        spy_calls: list[tuple[str, bool]] = []
+
+        def spy(worker_key: str, is_project_keyed: bool = False) -> None:
+            spy_calls.append((worker_key, is_project_keyed))
+
+        monkeypatch.setattr("agent.agent_session_queue._ensure_worker", spy)
+
+        # Capture WARNING/ERROR-level logs for the belt-and-braces check below.
+        caplog.set_level(logging.WARNING)
+
+        await _agent_session_health_check()
+
+        # Primary assertion: the spy was called exactly once with the derived
+        # (worker_key, is_project_keyed) pair from the seeded session. On the
+        # pre-fix tree, the UnboundLocalError at line 1019 prevented the call
+        # site from ever being reached, so spy_calls would be empty.
+        assert spy_calls == [(seeded_session.worker_key, seeded_session.is_project_keyed)], (
+            f"spy calls: {spy_calls!r}"
+        )
+
+        # Belt-and-braces: no log record should mention UnboundLocalError. On the
+        # pre-fix tree, the per-entry `except Exception: logger.exception(...)` at
+        # agent/session_health.py:1023 would write this string to the log.
+        for record in caplog.records:
+            message = record.getMessage()
+            assert "UnboundLocalError" not in message, (
+                f"pre-fix bug regression detected in log: {message!r}"
+            )
+            assert "cannot access local variable '_ensure_worker'" not in message, (
+                f"pre-fix bug regression detected in log: {message!r}"
+            )
+
 
 class TestJobHealthConstants:
     """Tests for health check constants."""
