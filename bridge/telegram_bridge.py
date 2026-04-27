@@ -1991,6 +1991,11 @@ async def main():
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
         )
 
+    # Dedup cache for edit events: (chat_id, message_id, text_hash) -> timestamp
+    # Telegram frequently delivers the same edit event 2-3x in rapid succession.
+    _edit_dedup: dict[tuple, float] = {}
+    _edit_dedup_ttl = 5.0  # seconds
+
     @client.on(events.MessageEdited)
     async def edit_handler(event):
         """Handle edited messages.
@@ -2003,7 +2008,18 @@ async def main():
         if event.out or SHUTTING_DOWN:
             return
 
+        import time as _time
+
+        _now = _time.monotonic()
         message = event.message
+        _dedup_key = (event.chat_id, message.id, hash((message.text or "").strip()))
+        if _now - _edit_dedup.get(_dedup_key, 0) < _edit_dedup_ttl:
+            return
+        _edit_dedup[_dedup_key] = _now
+        # Prune stale entries to avoid unbounded growth
+        for _k in [k for k, t in _edit_dedup.items() if _now - t > _edit_dedup_ttl * 10]:
+            del _edit_dedup[_k]
+
         chat = await event.get_chat()
         chat_title = getattr(chat, "title", None)
         is_dm = event.is_private
