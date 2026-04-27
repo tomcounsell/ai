@@ -191,27 +191,27 @@ This contract is documented in the helper's module docstring with a one-line rul
 
 ### Exception Handling Coverage
 
-- [ ] `JsonCache._load()` swallows JSON decode errors silently — test asserts that calling `_load()` on a corrupt file results in `_data == OrderedDict()` (empty, not crashed). Logger.warning optional but not required.
-- [ ] `JsonCache._save()` swallows IOError / OSError silently — test asserts that a `JsonCache` whose path points to a readonly directory still serves reads correctly after `set()`. (Mock `Path.write_text` to raise IOError.)
-- [ ] `get_or_compute()` swallows analytics emission errors — test asserts that when `analytics.collector.record_metric` is patched to raise, the cached value is still returned correctly. Importing `analytics.collector` is itself wrapped in try/except inside `get_or_compute`.
-- [ ] **Existing fallbacks preserved.** `agent/intent_classifier.py:226-230` and `tools/knowledge/indexer.py:99-106` are not modified by this work. Existing tests cover those fallbacks; we add tests asserting the cache's presence does not change their behavior.
+- [x] `JsonCache._load()` swallows JSON decode errors silently — test asserts that calling `_load()` on a corrupt file results in `_data == OrderedDict()` (empty, not crashed). Logger.warning optional but not required.
+- [x] `JsonCache._save()` swallows IOError / OSError silently — test asserts that a `JsonCache` whose path points to a readonly directory still serves reads correctly after `set()`. (Mock `Path.write_text` to raise IOError.)
+- [x] `get_or_compute()` swallows analytics emission errors — test asserts that when `analytics.collector.record_metric` is patched to raise, the cached value is still returned correctly. Importing `analytics.collector` is itself wrapped in try/except inside `get_or_compute`.
+- [x] **Existing fallbacks preserved.** `agent/intent_classifier.py:226-230` and `tools/knowledge/indexer.py:99-106` are not modified by this work. Existing tests cover those fallbacks; we add tests asserting the cache's presence does not change their behavior.
 
 ### Empty/Invalid Input Handling
 
-- [ ] Empty `message` to `classify_intent()` — already handled upstream; the cache key still hashes deterministically (`sha256("v1:|")` is a valid cache key). Test asserts the cache layer does not crash on empty/whitespace input.
-- [ ] Empty `content` to `_summarize_content()` — current behavior is to call Haiku with an empty body; cache layer preserves this and stores the empty-input result.
-- [ ] No agent-output processing in scope — neither call site produces output that loops back to the agent.
+- [x] Empty `message` to `classify_intent()` — already handled upstream; the cache key still hashes deterministically (`sha256("v1:|")` is a valid cache key). Test asserts the cache layer does not crash on empty/whitespace input.
+- [x] Empty `content` to `_summarize_content()` — current behavior is to call Haiku with an empty body; cache layer preserves this and stores the empty-input result.
+- [x] No agent-output processing in scope — neither call site produces output that loops back to the agent.
 
 ### Error State Rendering
 
-- [ ] No user-visible output is added by this work. Both call sites are internal; their outputs feed downstream code paths that already render errors elsewhere.
+- [x] No user-visible output is added by this work. Both call sites are internal; their outputs feed downstream code paths that already render errors elsewhere.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_intent_classifier.py::TestClassifyIntent` (entire class, 7 tests) — UPDATE: add an `autouse=True` `isolated_cache` fixture (see Step 5 for the full snippet) so every test runs against a `tmp_path`-rooted cold cache. Existing assertion logic is unchanged. **Affected tests:** `test_teammate_classification`, `test_work_classification`, `test_collaboration_classification`, `test_other_classification`, `test_no_api_key_defaults_to_work`, `test_api_error_defaults_to_work`, `test_context_passed_to_api`. The two tests that do NOT call the mocked Haiku client (`test_no_api_key_defaults_to_work` returns early before cache lookup; `test_api_error_defaults_to_work` raises before cache `set`) still benefit from the fixture for module-state hygiene.
-- [ ] `tests/unit/test_knowledge_indexer.py::TestSummarizeContent` (2 tests) — UPDATE: same autouse fixture pattern. **Affected tests:** `test_summarize_uses_haiku_constant`, `test_summarize_fallback_on_api_failure`. The fallback test still passes because the falsy/exception path bypasses cache write per the empty-result skip rule.
-- [ ] `tests/tools/test_classifier.py` — UNCHANGED. This file exercises `classify_request` (work-request classifier), which is out of scope per the No-Gos section.
-- [ ] **New test file** `tests/unit/test_json_cache.py` (CREATE): covers the helper's own behavior — hit, miss, fallback-on-corrupt-file, TTL expiry, LRU eviction at `max_entries`, atomic write semantics (no partial file visible after a simulated crash mid-save), version-key invalidation (different `version=` parameters produce different keys for identical input), **falsy-result-not-cached** (compute_fn returns `""`, `None`, or `{}` → cache stays empty; subsequent calls re-invoke `compute_fn`).
+- [x] `tests/unit/test_intent_classifier.py::TestClassifyIntent` (entire class, 7 tests) — UPDATE: add an `autouse=True` `isolated_cache` fixture (see Step 5 for the full snippet) so every test runs against a `tmp_path`-rooted cold cache. Existing assertion logic is unchanged. **Affected tests:** `test_teammate_classification`, `test_work_classification`, `test_collaboration_classification`, `test_other_classification`, `test_no_api_key_defaults_to_work`, `test_api_error_defaults_to_work`, `test_context_passed_to_api`. The two tests that do NOT call the mocked Haiku client (`test_no_api_key_defaults_to_work` returns early before cache lookup; `test_api_error_defaults_to_work` raises before cache `set`) still benefit from the fixture for module-state hygiene.
+- [x] `tests/unit/test_knowledge_indexer.py::TestSummarizeContent` (2 tests) — UPDATE: same autouse fixture pattern. **Affected tests:** `test_summarize_uses_haiku_constant`, `test_summarize_fallback_on_api_failure`. The fallback test still passes because the falsy/exception path bypasses cache write per the empty-result skip rule.
+- [x] `tests/tools/test_classifier.py` — UNCHANGED. This file exercises `classify_request` (work-request classifier), which is out of scope per the No-Gos section.
+- [x] **New test file** `tests/unit/test_json_cache.py` (CREATE): covers the helper's own behavior — hit, miss, fallback-on-corrupt-file, TTL expiry, LRU eviction at `max_entries`, atomic write semantics (no partial file visible after a simulated crash mid-save), version-key invalidation (different `version=` parameters produce different keys for identical input), **falsy-result-not-cached** (compute_fn returns `""`, `None`, or `{}` → cache stays empty; subsequent calls re-invoke `compute_fn`).
 
 No DELETE or REPLACE dispositions. All existing impacts are UPDATE: autouse pytest fixture for cache isolation.
 
@@ -294,35 +294,35 @@ The `/update` skill (`scripts/remote-update.sh`) does not need to do anything: t
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/json-cache-layer.md` documenting:
+- [x] Create `docs/features/json-cache-layer.md` documenting:
   - When to add a new call site (deterministic inputs, repeated identical calls, fallback already in place)
   - Version-bumping for prompt changes (single string change at one call site)
   - What NOT to cache (Popoto-managed data, non-deterministic inputs, side-effecting calls)
   - The single-writer-per-file invariant — explicit and prominent
   - The full scaling path (table from the issue) as documented future-state design — NOT built work
   - Hit-rate observability via `python -m tools.analytics summary`
-- [ ] Add entry to `docs/features/README.md` index table (alphabetical insertion enforced by hook).
+- [x] Add entry to `docs/features/README.md` index table (alphabetical insertion enforced by hook).
 
 ### External Documentation Site
 None — this repo does not use Sphinx / MkDocs / Read the Docs.
 
 ### Inline Documentation
-- [ ] Module docstring on `utils/json_cache.py` explaining the helper's contract and the single-writer invariant.
-- [ ] Inline comment at each cache singleton (`_cache = JsonCache(...)`) explaining why that namespace, what TTL was chosen, and what version is in use.
+- [x] Module docstring on `utils/json_cache.py` explaining the helper's contract and the single-writer invariant.
+- [x] Inline comment at each cache singleton (`_cache = JsonCache(...)`) explaining why that namespace, what TTL was chosen, and what version is in use.
 
 ## Success Criteria
 
-- [ ] `utils/json_cache.py` exposes `JsonCache` and `get_or_compute()` with version-prefix sha256 keying, TTL, and atomic snapshot via `os.replace`.
-- [ ] `classify_intent()` (`agent/intent_classifier.py:162`) routes through the helper with `ttl=7200` and `data/cache/intent_classifier.json`. The existing graceful-degradation `except Exception` block at line 226 is preserved verbatim.
-- [ ] `_summarize_content()` (`tools/knowledge/indexer.py:69`) routes through the helper with `ttl=None` and `data/cache/knowledge_summaries.json`. The existing truncation fallback at line 99 is preserved.
-- [ ] `analytics.collector.record_metric` emits `cache.hit` and `cache.miss` events with `{"namespace": ...}` dimension; visible via `python -m tools.analytics summary`.
-- [ ] Tests cover: hit, miss, fallback-on-corrupt-file, TTL expiry, LRU eviction at `max_entries`, atomic write (no partial file on simulated crash mid-save), version-key invalidation, analytics-unavailable graceful degradation.
-- [ ] Affected existing tests (`tests/unit/test_intent_classifier.py`, `tests/unit/test_knowledge_indexer.py`) updated to use per-test cache isolation via `tmp_path` and module-singleton monkeypatch.
-- [ ] `docs/features/json-cache-layer.md` created with all the content listed under Documentation, including the scaling path as future-state design.
-- [ ] `docs/features/README.md` index updated in alphabetical position.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
-- [ ] **Post-deploy reminder (NOT build work):** PR description includes a note to revisit hit rates after 7 days via `python -m tools.analytics summary`.
+- [x] `utils/json_cache.py` exposes `JsonCache` and `get_or_compute()` with version-prefix sha256 keying, TTL, and atomic snapshot via `os.replace`.
+- [x] `classify_intent()` (`agent/intent_classifier.py:162`) routes through the helper with `ttl=7200` and `data/cache/intent_classifier.json`. The existing graceful-degradation `except Exception` block at line 226 is preserved verbatim.
+- [x] `_summarize_content()` (`tools/knowledge/indexer.py:69`) routes through the helper with `ttl=None` and `data/cache/knowledge_summaries.json`. The existing truncation fallback at line 99 is preserved.
+- [x] `analytics.collector.record_metric` emits `cache.hit` and `cache.miss` events with `{"namespace": ...}` dimension; visible via `python -m tools.analytics summary`.
+- [x] Tests cover: hit, miss, fallback-on-corrupt-file, TTL expiry, LRU eviction at `max_entries`, atomic write (no partial file on simulated crash mid-save), version-key invalidation, analytics-unavailable graceful degradation.
+- [x] Affected existing tests (`tests/unit/test_intent_classifier.py`, `tests/unit/test_knowledge_indexer.py`) updated to use per-test cache isolation via `tmp_path` and module-singleton monkeypatch.
+- [x] `docs/features/json-cache-layer.md` created with all the content listed under Documentation, including the scaling path as future-state design.
+- [x] `docs/features/README.md` index updated in alphabetical position.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
+- [x] **Post-deploy reminder (NOT build work):** PR description includes a note to revisit hit rates after 7 days via `python -m tools.analytics summary`.
 
 ## Team Orchestration
 
