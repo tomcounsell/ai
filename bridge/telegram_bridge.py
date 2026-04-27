@@ -2064,25 +2064,47 @@ async def main():
             working_dir_str = project.get("working_dir", "")
             new_session_id = f"tg_{project_key}_{event.chat_id}_{message.id}_edit"
 
-            depth = await dispatch_telegram_session(
-                project_key=project_key,
-                session_id=new_session_id,
-                working_dir=working_dir_str,
-                message_text=edited_text,
-                sender_name=sender_name,
-                chat_id=telegram_chat_id,
-                telegram_message_id=message.id,
-                chat_title=chat_title,
-                priority="normal",
-                sender_id=sender_id,
-                session_type=None,
-                project_config=project,
-            )
-            logger.info(
-                f"[edit] Spawned fresh session {new_session_id} for completed-session edit "
-                f"(msg {message.id}, depth={depth})"
-            )
-            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+            # Idempotency guard: if an _edit session already exists and is
+            # active, steer it rather than spawning another. Prevents cascade
+            # when Telegram delivers duplicate edit events for the same message.
+            try:
+                from agent.steering import push_steering_message
+
+                edit_sessions = list(AgentSession.query.filter(session_id=new_session_id))
+                active_edit = next(
+                    (s for s in edit_sessions if s.status in ("pending", "running", "active")),
+                    None,
+                )
+            except Exception:
+                active_edit = None
+
+            if active_edit:
+                push_steering_message(new_session_id, f"[Edit] {edited_text}", sender_name)
+                logger.info(
+                    f"[edit] Steered duplicate edit into existing session {new_session_id} "
+                    f"(msg {message.id}, status={active_edit.status})"
+                )
+                await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+            else:
+                depth = await dispatch_telegram_session(
+                    project_key=project_key,
+                    session_id=new_session_id,
+                    working_dir=working_dir_str,
+                    message_text=edited_text,
+                    sender_name=sender_name,
+                    chat_id=telegram_chat_id,
+                    telegram_message_id=message.id,
+                    chat_title=chat_title,
+                    priority="normal",
+                    sender_id=sender_id,
+                    session_type=None,
+                    project_config=project,
+                )
+                logger.info(
+                    f"[edit] Spawned fresh session {new_session_id} for completed-session edit "
+                    f"(msg {message.id}, depth={depth})"
+                )
+                await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
         else:
             # killed/abandoned/failed — ignore
