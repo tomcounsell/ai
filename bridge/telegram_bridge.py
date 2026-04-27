@@ -2058,6 +2058,15 @@ async def main():
             logger.debug(f"[edit] No session found for msg {message.id}, ignoring edit")
             return
 
+        # Ignore metadata-only updates (reactions, link previews, etc.) where
+        # Telegram fires UpdateEditMessage but the text itself didn't change.
+        original_text = (
+            (session.initial_telegram_message or {}).get("message_text", "") or ""
+        ).strip()
+        if edited_text == original_text:
+            logger.debug(f"[edit] Ignoring no-op edit on msg {message.id} (text unchanged)")
+            return
+
         if session.status in ("running", "active", "pending"):
             # Agent is still working — steer with the updated text
             from agent.steering import push_steering_message
