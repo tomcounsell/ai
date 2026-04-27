@@ -172,6 +172,31 @@ def _make_mock_response(text: str):
 
 
 class TestClassifyIntent:
+    @pytest.fixture(autouse=True)
+    def isolated_cache(self, monkeypatch, tmp_path):
+        """Replace the module-level cache singleton with a tmp_path-rooted instance.
+
+        Runs before every test to guarantee a cold cache. Required because the
+        cache layer would otherwise short-circuit the mocked Haiku client and
+        cause `mock_client.messages.create.assert_called_once()` to fail on
+        the second test that shares the same key derivation path.
+
+        Guarded with hasattr so this fixture is a no-op if the wire-up has not
+        landed yet. Once the singleton exists, the fixture activates with no
+        code change.
+        """
+        from agent import intent_classifier
+
+        if not hasattr(intent_classifier, "_cache"):
+            return
+        from utils.json_cache import JsonCache
+
+        monkeypatch.setattr(
+            intent_classifier,
+            "_cache",
+            JsonCache(tmp_path / "intent_cache.json", max_entries=10),
+        )
+
     def test_teammate_classification(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
             mock_client = MagicMock()

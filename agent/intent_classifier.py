@@ -18,14 +18,27 @@ must never prevent normal Dev-session processing.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
+
+from utils.json_cache import JsonCache, get_or_compute
 
 logger = logging.getLogger(__name__)
 
 # Classification threshold: only route to Teammate if confidence exceeds this
 TEAMMATE_CONFIDENCE_THRESHOLD = 0.90
+
+# Persistent JSON cache for repeated identical classifier inputs.
+#   namespace: data/cache/intent_classifier.json
+#   ttl: 7200s (2h) — long enough to absorb status-check repetitions in a session
+#   version: bump to "v2" if CLASSIFIER_PROMPT changes (invalidates all old keys)
+#   max_entries: 2000 — ~2.5MB worst case at ~200 bytes/entry
+_cache = JsonCache(Path("data/cache/intent_classifier.json"), max_entries=2000)
+_CACHE_VERSION = "v1"
+_CACHE_TTL_SECONDS = 7200
 
 CLASSIFIER_PROMPT = """\
 You are an intent classifier. Classify the user message as "teammate", \
@@ -193,27 +206,41 @@ async def classify_intent(
 
         # Build the user message with optional context
         user_content = ""
+        recent_window = ""
         if context and context.get("recent_messages"):
             recent = context["recent_messages"][-3:]  # Last 3 messages
-            user_content += "Recent conversation:\n"
+            recent_window = "Recent conversation:\n"
             for msg in recent:
-                user_content += f"- {msg}\n"
-            user_content += "\n"
+                recent_window += f"- {msg}\n"
+            recent_window += "\n"
+            user_content += recent_window
         user_content += f"Classify this message:\n{message}"
 
         client = anthropic.Anthropic(api_key=api_key)
 
-        def _call_api():
-            return client.messages.create(
+        def _call_and_serialize() -> dict:
+            response = client.messages.create(
                 model=MODEL_FAST,
                 max_tokens=100,
                 messages=[{"role": "user", "content": user_content}],
                 system=CLASSIFIER_PROMPT,
             )
+            raw_text = response.content[0].text.strip()
+            parsed = _parse_classifier_response(raw_text)
+            return dataclasses.asdict(parsed)
 
-        response = await asyncio.to_thread(_call_api)
-        raw_text = response.content[0].text.strip()
-        result = _parse_classifier_response(raw_text)
+        # Cache key uses the same formatted recent_window block sent to the API,
+        # so any upstream prompt-builder change auto-invalidates the keys.
+        cache_input = f"{message}\n---\n{recent_window}"
+        cached_dict = await asyncio.to_thread(
+            get_or_compute,
+            _cache,
+            cache_input,
+            _call_and_serialize,
+            ttl=_CACHE_TTL_SECONDS,
+            version=_CACHE_VERSION,
+        )
+        result = IntentResult(**cached_dict)
 
         elapsed_ms = (time.monotonic() - start) * 1000
         logger.info(

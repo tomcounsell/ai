@@ -24,6 +24,7 @@ Previously, the bridge classifier only distinguished "sdlc" and "question", and 
 - `is_teammate` retains the 0.90 confidence threshold
 - `is_work` returns True only when intent is literally "work"
 - Default for unparseable/low-confidence: "work" (fail-safe to dev-session)
+- Identical inputs are served from a persistent JSON cache (TTL 2h) -- see [JSON Cache Layer](json-cache-layer.md)
 
 ### Three-Way PM Dispatch
 

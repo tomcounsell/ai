@@ -161,7 +161,7 @@ Each indexed document gets one or more companion Memory records that integrate w
 - **Source**: `source="knowledge"` (new constant `SOURCE_KNOWLEDGE`)
 - **Importance**: 3.0 -- between agent observations (1.0) and human messages (6.0)
 - **Reference pointer**: JSON string pointing to the source file, e.g. `{"tool": "read_file", "params": {"file_path": "/path/to/doc.md"}}`
-- **Summarization**: Haiku generates a 1-2 sentence summary. Falls back to first 500 chars if the API call fails.
+- **Summarization**: Haiku generates a 1-2 sentence summary. Falls back to first 500 chars if the API call fails. Identical `(content[:4000], filename)` inputs are served from a persistent JSON cache (no TTL, max 5000 entries) at `data/cache/knowledge_summaries.json` -- see [JSON Cache Layer](json-cache-layer.md).
 - **Large documents**: Files over 2000 words are split by top-level headings (h1/h2), producing one companion memory per section.
 
 Companion memories enter the bloom filter like any other memory. When the agent works on a related project, the bloom fires, the thought is injected, and the agent can read the full file on demand.
