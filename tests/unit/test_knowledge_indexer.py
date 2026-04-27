@@ -153,6 +153,24 @@ class TestIndexerPipeline:
 class TestSummarizeContent:
     """Test the _summarize_content function."""
 
+    @pytest.fixture(autouse=True)
+    def isolated_cache(self, monkeypatch, tmp_path):
+        """Replace the indexer's module-level cache singleton with a tmp_path-rooted
+        instance. See test_intent_classifier.TestClassifyIntent.isolated_cache for
+        the rationale; the hasattr guard keeps this a no-op until the wire-up lands.
+        """
+        from tools.knowledge import indexer
+
+        if not hasattr(indexer, "_cache"):
+            return
+        from utils.json_cache import JsonCache
+
+        monkeypatch.setattr(
+            indexer,
+            "_cache",
+            JsonCache(tmp_path / "summary_cache.json", max_entries=10),
+        )
+
     @patch("anthropic.Anthropic")
     def test_summarize_uses_haiku_constant(self, mock_anthropic_cls):
         """Verify _summarize_content passes the HAIKU model constant to the API."""

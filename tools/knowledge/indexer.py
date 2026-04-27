@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 
 from config.models import HAIKU
+from utils.json_cache import JsonCache, get_or_compute
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,15 @@ LARGE_DOC_WORD_THRESHOLD = 2000
 
 # Max chars for summary fallback when Haiku is unavailable
 SUMMARY_FALLBACK_MAX_CHARS = 500
+
+# Persistent JSON cache for knowledge-document summaries.
+#   namespace: data/cache/knowledge_summaries.json
+#   ttl: None — content hash is implicit in the key (first 4000 chars + filename).
+#         Bumping `_CACHE_VERSION` invalidates all old keys atomically.
+#   version: bump to "v2" if the summarization prompt changes meaningfully.
+#   max_entries: 5000 — ~2.5MB worst case at ~500 bytes/entry.
+_cache = JsonCache(Path("data/cache/knowledge_summaries.json"), max_entries=5000)
+_CACHE_VERSION = "v1"
 
 
 def _is_supported_file(file_path: str) -> bool:
@@ -78,22 +88,35 @@ def _summarize_content(content: str, file_path: str) -> str:
         client = anthropic.Anthropic()
         filename = os.path.basename(file_path)
 
-        response = client.messages.create(
-            model=HAIKU,
-            max_tokens=300,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"Summarize this document in 1-2 sentences. "
-                        f"Focus on what it contains and why someone working on "
-                        f"this project would want to read it.\n\n"
-                        f"File: {filename}\n\n{content[:4000]}"
-                    ),
-                }
-            ],
+        def _summarize_via_haiku() -> str:
+            response = client.messages.create(
+                model=HAIKU,
+                max_tokens=300,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Summarize this document in 1-2 sentences. "
+                            f"Focus on what it contains and why someone working on "
+                            f"this project would want to read it.\n\n"
+                            f"File: {filename}\n\n{content[:4000]}"
+                        ),
+                    }
+                ],
+            )
+            return response.content[0].text.strip()
+
+        # Cache key: truncated content + filename. Frontmatter and body changes
+        # both flow through the first 4000 chars; bump _CACHE_VERSION on prompt
+        # changes. Falsy results (empty summary) bypass storage.
+        cache_input = f"{content[:4000]}\n---\n{filename}"
+        summary = get_or_compute(
+            _cache,
+            cache_input,
+            _summarize_via_haiku,
+            ttl=None,
+            version=_CACHE_VERSION,
         )
-        summary = response.content[0].text.strip()
         if summary:
             return summary
     except Exception as e:
