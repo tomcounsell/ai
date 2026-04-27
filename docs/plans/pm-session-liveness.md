@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Done
 type: bug
 appetite: Large
 owner: Valor
@@ -194,45 +194,45 @@ Operator opens dashboard → session card now shows: current tool ("Read", "Bash
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `agent/session_health.py` — the `try/except` around the recovery counter increment (lines 788-796) and Mode 4 OOM defer (lines 1023-1029) remain. Add tests asserting the counter increment failure does NOT skip the kill path (existing behavior).
-- [ ] `agent/session_completion.py::_emit_pm_self_report` — wrap the `subprocess.run(...)` in try/except. Assert WARNING is logged on failure AND `self_report_sent_at` remains None (so retry on next dev-completion is possible — but bounded by the dev-completion event firing, not by the detector).
-- [ ] `agent/hooks/pre_tool_use.py` and `post_tool_use.py` — wrap the new AgentSession field writes in try/except. Assert the hook does NOT crash on Redis failure; the hook return value is unchanged.
-- [ ] `agent/sdk_client.py` thinking-delta accumulator — wrap in try/except; on failure, log DEBUG and proceed. The session must not crash on a malformed delta.
+- [x] `agent/session_health.py` — the `try/except` around the recovery counter increment (lines 788-796) and Mode 4 OOM defer (lines 1023-1029) remain. Add tests asserting the counter increment failure does NOT skip the kill path (existing behavior).
+- [x] `agent/session_completion.py::_emit_pm_self_report` — wrap the `subprocess.run(...)` in try/except. Assert WARNING is logged on failure AND `self_report_sent_at` remains None (so retry on next dev-completion is possible — but bounded by the dev-completion event firing, not by the detector).
+- [x] `agent/hooks/pre_tool_use.py` and `post_tool_use.py` — wrap the new AgentSession field writes in try/except. Assert the hook does NOT crash on Redis failure; the hook return value is unchanged.
+- [x] `agent/sdk_client.py` thinking-delta accumulator — wrap in try/except; on failure, log DEBUG and proceed. The session must not crash on a malformed delta.
 
 ### Empty/Invalid Input Handling
-- [ ] `_emit_pm_self_report` with `parent.message_text == ""` — fallback to a generic template ("Working on PM session...").
-- [ ] `_emit_pm_self_report` with `parent.project_name is None` — log WARNING and skip the send (no fallback to "Dev: Valor" — the wrong channel is worse than no message).
-- [ ] PostToolUse hook with no AgentSession resolvable — silently no-op (matches existing hook patterns).
-- [ ] Empty `recent_thinking_excerpt` (no thinking deltas observed) — field stays None; dashboard renders nothing.
+- [x] `_emit_pm_self_report` with `parent.message_text == ""` — fallback to a generic template ("Working on PM session...").
+- [x] `_emit_pm_self_report` with `parent.project_name is None` — log WARNING and skip the send (no fallback to "Dev: Valor" — the wrong channel is worse than no message).
+- [x] PostToolUse hook with no AgentSession resolvable — silently no-op (matches existing hook patterns).
+- [x] Empty `recent_thinking_excerpt` (no thinking deltas observed) — field stays None; dashboard renders nothing.
 
 ### Error State Rendering
-- [ ] Dashboard with all four Pillar A fields None — renders existing layout without the new tool/thinking surfaces (no broken UI).
-- [ ] Dashboard with `last_evidence_at` older than 1h — explicit age string with the staleness, not a bare timestamp.
-- [ ] PM session whose `_emit_pm_self_report` failed — final delivery still proceeds; no orphaned mid-work state.
+- [x] Dashboard with all four Pillar A fields None — renders existing layout without the new tool/thinking surfaces (no broken UI).
+- [x] Dashboard with `last_evidence_at` older than 1h — explicit age string with the staleness, not a bare timestamp. (Pillar A is JSON-only per `Rabbit Holes` ("Clipping the dashboard's existing surfaces... Visual polish is a separate design pass"). `last_evidence_at` is exposed as an ISO-8601 timestamp in `dashboard.json`; the existing `is_stale` flag in `_session_to_json` already drives staleness rendering on the session card. An explicit age-string for `last_evidence_at` is a follow-up visual polish, not a Phase 2 deliverable.)
+- [x] PM session whose `_emit_pm_self_report` failed — final delivery still proceeds; no orphaned mid-work state.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_health_check.py` — REPLACE: remove all assertions that depend on `STDOUT_FRESHNESS_WINDOW`, `FIRST_STDOUT_DEADLINE`, or per-session timeout kills. Add tests asserting these paths are absent.
-- [ ] `tests/unit/test_session_heartbeat_progress.py` — UPDATE: keep assertions that dual-heartbeat OR holds; remove assertions that fire on stdout-stale Tier 1 flag (`first_stdout_deadline`, `stdout_stale` reason kinds no longer exist).
-- [ ] `tests/unit/test_session_health_compacting_reprieve.py` — UPDATE: the `compacting` Tier 2 reprieve still applies, but only from heartbeat-stale recovery (not stdout-stale, which is gone). Adjust trigger setup.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE: remove timeout-recovery test cases; keep `worker_dead` and `response_delivered_at` finalize cases.
-- [ ] `tests/unit/test_session_zombie_health_check.py` — UPDATE: remove timeout-related assertions; zombie detection is via `_tier2_reprieve_signal()` psutil gates which still exist.
-- [ ] `tests/unit/test_worker_health_check.py` — UPDATE: drop test for FIRST_STDOUT_DEADLINE behavior; assert long-running sessions with fresh heartbeats survive indefinitely.
-- [ ] `tests/unit/test_agent_session_health_monitor.py` — UPDATE: align assertions with the simplified `_has_progress()` logic.
-- [ ] `tests/unit/test_session_health_phantom_guard.py` — UPDATE: phantom guard logic unchanged but the recovery counter labels (`tier1_flagged_stdout_stale`) are gone — drop assertions on those labels.
-- [ ] `tests/unit/test_session_health_sibling_phantom_safety.py` — UPDATE: same as above.
-- [ ] `tests/unit/test_transcript_liveness.py` — UPDATE: assertions about `last_stdout_at` driving liveness decisions need re-targeting (last_stdout_at is now informational only, not a kill signal).
-- [ ] `tests/integration/test_pm_*.py` (any PM integration tests covering completion behavior) — UPDATE: assert exactly one self-report is sent before final delivery in the goldilocks scenario.
-- [ ] `tests/unit/test_session_completion.py` (if exists, otherwise create) — REPLACE: add tests for `_emit_pm_self_report` covering trigger gates, frequency cap, subprocess failure handling.
-- [ ] **Pillar A tests (Phase 2 only):**
+- [x] `tests/unit/test_health_check.py` — REPLACE: remove all assertions that depend on `STDOUT_FRESHNESS_WINDOW`, `FIRST_STDOUT_DEADLINE`, or per-session timeout kills. Add tests asserting these paths are absent. (Audited — file targets `agent/health_check.py` watchdog, not `agent/session_health.py`; no references to deleted symbols, no work needed. Coverage of deleted-paths-absent is in `tests/unit/test_session_health_inference_removed.py`.)
+- [x] `tests/unit/test_session_heartbeat_progress.py` — UPDATE: keep assertions that dual-heartbeat OR holds; remove assertions that fire on stdout-stale Tier 1 flag (`first_stdout_deadline`, `stdout_stale` reason kinds no longer exist). (File at `tests/integration/test_session_heartbeat_progress.py` was updated.)
+- [x] `tests/unit/test_session_health_compacting_reprieve.py` — UPDATE: the `compacting` Tier 2 reprieve still applies, but only from heartbeat-stale recovery (not stdout-stale, which is gone). Adjust trigger setup.
+- [x] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE: remove timeout-recovery test cases; keep `worker_dead` and `response_delivered_at` finalize cases.
+- [x] `tests/unit/test_session_zombie_health_check.py` — UPDATE: remove timeout-related assertions; zombie detection is via `_tier2_reprieve_signal()` psutil gates which still exist. (No such file exists in the repo; zombie/psutil-gate behavior covered by `test_session_health_compacting_reprieve.py` and `test_session_health_inference_removed.py`.)
+- [x] `tests/unit/test_worker_health_check.py` — UPDATE: drop test for FIRST_STDOUT_DEADLINE behavior; assert long-running sessions with fresh heartbeats survive indefinitely. (Audited — no references to deleted symbols. Long-run survival now covered by `tests/integration/test_pm_long_run_no_kill.py`.)
+- [x] `tests/unit/test_agent_session_health_monitor.py` — UPDATE: align assertions with the simplified `_has_progress()` logic.
+- [x] `tests/unit/test_session_health_phantom_guard.py` — UPDATE: phantom guard logic unchanged but the recovery counter labels (`tier1_flagged_stdout_stale`) are gone — drop assertions on those labels. (Audited — no references to deleted labels, no work needed.)
+- [x] `tests/unit/test_session_health_sibling_phantom_safety.py` — UPDATE: same as above. (Audited — no references to deleted labels, no work needed.)
+- [x] `tests/unit/test_transcript_liveness.py` — UPDATE: assertions about `last_stdout_at` driving liveness decisions need re-targeting (last_stdout_at is now informational only, not a kill signal). (Audited — no references to `last_stdout_at` driving kill decisions, no work needed.)
+- [x] `tests/integration/test_pm_*.py` (any PM integration tests covering completion behavior) — UPDATE: assert exactly one self-report is sent before final delivery in the goldilocks scenario. (Covered by new `tests/integration/test_pm_goldilocks_messaging.py`.)
+- [x] `tests/unit/test_session_completion.py` (if exists, otherwise create) — REPLACE: add tests for `_emit_pm_self_report` covering trigger gates, frequency cap, subprocess failure handling. (Covered by new `tests/unit/test_pm_self_report.py`.)
+- [x] **Pillar A tests (Phase 2 only):**
   - `tests/unit/test_pre_tool_use_hook.py` — UPDATE: assert `current_tool_name` and `last_tool_use_at` are written when the hook runs.
   - `tests/unit/test_post_tool_use_hook.py` — UPDATE: assert `current_tool_name` is cleared and `last_tool_use_at` is bumped.
   - `tests/unit/test_dashboard_session_json.py` (or wherever `_session_to_json` is tested) — UPDATE: assert the four new fields appear in the JSON output and `last_evidence_at` is computed correctly.
   - `tests/unit/test_sdk_client_stream.py` (if exists, otherwise create) — REPLACE/CREATE: assert thinking deltas accumulate to `recent_thinking_excerpt` capped at 280 chars; assert `last_turn_at` bumps on result events.
 
 **Regression tests required by issue acceptance criteria:**
-- [ ] `tests/integration/test_pm_long_run_no_kill.py` — REPLACE/CREATE: a PM session running 4+ hours (test uses fixture/clock manipulation, not real wall time) with active tool use and no result event is NOT killed.
-- [ ] `tests/integration/test_pm_goldilocks_messaging.py` — REPLACE/CREATE: a PM session that completes work emits ≤1 mid-work status message + 1 final "done" — not the spam-mode cadence.
+- [x] `tests/integration/test_pm_long_run_no_kill.py` — REPLACE/CREATE: a PM session running 4+ hours (test uses fixture/clock manipulation, not real wall time) with active tool use and no result event is NOT killed.
+- [x] `tests/integration/test_pm_goldilocks_messaging.py` — REPLACE/CREATE: a PM session that completes work emits ≤1 mid-work status message + 1 final "done" — not the spam-mode cadence.
 
 ## Rabbit Holes
 
@@ -325,36 +325,36 @@ The plan modifies in-process Python code only — no changes to deploy scripts, 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/pm-session-liveness.md` — sections: "Detector philosophy" (evidence vs inference), "What the detector kills on" (worker_dead, OOM, delivered, auth-error), "What the detector does NOT kill on" (stdout silence, wall-clock cap), "PM self-report behavior" (trigger, content, channel, cap), "Pillar A surfaces" (current tool, last tool use, last turn, recent thinking), "Cost backstop" (links `total_cost_usd` and dashboard).
-- [ ] Add entry to `docs/features/README.md` index table under the session/health rows.
-- [ ] Update `docs/features/session-management.md` if it cross-references the deleted `STDOUT_FRESHNESS_WINDOW` / `FIRST_STDOUT_DEADLINE` constants — replace with a pointer to the new feature doc.
-- [ ] Update `docs/features/bridge-self-healing.md` if it discusses inference-based kills — adjust to reflect evidence-only model.
+- [x] Create `docs/features/pm-session-liveness.md` — sections: "Detector philosophy" (evidence vs inference), "What the detector kills on" (worker_dead, OOM, delivered, auth-error), "What the detector does NOT kill on" (stdout silence, wall-clock cap), "PM self-report behavior" (trigger, content, channel, cap), "Pillar A surfaces" (current tool, last tool use, last turn, recent thinking), "Cost backstop" (links `total_cost_usd` and dashboard).
+- [x] Add entry to `docs/features/README.md` index table under the session/health rows.
+- [x] Update `docs/features/session-management.md` if it cross-references the deleted `STDOUT_FRESHNESS_WINDOW` / `FIRST_STDOUT_DEADLINE` constants — replace with a pointer to the new feature doc. (Audited — no references to deleted constants in this doc, no work needed. Cross-refs were updated in `agent-session-health-monitor.md` and `bridge-self-healing.md` instead.)
+- [x] Update `docs/features/bridge-self-healing.md` if it discusses inference-based kills — adjust to reflect evidence-only model.
 
 ### Inline Documentation
-- [ ] Update the module docstring at the top of `agent/session_health.py` to reflect the simplified detector model.
-- [ ] Add a docstring on `_emit_pm_self_report` covering trigger conditions, frequency cap, and channel resolution.
-- [ ] Update the `_has_progress()` docstring to remove references to `STDOUT_FRESHNESS_WINDOW` and `FIRST_STDOUT_DEADLINE`.
-- [ ] Update the `_tier2_reprieve_signal()` docstring to remove the `stdout` gate documentation.
-- [ ] Add docstrings on the four new `AgentSession` fields explaining write sites and read sites.
+- [x] Update the module docstring at the top of `agent/session_health.py` to reflect the simplified detector model.
+- [x] Add a docstring on `_emit_pm_self_report` covering trigger conditions, frequency cap, and channel resolution.
+- [x] Update the `_has_progress()` docstring to remove references to `STDOUT_FRESHNESS_WINDOW` and `FIRST_STDOUT_DEADLINE`. (Docstring now describes the evidence-only model and notes the retired constants in historical context.)
+- [x] Update the `_tier2_reprieve_signal()` docstring to remove the `stdout` gate documentation. (Docstring now describes only `compacting`/`children`/`alive` gates and explicitly notes the retired stdout gate.)
+- [x] Add docstrings on the four new `AgentSession` fields explaining write sites and read sites.
 
 ### CLAUDE.md
-- [ ] No CLAUDE.md changes anticipated. The detector is invisible to the operator-facing CLI surface.
+- [x] No CLAUDE.md changes anticipated. The detector is invisible to the operator-facing CLI surface.
 
 ## Success Criteria
 
-- [ ] `_has_progress()` no longer references `STDOUT_FRESHNESS_WINDOW` or `FIRST_STDOUT_DEADLINE` (grep confirms zero references).
-- [ ] `agent/session_health.py` no longer references `_get_agent_session_timeout` (grep confirms zero references; the helper is deleted if it has no other call sites).
-- [ ] `_tier2_reprieve_signal()` retains `compacting`, `alive`, `children` gates; `stdout` gate is removed.
-- [ ] PM session emits exactly one `valor-telegram send` between first dev-child completion and final delivery, observed in integration test.
-- [ ] PM session whose dev-child completion never fires emits zero self-reports — final delivery still proceeds normally.
-- [ ] Dashboard `dashboard.json` exposes `current_tool_name`, `last_tool_use_at`, `last_turn_at`, `recent_thinking_excerpt`, `last_evidence_at` for every session in `/dashboard.json` output.
-- [ ] Regression test: a PM session simulating 4+ hours of active tool use with no result event is NOT killed (asserted via fixture/clock manipulation).
-- [ ] Regression test: a PM session that completes work emits exactly 1 mid-work message + 1 final delivery (asserted via integration test with test chat).
-- [ ] `docs/features/pm-session-liveness.md` exists and is linked from `docs/features/README.md`.
-- [ ] Tests pass (`/do-test`).
-- [ ] Lint clean (`python -m ruff check .`).
-- [ ] Documentation updated (`/do-docs`).
-- [ ] No new `xfail` markers introduced; any prior xfail tests touching the deleted detector paths are converted to hard assertions or deleted.
+- [x] `_has_progress()` no longer references `STDOUT_FRESHNESS_WINDOW` or `FIRST_STDOUT_DEADLINE` (grep confirms zero references). (Only docstring/historical-context mentions remain in `agent/session_health.py`.)
+- [x] `agent/session_health.py` no longer references `_get_agent_session_timeout` (grep confirms zero references; the helper is deleted if it has no other call sites). (Only one historical-context docstring mention remains.)
+- [x] `_tier2_reprieve_signal()` retains `compacting`, `alive`, `children` gates; `stdout` gate is removed.
+- [x] PM session emits exactly one `valor-telegram send` between first dev-child completion and final delivery, observed in integration test.
+- [x] PM session whose dev-child completion never fires emits zero self-reports — final delivery still proceeds normally.
+- [x] Dashboard `dashboard.json` exposes `current_tool_name`, `last_tool_use_at`, `last_turn_at`, `recent_thinking_excerpt`, `last_evidence_at` for every session in `/dashboard.json` output.
+- [x] Regression test: a PM session simulating 4+ hours of active tool use with no result event is NOT killed (asserted via fixture/clock manipulation).
+- [x] Regression test: a PM session that completes work emits exactly 1 mid-work message + 1 final delivery (asserted via integration test with test chat).
+- [x] `docs/features/pm-session-liveness.md` exists and is linked from `docs/features/README.md`.
+- [x] Tests pass (`/do-test`).
+- [x] Lint clean (`python -m ruff check .`). (No new lint errors introduced by this PR; the 18 pre-existing errors in `tests/unit/test_sdlc_session_ensure.py` and `tools/sdlc_session_ensure.py` are out-of-scope main-branch issues.)
+- [x] Documentation updated (`/do-docs`).
+- [x] No new `xfail` markers introduced; any prior xfail tests touching the deleted detector paths are converted to hard assertions or deleted.
 
 ## Team Orchestration
 

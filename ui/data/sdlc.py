@@ -249,6 +249,17 @@ class PipelineProgress(BaseModel):
     total_cache_read_tokens: int = 0
     total_cost_usd: float = 0.0
 
+    # In-flight visibility (issue #1172, Pillar A). Operator-facing
+    # liveness signals — what is the agent doing right now? All four are
+    # nullable; sessions started before the deploy keep None until their
+    # next tool / turn boundary. ``last_evidence_at`` is derived in
+    # ``_session_to_json`` as max of every available evidence timestamp.
+    current_tool_name: str | None = None
+    last_tool_use_at: float | None = None
+    last_turn_at: float | None = None
+    recent_thinking_excerpt: str | None = None
+    last_evidence_at: float | None = None
+
     # SDLC state
     stages: list[StageState] = []
     current_stage: str | None = None
@@ -613,6 +624,28 @@ def _session_to_pipeline(session) -> PipelineProgress:
     total_cache_read_tokens = _to_int(getattr(session, "total_cache_read_tokens", 0))
     total_cost_usd = _to_float(getattr(session, "total_cost_usd", 0.0))
 
+    # Pillar A in-flight visibility (issue #1172). Coerce to floats so
+    # JSON consumers see a stable shape; absent timestamps stay None.
+    current_tool_name = _safe_str(getattr(session, "current_tool_name", None))
+    last_tool_use_at = _safe_float(getattr(session, "last_tool_use_at", None))
+    last_turn_at = _safe_float(getattr(session, "last_turn_at", None))
+    recent_thinking_excerpt = _safe_str(getattr(session, "recent_thinking_excerpt", None))
+
+    # Derive ``last_evidence_at`` as the max of every available evidence
+    # timestamp (heartbeats, stdout, tool, turn, compaction). None if every
+    # contributing field is None — the dashboard renders None as "no
+    # evidence yet" rather than synthesizing a misleading zero.
+    evidence_candidates = [
+        _safe_float(getattr(session, "last_heartbeat_at", None)),
+        _safe_float(getattr(session, "last_sdk_heartbeat_at", None)),
+        _safe_float(getattr(session, "last_stdout_at", None)),
+        last_tool_use_at,
+        last_turn_at,
+        _safe_float(getattr(session, "last_compaction_ts", None)),
+    ]
+    evidence_present = [t for t in evidence_candidates if t is not None]
+    last_evidence_at = max(evidence_present) if evidence_present else None
+
     # Resolve issue/PR links with a history fallback. When do-build /
     # do-issue run, they shell out to `gh` which emits the URL to stdout
     # but doesn't always make it back onto the AgentSession model fields.
@@ -663,6 +696,11 @@ def _session_to_pipeline(session) -> PipelineProgress:
         total_output_tokens=total_output_tokens,
         total_cache_read_tokens=total_cache_read_tokens,
         total_cost_usd=total_cost_usd,
+        current_tool_name=current_tool_name,
+        last_tool_use_at=last_tool_use_at,
+        last_turn_at=last_turn_at,
+        recent_thinking_excerpt=recent_thinking_excerpt,
+        last_evidence_at=last_evidence_at,
     )
 
 

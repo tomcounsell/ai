@@ -26,7 +26,6 @@ import pytest
 from agent.agent_session_queue import (
     HEARTBEAT_FRESHNESS_WINDOW,
     MAX_RECOVERY_ATTEMPTS,
-    STDOUT_FRESHNESS_WINDOW,
     _active_sessions,
     _has_progress,
     _tier2_reprieve_signal,
@@ -106,8 +105,8 @@ class TestHeartbeatFreshness:
 
 
 class TestTier2ReprieveIntegration:
-    def test_reprieve_via_recent_stdout(self):
-        """Scenario 3: Both heartbeats stale; fresh stdout → 'stdout' reprieve."""
+    def test_no_reprieve_via_recent_stdout(self):
+        """Issue #1172 retired the stdout gate — recent stdout no longer reprieves."""
         s = _mk_session(
             last_heartbeat_at=_ago(300),
             last_sdk_heartbeat_at=_ago(300),
@@ -115,16 +114,11 @@ class TestTier2ReprieveIntegration:
         )
         # Tier 1 flags as stuck
         assert _has_progress(s) is False
-        # Tier 2 reprieves on recent stdout (no handle needed)
-        signal = _tier2_reprieve_signal(None, s)
-        assert signal == "stdout"
+        # Tier 2 has no stdout gate; with no compaction and no handle → None.
+        assert _tier2_reprieve_signal(None, s) is None
 
     def test_no_reprieve_when_all_signals_stale(self):
-        """Scenario 4 setup: no reprieve signals → None (kill would proceed).
-
-        ``STDOUT_FRESHNESS_WINDOW`` is 600s, so ``last_stdout_at`` must be older
-        than that for the stdout reprieve gate to decline.
-        """
+        """No reprieve signals → None (kill would proceed)."""
         s = _mk_session(
             last_heartbeat_at=_ago(800),
             last_sdk_heartbeat_at=_ago(800),
@@ -132,6 +126,16 @@ class TestTier2ReprieveIntegration:
         )
         assert _has_progress(s) is False
         assert _tier2_reprieve_signal(None, s) is None
+
+    def test_reprieve_via_recent_compaction(self):
+        """Compaction within COMPACT_REPRIEVE_WINDOW_SEC reprieves the kill."""
+        s = _mk_session(
+            last_heartbeat_at=_ago(300),
+            last_sdk_heartbeat_at=_ago(300),
+            last_compaction_ts=time.time() - 30,
+        )
+        assert _has_progress(s) is False
+        assert _tier2_reprieve_signal(None, s) == "compacting"
 
 
 class TestRecoveryAttemptsIntegration:
@@ -181,6 +185,3 @@ class TestDisableProgressKillIntegration:
 class TestFreshnessWindowConstants:
     def test_heartbeat_freshness_window_is_90_seconds(self):
         assert HEARTBEAT_FRESHNESS_WINDOW == 90
-
-    def test_stdout_freshness_window_is_600_seconds(self):
-        assert STDOUT_FRESHNESS_WINDOW == 600

@@ -1,4 +1,15 @@
-"""Periodic health monitoring, no-progress detection, orphan cleanup, and startup recovery."""
+"""Periodic health monitoring, evidence-only no-progress detection, orphan cleanup,
+and startup recovery.
+
+Detector philosophy (issue #1172): the detector kills only on **evidence** of
+failure (worker_dead, OS-initiated OOM, response already delivered). It does
+NOT kill on **inference** from absence of expected activity. Stdout silence,
+heartbeat-stale-but-subprocess-alive, and wall-clock deadlines are not used as
+kill signals. Cost monitoring (`AgentSession.total_cost_usd`) is the long-run
+backstop for genuinely runaway sessions.
+
+See ``docs/features/pm-session-liveness.md`` for the full model.
+"""
 
 import asyncio
 import logging
@@ -115,10 +126,6 @@ def _ts(val):
 
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
-AGENT_SESSION_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard sessions
-AGENT_SESSION_TIMEOUT_BUILD = (
-    9000  # 2.5 hours for build sessions (detected by /do-build in message_text)
-)
 AGENT_SESSION_HEALTH_MIN_RUNNING = (
     300  # Don't recover sessions running less than 5 min (race condition guard)
 )
@@ -132,28 +139,14 @@ HEARTBEAT_WRITE_INTERVAL = 60
 # age is strictly less than this window is considered fresh. 90s provides a
 # 30s grace margin over the 60s write cadence.
 HEARTBEAT_FRESHNESS_WINDOW = 90
-# Freshness window (seconds) for the stdout-stale Tier 1 kill signal (#1046)
-# and the Tier 2 recent-stdout reprieve gate. A session whose last_stdout_at
-# age exceeds this window is flagged by Tier 1 even when both heartbeats are
-# fresh. 600s (10 min) accommodates long tool calls while bounding the
-# alive-but-silent failure mode. Env-tunable via STDOUT_FRESHNESS_WINDOW_SECS.
-STDOUT_FRESHNESS_WINDOW = int(os.environ.get("STDOUT_FRESHNESS_WINDOW_SECS", 600))
 # Post-compaction grace period (issue #1099 Mode 3). After a successful
 # compaction, the session often returns to idle briefly before the next turn
 # picks up. During this window the Tier 2 gate reprieves the kill rather than
-# treating the idle period as a stuck subprocess. Kept distinct from
-# ``STDOUT_FRESHNESS_WINDOW`` — the two answer different questions and may
-# evolve independently (e.g. if compaction legitimately takes longer than 10
-# minutes, or if the stdout-freshness threshold is tightened). The companion
-# writer is ``agent/hooks/pre_compact.py::pre_compact_hook``, which updates
+# treating the idle period as a stuck subprocess. The companion writer is
+# ``agent/hooks/pre_compact.py::pre_compact_hook``, which updates
 # ``AgentSession.last_compaction_ts`` on every successful backup. Env-tunable
 # via ``COMPACT_REPRIEVE_WINDOW_SECS``.
 COMPACT_REPRIEVE_WINDOW_SEC = int(os.environ.get("COMPACT_REPRIEVE_WINDOW_SECS", 600))
-# Deadline (seconds) after started_at before a session that has NEVER produced
-# stdout is also flagged by Tier 1. Preserves warmup tolerance (#1036) while
-# bounding the "silent from the start" case. Env-tunable via
-# FIRST_STDOUT_DEADLINE_SECS.
-FIRST_STDOUT_DEADLINE = int(os.environ.get("FIRST_STDOUT_DEADLINE_SECS", 300))
 # Max health-check kills before a session is finalized as `failed` instead
 # of being re-queued to `pending`. Ensures sessions always reach a terminal
 # status within ~10 minutes of going non-progressing, avoiding the
@@ -164,13 +157,6 @@ MAX_RECOVERY_ATTEMPTS = 2
 # health-check tick budget tight while still giving the cancellation a
 # moment to complete.
 TASK_CANCEL_TIMEOUT = 0.25
-
-# Module-level variable set by _has_progress() before returning False to
-# attribute the reason for flagging without changing the return type (#1046).
-# The health-check loop reads this immediately after _has_progress() returns
-# False to emit the tier1_flagged_stdout_stale counter. Reset to "" at the
-# top of _has_progress() on every call to avoid stale attribution.
-_last_progress_reason: str = ""
 
 
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
@@ -446,120 +432,54 @@ def _recover_interrupted_agent_sessions_startup() -> int:
 # === Agent Session Health Monitor ===
 
 
-def _get_agent_session_timeout(session) -> int:
-    """Return the timeout in seconds for a session based on its message_text.
-
-    Build sessions (containing '/do-build') get a longer timeout since they
-    involve full SDLC cycles. All other sessions get the standard timeout.
-    """
-    message_text = getattr(session, "message_text", "") or ""
-    if "/do-build" in message_text:
-        return AGENT_SESSION_TIMEOUT_BUILD
-    return AGENT_SESSION_TIMEOUT_DEFAULT
-
-
 def _has_progress(entry: AgentSession) -> bool:
     """Return True iff the session shows any signal that real work has begun.
 
-    Tier 1 signals (dual heartbeat, issue #1036) — checked first:
-    - ``last_heartbeat_at``: queue-layer heartbeat, written every 60s by
-      ``_heartbeat_loop`` inside ``_execute_agent_session``.
-    - ``last_sdk_heartbeat_at``: messenger-sourced heartbeat, written by
-      ``BackgroundTask._watchdog`` via the ``on_heartbeat_tick`` callback.
+    Evidence-only model (issue #1172): inference paths from #1046
+    (``STDOUT_FRESHNESS_WINDOW``, ``FIRST_STDOUT_DEADLINE``) are gone. Stdout
+    silence is no longer a kill signal — long-thinking turns and large tool
+    outputs produce legitimate stdout silence.
 
-    Semantics: **OR** — if EITHER heartbeat is fresher than
-    ``HEARTBEAT_FRESHNESS_WINDOW`` (90s), the session has progress. This
-    tolerates single-writer failures (e.g. queue heartbeat loop wedged while
-    the messenger watchdog keeps ticking), minimizing false-positives
-    (killing a working session). The kill trigger in the health check
-    requires BOTH heartbeats to be stale before even evaluating Tier 2.
+    Signals (any one is sufficient):
 
-    Tier 1 extension — stdout-stale kill signal (#1046):
-    Even when both heartbeats are fresh, a session whose ``last_stdout_at``
-    is stale beyond ``STDOUT_FRESHNESS_WINDOW`` (600s) is flagged by Tier 1.
-    This catches the alive-but-silent failure mode where a ``claude -p``
-    subprocess keeps emitting heartbeats but produces no stdout for 10+ min.
+    1. **Dual-heartbeat OR (#1036, retained verbatim).** Either
+       ``last_heartbeat_at`` (queue-layer, written by ``_heartbeat_loop``)
+       OR ``last_sdk_heartbeat_at`` (messenger-sourced, written by
+       ``BackgroundTask._watchdog``) fresher than
+       ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress.
+    2. **Own-progress fields (#944 / #963, retained).**
+       - ``turn_count > 0`` — at least one turn boundary observed.
+       - ``log_path`` non-empty — first log entry written.
+       - ``claude_session_uuid`` non-empty — SDK authenticated.
+    3. **Child-progress check (#944, retained).** A PM session with at
+       least one non-terminal child is not stuck. ``get_children()``
+       returns ``[]`` on failure with a WARNING log; no outer try/except
+       needed.
 
-    For sessions that have never produced stdout (``last_stdout_at is None``),
-    ``FIRST_STDOUT_DEADLINE`` (300s) applies: if ``started_at`` is older than
-    the deadline, Tier 1 flags the session. This preserves warmup tolerance
-    (#1036) while bounding the "silent from the start" case.
-
-    When a live-but-silent subprocess is flagged by Tier 1, Tier 2 gate (c)
-    "alive" will reprieve it — the subprocess is still running. The session
-    remains monitored and is only killed once the subprocess eventually goes
-    non-alive or the absolute timeout fires. This is intentional: an alive
-    subprocess should not be killed prematurely; the reprieve loop bounds kill
-    latency to ``STDOUT_FRESHNESS_WINDOW + one health-check tick`` after the
-    process goes non-alive.
-
-    The reason for the Tier 1 flag is stored in the module-level
-    ``_last_progress_reason`` variable (set before returning False) so the
-    health-check loop can emit a distinct counter without changing the return
-    type. The variable is reset to "" at the top of every call.
-
-    Own-progress signals (original behavior, preserved):
-    - ``claude_session_uuid`` — populated on SDK authentication.
-    - ``log_path`` — written on the first log entry.
-    - ``turn_count`` — incremented per turn completion.
-
-    Any one of the three is sufficient evidence that the session is in flight.
-
-    Additionally, a session with active children (e.g. a PM session that has
-    spawned a dev child) is considered to have progress even if it has no
-    own-progress signals. The child lookup uses ``get_children()`` which queries
-    via the Popoto ``parent_agent_session_id`` index. ``get_children()`` already
-    returns ``[]`` on failure with a WARNING log, so no outer try/except is
-    needed.
-
-    Used by ``_agent_session_health_check`` to distinguish stuck slugless dev
-    sessions (worker_alive via a co-running PM, but no progress) from healthy
-    long-warmup BUILD sessions. See issues #944, #963, #1036, and #1046.
+    Returns ``False`` only when EVERY signal is absent (both heartbeats
+    stale, all own-progress fields empty, no live children). The caller
+    (``_agent_session_health_check``) then evaluates ``_tier2_reprieve_signal``
+    before deciding to recover.
     """
-    global _last_progress_reason
-    _last_progress_reason = ""
-
     # Tier 1: dual-heartbeat OR check (#1036). Fresh on either signal → progress.
     now_utc = datetime.now(tz=UTC)
-    any_heartbeat_fresh = False
     for hb_attr in ("last_heartbeat_at", "last_sdk_heartbeat_at"):
         hb = getattr(entry, hb_attr, None)
         if isinstance(hb, datetime):
             hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
-            age_s = (now_utc - hb_aware).total_seconds()
-            if age_s < HEARTBEAT_FRESHNESS_WINDOW:
-                any_heartbeat_fresh = True
-                break
+            if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
+                return True
 
-    if any_heartbeat_fresh:
-        # Tier 1 extension: stdout-stale kill signal (#1046).
-        # Even with fresh heartbeats, flag if stdout is stale or overdue.
-        lso = getattr(entry, "last_stdout_at", None)
-        if isinstance(lso, datetime):
-            lso_aware = lso if lso.tzinfo else lso.replace(tzinfo=UTC)
-            if (now_utc - lso_aware).total_seconds() >= STDOUT_FRESHNESS_WINDOW:
-                _last_progress_reason = "stdout_stale"
-                return False  # stdout stale; Tier 1 flags despite fresh heartbeats
-        elif lso is None:
-            # No stdout yet — apply FIRST_STDOUT_DEADLINE relative to started_at.
-            started = getattr(entry, "started_at", None)
-            if started is not None:
-                started_aware = started if started.tzinfo else started.replace(tzinfo=UTC)
-                if (now_utc - started_aware).total_seconds() >= FIRST_STDOUT_DEADLINE:
-                    _last_progress_reason = "first_stdout_deadline"
-                    return False  # never produced stdout within deadline; flag
-        return True
-
-    # Own-progress fields (original behavior, preserves #944 / #963 invariants).
+    # Own-progress fields (preserves #944 / #963 invariants).
     if (entry.turn_count or 0) > 0:
         return True
     if bool((entry.log_path or "").strip()):
         return True
     if bool(entry.claude_session_uuid):
         return True
-    # Child-progress check: a PM session with active children is not stuck
-    # get_children() queries via Popoto parent_agent_session_id index (not string session_id)
-    # and already returns [] on failure with a WARNING log — no outer try/except needed
+    # Child-progress check: a PM session with active children is not stuck.
+    # get_children() queries via Popoto parent_agent_session_id index and
+    # returns [] on failure with a WARNING log — no outer try/except needed.
     children = entry.get_children()
     if any(c.status not in _TERMINAL_STATUSES for c in children):
         return True
@@ -570,43 +490,44 @@ def _tier2_reprieve_signal(
     handle: "SessionHandle | None",
     entry: AgentSession,
 ) -> str | None:
-    """Evaluate Tier 2 activity-positive reprieve gates (issue #1036, #1099).
+    """Evaluate Tier 2 activity-positive reprieve gates (issue #1036, #1099, #1172).
 
-    Called by the health check after Tier 1 has flagged a session as "both
-    heartbeats stale". Any single positive signal reprieves the kill.
+    Called by the health check after ``_has_progress`` has returned False for a
+    session whose worker is alive (no_progress recovery branch). Any single
+    positive signal reprieves the kill.
 
     Gates (order matters for telemetry — the first passing gate is returned):
-      (b) "compacting" — ``entry.last_compaction_ts`` is within
-                         ``COMPACT_REPRIEVE_WINDOW_SEC``. Companion writer:
-                         ``agent/hooks/pre_compact.py::pre_compact_hook`` updates
-                         ``last_compaction_ts`` on every successful backup.
-                         Added for issue #1099 Mode 3 — prevents false kills on
-                         sessions that are legitimately idle post-compaction.
-      (c) "alive"      — ``psutil.Process(pid).status()`` is not one of
-                         {zombie, dead, stopped}. Proves the SDK subprocess
-                         still exists and is not a zombie.
-      (d) "children"   — ``psutil.Process(pid).children()`` is non-empty.
-                         Stronger signal than (c): tool-subprocess execution is
-                         actively happening right now. Returned in preference
-                         to "alive" so metrics highlight this case.
-      (e) "stdout"     — ``entry.last_stdout_at`` is within
-                         ``STDOUT_FRESHNESS_WINDOW``. Proves the SDK recently
-                         emitted stdout (stream-json event).
+      "compacting" — ``entry.last_compaction_ts`` is within
+                     ``COMPACT_REPRIEVE_WINDOW_SEC``. Companion writer:
+                     ``agent/hooks/pre_compact.py::pre_compact_hook`` updates
+                     ``last_compaction_ts`` on every successful backup. Added
+                     for issue #1099 Mode 3 — prevents false kills on
+                     sessions that are legitimately idle post-compaction.
+      "children"   — ``psutil.Process(pid).children()`` is non-empty.
+                     Strongest signal: tool-subprocess execution is actively
+                     happening right now. Returned in preference to "alive".
+      "alive"      — ``psutil.Process(pid).status()`` is not one of
+                     {zombie, dead, stopped}. Proves the SDK subprocess
+                     still exists and is not a zombie.
 
-    Returns the name of the first passing gate ("compacting", "children",
-    "alive", or "stdout"), or ``None`` if every gate fails.
+    Returns the name of the first passing gate ("compacting", "children", or
+    "alive"), or ``None`` if every gate fails.
+
+    The previous "stdout" gate (and its ``STDOUT_FRESHNESS_WINDOW`` constant)
+    was retired by issue #1172. Recent stdout is no longer evidence the
+    subprocess is making progress — long-thinking turns and large tool
+    outputs produce legitimate stdout silence.
 
     Failure handling:
-      * ``last_compaction_ts`` is ``None`` / non-numeric → (b) skipped.
-      * ``handle is None`` → (c)(d) skipped; fall through to (e).
-      * ``handle.pid is None`` → (c)(d) skipped; fall through to (e).
+      * ``last_compaction_ts`` is ``None`` / non-numeric → "compacting" skipped.
+      * ``handle is None`` or ``handle.pid is None`` → psutil gates skipped.
       * ``psutil.NoSuchProcess`` / ``psutil.AccessDenied`` / ``ImportError``
-        → (c)(d) skipped silently; fall through to (e).
+        → psutil gates skipped silently.
 
     This helper NEVER raises. A genuinely dead session where every gate
     fails is preferable to crashing the health-check loop.
     """
-    # (b) compacting — reprieve when a compaction completed within
+    # "compacting" — reprieve when a compaction completed within
     # COMPACT_REPRIEVE_WINDOW_SEC seconds. Evaluated FIRST so the telemetry
     # counter (``tier2_reprieve_total:compacting``) distinguishes this case
     # from the psutil-based gates. See issue #1099 Mode 3.
@@ -641,13 +562,6 @@ def _tier2_reprieve_signal(
             # Defensive: never crash the health check from a psutil edge case.
             logger.debug("[session-health] psutil probe failed for pid=%s: %s", pid, e)
 
-    # (e) recent stdout — works even when pid is unknown.
-    lso = getattr(entry, "last_stdout_at", None)
-    if isinstance(lso, datetime):
-        lso_aware = lso if lso.tzinfo else lso.replace(tzinfo=UTC)
-        age = (datetime.now(tz=UTC) - lso_aware).total_seconds()
-        if age < STDOUT_FRESHNESS_WINDOW:
-            return "stdout"
     return None
 
 
@@ -663,15 +577,15 @@ async def _agent_session_health_check() -> None:
     For RUNNING sessions:
     1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover.
     2. If worker appears alive but running > AGENT_SESSION_HEALTH_MIN_RUNNING AND
-       the session has no progress signal (``turn_count``, ``log_path``,
-       ``claude_session_uuid`` all empty): recover. Slugless dev sessions share
-       ``worker_key`` with co-running PM sessions, so ``worker_alive`` alone
-       does not prove the dev session is being handled (#944).
-    3. If exceeded timeout: recover regardless of worker state.
-    4. Legacy sessions without started_at and no worker: recover.
+       ``_has_progress(entry)`` is False (no own-progress fields, no fresh
+       heartbeats, no live children): evaluate Tier 2 reprieve gates and recover
+       only if every gate also fails. Slugless dev sessions share ``worker_key``
+       with co-running PM sessions, so ``worker_alive`` alone does not prove
+       the dev session is being handled (#944).
+    3. Legacy sessions without started_at and no worker: recover.
 
     For PENDING sessions:
-    5. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
+    4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
     **Delivery guard (#918):** Before recovering a running session to pending,
@@ -680,6 +594,13 @@ async def _agent_session_health_check() -> None:
     would cause a duplicate reply. Instead, the session is finalized as
     ``completed`` via ``finalize_session()``. This prevents the crash-recover
     loop that previously produced 6+ duplicate messages per session.
+
+    **No wall-clock timeout (#1172):** the per-session
+    ``_get_agent_session_timeout`` cap was retired. A session writing fresh
+    heartbeats is allowed to run as long as it needs. Cost monitoring
+    (``AgentSession.total_cost_usd``) is the long-run backstop for genuinely
+    runaway sessions; ``worker_dead`` and Mode 4 OOM defer (#1099) remain the
+    evidence-based kill paths.
 
     Recovery resets status to 'pending' via direct mutation and save.
     Status is an IndexedField, so no delete-and-recreate is needed.
@@ -762,24 +683,16 @@ async def _agent_session_health_check() -> None:
                     f"turn_count={entry.turn_count}, log_path={entry.log_path!r}, "
                     f"claude_session_uuid={entry.claude_session_uuid!r})"
                 )
-            elif started_ts is not None:
-                timeout = _get_agent_session_timeout(entry)
-                if running_seconds is not None and running_seconds > timeout:
-                    should_recover = True
-                    reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
 
             if should_recover:
                 # Classify the recovery reason up front — referenced below to
-                # gate Tier 1/Tier 2 reprieve logic to no_progress recoveries
-                # only (#1039 review). worker_dead and timeout kinds must
-                # NOT pass through Tier 2: a dead worker cannot be reprieved
-                # by an "active children" signal, and a timed-out session
-                # with active children should still be killed — otherwise
-                # the timeout cap becomes unenforceable.
+                # gate Tier 2 reprieve logic to no_progress recoveries only.
+                # worker_dead recoveries skip reprieve: a dead worker cannot
+                # be reprieved by an "active children" signal. The "timeout"
+                # reason kind was retired by #1172 along with the wall-clock
+                # cap — only "no_progress" and "worker_dead" remain.
                 if "no progress signal" in reason:
                     _reason_kind = "no_progress"
-                elif "exceeded timeout" in reason:
-                    _reason_kind = "timeout"
                 else:
                     _reason_kind = "worker_dead"
 
@@ -821,19 +734,16 @@ async def _agent_session_health_check() -> None:
                         )
                     continue
 
-                # === Two-tier no-progress detector (#1036) ===
-                # Tier 1/Tier 2 reprieve logic applies ONLY to no_progress
-                # recoveries. worker_dead and timeout recoveries skip reprieve
-                # and fall through to the kill path below (#1039 review):
-                #   * worker_dead: no worker to deliver future progress.
-                #   * timeout: Tier 2 activity signals must NOT defeat the
-                #     absolute timeout cap; an actively-running session that
-                #     exceeds its configured timeout should still be killed.
+                # === Two-tier no-progress detector (#1036, simplified by #1172) ===
+                # Tier 2 reprieve logic applies ONLY to no_progress recoveries.
+                # worker_dead recoveries skip reprieve and fall through to the
+                # kill path below — a dead worker cannot be reprieved by an
+                # "active children" signal.
                 handle = _active_sessions.get(entry.agent_session_id)
                 if handle is None:
                     logger.debug(
                         "[session-health] No registry handle for %s; "
-                        "Tier 2 will use stdout gate only",
+                        "Tier 2 reprieve will only see compaction state",
                         entry.agent_session_id,
                     )
                 if _reason_kind == "no_progress":
@@ -843,22 +753,6 @@ async def _agent_session_health_check() -> None:
                         _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
                     except Exception as _m_err:
                         logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
-
-                    # Emit stdout-stale counter when the flag came from stdout,
-                    # not from heartbeat staleness (#1046). _last_progress_reason
-                    # is set by _has_progress() before returning False.
-                    if _last_progress_reason in ("stdout_stale", "first_stdout_deadline"):
-                        try:
-                            from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                            _MR.incr(
-                                f"{entry.project_key}:session-health:tier1_flagged_stdout_stale"
-                            )
-                        except Exception as _m_err:
-                            logger.debug(
-                                "[session-health] tier1_flagged_stdout_stale counter failed: %s",
-                                _m_err,
-                            )
 
                     reprieve = _tier2_reprieve_signal(handle, entry)
                     if reprieve is not None:

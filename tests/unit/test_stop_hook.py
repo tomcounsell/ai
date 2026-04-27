@@ -389,9 +389,7 @@ class TestAgentSessionCompletion:
                 "hook_utils.memory_bridge.load_agent_session_sidecar",
                 return_value=mock_sidecar,
             ),
-            patch(
-                "models.agent_session.AgentSession.get_by_id", return_value=mock_session
-            ),
+            patch("models.agent_session.AgentSession.get_by_id", return_value=mock_session),
             patch("models.agent_session.AgentSession.query") as mock_query,
             patch("models.session_lifecycle.finalize_session") as mock_finalize,
         ):
