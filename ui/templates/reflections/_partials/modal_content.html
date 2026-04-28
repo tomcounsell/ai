@@ -40,6 +40,14 @@
                 {% else %}
                 <p class="text-muted">No runs recorded yet.</p>
                 {% endif %}
+
+                {% if manual_command %}
+                <h3 style="margin-top: 16px;">Run manually</h3>
+                <div class="text-muted" style="font-size: 11px; margin-bottom: 6px;">
+                    {% if r.execution_type == 'function' %}Run from this repo's shell:{% else %}Paste into a Claude Code session in this repo:{% endif %}
+                </div>
+                <span class="resume-chip mono" onclick="copyReflectionCommand(this)" title="Click to copy" data-cmd="{{ manual_command }}" style="display: block; word-break: break-word; white-space: pre-wrap; font-size: 11px; padding: 8px;">{{ manual_command }}</span>
+                {% endif %}
             </div>
         </div>
 
@@ -77,16 +85,34 @@
         {% else %}
         <p class="text-muted">No runs recorded yet.</p>
         {% endif %}
-
-        {% if manual_command %}
-        <h3>Run manually</h3>
-        <p class="text-muted" style="font-size: 12px; margin-bottom: 6px;">
-            {% if r.execution_type == 'function' %}Run from this repo's shell:{% else %}Paste into a Claude Code session in this repo:{% endif %}
-        </p>
-        <pre style="background: var(--bg-tertiary); padding: 10px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; word-break: break-word; user-select: all; cursor: text;">{{ manual_command }}</pre>
-        {% endif %}
     </div>
 </div>
+<style>
+.resume-chip {
+    display: inline-block;
+    background: var(--bg-secondary, #1e1e2e);
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: all;
+    transition: background 0.15s;
+}
+.resume-chip:hover { background: var(--bg-hover, #2a2a3e); }
+.resume-chip.copied { color: var(--success, #4caf50); border-color: var(--success, #4caf50); }
+</style>
+<script>
+function copyReflectionCommand(el) {
+    var cmd = el.dataset.cmd;
+    navigator.clipboard.writeText(cmd).then(function() {
+        el.classList.add('copied');
+        var orig = el.textContent;
+        el.textContent = '✓ copied';
+        setTimeout(function() { el.textContent = orig; el.classList.remove('copied'); }, 1500);
+    });
+}
+</script>
 {% else %}
 <div class="modal-content">
     <div class="modal-body">
