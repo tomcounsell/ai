@@ -170,8 +170,12 @@ class ModelSettings(BaseModel):
     """Local model configuration settings."""
 
     ollama_vision_model: str = Field(
-        default="llama3.2-vision:11b",
-        description="Ollama vision model for local image analysis (env: OLLAMA_VISION_MODEL)",
+        default="gemma4:e2b",
+        description=(
+            "Ollama vision model for local image analysis (env: OLLAMA_VISION_MODEL). "
+            "Defaults to the same multimodal model as OLLAMA_LOCAL_MODEL so a single "
+            "Ollama pull serves both text and vision paths."
+        ),
     )
     session_default_model: str = Field(
         default="opus",
