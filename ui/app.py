@@ -51,9 +51,11 @@ def _filter_format_timestamp(ts: float | None) -> str:
 
 
 def _filter_format_duration(seconds: float | None) -> str:
-    """Jinja2 filter: format seconds to compact integer duration."""
+    """Jinja2 filter: format seconds to compact duration."""
     if seconds is None:
         return "-"
+    if seconds < 1:
+        return f"{round(seconds * 1000)}ms"
     if seconds < 60:
         return f"{round(seconds)}s"
     if seconds < 3600:
@@ -123,20 +125,78 @@ def create_app() -> FastAPI:
     def index(request: Request):
         """Root route: single-page dashboard with all system state."""
         from ui.data.machine import get_machine_name, get_machine_projects
-        from ui.data.reflections import get_all_reflections
+        from ui.data.reflections import get_grouped_reflections
         from ui.data.sdlc import get_all_sessions
 
         sessions = get_all_sessions()
-        reflections = get_all_reflections()
+        grouped_reflections = get_grouped_reflections()
         machine_projects = get_machine_projects()
         return templates.TemplateResponse(
             request,
             "index.html",
             {
                 "sessions": sessions,
-                "reflections": reflections,
+                "grouped_reflections": grouped_reflections,
                 "machine_name": get_machine_name(),
                 "machine_projects": machine_projects,
+            },
+        )
+
+    @app.get("/reflections/_partials/status-grid/", response_class=HTMLResponse)
+    def partial_reflections_grid(request: Request):
+        """HTMX partial: refreshable reflections status grid."""
+        from ui.data.reflections import get_grouped_reflections
+
+        grouped_reflections = get_grouped_reflections()
+        return templates.TemplateResponse(
+            request,
+            "reflections/_partials/status_grid.html",
+            {"grouped_reflections": grouped_reflections},
+        )
+
+    @app.get("/reflection/{name}/modal-content", response_class=HTMLResponse)
+    def reflection_modal_content(request: Request, name: str):
+        """HTMX partial: reflection detail content for modal."""
+        from ui.data.reflections import get_reflection_detail, get_run_history
+
+        r = get_reflection_detail(name)
+        runs = get_run_history(name, page=1)["runs"] if r else []
+        recent_runs = runs[:5]
+
+        spark_runs = list(reversed(runs[:30]))
+        durations = [
+            run.get("duration") or 0 for run in spark_runs if run.get("duration") is not None
+        ]
+        max_dur = max(durations) if durations else 1
+        sparkline = [
+            {
+                "color": "#ef4444" if run.get("status") == "error" else "#22c55e",
+                "height_pct": max(
+                    8,
+                    round((run.get("duration", 0) or 0) / max_dur * 100) if max_dur else 8,
+                ),
+                "title": f"{run.get('status', '?')} · {(run.get('duration') or 0):.3f}s",
+            }
+            for run in spark_runs
+        ]
+
+        manual_command = None
+        if r:
+            if r.get("execution_type") == "function" and r.get("callable"):
+                module, _, func = r["callable"].rpartition(".")
+                if module and func:
+                    manual_command = f'python -c "from {module} import {func}; {func}()"'
+            elif r.get("execution_type") == "agent" and r.get("command"):
+                manual_command = r["command"].strip()
+
+        return templates.TemplateResponse(
+            request,
+            "reflections/_partials/modal_content.html",
+            {
+                "r": r,
+                "recent_runs": recent_runs,
+                "sparkline": sparkline,
+                "manual_command": manual_command,
             },
         )
 

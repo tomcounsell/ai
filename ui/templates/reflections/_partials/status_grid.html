@@ -1,36 +1,80 @@
-{% from "reflections/_macros.html" import format_ts, format_dur, format_interval, status_badge %}
+{% from "reflections/_macros.html" import format_interval %}
 
+{% if grouped_reflections %}
+<script>
+window._expandedReflectionGroups = window._expandedReflectionGroups || new Set();
+
+function toggleReflectionGroup(el) {
+    var gid = el.dataset.group;
+    var rows = document.querySelectorAll('tr[data-group="' + gid + '"]');
+    var collapsed = el.classList.toggle('collapsed');
+    if (collapsed) {
+        window._expandedReflectionGroups.delete(gid);
+    } else {
+        window._expandedReflectionGroups.add(gid);
+    }
+    var countEl = el.querySelector('.child-count');
+    var countHtml = countEl ? ' <span class="child-count">' + countEl.textContent + '</span>' : '';
+    el.innerHTML = (collapsed ? '&#9654;' : '&#9660;') + countHtml;
+    el.title = collapsed ? 'Show reflections' : 'Hide reflections';
+    for (var i = 0; i < rows.length; i++) {
+        rows[i].style.display = collapsed ? 'none' : '';
+    }
+}
+</script>
 <table class="data-table">
     <thead>
         <tr>
-            <th style="width: 20px;"></th>
+            <th style="width: 60px;"></th>
             <th>Name</th>
-            <th>Timing</th>
+            <th style="width: 100px;">Cadence</th>
+            <th style="width: 80px; white-space: nowrap;">State</th>
         </tr>
     </thead>
     <tbody>
-        {% for r in reflections %}
-        <tr>
-            <td style="text-align: center;">
-                {% if not r.enabled %}<span class="badge badge-skipped">off</span>
-                {% elif r.last_status in ('error', 'failed') %}<span style="color: var(--red);">●</span>
-                {% else %}<span style="color: #22c55e;">●</span>{% endif %}
+        {% for g in grouped_reflections %}
+        {# Group parent row — always visible, click anywhere toggles children #}
+        <tr class="session-row" style="cursor: pointer;" onclick="toggleReflectionGroup(this.querySelector('.child-toggle'))">
+            <td style="white-space: nowrap;">
+                <span class="child-toggle collapsed" data-group="{{ g.group }}" title="Show reflections">&#9654; <span class="child-count">{{ g.count }}</span></span>
             </td>
+            <td style="white-space: nowrap;">
+                <div class="card-title">{{ g.group }}</div>
+                <div class="text-muted" style="font-size: 12px; white-space: nowrap;">{{ g.description }}</div>
+            </td>
+            <td class="mono" style="white-space: nowrap; font-size: 11px;">
+                {% for c in g.cadences %}{{ format_interval(c) }}{% if not loop.last %}, {% endif %}{% endfor %}
+            </td>
+            <td style="white-space: nowrap;">
+                {% if g.any_error %}<span style="color: var(--red); margin-right: 4px;" title="One or more reflections failing">●</span>{% endif %}
+                <span class="badge badge-success" title="{{ g.count - g.off_count }} enabled">{{ g.count - g.off_count }} on</span>
+                <span class="badge badge-skipped" title="{{ g.off_count }} disabled">{{ g.off_count }} off</span>
+            </td>
+        </tr>
+        {# Reflection child rows — hidden by default; click opens modal #}
+        {% for r in g.reflections %}
+        <tr class="session-row child-row" data-group="{{ g.group }}" style="display: none; cursor: pointer;" hx-get="/reflection/{{ r.name }}/modal-content" hx-target="#session-modal-body" hx-swap="innerHTML" hx-trigger="click" hx-on::after-request="openSessionModal()">
             <td>
-                <div class="card-title">{{ r.name }}</div>
-                <div class="text-muted" style="font-size: 12px;">{{ r.description }}</div>
-                {% if r.last_error %}
-                <div style="font-size: 11px; color: var(--red); margin-top: 4px; font-family: var(--font-mono);">{{ r.last_error }}</div>
-                {% endif %}
+                <span class="child-connector"></span>
             </td>
-            <td class="mono" style="white-space: nowrap;">
-                <span class="priority-icon">{% if r.priority == 'urgent' %}⬆⬆{% elif r.priority == 'high' %}⬆{% elif r.priority == 'low' %}⬇{% endif %}</span>
-                <span style="display: inline-block; width: 80px;">{{ format_ts(r.last_run) }}</span>
-                <span class="duration-label">{{ format_dur(r.last_duration) }}</span>
-                <span class="text-muted" style="margin: 0 4px;">→</span>
-                <span style="display: inline-block; width: 80px;">{{ format_ts(r.next_due) }}</span>
+            <td style="white-space: nowrap;">
+                <div class="card-title">{{ r.name }}</div>
+                <div class="text-muted" style="font-size: 12px; white-space: nowrap;">{{ r.description }}</div>
+            </td>
+            <td class="mono" style="white-space: nowrap;">{{ format_interval(r.interval) }}</td>
+            <td style="white-space: nowrap;">
+                {% if not r.enabled %}<span class="badge badge-skipped">off</span>
+                {% elif r.last_status in ('error', 'failed') %}<span style="color: var(--red);" title="{{ r.last_error or 'last run failed' }}">●</span>
+                {% else %}<span style="color: #22c55e;" title="ok">●</span>{% endif %}
             </td>
         </tr>
         {% endfor %}
+        {% endfor %}
     </tbody>
 </table>
+{% else %}
+<div class="empty-state">
+    <h3>No reflections registered</h3>
+    <p>Add reflections to <code>config/reflections.yaml</code> to see them here.</p>
+</div>
+{% endif %}

@@ -1,0 +1,122 @@
+{% from "reflections/_macros.html" import format_ts, format_dur, format_interval, status_badge %}
+
+{% if r %}
+<div class="modal-content">
+    <div class="modal-header">
+        <h2 class="modal-title">{{ r.name }}</h2>
+        <div class="flex gap-2" style="align-items: center;">
+            {{ status_badge(r.last_status) }}
+            {% if not r.enabled %}<span class="badge badge-skipped">off</span>{% endif %}
+        </div>
+    </div>
+
+    <div class="modal-body">
+        <p class="text-muted" style="margin-bottom: 16px;">{{ r.description }}</p>
+
+        <div class="grid-2 mb-4">
+            <div>
+                <h3>Schedule</h3>
+                <table class="data-table compact">
+                    <tr><td class="text-secondary">Group</td><td>{{ r.group }}</td></tr>
+                    <tr><td class="text-secondary">Cadence</td><td class="mono">{{ format_interval(r.interval) }}</td></tr>
+                    <tr><td class="text-secondary">Priority</td><td class="mono">{{ r.priority }}</td></tr>
+                    <tr><td class="text-secondary">Type</td><td class="mono">{{ r.execution_type }}</td></tr>
+                    <tr><td class="text-secondary">Enabled</td><td class="mono">{{ 'yes' if r.enabled else 'no' }}</td></tr>
+                    <tr><td class="text-secondary">Next due</td><td class="mono">{{ format_ts(r.next_due) }}{% if r.overdue %} <span class="badge badge-warning">overdue</span>{% endif %}</td></tr>
+                    <tr><td class="text-secondary">Total runs</td><td class="mono">{{ r.run_count }}</td></tr>
+                </table>
+            </div>
+            <div>
+                <h3>Recent runs</h3>
+                {% if sparkline %}
+                <svg width="100%" height="80" preserveAspectRatio="none" viewBox="0 0 {{ sparkline|length * 8 }} 100" style="display:block; background: var(--bg-tertiary); border-radius: 4px;">
+                    {% for bar in sparkline %}
+                    <rect x="{{ loop.index0 * 8 + 1 }}" y="{{ 100 - bar.height_pct }}" width="6" height="{{ bar.height_pct }}" fill="{{ bar.color }}">
+                        <title>{{ bar.title }}</title>
+                    </rect>
+                    {% endfor %}
+                </svg>
+                <div class="text-muted" style="font-size: 11px; margin-top: 6px;">{{ sparkline|length }} most recent runs · oldest left, newest right · bar height = duration</div>
+                {% else %}
+                <p class="text-muted">No runs recorded yet.</p>
+                {% endif %}
+
+                {% if manual_command %}
+                <h3 style="margin-top: 16px;">Run manually</h3>
+                <div class="text-muted" style="font-size: 11px; margin-bottom: 6px;">
+                    {% if r.execution_type == 'function' %}Run from this repo's shell:{% else %}Paste into a Claude Code session in this repo:{% endif %}
+                </div>
+                <span class="resume-chip mono" onclick="copyReflectionCommand(this)" title="Click to copy" data-cmd="{{ manual_command }}" style="display: block; word-break: break-word; white-space: pre-wrap; font-size: 11px; padding: 8px;">{{ manual_command }}</span>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if r.last_error %}
+        <h3>Last error</h3>
+        <pre class="error-block" style="font-size: 12px; color: var(--red); white-space: pre-wrap; word-break: break-word;">{{ r.last_error }}</pre>
+        {% endif %}
+
+        <h3>History (last {{ recent_runs|length }} of {{ r.run_count }})</h3>
+        {% if recent_runs %}
+        <table class="data-table compact">
+            <thead>
+                <tr>
+                    <th style="width: 60px;">Status</th>
+                    <th>When</th>
+                    <th style="width: 80px;">Duration</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in recent_runs %}
+                <tr>
+                    <td>
+                        {% if run.status == 'success' %}<span style="color: #22c55e;">●</span> ok
+                        {% elif run.status == 'error' %}<span style="color: var(--red);">●</span> err
+                        {% else %}<span class="text-muted">{{ run.status }}</span>{% endif %}
+                    </td>
+                    <td class="mono">{{ format_ts(run.timestamp) }}</td>
+                    <td class="mono">{{ format_dur(run.duration) }}</td>
+                    <td style="font-size: 11px; color: var(--red); font-family: var(--font-mono); word-break: break-word;">{{ run.error or '' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted">No runs recorded yet.</p>
+        {% endif %}
+    </div>
+</div>
+<style>
+.resume-chip {
+    display: inline-block;
+    background: var(--bg-secondary, #1e1e2e);
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: all;
+    transition: background 0.15s;
+}
+.resume-chip:hover { background: var(--bg-hover, #2a2a3e); }
+.resume-chip.copied { color: var(--success, #4caf50); border-color: var(--success, #4caf50); }
+</style>
+<script>
+function copyReflectionCommand(el) {
+    var cmd = el.dataset.cmd;
+    navigator.clipboard.writeText(cmd).then(function() {
+        el.classList.add('copied');
+        var orig = el.textContent;
+        el.textContent = '✓ copied';
+        setTimeout(function() { el.textContent = orig; el.classList.remove('copied'); }, 1500);
+    });
+}
+</script>
+{% else %}
+<div class="modal-content">
+    <div class="modal-body">
+        <p class="text-muted">Reflection not found.</p>
+    </div>
+</div>
+{% endif %}

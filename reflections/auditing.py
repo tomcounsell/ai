@@ -587,9 +587,11 @@ def run_pr_review_audit() -> dict:
         if not github_config:
             continue
 
-        repo = github_config.get("repo", "")
-        if not repo:
+        org = github_config.get("org", "")
+        repo_name = github_config.get("repo", "")
+        if not org or not repo_name:
             continue
+        repo = f"{org}/{repo_name}"
 
         project_wd = project["working_directory"]
 
@@ -617,7 +619,10 @@ def run_pr_review_audit() -> dict:
             )
 
             if pr_result.returncode != 0:
-                logger.warning(f"PR review audit: gh pr list failed for {slug}")
+                logger.warning(
+                    f"PR review audit: gh pr list failed for {slug} (repo={repo}): "
+                    f"{pr_result.stderr.strip()}"
+                )
                 continue
 
             prs = json.loads(pr_result.stdout) if pr_result.stdout.strip() else []

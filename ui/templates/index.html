@@ -44,6 +44,20 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
             }
         });
     }
+    if (e.detail.target && e.detail.target.id === 'status-grid' && window._expandedReflectionGroups && window._expandedReflectionGroups.size > 0) {
+        window._expandedReflectionGroups.forEach(function(gid) {
+            var toggle = document.querySelector('.child-toggle[data-group="' + gid + '"]');
+            if (toggle && toggle.classList.contains('collapsed')) {
+                var rows = document.querySelectorAll('tr[data-group="' + gid + '"]');
+                var countEl = toggle.querySelector('.child-count');
+                var countHtml = countEl ? ' <span class="child-count">' + countEl.textContent + '</span>' : '';
+                toggle.classList.remove('collapsed');
+                toggle.innerHTML = '&#9660;' + countHtml;
+                toggle.title = 'Hide reflections';
+                rows.forEach(function(row) { row.style.display = ''; });
+            }
+        });
+    }
 });
 </script>
 <script>
@@ -63,16 +77,9 @@ function toggleStats() {
 {# ── Reflections ── #}
 <section id="reflections" class="mt-8">
     <h2>Reflections</h2>
-    {% if reflections %}
     <div id="status-grid" hx-get="/reflections/_partials/status-grid/" hx-trigger="every 10s" hx-swap="innerHTML">
         {% include "reflections/_partials/status_grid.html" %}
     </div>
-    {% else %}
-    <div class="empty-state">
-        <h3>No reflections registered</h3>
-        <p>Add reflections to <code>config/reflections.yaml</code> to see them here.</p>
-    </div>
-    {% endif %}
 </section>
 
 {# ── Machine Config ── #}
