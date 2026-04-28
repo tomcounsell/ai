@@ -2,40 +2,37 @@
 status: Planning
 type: feature
 appetite: Small
-owner: Valor
+owner: Valor Engels
 created: 2026-04-29
 tracking: https://github.com/tomcounsell/ai/issues/1189
 last_comment_id:
 ---
 
-# PM Persona — Announce Workflow Boundary and Pause for plan/skip Confirmation
+# PM Workflow Announcement and Pause-for-Confirmation
 
 ## Problem
 
-The PM persona is supposed to route every coding/feature/bug/automation/config request through SDLC starting with a GitHub issue. The rule is real — bucket #3 of the "Intake and Triage" section in `~/Desktop/Valor/personas/project-manager.md:96` says: *"route through SDLC: create a GitHub issue if none exists, then drive the pipeline (ISSUE → PLAN → CRITIQUE → BUILD → …). Never implement code directly, even for small or 'trivial' changes."*
+The PM persona's "Intake and Triage" rule for bucket #3 (coding/feature/bug/automation/config requests) tells the agent to silently file a GitHub issue and route through SDLC. The rule is real but undermined by two structural facts:
 
-But the rule is silent and frequently bypassed because:
-
-1. **Shared segment outranks the overlay.** `agent/sdk_client.py::load_persona_prompt` prepends `config/personas/segments/work-patterns.md` *before* the PM overlay. That segment is written from a developer's autonomous-mode perspective and tells the agent things like "Most work does not require check-ins: Code changes, refactoring, bug fixes," "Implementation detail? My call," "Should I fix this bug I found? Yes, fix it," and "YOLO mode — NO APPROVAL NEEDED." The PM rules come after, but the developer-flavored content is louder, longer, and gets read first.
-2. **The workflow contract is never spoken aloud.** Even when the PM follows the rule, the human sees no announcement that an issue is being filed (or skipped). When the PM violates the rule, the human has no signal until after the work has shipped.
-3. **No pause-and-confirm.** The persona expects the PM to either silently file an issue or silently implement. There is no documented behavior for "ask the human, wait, and proceed based on their answer."
+1. **The shared `work-patterns.md` segment loads BEFORE the PM overlay** and pushes a developer-mode default: "YOLO mode — NO APPROVAL NEEDED," "code changes don't require check-ins," "implementation detail? My call," "Should I fix this bug I found? Yes, fix it." The PM overlay rules come after, but the developer-flavored content is louder and gets read first.
+2. **The contract is never spoken to the human.** When the PM follows the rule, the human sees no announcement that an issue is being filed. When the PM violates the rule, the human has no signal until after the work has shipped.
 
 **Current behavior:**
 
-A PM session for the PBA project (2026-04-28) built a daily-briefing system entirely outside SDLC — created `~/Library/LaunchAgents/com.valor.pba.briefing.{morning,evening}.plist` (loaded into launchd), created `~/src/pba.ai/scripts/daily_briefing.sh` (~100 LoC shell + embedded prompt), and posted "Briefings: live" to the `PM: PBA` Telegram chat. There is no GitHub issue, no plan doc, no PR for this work. The infrastructure is real and functional. The rule was in the prompt; the agent did not surface it; the human had no opportunity to either confirm or override before the LaunchAgents were on disk.
+A PM session occasionally implements code/automation/config changes directly without filing an issue or running SDLC, rationalizing the work as "config" rather than "software." The 2026-04-28 PBA incident (briefing LaunchAgents and shell scripts created entirely outside SDLC) is the canonical failure mode.
 
 **Desired outcome:**
 
-When intake bucket #3 fires (request touches code, config, automation, infra, or scripts), the PM:
+When intake bucket #3 fires, the PM:
 
 1. **Stops** before doing anything that touches code/config/automation/infra.
-2. **Announces** the workflow contract using a literal phrase the human will recognize: *"Unless you directly instruct me to skip our standard workflow, we need to file an issue to plan all improvements and changes to software."*
-3. **Asks** for a structured short-token reply: `plan` (file an issue + run `/do-plan`) or `skip` (override SDLC for this task only).
-4. **Persists** the question to `session.expectations` by ending the response with a `## Open Questions` section — the drafter at `bridge/message_drafter.py:1725` copies it into the field.
-5. **Ends the turn**, transitioning the session to `dormant`.
-6. **Resumes inside the same session** when the human replies, via the existing semantic routing path: `bridge/session_router.py::find_matching_session` queries dormant sessions in the chat with non-null `expectations` and matches via Haiku at confidence ≥ 0.80. The `plan`/`skip` tokens are deliberately chosen so even a one-word fresh reply clears the threshold.
+2. **Announces** the workflow contract using a literal phrase: *"Unless you directly instruct me to skip our standard workflow, we need to file an issue to plan all improvements and changes to software."*
+3. **Asks** for a `plan` or `skip` reply token.
+4. **Persists** the question to `session.expectations` by ending the response with a `## Open Questions` section (the drafter at `bridge/message_drafter.py:1727` extracts verbatim).
+5. **Ends the turn**, transitioning to `dormant` via the existing transcript-end path (`bridge/session_transcript.py:317`).
+6. **Resumes inside the same session** when the human replies — `bridge/session_router.py::find_matching_session` matches the fresh `plan`/`skip` reply at confidence ≥ 0.80.
 
-The shared segment's developer-mode defaults (commit autonomously, decide implementation details, don't escalate) are explicitly overridden in the PM overlay so the agent doesn't read two contradictory documents and pick the louder one. A loader-side warning catches overlay drift on machines where the private overlay is stale.
+The shared segment's developer-mode defaults are explicitly overridden in the PM overlay so the agent doesn't read two contradictory documents and pick the louder one.
 
 ## Freshness Check
 
@@ -44,345 +41,470 @@ The shared segment's developer-mode defaults (commit autonomously, decide implem
 **Disposition:** Unchanged
 
 **File:line references re-verified:**
-- `~/Desktop/Valor/personas/project-manager.md:96` — bucket #3 wording — still holds (verified 2026-04-29). Private overlay is 254 lines, last modified 2026-04-24.
-- `agent/sdk_client.py:919` — existing CRITIQUE-missing loader warning — still holds (verified). The function `load_persona_prompt` lives in this file; the warning is the precedent for the proposed loader-warning addition.
-- `models/agent_session.py:201` — `expectations` field — still holds. `Field(null=True)` on the AgentSession model.
-- `models/agent_session.py:108` — `dormant` status definition — still holds: "Paused on open question, waiting for human reply."
-- `bridge/message_drafter.py:1725` — open-question extraction path — still holds. `expectations = structured.expectations` then falls back to `_extract_open_questions(raw_response)` if not set.
-- `agent/output_handler.py:380` — `_persist_routing_fields` write path — still holds (`session.expectations = expectations`).
-- `bridge/session_router.py:50-130` — `find_matching_session` flow — still holds; threshold `>= 0.80` is enforced on the classifier output.
-- `config/personas/segments/work-patterns.md` — developer-flavored defaults — still holds. Verified strings: "Most work does not require check-ins", "Implementation detail? My call", "Should I fix this bug I found? Yes, fix it", "YOLO mode - NO APPROVAL NEEDED".
+- `agent/sdk_client.py:919` — existing CRITIQUE-missing warning sits at line 919 inside `load_persona_prompt`. Confirmed verbatim.
+- `bridge/message_drafter.py:1725` — `expectations = structured.expectations` followed by the verbatim `_extract_open_questions` fallback at line 1727. Issue cited 1725; the fallback block is 1725–1731. Both still present.
+- `agent/output_handler.py:380` — `session.expectations = expectations` inside `_persist_routing_fields`. Confirmed.
+- `models/agent_session.py:201` — `expectations = Field(null=True)`. Confirmed (line 201 exact).
+- `models/agent_session.py:108` — `dormant - Paused on open question, waiting for human reply`. Confirmed (line 108 exact).
+- `bridge/session_router.py:57` and `:86` — `s.status not in ("active", "dormant")` filter and `expectations` filter both present. Confirmed.
+- `~/Desktop/Valor/personas/project-manager.md:96` — bucket #3 with the exact wording the issue quotes. Confirmed verbatim.
+- `config/personas/project-manager.md` — does NOT contain a "Role" / "How I Work" / "Intake and Triage" section. The in-repo template is *only* the SDLC pipeline overlay (Hard Rules, Stage→Model Dispatch, etc.). The "Intake and Triage" overlay only exists in the private `~/Desktop/Valor/personas/project-manager.md`. **This is a planning constraint, see Notes.**
+- `config/personas/segments/manifest.json` — confirms universal segment order (all personas render all segments). The architectural rationale for "edit overlay, don't fork segments" still holds.
 
 **Cited sibling issues/PRs re-checked:**
-- #274 — closed (semantic session routing infrastructure shipped) — still relevant prior art.
-- #318 — closed (unthreaded routing extension) — still relevant prior art.
-- #280 — closed (verbatim `## Open Questions` extraction; motivated `_extract_open_questions`) — still relevant prior art.
-- #1007 / PR #1009 — closed/merged (PM persona hardening: established the pattern of adding sections to the PM overlay) — still relevant prior art; pattern reuse.
-- #1148 / PR #1152 — closed/merged (SESSION_TYPE injection + PM persona load into harness sessions) — confirmed; this issue's persona changes will reach production.
+- #274 (Semantic Session Routing) — closed, infrastructure shipped. Foundation for `expectations`/router still present.
+- #318 (route unthreaded into active sessions) — closed, decision matrix shipped. Active+dormant routing both supported.
+- #280 (summarizer fabricated questions) — closed; verbatim `## Open Questions` extraction is the resolution this plan depends on.
+- #1007 / PR #1009 (PM self-monitoring + pipeline completion guards) — merged. Last significant PM overlay edit. Convention of "hard rules near the top" still in force.
+- #1148 / PR #1152 (inject SESSION_TYPE + PM persona for harness) — merged. Confirms PM overlay actually loads in production for harness sessions.
 
 **Commits on main since issue was filed (touching referenced files):**
-- None of `agent/sdk_client.py`, `config/personas/`, `models/agent_session.py`, `bridge/message_drafter.py`, `bridge/session_router.py` have been touched since 2026-04-28T05:58:52Z. `git log --oneline --since="..."` returned empty.
+- None. `git log --oneline --since="2026-04-28T05:58:52Z" -- agent/sdk_client.py bridge/message_drafter.py bridge/session_router.py config/personas/ models/agent_session.py agent/output_handler.py` returned empty.
 
-**Active plans in `docs/plans/` overlapping this area:**
-- `docs/plans/pm-persona-hardening.md` (issue #1007) — adds different sections (Pre-Completion Checklist, Child Session Monitoring, Exit Validation). No overlap with bucket #3 / Intake and Triage / shared-segment override; pattern is reusable.
-- `docs/plans/pm-skips-critique-and-review.md` — addresses pipeline-stage-skipping. Different failure mode; no overlap with intake-bucket announcement.
-- No plan file at `docs/plans/pm-workflow-announcement.md` exists yet — this plan is greenfield in that path.
+**Active plans in `docs/plans/` overlapping this area:** None. No other open plan touches the PM persona overlay or `expectations` routing.
 
-**Notes:** Discovered during recon that the **public template** at `config/personas/project-manager.md` does **NOT** contain an Intake and Triage section — only the private overlay at `~/Desktop/Valor/personas/project-manager.md` has it. The public template is currently scoped to "Hard Rules" (CRITIQUE/REVIEW/MERGE gates) and rule numbering. Issue #1189 says to update both files to "match" — but the public template doesn't have the section to update. Resolution: **add** the Intake and Triage section + new sections to the public template so it serves as a real authoritative fallback when the private overlay is missing on dev machines. This is captured in the Open Question section to confirm direction with the supervisor before BUILD.
+**Notes:**
+- The in-repo template `config/personas/project-manager.md` is *not* a mirror of the private overlay's "Role / How I Work / Intake and Triage" content. It's the pipeline-rules overlay (CRITIQUE/REVIEW gates, dispatch table, exit validation). This affects how AC#2 ("public template updated to match the private overlay's bucket #3 wording") gets satisfied: we must **introduce** the Intake and Triage section into the in-repo template, not edit an existing line. See Solution → Technical Approach for details.
+- The exact line of bucket #3 is `~/Desktop/Valor/personas/project-manager.md:96`. The issue cited this; verified it matches verbatim.
 
 ## Prior Art
 
-Search results from `gh issue list --state closed` and `gh pr list --state merged`:
-
-- **#274** — Semantic Session Routing: Structured Summarizer + Context-Aware Message Routing — Original implementation of the `expectations` + routing infrastructure this issue depends on. Successful; landed.
-- **#318** — Route unthreaded messages into active sessions via `expectations` + `queued_steering_messages` — Extended #274 to handle active (not just dormant) sessions; introduced the decision matrix this issue's flow plugs into. Successful; landed.
-- **#280** — Summarizer fabricates questions not present in raw agent output — Motivated the verbatim `## Open Questions` extraction path in the drafter (`bridge/message_drafter.py:1725-1732`) that this issue's PM update relies on. Successful; landed.
-- **#1007 / PR #1009** — PM persona needs self-monitoring and pipeline completion guards — Most recent significant PM persona overlay edit. Established the convention of adding new sections (Pre-Completion Checklist, Child Session Monitoring, Exit Validation) to the overlay. Pattern directly reusable.
-- **#1148 / PR #1152** — Inject SESSION_TYPE + load PM persona into harness sessions — Confirms the PM persona is now actually loaded for harness sessions; this issue's persona changes will reach production.
-
-No prior issue attempted to fix the "shared segment outranks overlay" tension; this is the first time it's being addressed. The prior PM-overlay edits did not change the bucket #3 wording.
+- **#1007 / PR #1009** (closed/merged 2026-04-16) — PM persona self-monitoring + pipeline completion guards. Most recent significant PM overlay edit. Established the convention of putting hard rules near the top of the overlay; this plan extends that convention with a new hard rule (workflow announcement) without disrupting the existing rule ordering.
+- **PR #802** (merged 2026-04-07) — `fix(sdlc): enforce CRITIQUE and REVIEW gates in PM persona and sdk_client`. **Direct precedent for this plan's loader-warning addition.** Added the `if "CRITIQUE" not in overlay_content` warning at `agent/sdk_client.py:919–923`. We mirror the exact shape (substring check + WARN log + actionable message) for the workflow-announcement rule.
+- **#274** (closed) — Semantic Session Routing: structured summarizer + context-aware routing. Foundational. The `expectations` field, the `## Open Questions` extraction path, and the Haiku classifier with 0.80 threshold are all #274 deliverables.
+- **#318** (closed) — Route unthreaded messages into active sessions via expectations + queued_steering_messages. Extended #274 to cover active sessions. Decision matrix:
+  - active session, confidence ≥ 0.80 → push to steering queue (don't create new session)
+  - dormant session, confidence ≥ 0.80 → resume session
+  - any session, confidence < 0.80 → create new session
+- **#280** (closed) — Summarizer fabricated questions. Motivated the verbatim `## Open Questions` extraction path. The drafter no longer LLM-summarizes questions — it copies them verbatim from the section. This plan relies on that verbatim path (we cannot risk Haiku rephrasing the workflow phrase).
+- **#1148 / PR #1152** — inject SESSION_TYPE + load PM persona into harness sessions. Confirms the PM overlay actually reaches production code paths.
 
 ## Research
 
-No relevant external findings — this work is purely internal (persona text edits + a Python loader warning + an optional internal validator hook). No external libraries, APIs, or ecosystem patterns are involved. Proceeding with codebase context.
+No relevant external findings — proceeding with codebase context. The work is purely internal: PM persona overlay text + an in-repo loader-warning addition + tests against existing infrastructure. No new libraries, no API contract changes, no external ecosystem patterns to research.
 
 ## Spike Results
 
-No spikes needed — all assumptions in the issue's Solution Sketch are verifiable by reading the cited code paths, and recon confirmed every cited file:line still holds. The remaining uncertainty (text-only vs. text+hook) is a human design decision, not an empirical question — captured in Open Questions.
+No spikes required. Small appetite, all assumptions verified by code reading during freshness check (Phase 0.5):
+
+- The verbatim extraction path in `bridge/message_drafter.py:1727` works on `## Open Questions` headers.
+- The `_persist_routing_fields` callback at `agent/output_handler.py:380` writes `expectations` to the session.
+- The `dormant` transition is handled by `bridge/session_transcript.py:317` via `transition_status`.
+- The semantic router at `bridge/session_router.py:50–172` filters `("active", "dormant")` and uses Haiku at 0.80 threshold.
+
+The "text-only vs. text + hook" question raised in the issue is a design decision, not a verifiable assumption. It is resolved in Solution → Technical Approach, with rationale.
 
 ## Data Flow
 
-The pause-and-confirm flow piggybacks on the existing semantic-routing path. No new data flow is introduced. Trace:
+End-to-end trace for the announce-and-pause flow when a coding/feature/bug/automation/config message arrives:
 
-1. **Entry**: Human sends a Telegram message that the PM session classifies as bucket #3 (coding/automation/config request).
-2. **PM session**: Reads bucket #3 rule, emits a response containing the workflow-announcement phrase plus a `## Open Questions` section asking for `plan` or `skip`, then exits the turn.
-3. **Drafter** (`bridge/message_drafter.py:1725`): Extracts the `## Open Questions` content into `expectations` (verbatim, bypassing anti-fabrication filter).
-4. **Output handler** (`agent/output_handler.py:380`): Writes `session.expectations = expectations` and `session.save()`.
-5. **Lifecycle**: Session transitions to `dormant` (status documented at `models/agent_session.py:108`).
-6. **Human reply**: Sends `plan` or `skip` (or longer) as a fresh Telegram message in the same chat.
-7. **Bridge router** (`bridge/session_router.py:53`): Queries `AgentSession` by `chat_id`, filters to `status in (active, dormant)` with non-null `expectations`. The dormant PM session is a candidate.
-8. **Haiku classifier**: Builds the multiple-choice prompt, returns `{"match": "<session_id>", "confidence": 0.85+, "reason": "..."}`. Confidence threshold ≥ 0.80 routes the reply back to the dormant session.
-9. **PM resumes**: Same session, same context. Branch on the reply: `plan` → file an issue (or use existing) and dispatch `/sdlc`; `skip` → proceed without SDLC for this task only.
+1. **Entry point**: Telegram message arrives in a PM-mode chat → `bridge/telegram_bridge.py` enqueues a PM AgentSession.
+2. **Worker pickup**: `worker/__main__.py` picks up the session → `agent/session_executor.py` invokes `claude -p` with the PM system prompt (segments + overlay).
+3. **PM agent classification**: PM agent reads the message, classifies it as bucket #3 (coding/feature/bug/automation/config) using its updated overlay rules.
+4. **PM agent response composition**: Per the new rule, the PM agent emits a response that:
+   - Announces the workflow contract using the literal phrase
+   - Lists the `plan` / `skip` short-token options
+   - Ends with a `## Open Questions` section containing the workflow question
+   - Performs no other tool calls (no Bash, no Write, no Edit) before yielding
+5. **Stop hook + drafter**: When the PM agent finishes its turn, `bridge/message_drafter.py::draft_message` runs. It detects the `## Open Questions` section, extracts it verbatim via `_extract_open_questions`, and sets `MessageDraft.expectations` (line 1727–1729).
+6. **Persist**: `agent/output_handler.py::_persist_routing_fields` (line 380) writes `expectations` back to the AgentSession.
+7. **Transcript completion**: The session transcript ends. `bridge/session_transcript.py:317` calls `transition_status(session, "dormant", ...)`.
+8. **Telegram delivery**: The drafted message goes out to the user with the announce-and-pause text. The session is now `dormant` with non-null `expectations`.
+9. **Human replies** (`plan` or `skip`): A fresh unthreaded reply lands in the same chat.
+10. **Semantic routing**: `bridge/session_router.py::find_matching_session` finds the dormant session (status in `("active", "dormant")`, non-null `expectations`), passes the message + context_summary + expectations to the Haiku classifier at confidence threshold 0.80.
+11. **Match decision**:
+    - If matched (≥ 0.80) AND session is dormant → resume the session via `valor-session resume` with the reply as the new message.
+    - If matched (≥ 0.80) AND session were active → push to steering queue. (Not the expected path here because we just transitioned to dormant.)
+    - If unmatched (< 0.80) → create a new session.
+12. **PM agent resumes**: On `plan` reply → PM proceeds with "create issue + run /do-plan." On `skip` reply → PM acknowledges the override and implements directly *for this task only* (the override does not persist beyond this turn).
 
-No new state, no new IPC, no new keys. The mechanism is already shipped — the change is making the PM use it.
+The two-token design (`plan` / `skip`) is load-bearing for step 11. They are intentionally short so a one-word fresh Telegram reply contains enough signal for Haiku to clear the 0.80 threshold against the stored expectations text.
 
 ## Architectural Impact
 
-- **New dependencies:** None.
-- **Interface changes:** None to Python APIs. PM persona overlay text changes; `agent/sdk_client.py::load_persona_prompt` gains one additional warning check (parallel to the existing CRITIQUE-missing check).
-- **Coupling:** No coupling change. The PM overlay already drives behavior; this issue tightens what the overlay says, not how it's loaded.
-- **Data ownership:** Unchanged. `session.expectations` is already PM-owned (and any session that emits `## Open Questions`).
-- **Reversibility:** Trivial — revert the overlay edits and the loader-warning line. No data migration, no schema change, no users impacted.
+- **New dependencies**: None.
+- **Interface changes**: None at the code/API layer. Persona text is interpreted by the LLM at runtime, not parsed by code (except for the existing CRITIQUE-substring check). The new substring check follows the same shape.
+- **Coupling**: No change. The PM overlay and the loader function continue their current relationship.
+- **Data ownership**: No change. `expectations` already lives on AgentSession; we are using it as designed.
+- **Reversibility**: Trivial. Reverting the PR restores the silent rule. The two persona files and the one loader function are the entire surface area.
 
 ## Appetite
 
 **Size:** Small
 
-**Team:** Solo dev (with PM check-in for the open question on text-only vs. text+hook approach)
+**Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1 (resolve "text only vs. text+hook" before BUILD)
-- Review rounds: 1 (standard PR review)
+- PM check-ins: 1 (resolve the "text-only vs. text + hook" question before BUILD; the plan resolves it as text-only, but the human should confirm)
+- Review rounds: 1 (single PR review)
 
-This is a prompt edit + a one-line Python warning. The complexity is in getting the PM persona text right, not in the code change.
+This is persona-text editing + a 5-line loader patch + 2 new tests. No infrastructure changes, no migrations, no new dependencies.
 
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| `~/Desktop/Valor/personas/project-manager.md` exists | `test -f ~/Desktop/Valor/personas/project-manager.md && echo OK` | Private overlay is the runtime authority on this machine |
-| Python venv has anthropic SDK | `.venv/bin/python -c "import anthropic; print(anthropic.__version__)"` | Required for any new test that exercises the routing classifier |
+| `~/Desktop/Valor/personas/project-manager.md` exists | `test -f ~/Desktop/Valor/personas/project-manager.md && echo OK` | Private overlay must be present to edit it |
+| `config/personas/project-manager.md` exists | `test -f config/personas/project-manager.md && echo OK` | In-repo template target |
+| `agent/sdk_client.py` line 919 contains the existing CRITIQUE warning | `grep -q 'CRITIQUE.*overlay_content' agent/sdk_client.py && echo OK` | Confirms the precedent block is intact before we add a parallel block |
+| Anthropic API key for Haiku routing | `python -c "from config.settings import settings; assert settings.anthropic_api_key"` | Required for the integration test in Test Impact |
+| Redis available for session persistence | `redis-cli ping` returns `PONG` | Required for both unit and integration tests |
 
 ## Solution
 
 ### Key Elements
 
-- **PM overlay bucket #3 rewrite**: Replace the silent rule with an announce-then-pause version that contains the literal phrase, the `plan`/`skip` tokens, and the `## Open Questions` requirement. Applies to BOTH `~/Desktop/Valor/personas/project-manager.md` (private) and `config/personas/project-manager.md` (public template, requires adding the Intake section).
-- **"What counts as a software change" enumeration**: Explicit list of categories (LaunchAgents/cron/launchd/systemd, shell/Python/Node scripts, runtime config files, infrastructure, new dependencies, new files under `~/Library/LaunchAgents/`, `~/.local/bin/`, `/etc/`, `~/Library/LaunchDaemons/`) so the "it's just config" rationalization fails. Plus a clear "no-issue tasks" list for handle-directly cases.
-- **"PM Overrides of Shared Defaults" table**: Reverses developer-flavored defaults from `work-patterns.md` (code-changes-don't-need-check-ins, implementation-detail-my-call, fix-the-bug-yourself, reversible-decisions-just-do-it, YOLO mode), with closing line "When the shared segment and this overlay disagree, this overlay wins." Mirrors the precedent in PR #1009.
-- **Loader warning**: Extend `agent/sdk_client.py:919` with a parallel check for the announcement phrase. Catches overlay drift on machines where the private overlay lives in iCloud and may be stale or out of sync.
+- **PM overlay text update** (private + in-repo template): Replace bucket #3 with the announce-then-pause version. Add a new "What counts as a software change (issue required)" enumeration, and a "PM Overrides of Shared Defaults" table that explicitly reverses ≥5 developer-flavored defaults from `work-patterns.md`.
+- **Loader-warning patch**: Extend `agent/sdk_client.py:919` block (CRITIQUE warning) with a parallel block that warns when the PM overlay loads without the literal "Unless you directly instruct me to skip" substring. Same shape as the existing precedent.
+- **Test coverage**: One unit test asserting the drafter's `## Open Questions` → `expectations` path works for the workflow phrase. One integration test asserting a fresh `plan` or `skip` reply routes back to the dormant session at confidence ≥ 0.80.
+- **Documentation update**: Extend `docs/features/personas.md` with a new section on the PM workflow announcement (what it does, when it fires, the literal phrase, the override semantics).
 
 ### Flow
 
-Bucket-#3 message → PM emits announcement + `## Open Questions` (with `plan`/`skip` tokens) → drafter writes `expectations` → session goes `dormant` → human replies `plan` or `skip` → router matches reply back to the same session → PM branches on reply (file issue + run `/sdlc`, or proceed with SDLC bypass).
+PM-mode chat → coding/feature/bug/automation/config message → PM agent reads overlay → PM emits announce + `## Open Questions` → drafter writes `expectations` → session goes dormant → human sees announcement → human replies `plan` or `skip` → router matches reply to dormant session at ≥ 0.80 → PM resumes with the chosen path.
 
 ### Technical Approach
 
-This is a prompt-engineering change with a thin Python guardrail. Three coordinated edits:
+**Decision: text-only, no structural enforcement.**
 
-1. **`~/Desktop/Valor/personas/project-manager.md`** — Rewrite bucket #3 (currently line 96), then append two new sections after Intake and Triage: "What counts as a software change (issue required)" and "PM Overrides of Shared Defaults". The rewritten bucket #3 contains the literal phrase verbatim, names the `plan`/`skip` tokens, requires `## Open Questions` to be the closing section, and forbids implementation in the same turn. The bucket #3 description itself expands beyond "coding task / feature request / bug report / software update" to cover "automation, scripts (shell, Python, Node), runtime config (`.env`, `projects.json`, `.mcp.json`, `settings.json`, plist files), infrastructure (Vercel/Render/SMTP/DNS/IAM/launchd/cron), and new dependencies."
-2. **`config/personas/project-manager.md`** (public template) — This file currently has only Hard Rules (CRITIQUE/REVIEW/MERGE gates). Add an Intake and Triage section that mirrors the private overlay, plus the two new sections from step 1. The public template is the authoritative fallback when the private overlay is absent (e.g., on dev machines per `_resolve_overlay_path`); it must contain the same intake rules so dev-machine PM behavior matches production.
-3. **`agent/sdk_client.py`** — Inside `load_persona_prompt`, after the existing CRITIQUE-missing check (line 919) and the `subagent_type="dev-session"` deprecation check (line 924), add a third check:
+The issue's Solution Sketch raises an open question: "rather than edit the prompt and hope it's followed, attempt to enforce structurally — e.g., a stop-hook check that blocks `Bash`/`Write`/`Edit` tool calls in PM sessions until `expectations` has been written and a confirming reply is matched."
 
-   ```python
-   if persona == "project-manager" and "Unless you directly instruct me to skip" not in overlay_content:
-       logger.warning(
-           f"PM persona overlay '{overlay_path}' is missing the workflow-announcement rule "
-           "— PM may silently implement code/config changes without surfacing the SDLC contract."
-       )
-   ```
+This plan adopts the **text-only** path. Rationale:
 
-   Same pattern, same precedent. Just a warning — the loader does not refuse to load.
+1. **Lower risk and reversible.** Persona text edits do not change runtime contracts. A failure mode (the agent ignores the rule anyway) reverts to current behavior, not a new failure mode.
+2. **Direct precedent.** PR #802 added the CRITIQUE-substring loader warning. We mirror it. Same shape, same loader, same operator visibility.
+3. **A blocking stop-hook would have unacceptable false positives.** The PM agent legitimately runs Bash for read-only triage in *every* session: `gh issue list`, `gh pr list`, `valor-telegram read`, `python -m tools.sdlc_stage_query`, etc. A hook that blocks Bash until `expectations` is written would block bucket #1 (questions answerable from context) and bucket #2 (status checks) — both of which use the same Bash surface. Distinguishing "Bash for triage" from "Bash for implementation" requires the same classification the PM overlay text already does, so the hook would re-implement the rule it's enforcing in a less expressive substrate.
+4. **A blocking stop-hook for `Write`/`Edit` only is also wrong.** PM sessions are read-only by design (`agent/hooks/pre_tool_use.py` already enforces this for the pure PM session — no Write/Edit). The PM agent's failure mode is *not* writing files; it's *spawning a dev session* (or running `launchctl load` via Bash) that does the writing. A `Write`/`Edit` hook in the PM session catches nothing.
+5. **The structural failure mode the issue worries about is real, but it's solved by the loader warning + future audit.** The loader warning catches overlay drift on the bridge machine where the private overlay is iCloud-synced and could fall out of sync. If the rule is missing from the overlay, the bridge logs WARN immediately on PM session startup. We do not need a runtime hook to catch this; we need overlay integrity, which the loader warning provides.
 
-The `plan`/`skip` token choice is load-bearing: short, distinctive, semantically unambiguous to the Haiku classifier. The classifier prompt already enforces ≥0.80 confidence; the `plan`/`skip` tokens trivially clear that bar because the dormant session's `expectations` contains those literal tokens.
+If the text-only approach proves insufficient in practice (measured by recurring "PM implemented without filing an issue" incidents over a 2-week observation window), we revisit and add a hook *then*. Premature hook addition is a rabbit hole — see Rabbit Holes section.
 
-**Open question (resolved before BUILD):** The issue raises whether to also add a stop-hook check in `.claude/hooks/` that blocks `Bash`/`Write`/`Edit` tool calls in PM sessions until `expectations` has been written. This is a structural enforcement layer that catches the failure mode the persona text alone cannot. Recommendation: **start with text-only** (this plan), and if a follow-up incident shows the persona text is not sufficient, file a separate issue for the hook. Rationale: prompt-only changes have precedent in #1007/PR #1009; structural hooks have precedent in `validate_no_raw_redis_delete.py` but are heavier to maintain. Ship the lightweight fix first; add structural enforcement only if needed. Captured under Open Questions for supervisor confirmation.
+**Three coordinated changes:**
+
+#### 1. Replace bucket #3 in BOTH overlay files
+
+**Private overlay** (`~/Desktop/Valor/personas/project-manager.md`, line ~96, in the `### Intake and Triage` section): Replace the current bucket #3 line:
+
+```markdown
+3. **Coding task / feature request / bug report / software update** — route through SDLC: create a GitHub issue if none exists, then drive the pipeline (ISSUE → PLAN → CRITIQUE → BUILD → …). **Never implement code directly, even for small or "trivial" changes.**
+```
+
+with:
+
+```markdown
+3. **Coding task / feature / bug / software update / automation / config change** — STOP. Before doing anything that touches code, config, automation, or infrastructure, I announce the workflow contract and pause for confirmation.
+
+   **Required announcement** (use this literal phrase):
+   > "Unless you directly instruct me to skip our standard workflow, we need to file an issue to plan all improvements and changes to software."
+
+   Then ask the human to reply with one of:
+   - `plan` — file an issue and run `/do-plan`
+   - `skip` — override SDLC for this task only (one-time override; does not persist)
+
+   End the response with a `## Open Questions` section containing the workflow question verbatim. This populates `session.expectations` so the unthreaded-message router can match the human's reply back to this session.
+
+   Then end the turn. Do NOT implement, plan, dispatch, or run any tool that writes code/config/infra in the same turn. The session transitions to `dormant`. When the human replies `plan` or `skip`, semantic routing resumes this session with their answer.
+```
+
+**In-repo template** (`config/personas/project-manager.md`): Currently this file does NOT contain a "Role / How I Work / Intake and Triage" section — it's only the pipeline-rules overlay. We **add** an "Intake and Triage" section that mirrors the private overlay's bucket #3 wording. Place it before the existing `## Hard Rules` section (under a new `## Intake and Triage` heading) so the overlay reads top-to-bottom as: identity → triage → hard rules → pipeline mechanics. This satisfies AC#2 ("public template is updated to match the private overlay's bucket #3 wording") by making the in-repo template a usable fallback when `~/Desktop/Valor/` is absent.
+
+#### 2. Add two new sections to the PM overlay
+
+Add to BOTH the private overlay and the in-repo template, immediately after the new "Intake and Triage" section.
+
+**Section A — "What counts as a software change (issue required)":**
+
+A bullet list naming concrete artifact types that must trigger bucket #3, plus a contrasting "no-issue tasks" list. Required artifact types per the issue's Solution Sketch §2:
+
+- Source code in any repo (`.py`, `.js`, `.ts`, `.go`, `.sh`, etc.)
+- LaunchAgents (`~/Library/LaunchAgents/*.plist`), launchd daemons (`~/Library/LaunchDaemons/`), system cron, systemd units
+- Shell scripts, Python scripts, Node scripts (anywhere on disk)
+- Runtime config files (`.env`, `projects.json`, `.mcp.json`, `settings.json`, `.plist`)
+- Infrastructure changes (Vercel/Render/SMTP/DNS/IAM)
+- New dependencies (anything added via `pip`, `npm`, `brew`, `uv add`, etc.)
+- Anything new under `~/Library/LaunchAgents/`, `~/.local/bin/`, `/etc/`, `~/Library/LaunchDaemons/`
+
+Plus a "no-issue tasks" list (handle directly, no announcement needed):
+- Replying to messages, reading state, sending Telegram messages
+- GitHub issue management (create/edit/label/close — these are the PM's job)
+- Searching memory, running existing tools to read state
+- Status reports and triage summaries
+
+**Section B — "PM Overrides of Shared Defaults":**
+
+A markdown table that reverses developer-flavored defaults from `config/personas/segments/work-patterns.md`. Must reverse at least 5 distinct defaults. Concrete table:
+
+| Shared default (from `work-patterns.md`) | PM override |
+|------------------------------------------|-------------|
+| "Most work does not require check-ins: Code changes, refactoring, bug fixes" | Code changes ALWAYS require an issue + plan + announcement first. The PM does not implement code in any session. |
+| "Implementation detail? My call." | Implementation choices belong to the dev session, not the PM. The PM dispatches; the dev session decides. |
+| "Should I fix this bug I found? Yes, fix it" | Bugs require a GitHub issue. The PM files the issue and dispatches; the dev session fixes. |
+| "Reversible decision? Make it and move on. Git exists." | The PM does not commit code. All commits flow through dev sessions on `session/{slug}` branches. |
+| "YOLO mode — NO APPROVAL NEEDED." | The PM announces the workflow contract for any code/config/automation/infra request and waits for `plan` / `skip`. |
+| "Git operations are FULLY autonomous - NO APPROVAL NEEDED" | The PM only commits docs/plans on main. Code commits are dev-session-only. The PM never runs `git commit` on a feature branch. |
+
+End the section with the literal sentence:
+
+> When the shared segment and this overlay disagree, this overlay wins.
+
+This is the load-bearing override line — it tells the agent how to resolve the contradiction it would otherwise pick the louder side of.
+
+#### 3. Loader-warning patch in `agent/sdk_client.py:919`
+
+Add a parallel block immediately after the existing CRITIQUE warning. Existing block:
+
+```python
+if persona == "project-manager" and "CRITIQUE" not in overlay_content:
+    logger.warning(
+        f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
+        "— pipeline integrity may be compromised"
+    )
+```
+
+New block (immediately after):
+
+```python
+if persona == "project-manager" and "Unless you directly instruct me to skip" not in overlay_content:
+    logger.warning(
+        f"PM persona overlay '{overlay_path}' is missing the workflow-announcement rule "
+        "— PM may silently implement code/config changes without surfacing the SDLC contract."
+    )
+```
+
+Same shape, same logger, same `overlay_path` interpolation. The substring is chosen to be specific enough that no incidental phrasing trips the check, and short enough to be robust to minor wording adjustments around it (we check for the unique opening clause, not the full phrase).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No new `except Exception:` blocks added by this work. The `_persist_routing_fields` path already has `try/except` swallowing persistence errors (`agent/output_handler.py:390`) — that behavior is unchanged; existing tests cover it.
+- [ ] No new `except Exception: pass` blocks in this change.
+- [ ] The loader warning at `sdk_client.py:919` does not introduce exception handling — it's a substring check + log call. Existing tests in `tests/unit/test_persona_loading.py` cover the loader's exception paths (missing overlay → FileNotFoundError); add a case asserting the new WARN log fires when the substring is missing.
 
 ### Empty/Invalid Input Handling
-- [ ] If the human reply is empty/whitespace-only, the existing router behavior applies: `find_matching_session` is invoked, the Haiku classifier sees an empty message, and returns null/low-confidence — the message becomes a fresh session, NOT a routing match. No new edge case introduced.
-- [ ] If the human reply is something other than `plan` or `skip` (e.g., a question, a clarification), the Haiku classifier's reasoning naturally handles it — the dormant session's `expectations` contains the announcement question, so the classifier matches on relevance not literal token. The PM session resumes with the human's actual response and decides how to interpret it.
+- [ ] Empty `overlay_content` (zero-length file): the substring check returns `False`, the WARN log fires. Add a unit test asserting this.
+- [ ] Whitespace-only overlay content: same — substring missing, WARN fires.
+- [ ] Overlay content containing partial substring (e.g., "Unless you directly" without "instruct me to skip"): substring check returns `False`, WARN fires. This is correct; we want the full phrase or none.
 
 ### Error State Rendering
-- [ ] If the PM persona overlay is malformed (missing the announcement phrase), the loader warning logs to stderr but the session still loads. This is intentional — same shape as the existing CRITIQUE warning. Test asserts the warning fires.
-- [ ] If `_extract_open_questions` finds the workflow question but the drafter's anti-fabrication filter would normally strip it, the verbatim-extraction path bypasses the filter (`bridge/message_drafter.py:1727-1732` is the existing fallback path). Test asserts `expectations` is populated when the response ends with a `## Open Questions` section containing the announcement question.
+- [ ] If the drafter fails to extract `## Open Questions` (Haiku unavailable AND OpenRouter unavailable AND no `## Open Questions` section in the response), `expectations` stays None and the session does NOT go dormant on this signal — the PM never wrote the section. This is an upstream concern; the PM agent failing to follow the rule is what the loader warning surfaces.
+- [ ] The fresh-reply routing path: if the human replies with neither `plan` nor `skip` (e.g., "actually, never mind, let's talk about something else"), the Haiku classifier returns confidence < 0.80 and the message creates a new session. This is the correct fallback — `## Open Questions` was answered via topic change, not via the expected tokens. No bug.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_open_question_gate.py` — UPDATE: add a new test case asserting that a PM-shaped response containing the workflow announcement phrase + `## Open Questions` populates `expectations` correctly. Existing tests are unaffected.
-- [ ] `tests/integration/test_unthreaded_routing.py` — UPDATE: add a new test case asserting that a fresh `plan` reply (or `skip` reply) in the same chat routes back to a dormant PM session whose `expectations` contains the workflow question. Confidence threshold ≥0.80 must hold. Existing tests are unaffected.
-- [ ] `tests/unit/test_pm_persona_guards.py` — UPDATE: add new test cases asserting (a) the private overlay (or public template) contains the literal announcement phrase, (b) the "What counts as a software change" enumeration names LaunchAgents/cron/launchd/shell scripts/runtime config/infrastructure/new dependencies, (c) the "PM Overrides of Shared Defaults" table reverses ≥5 developer-flavored defaults and ends with "When the shared segment and this overlay disagree, this overlay wins." This file already exists (created by PR #1009).
-- [ ] New unit test: `tests/unit/test_sdk_client_persona_warnings.py` (REPLACE if exists, otherwise CREATE): add test asserting that loading the PM persona with an overlay missing the announcement phrase emits a WARNING log to the logger.
+- [ ] `tests/unit/test_open_question_gate.py` — UPDATE: add a new test class `TestWorkflowAnnouncementExtraction` that asserts a PM response containing the literal "Unless you directly instruct me to skip" announcement plus a `## Open Questions` section produces `expectations` with the workflow question text. Existing tests must continue to pass without modification.
+- [ ] `tests/integration/test_unthreaded_routing.py` — UPDATE: add `TestPlanSkipReplyRouting` test class that creates a dormant PM session with `expectations="Should I file an issue (plan) or skip SDLC (skip)?"` and asserts a fresh `plan` reply routes back to the dormant session via the semantic router at confidence ≥ 0.80, and a fresh `skip` reply does the same. Existing tests must continue to pass without modification.
+- [ ] `tests/unit/test_persona_loading.py` — UPDATE: add `TestPMWorkflowAnnouncementWarning` test class that asserts the loader emits a WARN log when the PM overlay does NOT contain "Unless you directly instruct me to skip". Mirrors the existing CRITIQUE-warning test pattern. Existing tests must continue to pass without modification.
+
+No DELETE or REPLACE dispositions — all existing tests remain valid; we only add new test classes inside existing files.
 
 ## Rabbit Holes
 
-- **Editing `work-patterns.md` to be persona-aware.** Tempting (the contradiction is structural), but the segments architecture is intentionally universal per `config/personas/segments/manifest.json`. Overriding via the PM overlay is the lower-risk path; making segments persona-aware is a larger architectural change and explicitly out of scope per the issue.
-- **Backfilling an issue for the existing PBA briefing LaunchAgents.** That's a separate cleanup decision (delete vs. retroactively legitimize); not part of this PM-persona fix.
-- **Building the structural stop-hook now.** Tempting (more enforcement), but unnecessary if the persona text is sufficient. Defer to a follow-up issue if real incidents show text-only is not enough. Adding a hook touches `.claude/hooks/pre_tool_use.py` (currently 92 lines, simple) and would need session-type detection plus an `expectations`-set check — non-trivial test coverage.
-- **Renaming or expanding the `plan`/`skip` token set.** The tokens are deliberately short and distinctive to clear the 0.80 confidence threshold. Adding more tokens (e.g., `defer`, `triage`, `noop`) dilutes that signal. If the human wants a richer reply, the Haiku classifier already handles it — no schema change needed.
+- **Editing `config/personas/segments/work-patterns.md` to be persona-aware.** The issue explicitly drops this from scope. The segments architecture per `manifest.json` is intentionally universal; making segments persona-aware is a larger architectural change that should land separately if needed. We override via the PM overlay, not by forking segments.
+- **Adding a stop-hook to block Bash/Write/Edit until expectations is written.** Tempting because it would catch the failure mode structurally. Rejected for now (see Solution → Technical Approach for full rationale): it would have unacceptable false positives on legitimate triage Bash, the PM session is already read-only for Write/Edit (so the hook catches nothing useful), and the failure mode the issue worries about is overlay drift, which the loader warning already addresses.
+- **Renaming the reply tokens to something "more descriptive" (e.g., `plan-issue` / `skip-sdlc`).** The current tokens are load-bearing — chosen so a single-word Telegram reply contains enough lexical signal for the Haiku classifier to clear the 0.80 threshold against the stored expectations text. Multi-word tokens are no better. Renaming requires re-verifying the classifier; not worth it without a measured failure.
+- **Backfilling a GitHub issue for the existing PBA briefing LaunchAgents.** Out of scope (issue #1189 explicitly drops this). That's a separate cleanup decision (delete vs. retroactively legitimize) for the human, not part of this PM-persona fix.
+- **Generalizing the announce-and-pause flow to all personas.** Only the PM persona has the bucket #3 problem; the developer persona is *supposed* to autonomously implement, and the teammate persona doesn't dispatch coding work. Generalizing would be solving a problem we don't have.
 
 ## Risks
 
-### Risk 1: PM ignores the overlay rule in practice
-**Impact:** The persona text says one thing; the agent does another. Same failure mode as before.
-**Mitigation:** Three layers — (a) the announcement phrase becomes part of the explicit override table, making the rule unmissable in the prompt; (b) the loader warning catches overlay drift on the machine where production runs; (c) `tests/unit/test_pm_persona_guards.py` asserts the announcement phrase exists in the overlay file (CI gate). If the agent ignores all three, the structural hook approach (deferred to a follow-up) becomes warranted.
+### Risk 1: The PM agent ignores the new rule and implements anyway.
+**Impact:** The failure mode the plan is meant to prevent persists. The human still has no signal until after the work has shipped.
+**Mitigation:**
+- The loader warning at `sdk_client.py:919` ensures the rule is *physically present* in the overlay every time a PM session starts. If the overlay drifts (private file out of sync), the bridge logs WARN immediately.
+- The "PM Overrides of Shared Defaults" table directly contradicts the developer-flavored defaults the agent inherits, with the literal sentence "When the shared segment and this overlay disagree, this overlay wins." This is the strongest text-level intervention available.
+- 2-week observation window after merge: if the failure mode recurs, we revisit and add a structural enforcement (stop-hook). The plan explicitly defers the hook decision to a measured outcome.
 
-### Risk 2: Haiku classifier misroutes `plan` / `skip` reply
-**Impact:** Human types `plan`; classifier returns confidence 0.79; reply spawns a new session instead of resuming the dormant one. PM sits dormant with stale expectations indefinitely.
-**Mitigation:** The classifier prompt has been tested for similar short-token replies in the existing routing tests. The dormant session's `expectations` will contain the *full* announcement question, not just the tokens — so the Haiku model sees rich context. If the threshold is genuinely too tight, that's a routing-system bug independent of this issue. Mitigation: integration test in `tests/integration/test_unthreaded_routing.py` that asserts the route succeeds with confidence ≥0.80 for both `plan` and `skip` (and for a longer "yes please plan it" variant).
+### Risk 2: The Haiku classifier mismatches `plan` / `skip` replies.
+**Impact:** Human replies `plan`, but the router creates a new session instead of resuming. The PM never gets the answer; the human is confused.
+**Mitigation:**
+- The tokens are intentionally short and contextually distinctive against the stored `expectations` text ("Should I file an issue (plan) or skip SDLC (skip)?"). The 0.80 threshold has been load-tested in `tests/integration/test_unthreaded_routing.py` for similar single-word replies.
+- New integration test asserts both `plan` and `skip` reach confidence ≥ 0.80 against the workflow expectations text. If the test fails on real Haiku output, we adjust the expectations wording to make the match unambiguous.
 
-### Risk 3: Shared segment evolves and re-introduces conflicts
-**Impact:** If `work-patterns.md` is edited later (e.g., new "fix it autonomously" defaults added), the override table goes stale.
-**Mitigation:** The override table cites the specific lines it reverses. A future edit to `work-patterns.md` should grep for "PM Overrides of Shared Defaults" and update both files together. Document this in the override-table preamble.
-
-### Risk 4: Public template diverges from private overlay over time
-**Impact:** Dev-machine PM (using the public template) behaves differently from production PM (using the private overlay).
-**Mitigation:** `tests/unit/test_pm_persona_guards.py` asserts both files contain the announcement phrase and the override table. Both are checked in CI.
+### Risk 3: The in-repo template diverges from the private overlay.
+**Impact:** Dev machines without `~/Desktop/Valor/` load the in-repo template, which now mirrors the private overlay's "Intake and Triage" section. If the private overlay updates and the in-repo template doesn't, dev-machine PM sessions get stale rules.
+**Mitigation:**
+- This is an existing risk (the private overlay has always been the source of truth, the in-repo template a fallback). Not introduced by this plan.
+- Add a future audit task (out of scope for this plan): periodically diff the two files and flag divergence. Not in this plan; tracking only.
+- For this plan: when we ship, both files are updated atomically in the same PR. Future drift is a separate concern.
 
 ## Race Conditions
 
-No race conditions identified — all the operations in this flow are synchronous from the agent's perspective. The drafter writes `expectations` after the agent finishes its turn; the lifecycle transition to `dormant` happens after the write; the human reply arrives later as a separate event. There is no concurrent-write or shared-state hazard.
+No race conditions identified. All operations are synchronous from the agent's perspective:
+
+- Persona overlay loading is a one-shot file read at session startup (`agent/sdk_client.py::load_persona_prompt`).
+- The drafter runs synchronously after the agent's turn ends; `_persist_routing_fields` writes `expectations` before the transcript completes.
+- The transcript completion in `bridge/session_transcript.py:317` calls `transition_status(session, "dormant", ...)` after `expectations` is already persisted.
+- The unthreaded-message router runs only after a fresh message arrives, by which time the dormant session is fully persisted.
+
+There is no concurrent-session scenario where `expectations` could be read before written, or where the transition to `dormant` could race the routing decision.
 
 ## No-Gos (Out of Scope)
 
-- Editing `config/personas/segments/work-patterns.md` to be persona-aware. (See Rabbit Holes.)
-- Backfilling a GitHub issue for the existing PBA briefing LaunchAgents. (Separate cleanup decision.)
-- Adding a structural stop-hook to block tool calls until `expectations` is written. (Defer to a follow-up issue if needed; see Open Questions.)
-- Renaming the `plan`/`skip` reply tokens or adding new tokens.
-- Schema changes to `AgentSession` (`expectations` and `context_summary` already exist).
-- Changes to the bridge nudge loop or worker output routing.
+- Backfilling a GitHub issue for the existing 2026-04-28 PBA briefing LaunchAgents. Separate cleanup decision (delete vs. retroactively legitimize) for the human.
+- Editing `config/personas/segments/work-patterns.md` to be persona-aware. The segments architecture is intentionally universal per `manifest.json`. We override via the PM overlay, not by forking the segment.
+- Adding a stop-hook to block Bash/Write/Edit until `expectations` is written. Deferred unless the text-only approach proves insufficient over a 2-week observation window.
+- Renaming the `plan` / `skip` tokens. They are load-bearing for the routing classifier.
+- Generalizing the announce-and-pause flow to non-PM personas. Only PM has the bucket #3 problem.
+- Schema changes. `expectations` and `context_summary` already exist on AgentSession.
 
 ## Update System
 
-No update system changes required — this is a persona-text edit + a one-line warning in `agent/sdk_client.py`. The private overlay at `~/Desktop/Valor/personas/project-manager.md` is iCloud-synced and will reach all machines automatically once committed there. The public template is in the repo and propagates via normal `git pull`. The loader-warning code is loaded on session startup; no migration required for existing sessions.
+No update system changes required. This feature is purely internal to the PM persona overlay and a single loader-warning patch in `agent/sdk_client.py`. The standard `/update` workflow already pulls latest, restarts the bridge (which re-loads the persona at session startup), and runs doctor checks. There are no new dependencies, no new config files, no migration steps for existing installations.
+
+**One operational note:** The private overlay at `~/Desktop/Valor/personas/project-manager.md` lives outside the repo (iCloud-synced). After this PR merges, each bridge machine's private overlay must be hand-edited (or copied from the in-repo template) to add the new sections. This is a one-time per-machine action; the loader WARN log will flag any machine that hasn't been updated, so the operator gets immediate feedback. This is consistent with existing private-overlay handling (#1148 / PR #1152 took the same approach).
 
 ## Agent Integration
 
-No agent integration required — the PM persona file is loaded by `load_persona_prompt()` and injected into the PM session's system prompt at startup. No MCP server, bridge, or `.mcp.json` changes needed. The `expectations` and routing infrastructure are already wired and tested. The change is which text the PM reads, not which tools the agent has.
+No agent integration required — this is a persona-text + loader-warning change.
+
+- No new MCP server functionality.
+- No changes to `.mcp.json`.
+- No bridge code changes (`bridge/telegram_bridge.py` is unchanged; the PM persona is loaded by `agent/sdk_client.py::load_pm_system_prompt` which is unchanged structurally — only the overlay text and the in-loader substring check change).
+- The existing semantic-routing infrastructure (`bridge/session_router.py`, `bridge/message_drafter.py`, `agent/output_handler.py`) is used as designed; we don't add to it, we exercise it.
+- Integration test (`tests/integration/test_unthreaded_routing.py`) verifies the PM agent's `## Open Questions` flow works end-to-end via the existing routing path.
 
 ## Documentation
 
-- [ ] Create `docs/features/pm-workflow-announcement.md` describing the announce-then-pause flow, the `plan`/`skip` reply contract, and how it interacts with semantic routing. Include the literal announcement phrase so anyone debugging session expectations can match it.
-- [ ] Add an entry to `docs/features/README.md` under the PM/SDLC section linking to the new feature doc.
-- [ ] Update `docs/features/session-steering.md` (if it references intake-bucket behavior) with a cross-reference to the new feature doc.
-- [ ] Update `docs/features/pm-dev-session-architecture.md` with a brief note that PM bucket-#3 messages now require human confirmation before SDLC dispatch (and link to the new feature doc).
+### Feature Documentation
+- [ ] Update `docs/features/personas.md` with a new section "PM Workflow Announcement" describing what bucket #3 does, the literal announcement phrase, the `plan` / `skip` reply tokens, and the override semantics (one-time, does not persist).
+- [ ] No new `docs/features/<slug>.md` file needed — the PM workflow announcement is a feature *of* the personas system, not a new system. Adding a section to the existing `docs/features/personas.md` is the right home.
+- [ ] No update to `docs/features/README.md` index table required — the entry for "Personas" already exists at line 86 of the index and points at `personas.md`. The new section is internal to that doc.
+
+### External Documentation Site
+- This repo does not use Sphinx, Read the Docs, or MkDocs. Skipping.
+
+### Inline Documentation
+- [ ] Add a docstring to the new loader-warning block in `agent/sdk_client.py` explaining what the substring check guards against (overlay drift on bridge machines where the private overlay is iCloud-synced).
+- [ ] No new functions or public APIs introduced; existing docstrings unchanged.
 
 ## Success Criteria
 
 - [ ] `~/Desktop/Valor/personas/project-manager.md` bucket #3 contains the literal phrase "Unless you directly instruct me to skip our standard workflow"
-- [ ] `config/personas/project-manager.md` (public template) is updated to include an Intake and Triage section + the same bucket #3 wording as the private overlay
-- [ ] PM overlay (both files) contain a "What counts as a software change" enumeration explicitly naming LaunchAgents, cron, launchd, shell scripts, runtime config files, infrastructure, and new dependencies
-- [ ] PM overlay (both files) contain a "PM Overrides of Shared Defaults" table that reverses ≥5 specific developer-flavored defaults from `work-patterns.md` and ends with "When the shared segment and this overlay disagree, this overlay wins"
-- [ ] `agent/sdk_client.py` emits a `WARNING` log when the PM overlay is loaded and does NOT contain the substring "Unless you directly instruct me to skip"
-- [ ] New unit test confirms a PM agent response ending with a `## Open Questions` section containing the workflow question populates `session.expectations` with the question text
-- [ ] New integration test confirms a fresh unthreaded `plan` or `skip` reply in the same chat routes back to the dormant session at confidence ≥ 0.80
-- [ ] No regression in `tests/unit/test_open_question_gate.py` or `tests/integration/test_unthreaded_routing.py`
+- [ ] `config/personas/project-manager.md` (in-repo template) has an "Intake and Triage" section matching the private overlay's bucket #3 wording
+- [ ] PM overlay (both files) contains a "What counts as a software change (issue required)" enumeration explicitly naming LaunchAgents, cron, launchd, shell scripts, runtime config files, infrastructure, and new dependencies
+- [ ] PM overlay (both files) contains a "PM Overrides of Shared Defaults" table reversing ≥5 specific developer-flavored defaults from `work-patterns.md` and ending with "When the shared segment and this overlay disagree, this overlay wins"
+- [ ] `agent/sdk_client.py` emits a WARN log when the PM overlay is loaded and does NOT contain the substring "Unless you directly instruct me to skip"
+- [ ] New unit test confirms a PM agent response containing a `## Open Questions` section with the workflow question populates `session.expectations` with the question text (in `tests/unit/test_open_question_gate.py`)
+- [ ] New unit test confirms the loader WARN fires when the PM overlay is missing the workflow-announcement substring (in `tests/unit/test_persona_loading.py`)
+- [ ] New integration test confirms a fresh unthreaded `plan` or `skip` reply in the same chat routes back to the dormant session at confidence ≥ 0.80 (in `tests/integration/test_unthreaded_routing.py`)
+- [ ] No regression in `tests/unit/test_open_question_gate.py`, `tests/integration/test_unthreaded_routing.py`, or `tests/unit/test_persona_loading.py`
+- [ ] `docs/features/personas.md` has a new section describing the PM Workflow Announcement
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
-This is a small persona-text + thin Python plan. One builder, one validator, one documentarian.
-
 ### Team Members
 
-- **Builder (persona-edits)**
-  - Name: persona-builder
-  - Role: Edit the private overlay, public template, and `agent/sdk_client.py` warning. Add new tests.
+- **Builder (persona overlay text)**
+  - Name: `pm-overlay-builder`
+  - Role: Edit both PM overlay files (private and in-repo template) — replace bucket #3, add "What counts as a software change" enumeration, add "PM Overrides of Shared Defaults" table.
   - Agent Type: builder
-  - Resume: true
+  - Resume: false
 
-- **Validator (persona-edits)**
-  - Name: persona-validator
-  - Role: Verify the announcement phrase exists in both files, the override table reverses ≥5 defaults, the warning fires under the missing-phrase condition, and all new and existing tests pass.
+- **Builder (loader patch + tests)**
+  - Name: `loader-builder`
+  - Role: Add the parallel WARN block in `agent/sdk_client.py:919–924`, write the new unit test in `test_persona_loading.py`, write the new test in `test_open_question_gate.py`, write the new integration test in `test_unthreaded_routing.py`.
+  - Agent Type: builder
+  - Resume: false
+
+- **Validator (full suite)**
+  - Name: `pm-overlay-validator`
+  - Role: Run unit and integration tests, lint and format, verify all Success Criteria checkboxes are objectively met by inspecting the diff.
   - Agent Type: validator
-  - Resume: true
+  - Resume: false
 
 - **Documentarian**
-  - Name: pm-docs
-  - Role: Write `docs/features/pm-workflow-announcement.md` and update the index + cross-references.
+  - Name: `pm-overlay-documentarian`
+  - Role: Update `docs/features/personas.md` with the new section.
   - Agent Type: documentarian
-  - Resume: true
+  - Resume: false
 
 ## Step by Step Tasks
 
-### 1. Edit the private overlay (`~/Desktop/Valor/personas/project-manager.md`)
-- **Task ID**: build-private-overlay
+### 1. Update both PM overlay files
+- **Task ID**: build-overlay
 - **Depends On**: none
-- **Validates**: file contains "Unless you directly instruct me to skip"; "What counts as a software change" enumeration; "PM Overrides of Shared Defaults" table
-- **Informed By**: Recon Summary in issue #1189; existing bucket #3 at line 96
-- **Assigned To**: persona-builder
+- **Validates**: bucket #3 text matches the spec verbatim; "What counts" enumeration includes all 7 named artifact categories; "PM Overrides" table reverses ≥5 work-patterns defaults; both files end the table with "When the shared segment and this overlay disagree, this overlay wins."
+- **Informed By**: none
+- **Assigned To**: pm-overlay-builder
 - **Agent Type**: builder
-- **Parallel**: false
-- Rewrite bucket #3 to include the literal announcement phrase, the `plan`/`skip` token contract, the `## Open Questions` requirement, and the "no implementation in the same turn" rule. Expand the bucket description to include automation, scripts, runtime config, infrastructure, and new dependencies.
-- Add "What counts as a software change (issue required)" section enumerating LaunchAgents, cron, launchd, systemd, shell/Python/Node scripts, `.env`, `projects.json`, `.mcp.json`, `settings.json`, plist files, Vercel/Render/SMTP/DNS/IAM, new dependencies, new files under `~/Library/LaunchAgents/`, `~/.local/bin/`, `/etc/`, `~/Library/LaunchDaemons/`. Plus a "no-issue tasks (handle directly)" sub-list for replying, status, GitHub issue management, sending messages, searching memory, running existing read-only tools.
-- Add "PM Overrides of Shared Defaults" table with at least 5 rows reversing the developer-flavored defaults from `config/personas/segments/work-patterns.md` (code-changes-don't-need-check-ins → bucket #3 announcement required; implementation-detail-my-call → ask before code/config changes; fix-the-bug-yourself → file an issue first; reversible-decisions-just-do-it → not for software changes; YOLO mode for everything → YOLO mode does not extend to bypassing SDLC). Closing line: "When the shared segment and this overlay disagree, this overlay wins."
+- **Parallel**: true
+- Edit `~/Desktop/Valor/personas/project-manager.md` line 96 — replace bucket #3 with the announce-then-pause version per Solution → Technical Approach §1
+- Edit `config/personas/project-manager.md` — add a new `## Intake and Triage` section before `## Hard Rules` mirroring the private overlay's bucket #3 content
+- Add "What counts as a software change (issue required)" enumeration to BOTH files (private + in-repo) immediately after the new bucket #3 / Intake and Triage section
+- Add "PM Overrides of Shared Defaults" table to BOTH files immediately after the "What counts" enumeration
+- End each "PM Overrides" table with the literal sentence: "When the shared segment and this overlay disagree, this overlay wins."
 
-### 2. Edit the public template (`config/personas/project-manager.md`)
-- **Task ID**: build-public-template
-- **Depends On**: build-private-overlay
-- **Validates**: file contains the same announcement phrase, enumeration, and override table
-- **Informed By**: build-private-overlay (mirror the same content)
-- **Assigned To**: persona-builder
+### 2. Patch the loader and add tests
+- **Task ID**: build-loader-and-tests
+- **Depends On**: none (can run parallel to overlay edit)
+- **Validates**: `tests/unit/test_persona_loading.py` (existing + new), `tests/unit/test_open_question_gate.py` (existing + new), `tests/integration/test_unthreaded_routing.py` (existing + new); `agent/sdk_client.py` has the parallel WARN block at line ~924
+- **Informed By**: none
+- **Assigned To**: loader-builder
 - **Agent Type**: builder
-- **Parallel**: false
-- Add an "Intake and Triage" section to the public template (currently absent) that mirrors the private overlay's bucket structure. The private overlay is the authority for production; the public template is the authority for dev machines per `_resolve_overlay_path` fallback.
-- Add the same "What counts as a software change" enumeration and "PM Overrides of Shared Defaults" table as the private overlay.
+- **Parallel**: true
+- Add the parallel WARN block in `agent/sdk_client.py` immediately after the existing CRITIQUE warning (currently at lines 919–923)
+- Add `TestPMWorkflowAnnouncementWarning` test class to `tests/unit/test_persona_loading.py` asserting the WARN log fires when the overlay is missing the workflow-announcement substring (mirror existing CRITIQUE-warning test pattern)
+- Add `TestWorkflowAnnouncementExtraction` test class to `tests/unit/test_open_question_gate.py` asserting `## Open Questions` extraction works for the workflow phrase
+- Add `TestPlanSkipReplyRouting` test class to `tests/integration/test_unthreaded_routing.py` asserting `plan` and `skip` replies match dormant sessions at confidence ≥ 0.80
 
-### 3. Add the loader warning (`agent/sdk_client.py`)
-- **Task ID**: build-loader-warning
-- **Depends On**: build-public-template
-- **Validates**: tests/unit/test_sdk_client_persona_warnings.py (new); ruff check passes
-- **Informed By**: existing CRITIQUE-missing warning at line 919; existing dev-session deprecation warning at line 924
-- **Assigned To**: persona-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Inside `load_persona_prompt`, after the existing two warnings (lines 919 and 924), add a third `if` block checking for the announcement phrase. Match the pattern of the existing warnings. Use `logger.warning` with the same message shape.
-- Run `python -m ruff format agent/sdk_client.py && python -m ruff check agent/sdk_client.py`.
-
-### 4. Write tests
-- **Task ID**: build-tests
-- **Depends On**: build-loader-warning
-- **Validates**: pytest tests/unit/test_sdk_client_persona_warnings.py; pytest tests/unit/test_pm_persona_guards.py; pytest tests/unit/test_open_question_gate.py; pytest tests/integration/test_unthreaded_routing.py
-- **Informed By**: existing test patterns in test_open_question_gate.py and test_pm_persona_guards.py
-- **Assigned To**: persona-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Add a new test case to `tests/unit/test_pm_persona_guards.py`: assert the private overlay (and public template) contain the announcement phrase, the enumeration of software-change categories, and the override table with ≥5 rows ending with "this overlay wins".
-- Add a new test case to `tests/unit/test_open_question_gate.py` (or equivalent): assert that a PM-shaped response containing the workflow announcement + `## Open Questions` populates `expectations` correctly.
-- Add a new test case to `tests/integration/test_unthreaded_routing.py`: assert that a fresh `plan` reply and a fresh `skip` reply each route back to the dormant session at confidence ≥ 0.80 when the dormant session's `expectations` contains the workflow question.
-- Create `tests/unit/test_sdk_client_persona_warnings.py` (or extend an existing similar file): assert that loading the PM persona from a temporary overlay file missing the announcement phrase emits a WARNING log via `caplog`.
-
-### 5. Validate
-- **Task ID**: validate-edits
-- **Depends On**: build-tests
-- **Assigned To**: persona-validator
+### 3. Validate
+- **Task ID**: validate-all
+- **Depends On**: build-overlay, build-loader-and-tests
+- **Assigned To**: pm-overlay-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_pm_persona_guards.py tests/unit/test_open_question_gate.py tests/unit/test_sdk_client_persona_warnings.py tests/integration/test_unthreaded_routing.py -v`.
-- Run `python -m ruff check . && python -m ruff format --check .`.
-- Verify the announcement phrase exists in both persona files via `grep`.
-- Verify the loader warning fires by loading a PM persona overlay missing the phrase (use a tmp file) and asserting the warning is emitted.
-- Report pass/fail.
+- Run `pytest tests/unit/test_persona_loading.py tests/unit/test_open_question_gate.py tests/integration/test_unthreaded_routing.py -v`
+- Run `python -m ruff check .` and `python -m ruff format --check .`
+- Verify each Success Criteria checkbox by inspecting the diff and the running PM session's loader log
+- Report pass/fail status
 
-### 6. Documentation
-- **Task ID**: document-feature
-- **Depends On**: validate-edits
-- **Assigned To**: pm-docs
+### 4. Document
+- **Task ID**: document-pm-workflow-announcement
+- **Depends On**: validate-all
+- **Assigned To**: pm-overlay-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/pm-workflow-announcement.md` describing the flow (announce → expectations write → dormant → human reply → semantic route → resume). Include the literal phrase. Cross-reference `bridge/session_router.py`, `bridge/message_drafter.py:1725`, and `agent/output_handler.py:380`.
-- Add an entry to `docs/features/README.md` index table.
-- Add a cross-reference from `docs/features/session-steering.md` and `docs/features/pm-dev-session-architecture.md` if appropriate.
+- Add new section "PM Workflow Announcement" to `docs/features/personas.md`
+- Document the announcement phrase, the `plan` / `skip` reply tokens, and the override semantics (one-time, does not persist)
+- Cross-reference the issue (#1189), the loader warning location (`agent/sdk_client.py:919`), and the existing routing infrastructure (`bridge/session_router.py`, `bridge/message_drafter.py`)
+- Verify `docs/features/README.md` index entry for "Personas" still points at this doc (no index change needed)
 
-### 7. Final validation
-- **Task ID**: validate-all
-- **Depends On**: document-feature
-- **Assigned To**: persona-validator
+### 5. Final validation
+- **Task ID**: final-validate
+- **Depends On**: document-pm-workflow-announcement
+- **Assigned To**: pm-overlay-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run all tests: `pytest tests/ -x -q`.
-- Run lint and format: `python -m ruff check . && python -m ruff format --check .`.
-- Verify all success criteria are met.
-- Generate final report.
+- Run full test suite: `pytest tests/ -x -q` (no regressions in any test file)
+- Verify all Success Criteria checkboxes
+- Generate final report
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_pm_persona_guards.py tests/unit/test_open_question_gate.py tests/unit/test_sdk_client_persona_warnings.py tests/integration/test_unthreaded_routing.py -x -q` | exit code 0 |
+| Tests pass | `pytest tests/unit/test_persona_loading.py tests/unit/test_open_question_gate.py tests/integration/test_unthreaded_routing.py -x -q` | exit code 0 |
+| Full suite passes | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Private overlay has announcement phrase | `grep -c "Unless you directly instruct me to skip" ~/Desktop/Valor/personas/project-manager.md` | output > 0 |
-| Public template has announcement phrase | `grep -c "Unless you directly instruct me to skip" config/personas/project-manager.md` | output > 0 |
-| Loader has new warning check | `grep -c "Unless you directly instruct me to skip" agent/sdk_client.py` | output > 0 |
-| Override table closing line present | `grep -c "this overlay wins" config/personas/project-manager.md` | output > 0 |
+| Private overlay has the announcement phrase | `grep -q "Unless you directly instruct me to skip our standard workflow" ~/Desktop/Valor/personas/project-manager.md` | exit code 0 |
+| In-repo template has the announcement phrase | `grep -q "Unless you directly instruct me to skip our standard workflow" config/personas/project-manager.md` | exit code 0 |
+| In-repo template has "PM Overrides of Shared Defaults" table | `grep -q "PM Overrides of Shared Defaults" config/personas/project-manager.md` | exit code 0 |
+| In-repo template has the closing sentence | `grep -q "When the shared segment and this overlay disagree, this overlay wins." config/personas/project-manager.md` | exit code 0 |
+| Loader has the new WARN block | `grep -q "Unless you directly instruct me to skip" agent/sdk_client.py` | exit code 0 |
+| Docs updated | `grep -q "PM Workflow Announcement" docs/features/personas.md` | exit code 0 |
 
 ## Critique Results
 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-|          |        |         |              |                     |
 
 ---
 
 ## Open Questions
 
-1. **Text-only or text+hook?** The issue explicitly raises this. Recommendation: ship text-only first (this plan), file a follow-up issue for a structural stop-hook only if a real incident shows text-only is insufficient. The lighter path has precedent (#1007/PR #1009) and the heavier path is non-trivial to maintain. Confirm direction before BUILD.
-
-2. **Public template scope.** The public template `config/personas/project-manager.md` does NOT currently have an Intake and Triage section — it's scoped to Hard Rules only. This plan adds the Intake section (mirroring the private overlay) so dev-machine PMs behave consistently with production. Confirm this is the right call vs. limiting the change to the private overlay only. Recommendation: add it to the public template — the public template is the documented fallback per `_resolve_overlay_path`, and dev-machine PMs need consistent behavior or the test gate at `tests/unit/test_pm_persona_guards.py` won't catch overlay drift on dev machines.
+1. **Text-only vs. text + structural hook?** The plan adopts text-only (Solution → Technical Approach explains why). The remaining decision: are you comfortable with the 2-week observation window before revisiting the hook decision? If you want a faster signal (e.g., 1 week, or measured per-incident rather than per-window), say so and I will adjust the post-merge follow-up commitment.
+2. **In-repo template structure**: the freshness check found that `config/personas/project-manager.md` does NOT currently mirror the private overlay's "Role / How I Work / Intake and Triage" content — it's only the pipeline-rules overlay. The plan adds a new `## Intake and Triage` section to satisfy AC#2. Is that the right structural placement, or do you want a separate `config/personas/project-manager-triage.md` file the loader concatenates? (The plan assumes single-file additions are simpler.)
+3. **Should the "skip" override be one-time or session-wide?** The plan specifies one-time (the next bucket-#3 message in the same session re-fires the announcement). Alternative: session-wide (once skipped, the rest of this session bypasses bucket #3). The plan defaults to one-time because session-wide creates ambiguity if the human switches topics mid-session. Confirm.
