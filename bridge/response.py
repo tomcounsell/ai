@@ -106,6 +106,11 @@ INVALID_REACTIONS = [
 # Reaction emojis for different stages (all validated 2026-02-13)
 REACTION_RECEIVED = "👀"  # Message acknowledged
 REACTION_PROCESSING = "🤔"  # Default thinking emoji
+# REACTION_ABORT parallels REACTION_RECEIVED for the steering-ack path: when a
+# user's follow-up matches an abort keyword, the bridge salutes (🫡 = "understood,
+# standing down") instead of the standard "noted" eyes. Selected inside
+# _ack_steering_routed() in bridge/telegram_bridge.py — never at call sites.
+REACTION_ABORT = "🫡"  # Steering abort acknowledged
 
 # REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS are re-exported from
 # agent.constants (canonical location) — imported at top of file for
