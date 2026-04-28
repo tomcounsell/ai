@@ -65,7 +65,7 @@ _VOICE_FALLBACK_MAP: dict[str, str] = {
     "shimmer": "af_sky",
 }
 
-KOKORO_DEFAULT_VOICE = "af_bella"
+KOKORO_DEFAULT_VOICE = "am_michael"  # bf_alice is a nice change for a female voice
 OPENAI_DEFAULT_VOICE = "nova"
 
 # Default location for downloaded Kokoro ONNX models.
@@ -163,7 +163,7 @@ def _resolve_voice(voice: str, backend: str) -> tuple[str | None, dict | None]:
 
     Returns (resolved_voice, error_dict). Exactly one will be non-None.
 
-    - "default" maps to backend canonical (af_bella for kokoro, nova for cloud).
+    - "default" maps to backend canonical (am_michael for kokoro, nova for cloud).
     - Caller's voice valid on selected backend -> use as-is.
     - Caller's voice valid on the OTHER backend -> remap via _VOICE_FALLBACK_MAP
       and emit an INFO log line.

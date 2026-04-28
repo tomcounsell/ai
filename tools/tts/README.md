@@ -74,7 +74,7 @@ Set the `OPENAI_API_KEY` environment variable. (`pip install openai` is already 
 
 | Backend | Default | Catalog (subset) |
 |---------|---------|------------------|
-| Kokoro  | `af_bella` | `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `am_adam`, `am_michael`, `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis` |
+| Kokoro  | `am_michael` | `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `am_adam`, `am_michael`, `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis` |
 | OpenAI  | `nova`     | `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer` |
 
 `voice="default"` always resolves to the selected backend's canonical voice. If you pass a Kokoro-only voice and the cloud backend ends up being selected (or vice versa), the `_VOICE_FALLBACK_MAP` remaps to a roughly equivalent voice and emits an INFO log line (`tts.voice_remapped`).

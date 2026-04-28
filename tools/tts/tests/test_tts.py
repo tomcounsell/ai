@@ -85,7 +85,7 @@ class TestVoiceResolution:
 
         voice, err = _resolve_voice("default", "kokoro")
         assert err is None
-        assert voice == "af_bella"
+        assert voice == "am_michael"
 
     def test_default_resolves_canonical_cloud(self):
         from tools.tts import _resolve_voice

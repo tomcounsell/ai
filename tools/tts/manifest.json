@@ -41,7 +41,7 @@
   "config": {
     "default_format": "opus",
     "supported_formats": ["opus"],
-    "kokoro_default_voice": "af_bella",
+    "kokoro_default_voice": "am_michael",
     "openai_default_voice": "nova",
     "kokoro_cache_ttl_s": 60,
     "max_text_length": 4096
