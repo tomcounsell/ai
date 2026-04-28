@@ -301,9 +301,37 @@ def _create_continuation_pm(
             Preserves full enriched PM→dev payloads; the prior 500-char cap
             silently truncated task content after the routing headers
             (see issue #1109).
+
+    Spawn contract (issue #1195):
+      * The created session always has a non-``None`` ``session_id`` and
+        ``working_dir``. ``session_id`` follows the chain pattern
+        ``f"{parent.session_id}_cont{new_depth}"`` so the continuation chain
+        is debuggable from the id alone (e.g. ``valor-session status``).
+      * ``working_dir`` is resolved via ``_resolve_working_dir_for_parent``
+        (parent ``project_config.working_directory`` → ``projects.json``
+        lookup → ``os.getcwd()`` fallback). Never ``None``.
+      * Spawn uses the typed ``_AgentSession.create_pm`` factory, which
+        enforces both fields by Python signature. The raw permissive
+        ``_AgentSession.create`` was the historical offender (#1195).
+      * If ``parent.session_id`` is ``None`` (theoretically possible for a
+        malformed parent), the spawn is skipped with a structured error log
+        rather than poisoning the chain with another ``None``-id session.
     """
     try:
         from models.agent_session import AgentSession as _AgentSession
+
+        # --- Guard: parent must have a real session_id (issue #1195) ---
+        # Without it, we cannot derive the continuation chain id (and any
+        # downstream code that calls sanitize_branch_name(session_id) would
+        # crash on None). Skip the spawn rather than poison the chain.
+        if not getattr(parent, "session_id", None):
+            _pid = getattr(parent, "agent_session_id", None) or getattr(parent, "id", "?")
+            logger.error(
+                "[continuation-pm-blocked] parent.session_id is None for "
+                f"parent_id={_pid} "
+                "— refusing to spawn continuation PM with a None-id chain."
+            )
+            return
 
         # --- Depth cap (CONCERN 4) ---
         parent_depth = 0
@@ -353,17 +381,26 @@ def _create_continuation_pm(
         if issue_number:
             message += f"\n\nTracking: https://github.com/tomcounsell/ai/issues/{issue_number}"
 
-        # --- Create the continuation PM session ---
+        # --- Create the continuation PM session (issue #1195) ---
+        # Use the typed `create_pm` factory rather than raw `create(...)`. The
+        # factory's signature requires `session_id` and `working_dir`, so a
+        # missing field surfaces at the call site instead of silently saving
+        # a None-field session that crashes the executor at startup. Both
+        # values are resolved from the parent and the existing
+        # `_resolve_working_dir_for_parent` helper below.
         new_depth = parent_depth + 1
-        continuation = _AgentSession.create(
-            session_type="pm",
+        new_session_id = f"{parent.session_id}_cont{new_depth}"
+        working_dir = _resolve_working_dir_for_parent(parent)
+        continuation = _AgentSession.create_pm(
+            session_id=new_session_id,
             project_key=getattr(parent, "project_key", "valor"),
-            status="pending",
-            chat_id=getattr(parent, "chat_id", None),
+            working_dir=working_dir,
+            chat_id=str(getattr(parent, "chat_id", "") or ""),
+            telegram_message_id=0,
             message_text=message,
+            status="pending",
             parent_agent_session_id=parent_id,
             continuation_depth=new_depth,
-            created_at=datetime.now(tz=UTC),
             turn_count=0,
             tool_call_count=0,
         )

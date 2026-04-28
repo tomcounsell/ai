@@ -265,6 +265,15 @@ The continuation PM is a new `AgentSession(session_type="pm", status="pending")`
 - `parent_agent_session_id` set to the original PM for lineage tracking.
 - `continuation_depth` incremented from the parent's value (capped at 3 to prevent runaway chains).
 
+**Spawn contract (issue #1195)**: Continuation PMs are created via the typed `_AgentSession.create_pm(...)` factory, which enforces required fields by Python signature. Two invariants hold for every spawn:
+
+- `session_id` follows the chain pattern `f"{parent.session_id}_cont{depth}"` (e.g. `pm-12345_cont1`, then `pm-12345_cont1_cont2` if a second continuation chains off the first). The chain depth is encoded in the id so debugging via `valor-session status --id ...` is one lookup.
+- `working_dir` is resolved through `_resolve_working_dir_for_parent(parent)` — parent `project_config.working_directory` first, then the `projects.json` lookup keyed by `parent.project_key`, then `os.getcwd()` as the final fallback. Never `None`.
+
+If `parent.session_id` is somehow `None` (theoretically possible for a malformed parent), the spawn is skipped with a `[continuation-pm-blocked]` error log rather than poisoning the chain with another `None`-id session.
+
+**Defense-in-depth executor guard (issue #1195)**: `agent/session_executor.py::_execute_agent_session` checks both `working_dir` and `session_id` for `None` before reaching `Path(session.working_dir)`. Any future spawn site that forgets a required field is caught here: the session is marked `failed` with `failure_reason="missing_working_dir_or_session_id"` and a `[executor-guard]` structured error is logged. This converts what was a silent `TypeError` mid-startup (no Telegram surface, no failure record) into an observable failure that dashboards and reflections pick up.
+
 **Deduplication**: Redis `SETNX` on key `continuation-pm:{parent_id}` (300s TTL) ensures only one continuation PM per parent, even when multiple Dev sessions complete simultaneously.
 
 **Monitoring**: The `[continuation-pm-created]` structured log tag is searchable by `scripts/reflections.py`. Daily metrics are tracked at `metrics:continuation_pm_created:{date}`.

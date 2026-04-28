@@ -631,6 +631,51 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 _hb_err,
             )
 
+        # Defense-in-depth guard (issue #1195): convert silent TypeError on
+        # `Path(None)` (or downstream `sanitize_branch_name(None)` AttributeError)
+        # into an observable failure. The historical offender was
+        # `_create_continuation_pm` saving sessions with both fields ``None``;
+        # any future spawn site that forgets a required field will fail loudly
+        # here instead of mid-startup with no Telegram message. The session is
+        # marked ``failed`` so dashboards / reflections surface it.
+        if session.working_dir is None or session.session_id is None:
+            offending_field = "working_dir" if session.working_dir is None else "session_id"
+            _aid = getattr(session, "agent_session_id", None) or getattr(session, "id", "?")
+            _stype = getattr(session, "session_type", "?")
+            _parent = getattr(session, "parent_agent_session_id", None)
+            logger.error(
+                "[executor-guard] Refusing to start session with None "
+                f"{offending_field} "
+                f"(reason=missing_working_dir_or_session_id): "
+                f"agent_session_id={_aid} "
+                f"session_type={_stype} "
+                f"parent_agent_session_id={_parent} "
+                f"working_dir={session.working_dir!r} session_id={session.session_id!r}"
+            )
+            try:
+                from models.session_lifecycle import finalize_session  # noqa: PLC0415
+
+                finalize_session(
+                    session,
+                    "failed",
+                    reason=f"missing_working_dir_or_session_id: {offending_field} is None",
+                )
+            except Exception as finalize_err:
+                logger.error(
+                    "[executor-guard] finalize_session(failed) raised: %s",
+                    finalize_err,
+                )
+                # Last-resort: mark status directly so the worker doesn't loop on
+                # this entry. ``reason`` is not a stored field on AgentSession —
+                # the structured ``[executor-guard]`` log above is the canonical
+                # reason record (visible to reflections / dashboards via log).
+                try:
+                    session.status = "failed"
+                    session.save(update_fields=["status", "updated_at"])
+                except Exception:
+                    pass
+            return
+
         working_dir = Path(session.working_dir)
         allowed_root = Path.home() / "src"
         is_wt = WORKTREES_DIR in str(working_dir)

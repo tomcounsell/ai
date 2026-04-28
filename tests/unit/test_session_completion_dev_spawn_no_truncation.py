@@ -32,6 +32,7 @@ def _make_parent() -> MagicMock:
     parent.session_id = "pm-parent"
     parent.agent_session_id = "pm-parent-uuid"
     parent.project_key = "valor"
+    parent.working_dir = "/tmp"
     parent.chat_id = "0"
     parent.continuation_depth = 0
     parent.project_config = None
@@ -82,17 +83,22 @@ class TestContinuationPMPreservesFullPayload:
         agent_session = _make_agent_session()
         long_result = _build_long_payload(2000)
 
-        # Capture the create() kwargs to inspect message_text.
+        # Capture the create_pm() kwargs to inspect message_text.
+        # Issue #1195: continuation PM spawn switched from raw `create(...)` to
+        # the typed `create_pm(...)` factory.
         captured_kwargs: dict = {}
 
-        def fake_create(**kwargs):
+        def fake_create_pm(**kwargs):
             captured_kwargs.update(kwargs)
             m = MagicMock()
-            m.session_id = "continuation-pm"
+            m.session_id = kwargs.get("session_id", "continuation-pm")
             return m
 
         with (
-            patch("models.agent_session.AgentSession.create", side_effect=fake_create),
+            patch(
+                "models.agent_session.AgentSession.create_pm",
+                side_effect=fake_create_pm,
+            ),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
         ):
             mock_redis.set.return_value = True  # acquire dedup lock
@@ -119,6 +125,11 @@ class TestContinuationPMPreservesFullPayload:
         # The message_text must be longer than the old 500-char ceiling so
         # callers can verify we're no longer pinned to the broken cap.
         assert len(message_text) > 1500
+        # Issue #1195: spawn contract — both fields populated.
+        assert captured_kwargs.get("session_id") is not None
+        assert captured_kwargs.get("working_dir") is not None
+        # session_id chain pattern.
+        assert captured_kwargs["session_id"] == "pm-parent_cont1"
 
     def test_handle_dev_completion_raises_preview_cap_above_500(self):
         """The preview built by _handle_dev_session_completion must be >500 chars.
