@@ -17,6 +17,58 @@ logger = logging.getLogger(__name__)
 REGISTRY_PATH = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
 RUNS_PER_PAGE = 20
 
+GROUP_AGENTS = "agents"
+GROUP_HOUSEKEEPING = "housekeeping"
+GROUP_AUDITS = "audits"
+GROUP_MEMORY = "memory"
+
+GROUP_DISPLAY_ORDER = [GROUP_AGENTS, GROUP_HOUSEKEEPING, GROUP_AUDITS, GROUP_MEMORY]
+
+GROUP_DESCRIPTIONS: dict[str, str] = {
+    GROUP_AGENTS: "Liveness, throttling, circuit health, and recovery for agent sessions",
+    GROUP_HOUSEKEEPING: "Redis cleanup, disk checks, analytics rollup, and branch pruning",
+    GROUP_AUDITS: "Daily review of code, docs, hooks, skills, and Sentry issues",
+    GROUP_MEMORY: "Deduplication, decay pruning, quality audits, and knowledge reindexing",
+}
+
+REFLECTION_GROUPS: dict[str, str] = {
+    "session-liveness-check": GROUP_AGENTS,
+    "agent-session-cleanup": GROUP_AGENTS,
+    "circuit-health-gate": GROUP_AGENTS,
+    "session-count-throttle": GROUP_AGENTS,
+    "failure-loop-detector": GROUP_AGENTS,
+    "session-recovery-drip": GROUP_AGENTS,
+    "session-intelligence": GROUP_AGENTS,
+    "system-health-digest": GROUP_AGENTS,
+    "redis-index-cleanup": GROUP_HOUSEKEEPING,
+    "redis-ttl-cleanup": GROUP_HOUSEKEEPING,
+    "disk-space-check": GROUP_HOUSEKEEPING,
+    "analytics-rollup": GROUP_HOUSEKEEPING,
+    "merged-branch-cleanup": GROUP_HOUSEKEEPING,
+    "stale-branch-cleanup": GROUP_HOUSEKEEPING,
+    "behavioral-learning": GROUP_HOUSEKEEPING,
+    "tech-debt-scan": GROUP_AUDITS,
+    "redis-quality-audit": GROUP_AUDITS,
+    "daily-log-review": GROUP_AUDITS,
+    "documentation-audit": GROUP_AUDITS,
+    "skills-audit": GROUP_AUDITS,
+    "hooks-audit": GROUP_AUDITS,
+    "feature-docs-audit": GROUP_AUDITS,
+    "pr-review-audit": GROUP_AUDITS,
+    "task-backlog-check": GROUP_AUDITS,
+    "principal-staleness": GROUP_AUDITS,
+    "sentry-issue-triage": GROUP_AUDITS,
+    "daily-report-and-notify": GROUP_AUDITS,
+    "memory-dedup": GROUP_MEMORY,
+    "memory-decay-prune": GROUP_MEMORY,
+    "memory-quality-audit": GROUP_MEMORY,
+    "knowledge-reindex": GROUP_MEMORY,
+}
+
+
+def _classify_group(name: str) -> str:
+    return REFLECTION_GROUPS.get(name, GROUP_HOUSEKEEPING)
+
 
 def _load_registry() -> list[dict]:
     """Load the reflections registry from config/reflections.yaml."""
@@ -68,11 +120,14 @@ def get_all_reflections() -> list[dict]:
         reflections.append(
             {
                 "name": name,
+                "group": _classify_group(name),
                 "description": config.get("description", ""),
                 "interval": interval,
                 "priority": config.get("priority", "normal"),
                 "enabled": config.get("enabled", True),
                 "execution_type": config.get("execution_type", "unknown"),
+                "callable": config.get("callable"),
+                "command": config.get("command"),
                 "last_run": ran_at,
                 "next_due": next_due,
                 "due_in_seconds": due_in_seconds,
@@ -93,6 +148,50 @@ def get_all_reflections() -> list[dict]:
     with_due.sort(key=lambda r: r["next_due"])
 
     return with_due + without_due
+
+
+def get_grouped_reflections() -> list[dict]:
+    """Return reflections bucketed by group, in display order.
+
+    Empty groups are omitted. Within each group, the existing sort from
+    `get_all_reflections()` is preserved (soonest next_due first, then
+    entries without next_due).
+
+    Returns:
+        List of {"group": str, "items": [reflection, ...]} dicts.
+    """
+    reflections = get_all_reflections()
+    by_group: dict[str, list[dict]] = {g: [] for g in GROUP_DISPLAY_ORDER}
+    for r in reflections:
+        by_group.setdefault(r["group"], []).append(r)
+    groups = []
+    for g in GROUP_DISPLAY_ORDER:
+        items = by_group.get(g) or []
+        if not items:
+            continue
+        cadence_set = sorted({r["interval"] for r in items if r.get("interval")})
+        groups.append(
+            {
+                "group": g,
+                "description": GROUP_DESCRIPTIONS.get(g, ""),
+                "reflections": items,
+                "count": len(items),
+                "cadences": cadence_set,
+                "any_error": any(
+                    r["enabled"] and r["last_status"] in ("error", "failed") for r in items
+                ),
+                "off_count": sum(1 for r in items if not r["enabled"]),
+            }
+        )
+    return groups
+
+
+def get_reflection_detail(name: str) -> dict | None:
+    """Return a single reflection's merged config + state, or None."""
+    for r in get_all_reflections():
+        if r["name"] == name:
+            return r
+    return None
 
 
 def get_run_history(name: str, page: int = 1) -> dict:
