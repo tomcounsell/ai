@@ -92,7 +92,7 @@ This change touches only the *outbound ack* side of the steering data flow. The 
 - **Coupling**: slightly *decreases* coupling — removes six hardcoded user-facing string literals from infrastructure code, leaving only logger lines (internal observability) behind.
 - **Data ownership**: unchanged. The PM persona owns user-facing utterances; this change removes the bridge's overreach into that domain.
 - **Reversibility**: trivial. The six edits are localized and the precedent helper (`set_reaction`) already exists. Reverting is a single-commit rollback.
-- **New constant**: `bridge/response.py` gains `REACTION_ABORT = "🛑"` to parallel the existing `REACTION_RECEIVED`. The constant pattern is already established (lines 107-108).
+- **New constant**: `bridge/response.py` gains `REACTION_ABORT = "🫡"` (salute) to parallel the existing `REACTION_RECEIVED = "👀"`. The constant pattern is already established (lines 107-108). Emoji choice rationale: bot-emitted reactions speak in the *reactor's* voice, not directive-voice. 👀 reads as "I see / noted" from the reactor; 🫡 reads as "understood, standing down." Both work as first-person statements regardless of who reacts. Earlier candidate 🛑 was rejected because, applied to a user's message, it parses as a directive aimed at the author ("*you* stop") rather than a self-report. See memory `feedback_reactor_voice_emoji.md`.
 
 ## Appetite
 
@@ -104,7 +104,7 @@ This change touches only the *outbound ack* side of the steering data flow. The 
 - PM check-ins: 0 (scope is fully specified)
 - Review rounds: 1 (standard `/do-pr-review`)
 
-This is a mechanical six-site replacement using an already-imported helper and an already-defined constant. The only design decision is the abort emoji choice, which is recommended (🛑) in the issue.
+This is a mechanical six-site replacement using an already-imported helper and an already-defined constant. The abort emoji choice (🫡) is resolved — see Architectural Impact for the reactor-voice rationale.
 
 ## Prerequisites
 
@@ -119,7 +119,7 @@ No prerequisites — the helper, the standard reaction emojis, and the import pa
 
 ### Key Elements
 
-- **`REACTION_ABORT` constant** (new): added to `bridge/response.py` alongside `REACTION_RECEIVED`. Value: `"🛑"`.
+- **`REACTION_ABORT` constant** (new): added to `bridge/response.py` alongside `REACTION_RECEIVED`. Value: `"🫡"`.
 - **`set_reaction` calls** at each of the six sites: replace the `send_markdown(...)` ack call with `await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)` (or `REACTION_ABORT` for abort branches).
 - **Defensive wrapping**: each `set_reaction` call wrapped in `try/except: pass` per the precedent at `bridge/update.py:98-100`. Reaction failures (non-Premium accounts, restricted chats, deleted messages) must never break the steering path.
 - **Logger lines preserved**: every existing `logger.info(...)` line at each site stays exactly as written. Internal observability is untouched.
@@ -132,7 +132,7 @@ User sends follow-up message → Bridge routes it via one of the six steering pa
 ### Technical Approach
 
 - **Single file edit**: `bridge/telegram_bridge.py` for the six ack replacements.
-- **Tiny additive edit**: `bridge/response.py` to define `REACTION_ABORT = "🛑"`.
+- **Tiny additive edit**: `bridge/response.py` to define `REACTION_ABORT = "🫡"`.
 - **Reuse the existing import line** in `bridge/telegram_bridge.py:122` that already imports `REACTION_RECEIVED` — extend to `REACTION_ABORT`.
 - **Per-site behavior:**
 
@@ -172,7 +172,7 @@ A new unit test asserting that the six call sites use `set_reaction` and not `se
 - **Don't move the ack into the PM session.** Architecturally cleaner (the PM owns all user-facing utterances), but adds 5–30s of latency before the user sees acknowledgment. The issue explicitly defers this to a separate piece of work.
 - **Don't generalize a "forbidden vocabulary" persona-doc rule.** Separate persona-edit issue. In scope here is the six call sites only.
 - **Don't refactor the six steering paths.** The routing logic is correct; only the ack-emission line at each terminal is wrong. Resist the urge to consolidate the six paths into a helper — they have subtly different preconditions and the consolidation has been deferred multiple times for good reasons.
-- **Don't expand the abort emoji palette.** Pick one (🛑) and use it consistently across all abort sites. Visual consistency matters more than per-site nuance.
+- **Don't expand the abort emoji palette.** Pick one (🫡) and use it consistently across all abort sites. Visual consistency matters more than per-site nuance.
 - **Don't update the historical plan `docs/plans/rapid_fire_coalescing_fix.md`** that mentions the old ack text — it's a record of past work, not active spec.
 
 ## Risks
@@ -181,9 +181,9 @@ A new unit test asserting that the six call sites use `set_reaction` and not `se
 **Impact:** Some users may receive no visible acknowledgment of their steering message.
 **Mitigation:** `set_reaction` already returns `False` and logs at debug level on failure (`bridge/response.py:315`). The eventual agent reply still lands normally, and the user retains the visual evidence of their own outgoing message. This is the same failure mode as the old `send_markdown` calls — those could fail too.
 
-### Risk 2: An emoji choice (🛑) might render differently across Telegram clients
+### Risk 2: An emoji choice (🫡) might render differently across Telegram clients
 **Impact:** Visual inconsistency for the abort acknowledgment.
-**Mitigation:** 🛑 (U+1F6D1, "octagonal sign") is a basic Unicode emoji with broad client support, used commonly for "stop" semantics. The existing `REACTION_RECEIVED = "👀"` precedent works across clients; 🛑 is in the same compatibility tier. If field testing reveals issues, the constant is one-line-changeable.
+**Mitigation:** 🫡 (U+1FAE1, "saluting face") is a standard Unicode 14.0 emoji (Sept 2021) with broad client support across modern Telegram desktop, mobile, and web clients. The existing `REACTION_RECEIVED = "👀"` precedent works across clients; 🫡 is in the same compatibility tier. If field testing reveals issues on older clients, the constant is one-line-changeable.
 
 ### Risk 3: The sixth call site (line 1049) has different existing semantics
 **Impact:** Removing the text ack at line 1049 changes the user-visible behavior more than at the other sites — the old text was different ("Noted — I'll incorporate this on my next checkpoint." instead of "Adding to current task").
@@ -213,9 +213,9 @@ No agent integration changes required. This change is entirely on the bridge's *
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/mid-session-steering.md` line ~21 — replace the description of step 7 from "bridge replies 'Adding to current task'..." to "bridge attaches a 👀 (or 🛑 for abort) emoji reaction to the user's message". Keep the rest of the steering flow description intact.
+- [ ] Update `docs/features/mid-session-steering.md` line ~21 — replace the description of step 7 from "bridge replies 'Adding to current task'..." to "bridge attaches a 👀 (or 🫡 for abort) emoji reaction to the user's message". Keep the rest of the steering flow description intact.
 - [ ] Update `docs/features/intake-classifier.md` — fix the diagram comment around line 28 (`(ack: "Adding to current task")`) to reference the emoji reaction instead.
-- [ ] Update `docs/features/semantic-session-routing.md` line ~84 — replace the user-facing acknowledgment description from quoted text strings to "an emoji reaction (👀 for steer, 🛑 for abort)".
+- [ ] Update `docs/features/semantic-session-routing.md` line ~84 — replace the user-facing acknowledgment description from quoted text strings to "an emoji reaction (👀 for steer, 🫡 for abort)".
 - [ ] Update `docs/features/steering-implementation-spec.md` lines ~52, ~60, ~103 — replace text-ack references with emoji-reaction references. Note: line 103 contains a code snippet showing `await client.send_message(event.chat_id, "Adding to current task", ...)` — replace with the new `set_reaction` pattern.
 
 ### Inline Documentation
@@ -234,7 +234,7 @@ The historical plan `docs/plans/rapid_fire_coalescing_fix.md` is **not** updated
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`) — the four `docs/features/*.md` files listed above.
 - [ ] `python -m ruff check .` and `python -m ruff format --check .` exit clean.
-- [ ] Manual verification (post-merge, opportunistic): send a steering follow-up to a running agent session; confirm the user's message gets a 👀 reaction and no text reply lands in the thread; send `stop` and confirm 🛑.
+- [ ] Manual verification (post-merge, opportunistic): send a steering follow-up to a running agent session; confirm the user's message gets a 👀 reaction and no text reply lands in the thread; send `stop` and confirm 🫡.
 
 ## Team Orchestration
 
@@ -269,7 +269,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Assigned To**: bridge-ack-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `REACTION_ABORT = "🛑"  # Steering abort acknowledged` immediately below `REACTION_PROCESSING` in `bridge/response.py:108`.
+- Add `REACTION_ABORT = "🫡"  # Steering abort acknowledged` immediately below `REACTION_PROCESSING` in `bridge/response.py:108`.
 - Keep the same comment style as the surrounding constants.
 
 #### 2. Replace the six ack call sites
@@ -332,7 +332,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Abort emoji choice — 🛑 vs 🤚?** The issue recommends 🛑 (octagonal stop sign) but mentions 🤚 (raised back of hand) as an alternative. Plan defaults to 🛑 for stronger "halt" semantics. Confirm or override.
-2. **Does the line 1049 site warrant special treatment?** The issue's recon missed this site. It currently emits *both* a text ack AND a reaction. The plan removes the text and keeps the reaction (changing it to be abort-aware). Confirm this consolidation is correct, or split into a separate cleanup if the site has constraints not visible from the file.
+1. **Abort emoji choice — RESOLVED: 🫡 (salute).** Initial proposal of 🛑 was rejected: bot-emitted reactions speak in the *reactor's* voice, and 🛑 applied to a user's message reads as a directive at the author ("*you* stop") rather than a self-report. 🫡 ("understood, standing down") is unambiguously first-person from the reactor and matches the PM persona's calm acknowledgment voice. Per Valor's framing: "a salute means I understand and there's nothing left to say." See memory `feedback_reactor_voice_emoji.md` for the general principle.
+2. **Line 1049 special treatment — RESOLVED: consolidate.** Drop the redundant text ack ("Noted — I'll incorporate this on my next checkpoint."), keep the existing `set_reaction(REACTION_RECEIVED)` call, and extend it to be abort-aware (`REACTION_ABORT if is_abort else REACTION_RECEIVED`). This removes the only site that previously emitted both a text and a reaction.
