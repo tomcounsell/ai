@@ -23,6 +23,20 @@ The `_dead_letter_message()` helper routes exhausted messages based on type:
 - **Text messages** (type=None): persisted to `bridge/dead_letters.py` via `persist_failed_delivery()` for later replay
 - **Reactions and custom emoji messages**: logged at WARNING level and discarded (ephemeral, not worth replaying)
 
+#### `cleanup_file` honoring at DLQ placement
+
+When the payload carries `cleanup_file: True` (set by `valor-telegram send
+--cleanup-after-send`, used by `/do-debrief`), the relay calls
+`_safe_unlink(path)` for each file path on the payload at DLQ placement
+time — **not** just on success. This makes the relay the sole owner of
+temp-file lifecycle across the asynchronous retry boundary: the producer
+(`/do-debrief`) pushes the payload and exits, and the relay deletes the
+file whether the send eventually succeeds or terminally fails. Synchronous
+deletion by the producer would race the retry loop and trip the
+"file not found at send time" branch. `_safe_unlink` swallows missing-file
+errors so cleanup never raises. See [TTS](tts.md#temp-file-ownership-the-load-bearing-detail)
+for the full rationale.
+
 ### Unified Failure Handling
 
 All three message type paths (reaction, custom_emoji_message, default text) use the same bounded-retry logic. Handler dispatch is wrapped in try/except so unexpected exceptions feed into the retry path rather than crashing or falling through.

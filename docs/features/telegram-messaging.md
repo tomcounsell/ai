@@ -219,12 +219,31 @@ valor-telegram send --chat "Tom" --file ./report.pdf "Here's the report"
 # Image with caption
 valor-telegram send --chat "Dev: Valor" --image ./screenshot.png "Check this"
 
-# Audio file
+# Audio file (delivered as a generic audio document)
 valor-telegram send --chat "Dev: Valor" --audio ./recording.mp3
+
+# Native voice message (waveform bubble, not an audio document)
+valor-telegram send --chat "Dev: Valor" --voice-note --audio /tmp/out.ogg
+
+# Voice message + relay-owned cleanup of the temp file after send / DLQ
+valor-telegram send --chat "Dev: Valor" --voice-note --cleanup-after-send --audio /tmp/out.ogg
 
 # Forum group / topic (reply-to required)
 valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 ```
+
+`--voice-note` adds `voice_note: True` and `duration: <float>` (computed via
+`tools.tts._compute_duration_opus` / `ffprobe`) to the Redis outbox payload so
+`bridge/telegram_relay.py` delivers via Telethon's `voice_note=True` +
+`DocumentAttributeAudio` path. Without this flag, OGG/Opus arrives as a
+generic audio document.
+
+`--cleanup-after-send` adds `cleanup_file: True` so the relay (not the CLI)
+unlinks the temp file after a successful send **or** after the payload is
+moved to the dead-letter queue on retry exhaustion. This keeps temp-file
+ownership on the relay and avoids racing the asynchronous retry loop.
+`/do-debrief` uses both flags; manual CLI users typically only set
+`--voice-note`. See [TTS](tts.md) for the full design.
 
 ### Listing Chats
 
@@ -341,7 +360,7 @@ Both `valor-telegram send` and `tools/send_telegram.py` route through the Redis 
 
 | Tool | Context | Session ID prefix | File Support |
 |------|---------|------------------|--------------|
-| `valor-telegram send` | Dev session / CLI | `cli-{unix_timestamp}` | `--file`, `--image`, `--audio`, `--reply-to` |
+| `valor-telegram send` | Dev session / CLI | `cli-{unix_timestamp}` | `--file`, `--image`, `--audio`, `--voice-note`, `--cleanup-after-send`, `--reply-to` |
 | `python tools/send_telegram.py` | PM session (PM) | Session UUID | `--file` (repeatable, max 10 for albums; auto-detects media type) |
 
 See [PM Telegram Tool](pm-telegram-tool.md) for details on the PM send path.
@@ -350,4 +369,6 @@ See [PM Telegram Tool](pm-telegram-tool.md) for details on the PM send path.
 
 - [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
 - [PM Telegram Tool](pm-telegram-tool.md) — PM session self-messaging with file attachments and multi-file albums
+- [TTS](tts.md) — `valor-tts` synthesis + the `--voice-note` / `--cleanup-after-send` send path used by `/do-debrief`
+- [Relay Retry Guard](relay-retry-guard.md) — bounded retries, dead-letter routing, and `cleanup_file` honoring at DLQ placement
 - `config/personas/segments/tools.md` -- agent persona references to this tool

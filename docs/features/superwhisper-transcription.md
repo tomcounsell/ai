@@ -72,5 +72,6 @@ The `_is_superwhisper_available()` function caches the `pgrep` result for 60 sec
 
 ## Related
 
+- [TTS](tts.md) -- inverse direction (text -> OGG/Opus); `tools/tts/` mirrors `tools/transcribe/` one-for-one (dual backend, 60s availability cache, error-as-dict)
 - [YouTube Transcription](youtube-transcription.md) -- video transcription via YouTube's own transcript API
 - `tools/transcribe/README.md` -- detailed API reference and installation guide
