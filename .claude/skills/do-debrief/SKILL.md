@@ -72,6 +72,7 @@ Write the brief in the shape above. Apply these rules verbatim:
 
 - **Default-and-confirm phrasing** on every decision: state your intended action + the unless-clause.
 - **Contractions** ("I'm", "don't", "we're") — written prose reads stiff aloud.
+- **Never recite issue/PR numbers** (or any multi-digit identifier). TTS reads "1195" as either "one thousand one hundred ninety-five" (cumbersome) or "one-one-nine-five" (meaningless) — both waste the listener's attention, and the number isn't actionable in audio anyway. Refer to the work by substance: "the continuation-PM crash," not "issue 1195." If the listener needs traceability, follow the voice message with a written brief that includes the numbers.
 - **Proper-noun respelling** for TTS prosody. Product names benefit from hyphenation when they should sound like one word with multiple syllables (e.g., spell "Yudame" as `You-duh-may`). Dictionary-style hints only — never IPA in slashes; the phonemizer reads `/.../` literally and doubles the clip duration.
 
 ### 5. Pass B — cut and re-shape
@@ -112,6 +113,7 @@ The relay owns the file from the moment the payload is pushed — it deletes on 
 - **Laddered FYIs.** "Also… and another thing… oh and…" — pre-batch into "Three quick FYIs:" with one clause each.
 - **Status-of-status.** "I'm working on the migration" isn't brief-worthy. Either it shipped (FYI) or it's blocked on a decision (Decision).
 - **Synthesizing raw notes verbatim.** That's a dictated memo, not a brief. The construction phases above are the value the skill adds.
+- **Reciting numbers in audio.** Issue numbers, PR numbers, port numbers, and dollar figures with many digits all read badly through TTS and don't help a listener anyway. Substance over identifier; numbers go in the written follow-up.
 - **Skipping the review gate.** TTS + Telegram is one-way; the wrong "I'm pushing the vendor call to Thursday unless you want it sooner" is permanent once it lands.
 
 ## Error handling
