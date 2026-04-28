@@ -133,13 +133,23 @@ async def _ack_steering_routed(
     sender_name: str,
     text: str,
     log_context: str,
+    agent_session: "AgentSession | None" = None,
 ) -> None:
     """Push a steering message, react to ack, log, and mark handled.
 
     Bundles the terminal sequence shared by every steering routing branch
     in handle_message. Caller is responsible for `return` after this call.
+
+    If `agent_session` is provided, also writes to the AgentSession Popoto
+    model's `queued_steering_messages` field (durable, PM-visible) before
+    the Redis push. Two of the six routing branches hold the AgentSession
+    object in hand and need the dual write so the PM session sees the
+    steering message even before the worker drains the Redis queue. The
+    other four branches push by session_id only.
     """
     is_abort = text.strip().lower() in ABORT_KEYWORDS
+    if agent_session is not None:
+        agent_session.push_steering_message(text)  # durable, PM-visible
     push_steering_message(session_id, text, sender_name, is_abort=is_abort)
     try:
         await set_reaction(
@@ -155,7 +165,8 @@ async def _ack_steering_routed(
     await record_telegram_message_handled(event.chat_id, message.id)
 ```
 
-- **Six routing branches collapse** to a single helper call + `return`. The unique per-site information (the routing branch's `log_context` string) is the only argument that varies meaningfully.
+- **Six routing branches collapse** to a single helper call + `return`. The unique per-site information is the routing branch's `log_context` string, plus — at the two sites that already hold the `AgentSession` object — an `agent_session=` argument so the helper preserves the dual push.
+- **Dual-push sites**: lines 1535 (in-memory coalescing guard, has `guard_session`) and 1648 (intake-classifier interjection, has `fresh_session`) currently perform a dual push: first to `<session>.push_steering_message(text)` (durable, PM-visible via the Popoto model's `queued_steering_messages` field) and then to the Redis steering queue. The helper's optional `agent_session` parameter preserves this behavior. The other four branches push by `session_id` only — they do not hold the AgentSession object and do not need the dual write.
 - **Hoisted imports**: `ABORT_KEYWORDS`, `push_steering_message`, and `record_telegram_message_handled` move to module-level imports (most are already partially imported there). Inline `from agent.steering import ...` and `from bridge.markdown import send_markdown` clutter at each site is deleted.
 - **`send_markdown` import**: dead at all six sites after the change. Verify no other code in this file's steering paths still depends on it before removing the top-of-file import — but the inline imports inside each branch are unambiguously dead and go away.
 - **Defensive wrapping**: the `try/except: pass` lives once, inside the helper — not duplicated at six sites. Matches `bridge/update.py:98-100` precedent.
@@ -184,6 +195,9 @@ return
 ```
 
 - **Per-site `log_context` strings** preserve the existing semantics from each branch's `logger.info(...)` line (project name, branch type, session id, age, confidence, etc.). The `(action)` suffix `(abort|steer)` is appended by the helper, so the caller's `log_context` should NOT include it.
+- **Pass `agent_session=` at the two dual-push sites:**
+  - Line 1535 branch: `agent_session=guard_session`
+  - Line 1648 branch: `agent_session=fresh_session`
 - **Branches without an `is_abort` distinction** (lines 1552 and 1654 — coalescing guard and intake-classifier interjection) become abort-aware *for free* via the helper. This is a behavior change in those branches: previously a user sending "stop" via these routes saw the same generic "Adding to current task" text and would have to wait for the agent to honor the abort. Now they see 🫡 and `is_abort=True` is passed through to `push_steering_message`, which is the more correct behavior. This unification is part of "all six sites act the same."
 - **Dead inline imports removed**: `from agent.steering import ABORT_KEYWORDS, push_steering_message` and `from bridge.markdown import send_markdown` blocks inside each branch all delete.
 - **Net-line accounting**: each collapsed site goes from ~25 lines (imports + is_abort + push + send_markdown wrapper + log + record + return) to ~9 lines (one helper call + return + branch-detection condition). Six sites × 16 lines saved ≈ 96 lines removed. New helper is ~25 lines. Net target: **~−70 lines**, well above the "remove more than added" bar.
@@ -238,6 +252,10 @@ No existing tests affected — repo-wide grep `grep -rn "Adding to current task\
 **Impact:** Two routing branches that previously did not detect abort keywords now will. A user sending "stop" via the in-memory coalescing path or intake-classifier interjection path will see 🫡 instead of 👀, and `push_steering_message` will receive `is_abort=True`, which the agent honors as an explicit cancel signal.
 **Mitigation:** This is the explicitly desired behavior change ("all six sites act the same"). Document it in the PR description and the docs cascade. Existing tests do not assert on the prior behavior at these sites, so no breakage. If the unification proves wrong in field testing, it's a one-line revert in the helper or branch.
 
+### Risk 6: Helper silently drops the durable PM-visible write at dual-push sites (CRITIQUE B1)
+**Impact:** Sites 1535 and 1648 currently perform a dual push — first `<session>.push_steering_message(text)` (writes to the AgentSession Popoto model's `queued_steering_messages` field, durable and PM-visible) and then the Redis push. An earlier draft of the helper handled only the Redis push, so naively adopting it at those two sites would silently drop the durable write — the PM session would stop seeing those steering messages on pickup.
+**Mitigation:** Helper signature explicitly takes `agent_session: AgentSession | None = None`. When provided, the helper writes via `agent_session.push_steering_message(text)` *before* the Redis push, preserving exact prior behavior. Plan calls out the two specific sites that must pass this argument. Validator step asserts the dual-push presence by counting `agent_session=` keyword arguments across the collapsed branches (must be exactly 2).
+
 ## Race Conditions
 
 No new race conditions introduced. The existing `await record_telegram_message_handled(event.chat_id, message.id)` and `return` calls following each ack remain in the same order — the only change is the ack emission style. The reaction call is awaited synchronously like the original `send_markdown`, so message-handling sequencing is unchanged.
@@ -275,6 +293,7 @@ The historical plan `docs/plans/rapid_fire_coalescing_fix.md` is **not** updated
 
 ## Success Criteria
 
+- [ ] **Dual-push preserved at sites 1535 and 1648**: each of those two helper calls passes `agent_session=guard_session` (or `agent_session=fresh_session`) so the durable PM-visible write via `AgentSession.push_steering_message(text)` continues to occur before the Redis push. Verify by reading the collapsed branches and confirming the `agent_session=` argument is present at exactly two of the six call sites.
 - [ ] **Net-negative diff**: `git diff --shortstat main...session/bridge-steering-emoji-acks -- bridge/` reports more lines removed than inserted. PR shrinks `bridge/telegram_bridge.py` net.
 - [ ] `_ack_steering_routed` helper exists in `bridge/telegram_bridge.py` and is the *only* code path that emits steering acks.
 - [ ] All six routing branches in `handle_message` collapse to a single helper call + `return` (plus their per-branch `log_context` string).
@@ -396,6 +415,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | `REACTION_ABORT` constant defined | `grep -n "^REACTION_ABORT" bridge/response.py` | output contains `REACTION_ABORT` |
 | Helper defined exactly once | `grep -c "^async def _ack_steering_routed" bridge/telegram_bridge.py` | output is `1` |
 | Helper called by all six branches | `grep -c "await _ack_steering_routed" bridge/telegram_bridge.py` | output is `6` |
+| Dual-push preserved at exactly two sites | `grep -c "agent_session=" bridge/telegram_bridge.py` | output is `2` (one each at the in-memory coalescing guard and intake-classifier interjection branches) |
 | Bridge imports both reaction constants | `grep -n "REACTION_RECEIVED\|REACTION_ABORT" bridge/telegram_bridge.py` | output contains both names |
 | Inline `send_markdown` imports gone from `handle_message` | `awk '/^async def handle_message/,/^async def [^h]/' bridge/telegram_bridge.py \| grep -c "from bridge.markdown import send_markdown"` | output is `0` |
 | Lint clean | `python -m ruff check bridge/` | exit code 0 |
@@ -404,7 +424,23 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict (initial run):** NEEDS REVISION — 1 blocker, 4 concerns, 2 nits. Plan revised below.
+
+### B1: Helper silently drops the durable PM-visible write at dual-push sites — RESOLVED
+
+**Finding:** The plan's "byte-identical sequences" premise was wrong for two of the six sites. Lines 1535 (in-memory coalescing guard) and 1648 (intake-classifier interjection) perform a *dual* push — first to `<session>.push_steering_message(text)` (writes to the AgentSession Popoto model's `queued_steering_messages` field, durable and PM-visible) and then to the Redis steering queue (in-flight injection for the PostToolUse hook). The helper as originally drafted handled only the Redis push, so adopting it as written at those two sites would have silently dropped the durable PM-visible write.
+
+**Fix applied:**
+- Helper signature extended with optional `agent_session: AgentSession | None = None`.
+- Helper body: when `agent_session` is provided, calls `agent_session.push_steering_message(text)` before the Redis push.
+- Plan calls out the two specific sites that must pass `agent_session=guard_session` (line 1535) or `agent_session=fresh_session` (line 1648).
+- Verification table adds `grep -c "agent_session=" bridge/telegram_bridge.py` → must equal `2`.
+- Risks section adds Risk 6 (this finding) with the resolution.
+- Success Criteria adds an explicit dual-push check.
+
+### Concerns (4) and Nits (2) — DEFERRED
+
+The critique skill returned a verdict summary noting 4 concerns and 2 nits beyond the blocker, but did not surface their content through the channel available here. They are not blocking; the build can proceed against the revised plan, and the concerns/nits will be re-raised by `/do-pr-review` if material. If a critique artifact file surfaces later, it should be appended to this section verbatim and the plan re-evaluated before merge.
 
 ---
 
