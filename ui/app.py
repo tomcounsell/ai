@@ -212,6 +212,70 @@ def create_app() -> FastAPI:
             {"analytics": analytics},
         )
 
+    # `/memories` is the per-record Memory inspector. It pairs with
+    # `/_partials/memories/` for HTMX swap on filter change and 30s refresh.
+    @app.get("/memories", response_class=HTMLResponse)
+    def memories_page(
+        request: Request,
+        category: str | None = None,
+        decay: bool = False,
+        show_superseded: bool = False,
+    ):
+        """Per-record memory inspector page (read-only).
+
+        Filter state is held in query params so HTMX can re-issue the
+        partial with the same shape on swap.
+        """
+        from ui.data.memories import KNOWN_CATEGORIES, get_memories
+
+        data = get_memories(
+            category=category,
+            decay_only=decay,
+            include_superseded=show_superseded,
+        )
+        return templates.TemplateResponse(
+            request,
+            "memories.html",
+            {
+                "data": data,
+                "filter_category": category,
+                "filter_decay": decay,
+                "filter_show_superseded": show_superseded,
+                "known_categories": KNOWN_CATEGORIES,
+            },
+        )
+
+    @app.get("/_partials/memories/", response_class=HTMLResponse)
+    def partial_memories_list(
+        request: Request,
+        category: str | None = None,
+        decay: bool = False,
+        show_superseded: bool = False,
+    ):
+        """HTMX partial: memory list region.
+
+        Returns the rendered records grouped by category. Same data shape
+        as `memories_page`, used for HTMX swap on filter change and 30s
+        refresh.
+        """
+        from ui.data.memories import get_memories
+
+        data = get_memories(
+            category=category,
+            decay_only=decay,
+            include_superseded=show_superseded,
+        )
+        return templates.TemplateResponse(
+            request,
+            "_partials/memories_list.html",
+            {
+                "data": data,
+                "filter_category": category,
+                "filter_decay": decay,
+                "filter_show_superseded": show_superseded,
+            },
+        )
+
     @app.get("/_partials/sessions/", response_class=HTMLResponse)
     def partial_sessions_table(request: Request):
         """HTMX partial: refreshable sessions table."""

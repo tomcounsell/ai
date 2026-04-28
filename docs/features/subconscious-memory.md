@@ -412,19 +412,9 @@ All Memory records carry a `project_key` that scopes them to a specific project.
 
 The Telegram bridge path writes directly with `project_key="dm"` for human messages and uses `DEFAULT_PROJECT_KEY` from environment/config for agent-extracted observations.
 
-### DEFAULT_PROJECT_KEY Change
+### Migration Helper
 
-Prior to PR #820, `DEFAULT_PROJECT_KEY = "dm"` in `config/memory_defaults.py`. This caused all 2,376 Memory records created by Claude Code hooks between 2026-03-24 and 2026-04-07 to be stored under the Telegram DM partition, making recall completely broken for Claude Code sessions (which queried the `"valor"` partition and found nothing).
-
-The default was changed to `"default"` to ensure misconfigured callers are identifiable rather than silently merging with DM memories. A migration script (`scripts/migrate_memory_project_key.py`) re-keys the mislabeled records — see [Claude Code Memory](claude-code-memory.md) for migration instructions.
-
-### Issue #1171: Recovery-Surface Migration to `valor`
-
-When `VALOR_PROJECT_KEY=valor` was promoted to a baked plist env var (issue #1171) so the recovery reflections (`circuit_health_gate`, `session_recovery_drip`) could find AgentSession records tagged `project_key="valor"`, the memory subsystem's reads also shifted to `valor`. At that point the production memory store held 262 records under `valor`, 218 under `default`, and 4 under `dm` (mislabeled hook records, not genuine Telegram DMs).
-
-To prevent ~45% memory regression on day 0 of deploy, `scripts/migrate_memory_project_key.py` was extended to handle BOTH `default` and `dm` buckets and re-tag obsolete records via Popoto's supported `save(migrate_key=True)` path. Running once on the canonical machine migrated 222 records (218 default + 4 dm), leaving 484 valor / 0 default / 0 dm.
-
-The genuine-DM preservation rule (`source=human AND agent_id=dm`) is intact — those records stay under `dm`. The `dm`-namespace writer leak source is tracked separately as issue #1173 (sibling investigation).
+When `DEFAULT_PROJECT_KEY` or the live `VALOR_PROJECT_KEY` env var changes, mislabeled records can be re-keyed via `scripts/migrate_memory_project_key.py` using Popoto's supported `save(migrate_key=True)` path. The genuine-DM preservation rule (`source=human AND agent_id=dm`) keeps real Telegram DM records under the `dm` partition. See [Claude Code Memory](claude-code-memory.md) for invocation.
 
 ## Configuration
 
@@ -501,6 +491,42 @@ python -m tools.memory_search status --project dm  # Scope to a specific project
 **Exit codes:** 0 = healthy, 1 = Redis unreachable. The `tools.doctor` integration is a future step (tracked by issue #964).
 
 **Note:** `last_write` reflects the most recent relevance-score update, not creation time. Decay or boost operations on old records can make them appear recent.
+
+## Dashboard View
+
+The `/memories` route on the local dashboard (default `localhost:8500/memories`) provides a per-record memory inspector for the active project. It complements the aggregate counters on the index page (`memory_recalls_today/_7d`, `memory_extractions_today/_7d`) with a row-level view of every Memory record.
+
+![Dashboard /memories view](assets/dashboard-memories.png)
+
+**What's shown per row:**
+- Title — first line of the record's `content`, truncated to ~80 chars.
+- Importance — current `importance` score (1 decimal place).
+- Source — `human`, `agent`, `knowledge`, or `system` (color-coded badge).
+- Outcomes — derived from `metadata.outcome_history`: `acted ×N / dismissed ×N` plus the act-rate %.
+- Decay flag — yellow `decay N/3` badge when `metadata.dismissal_count >= DISMISSAL_DECAY_THRESHOLD - 1` (i.e., the record is one dismissal away from importance decay).
+- Supersession badge — when shown, displays "merged into `mem_xyz`" linking the record to its replacement (visible only when the show-superseded toggle is on).
+
+Records are grouped by category (`correction`, `decision`, `pattern`, `surprise`, `default`) and sorted by `relevance` descending within each group.
+
+**Filter controls:**
+- Category buttons — filter to one category, or `all` for the union.
+- `decay only` toggle — restrict to records that hit the decay-imminent rule above.
+- `show superseded` toggle — include records where `superseded_by` is non-empty (hidden by default; the dedup reflection sets this field).
+
+Filter state lives in query params (`?category=...&decay=...&show_superseded=...`). The list region auto-refreshes via HTMX every 30s; filter state survives the swap.
+
+**Defaults and limits:**
+- Project scope: `VALOR_PROJECT_KEY` env var, falling back to `DEFAULT_PROJECT_KEY` (`config/memory_defaults.py`). Single-project view by design — there is no project selector.
+- Top-N cap: 200 records (sorted by `relevance` desc, applied after filters). When the filtered corpus exceeds 200, a footer banner reads `Showing 200 of N records — see python -m tools.memory_search for full inspection.`
+- Read-only: the view never writes to Memory records. Mutation continues to live in `python -m tools.memory_search` (forget, save, etc.).
+
+**Implementation files:**
+- `ui/data/memories.py` — synchronous data-access module. Exports `get_memories(project_key, category, decay_only, include_superseded, limit)` and `get_memory_detail(memory_id)`. Wraps the Popoto query in try/except and returns an empty payload on failure (the dashboard never 500s on a Redis hiccup).
+- `ui/templates/memories.html` — the full page (extends `base.html`).
+- `ui/templates/_partials/memories_list.html` — the list region rendered by HTMX swap.
+- Routes in `ui/app.py`: `GET /memories` (page) and `GET /_partials/memories/` (HTMX partial).
+
+The dashboard index page links to `/memories` via the "Memories" pill in the top-right header.
 
 ## Error Handling
 

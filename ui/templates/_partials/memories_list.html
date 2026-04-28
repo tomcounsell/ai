@@ -1,0 +1,109 @@
+{# Memories list partial — records grouped by category, rendered as data tables.
+   Receives `data` (from ui.data.memories.get_memories) and the active filter values.
+   Used by /memories (full page) and /_partials/memories/ (HTMX swap). #}
+
+{% set records = data.records %}
+
+{% if not records %}
+<div class="empty-state-inline" style="padding: 1.5rem 0;">
+    <p class="text-muted" style="margin: 0;">
+        No memories match this filter.
+        {% if filter_decay or filter_category or not filter_show_superseded %}
+            Try clearing filters, or
+        {% endif %}
+        run <code>python -m tools.memory_search inspect --stats</code> to see the full corpus.
+    </p>
+</div>
+{% else %}
+
+{# Group records by category, preserving the relevance-desc sort within each group. #}
+{% set groups = {} %}
+{% for r in records %}
+    {% set _ = groups.setdefault(r.category, []).append(r) %}
+{% endfor %}
+
+<div class="memories-list">
+{% for category, items in groups|dictsort %}
+<section class="memories-category" style="margin-bottom: 1.5rem;">
+    <h3 style="display:flex;align-items:center;gap:8px;margin:0 0 0.5rem;">
+        <span>{{ category }}</span>
+        <span class="text-muted" style="font-weight:normal;font-size:0.85em;">{{ items|length }}</span>
+    </h3>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th style="min-width: 30%;">Title</th>
+                <th style="text-align: right;">Importance</th>
+                <th>Source</th>
+                <th>Outcomes</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in items %}
+            <tr {% if r.superseded %}class="superseded"{% endif %}>
+                <td>
+                    <span class="mono" title="{{ r.content }}">{{ r.title or "(empty)" }}</span>
+                    <div class="text-muted" style="font-size: 0.8em;">
+                        <span title="memory_id">{{ r.memory_id[:8] }}</span>
+                        {% if r.tags %}
+                            {% for tag in r.tags[:3] %}
+                                <span class="badge badge-skipped" style="margin-left: 4px;">{{ tag }}</span>
+                            {% endfor %}
+                        {% endif %}
+                    </div>
+                </td>
+                <td style="text-align: right;">{{ "%.1f"|format(r.importance) }}</td>
+                <td>
+                    {% if r.source == "human" %}<span class="badge badge-blue">human</span>
+                    {% elif r.source == "agent" %}<span class="badge badge-skipped">agent</span>
+                    {% elif r.source == "knowledge" %}<span class="badge badge-purple">knowledge</span>
+                    {% elif r.source == "system" %}<span class="badge badge-skipped">system</span>
+                    {% else %}<span class="badge badge-skipped">{{ r.source or "?" }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if r.acted_count or r.dismissed_count %}
+                        <span class="text-muted">
+                            acted &times;{{ r.acted_count }} / dismissed &times;{{ r.dismissed_count }}
+                            {% if r.act_rate is not none %}
+                                <span style="margin-left: 4px;">{{ (r.act_rate * 100)|int }}% act</span>
+                            {% endif %}
+                        </span>
+                    {% else %}
+                        <span class="text-muted">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if r.decay_imminent %}
+                        <span class="badge" style="background: #fbbf24; color: #1f1f1f;" title="Approaching importance decay threshold">
+                            decay {{ r.dismissal_count }}/{{ r.decay_threshold }}
+                        </span>
+                    {% endif %}
+                    {% if r.superseded %}
+                        <span class="text-muted" title="{{ r.superseded_by_rationale }}">
+                            merged into <code>{{ r.superseded_by[:8] }}</code>
+                        </span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endfor %}
+</div>
+
+{% if data.truncated_count %}
+<div class="text-muted" style="padding: 1rem 0; font-size: 0.9em;">
+    Showing {{ records|length }} of {{ data.total_matched }} records — see
+    <code>python -m tools.memory_search</code> for full inspection.
+</div>
+{% endif %}
+
+{% endif %}
+
+<style>
+.memories-list tr.superseded { opacity: 0.55; }
+.memories-list tr.superseded td { font-style: italic; }
+</style>
