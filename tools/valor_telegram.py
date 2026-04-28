@@ -763,6 +763,21 @@ def cmd_send(args: argparse.Namespace) -> int:
     session_id = f"cli-{int(time.time())}"
     reply_to = getattr(args, "reply_to", None)
 
+    # Issue #1191: When invoked from inside an AgentSession, default reply_to to
+    # TELEGRAM_REPLY_TO injected by agent/sdk_client.py:_extract_sdlc_env_vars
+    # (populated from session.telegram_message_id). Mirrors the behavior of
+    # tools/send_telegram.py and TelegramRelayOutputHandler so mid-session sends
+    # thread off the same root as the agent's final response. Explicit
+    # --reply-to (above) always wins. Invalid/empty env values silently fall
+    # through to None to preserve "no reply" semantics rather than crash.
+    if reply_to is None:
+        env_reply_to = os.environ.get("TELEGRAM_REPLY_TO", "").strip()
+        if env_reply_to:
+            try:
+                reply_to = int(env_reply_to)
+            except (TypeError, ValueError):
+                reply_to = None
+
     payload: dict = {
         "chat_id": chat_id,
         "reply_to": int(reply_to) if reply_to else None,
@@ -984,7 +999,10 @@ def main() -> int:
         "--reply-to",
         type=int,
         default=None,
-        help="Message ID to reply to (required for forum groups/topics)",
+        help=(
+            "Message ID to reply to (required for forum groups/topics). "
+            "Defaults to $TELEGRAM_REPLY_TO when set (in-session use)."
+        ),
     )
     send_parser.add_argument(
         "--voice-note",
