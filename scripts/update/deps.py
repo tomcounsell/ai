@@ -110,11 +110,20 @@ def _markitdown_importable(project_dir: Path) -> bool:
     return result.returncode == 0
 
 
-def sync_with_uv(project_dir: Path, reinstall: bool = False) -> DepSyncResult:
-    """Sync dependencies using uv."""
+def sync_with_uv(project_dir: Path, reinstall: bool = False, frozen: bool = True) -> DepSyncResult:
+    """Sync dependencies using uv.
+
+    `frozen=True` (default) installs strictly from `uv.lock` without
+    re-resolving — this is what every machine should do during routine
+    `/update` so the lockfile stays byte-stable across the fleet. Only
+    `auto_bump_deps` (which has just edited `pyproject.toml`) passes
+    `frozen=False` to regenerate the lock.
+    """
     had_markitdown_before = _markitdown_importable(project_dir)
 
     cmd = ["uv", "sync", "--all-extras"]
+    if frozen:
+        cmd.append("--frozen")
     if reinstall:
         cmd.append("--reinstall")
 
@@ -187,18 +196,21 @@ def sync_with_pip(project_dir: Path) -> DepSyncResult:
         )
 
 
-def sync_dependencies(project_dir: Path, reinstall: bool = False) -> DepSyncResult:
+def sync_dependencies(
+    project_dir: Path, reinstall: bool = False, frozen: bool = True
+) -> DepSyncResult:
     """
     Sync dependencies using best available method.
 
-    Prefers uv, falls back to pip.
+    Prefers uv, falls back to pip. `frozen` is forwarded to uv (pip has no
+    lockfile concept here, so it's ignored on the pip path).
     """
     if has_uv():
-        return sync_with_uv(project_dir, reinstall=reinstall)
+        return sync_with_uv(project_dir, reinstall=reinstall, frozen=frozen)
 
     # Try to install uv
     if install_uv() and has_uv():
-        return sync_with_uv(project_dir, reinstall=reinstall)
+        return sync_with_uv(project_dir, reinstall=reinstall, frozen=frozen)
 
     # Fall back to pip
     return sync_with_pip(project_dir)
@@ -487,14 +499,15 @@ def auto_bump_deps(project_dir: Path) -> AutoBumpResult:
     if not result.any_bumped:
         return result
 
-    # Sync dependencies with new pins
-    sync_result = sync_dependencies(project_dir)
+    # Sync dependencies with new pins. `frozen=False` because we just edited
+    # pyproject.toml and need uv to re-resolve and rewrite uv.lock.
+    sync_result = sync_dependencies(project_dir, frozen=False)
     result.synced = sync_result.success
     if not sync_result.success:
         result.sync_error = sync_result.error
         # Roll back
         pyproject.write_text(original_content)
-        sync_dependencies(project_dir)  # restore old deps
+        sync_dependencies(project_dir, frozen=False)  # restore old deps
         result.rolled_back = True
         return result
 
@@ -506,7 +519,7 @@ def auto_bump_deps(project_dir: Path) -> AutoBumpResult:
     if not passed:
         # Roll back
         pyproject.write_text(original_content)
-        sync_dependencies(project_dir)
+        sync_dependencies(project_dir, frozen=False)
         result.rolled_back = True
 
     return result
