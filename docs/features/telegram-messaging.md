@@ -245,6 +245,21 @@ ownership on the relay and avoids racing the asynchronous retry loop.
 `/do-debrief` uses both flags; manual CLI users typically only set
 `--voice-note`. See [TTS](tts.md) for the full design.
 
+#### `--reply-to` Default From Environment (In-Session Use)
+
+When `valor-telegram send` runs inside an active AgentSession (e.g., the
+agent shells out for a mid-session status update), `--reply-to` defaults
+to the `TELEGRAM_REPLY_TO` env var, which `agent/sdk_client.py:_extract_sdlc_env_vars`
+populates from `session.telegram_message_id` (the user's triggering message).
+This makes mid-session sends thread off the same root as the agent's final
+response (`agent/output_handler.py:TelegramRelayOutputHandler`), so all
+sends in a turn share one visible reply chain in Telegram.
+
+Precedence: explicit `--reply-to` always wins. Empty, missing, or non-numeric
+`TELEGRAM_REPLY_TO` silently falls through to no-reply behavior. Invocations
+from outside an AgentSession (no env var set) preserve the original
+no-default behavior. Issue #1191.
+
 ### Listing Chats
 
 ```bash
