@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Memories — Valor System{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Memories <span class="text-muted" style="font-weight:normal;font-size:0.6em;">{{ data.project_key }}</span></h1>
+    <a href="/" class="text-muted">&larr; Dashboard</a>
+</div>
+
+<section id="memories">
+    {# Filter controls. Each control issues an HTMX swap into #memories-list with the
+       new filter state in query params. The list region also auto-refreshes every 30s. #}
+    <div class="filter-bar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:1rem;">
+        <span class="text-muted" style="font-size:0.85em;">Category:</span>
+        <a class="btn-filter {% if not filter_category %}active{% endif %}"
+           href="/memories{% if filter_decay %}?decay=true{% endif %}{% if filter_show_superseded %}{% if filter_decay %}&{% else %}?{% endif %}show_superseded=true{% endif %}">all</a>
+        {% for cat in known_categories %}
+            <a class="btn-filter {% if filter_category == cat %}active{% endif %}"
+               href="/memories?category={{ cat }}{% if filter_decay %}&decay=true{% endif %}{% if filter_show_superseded %}&show_superseded=true{% endif %}">{{ cat }}</a>
+        {% endfor %}
+
+        <span class="text-muted" style="margin-left: 1rem; font-size:0.85em;">Filters:</span>
+        <a class="btn-filter {% if filter_decay %}active{% endif %}"
+           href="/memories?decay={{ 'false' if filter_decay else 'true' }}{% if filter_category %}&category={{ filter_category }}{% endif %}{% if filter_show_superseded %}&show_superseded=true{% endif %}"
+           title="Records approaching importance decay">
+            decay only
+        </a>
+        <a class="btn-filter {% if filter_show_superseded %}active{% endif %}"
+           href="/memories?show_superseded={{ 'false' if filter_show_superseded else 'true' }}{% if filter_category %}&category={{ filter_category }}{% endif %}{% if filter_decay %}&decay=true{% endif %}"
+           title="Include records merged into others by the dedup reflection">
+            show superseded
+        </a>
+
+        <span class="text-muted" style="margin-left: auto; font-size:0.85em;">
+            {{ data.total_matched }} record{{ '' if data.total_matched == 1 else 's' }} match
+        </span>
+    </div>
+
+    <div id="memories-list"
+         hx-get="/_partials/memories/{% set q = [] %}{% if filter_category %}{% set _ = q.append('category=' ~ filter_category) %}{% endif %}{% if filter_decay %}{% set _ = q.append('decay=true') %}{% endif %}{% if filter_show_superseded %}{% set _ = q.append('show_superseded=true') %}{% endif %}{% if q %}?{{ q|join('&') }}{% endif %}"
+         hx-trigger="every 30s"
+         hx-swap="innerHTML">
+        {% include "_partials/memories_list.html" %}
+    </div>
+</section>
+
+<style>
+.btn-filter {
+    display: inline-block;
+    padding: 4px 10px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    text-decoration: none;
+    font-size: 0.85em;
+    background: transparent;
+}
+.btn-filter:hover { border-color: #8b949e; }
+.btn-filter.active {
+    background: #1f6feb;
+    border-color: #1f6feb;
+    color: #fff;
+}
+</style>
+{% endblock %}

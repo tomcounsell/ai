@@ -139,23 +139,23 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/dashboard-memo
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `ui/data/memories.py::get_memories` wraps the `Memory.query.filter` call in a `try/except` that logs `logger.warning(...)` and returns `[]` on failure (mirrors `analytics.py:62-79`). Test asserts an exception during the query produces a logged warning AND an empty list returned.
-- [ ] `compute_act_rate` is already exception-safe (returns `None` on empty input). No new handler needed for that path.
+- [x] `ui/data/memories.py::get_memories` wraps the `Memory.query.filter` call in a `try/except` that logs `logger.warning(...)` and returns `[]` on failure (mirrors `analytics.py:62-79`). Test asserts an exception during the query produces a logged warning AND an empty list returned.
+- [x] `compute_act_rate` is already exception-safe (returns `None` on empty input). No new handler needed for that path.
 
 ### Empty/Invalid Input Handling
-- [ ] `get_memories` with `project_key=""` falls back to `DEFAULT_PROJECT_KEY`. Tested.
-- [ ] `get_memories` returning an empty list renders the empty-state UI (test the template path with zero records).
-- [ ] `category` query param with an unknown value (e.g., `?category=bogus`) renders empty list with the empty-state hint, not a 500 error.
-- [ ] Memory record with missing `metadata` dict (legacy data) renders without crashing — defaults to category="default", outcome history = [], `dismissal_count=0`.
+- [x] `get_memories` with `project_key=""` falls back to `DEFAULT_PROJECT_KEY`. Tested.
+- [x] `get_memories` returning an empty list renders the empty-state UI (test the template path with zero records).
+- [x] `category` query param with an unknown value (e.g., `?category=bogus`) renders empty list with the empty-state hint, not a 500 error.
+- [x] Memory record with missing `metadata` dict (legacy data) renders without crashing — defaults to category="default", outcome history = [], `dismissal_count=0`.
 
 ### Error State Rendering
-- [ ] `/memories` route with the data layer raising surfaces the existing `error.html` template (already wired via the global exception handler in `ui/app.py:394-399`). Test asserts a 500 page renders, not a traceback.
-- [ ] HTMX partial endpoint returning empty list still renders valid HTML (no `null` literal sneaking into the swap).
+- [x] `/memories` route with the data layer raising surfaces the existing `error.html` template (already wired via the global exception handler in `ui/app.py:394-399`). Test asserts a 500 page renders, not a traceback.
+- [x] HTMX partial endpoint returning empty list still renders valid HTML (no `null` literal sneaking into the swap).
 
 ## Test Impact
 
-- [ ] `tests/integration/test_dashboard.py` (or equivalent existing UI smoke test) — UPDATE if it asserts the route table; add `/memories` and `/_partials/memories/` to expected routes.
-- [ ] No existing tests assert on the analytics stats Memory group structure that would break.
+- [x] `tests/integration/test_dashboard.py` (or equivalent existing UI smoke test) — UPDATE if it asserts the route table; add `/memories` and `/_partials/memories/` to expected routes. (No prior `test_dashboard.py` exists; new `tests/integration/test_dashboard_memories.py` covers the routes.)
+- [x] No existing tests assert on the analytics stats Memory group structure that would break.
 
 If the existing `tests/integration/test_dashboard.py` does not exist or does not enumerate routes, no existing tests are affected — this is purely additive UI work with no prior coverage of `/memories` (which is a new path). The builder verifies on first build.
 
@@ -208,31 +208,31 @@ No agent integration required — this is a dashboard-internal feature. The agen
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/subconscious-memory.md` with a new `## Dashboard view` section describing the `/memories` route, the filter controls, and the supersession-default behavior. Include a screenshot of the rendered page.
-- [ ] Add a row to the `docs/features/README.md` index (if subconscious-memory is not already there with a link, add the dashboard subsection link).
+- [x] Update `docs/features/subconscious-memory.md` with a new `## Dashboard view` section describing the `/memories` route, the filter controls, and the supersession-default behavior. Include a screenshot of the rendered page.
+- [x] Add a row to the `docs/features/README.md` index (if subconscious-memory is not already there with a link, add the dashboard subsection link).
 
 ### External Documentation Site
 The repo doesn't use Sphinx/MkDocs. No external docs site to update.
 
 ### Inline Documentation
-- [ ] Module docstring on `ui/data/memories.py` explaining the data-access pattern (mirror `ui/data/reflections.py:1-6`).
-- [ ] Module docstring on `ui/templates/memories.html` is unnecessary; templates are self-evident.
-- [ ] Comment in `ui/app.py` route handler noting that `/memories` is paired with `/_partials/memories/` for HTMX swap.
+- [x] Module docstring on `ui/data/memories.py` explaining the data-access pattern (mirror `ui/data/reflections.py:1-6`).
+- [x] Module docstring on `ui/templates/memories.html` is unnecessary; templates are self-evident. (Explicit decision: no template docstring added.)
+- [x] Comment in `ui/app.py` route handler noting that `/memories` is paired with `/_partials/memories/` for HTMX swap.
 
 ## Success Criteria
 
-- [ ] `/memories` route renders a list of Memory records for the active project, grouped by category.
-- [ ] Each row shows: title (first line of content, truncated to ~80 chars), category badge, importance (1 decimal), age (humanized), source, outcome summary (e.g., "acted ×3 / dismissed ×1, 75% act rate"), decay flag (visible iff `dismissal_count >= 2`), supersession indicator (visible iff record is superseded AND show-superseded toggle is on).
-- [ ] Filter controls work: category buttons (correction / decision / pattern / surprise / all), decay-only toggle, show-superseded toggle. Filter state survives an HTMX swap.
-- [ ] Decay-imminent records visually flagged (e.g., yellow badge "decay 2/3").
-- [ ] Superseded records hidden by default; visible behind toggle with faded "merged into mem_xyz" link.
-- [ ] Empty state when no memories match the filter — friendly message pointing to the CLI.
-- [ ] Truncation banner when the filtered corpus exceeds 200 records.
-- [ ] Page renders in <500ms on a corpus of 500 memories (measured via browser devtools).
-- [ ] `python -m ruff check ui/` and `python -m ruff format --check ui/` pass.
-- [ ] `pytest tests/` passes (no regressions).
-- [ ] `docs/features/subconscious-memory.md` updated with the dashboard view section.
-- [ ] PR opened with `Closes #1181` in the body.
+- [x] `/memories` route renders a list of Memory records for the active project, grouped by category.
+- [x] Each row shows: title (first line of content, truncated to ~80 chars), category badge, importance (1 decimal), age (humanized), source, outcome summary (e.g., "acted ×3 / dismissed ×1, 75% act rate"), decay flag (visible iff `dismissal_count >= 2`), supersession indicator (visible iff record is superseded AND show-superseded toggle is on).
+- [x] Filter controls work: category buttons (correction / decision / pattern / surprise / all), decay-only toggle, show-superseded toggle. Filter state survives an HTMX swap.
+- [x] Decay-imminent records visually flagged (e.g., yellow badge "decay 2/3").
+- [x] Superseded records hidden by default; visible behind toggle with faded "merged into mem_xyz" link.
+- [x] Empty state when no memories match the filter — friendly message pointing to the CLI.
+- [x] Truncation banner when the filtered corpus exceeds 200 records.
+- [x] Page renders in <500ms on a corpus of 500 memories (measured via browser devtools).
+- [x] `python -m ruff check ui/` and `python -m ruff format --check ui/` pass.
+- [x] `pytest tests/` passes (no regressions).
+- [x] `docs/features/subconscious-memory.md` updated with the dashboard view section.
+- [x] PR opened with `Closes #1181` in the body.
 
 ## Team Orchestration
 
