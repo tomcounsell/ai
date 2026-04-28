@@ -921,6 +921,22 @@ def load_persona_prompt(persona: str = "developer") -> str:
                 f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
                 "— pipeline integrity may be compromised"
             )
+        # Workflow-announcement guard: the PM overlay MUST contain the bucket-#3
+        # announce-and-pause rule so coding/automation/config requests don't get
+        # silently implemented. The substring is the unique opening clause of the
+        # required announcement phrase. This guards against overlay drift on
+        # bridge machines where the private overlay is iCloud-synced and could
+        # fall out of sync with the in-repo template. Mirrors the CRITIQUE check
+        # above and PR #802's loader-warning pattern. See issue #1189.
+        if (
+            persona == "project-manager"
+            and "Unless you directly instruct me to skip" not in overlay_content
+        ):
+            logger.warning(
+                f"PM persona overlay '{overlay_path}' is missing the "
+                "workflow-announcement rule — PM may silently implement "
+                "code/config changes without surfacing the SDLC contract."
+            )
         if persona == "project-manager" and 'subagent_type="dev-session"' in overlay_content:
             logger.warning(
                 f"PM persona overlay '{overlay_path}' still contains Agent tool dispatch "

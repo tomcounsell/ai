@@ -403,3 +403,106 @@ class TestStageAwareOpenQuestionGate:
         )
         questions = _extract_open_questions(output)
         assert questions == []  # Resolved sections are excluded
+
+
+class TestWorkflowAnnouncementExtraction:
+    """Issue #1189: PM workflow-announcement responses end with a
+    ## Open Questions section that must populate session.expectations
+    verbatim, so the unthreaded-message router can match a `plan` or
+    `skip` reply back to the dormant session.
+
+    The PM persona overlay tells the agent to emit a literal phrase
+    ("Unless you directly instruct me to skip our standard workflow...")
+    plus a `## Open Questions` section asking the human to choose between
+    `plan` and `skip`. These tests verify the extraction → expectations
+    pipeline works for that exact response shape.
+    """
+
+    def test_workflow_question_extracted_from_announcement_response(self):
+        """A PM bucket-#3 announcement response is parseable."""
+        pm_response = (
+            "Unless you directly instruct me to skip our standard workflow, "
+            "we need to file an issue to plan all improvements and changes to "
+            "software.\n\n"
+            "Reply with one of:\n"
+            "- `plan` — file an issue and run /do-plan\n"
+            "- `skip` — override SDLC for this task only\n\n"
+            "## Open Questions\n\n"
+            "1. Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
+        )
+        questions = _extract_open_questions(pm_response)
+        assert len(questions) == 1
+        assert "plan" in questions[0].lower()
+        assert "skip" in questions[0].lower()
+
+    def test_workflow_question_with_bullet_extracted(self):
+        """Bullet-style ## Open Questions for the workflow phrase still extracts."""
+        pm_response = (
+            "Unless you directly instruct me to skip our standard workflow, "
+            "we need to file an issue to plan all improvements and changes to "
+            "software.\n\n"
+            "## Open Questions\n\n"
+            "- Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
+        )
+        questions = _extract_open_questions(pm_response)
+        assert len(questions) == 1
+
+    @pytest.mark.asyncio
+    async def test_workflow_question_populates_expectations(self):
+        """When a PM response carries the workflow announcement and a
+        ## Open Questions section, draft_message populates expectations
+        from the section even if Haiku does not detect it."""
+        pm_response = (
+            "Unless you directly instruct me to skip our standard workflow, "
+            "we need to file an issue to plan all improvements and changes to "
+            "software.\n\n"
+            "Reply with `plan` to file an issue, or `skip` to override SDLC "
+            "for this task only.\n\n"
+            "## Open Questions\n\n"
+            "1. Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredDraft(
+                context_summary="PM announcing workflow contract for a coding request",
+                response=(
+                    "Unless you directly instruct me to skip our standard workflow, "
+                    "we need to file an issue. Reply `plan` or `skip`."
+                ),
+                # Haiku might miss the workflow question — extraction must back-fill it
+                expectations=None,
+            )
+        )
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(pm_response)
+
+        assert result.expectations is not None, (
+            "expectations should be populated from the verbatim ## Open Questions section "
+            "so the unthreaded-message router can match a `plan` or `skip` reply"
+        )
+        # The workflow question must contain both reply tokens for the
+        # semantic router to clear the 0.80 threshold against single-word replies.
+        assert "plan" in result.expectations.lower()
+        assert "skip" in result.expectations.lower()
+
+    @pytest.mark.asyncio
+    async def test_haiku_expectations_take_priority_for_workflow(self):
+        """If Haiku already extracts the workflow question, that wins
+        (consistent with the existing LLM-priority rule)."""
+        pm_response = (
+            "Unless you directly instruct me to skip our standard workflow, "
+            "we need to file an issue to plan all improvements and changes to "
+            "software.\n\n"
+            "## Open Questions\n\n"
+            "1. Should I file an issue (`plan`) or skip SDLC (`skip`)?\n"
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredDraft(
+                context_summary="PM workflow announcement",
+                response="Unless you directly instruct me to skip... reply `plan` or `skip`.",
+                expectations="Should I file an issue (plan) or skip SDLC (skip)?",
+            )
+        )
+        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
+            result = await draft_message(pm_response)
+
+        assert result.expectations == "Should I file an issue (plan) or skip SDLC (skip)?"
