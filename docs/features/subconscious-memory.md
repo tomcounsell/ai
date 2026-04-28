@@ -492,7 +492,7 @@ python -m tools.memory_search status --project dm  # Scope to a specific project
 
 **Note:** `last_write` reflects the most recent relevance-score update, not creation time. Decay or boost operations on old records can make them appear recent.
 
-## Dashboard View
+## Dashboard view
 
 The `/memories` route on the local dashboard (default `localhost:8500/memories`) provides a per-record memory inspector for the active project. It complements the aggregate counters on the index page (`memory_recalls_today/_7d`, `memory_extractions_today/_7d`) with a row-level view of every Memory record.
 
