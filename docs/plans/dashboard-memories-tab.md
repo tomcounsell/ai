@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-27
 tracking: https://github.com/tomcounsell/ai/issues/1181
 last_comment_id:
+revision_applied: true
 ---
 
 # Dashboard `/memories` view — per-record memory inspector
@@ -125,8 +126,15 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/dashboard-memo
 - **Pagination ceiling: top-N=200, sorted by `relevance` descending.** When the corpus exceeds 200 records after filtering, render a footer banner: `Showing 200 of N records — see python -m tools.memory_search for full inspection.` Avoids both pagination UI and unbounded payload size.
 - **Reuse helpers.** `compute_act_rate()` from `agent/memory_extraction.py` for the act-rate %. `tools.memory_search.inspect(memory_id=…)` for the deferred detail route (v1 uses inline rendering only — `inspect()` is wired up but the modal/detail page is out of scope).
 - **Project scoping.** Resolve `project_key` from `os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)`. The view is single-project (matches the dashboard's existing single-project assumption).
+  - **Implementation Note (concern: project-key resolution):** v1 is explicitly single-project. Do NOT add a project selector in this PR. If a future cross-project view is wanted, that is a separate feature with its own plan. The route reads `VALOR_PROJECT_KEY` once at request time; no caching.
 - **Decay flag rule.** A record is "decay-imminent" when `metadata.get("dismissal_count", 0) >= DISMISSAL_DECAY_THRESHOLD - 1` (i.e., `>= 2`). Read the threshold from `config.memory_defaults` so the rule tracks the constant if it's ever tuned.
+- **Sort and cap ordering.** Apply filters first, THEN sort the filtered subset by `relevance` desc, THEN truncate to `limit=200`. This protects render time even when the unfiltered corpus is large.
+  - **Implementation Note (concern: sort cost on `DecayingSortedField`):** The plan accepts the materialize-and-sort cost for ≤1000 records. Do NOT attempt to bypass Popoto and read the sorted set directly via raw Redis (forbidden by the global no-raw-Redis rule, see `.claude/hooks/validators/validate_no_raw_redis_delete.py`). If Popoto exposes a documented top-N helper for `DecayingSortedField` partitions, use it; otherwise materialize and sort in Python. Benchmark on the active corpus during build (`memory inspect --stats` reports the count). The 500ms render budget in Success Criteria is the gate — if hit, we're done.
 - **Empty state.** No memories matching the filter → render a friendly hint pointing to the CLI, not a blank panel.
+- **Missing-metadata defensive access.** Every read of `record.metadata` uses `.get()` with a default. Legacy records may have `metadata = {}` or be missing keys entirely. Concretely: `meta.get("category", "default")`, `meta.get("dismissal_count", 0)`, `meta.get("outcome_history", [])`, `meta.get("last_outcome", None)`. Same pattern for `record.superseded_by` (top-level field, but treat as `None` if unset).
+  - **Implementation Note (concern: legacy records):** This is enforced in the data layer — the template iterates pre-decorated dicts, so it never sees raw `metadata`. Failure path test in step 1 covers a record with `metadata = {}`.
+- **Supersession display.** Show "merged into `mem_xyz`" using the `superseded_by` top-level `StringField`. Do NOT show a merge timestamp — the model has no `superseded_at` field today, and adding one is a separate migration.
+  - **Implementation Note (concern: supersession timestamp):** v1 omits the merge timestamp. If the user wants to know "when," they consult `python -m tools.memory_search inspect --id <id>` which shows the rationale. A `superseded_at` field is its own additive change with its own migration considerations and is out of scope for this view.
 
 ## Failure Path Test Strategy
 
@@ -272,10 +280,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `ui/data/memories.py` with `get_memories(project_key, category=None, decay_only=False, include_superseded=False, limit=200)` and `get_memory_detail(memory_id)` (the latter is a thin wrapper over `tools.memory_search.inspect`).
-- Use `Memory.query.filter(project_key=project_key)` to fetch. Sort by `relevance` desc. Apply filters in Python.
-- Compute per-record: `act_rate` via `compute_act_rate()`, `decay_imminent` boolean, `superseded_by` link.
+- Use `Memory.query.filter(project_key=project_key)` to fetch. **Apply filters first, then sort the filtered subset by `relevance` desc, then truncate to `limit`.** This ordering protects render time on large corpora.
+- Use `.get()` with defaults for every `metadata` access — legacy records may be missing keys (`category`, `dismissal_count`, `outcome_history`, `last_outcome`).
+- Compute per-record: `act_rate` via `compute_act_rate()`, `decay_imminent` boolean (when `dismissal_count >= DISMISSAL_DECAY_THRESHOLD - 1`), `superseded_by` link (read from the top-level `StringField`, NOT `metadata`).
 - Wrap the query in `try/except Exception` returning `[]` on failure with a `logger.warning`.
 - Read `DISMISSAL_DECAY_THRESHOLD` from `config.memory_defaults` (do not hard-code 2 or 3).
+- **Do NOT attempt raw Redis access** to bypass Popoto — forbidden by `.claude/hooks/validators/validate_no_raw_redis_delete.py`. Materialize-and-sort in Python is the accepted cost for ≤1000 records; the 500ms render budget in Success Criteria is the gate.
 
 ### 2. Build routes
 - **Task ID**: build-routes
@@ -360,14 +370,27 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns)
+**Verdict recorded at:** 2026-04-28T17:18:25Z
+**Artifact hash:** `sha256:365f7d5826fd91364b7d0e887d6bb962664b29ae7331dbe56f004ef0a652d421`
+
+### Concerns and Resolutions
+
+The critique returned a "ready to build with concerns" verdict — none of the concerns are blockers, but each warrants an Implementation Note embedded in the plan so the builder reads the resolution inline. Concerns and their resolutions are mirrored as Implementation Notes within the relevant sections above (Solution → Technical Approach, Step by Step Tasks → Build data layer).
+
+| # | Concern | Resolution (inline in plan) |
+|---|---------|-----------------------------|
+| 1 | Project-key resolution: single-project vs multi-project | v1 is single-project. `VALOR_PROJECT_KEY` env var, no project selector. Cross-project view is a separate feature. |
+| 2 | Sort cost on `DecayingSortedField` partitions | Accept materialize-and-sort in Python for ≤1000 records. Filter-then-sort-then-cap ordering protects render time. No raw Redis access. The 500ms render budget is the gate. |
+| 3 | Supersession badge timestamp | Omit timestamp for v1. Model has no `superseded_at` field; adding one is a separate migration. CLI `inspect` shows rationale for the curious. |
+| 4 | Legacy records with missing `metadata` keys | Defensive `.get()` access at the data layer. `superseded_by` is a top-level field, not in `metadata`. Failure-path test covers `metadata = {}`. |
+
+### Status
+
+`revision_applied: true` is set in the plan frontmatter. The plan is ready for `/do-build`.
 
 ---
 
 ## Open Questions
 
-1. **Project-key resolution at the dashboard.** The view assumes a single active project resolved from `VALOR_PROJECT_KEY` (with `DEFAULT_PROJECT_KEY` as fallback). Is this correct, or should the dashboard show records across all known projects on this machine (analogous to how `machine_projects` is displayed today)? If multi-project, we need a project selector — bumps appetite slightly. **Recommend single-project for v1** to match existing dashboard scope; revisit when/if cross-project views are added elsewhere.
-
-2. **Sort key when `relevance` is a Popoto sorted-set field.** The plan sorts by `relevance` desc after materializing the list. If the corpus is large and sort cost matters, we'd query the sorted set directly via Popoto's exposed helpers. Is there a documented Popoto API for "get top-N from a `DecayingSortedField` partition"? If not, accept the materialize-and-sort cost (acceptable for ≤1000 records).
-
-3. **Supersession badge timestamp.** The plan shows "merged into `mem_xyz`" but doesn't show *when* the merge happened. The Memory model doesn't currently track a merge timestamp — the `superseded_by_rationale` is the only audit field. Acceptable to omit the timestamp for v1, or should we track merge time as a small additive field on the model? **Recommend: omit for v1** (additive model field is its own small migration; out of scope here).
+_All open questions from the original draft were resolved during the critique-revision pass and are captured as Implementation Notes inline above. No outstanding questions remain — proceed to build._
