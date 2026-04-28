@@ -27,6 +27,7 @@ def terminal_pm(redis_test_db):
         session_id="pm-continuation-001",
         session_type="pm",
         project_key="test",
+        working_dir="/tmp",
         status="completed",
         chat_id="999",
         sender_name="TestUser",
@@ -100,6 +101,11 @@ class TestCreateContinuationPM:
         assert "CONTINUATION" in cont.message_text
         assert "934" in cont.message_text
         assert "BUILD" in cont.message_text
+        # Issue #1195: spawn contract — both fields must be populated.
+        assert cont.session_id is not None
+        assert cont.working_dir is not None
+        # session_id chain pattern: {parent.session_id}_cont{depth}
+        assert cont.session_id == f"{terminal_pm.session_id}_cont1"
 
     def test_creates_session_with_issue_number_none(self, terminal_pm, redis_test_db):
         """Continuation PM is created even when issue_number is None."""
@@ -123,6 +129,9 @@ class TestCreateContinuationPM:
         cont = pm_children[0]
         assert "unknown issue" in cont.message_text
         assert cont.status == "pending"
+        # Issue #1195: spawn contract.
+        assert cont.session_id is not None
+        assert cont.working_dir is not None
 
     def test_creates_session_with_empty_result_preview(self, terminal_pm, redis_test_db):
         """Continuation PM handles empty result_preview gracefully."""
@@ -143,6 +152,104 @@ class TestCreateContinuationPM:
             if c.session_type == "pm"
         ]
         assert len(pm_children) == 1
+        cont = pm_children[0]
+        # Issue #1195: spawn contract — even with empty result_preview, the
+        # session_id and working_dir must be populated.
+        assert cont.session_id is not None
+        assert cont.working_dir is not None
+
+    def test_session_id_pattern_is_continuation_chain(self, terminal_pm, redis_test_db):
+        """Issue #1195: session_id follows {parent.session_id}_cont{depth}."""
+        from agent.agent_session_queue import _create_continuation_pm
+
+        _create_continuation_pm(
+            parent=terminal_pm,
+            agent_session=None,
+            issue_number=934,
+            stage="BUILD",
+            outcome="success",
+            result_preview="r",
+        )
+
+        pm_children = [
+            c
+            for c in AgentSession.query.filter(parent_agent_session_id=terminal_pm.agent_session_id)
+            if c.session_type == "pm"
+        ]
+        assert len(pm_children) == 1
+        # First continuation: depth=1, suffix=_cont1
+        assert pm_children[0].session_id == f"{terminal_pm.session_id}_cont1"
+
+    def test_working_dir_resolves_via_helper(self, terminal_pm, redis_test_db):
+        """Issue #1195: working_dir is resolved through _resolve_working_dir_for_parent."""
+        from agent.agent_session_queue import _create_continuation_pm
+
+        with patch(
+            "agent.session_completion._resolve_working_dir_for_parent",
+            return_value="/resolved/path",
+        ) as mock_resolve:
+            _create_continuation_pm(
+                parent=terminal_pm,
+                agent_session=None,
+                issue_number=934,
+                stage="BUILD",
+                outcome="success",
+                result_preview="r",
+            )
+
+        # Helper must be called exactly once with the parent.
+        assert mock_resolve.call_count == 1
+        called_arg = mock_resolve.call_args[0][0]
+        assert called_arg.session_id == terminal_pm.session_id
+
+        pm_children = [
+            c
+            for c in AgentSession.query.filter(parent_agent_session_id=terminal_pm.agent_session_id)
+            if c.session_type == "pm"
+        ]
+        assert len(pm_children) == 1
+        assert pm_children[0].working_dir == "/resolved/path"
+
+    def test_no_spawn_when_parent_session_id_is_none(self, redis_test_db, caplog):
+        """Issue #1195: malformed parent (session_id=None) does not poison the chain.
+
+        We construct a stand-in parent object with ``session_id=None`` and call
+        ``_create_continuation_pm`` directly — it must log the error and skip
+        the spawn rather than save another None-id session.
+        """
+        import logging
+
+        from agent.agent_session_queue import _create_continuation_pm
+
+        class _Stub:
+            session_id = None
+            agent_session_id = "malformed-parent-001"
+            project_key = "test"
+            chat_id = "999"
+            continuation_depth = 0
+            project_config = None
+
+        before_count = len(list(AgentSession.query.all()))
+
+        with caplog.at_level(logging.ERROR):
+            _create_continuation_pm(
+                parent=_Stub(),
+                agent_session=None,
+                issue_number=934,
+                stage="BUILD",
+                outcome="success",
+                result_preview="r",
+            )
+
+        # No new session created.
+        after_count = len(list(AgentSession.query.all()))
+        assert after_count == before_count
+
+        # Structured error log emitted.
+        _msgs = [r.message for r in caplog.records]
+        assert any("[continuation-pm-blocked]" in m and "session_id is None" in m for m in _msgs), (
+            f"Expected '[continuation-pm-blocked]' error log; got: {_msgs}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +272,7 @@ class TestContinuationDepthCap:
             session_id="pm-deep-001",
             session_type="pm",
             project_key="test",
+            working_dir="/tmp",
             status="completed",
             chat_id="999",
             message_text="Deep continuation",
@@ -199,6 +307,7 @@ class TestContinuationDepthCap:
             session_id="pm-depth-1",
             session_type="pm",
             project_key="test",
+            working_dir="/tmp",
             status="completed",
             chat_id="999",
             message_text="First continuation",
@@ -224,6 +333,9 @@ class TestContinuationDepthCap:
         ]
         assert len(children) == 1
         assert children[0].continuation_depth == 2
+        # Issue #1195: chain pattern follows {parent.session_id}_cont{depth}.
+        assert children[0].session_id == "pm-depth-1_cont2"
+        assert children[0].working_dir is not None
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +399,7 @@ class TestHandleCompletionContinuationFallback:
             session_id="pm-terminal-steer-001",
             session_type="pm",
             project_key="test",
+            working_dir="/tmp",
             status="completed",
             chat_id="999",
             message_text="Run SDLC on issue #934 (issues/934)",
@@ -492,6 +605,7 @@ class TestHandleCompletionOrderingRace:
             session_id="pm-ordering-race-001",
             session_type="pm",
             project_key="test",
+            working_dir="/tmp",
             status="completed",
             chat_id="999",
             message_text="Run SDLC on issue #987 (issues/987)",
@@ -571,6 +685,7 @@ class TestHandleCompletionPathBFallback:
             session_id="pm-path-b-001",
             session_type="pm",
             project_key="test",
+            working_dir="/tmp",
             status="completed",
             chat_id="999",
             message_text="Run SDLC on issue #987 (issues/987)",
