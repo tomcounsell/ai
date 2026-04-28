@@ -25,7 +25,7 @@ INTAKE CLASSIFIER (new, #320)
     |  call classify_message_intent_async() with session context
     |
     +-- interjection -> push to queued_steering_messages + Redis steering queue
-    |                   (ack: "Adding to current task")
+    |                   (ack: 👀 reaction on user's message, or 🫡 for abort keywords)
     |
     +-- acknowledgment -> mark dormant session as completed
     |                     (requires dormant status + expectations set)

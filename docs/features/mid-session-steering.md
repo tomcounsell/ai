@@ -18,7 +18,7 @@ Mid-session steering allows a user to send a reply-to message in Telegram that g
 4. **User sends a reply-to message** to steer the agent (e.g., "actually, focus on OAuth specifically").
 5. **Bridge steering check** queries for sessions with matching `session_id` in `running` or `active` status.
 6. **Match found** -- message is pushed to the Redis steering queue (`steering:{session_id}`).
-7. **Acknowledgment sent** -- bridge replies "Adding to current task" (or "Stopping current task." for abort keywords).
+7. **Acknowledgment sent** -- bridge attaches a 👀 emoji reaction to the user's message (or 🫡 for abort keywords). No inline text reply is emitted; the eventual real reply lands in the thread as a normal PM-authored message.
 8. **PostToolUse hook fires** on the agent's next tool call, pops the steering message from Redis.
 9. **Agent receives the steering message** via `client.interrupt()` + `client.query()` and adjusts its behavior.
 
