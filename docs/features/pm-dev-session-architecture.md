@@ -272,7 +272,7 @@ The continuation PM is a new `AgentSession(session_type="pm", status="pending")`
 
 If `parent.session_id` is somehow `None` (theoretically possible for a malformed parent), the spawn is skipped with a `[continuation-pm-blocked]` error log rather than poisoning the chain with another `None`-id session.
 
-**Defense-in-depth executor guard (issue #1195)**: `agent/session_executor.py::_execute_agent_session` checks both `working_dir` and `session_id` for `None` before reaching `Path(session.working_dir)`. Any future spawn site that forgets a required field is caught here: the session is marked `failed` with `failure_reason="missing_working_dir_or_session_id"` and a `[executor-guard]` structured error is logged. This converts what was a silent `TypeError` mid-startup (no Telegram surface, no failure record) into an observable failure that dashboards and reflections pick up.
+**Defense-in-depth executor guard (issue #1195)**: `agent/session_executor.py::_execute_agent_session` checks both `working_dir` and `session_id` for `None` before reaching `Path(session.working_dir)`. Any future spawn site that forgets a required field is caught here: the session is marked failed and a `[executor-guard]` structured error is logged with `reason=missing_working_dir_or_session_id` (the log line is the durable failure record — there is no `failure_reason` column on `AgentSession`). This converts what was a silent `TypeError` mid-startup (no Telegram surface, no failure record) into an observable failure that dashboards and reflections pick up.
 
 **Deduplication**: Redis `SETNX` on key `continuation-pm:{parent_id}` (300s TTL) ensures only one continuation PM per parent, even when multiple Dev sessions complete simultaneously.
 
