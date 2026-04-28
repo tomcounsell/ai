@@ -65,6 +65,72 @@ Each mode wraps the persona prompt differently:
 | `project-manager` | `~/Desktop/Valor/personas/project-manager.md` (private) or `config/personas/project-manager.md` (in-repo fallback) | Triage, routing, SDLC gate enforcement, GitHub management | PM: groups, bridge messaging |
 | `teammate` | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats |
 
+## PM Workflow Announcement
+
+PM intake bucket #3 (coding/feature/bug/automation/config requests) requires the PM to STOP, announce the workflow contract verbatim, and pause for human confirmation before any code, config, or infrastructure work begins. This prevents the failure mode where a PM session silently implements changes without filing a GitHub issue or running the SDLC pipeline. See issue [#1189](https://github.com/tomcounsell/ai/issues/1189) for the original failure case.
+
+### When It Fires
+
+The announcement is required for any message that asks for changes to:
+
+- Source code in any repo (`.py`, `.js`, `.ts`, `.go`, `.sh`, etc.)
+- LaunchAgents (`~/Library/LaunchAgents/*.plist`), launchd daemons, system cron, systemd units
+- Shell scripts, Python scripts, Node scripts (anywhere on disk)
+- Runtime config files (`.env`, `projects.json`, `.mcp.json`, `settings.json`, `.plist`)
+- Infrastructure changes (Vercel/Render/SMTP/DNS/IAM)
+- New dependencies (anything added via `pip`, `npm`, `brew`, `uv add`, etc.)
+- Anything new under `~/Library/LaunchAgents/`, `~/.local/bin/`, `/etc/`, `~/Library/LaunchDaemons/`
+
+The announcement does **not** fire for routine PM work: replying to messages, reading state, sending Telegram messages, GitHub issue management (create/edit/label/close), memory search, status reports, or running existing tools to read state.
+
+### The Announcement Phrase (Verbatim)
+
+The PM must use this literal phrase when bucket #3 fires:
+
+> "Unless you directly instruct me to skip our standard workflow, we need to file an issue to plan all improvements and changes to software."
+
+The PM then asks the human to reply with one of two short tokens:
+
+- `plan` — file an issue and run `/do-plan`
+- `skip` — override SDLC for THIS task only
+
+The response ends with a `## Open Questions` section containing the workflow question verbatim. This populates `session.expectations` (via `bridge/message_drafter.py::_extract_open_questions`) so the unthreaded-message router can match the human's reply back to the dormant session at confidence ≥ 0.80.
+
+### Override Semantics: One-Time, No Persistence
+
+A `skip` reply overrides SDLC for the current bucket-#3 task **only**. The next bucket-#3 message in the same session re-fires the announcement. There is no persistent flag (no `session.skip_sdlc=true`, no in-memory override register). The agent decides per-message based on the most recent `## Open Questions` exchange.
+
+If the human wants session-wide override, they must reply `skip` to each bucket-#3 announcement individually. This avoids the failure mode where a topic shift mid-session ("oh actually let's also work on X") silently inherits a prior override.
+
+### Resume Flow
+
+1. Human asks for a code/automation/config change in a PM-mode chat.
+2. PM agent emits the announcement + `## Open Questions` section, then ends the turn.
+3. The drafter at `bridge/message_drafter.py:1727` extracts the question verbatim and `agent/output_handler.py::_persist_routing_fields` writes it to `session.expectations`.
+4. `bridge/session_transcript.py` transitions the session to `dormant`.
+5. Human replies `plan` or `skip` (no reply-to threading needed).
+6. `bridge/session_router.py::find_matching_session` matches the fresh reply to the dormant session via Haiku at confidence ≥ 0.80 and resumes it via `valor-session resume`.
+7. PM proceeds: on `plan` → file issue and dispatch `/do-plan`; on `skip` → implement directly **for this task only**.
+
+### Loader Guard
+
+`agent/sdk_client.py::load_persona_prompt` emits a WARN log when the PM overlay is loaded without the substring "Unless you directly instruct me to skip". This guards against overlay drift on bridge machines where the private overlay (`~/Desktop/Valor/personas/project-manager.md`, iCloud-synced) could fall out of sync with the in-repo template (`config/personas/project-manager.md`). Mirrors the existing CRITIQUE-substring warning pattern (PR #802).
+
+If you see this warning at PM session startup, hand-edit the private overlay on that machine to add the bucket-#3 announce-and-pause section (or copy from the in-repo template).
+
+### PM Overrides of Shared Defaults
+
+The PM overlay explicitly reverses six developer-flavored defaults from `config/personas/segments/work-patterns.md` (which loads before the overlay):
+
+- "Most work does not require check-ins" → Code changes ALWAYS require an issue + plan + announcement first.
+- "Implementation detail? My call." → Implementation choices belong to the dev session, not the PM.
+- "Should I fix this bug I found? Yes, fix it" → Bugs require a GitHub issue.
+- "Reversible decision? Make it and move on. Git exists." → The PM does not commit code.
+- "YOLO mode — NO APPROVAL NEEDED." → The PM announces the workflow contract and waits for `plan`/`skip`.
+- "Git operations are FULLY autonomous" → The PM only commits docs/plans on main.
+
+The overlay ends the override section with the literal sentence: **"When the shared segment and this overlay disagree, this overlay wins."** This is the load-bearing tiebreaker the agent reads when resolving the contradiction between the shared segment and the PM-specific rules.
+
 ## Configuration
 
 ### projects.json
