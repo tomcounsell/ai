@@ -146,6 +146,48 @@ python tools/send_telegram.py --emoji "sad"
 
 Requires `TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID`. Queues a `custom_emoji_message` payload to the Redis outbox. The relay renders it using `MessageEntityCustomEmoji` for Premium custom emoji, falling back to plain text if the send fails.
 
+### TTS (`tools.tts`)
+
+Dual-backend text-to-speech producing OGG/Opus audio. Kokoro ONNX is the
+local primary; OpenAI tts-1 is the cloud fallback. Mirrors `tools/transcribe/`
+one-for-one (60s availability cache, error-as-dict, dispatch-with-fallback).
+The bridge relay (`bridge/telegram_relay.py`) delivers the result as a native
+Telegram voice message when paired with `valor-telegram send --voice-note`.
+See `docs/features/tts.md` for the full design and `tools/tts/README.md`
+for the agent-facing reference.
+
+```bash
+# Cloud-only setup is the default — just OPENAI_API_KEY in ~/Desktop/Valor/.env.
+# Local Kokoro is optional:
+pip install -e '.[tts]'
+brew install ffmpeg
+python scripts/download_kokoro_models.py     # ~330MB into ~/.cache/kokoro-onnx/
+
+# CLI
+valor-tts --text "Hello." --output /tmp/out.ogg
+valor-tts --text "Hello." --output /tmp/out.ogg --voice af_bella
+valor-tts --text "Hello." --output /tmp/out.ogg --force-cloud
+
+# End-to-end: synthesize + deliver as a native voice bubble
+OUT=$(mktemp -t debrief).ogg
+valor-tts --text "Two-minute deploy debrief..." --output "$OUT"
+valor-telegram send --chat "Dev: Valor" --voice-note --cleanup-after-send --audio "$OUT"
+```
+
+```python
+from tools.tts import synthesize
+
+result = synthesize("Hello world.", "/tmp/out.ogg")
+if result["error"]:
+    raise RuntimeError(result["error"])
+print(result["backend"], result["duration"])  # "kokoro" or "cloud"; seconds
+```
+
+The `/do-debrief` skill (`.claude/skills/do-debrief/SKILL.md`) is the one
+user-invocable composite: synth → push to outbox with `cleanup_file=True` →
+exit. There is intentionally no `/tts` skill — `tools/transcribe/` has no
+`/transcribe` skill either; CLI + README is the stable agent-facing surface.
+
 ### YouTube Search (`tools.youtube_search`)
 
 Search YouTube videos by query using yt-dlp. No API key required.

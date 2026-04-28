@@ -162,6 +162,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
 | [TRM Task Type Profile](trm-task-type-profile.md) | Grove-style Task-Relevant Maturity registry: per-task-type performance metrics drive PM delegation style (structured vs autonomous dev session handoff) | Shipped |
+| [TTS](tts.md) | Text-to-speech with Kokoro ONNX local primary + OpenAI tts-1 cloud fallback; bridge relay extended to deliver native Telegram voice messages; `/do-debrief` composite skill | Shipped |
 | [Unified Analytics](unified-analytics.md) | Dual-write metrics collection (SQLite + Redis) with instrumentation across all subsystems, historical query API, CLI export, dashboard trend view, and reflections rollup | Shipped |
 | [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC; CLI/log surfaces show explicit UTC labels, conversational surfaces convert to local time | Shipped |
 | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |

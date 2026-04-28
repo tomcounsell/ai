@@ -23,9 +23,9 @@ Status filter (explicit — issue #1128 C3): target
 `waiting_for_children`, `superseded`, and all terminal statuses.
 
 Tune via env:
-    WATCHDOG_IDLE_TEARDOWN_ENABLED     — default on; set to 0/false/no to disable.
-    WATCHDOG_IDLE_SWEEP_INTERVAL       — seconds between sweeps (default 1800 = 30 min).
-    WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS — dormancy age to trigger teardown (default 86400 = 24h).
+    WATCHDOG_IDLE_TEARDOWN_ENABLED — default on; set to 0/false/no to disable.
+    WATCHDOG_IDLE_SWEEP_INTERVAL   — seconds between sweeps (default 1800 = 30 min).
+    WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS — dormancy age (default 86400 = 24h).
 """
 
 from __future__ import annotations

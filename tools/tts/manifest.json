@@ -1,0 +1,70 @@
+{
+  "name": "tts",
+  "version": "1.0.0",
+  "description": "Dual-backend text-to-speech: Kokoro ONNX (local) + OpenAI tts-1 (cloud)",
+  "type": "api",
+  "status": "stable",
+
+  "backends": [
+    {
+      "name": "kokoro",
+      "type": "local",
+      "description": "Kokoro ONNX -- local inference, free, ~330MB models",
+      "detection": "model files present + kokoro_onnx import + ffmpeg + dynamic probe",
+      "priority": 1
+    },
+    {
+      "name": "openai-tts",
+      "type": "cloud",
+      "description": "OpenAI tts-1 -- cloud fallback, native OGG/Opus output",
+      "repository": "https://platform.openai.com/docs/guides/text-to-speech",
+      "priority": 2
+    }
+  ],
+
+  "capabilities": [
+    "synthesize"
+  ],
+
+  "requires": {
+    "env": ["OPENAI_API_KEY"],
+    "env_optional": ["KOKORO_MODELS_DIR"],
+    "system_optional": ["ffmpeg", "ffprobe"],
+    "python": ">=3.11"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.tts import synthesize; print('OK')\"",
+    "test": "pytest tools/tts/tests/ -v"
+  },
+
+  "config": {
+    "default_format": "opus",
+    "supported_formats": ["opus"],
+    "kokoro_default_voice": "af_bella",
+    "openai_default_voice": "nova",
+    "kokoro_cache_ttl_s": 60,
+    "max_text_length": 4096
+  },
+
+  "workflows": [
+    {
+      "name": "basic-synthesis",
+      "description": "Synthesize text to OGG/Opus (auto-selects best backend)",
+      "steps": [
+        "from tools.tts import synthesize",
+        "result = synthesize('hello world', '/tmp/out.ogg')",
+        "print(result['path'], result['duration'])"
+      ]
+    },
+    {
+      "name": "telegram-voice-message",
+      "description": "Produce + deliver a Telegram voice message via the bridge relay",
+      "steps": [
+        "valor-tts --text 'hello' --output /tmp/out.ogg",
+        "valor-telegram send --chat 'Dev: Valor' --voice-note --audio /tmp/out.ogg",
+        "Bridge relay sends with voice_note=True; arrives as a voice bubble"
+      ]
+    }
+  ]
+}

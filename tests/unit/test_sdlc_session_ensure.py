@@ -16,7 +16,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -386,7 +386,7 @@ def _make_orphan_session(session_id, age_seconds, heartbeat=None, session_type="
     s.session_type = session_type
     s.status = "running"
     s.last_heartbeat_at = heartbeat
-    s.created_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    s.created_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
     s.issue_url = None
     return s
 
@@ -395,7 +395,7 @@ class TestKillOrphans:
     """Tests for the --kill-orphans zombie-cleanup CLI path."""
 
     def test_dry_run_lists_without_modifying(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         orphan = _make_orphan_session("sdlc-local-9991", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
@@ -409,7 +409,7 @@ class TestKillOrphans:
         assert result["orphans"][0]["session_id"] == "sdlc-local-9991"
 
     def test_real_run_finalizes_orphans_via_finalize_session(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         orphan = _make_orphan_session("sdlc-local-9992", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
@@ -438,7 +438,7 @@ class TestKillOrphans:
         assert kwargs["skip_parent"] is True
 
     def test_finalize_session_failure_does_not_crash(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         orphan = _make_orphan_session("sdlc-local-9993", ORPHAN_AGE_SECONDS + 60)
         mock_as = MagicMock()
@@ -459,7 +459,7 @@ class TestKillOrphans:
         assert "boom" in result["results"][0]["error"]
 
     def test_newer_than_threshold_not_listed(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import _kill_orphans
 
         fresh = _make_orphan_session("sdlc-local-9994", 60)  # 1 minute old
         mock_as = MagicMock()
@@ -472,12 +472,12 @@ class TestKillOrphans:
         assert result["orphans"] == []
 
     def test_session_with_heartbeat_never_listed(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         old_but_alive = _make_orphan_session(
             "sdlc-local-9995",
             age_seconds=ORPHAN_AGE_SECONDS + 3600,
-            heartbeat=datetime.now(timezone.utc),
+            heartbeat=datetime.now(UTC),
         )
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [old_but_alive]
@@ -488,7 +488,7 @@ class TestKillOrphans:
         assert result["count"] == 0
 
     def test_boundary_at_threshold_is_listed(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         at_boundary = _make_orphan_session("sdlc-local-9996", ORPHAN_AGE_SECONDS)
         mock_as = MagicMock()
@@ -501,7 +501,7 @@ class TestKillOrphans:
         assert result["count"] == 1
 
     def test_boundary_one_second_under_not_listed(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         under = _make_orphan_session("sdlc-local-9997", ORPHAN_AGE_SECONDS - 1)
         mock_as = MagicMock()
@@ -513,7 +513,7 @@ class TestKillOrphans:
         assert result["count"] == 0
 
     def test_boundary_one_second_over_is_listed(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         over = _make_orphan_session("sdlc-local-9998", ORPHAN_AGE_SECONDS + 1)
         mock_as = MagicMock()
@@ -525,7 +525,7 @@ class TestKillOrphans:
         assert result["count"] == 1
 
     def test_non_sdlc_local_session_never_listed(self):
-        from tools.sdlc_session_ensure import _kill_orphans, ORPHAN_AGE_SECONDS
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
 
         # A bridge session matching all other zombie criteria must be skipped.
         bridge = _make_orphan_session("tg_valor_-1003449100931_691", ORPHAN_AGE_SECONDS + 3600)

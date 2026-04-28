@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -224,22 +224,22 @@ Dev at shell → `valor-tts --text "hello" --output /tmp/out.ogg` → play back 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/tts/__init__.py` — no `except Exception: pass` blocks. All exceptions must be caught and returned as `{"error": str(e)}` dict. Unit test asserts this for each backend.
-- [ ] `_is_kokoro_available()` — any exception during availability check returns False (matches `_is_superwhisper_available()` convention). Test: force `onnxruntime` import failure, assert False returned, assert no exception propagates.
-- [ ] `bridge/telegram_relay.py` (extended) — if `DocumentAttributeAudio` construction fails (e.g., bad duration), log warning and fall back to non-voice send. Test: pass `duration=None` to the relay branch, assert document-send path is used and warning is logged.
-- [ ] If ffmpeg subprocess fails mid-transcode, return `{"error": "ffmpeg failed: ..."}`. Test: mock subprocess to return non-zero, assert error dict.
+- [x] `tools/tts/__init__.py` — no `except Exception: pass` blocks. All exceptions must be caught and returned as `{"error": str(e)}` dict. Unit test asserts this for each backend.
+- [x] `_is_kokoro_available()` — any exception during availability check returns False (matches `_is_superwhisper_available()` convention). Test: force `onnxruntime` import failure, assert False returned, assert no exception propagates.
+- [x] `bridge/telegram_relay.py` (extended) — if `DocumentAttributeAudio` construction fails (e.g., bad duration), log warning and fall back to non-voice send. Test: pass `duration=None` to the relay branch, assert document-send path is used and warning is logged.
+- [x] If ffmpeg subprocess fails mid-transcode, return `{"error": "ffmpeg failed: ..."}`. Test: mock subprocess to return non-zero, assert error dict.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty text (`synthesize("")`) → `{"error": "text cannot be empty"}`. No API call made. Test covers.
-- [ ] Whitespace-only text → same as empty. Test covers.
-- [ ] Text over 4096 characters (OpenAI tts-1 limit) → `{"error": "text too long: 5000 chars (max 4096)"}`. Test covers.
-- [ ] Invalid voice name → `{"error": "unknown voice: X. Available: [...]"}`. Test covers.
-- [ ] Invalid format (not "opus") → `{"error": "unsupported format: wav. Only 'opus' supported."}`. Test covers.
+- [x] Empty text (`synthesize("")`) → `{"error": "text cannot be empty"}`. No API call made. Test covers.
+- [x] Whitespace-only text → same as empty. Test covers.
+- [x] Text over 4096 characters (OpenAI tts-1 limit) → `{"error": "text too long: 5000 chars (max 4096)"}`. Test covers.
+- [x] Invalid voice name → `{"error": "unknown voice: X. Available: [...]"}`. Test covers.
+- [x] Invalid format (not "opus") → `{"error": "unsupported format: wav. Only 'opus' supported."}`. Test covers.
 
 ### Error State Rendering
-- [ ] `/do-debrief` error path: if `synthesize()` returns an error dict, skill surfaces it to the agent verbatim (does NOT swallow). Test: mock `synthesize()` to return error, assert stderr contains the error message.
-- [ ] File cleanup after send: the **relay** deletes the temp file when `payload["cleanup_file"] is True` — on success OR after DLQ placement. `/do-debrief` never deletes the file itself once the payload has been pushed. Test: push a payload with `cleanup_file: True` + successful send → file removed by relay; push a payload + mock a 3x retry failure → file removed when DLQ'd. Additional test: `/do-debrief` exits before relay runs → file still exists (relay hasn't processed yet), not a bug.
-- [ ] Synthesis-stage cleanup: if `synthesize()` itself raises mid-run (before the payload is pushed to the outbox), `/do-debrief` deletes the partially-written temp file in a `try/finally`. This is the only pre-push cleanup responsibility on the caller.
+- [x] `/do-debrief` error path: if `synthesize()` returns an error dict, skill surfaces it to the agent verbatim (does NOT swallow). Test: mock `synthesize()` to return error, assert stderr contains the error message.
+- [x] File cleanup after send: the **relay** deletes the temp file when `payload["cleanup_file"] is True` — on success OR after DLQ placement. `/do-debrief` never deletes the file itself once the payload has been pushed. Test: push a payload with `cleanup_file: True` + successful send → file removed by relay; push a payload + mock a 3x retry failure → file removed when DLQ'd. Additional test: `/do-debrief` exits before relay runs → file still exists (relay hasn't processed yet), not a bug.
+- [x] Synthesis-stage cleanup: if `synthesize()` itself raises mid-run (before the payload is pushed to the outbox), `/do-debrief` deletes the partially-written temp file in a `try/finally`. This is the only pre-push cleanup responsibility on the caller.
 
 ## Test Impact
 
@@ -351,7 +351,7 @@ TTS follows this precedent:
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/tts.md` describing:
+- [x] Create `docs/features/tts.md` describing:
   - What TTS is in this system (text → OGG/Opus audio)
   - Dual-backend design (Kokoro primary, OpenAI tts-1 fallback)
   - How voice-message delivery works (relay + Telethon `voice_note`)
@@ -360,38 +360,38 @@ TTS follows this precedent:
   - `/do-debrief` skill invocation (and why there is no `/tts` skill — see CONCERN 4 resolution)
   - Install/setup (kokoro-onnx pip + model download script + ffmpeg)
   - Troubleshooting (Kokoro unavailable, voice message arrives as document, etc.)
-- [ ] Add `tts.md` entry to `docs/features/README.md` index table with a one-line summary.
+- [x] Add `tts.md` entry to `docs/features/README.md` index table with a one-line summary.
 
 ### External Documentation Site
-- [ ] N/A — this repo does not use Sphinx / Read the Docs / MkDocs.
+- [x] N/A — this repo does not use Sphinx / Read the Docs / MkDocs.
 
 ### Inline Documentation
-- [ ] Docstrings on `synthesize()`, `_synthesize_kokoro()`, `_synthesize_openai()`, `_is_kokoro_available()`, and the relay branch.
-- [ ] Comments on the duration-computation helper and the voice-mapping dict.
-- [ ] `tools/tts/manifest.json` `description` field set.
-- [ ] `tools/tts/README.md` follows `tools/transcribe/README.md` structure.
+- [x] Docstrings on `synthesize()`, `_synthesize_kokoro()`, `_synthesize_openai()`, `_is_kokoro_available()`, and the relay branch.
+- [x] Comments on the duration-computation helper and the voice-mapping dict.
+- [x] `tools/tts/manifest.json` `description` field set.
+- [x] `tools/tts/README.md` follows `tools/transcribe/README.md` structure.
 
 ### CLAUDE.md cleanup (side task)
-- [ ] Remove or correct references to `.mcp.json` and `mcp_servers/` in `CLAUDE.md` (both project-local and `~/.claude/CLAUDE.md` if applicable — only edit the repo one). Replace with a one-line note that agent-facing tools live under `tools/<name>/` with CLI entry points in `pyproject.toml`.
+- [x] Remove or correct references to `.mcp.json` and `mcp_servers/` in `CLAUDE.md` (both project-local and `~/.claude/CLAUDE.md` if applicable — only edit the repo one). Replace with a one-line note that agent-facing tools live under `tools/<name>/` with CLI entry points in `pyproject.toml`.
 
 ## Success Criteria
 
-- [ ] `tools/tts/` exists with `__init__.py`, `manifest.json`, `README.md`, `tests/` — layout matches `tools/transcribe/` exactly (`diff <(ls tools/transcribe) <(ls tools/tts)` shows no structural difference).
-- [ ] `synthesize(text="hello")` returns an OGG/Opus file playable by `ffplay` / QuickTime.
-- [ ] Backend selection works: with Kokoro available → `backend: "kokoro"`; with Kokoro disabled (via env override) → `backend: "cloud"`.
-- [ ] Availability cache works (second call within 60s does not re-run the check). Asserted in unit test via mock-patched time.
-- [ ] Fallback-on-error works: mock Kokoro to raise mid-synth → cloud path is used, no exception propagates. Asserted in unit test.
-- [ ] `valor-tts --text "hello" --output /tmp/out.ogg` creates a valid file.
-- [ ] `valor-telegram send --chat "Dev: Valor" --voice-note --audio /tmp/out.ogg` arrives as a native Telegram voice message (waveform bubble, not audio-document tile). **Verified manually on at least one live chat.**
-- [ ] `/do-debrief` skill file exists at `.claude/skills/do-debrief/SKILL.md`, ≤150 lines, end-to-end flow documented. (No `/tts` skill is shipped — agents invoke `valor-tts` directly via Bash; see Solution → Key Elements for rationale.)
-- [ ] `/do-debrief` invocation with 2-minute debrief text produces and delivers a voice message end-to-end.
-- [ ] `docs/features/tts.md` exists and is indexed in `docs/features/README.md`.
-- [ ] `CLAUDE.md` no longer references non-existent `.mcp.json` / `mcp_servers/` (or explicitly documents them as future-looking).
-- [ ] All unit tests pass: `pytest tools/tts/tests/ tests/unit/test_telegram_relay_voice_note.py tests/unit/test_valor_telegram_voice_flag.py -q`.
-- [ ] Lint + format clean: `python -m ruff check . && python -m ruff format --check .`.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
-- [ ] Plan documentation checkboxes satisfied (this section + Documentation section).
+- [x] `tools/tts/` exists with `__init__.py`, `manifest.json`, `README.md`, `tests/` — layout matches `tools/transcribe/` exactly (`diff <(ls tools/transcribe) <(ls tools/tts)` shows no structural difference).
+- [x] `synthesize(text="hello")` returns an OGG/Opus file playable by `ffplay` / QuickTime.
+- [x] Backend selection works: with Kokoro available → `backend: "kokoro"`; with Kokoro disabled (via env override) → `backend: "cloud"`.
+- [x] Availability cache works (second call within 60s does not re-run the check). Asserted in unit test via mock-patched time.
+- [x] Fallback-on-error works: mock Kokoro to raise mid-synth → cloud path is used, no exception propagates. Asserted in unit test.
+- [x] `valor-tts --text "hello" --output /tmp/out.ogg` creates a valid file.
+- [x] `valor-telegram send --chat "Dev: Valor" --voice-note --audio /tmp/out.ogg` arrives as a native Telegram voice message (waveform bubble, not audio-document tile). **Verified manually on at least one live chat.**
+- [x] `/do-debrief` skill file exists at `.claude/skills/do-debrief/SKILL.md`, ≤150 lines, end-to-end flow documented. (No `/tts` skill is shipped — agents invoke `valor-tts` directly via Bash; see Solution → Key Elements for rationale.)
+- [x] `/do-debrief` invocation with 2-minute debrief text produces and delivers a voice message end-to-end.
+- [x] `docs/features/tts.md` exists and is indexed in `docs/features/README.md`.
+- [x] `CLAUDE.md` no longer references non-existent `.mcp.json` / `mcp_servers/` (or explicitly documents them as future-looking).
+- [x] All unit tests pass: `pytest tools/tts/tests/ tests/unit/test_telegram_relay_voice_note.py tests/unit/test_valor_telegram_voice_flag.py -q`.
+- [x] Lint + format clean: `python -m ruff check . && python -m ruff format --check .`.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
+- [x] Plan documentation checkboxes satisfied (this section + Documentation section).
 
 ## Team Orchestration
 
