@@ -23,11 +23,15 @@ from urllib.request import urlopen
 MODEL_FILENAME = "kokoro-v1.0.onnx"
 VOICES_FILENAME = "voices-v1.0.bin"
 
-# Hugging Face mirror (public, no auth required).
-HF_BASE = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main"
+# Canonical release assets published by the kokoro-onnx maintainer.
+# The Hugging Face repo restructured into per-voice files in early 2026 and
+# the consolidated `voices.bin` no longer resolves there (HTTP 404). The
+# GitHub release tag below is the upstream's documented "model files" drop.
+KOKORO_RELEASE_TAG = "model-files-v1.0"
+GH_BASE = f"https://github.com/thewh1teagle/kokoro-onnx/releases/download/{KOKORO_RELEASE_TAG}"
 DOWNLOAD_URLS = {
-    MODEL_FILENAME: f"{HF_BASE}/onnx/model.onnx",
-    VOICES_FILENAME: f"{HF_BASE}/voices.bin",
+    MODEL_FILENAME: f"{GH_BASE}/kokoro-v1.0.onnx",
+    VOICES_FILENAME: f"{GH_BASE}/voices-v1.0.bin",
 }
 
 

@@ -28,6 +28,7 @@ from scripts.update import (  # noqa: E402
     git,
     hardlinks,
     hooks,
+    kokoro,
     migrations,
     npm_tools,
     officecli,
@@ -126,6 +127,7 @@ class UpdateResult:
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
     sentry_cli_result: sentry_cli.InstallResult | None = None
+    kokoro_result: kokoro.DownloadResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -684,6 +686,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         log(f"WARN: sentry-cli {sr.action}: {sr.error}", v)
         result.warnings.append(f"sentry-cli: {sr.error}")
+
+    # Step 3.11: Kokoro TTS model + voices download.
+    # Idempotent: skipped when both files are already present in the cache
+    # directory ($KOKORO_MODELS_DIR or ~/.cache/kokoro-onnx/). The single
+    # voices-v1.0.bin asset bundles every voice (am_michael default,
+    # bf_alice female alternative, etc.), so there's no per-voice fetch.
+    # Failures are non-fatal — the TTS layer falls back to OpenAI tts-1.
+    log("Checking Kokoro TTS models...", v)
+    result.kokoro_result = kokoro.ensure_models(project_dir)
+    kr = result.kokoro_result
+    if kr.success:
+        if kr.action == "skipped":
+            log(f"Kokoro models OK ({kr.models_dir})", v)
+        else:
+            log(f"Kokoro models downloaded ({kr.models_dir})", v, always=True)
+    else:
+        log(f"WARN: Kokoro download: {kr.error}", v)
+        result.warnings.append(f"Kokoro: {kr.error}")
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
