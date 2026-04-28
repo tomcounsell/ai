@@ -9,9 +9,11 @@ Tests:
 - load_system_prompt() uses developer persona with WORKER_RULES
 - load_pm_system_prompt() uses project-manager persona
 - _resolve_overlay_path() checks Desktop/Valor first, then config/personas/
+- PM overlay loader emits WARN when missing the workflow-announcement rule (#1189)
 """
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -318,3 +320,130 @@ class TestLoadSystemPromptIntegration:
         """_base.md should not exist -- replaced by segments."""
         base_path = PERSONAS_BASE_DIR / "_base.md"
         assert not base_path.exists(), "_base.md should have been deleted"
+
+
+class TestPMWorkflowAnnouncementWarning:
+    """Issue #1189: PM overlay must contain the workflow-announcement rule.
+
+    The loader at agent/sdk_client.py emits a WARN log when the PM overlay
+    is missing the substring "Unless you directly instruct me to skip".
+    Mirrors the existing CRITIQUE-substring warning pattern (PR #802).
+    """
+
+    @pytest.fixture
+    def _mock_overlay_dir_factory(self, tmp_path, monkeypatch):
+        """Build a per-test PM overlay with custom content."""
+        import agent.sdk_client as sdk_mod
+
+        overlay_dir = tmp_path / "personas"
+        overlay_dir.mkdir()
+        # Minimum non-PM overlays so the loader doesn't crash on other personas
+        (overlay_dir / "developer.md").write_text(
+            "# Developer\n\n## Permissions\n\nFull System Access\n"
+        )
+        (overlay_dir / "teammate.md").write_text(
+            "# Teammate\n\n## Communication\n\nFriendly tone\n"
+        )
+
+        def _set_pm_overlay(content: str) -> None:
+            (overlay_dir / "project-manager.md").write_text(content)
+            monkeypatch.setattr(sdk_mod, "PERSONAS_OVERLAY_DIR", overlay_dir)
+
+        return _set_pm_overlay
+
+    def test_warns_when_announcement_substring_missing(self, _mock_overlay_dir_factory, caplog):
+        """Overlay missing the announcement clause should emit WARN."""
+        # PM overlay with CRITIQUE rules but NO workflow-announcement rule
+        _mock_overlay_dir_factory(
+            "# PM Persona\n\n"
+            "## Hard Rules\n\nCRITIQUE is mandatory after PLAN.\n"
+            "REVIEW is mandatory after TEST.\n"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
+            load_persona_prompt("project-manager")
+
+        assert any(
+            "missing the workflow-announcement rule" in record.message for record in caplog.records
+        ), (
+            "Expected WARN log when PM overlay lacks 'Unless you directly instruct me to skip', "
+            f"got: {[r.message for r in caplog.records]}"
+        )
+
+    def test_no_warning_when_announcement_substring_present(
+        self, _mock_overlay_dir_factory, caplog
+    ):
+        """Overlay containing the announcement clause should NOT emit the workflow WARN."""
+        _mock_overlay_dir_factory(
+            "# PM Persona\n\n"
+            "## Intake and Triage\n\n"
+            "CRITIQUE is mandatory.\n"
+            'Use this phrase: "Unless you directly instruct me to skip our standard '
+            "workflow, we need to file an issue to plan all improvements and changes "
+            'to software."\n'
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
+            load_persona_prompt("project-manager")
+
+        assert not any(
+            "missing the workflow-announcement rule" in record.message for record in caplog.records
+        ), (
+            "Did NOT expect workflow-announcement WARN when overlay contains the phrase, "
+            f"got: {[r.message for r in caplog.records]}"
+        )
+
+    def test_warns_on_empty_overlay(self, _mock_overlay_dir_factory, caplog):
+        """Empty PM overlay (zero-length) should emit the workflow WARN.
+
+        The substring check returns False for empty content. The loader
+        also emits the CRITIQUE warning here; we only assert ours fires.
+        """
+        _mock_overlay_dir_factory("")
+
+        with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
+            load_persona_prompt("project-manager")
+
+        assert any(
+            "missing the workflow-announcement rule" in record.message for record in caplog.records
+        )
+
+    def test_warns_on_whitespace_only_overlay(self, _mock_overlay_dir_factory, caplog):
+        """Whitespace-only PM overlay should emit the workflow WARN."""
+        _mock_overlay_dir_factory("   \n\n\t\n   \n")
+
+        with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
+            load_persona_prompt("project-manager")
+
+        assert any(
+            "missing the workflow-announcement rule" in record.message for record in caplog.records
+        )
+
+    def test_warns_when_only_partial_substring_present(self, _mock_overlay_dir_factory, caplog):
+        """Partial substring (e.g., "Unless you directly" but missing the rest)
+        should still emit the WARN — we want the unique opening clause intact."""
+        _mock_overlay_dir_factory(
+            "# PM Persona\n\nCRITIQUE rules.\n"
+            "Unless you directly handle the request differently...\n"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
+            load_persona_prompt("project-manager")
+
+        assert any(
+            "missing the workflow-announcement rule" in record.message for record in caplog.records
+        )
+
+    def test_repo_pm_template_has_announcement_substring(self):
+        """The in-repo PM template MUST contain the workflow-announcement clause.
+
+        This guards against the in-repo template drifting away from the rule.
+        It is the source-of-truth fallback when the private overlay is absent.
+        """
+        repo_template = PERSONAS_BASE_DIR / "project-manager.md"
+        assert repo_template.exists(), f"In-repo PM template not found at {repo_template}"
+        content = repo_template.read_text()
+        assert "Unless you directly instruct me to skip" in content, (
+            "In-repo PM template is missing the workflow-announcement clause "
+            "(issue #1189). The loader will emit a WARN at session startup."
+        )

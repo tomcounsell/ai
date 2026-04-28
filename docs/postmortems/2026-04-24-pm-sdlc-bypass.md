@@ -54,3 +54,7 @@ Updated `~/Desktop/Valor/personas/project-manager.md`:
 2. **Triage instructions need to be unambiguous about routing, not just classification.** "Coding task — dispatch a dev-session" doesn't convey that the dev-session must be part of a full SDLC pipeline rather than a one-shot implementation.
 
 3. **The collaboration mode escape hatch had a similar hole.** The fallback said "if code changes, spawn a dev-session" — not "route through SDLC." Both the triage and the collaboration fallback now explicitly name SDLC as the destination.
+
+## Follow-up
+
+A second incident on 2026-04-28 (PBA briefing LaunchAgents) showed the text-only triage rule was still being bypassed when the PM session re-classified work as "config" rather than "software." Issue [#1189](https://github.com/tomcounsell/ai/issues/1189) closed that gap with a structural change: PM bucket #3 now requires the agent to STOP, announce the workflow contract verbatim, and pause for a `plan` / `skip` reply before any code/config/automation/infra work begins. See [PM Workflow Announcement](../features/personas.md#pm-workflow-announcement) for the full mechanism (announcement phrase, override semantics, loader guard).

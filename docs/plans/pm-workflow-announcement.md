@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -376,6 +376,7 @@ No agent integration required — this is a persona-text + loader-warning change
 - [x] Update `docs/features/personas.md` with a new section "PM Workflow Announcement" describing what bucket #3 does, the literal announcement phrase, the `plan` / `skip` reply tokens, and the override semantics (one-time, does not persist).
 - [x] No new `docs/features/<slug>.md` file needed — the PM workflow announcement is a feature *of* the personas system, not a new system. Adding a section to the existing `docs/features/personas.md` is the right home.
 - [x] No update to `docs/features/README.md` index table required — the entry for "Personas" already exists at line 86 of the index and points at `personas.md`. The new section is internal to that doc.
+- [x] Forward-reference added in `docs/postmortems/2026-04-24-pm-sdlc-bypass.md` (Follow-up section) linking the prior bypass incident to this structural fix.
 
 ### External Documentation Site
 - This repo does not use Sphinx, Read the Docs, or MkDocs. Skipping.

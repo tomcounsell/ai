@@ -165,3 +165,126 @@ class TestSemanticRoutingDecisionMatrix:
         matched_sessions = list(AgentSession.query.filter(session_id="tg_valor_chat1_nonexistent"))
         assert len(matched_sessions) == 0
         # Bridge should fall through to using matched_id as session_id
+
+
+class TestPlanSkipReplyRouting:
+    """Issue #1189: PM bucket-#3 announcement creates a dormant session
+    with `expectations` set to the workflow question. Fresh `plan` and
+    `skip` replies must route back to that dormant session via the
+    semantic router at confidence >= 0.80.
+
+    Network-dependent: calls Haiku via the real Anthropic API. Skipped
+    when ANTHROPIC_API_KEY is unavailable.
+    """
+
+    _WORKFLOW_EXPECTATIONS = (
+        "Should I file a GitHub issue and run /do-plan (`plan`), or override SDLC "
+        "for this task only (`skip`)? Reply with one short token: `plan` or `skip`."
+    )
+    _WORKFLOW_CONTEXT = (
+        "PM session received a coding/automation request and announced the workflow "
+        "contract: 'Unless you directly instruct me to skip our standard workflow, "
+        "we need to file an issue to plan all improvements and changes to software.' "
+        "Awaiting human reply with `plan` or `skip`."
+    )
+
+    @pytest.fixture(autouse=True)
+    def _require_api_key(self):
+        """Skip the whole class when no Anthropic key is available."""
+        from utils.api_keys import get_anthropic_api_key
+
+        if not get_anthropic_api_key():
+            pytest.skip("ANTHROPIC_API_KEY not configured — skipping live router test")
+
+    def _make_dormant_pm_session(self, session_id: str, chat_id: str):
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id=session_id,
+            project_key="valor",
+            status="dormant",
+            chat_id=chat_id,
+            message_text="please add a new launchd timer for the nightly cleanup",
+            working_dir="/tmp",
+            created_at=datetime.now(tz=UTC),
+            expectations=self._WORKFLOW_EXPECTATIONS,
+            context_summary=self._WORKFLOW_CONTEXT,
+        )
+        session.save()
+        return session
+
+    @pytest.mark.asyncio
+    async def test_plan_reply_matches_dormant_pm_session(self):
+        """A fresh `plan` reply should match the dormant PM session at
+        confidence >= 0.80 via the semantic router."""
+        from bridge.session_router import (
+            ROUTING_CONFIDENCE_THRESHOLD,
+            find_matching_session,
+        )
+
+        chat_id = "tg_valor_chat_plan"
+        session = self._make_dormant_pm_session("tg_valor_pm_plan_1", chat_id)
+        try:
+            matched_id, confidence = await find_matching_session(
+                chat_id=chat_id,
+                message_text="plan",
+                project_key="valor",
+            )
+            assert matched_id == session.session_id, (
+                f"Expected `plan` reply to match the dormant PM session, "
+                f"got matched_id={matched_id} confidence={confidence:.2f}"
+            )
+            assert confidence >= ROUTING_CONFIDENCE_THRESHOLD, (
+                f"Expected confidence >= {ROUTING_CONFIDENCE_THRESHOLD}, got {confidence:.2f}"
+            )
+        finally:
+            session.delete()
+
+    @pytest.mark.asyncio
+    async def test_skip_reply_matches_dormant_pm_session(self):
+        """A fresh `skip` reply should also match the dormant PM session
+        at confidence >= 0.80."""
+        from bridge.session_router import (
+            ROUTING_CONFIDENCE_THRESHOLD,
+            find_matching_session,
+        )
+
+        chat_id = "tg_valor_chat_skip"
+        session = self._make_dormant_pm_session("tg_valor_pm_skip_1", chat_id)
+        try:
+            matched_id, confidence = await find_matching_session(
+                chat_id=chat_id,
+                message_text="skip",
+                project_key="valor",
+            )
+            assert matched_id == session.session_id, (
+                f"Expected `skip` reply to match the dormant PM session, "
+                f"got matched_id={matched_id} confidence={confidence:.2f}"
+            )
+            assert confidence >= ROUTING_CONFIDENCE_THRESHOLD, (
+                f"Expected confidence >= {ROUTING_CONFIDENCE_THRESHOLD}, got {confidence:.2f}"
+            )
+        finally:
+            session.delete()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_topic_does_not_match(self):
+        """An unrelated reply (topic shift) should NOT match the dormant
+        PM session — the router falls through to new-session creation."""
+        from bridge.session_router import find_matching_session
+
+        chat_id = "tg_valor_chat_topic_shift"
+        session = self._make_dormant_pm_session("tg_valor_pm_topic_shift_1", chat_id)
+        try:
+            matched_id, confidence = await find_matching_session(
+                chat_id=chat_id,
+                message_text=("actually, never mind that — what's the weather forecast?"),
+                project_key="valor",
+            )
+            # Either no match (preferred) or low confidence — both fall through.
+            assert matched_id is None or confidence < 0.80, (
+                f"Unrelated message should not match dormant workflow session, "
+                f"got matched_id={matched_id} confidence={confidence:.2f}"
+            )
+        finally:
+            session.delete()
