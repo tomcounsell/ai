@@ -116,7 +116,7 @@ def _is_kokoro_available() -> bool:
         # Stage 2: dynamic probe (one-character synth).
         try:
             wav = _synthesize_kokoro_raw("a", KOKORO_DEFAULT_VOICE)
-            if not wav or not isinstance(wav, (bytes, bytearray)):
+            if not wav or not isinstance(wav, bytes | bytearray):
                 available = False
                 reason = "dynamic probe returned empty bytes"
         except Exception as e:  # noqa: BLE001 -- intentional: never raise
