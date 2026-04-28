@@ -122,7 +122,7 @@ def get_memories(
     """Return decorated, filtered, sorted, and capped memory records.
 
     Filter ordering: filters apply first, THEN sort the filtered subset
-    by `importance` desc, THEN truncate to `limit`. This protects render
+    by `relevance` desc, THEN truncate to `limit`. This protects render
     time on large corpora.
 
     The query is wrapped in try/except. On any failure, returns an empty
