@@ -115,6 +115,7 @@ OLLAMA_LOCAL_MODEL = "gemma4:e2b"
 OLLAMA_SUPERSEDED_MODELS = [
     "gemma2:3b",
     "gemma3:4b",
+    "gemma3:12b-it-qat",
     "qwen3:1.7b",
     "qwen3:4b",
 ]
