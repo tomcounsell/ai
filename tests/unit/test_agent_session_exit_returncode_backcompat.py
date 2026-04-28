@@ -134,8 +134,8 @@ def test_load_and_save_succeeds_when_exit_returncode_missing_from_hash():
         # The core guarantee — this is the exact path that was blowing up
         # in append_event / update_stage_states for session sdlc-local-1099.
         # The descriptor pollution may transiently appear on read, but the
-        # ``_heal_int_field_descriptor_pollution`` hook in ``AgentSession.save``
-        # must coerce it back to a serializable default before encoding.
+        # ``_heal_descriptor_pollution`` hook in ``AgentSession.save`` must
+        # coerce it back to a serializable default before encoding.
         reloaded.turn_count = (reloaded.turn_count or 0) + 1
         reloaded.save()  # must NOT raise — full save path
 

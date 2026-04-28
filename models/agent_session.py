@@ -485,66 +485,80 @@ class AgentSession(Model):
             return default
         return value
 
-    def _heal_int_field_descriptor_pollution(self) -> None:
-        """Force-set ``_INT_FIELDS_BACKCOMPAT`` attributes that still hold the
-        Popoto field descriptor object back to their declared default.
+    def _heal_descriptor_pollution(self) -> None:
+        """Force-set every field whose attribute still holds the Popoto class
+        descriptor object back to that field's declared default.
 
-        Background (issue #1099 / PR #1153):
+        Background (issues #1099, #1172):
             Popoto's lazy-load path (``_create_lazy_model``) bypasses
             ``__init__`` entirely — it uses ``object.__new__`` and only stores
             the keys present in the Redis hash. When a new field is added to
             the model after rows have already been written, the missing-key
             fields fall through to the class-level Field descriptor on
             attribute access. ``__setattr__`` does NOT trigger for missing
-            keys (there is nothing to set), so the existing ``_INT_FIELDS_BACKCOMPAT``
-            coercion in ``__setattr__`` cannot catch this case.
+            keys (there is nothing to set), so per-field ``__setattr__``
+            coercion cannot catch this case.
 
             The descriptor object then poisons every downstream save path:
 
               * ``encode_popoto_model_obj`` (called by both full and partial
                 ``save()``) iterates every field and calls
-                ``msgpack.packb(IntField_instance)`` → TypeError.
-              * ``is_valid()`` (called by full ``save()``) calls
-                ``int(IntField_instance)`` → TypeError.
+                ``msgpack.packb(<Field instance>)`` → TypeError.
+              * ``pre_save_format`` / ``is_valid()`` iterate every field and
+                attempt ``field.type(<Field instance>)`` (e.g.
+                ``datetime(<DatetimeField>)``) → TypeError.
 
-            The live repro that triggered this fix: SDLC dispatch tried to
-            ``append_event`` on session ``sdlc-local-1099`` (a row written
-            before ``exit_returncode`` was added). The partial save
-            ``save(update_fields=["session_events", "updated_at"])`` crashed
-            because the encoder still touches ``exit_returncode``.
+            Two live repros so far:
+              * issue #1099 / PR #1153 — ``exit_returncode`` (IntField) added
+                in PR #1153 crashed ``append_event`` for rows that predated
+                the field with ``can not serialize 'IntField' object``.
+              * issue #1172 / PR #1177 — ``last_tool_use_at`` /
+                ``last_turn_at`` / ``self_report_sent_at`` (DatetimeField)
+                plus ``current_tool_name`` / ``recent_thinking_excerpt``
+                (Field) added in PR #1177 crashed liveness writes for
+                pre-existing rows with ``'DatetimeField' object cannot be
+                interpreted as an integer`` — the underlying Popoto error
+                surface differs by field type but the root cause is identical.
 
-        This helper iterates ``_INT_FIELDS_BACKCOMPAT``, checks each attribute
-        via the descriptor protocol, and writes the field's declared default
-        directly into ``__dict__`` for any attribute that is still the
-        descriptor object itself. It is called from ``save()`` so every save
-        path (full save, partial save, ``append_event``) is protected.
+            PR #1177 proved that maintaining a per-type backcompat list does
+            not scale — the IntField guard from #1153 didn't generalize to
+            the new field types. This heal walks **every** model field and
+            substitutes the declared default (typically ``None`` for
+            ``null=True`` fields, ``0`` for ``IntField``) for any attribute
+            that still resolves to the class-level Field descriptor. It is
+            called from ``save()`` so every save path (full save, partial
+            save, ``append_event``) is protected, and so future field
+            additions automatically inherit the protection without code
+            changes here.
 
-        Direct ``__dict__`` write avoids re-entering ``__setattr__`` (which
-        already passed-through the original poisoned value).
+            Direct ``__dict__`` write avoids re-entering ``__setattr__``
+            (which already passed-through the original poisoned value).
         """
-        for field_name in self._INT_FIELDS_BACKCOMPAT:
-            field = self._meta.fields.get(field_name)
-            if field is None:
-                continue
+        from popoto.fields.field import Field as _PopotoField
+
+        for field_name, field in self._meta.fields.items():
             try:
-                value = getattr(self, field_name)
-            except Exception:  # swallow-ok: descriptor introspection must not break save
+                value = object.__getattribute__(self, field_name)
+            except AttributeError:
                 continue
-            if value is field:
-                default = field.default
-                if default is None or not isinstance(default, int):
-                    default = 0
-                self.__dict__[field_name] = default
+            # The exact identity check `value is field` is the canonical
+            # marker of descriptor leak. Fall back to isinstance for
+            # subclasses (defensive — Popoto could conceivably hand back
+            # a different descriptor instance for the same field).
+            if value is field or (
+                isinstance(value, _PopotoField) and value.__class__ is field.__class__
+            ):
+                self.__dict__[field_name] = field.default
 
     def save(self, *args, **kwargs):
         """Save with defensive descriptor-pollution healing.
 
-        See ``_heal_int_field_descriptor_pollution`` for rationale. The heal
-        runs before ``super().save()`` so it precedes both ``pre_save``
-        (which calls ``is_valid()``) and ``encode_popoto_model_obj`` — the
-        two code paths that crash on the polluted descriptor.
+        See ``_heal_descriptor_pollution`` for rationale. The heal runs
+        before ``super().save()`` so it precedes both ``pre_save`` (which
+        calls ``is_valid()``) and ``encode_popoto_model_obj`` — the two code
+        paths that crash on the polluted descriptor.
         """
-        self._heal_int_field_descriptor_pollution()
+        self._heal_descriptor_pollution()
         return super().save(*args, **kwargs)
 
     def __setattr__(self, name, value):
