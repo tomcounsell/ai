@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +120,6 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
             kwargs["issue_url"] = issue_url
 
         from tools.valor_session import (
-            ProjectKeyResolutionError,
-            ProjectsConfigUnavailableError,
             _resolve_project_working_directory,
             resolve_project_key,
         )
@@ -184,7 +182,7 @@ def _iter_orphan_sessions():
     """
     from models.agent_session import AgentSession
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         pm_running = list(AgentSession.query.filter(session_type="pm", status="running"))

@@ -22,13 +22,14 @@ _repo_root = Path(__file__).parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+import pytest  # noqa: E402
+
 from tools.valor_session import (  # noqa: E402
     ProjectKeyResolutionError,
     ProjectsConfigUnavailableError,
     _resolve_project_working_directory,
     resolve_project_key,
 )
-import pytest  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
