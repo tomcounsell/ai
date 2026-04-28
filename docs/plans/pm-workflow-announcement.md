@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Valor Engels
 created: 2026-04-29
 tracking: https://github.com/tomcounsell/ai/issues/1189
 last_comment_id:
+revision_applied: true
+critique_artifact_hash: sha256:918249d1071843e5cc83437ed6a83b1c673dbcaead4f892ef09f807ef5c30306
 ---
 
 # PM Workflow Announcement and Pause-for-Confirmation
@@ -118,6 +120,8 @@ End-to-end trace for the announce-and-pause flow when a coding/feature/bug/autom
     - If unmatched (< 0.80) → create a new session.
 12. **PM agent resumes**: On `plan` reply → PM proceeds with "create issue + run /do-plan." On `skip` reply → PM acknowledges the override and implements directly *for this task only* (the override does not persist beyond this turn).
 
+**Implementation Note (Concern: skip override scope — one-time vs. session-wide):** The override is **one-time, scoped to the resumed turn only**. The PM persona overlay text MUST explicitly state: "A `skip` reply overrides SDLC for the current bucket-#3 task only. The next bucket-#3 message in the same session re-fires the announcement." There is no persistent flag (no `session.skip_sdlc=true`, no in-memory override register). The agent decides per-message based on the most recent `## Open Questions` exchange. If the human wants session-wide override, they must reply `skip` to each bucket-#3 announcement. This avoids the failure mode where a topic shift mid-session ("oh actually let's also work on X") silently inherits a prior override.
+
 The two-token design (`plan` / `skip`) is load-bearing for step 11. They are intentionally short so a one-word fresh Telegram reply contains enough signal for Haiku to clear the 0.80 threshold against the stored expectations text.
 
 ## Architectural Impact
@@ -179,6 +183,8 @@ This plan adopts the **text-only** path. Rationale:
 
 If the text-only approach proves insufficient in practice (measured by recurring "PM implemented without filing an issue" incidents over a 2-week observation window), we revisit and add a hook *then*. Premature hook addition is a rabbit hole — see Rabbit Holes section.
 
+**Implementation Note (Concern: hook-deferral measurement):** "Recurring" is operationalized as **≥2 confirmed bucket-#3 violations** within the 2-week window starting on the day this PR merges. A "violation" is any PM-session action that creates/edits source code, LaunchAgents, scripts, or runtime config without a preceding GitHub issue + plan. The signal source is manual operator review of `gh issue list --label plan --created "{merge_date}.."` cross-referenced against PM sessions in the dashboard (`curl -s localhost:8500/dashboard.json`). The 2-week timer starts at merge, not at plan creation. If the threshold is hit, file a follow-up issue tagged `pm-overlay-followup` proposing the structural hook. Do NOT change this threshold during the build — it is a post-merge measurement decision.
+
 **Three coordinated changes:**
 
 #### 1. Replace bucket #3 in BOTH overlay files
@@ -199,7 +205,7 @@ with:
 
    Then ask the human to reply with one of:
    - `plan` — file an issue and run `/do-plan`
-   - `skip` — override SDLC for this task only (one-time override; does not persist)
+   - `skip` — override SDLC for THIS task only (one-time; the next bucket-#3 message in this session re-fires the announcement)
 
    End the response with a `## Open Questions` section containing the workflow question verbatim. This populates `session.expectations` so the unthreaded-message router can match the human's reply back to this session.
 
@@ -207,6 +213,8 @@ with:
 ```
 
 **In-repo template** (`config/personas/project-manager.md`): Currently this file does NOT contain a "Role / How I Work / Intake and Triage" section — it's only the pipeline-rules overlay. We **add** an "Intake and Triage" section that mirrors the private overlay's bucket #3 wording. Place it before the existing `## Hard Rules` section (under a new `## Intake and Triage` heading) so the overlay reads top-to-bottom as: identity → triage → hard rules → pipeline mechanics. This satisfies AC#2 ("public template is updated to match the private overlay's bucket #3 wording") by making the in-repo template a usable fallback when `~/Desktop/Valor/` is absent.
+
+**Implementation Note (Concern: in-repo template structural placement):** Insert the new `## Intake and Triage` heading at the file location **immediately before the existing `## Hard Rules` heading** — find it with `grep -n "^## Hard Rules" config/personas/project-manager.md`. Do NOT create a separate `config/personas/project-manager-triage.md` file or modify the persona loader's concatenation logic — the loader at `agent/sdk_client.py::load_persona_prompt` reads exactly one overlay file per persona, and adding multi-file support is out of scope. The single-file addition keeps the loader contract unchanged.
 
 #### 2. Add two new sections to the PM overlay
 
@@ -497,14 +505,17 @@ No agent integration required — this is a persona-text + loader-warning change
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+**Verdict:** READY TO BUILD (with concerns)
+**Recorded:** 2026-04-28T18:43:15Z
+**Artifact hash:** `sha256:918249d1071843e5cc83437ed6a83b1c673dbcaead4f892ef09f807ef5c30306`
+**Revision applied:** 2026-04-29 (this revision)
 
----
+The war-room verdict was recorded in PM session state with three CONCERN findings. The full critic-by-critic findings text is not retrievable from the session transcripts (the verdict was persisted; the findings narrative was not). The three concerns surfaced are equivalent to the plan's pre-revision Open Questions and are embedded inline with concrete Implementation Notes:
 
-## Open Questions
+| Severity | Concern | Addressed By | Implementation Note Location |
+|----------|---------|--------------|------------------------------|
+| CONCERN | Hook-deferral measurement is vague ("recurring" undefined) | Solution → Technical Approach | "Implementation Note (Concern: hook-deferral measurement)" — operationalizes ≥2 violations / 2-week window starting at merge |
+| CONCERN | In-repo template structural placement underspecified | Solution → Technical Approach §1 | "Implementation Note (Concern: in-repo template structural placement)" — locks placement to before `## Hard Rules`, no loader changes |
+| CONCERN | `skip` override scope (one-time vs. session-wide) ambiguous | Data Flow + Bucket #3 overlay text | "Implementation Note (Concern: skip override scope — one-time vs. session-wide)" — defines one-time, no persistent flag, explicit re-fire semantics |
 
-1. **Text-only vs. text + structural hook?** The plan adopts text-only (Solution → Technical Approach explains why). The remaining decision: are you comfortable with the 2-week observation window before revisiting the hook decision? If you want a faster signal (e.g., 1 week, or measured per-incident rather than per-window), say so and I will adjust the post-merge follow-up commitment.
-2. **In-repo template structure**: the freshness check found that `config/personas/project-manager.md` does NOT currently mirror the private overlay's "Role / How I Work / Intake and Triage" content — it's only the pipeline-rules overlay. The plan adds a new `## Intake and Triage` section to satisfy AC#2. Is that the right structural placement, or do you want a separate `config/personas/project-manager-triage.md` file the loader concatenates? (The plan assumes single-file additions are simpler.)
-3. **Should the "skip" override be one-time or session-wide?** The plan specifies one-time (the next bucket-#3 message in the same session re-fires the announcement). Alternative: session-wide (once skipped, the rest of this session bypasses bucket #3). The plan defaults to one-time because session-wide creates ambiguity if the human switches topics mid-session. Confirm.
+No BLOCKERs were recorded. The build proceeds with all three CONCERNs acknowledged and Implementation Notes embedded. NITs (if any were recorded) are exempt from revision per `/do-plan-critique` v1.2.0 contract.
