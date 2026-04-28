@@ -284,23 +284,23 @@ Same shape, same logger, same `overlay_path` interpolation. The substring is cho
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No new `except Exception: pass` blocks in this change.
-- [ ] The loader warning at `sdk_client.py:919` does not introduce exception handling — it's a substring check + log call. Existing tests in `tests/unit/test_persona_loading.py` cover the loader's exception paths (missing overlay → FileNotFoundError); add a case asserting the new WARN log fires when the substring is missing.
+- [x] No new `except Exception: pass` blocks in this change.
+- [x] The loader warning at `sdk_client.py:919` does not introduce exception handling — it's a substring check + log call. Existing tests in `tests/unit/test_persona_loading.py` cover the loader's exception paths (missing overlay → FileNotFoundError); add a case asserting the new WARN log fires when the substring is missing.
 
 ### Empty/Invalid Input Handling
-- [ ] Empty `overlay_content` (zero-length file): the substring check returns `False`, the WARN log fires. Add a unit test asserting this.
-- [ ] Whitespace-only overlay content: same — substring missing, WARN fires.
-- [ ] Overlay content containing partial substring (e.g., "Unless you directly" without "instruct me to skip"): substring check returns `False`, WARN fires. This is correct; we want the full phrase or none.
+- [x] Empty `overlay_content` (zero-length file): the substring check returns `False`, the WARN log fires. Add a unit test asserting this.
+- [x] Whitespace-only overlay content: same — substring missing, WARN fires.
+- [x] Overlay content containing partial substring (e.g., "Unless you directly" without "instruct me to skip"): substring check returns `False`, WARN fires. This is correct; we want the full phrase or none.
 
 ### Error State Rendering
-- [ ] If the drafter fails to extract `## Open Questions` (Haiku unavailable AND OpenRouter unavailable AND no `## Open Questions` section in the response), `expectations` stays None and the session does NOT go dormant on this signal — the PM never wrote the section. This is an upstream concern; the PM agent failing to follow the rule is what the loader warning surfaces.
-- [ ] The fresh-reply routing path: if the human replies with neither `plan` nor `skip` (e.g., "actually, never mind, let's talk about something else"), the Haiku classifier returns confidence < 0.80 and the message creates a new session. This is the correct fallback — `## Open Questions` was answered via topic change, not via the expected tokens. No bug.
+- [x] If the drafter fails to extract `## Open Questions` (Haiku unavailable AND OpenRouter unavailable AND no `## Open Questions` section in the response), `expectations` stays None and the session does NOT go dormant on this signal — the PM never wrote the section. This is an upstream concern; the PM agent failing to follow the rule is what the loader warning surfaces.
+- [x] The fresh-reply routing path: if the human replies with neither `plan` nor `skip` (e.g., "actually, never mind, let's talk about something else"), the Haiku classifier returns confidence < 0.80 and the message creates a new session. This is the correct fallback — `## Open Questions` was answered via topic change, not via the expected tokens. No bug.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_open_question_gate.py` — UPDATE: add a new test class `TestWorkflowAnnouncementExtraction` that asserts a PM response containing the literal "Unless you directly instruct me to skip" announcement plus a `## Open Questions` section produces `expectations` with the workflow question text. Existing tests must continue to pass without modification.
-- [ ] `tests/integration/test_unthreaded_routing.py` — UPDATE: add `TestPlanSkipReplyRouting` test class that creates a dormant PM session with `expectations="Should I file an issue (plan) or skip SDLC (skip)?"` and asserts a fresh `plan` reply routes back to the dormant session via the semantic router at confidence ≥ 0.80, and a fresh `skip` reply does the same. Existing tests must continue to pass without modification.
-- [ ] `tests/unit/test_persona_loading.py` — UPDATE: add `TestPMWorkflowAnnouncementWarning` test class that asserts the loader emits a WARN log when the PM overlay does NOT contain "Unless you directly instruct me to skip". Mirrors the existing CRITIQUE-warning test pattern. Existing tests must continue to pass without modification.
+- [x] `tests/unit/test_open_question_gate.py` — UPDATE: add a new test class `TestWorkflowAnnouncementExtraction` that asserts a PM response containing the literal "Unless you directly instruct me to skip" announcement plus a `## Open Questions` section produces `expectations` with the workflow question text. Existing tests must continue to pass without modification.
+- [x] `tests/integration/test_unthreaded_routing.py` — UPDATE: add `TestPlanSkipReplyRouting` test class that creates a dormant PM session with `expectations="Should I file an issue (plan) or skip SDLC (skip)?"` and asserts a fresh `plan` reply routes back to the dormant session via the semantic router at confidence ≥ 0.80, and a fresh `skip` reply does the same. Existing tests must continue to pass without modification.
+- [x] `tests/unit/test_persona_loading.py` — UPDATE: add `TestPMWorkflowAnnouncementWarning` test class that asserts the loader emits a WARN log when the PM overlay does NOT contain "Unless you directly instruct me to skip". Mirrors the existing CRITIQUE-warning test pattern. Existing tests must continue to pass without modification.
 
 No DELETE or REPLACE dispositions — all existing tests remain valid; we only add new test classes inside existing files.
 
@@ -373,31 +373,31 @@ No agent integration required — this is a persona-text + loader-warning change
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/personas.md` with a new section "PM Workflow Announcement" describing what bucket #3 does, the literal announcement phrase, the `plan` / `skip` reply tokens, and the override semantics (one-time, does not persist).
-- [ ] No new `docs/features/<slug>.md` file needed — the PM workflow announcement is a feature *of* the personas system, not a new system. Adding a section to the existing `docs/features/personas.md` is the right home.
-- [ ] No update to `docs/features/README.md` index table required — the entry for "Personas" already exists at line 86 of the index and points at `personas.md`. The new section is internal to that doc.
+- [x] Update `docs/features/personas.md` with a new section "PM Workflow Announcement" describing what bucket #3 does, the literal announcement phrase, the `plan` / `skip` reply tokens, and the override semantics (one-time, does not persist).
+- [x] No new `docs/features/<slug>.md` file needed — the PM workflow announcement is a feature *of* the personas system, not a new system. Adding a section to the existing `docs/features/personas.md` is the right home.
+- [x] No update to `docs/features/README.md` index table required — the entry for "Personas" already exists at line 86 of the index and points at `personas.md`. The new section is internal to that doc.
 
 ### External Documentation Site
 - This repo does not use Sphinx, Read the Docs, or MkDocs. Skipping.
 
 ### Inline Documentation
-- [ ] Add a docstring to the new loader-warning block in `agent/sdk_client.py` explaining what the substring check guards against (overlay drift on bridge machines where the private overlay is iCloud-synced).
-- [ ] No new functions or public APIs introduced; existing docstrings unchanged.
+- [x] Add a docstring to the new loader-warning block in `agent/sdk_client.py` explaining what the substring check guards against (overlay drift on bridge machines where the private overlay is iCloud-synced).
+- [x] No new functions or public APIs introduced; existing docstrings unchanged.
 
 ## Success Criteria
 
-- [ ] `~/Desktop/Valor/personas/project-manager.md` bucket #3 contains the literal phrase "Unless you directly instruct me to skip our standard workflow"
-- [ ] `config/personas/project-manager.md` (in-repo template) has an "Intake and Triage" section matching the private overlay's bucket #3 wording
-- [ ] PM overlay (both files) contains a "What counts as a software change (issue required)" enumeration explicitly naming LaunchAgents, cron, launchd, shell scripts, runtime config files, infrastructure, and new dependencies
-- [ ] PM overlay (both files) contains a "PM Overrides of Shared Defaults" table reversing ≥5 specific developer-flavored defaults from `work-patterns.md` and ending with "When the shared segment and this overlay disagree, this overlay wins"
-- [ ] `agent/sdk_client.py` emits a WARN log when the PM overlay is loaded and does NOT contain the substring "Unless you directly instruct me to skip"
-- [ ] New unit test confirms a PM agent response containing a `## Open Questions` section with the workflow question populates `session.expectations` with the question text (in `tests/unit/test_open_question_gate.py`)
-- [ ] New unit test confirms the loader WARN fires when the PM overlay is missing the workflow-announcement substring (in `tests/unit/test_persona_loading.py`)
-- [ ] New integration test confirms a fresh unthreaded `plan` or `skip` reply in the same chat routes back to the dormant session at confidence ≥ 0.80 (in `tests/integration/test_unthreaded_routing.py`)
-- [ ] No regression in `tests/unit/test_open_question_gate.py`, `tests/integration/test_unthreaded_routing.py`, or `tests/unit/test_persona_loading.py`
-- [ ] `docs/features/personas.md` has a new section describing the PM Workflow Announcement
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `~/Desktop/Valor/personas/project-manager.md` bucket #3 contains the literal phrase "Unless you directly instruct me to skip our standard workflow"
+- [x] `config/personas/project-manager.md` (in-repo template) has an "Intake and Triage" section matching the private overlay's bucket #3 wording
+- [x] PM overlay (both files) contains a "What counts as a software change (issue required)" enumeration explicitly naming LaunchAgents, cron, launchd, shell scripts, runtime config files, infrastructure, and new dependencies
+- [x] PM overlay (both files) contains a "PM Overrides of Shared Defaults" table reversing ≥5 specific developer-flavored defaults from `work-patterns.md` and ending with "When the shared segment and this overlay disagree, this overlay wins"
+- [x] `agent/sdk_client.py` emits a WARN log when the PM overlay is loaded and does NOT contain the substring "Unless you directly instruct me to skip"
+- [x] New unit test confirms a PM agent response containing a `## Open Questions` section with the workflow question populates `session.expectations` with the question text (in `tests/unit/test_open_question_gate.py`)
+- [x] New unit test confirms the loader WARN fires when the PM overlay is missing the workflow-announcement substring (in `tests/unit/test_persona_loading.py`)
+- [x] New integration test confirms a fresh unthreaded `plan` or `skip` reply in the same chat routes back to the dormant session at confidence ≥ 0.80 (in `tests/integration/test_unthreaded_routing.py`)
+- [x] No regression in `tests/unit/test_open_question_gate.py`, `tests/integration/test_unthreaded_routing.py`, or `tests/unit/test_persona_loading.py`
+- [x] `docs/features/personas.md` has a new section describing the PM Workflow Announcement
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
