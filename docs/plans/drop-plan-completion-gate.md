@@ -458,12 +458,14 @@ builder, validator (default Tier 1).
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Criterion-mapping approach: confirm LLM-judge is acceptable.** The spike-resolution recommendation is to use LLM-judge (the existing per-criterion verdict in `/do-pr-review`'s rubric, plus a builder-reported `criterion_addressed` field in `/do-patch`) with a manual-review-comment fallback for ambiguous cases. The two alternatives (lexical match, explicit cross-reference protocol) were ruled out as fragile and over-engineered respectively. Does this match your intent, or do you want a stricter cross-reference contract?
+These were the four open questions raised at plan time. All were resolved by the human reviewer (Tom Counsell) on 2026-04-29 prior to dispatching critique. The plan body above already encodes these decisions; this section preserves the rationale for auditability.
 
-2. **Acknowledged-deferred unticking semantics.** The plan's Edit B says criteria the rubric judges `acknowledged` (verified disclosure) get unticked. Confirmation request: is "acknowledged-deferred" really an unsatisfied state for the purposes of plan-completion? The issue body says yes ("acknowledged-deferred ... should not remain ticked"), but I want to flag this so it's deliberate — some teams treat verified disclosures as effectively "done." This plan follows the issue's stated semantics: acknowledged = unticked.
+1. **Criterion-mapping approach — LLM-judge: APPROVED.** Use the existing per-criterion verdict from `/do-pr-review`'s rubric (Step 4b + Rubric item 1). For `/do-patch`, extend the builder agent's report to include `criterion_addressed: <text>`. When the LLM is uncertain, leave the existing checkbox state alone and emit a manual-review comment. Lexical match and explicit cross-reference protocols are explicitly **rejected** as fragile and over-engineered respectively. (Encoded in the Solution → Technical Approach section, Edits B and C.)
 
-3. **Helper module location.** Plan uses `tools/plan_checkbox_writer.py`. Alternative: `scripts/plan_checkbox_writer.py` (consistent with `scripts/validate_build.py` and `scripts/evaluate_build.py` which are the closest neighbors). The `tools/` location is more in line with the agent-integration norm (CLI entry points, used via `python -m tools.X`). Defaulting to `tools/` unless you prefer `scripts/`.
+2. **Acknowledged-deferred = unticked: APPROVED.** The plan-doc tick answers "is this criterion satisfied?" — a verified disclosure means the deferral was legitimate, but the criterion is still unmet. This is exactly the failure mode the issue is closing (dishonest ticks for mocked APIs / deferred tests). Acknowledged-deferred criteria get unticked. (Encoded in Edit B's third bullet under "For each criterion in `## Acceptance Criteria`".)
 
-4. **Scope of the new feature doc.** Should `docs/features/plan-checkbox-writers.md` be a single doc covering both the `/do-pr-review` write behavior AND the `/do-patch` write behavior, or should each skill's behavior live in its own feature doc? Plan defaults to a single combined doc since both behaviors share the helper module and the criterion-mapping rationale.
+3. **Helper location — `tools/plan_checkbox_writer.py`: APPROVED.** Repo convention per `CLAUDE.md` ("`tools/` — Local Python tools" for shared library code imported by skills). NOT `scripts/`. (Encoded in Edit D and the Step-by-Step Tasks; the alternative location was never written into the plan body.)
+
+4. **Documentation — single combined doc at `docs/features/plan-checkbox-writers.md`: APPROVED.** Both behaviors share the helper module, the LLM-judge mapping rationale, and the file-write semantics; splitting creates redundant cross-referencing. (Encoded in the Documentation section.)
