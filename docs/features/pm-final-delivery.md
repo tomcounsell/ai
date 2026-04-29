@@ -65,20 +65,28 @@ Two distinct pieces replace the marker:
 - **`_deliver_pipeline_completion(parent, summary_context, send_cb, chat_id, telegram_message_id)`**
   — async coroutine in `agent/session_completion.py`. Owns the final
   delivery end-to-end:
-  1. Acquire the Redis CAS lock
+  1. **Terminal-status guard** (kill-is-terminal, #1208): re-read the
+     parent's authoritative hash status. If it is terminal-and-not-`completed`
+     (e.g., `killed`, `failed`, `abandoned`, `cancelled`), log at INFO and
+     return without acquiring the CAS lock or sending anything. `completed`
+     parents pass through so the success-path runner can deliver. The same
+     guard fires at the top of `schedule_pipeline_completion(...)` so the
+     short-circuit happens before the asyncio task is even created. See
+     [Session Lifecycle: Kill-is-Terminal Invariant](session-lifecycle.md#kill-is-terminal-invariant).
+  2. Acquire the Redis CAS lock
      `pipeline_complete_pending:{parent_id}` via SETNX (60s TTL). If already
      held, log at INFO and return.
-  2. Resolve the PM's prior Claude Code UUID via
+  3. Resolve the PM's prior Claude Code UUID via
      `agent.sdk_client._get_prior_session_uuid`. `None` is tolerated — the
      harness falls back to `full_context_message` for a no-UUID first turn.
-  3. Invoke `get_response_via_harness` with a dedicated "compose final
+  4. Invoke `get_response_via_harness` with a dedicated "compose final
      summary" prompt. On harness failure or empty/whitespace result, fall
      back to the caller-supplied `summary_context`.
-  4. Call `send_cb(chat_id, text, telegram_message_id, parent)` to deliver.
-  5. Stamp `response_delivered_at` on the parent and finalize to
+  5. Call `send_cb(chat_id, text, telegram_message_id, parent)` to deliver.
+  6. Stamp `response_delivered_at` on the parent and finalize to
      `"completed"` via `finalize_session`. The runner is the **sole** caller
      that transitions the parent to `"completed"` on the success path.
-  6. On `asyncio.CancelledError`, best-effort deliver
+  7. On `asyncio.CancelledError`, best-effort deliver
      `"I was interrupted and will resume automatically. No action needed."`
      (dedup'd by `interrupted-sent:{session_id}` — 120s TTL) and re-raise to
      preserve asyncio shutdown semantics.
