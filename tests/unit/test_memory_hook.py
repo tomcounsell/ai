@@ -458,3 +458,354 @@ class TestClearSession:
 
         # Should not raise
         clear_session("nonexistent-clear-session")
+
+
+class TestLoadHooksSidecarInjectedIds:
+    """Test the helper that reads hooks-side sidecar injected[] for de-dup."""
+
+    def test_returns_empty_when_claude_uuid_none(self):
+        from agent.memory_hook import _load_hooks_sidecar_injected_ids
+
+        assert _load_hooks_sidecar_injected_ids(None) == set()
+
+    def test_returns_empty_when_claude_uuid_empty(self):
+        from agent.memory_hook import _load_hooks_sidecar_injected_ids
+
+        assert _load_hooks_sidecar_injected_ids("") == set()
+
+    def test_returns_empty_when_claude_uuid_unknown(self):
+        from agent.memory_hook import _load_hooks_sidecar_injected_ids
+
+        # Sentinel value used by Claude Code when session_id missing.
+        # Must not be used as a sidecar key (cross-session contamination).
+        assert _load_hooks_sidecar_injected_ids("unknown") == set()
+
+    def test_returns_empty_when_sidecar_missing(self, tmp_path, monkeypatch):
+        from agent.memory_hook import _load_hooks_sidecar_injected_ids
+
+        monkeypatch.setattr(
+            "agent.memory_hook._PROJECT_ROOT_FOR_SIDECAR",
+            tmp_path,
+        )
+        assert _load_hooks_sidecar_injected_ids("nonexistent-uuid") == set()
+
+    def test_loads_injected_ids_from_sidecar(self, tmp_path, monkeypatch):
+        import json
+
+        from agent.memory_hook import _load_hooks_sidecar_injected_ids
+
+        monkeypatch.setattr(
+            "agent.memory_hook._PROJECT_ROOT_FOR_SIDECAR",
+            tmp_path,
+        )
+
+        sidecar_dir = tmp_path / "data" / "sessions" / "test-uuid"
+        sidecar_dir.mkdir(parents=True)
+        (sidecar_dir / "memory_buffer.json").write_text(
+            json.dumps(
+                {
+                    "count": 3,
+                    "buffer": [],
+                    "injected": [
+                        {"memory_id": "m1", "content": "a"},
+                        {"memory_id": "m2", "content": "b"},
+                    ],
+                }
+            )
+        )
+
+        result = _load_hooks_sidecar_injected_ids("test-uuid")
+        assert result == {"m1", "m2"}
+
+    def test_returns_empty_on_corrupt_sidecar(self, tmp_path, monkeypatch):
+        from agent.memory_hook import _load_hooks_sidecar_injected_ids
+
+        monkeypatch.setattr(
+            "agent.memory_hook._PROJECT_ROOT_FOR_SIDECAR",
+            tmp_path,
+        )
+
+        sidecar_dir = tmp_path / "data" / "sessions" / "test-uuid"
+        sidecar_dir.mkdir(parents=True)
+        (sidecar_dir / "memory_buffer.json").write_text("not json{{")
+
+        result = _load_hooks_sidecar_injected_ids("test-uuid")
+        assert result == set()
+
+    def test_returns_empty_on_non_dict_sidecar(self, tmp_path, monkeypatch):
+        from agent.memory_hook import _load_hooks_sidecar_injected_ids
+
+        monkeypatch.setattr(
+            "agent.memory_hook._PROJECT_ROOT_FOR_SIDECAR",
+            tmp_path,
+        )
+        sidecar_dir = tmp_path / "data" / "sessions" / "test-uuid"
+        sidecar_dir.mkdir(parents=True)
+        (sidecar_dir / "memory_buffer.json").write_text('"a string"')
+
+        assert _load_hooks_sidecar_injected_ids("test-uuid") == set()
+
+
+class TestCheckAndInjectClaudeUuidSidecar:
+    """Test that check_and_inject honors the hooks-side sidecar via claude_uuid."""
+
+    def _seed_buffer(self, session: str, count: int, keywords: list[str]):
+        """Set up _tool_buffers / _tool_counts so the next call hits the
+        WINDOW_SIZE trigger with the desired keyword set."""
+        from agent.memory_hook import _tool_buffers, _tool_counts
+
+        _tool_counts[session] = count
+        _tool_buffers[session] = [
+            {"tool_name": "Read", "tool_input": {"file_path": f"x{i}"}} for i in range(count)
+        ]
+        return _tool_buffers, _tool_counts
+
+    def test_check_and_inject_excludes_sidecar_injected_ids(self, tmp_path, monkeypatch):
+        """Sidecar with one injected ID -> retrieval result with that ID is skipped."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "test-claude-uuid-exclude"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        # Seed sidecar with already-injected memory_id "skip-me"
+        monkeypatch.setattr(
+            "agent.memory_hook._PROJECT_ROOT_FOR_SIDECAR",
+            tmp_path,
+        )
+        sidecar_dir = tmp_path / "data" / "sessions" / "claude-uuid-1"
+        sidecar_dir.mkdir(parents=True)
+        (sidecar_dir / "memory_buffer.json").write_text(
+            json.dumps(
+                {
+                    "count": 0,
+                    "buffer": [],
+                    "injected": [{"memory_id": "skip-me", "content": "from prefetch"}],
+                }
+            )
+        )
+
+        keywords = ["auth", "deploy", "migrate", "ranks", "test"]
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        skip_me = MagicMock()
+        skip_me.memory_id = "skip-me"
+        skip_me.content = "skip me"
+        keep_me = MagicMock()
+        keep_me.memory_id = "keep-me"
+        keep_me.content = "keep me"
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch(
+                "agent.memory_retrieval.retrieve_memories",
+                return_value=[skip_me, keep_me],
+            ),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(
+                session,
+                "Read",
+                {"file_path": "final.py"},
+                claude_uuid="claude-uuid-1",
+            )
+
+        assert result is not None
+        assert "keep me" in result
+        assert "skip me" not in result
+
+        # Cleanup
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_check_and_inject_handles_missing_sidecar(self, tmp_path, monkeypatch):
+        """When claude_uuid points at non-existent sidecar, behavior unchanged."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "test-missing-sidecar"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        monkeypatch.setattr(
+            "agent.memory_hook._PROJECT_ROOT_FOR_SIDECAR",
+            tmp_path,
+        )
+
+        keywords = ["auth", "deploy", "migrate", "ranks", "test"]
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        record = MagicMock()
+        record.memory_id = "rec-1"
+        record.content = "valid record"
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(
+                session,
+                "Read",
+                {"file_path": "final.py"},
+                claude_uuid="never-existed",
+            )
+
+        assert result is not None
+        assert "valid record" in result
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_check_and_inject_skips_sidecar_when_claude_uuid_unknown(self, monkeypatch):
+        """claude_uuid='unknown' -> never opens the sidecar."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "test-unknown-uuid"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = ["auth", "deploy", "migrate", "ranks", "test"]
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        record = MagicMock()
+        record.memory_id = "rec-1"
+        record.content = "valid record"
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch(
+                "agent.memory_hook._load_hooks_sidecar_injected_ids",
+                return_value=set(),
+            ) as mock_loader,
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            check_and_inject(
+                session,
+                "Read",
+                {"file_path": "final.py"},
+                claude_uuid="unknown",
+            )
+
+        # Loader was called with "unknown", and would have returned set()
+        # internally. We assert the function still returned safely.
+        mock_loader.assert_called_once_with("unknown")
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_check_and_inject_skips_sidecar_when_claude_uuid_empty(self, monkeypatch):
+        """claude_uuid='' -> loader called with empty string and returns empty."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "test-empty-uuid"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = ["auth", "deploy", "migrate", "ranks", "test"]
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        record = MagicMock()
+        record.memory_id = "rec-1"
+        record.content = "valid"
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch(
+                "agent.memory_hook._load_hooks_sidecar_injected_ids",
+                return_value=set(),
+            ) as mock_loader,
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            check_and_inject(
+                session,
+                "Read",
+                {"file_path": "final.py"},
+                claude_uuid="",
+            )
+
+        mock_loader.assert_called_once_with("")
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_check_and_inject_unchanged_without_claude_uuid(self):
+        """claude_uuid=None (default) -> behavior identical to today (no sidecar)."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "test-no-uuid-arg"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = ["auth", "deploy", "migrate", "ranks", "test"]
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        record = MagicMock()
+        record.memory_id = "rec-1"
+        record.content = "valid"
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch(
+                "agent.memory_hook._load_hooks_sidecar_injected_ids",
+                return_value=set(),
+            ) as mock_loader,
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(
+                session,
+                "Read",
+                {"file_path": "final.py"},
+                # claude_uuid omitted -> defaults to None
+            )
+
+        # Loader was called with None
+        mock_loader.assert_called_once_with(None)
+        assert result is not None
+        assert "valid" in result
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)

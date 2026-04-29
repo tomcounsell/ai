@@ -167,7 +167,7 @@ The function is designed to be called from the SDLC merge stage or a post-merge 
 
 The memory system also runs in Claude Code CLI sessions via hooks. See [Claude Code Memory](claude-code-memory.md) for full details.
 
-- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and ensures the sidecar is attached to an AgentSession for dashboard observability. For worker-spawned subprocesses, the hook attaches the sidecar to the worker's pre-existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no duplicate record is written (issue [#1157](https://github.com/tomcounsell/ai/issues/1157)). For direct-CLI subprocesses, the hook falls through to `AgentSession.create_local()` and creates a fresh `local-*` record; the `SESSION_TYPE` env var determines the persona (`teammate`, `pm`, or `dev`) rather than always defaulting to `dev`.
+- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages), runs **first-turn prefetch** (see below), and ensures the sidecar is attached to an AgentSession for dashboard observability. For worker-spawned subprocesses, the hook attaches the sidecar to the worker's pre-existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars — no duplicate record is written (issue [#1157](https://github.com/tomcounsell/ai/issues/1157)). For direct-CLI subprocesses, the hook falls through to `AgentSession.create_local()` and creates a fresh `local-*` record; the `SESSION_TYPE` env var determines the persona (`teammate`, `pm`, or `dev`) rather than always defaulting to `dev`.
 - **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes) and updates AgentSession activity tracking
 - **Stop hook** runs Haiku extraction and outcome detection on the session transcript, completes the AgentSession lifecycle, and triggers post-merge learning extraction when applicable
 - **Novel territory signals** provide cues when the agent enters unfamiliar areas (zero bloom hits with many keywords). The vague recognition (deja vu) fallback was removed as it produced only noise -- see [Memory Hook Performance](memory-hook-performance.md)
@@ -175,6 +175,31 @@ The memory system also runs in Claude Code CLI sessions via hooks. See [Claude C
 - Bridge module: `.claude/hooks/hook_utils/memory_bridge.py`
 
 Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types. All memory capabilities (ingestion, recall, deja vu signals, extraction, outcome detection, post-merge learning, multi-query decomposition) now have feature parity across both paths.
+
+## First-turn Prefetch
+
+The PostToolUse `recall()` path buffers tool calls and queries memory every `WINDOW_SIZE=3` calls. On a fresh session that means the agent runs blind for the first three operations -- precisely when prior context would help most for orienting. Issue [#1180](https://github.com/tomcounsell/ai/issues/1180) added a complementary path that fires on `UserPromptSubmit` so the agent receives memory thoughts before any tool runs.
+
+**Trigger:** `.claude/hooks/user_prompt_submit.py` runs `memory_bridge.prefetch(session_id, prompt, cwd)` after `ingest()`. The result is emitted as a `hookSpecificOutput` JSON object on stdout, which Claude Code prepends to the agent's first system message.
+
+**Query source:** the user's prompt itself, not the tool buffer. `agent/memory_retrieval.retrieve_memories()` accepts a query string already, so the prompt is passed through verbatim -- no clustering, no keyword extraction layered on top. PM/Teammate worker subprocesses receive prompts wrapped with `FROM:`/`SCOPE:`/`MESSAGE:` boilerplate; `_strip_pm_boilerplate()` removes that prefix before BM25 so the routing template never dilutes the ranking signal.
+
+**Gates** (return None without retrieval):
+- prompt below `MIN_PROMPT_LENGTH = 50` characters (after PM-boilerplate strip)
+- prompt matches a `TRIVIAL_PATTERNS` token (`yes`, `continue`, `ok`, ...)
+- bloom pre-check returns zero hits
+
+**No deja vu on prefetch:** `_recall_with_query()` accepts a `bloom_check_emit_dejavu` flag. The PostToolUse `recall()` keeps the historical "this is new territory" thought; `prefetch()` passes `False` so the user-visible first turn never shows novel-territory noise (issue [#627](https://github.com/tomcounsell/ai/issues/627)).
+
+**De-dup contract:** both paths share the sidecar at `data/sessions/{session_id}/memory_buffer.json`. Prefetch appends surfaced memory IDs to `injected[]`; the PostToolUse `recall()` filters records whose `memory_id` is already in that list. The SDK-side `agent/memory_hook.check_and_inject()` (which fires on every tool call inside worker-spawned subprocesses) accepts an optional `claude_uuid` parameter and reads the same sidecar via `_load_hooks_sidecar_injected_ids()`. The watchdog hook in `agent/health_check.py` passes Claude Code's `input_data["session_id"]` as `claude_uuid`, so SDK-side recall never re-surfaces a memory that prefetch already showed.
+
+**Sidecar discipline:** `recall()` owns `count` and `buffer`; `prefetch()` only mutates `injected[]`. Both perform load-modify-save with atomic `tmp + rename`. Last-writer-wins on `injected[]`; the worst-case race is one cycle of duplicate thoughts (harmless degradation).
+
+**Latency budget:** `PREFETCH_LATENCY_WARN_MS = 200` (in `config/memory_defaults.py`). The single-call query is wall-clock-timed; exceeding the budget logs a `[memory_bridge] prefetch took {ms}ms` warning so operators can spot silent regressions via log grep.
+
+**`claude_uuid="unknown"` guard:** when `input_data["session_id"]` is absent, Claude Code defaults `claude_uuid` to the literal string `"unknown"`. The SDK-side loader skips sidecar reads when `claude_uuid` is empty or equals `"unknown"` to avoid every malformed-payload session sharing `data/sessions/unknown/memory_buffer.json` (cross-session contamination).
+
+**Failure mode:** silent. Every code path is wrapped in try/except; `prefetch()` returns `None` on any error. Memory failures must never block prompt submission.
 
 ## Category-Weighted Recall
 

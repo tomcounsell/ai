@@ -12,8 +12,10 @@ never crash or slow down the agent.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from config.memory_defaults import (
@@ -46,17 +48,81 @@ _tool_buffers: dict[str, list[dict[str, Any]]] = {}
 _tool_counts: dict[str, int] = {}
 _injected_thoughts: dict[str, list[tuple[str, str]]] = {}
 
+# Sentinel value used by the hooks layer when input_data["session_id"]
+# is absent. We refuse to read data/sessions/unknown/memory_buffer.json
+# because that path would be shared across every malformed-payload
+# session, causing cross-session contamination of the de-dup set.
+_UNKNOWN_CLAUDE_UUID = "unknown"
+
+# Project root resolution mirrors the hooks-side _get_sidecar_dir(). The
+# memory_bridge sidecar lives at <project_root>/data/sessions/{claude_uuid}/.
+_PROJECT_ROOT_FOR_SIDECAR = Path(__file__).resolve().parent.parent
+
+
+def _load_hooks_sidecar_injected_ids(claude_uuid: str | None) -> set[str]:
+    """Load the hooks-side sidecar injected[] memory_id values for de-dup.
+
+    The hooks-side sidecar is keyed by Claude Code's session UUID
+    (input_data["session_id"]), which is distinct from the SDK-side
+    AGENT_SESSION_ID env var. The watchdog hook passes its
+    claude_uuid through so this loader can find the right file.
+
+    Guarded against:
+      - missing claude_uuid (None / empty / "unknown" sentinel)
+      - missing sidecar file
+      - corrupt JSON / unexpected shape
+      - any I/O exception
+
+    Fail-silent: returns an empty set on any failure so the SDK-side
+    de-dup degrades to "no exclusion" (worst case: one duplicate
+    thought per cycle, harmless).
+    """
+    if not claude_uuid or claude_uuid == _UNKNOWN_CLAUDE_UUID:
+        return set()
+    try:
+        sidecar_path = (
+            _PROJECT_ROOT_FOR_SIDECAR / "data" / "sessions" / claude_uuid / "memory_buffer.json"
+        )
+        if not sidecar_path.exists():
+            return set()
+        with open(sidecar_path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return set()
+        injected = data.get("injected", [])
+        if not isinstance(injected, list):
+            return set()
+        ids: set[str] = set()
+        for item in injected:
+            if isinstance(item, dict):
+                mid = item.get("memory_id")
+                if mid:
+                    ids.add(str(mid))
+        return ids
+    except Exception:
+        return set()
+
 
 def check_and_inject(
     session_id: str,
     tool_name: str,
     tool_input: Any,
     project_key: str | None = None,
+    claude_uuid: str | None = None,
 ) -> str | None:
     """Check bloom filter and inject thoughts if relevant memories exist.
 
     Called from watchdog_hook() on every tool call. Uses sliding window
     rate limiting to avoid flooding the context.
+
+    De-dup contract: when claude_uuid is provided (and not the
+    "unknown" sentinel), reads the hooks-side sidecar at
+    data/sessions/{claude_uuid}/memory_buffer.json and excludes any
+    memory_ids already in its injected[] list. This prevents the SDK
+    side from re-surfacing memories that the UserPromptSubmit prefetch
+    already showed. When claude_uuid is None / empty / "unknown", the
+    sidecar read is skipped (direct-CLI paths and malformed payloads
+    fall back to today's behavior with no de-dup coordination).
 
     Returns:
         additionalContext string with <thought> blocks, or None.
@@ -159,17 +225,30 @@ def check_and_inject(
         # Re-rank by category weights (corrections/decisions surface higher)
         all_records = _apply_category_weights(all_records)
 
-        # Format as <thought> blocks
+        # Build the de-dup exclude set: union of process-local
+        # _injected_thoughts (this SDK process's prior cycles) and the
+        # hooks-side sidecar injected[] (UserPromptSubmit prefetch + the
+        # parallel hooks-side recall path).
+        process_local_exclude = {str(k) for (k, _v) in _injected_thoughts.get(session_id, [])}
+        process_local_exclude.discard("")
+        sidecar_exclude = _load_hooks_sidecar_injected_ids(claude_uuid)
+        exclude_ids = process_local_exclude | sidecar_exclude
+
+        # Format as <thought> blocks (skip records already shown).
         thoughts: list[str] = []
         session_thoughts = _injected_thoughts.setdefault(session_id, [])
 
-        for record in all_records[:MAX_THOUGHTS]:
+        for record in all_records:
+            if len(thoughts) >= MAX_THOUGHTS:
+                break
+            memory_id = str(getattr(record, "memory_id", "") or "")
+            if memory_id and memory_id in exclude_ids:
+                continue
             content = getattr(record, "content", "")
             if content:
                 thoughts.append(f"<thought>{content}</thought>")
                 # Track for outcome detection
-                key = getattr(record, "memory_id", "") or ""
-                session_thoughts.append((str(key), content))
+                session_thoughts.append((memory_id, content))
                 # Mark as accessed
                 try:
                     record.confirm_access()

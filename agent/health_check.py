@@ -564,12 +564,21 @@ async def watchdog_hook(
         pass  # Non-fatal: don't let tracking break the agent
 
     # === MEMORY INJECTION (every tool call, internally rate-limited) ===
-    # Computed before steering so both can be combined if needed
+    # Computed before steering so both can be combined if needed.
+    # Pass claude_uuid (Claude Code session UUID) so check_and_inject
+    # can locate the hooks-side sidecar at
+    # data/sessions/{claude_uuid}/memory_buffer.json and exclude
+    # memory_ids already surfaced by the UserPromptSubmit prefetch path.
     memory_context = None
     try:
         from agent.memory_hook import check_and_inject
 
-        memory_context = check_and_inject(session_id, tool_name, tool_input)
+        memory_context = check_and_inject(
+            session_id,
+            tool_name,
+            tool_input,
+            claude_uuid=claude_uuid,
+        )
     except Exception as e:
         logger.debug(f"[memory_hook] Import or call failed (non-fatal): {e}")
 
