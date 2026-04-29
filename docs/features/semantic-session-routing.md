@@ -81,7 +81,7 @@ When semantic routing matches an unthreaded message to a session that is current
 | dormant | >= 0.80 | Resume session using `session_id` (existing behavior) |
 | any | < 0.80 | Create new session (existing behavior) |
 
-**User feedback:** When a message is steered into an active session, the user receives an acknowledgment: *"Noted — I'll incorporate this on my next checkpoint."* For abort keywords (`stop`, `cancel`, `abort`, `nevermind`), the ack is: *"Stopping current task."*
+**User feedback:** When a message is steered into an active session, the bridge attaches an emoji reaction directly to the user's message — 👀 (`REACTION_RECEIVED`) for the standard steer path, 🫡 (`REACTION_ABORT`) for abort keywords (`stop`, `cancel`, `abort`, `nevermind`). No inline text reply is emitted; the eventual agent response arrives as a normal PM-authored message in the thread.
 
 **Implementation** (`bridge/telegram_bridge.py`): After `find_matching_session()` returns a match, the bridge loads the `AgentSession` and checks its status. Active sessions get `push_steering_message()` + early return. Dormant/other sessions fall through to existing behavior. Any failure in the active session check falls through gracefully with a warning log.
 

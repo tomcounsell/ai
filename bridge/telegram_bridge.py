@@ -90,6 +90,7 @@ from telethon import TelegramClient, events  # noqa: E402
 from telethon.errors import FloodWaitError  # noqa: E402
 
 from agent import build_harness_turn_input  # noqa: F401, E402
+from agent.steering import ABORT_KEYWORDS, push_steering_message  # noqa: E402
 from bridge.context import (  # noqa: E402
     REPLY_THREAD_CONTEXT_HEADER,  # noqa: F401
     build_activity_context,  # noqa: F401
@@ -118,6 +119,7 @@ from bridge.media import (  # noqa: E402
     validate_media_file,  # noqa: F401
 )
 from bridge.response import (  # noqa: E402
+    REACTION_ABORT,
     REACTION_COMPLETE,
     REACTION_RECEIVED,
     clean_message,
@@ -685,6 +687,49 @@ def _build_completed_resume_text(
     return f"{summary_block}\n\n{follow_up_text}"
 
 
+async def _ack_steering_routed(
+    client: TelegramClient,
+    event,
+    message,
+    *,
+    session_id: str,
+    sender_name: str,
+    text: str,
+    log_context: str,
+    agent_session=None,
+) -> None:
+    """Bundle the terminal sequence shared by every steering routing branch.
+
+    Detects abort keywords, optionally writes to the AgentSession Popoto
+    model (when ``agent_session`` is given — durable, PM-visible),
+    pushes to the Redis steering queue, reacts to the user's message
+    with the appropriate emoji, logs, and marks the message handled.
+
+    Caller is responsible for ``return`` after this call. ``log_context``
+    must NOT include the trailing ``(steer|abort)`` suffix — the helper
+    appends it from the resolved abort detection.
+    """
+    is_abort = text.strip().lower() in ABORT_KEYWORDS
+    if agent_session is not None:
+        # Dual-push: the durable PM-visible write goes to the Popoto model's
+        # queued_steering_messages field BEFORE the Redis push, so the PM
+        # session sees it even before the worker drains the queue.
+        agent_session.push_steering_message(text)
+    push_steering_message(session_id, text, sender_name, is_abort=is_abort)
+    try:
+        await set_reaction(
+            client,
+            event.chat_id,
+            message.id,
+            REACTION_ABORT if is_abort else REACTION_RECEIVED,
+        )
+    except Exception:
+        pass
+    action = "abort" if is_abort else "steer"
+    logger.info(f"{log_context} ({action})")
+    await record_telegram_message_handled(event.chat_id, message.id)
+
+
 async def check_message_query_request(client: TelegramClient) -> None:
     """Check for and process message query requests via file-based IPC.
 
@@ -1033,36 +1078,19 @@ async def main():
                             "active",
                         ):
                             # Active session: queue steering message, ack, return
-                            from agent.steering import (
-                                ABORT_KEYWORDS,
-                                push_steering_message,
+                            await _ack_steering_routed(
+                                client,
+                                event,
+                                message,
+                                session_id=matched_id,
+                                sender_name=sender_name,
+                                text=clean_text,
+                                log_context=(
+                                    f"[routing] Semantic routing: steered unthreaded message "
+                                    f"into {matched_session.status} session {matched_id} "
+                                    f"(confidence: {confidence:.2f})"
+                                ),
                             )
-
-                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                            push_steering_message(
-                                matched_id,
-                                clean_text,
-                                sender_name,
-                                is_abort=is_abort,
-                            )
-                            ack_text = (
-                                "Stopping current task."
-                                if is_abort
-                                else "Noted \u2014 I'll incorporate this on my next checkpoint."
-                            )
-                            from bridge.markdown import send_markdown
-
-                            await send_markdown(
-                                client, event.chat_id, ack_text, reply_to=message.id
-                            )
-                            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
-                            action = "abort" if is_abort else "steer"
-                            logger.info(
-                                f"[routing] Semantic routing: steered unthreaded message "
-                                f"into {matched_session.status} session {matched_id} "
-                                f"({action}, confidence: {confidence:.2f})"
-                            )
-                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
                     except Exception as e:
                         # Steering into active session failed — fall through
@@ -1193,7 +1221,6 @@ async def main():
             maybe_send_revival_prompt,
             queue_revival_agent_session,
         )
-        from agent.steering import push_steering_message
 
         # Check if this is a reply to a revival notification
         # (stateless: read the replied-to message)
@@ -1261,27 +1288,20 @@ async def main():
 
                 if matching_session:
                     # Route to steering queue instead of session queue.
-                    # push_steering_message auto-detects abort keywords.
-                    from agent.steering import ABORT_KEYWORDS
-
-                    is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                    push_steering_message(
-                        session_id,
-                        clean_text,
-                        sender_name,
-                        is_abort=is_abort,
+                    # _ack_steering_routed auto-detects abort keywords.
+                    await _ack_steering_routed(
+                        client,
+                        event,
+                        message,
+                        session_id=session_id,
+                        sender_name=sender_name,
+                        text=clean_text,
+                        log_context=(
+                            f"[{project_name}] Steered message into "
+                            f"{matching_session.status} session "
+                            f"{session_id}"
+                        ),
                     )
-                    ack_text = "Stopping current task." if is_abort else "Adding to current task"
-                    from bridge.markdown import send_markdown
-
-                    await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
-                    action = "abort" if is_abort else "steer"
-                    logger.info(
-                        f"[{project_name}] Steered message into "
-                        f"{matching_session.status} session "
-                        f"{session_id} ({action})"
-                    )
-                    await record_telegram_message_handled(event.chat_id, message.id)
                     return
                 else:
                     # No running/active session found -- check for pending.
@@ -1302,26 +1322,18 @@ async def main():
                                 else _ct.replace(tzinfo=UTC).timestamp()
                             )
                         age = time.time() - (_ct or 0)
-                        from agent.steering import ABORT_KEYWORDS
-
-                        is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                        push_steering_message(
-                            session_id,
-                            clean_text,
-                            sender_name,
-                            is_abort=is_abort,
+                        await _ack_steering_routed(
+                            client,
+                            event,
+                            message,
+                            session_id=session_id,
+                            sender_name=sender_name,
+                            text=clean_text,
+                            log_context=(
+                                f"[{project_name}] Steered reply-to into "
+                                f"pending session {session_id} (age={age:.1f}s)"
+                            ),
                         )
-                        ack_text = (
-                            "Stopping current task." if is_abort else "Adding to current task"
-                        )
-                        from bridge.markdown import send_markdown
-
-                        await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
-                        logger.info(
-                            f"[{project_name}] Steered reply-to into "
-                            f"pending session {session_id} (age={age:.1f}s)"
-                        )
-                        await record_telegram_message_handled(event.chat_id, message.id)
                         return
 
                     # Check for completed session — re-enqueue with prior context.
@@ -1343,21 +1355,18 @@ async def main():
                                 break
                         if live_guard:
                             # A live session now exists — steer into it instead.
-                            from agent.steering import ABORT_KEYWORDS
-
-                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                            push_steering_message(
-                                session_id, clean_text, sender_name, is_abort=is_abort
+                            await _ack_steering_routed(
+                                client,
+                                event,
+                                message,
+                                session_id=session_id,
+                                sender_name=sender_name,
+                                text=clean_text,
+                                log_context=(
+                                    f"[{project_name}] Steered reply-to-completed into "
+                                    f"live {live_guard.status} session {session_id}"
+                                ),
                             )
-                            ack_text = (
-                                "Stopping current task." if is_abort else "Adding to current task"
-                            )
-                            from bridge.markdown import send_markdown
-
-                            await send_markdown(
-                                client, event.chat_id, ack_text, reply_to=message.id
-                            )
-                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
 
                         # Early short-circuit: if this exact (chat_id, msg_id) was
@@ -1530,36 +1539,20 @@ async def main():
 
                         if guard_sessions:
                             guard_session = guard_sessions[0]
-                            # Push to AgentSession's queued_steering_messages
-                            # (Popoto model field) so the PM session sees it on pickup.
-                            guard_session.push_steering_message(clean_text)
-
-                            # Also push to Redis steering queue so the
-                            # PostToolUse hook picks it up immediately
-                            from agent.steering import push_steering_message
-
-                            push_steering_message(
-                                guard_session_id,
-                                clean_text,
-                                sender_name,
-                            )
-
-                            from bridge.markdown import send_markdown
-
-                            await send_markdown(
+                            await _ack_steering_routed(
                                 client,
-                                event.chat_id,
-                                "Adding to current task",
-                                reply_to=message.id,
+                                event,
+                                message,
+                                session_id=guard_session_id,
+                                sender_name=sender_name,
+                                text=clean_text,
+                                log_context=(
+                                    f"[{project_name}] In-memory coalescing guard: "
+                                    f"merged message into session {guard_session_id} "
+                                    f"(age={guard_age:.3f}s)"
+                                ),
+                                agent_session=guard_session,
                             )
-                            logger.info(
-                                f"[{project_name}] In-memory coalescing guard: "
-                                f"merged message into session {guard_session_id} "
-                                f"(age={guard_age:.3f}s)"
-                            )
-                            # Record as processed so bridge restart
-                            # catch-up doesn't reprocess this message
-                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
                         else:
                             # AgentSession still not in Redis after retry — fall through
@@ -1643,31 +1636,20 @@ async def main():
                                 break
 
                         if fresh_session:
-                            # Push to AgentSession's queued_steering_messages
-                            # for the PM session to read
-                            fresh_session.push_steering_message(clean_text)
-                            from bridge.markdown import send_markdown
-
-                            await send_markdown(
+                            await _ack_steering_routed(
                                 client,
-                                event.chat_id,
-                                "Adding to current task",
-                                reply_to=message.id,
+                                event,
+                                message,
+                                session_id=fresh_session.session_id,
+                                sender_name=sender_name,
+                                text=clean_text,
+                                log_context=(
+                                    f"[{project_name}] Intake classifier routed "
+                                    f"interjection to session "
+                                    f"{fresh_session.session_id}"
+                                ),
+                                agent_session=fresh_session,
                             )
-                            logger.info(
-                                f"[{project_name}] Intake classifier routed "
-                                f"interjection to session "
-                                f"{fresh_session.session_id}"
-                            )
-                            # Also push to Redis steering queue so the
-                            # PostToolUse hook picks it up immediately
-                            push_steering_message(
-                                fresh_session.session_id,
-                                clean_text,
-                                sender_name,
-                            )
-                            # Record as processed and return
-                            await record_telegram_message_handled(event.chat_id, message.id)
                             return
                         else:
                             logger.info(

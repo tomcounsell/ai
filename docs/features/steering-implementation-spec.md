@@ -49,7 +49,7 @@ When Valor is executing a long task (10-30+ minutes), the supervisor cannot cour
 
 **Steering (reply to running session):**
 
-User replies to Valor's "acknowledged" message → Bridge checks if session is active → Push to `steering:{session_id}` Redis list → Ack: "Adding to current task" → Watchdog picks up on next tool call → SDK `client.interrupt()` + `client.query(steering_message)` → Agent continues with new context
+User replies to Valor's "acknowledged" message → Bridge checks if session is active → Push to `steering:{session_id}` Redis list → Ack: 👀 emoji reaction on the user's message (🫡 if abort) → Watchdog picks up on next tool call → SDK `client.interrupt()` + `client.query(steering_message)` → Agent continues with new context
 
 **Follow-up (new message while session running):**
 
@@ -57,7 +57,7 @@ User sends new mention (not a reply) → Bridge sees active session for project 
 
 **Pending session merge (#619):**
 
-User sends two messages in quick succession (< 8s) → First message enqueues as pending job → Second message arrives before worker pops the first → Bridge detects pending session within `PENDING_MERGE_WINDOW_SECONDS` (8s) → Push to `steering:{session_id}` Redis list → Ack: "Adding to current task" → When worker pops the job, drain-on-start logic calls `pop_all_steering_messages()` and prepends follow-up text to `message_text` → Agent sees the combined message on first run
+User sends two messages in quick succession (< 8s) → First message enqueues as pending job → Second message arrives before worker pops the first → Bridge detects pending session within `PENDING_MERGE_WINDOW_SECONDS` (8s) → Push to `steering:{session_id}` Redis list → Ack: 👀 emoji reaction on the user's message → When worker pops the job, drain-on-start logic calls `pop_all_steering_messages()` and prepends follow-up text to `message_text` → Agent sees the combined message on first run
 
 For messages arriving within ~200ms (before the first session is written to Redis), an in-memory coalescing guard (`_recent_session_by_chat`) bridges the Redis visibility gap. See `docs/features/semantic-session-routing.md` for details on the coalescing guard.
 
@@ -65,7 +65,7 @@ This covers both the reply-to fast path (direct Telegram replies to pending sess
 
 **Abort:**
 
-User replies "stop" or "cancel" → Bridge pushes abort signal to steering queue → Watchdog picks up → SDK `client.interrupt()` → Session marked as aborted → Ack: "Stopped"
+User replies "stop" or "cancel" → Bridge pushes abort signal to steering queue → Watchdog picks up → SDK `client.interrupt()` → Session marked as aborted → Ack: 🫡 emoji reaction (`REACTION_ABORT`) on the user's message
 
 ### Technical Approach
 
@@ -99,8 +99,16 @@ if is_reply_to_valor and message.reply_to_msg_id:
     active_sessions = AgentSession.query.filter(session_id=session_id, status="active")
     if active_sessions:
         # Route to steering queue instead of session queue
-        push_steering_message(session_id, clean_text, sender_name)
-        await client.send_message(event.chat_id, "Adding to current task", reply_to=message.id)
+        # All terminal-sequence work (push + reaction + log + record-handled)
+        # is bundled in the `_ack_steering_routed` helper. The bridge attaches
+        # an emoji reaction to the user's message instead of sending a text ack.
+        await _ack_steering_routed(
+            client, event, message,
+            session_id=session_id,
+            sender_name=sender_name,
+            text=clean_text,
+            log_context=f"[{project_name}] Steered into active session {session_id}",
+        )
         return
 
     # Otherwise fall through to normal session queue (session resume)
