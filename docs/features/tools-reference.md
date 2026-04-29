@@ -240,20 +240,24 @@ python -m tools.valor_session status --id <SESSION_ID> --json
 
 See `docs/features/session-steering.md` for full documentation.
 
-### SDLC Stage Query (`tools.sdlc_stage_query`)
+### SDLC Stage Query (`sdlc-tool stage-query`)
 
 Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.
 
 ```bash
 # Query by session ID
-python -m tools.sdlc_stage_query --session-id tg_project_123_456
+sdlc-tool stage-query --session-id tg_project_123_456
 
 # Query by GitHub issue number (finds the PM session tracking that issue)
-python -m tools.sdlc_stage_query --issue-number 704
+sdlc-tool stage-query --issue-number 704
 
 # No args — falls back to VALOR_SESSION_ID / AGENT_SESSION_ID env vars
-python -m tools.sdlc_stage_query
+sdlc-tool stage-query
 ```
+
+The `sdlc-tool` wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd, including target-repo cwds with a shadow `tools/` package. See `docs/features/sdlc-tool-resolver.md`.
+
+For Python callers (tests or other tools), import the underlying module directly — the bare `python -m tools.sdlc_stage_query` form is the entry point that the wrapper dispatches into:
 
 ```python
 from tools.sdlc_stage_query import query_stage_states

@@ -17,13 +17,15 @@ This path fires automatically for all sessions initiated through the Telegram br
 
 ### 2. Skill stage markers (belt-and-suspenders — local Claude Code sessions)
 
-Each SDLC skill writes explicit in_progress/completed markers using `tools/sdlc_stage_marker.py`:
+Each SDLC skill writes explicit in_progress/completed markers using the `sdlc-tool stage-marker` wrapper (which dispatches into `tools/sdlc_stage_marker.py`):
 
 ```bash
-python -m tools.sdlc_stage_marker --stage DOCS --status in_progress --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} 2>/dev/null || true
 # ... skill work ...
-python -m tools.sdlc_stage_marker --stage DOCS --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
+
+The wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd (including target-repo cwds where a shadow `tools/` package would otherwise hijack module resolution). See `docs/features/sdlc-tool-resolver.md` for the full rationale.
 
 Skills with markers:
 - `do-issue` → ISSUE stage
@@ -34,15 +36,17 @@ Skills with markers:
 
 The tool resolves the PM session in priority order: `--session-id` argument, `VALOR_SESSION_ID` env var, `AGENT_SESSION_ID` env var, then `--issue-number` argument (which finds the PM session tracking that issue via `find_session_by_issue()`). For local Claude Code sessions, `--issue-number` is the primary resolution path since env vars don't persist across bash blocks. It fails silently (exit 0, empty JSON `{}`) if no session is found — skill execution is never interrupted by marker failures.
 
-## `tools/sdlc_stage_marker.py` CLI
+## `sdlc-tool stage-marker` CLI
 
 ```bash
-python -m tools.sdlc_stage_marker --stage <STAGE> --status <in_progress|completed>
-python -m tools.sdlc_stage_marker --stage REVIEW --status completed --session-id <ID>
-python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number 941
+sdlc-tool stage-marker --stage <STAGE> --status <in_progress|completed>
+sdlc-tool stage-marker --stage REVIEW --status completed --session-id <ID>
+sdlc-tool stage-marker --stage PLAN --status completed --issue-number 941
 ```
 
 Exit code is always 0. Returns `{}` on error, `{"stage": "DOCS", "status": "completed"}` on success.
+
+The bare module form (`python -m tools.sdlc_stage_marker`) is the underlying entry point — runtime callers should always use the `sdlc-tool stage-marker` wrapper so the call is cwd-independent.
 
 ## `get_display_progress()` — Stored State Only
 
@@ -71,7 +75,7 @@ Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call sh
 
 ```bash
 SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
-python -m tools.sdlc_session_ensure --issue-number 941 --issue-url "https://github.com/$SDLC_REPO/issues/941"
+sdlc-tool session-ensure --issue-number 941 --issue-url "https://github.com/$SDLC_REPO/issues/941"
 ```
 
 The `SDLC_REPO` value is shell-derived to avoid hardcoding the repo owner/name. `tools/sdlc_session_ensure.py` resolves `project_key` dynamically via `resolve_project_key(cwd)`, then derives `working_dir` from `projects.json[project_key].working_directory` (not `os.getcwd()`) via `_resolve_project_working_directory()` — enforcing the immutable project→repo pairing from issue #1158. If resolution fails, the function returns `{}` (idempotent no-op) rather than creating a mis-scoped session.
