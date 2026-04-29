@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
 created: 2026-04-29
 tracking: https://github.com/tomcounsell/ai/issues/1208
 last_comment_id:
+revision_applied: true
 ---
 
 # Kill Is Terminal — Stop Killed Sessions From Resurrecting
@@ -18,7 +19,7 @@ Witnessed live in PM: Valor (chat_id `-1003449100931`, parent session `tg_valor_
 
 1. Operator killed all running sessions. The parent PM (`tg_valor_-1003449100931_754`, agent_session_id `04a1b7ba207449a98169171c5e44513a`) was set to `status=killed` on disk.
 2. Worker `python -m worker` (PID 750, run by `com.valor.worker` LaunchAgent) kept invoking `_agent_session_hierarchy_health_check()` every 5 minutes.
-3. The check's query `AgentSession.query.filter(status="waiting_for_children")` kept matching the killed parent, even though its hash status was `killed`. (See Open Questions Q3 — likely Popoto IndexedField staleness or lazy-load skew.)
+3. The check's query `AgentSession.query.filter(status="waiting_for_children")` kept matching the killed parent, even though its hash status was `killed`. (Likely Popoto IndexedField staleness or lazy-load skew — root-cause investigation deferred to a follow-up issue per the Follow-up Issues section below; operational mitigation lives in Fix B.)
 4. For each match, the check called `schedule_pipeline_completion()` → drafted a final summary → **queued to `telegram:outbox:tg_valor_-1003449100931_754`** → relay shipped the message to Tom's chat.
 5. *Only after* shipping the message did the runner call `finalize_session(parent, "completed", ...)`, which raised `StatusConflictError` (`expected 'killed' on disk, found 'completed'`). The error was logged but harmless — the spam had already gone out.
 6. Tom received 9+ near-identical "All 5 child pipelines completed..." status messages over 90 minutes. Operator restart of the computer did not stop it because launchd auto-respawned the worker.
@@ -165,7 +166,7 @@ if fresh is not None and getattr(fresh, "status", None) in _TERMINAL_STATUSES:
 This re-uses `get_authoritative_session` (already imported and used elsewhere in `session_lifecycle.py`).
 
 **Fix C — Runner entry guard (`agent/session_completion.py`):**
-At the top of `schedule_pipeline_completion()` (and/or `_deliver_pipeline_completion()`), add a parent-status check before any drafting or queuing happens:
+At the top of `_deliver_pipeline_completion()` (and any sibling entry points such as `schedule_pipeline_completion()`), add a parent-status check before any drafting or queuing happens:
 ```python
 parent_status = getattr(parent, "status", None)
 if parent_status in TERMINAL_STATUSES and parent_status != "completed":
@@ -176,7 +177,16 @@ if parent_status in TERMINAL_STATUSES and parent_status != "completed":
     )
     return
 ```
-Place this *before* any `send_cb()` call, any drafting, any outbox queuing.
+
+**Implementation Note (B1 — ordering, blocker resolution):** The runner-entry terminal-status guard MUST run **before** the `pipeline_complete_pending` CAS lock acquisition at `agent/session_completion.py:499` (`POPOTO_REDIS_DB.set(_pipeline_complete_lock_key(parent_id), "1", nx=True, ex=60)`). The correct insertion site is between the existing `parent_id` validation (current line 488–490) and the CAS lock block (current lines 492–513). Concretely, the guard goes immediately after:
+
+```python
+if not parent_id:
+    logger.warning("[completion-runner] Missing parent_id; skipping")
+    return
+```
+
+and *before* the `# CAS lock — Race 1 ...` comment block. This ordering is load-bearing: a terminal parent must bail out *before* taking the lock so that (a) a killed parent never blocks lock acquisition for healthy work on an unrelated session, and (b) no `pipeline_complete_pending:{killed_parent_id}` Redis key is ever written for a dead session, leaving the lock keyspace clean. Place this *before* any `send_cb()` call, any drafting, any outbox queuing, and any lock acquisition.
 
 **Fix D — Caller audit pass (cross-module):**
 Enumerate every `finalize_session()` call site:
@@ -188,17 +198,28 @@ For each site, classify into one of:
 - **Catch-and-log** — wrap in `try/except StatusConflictError` and log at INFO. Pipeline-progression callers belong here: `agent/session_completion.py:738`, `agent/session_health.py:355,723,860,881,1010`, `bridge/session_transcript.py:312`, `bridge/telegram_bridge.py:1684`, `agent/session_executor.py:658`.
 - **Opt out** — pass `reject_from_terminal=False` with a docstring/comment explaining the legitimate need (e.g., escalating `abandoned`→`failed` on timeout, if any such site exists). Expected count: 0–1.
 
-**Fix E — Index-staleness investigation (during build, not blocked-on):**
-Reproduce the live-debug scenario: kill a parent, wait for the next 5-min hierarchy check, observe whether the new guard at Fix B logs "Skipping terminal parent." If yes, Fix B masks the staleness and the underlying corruption can be addressed separately. If the parent does NOT match the query at all (i.e., the index is now correct), then the staleness was from the prior #1006 bug class, recently corrected at runtime, and no further work is needed. If the parent still matches, deeper instrumentation (e.g., `r.smembers("agent_session:status:waiting_for_children")` snapshot before/after kill) is needed — schedule as a follow-up issue rather than blocking this plan.
-
-**Fix F — Operator runbook (`scripts/valor-service.sh`):**
-Update the `worker-stop` function to:
-```bash
-launchctl disable gui/$UID/com.valor.worker
-launchctl bootout gui/$UID/com.valor.worker 2>/dev/null
-# Wait for process exit, with timeout
+**Implementation Note (Q1 — log level decision):** Catch-and-log sites use **`logger.info(...)`** (NOT `WARNING` or `ERROR`). Once the new guards in Fix B (health-check) and Fix C (runner entry) are in place, a `StatusConflictError` raised from `finalize_session(reject_from_terminal=True)` represents the *expected, correct, defense-in-depth outcome* of a kill racing a routine pipeline-progression call — not an alarm condition. Reserving `WARNING`/`ERROR` for genuine concurrency anomalies keeps signal-to-noise high in `worker.log`. Standard message form:
+```python
+except StatusConflictError as e:
+    logger.info("[%s] Skipping finalize: %s", caller_name, e)
 ```
-Add a complementary `worker-enable` (re-enable after fix is verified). The CLAUDE.md "Quick Commands" table should be updated to reflect the new behavior.
+
+**Fix E — DEFERRED to follow-up issue (Q2 decision).** The original plan included an in-scope index-staleness investigation for the `waiting_for_children` index. **Decision:** split this out as a separate follow-up issue, OUT OF SCOPE for this plan. Rationale: Fix B (the re-read guard at the hierarchy health check) operationally masks the staleness — a stale index entry can no longer cause spam because the re-read sees the actual hash status. The underlying corruption (if real) is a Popoto-layer concern in the same class as #1006 and deserves its own dedicated investigation with proper instrumentation. Tracking note in the plan's "Follow-up Issues" section below.
+
+**Fix F — Operator runbook (`scripts/valor-service.sh`) — Q3 decision:**
+
+**Decision:** Keep `worker-stop` semantics unchanged (one-shot stop only — does NOT touch launchd's enabled/disabled state, so launchd's `KeepAlive=true` may auto-respawn the worker as today). Add an EXPLICIT new subcommand `worker-disable` for the stay-down behavior. This preserves backward compatibility for existing callers (scripts, cron jobs, human muscle memory) that rely on `worker-stop` being a transient stop, while giving operators a clearly-named opt-in for "I want this worker to stay down until I say otherwise."
+
+Concretely, the four operator commands are:
+
+| Command | Behavior | When to use |
+|---------|----------|-------------|
+| `worker-stop` | One-shot `bootout`. Does NOT call `launchctl disable`. launchd's `KeepAlive=true` may relaunch. | Transient stop — most common case; quick restart, debugging, etc. |
+| `worker-start` | `launchctl enable` (idempotent), then `bootstrap`. Always re-enables in case `worker-disable` was called previously. | Restart after stop or disable. |
+| `worker-disable` | `launchctl disable gui/$UID/com.valor.worker` then `launchctl bootout gui/$UID/com.valor.worker 2>/dev/null`. Worker stays down across launchd respawn until `worker-enable` or `worker-start`. | "I'm killing all the sessions and I do NOT want the worker to come back" — the live-debug scenario from this issue. |
+| `worker-enable` | `launchctl enable gui/$UID/com.valor.worker` only. Does not start the worker; pairs with a follow-up `worker-start`. | Re-enable after `worker-disable` without starting immediately. |
+
+Update the CLAUDE.md "Quick Commands" table to add `worker-disable` and `worker-enable` rows. The runbook entry for the kill-is-terminal scenario should reference `worker-disable`, not `worker-stop`.
 
 ## Failure Path Test Strategy
 
@@ -251,8 +272,8 @@ Add a complementary `worker-enable` (re-enable after fix is verified). The CLAUD
 
 ### Risk 4: Operator runbook change breaks an unrelated `valor-service.sh worker-stop` caller
 
-**Impact:** Other scripts or human operators who run `worker-stop` expect the worker to come back via `worker-start`. If `worker-stop` now disables, `worker-start` must re-enable.
-**Mitigation:** Update `worker-start` to `launchctl enable` before `bootstrap`. Document in CLAUDE.md Quick Commands. Add a smoke test: `worker-stop && worker-start && pgrep -af 'python.*-m worker'` should return one process.
+**Impact:** Other scripts or human operators who run `worker-stop` expect the worker to come back via `worker-start` and rely on launchd's `KeepAlive=true` for transient stops. If we change `worker-stop` semantics, those callers break.
+**Mitigation (Q3 resolution):** **`worker-stop` semantics are unchanged** — it remains a one-shot `bootout` that does not touch launchd's enabled/disabled state. The new "stay down across respawn" behavior lives in a *new* `worker-disable` subcommand, with a paired `worker-enable`. Existing callers see no behavior change. As a defensive measure, `worker-start` is updated to call `launchctl enable` (idempotent) before `bootstrap` so it correctly recovers from a prior `worker-disable`. Smoke tests cover both paths (see Step 5 verification).
 
 ## Race Conditions
 
@@ -406,20 +427,27 @@ No agent integration changes required — `valor-session` CLI is unchanged from 
 - **Assigned To**: test-author
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Create `tests/integration/test_kill_is_terminal.py` with the live-debug repro.
+- Create `tests/integration/test_kill_is_terminal.py` using **direct function invocation** of `_agent_session_hierarchy_health_check()` and `_deliver_pipeline_completion()` — see "Implementation Note (Q4 — integration test strategy)" below.
 - Extend `tests/unit/test_session_lifecycle.py` with the three new lifecycle tests listed in Test Impact.
 - Extend `tests/unit/test_kill_cascades_to_children.py` with `test_killed_parent_survives_child_completion`.
+
+**Implementation Note (Q4 — integration test strategy decision):** The integration test uses **direct function invocation only** — no worker-loop simulation, no launchd respawn dance, no real 5-minute scheduler ticks. Rationale: simulating the full worker loop is gold-plating for a defense-in-depth fix; the guards live at well-defined function boundaries (`_agent_session_hierarchy_health_check` iteration, `_deliver_pipeline_completion` entry, `finalize_session` body), so calling those functions directly with crafted AgentSession state covers the regression contract deterministically. The launchd-respawn-class bugs that worker-loop simulation would catch are orthogonal to this fix and would belong in a separate operational-resilience test suite. **The live verification target is the haunted parent `tg_valor_-1003449100931_754`** in PM: Valor (chat_id `-1003449100931`, agent_session_id `04a1b7ba207449a98169171c5e44513a`), captured in this issue's "Live Debugging Update" section — the validator step (Step 6) reproduces the kill-then-wait scenario against that real session to confirm the fix lands as intended in production conditions.
 
 ### 5. Operator runbook (Fix F)
 - **Task ID**: build-runbook
 - **Depends On**: none (independent of the lifecycle work)
-- **Validates**: smoke test `worker-stop && worker-start && pgrep -af 'python.*-m worker'` returns 1 line.
+- **Validates**: smoke tests:
+  - `worker-stop && worker-start && pgrep -af 'python.*-m worker' | wc -l` returns ≥ 1 (one-shot stop + restart).
+  - `worker-disable && launchctl print-disabled gui/$UID | grep -q 'com.valor.worker.*=> disabled'` (disable sticks).
+  - `worker-enable && worker-start && pgrep -af 'python.*-m worker' | wc -l` returns ≥ 1 (re-enable + start).
 - **Assigned To**: runbook-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Update `scripts/valor-service.sh` `stop_worker` and `start_worker` to handle launchd disable/enable.
-- Add `worker-disable` and `worker-enable` subcommands.
-- Update CLAUDE.md Quick Commands table.
+- Keep `worker-stop` behavior unchanged (one-shot `bootout`, no launchd disable) — preserves backward compatibility.
+- Update `worker-start` to call `launchctl enable` (idempotent) before `bootstrap` so it works correctly after a prior `worker-disable`.
+- Add a NEW `worker-disable` subcommand (`launchctl disable` + `bootout`) for the stay-down case.
+- Add a NEW `worker-enable` subcommand (`launchctl enable` only; does not start).
+- Update CLAUDE.md Quick Commands table to add `worker-disable` and `worker-enable` rows.
 
 ### 6. Validation
 - **Task ID**: validate-all
@@ -428,7 +456,7 @@ No agent integration changes required — `valor-session` CLI is unchanged from 
 - **Agent Type**: validator
 - **Parallel**: false
 - Run all Verification rows.
-- Reproduce the live-debug scenario: kill a parent on a test project, wait for two hierarchy-check cycles, confirm zero Telegram messages.
+- **Live verification (Q4 target):** Reproduce the live-debug scenario against the haunted parent `tg_valor_-1003449100931_754` (PM: Valor chat, agent_session_id `04a1b7ba207449a98169171c5e44513a`) — see this plan's Problem section and the issue's "Live Debugging Update". Procedure: ensure the parent is in `status=killed`, restart the worker, wait for two hierarchy-check cycles (10 minutes), confirm zero Telegram messages reach the chat and the parent's status remains `killed`.
 - Confirm CAS error rate in worker.log is zero post-fix.
 - Confirm the audit pass left no `finalize_session()` call site without a try/except for `StatusConflictError` (unless explicitly classified no-change).
 
@@ -453,8 +481,10 @@ No agent integration changes required — `valor-session` CLI is unchanged from 
 | Kill cascade test | `pytest tests/unit/test_kill_cascades_to_children.py -q -k killed_parent_survives` | exit code 0 |
 | Integration test | `pytest tests/integration/test_kill_is_terminal.py -q` | exit code 0 |
 | No unhandled finalize raises | `grep -rn "finalize_session(" agent/ models/ bridge/ \| grep -v 'try\|except\|#'` matches the audit checklist | manual review pass |
-| Worker-stop disables | `./scripts/valor-service.sh worker-stop && launchctl print-disabled gui/$UID \| grep -q 'com.valor.worker.*=> disabled'` | exit code 0 |
-| Worker-start re-enables | `./scripts/valor-service.sh worker-start && pgrep -af 'python.*-m worker' \| wc -l` | output > 0 |
+| Worker-stop is one-shot (semantics preserved) | `./scripts/valor-service.sh worker-stop && launchctl print-disabled gui/$UID \| grep 'com.valor.worker'` | NOT marked `=> disabled` (transient stop only) |
+| Worker-disable sticks | `./scripts/valor-service.sh worker-disable && launchctl print-disabled gui/$UID \| grep -q 'com.valor.worker.*=> disabled'` | exit code 0 |
+| Worker-start re-enables and starts | `./scripts/valor-service.sh worker-disable && ./scripts/valor-service.sh worker-start && pgrep -af 'python.*-m worker' \| wc -l` | output > 0 |
+| Worker-enable alone does not start | `./scripts/valor-service.sh worker-disable && ./scripts/valor-service.sh worker-enable && pgrep -af 'python.*-m worker' \| wc -l` | output == 0 |
 
 ## Critique Results
 
@@ -466,12 +496,8 @@ No agent integration changes required — `valor-session` CLI is unchanged from 
 
 ---
 
-## Open Questions
+## Follow-up Issues
 
-1. **Q1 — Catch-and-log default log level.** When `_deliver_pipeline_completion` and similar pipeline-progression callers catch `StatusConflictError`, should they log at `INFO` (treat as expected when kill races a completion) or `WARNING` (still flag it for operators)? My instinct is INFO because "kill happened concurrently" is not an alarm condition once the new guards are in place. Confirm.
+The following work is intentionally **out of scope** for this plan but should be filed as a separate GitHub issue once this plan ships:
 
-2. **Q2 — Should Fix E (index-staleness investigation) block this plan?** I propose treating it as a separate follow-up issue once Fix B (re-read guard) lands. Fix B masks the staleness operationally; the underlying corruption (if real) deserves its own investigation. Alternative: block this plan on resolving the corruption first. Which?
-
-3. **Q3 — `worker-stop` semantics: should it always disable, or only when called with `--disable`?** Current proposal: always disable, requiring `worker-start` (or new `worker-enable`) to re-enable. Alternative: `worker-stop` is a one-shot stop (auto-restarts allowed); `worker-disable` is the explicit "stay down" command. The operator-friendly version is the first, but it changes existing semantics. Which?
-
-4. **Q4 — Should the integration test simulate the real worker `_agent_session_hierarchy_health_check` cycle, or directly invoke the function?** The former is more realistic (catches launchd-respawn-style bugs); the latter is faster and more deterministic. Probably do both, but flag the tradeoff.
+- **Index-staleness investigation for `waiting_for_children` (Q2 deferral, originally Fix E in earlier drafts of this plan).** Determine why a `killed` parent matches `AgentSession.query.filter(status="waiting_for_children")` after kill. Likely candidates: Popoto IndexedField corruption (analogous to #1006, which only fixed the `running` index path), or a lazy-load timing artifact where the query returns a cached object whose in-memory status disagrees with the hash. Operational mitigation already in place via Fix B (the re-read guard at the hierarchy health check); this follow-up addresses the underlying corruption itself. Suggested instrumentation: snapshot `r.smembers("agent_session:status:waiting_for_children")` before and after kill, diff the membership, and compare to each session's `r.hget(key, "status")`. Title suggestion: "Investigate `waiting_for_children` index staleness for killed parents (follow-up to #1208)". This issue will be filed *after* the kill-is-terminal plan ships, not as part of this build.
