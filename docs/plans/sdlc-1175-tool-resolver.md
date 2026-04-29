@@ -433,8 +433,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools.
 | Wrapper installed | `command -v sdlc-tool` | exit code 0 |
 | Wrapper resolves | `sdlc-tool stage-query --issue-number 0` | exit code 0 |
 | No bare invocations remain | `grep -rn 'python -m tools.sdlc_' .claude/skills/ .claude/hooks/post_compact.py config/personas/project-manager.md` | exit code 1 |
-| Verdict tool is loud on failure | `AGENT_SESSION_ID=__nonexistent__ python -m tools.sdlc_verdict record --stage CRITIQUE --verdict X --session-id __nonexistent__` | exit code 1 (was 0) |
-| Update verify clean | `python -m scripts.update.run --dry-run` | exit code 0 |
+| Verdict tool is loud on failure | `pytest tests/unit/test_sdlc_tool_wrapper.py::TestVerdictAndDispatchLoudExit::test_verdict_record_exit_1_on_inner_raise -q` (monkey-patches `_find_session` to raise, then asserts `tools.sdlc_verdict.main()` exits 1; was 0). Note: a CLI invocation against a missing session ID (e.g. `AGENT_SESSION_ID=__nonexistent__ python -m tools.sdlc_verdict record …`) returns `{}` and exits 0 — that is the empty-match path, not a failure. | exit code 0 (test passes) |
+| Update verify clean | `python -m scripts.update.run --verify` | exit code 0 |
 
 ## Critique Results
 
