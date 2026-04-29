@@ -251,6 +251,52 @@ class TestCreateContinuationPM:
             f"Expected '[continuation-pm-blocked]' error log; got: {_msgs}"
         )
 
+    def test_resolve_helper_raise_is_logged_not_swallowed(self, terminal_pm, redis_test_db, caplog):
+        """If _resolve_working_dir_for_parent raises, the error is logged
+        with the [harness] tag and parent context, and no malformed continuation
+        is saved.
+
+        Issue #1206: covers the broad ``except Exception`` branch at
+        ``agent/session_completion.py:436``. The helper raising mid-spawn is a
+        plausible failure (config lookup, projects.json IO error) and the
+        previous log line lost parent context, making post-mortem triage
+        harder. This test asserts the enriched log message.
+        """
+        import logging
+
+        from agent.agent_session_queue import _create_continuation_pm
+
+        before = len(list(AgentSession.query.all()))
+        with (
+            patch(
+                "agent.session_completion._resolve_working_dir_for_parent",
+                side_effect=RuntimeError("simulated config failure"),
+            ),
+            caplog.at_level(logging.ERROR),
+        ):
+            _create_continuation_pm(
+                parent=terminal_pm,
+                agent_session=None,
+                issue_number=934,
+                stage="BUILD",
+                outcome="success",
+                result_preview="r",
+            )
+
+        after = len(list(AgentSession.query.all()))
+        assert after == before, "no malformed continuation session was saved"
+
+        msgs = [r.message for r in caplog.records]
+        assert any("[harness] _create_continuation_pm failed" in m for m in msgs), (
+            f"Expected [harness] tag in error log; got: {msgs!r}"
+        )
+        assert any(terminal_pm.session_id in m for m in msgs), (
+            f"Expected parent session_id in error log; got: {msgs!r}"
+        )
+        assert any("simulated config failure" in m for m in msgs), (
+            f"Expected the simulated RuntimeError text in error log; got: {msgs!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test 2: Continuation depth cap prevents infinite chains
