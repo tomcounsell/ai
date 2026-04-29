@@ -927,6 +927,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
         # Install/reload standalone worker service
         if (project_dir / "com.valor.worker.plist").exists():
+            worker_was_running = service.is_worker_running()
             if service.install_worker(project_dir):
                 log("Worker service installed", v)
                 # Verify worker starts and writes heartbeat.
@@ -936,84 +937,97 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
                 heartbeat_file = project_dir / "data" / "last_worker_connected"
                 install_ts = _time.time()
-                worker_healthy = False
-                for _ in range(15):  # 30s window
-                    _time.sleep(2)
-                    if not service.is_worker_running():
-                        continue
+                # If the worker was already running before install (no-op plist),
+                # its heartbeat predates install_ts — accept it as-is rather than
+                # waiting for a fresh write that will never come.
+                if worker_was_running and service.is_worker_running():
                     worker_pid = service.get_worker_pid()
-                    # Check heartbeat was written after we started installing
-                    try:
-                        if heartbeat_file.exists() and heartbeat_file.stat().st_mtime > install_ts:
-                            log(f"Worker running (PID: {worker_pid})", v)
-                            worker_healthy = True
-                            break
-                    except OSError:
-                        pass
-                if not worker_healthy:
-                    # Process present but heartbeat not yet written — warn but not an error
-                    worker_pid = service.get_worker_pid()
-                    if worker_pid:
-                        log(
-                            f"Worker running (PID: {worker_pid}) — heartbeat pending",
-                            v,
-                            always=True,
-                        )
-                        result.warnings.append(
-                            "Worker started but heartbeat pending — "
-                            "dashboard may show stale status briefly"
-                        )
-                    else:
-                        # Kickstart fallback: force-start the service if launchd
-                        # didn't auto-start after bootout+bootstrap.
-                        import subprocess
-
-                        uid = os.getuid()
+                    log(f"Worker running (PID: {worker_pid})", v)
+                    worker_healthy = True
+                else:
+                    worker_healthy = False
+                    for _ in range(15):  # 30s window
+                        _time.sleep(2)
+                        if not service.is_worker_running():
+                            continue
+                        worker_pid = service.get_worker_pid()
+                        # Check heartbeat was written after we started installing
                         try:
-                            subprocess.run(
-                                ["launchctl", "kickstart", "-k", f"gui/{uid}/com.valor.worker"],
-                                capture_output=True,
-                            )
-                        except Exception as e:
-                            log(f"launchctl kickstart failed: {e}", v, always=True)
-                        # Re-poll up to 30s for worker heartbeat after kickstart.
-                        # Worker startup (module imports, Redis connect, Popoto index
-                        # rebuild, session recovery, orphan cleanup, claude binary
-                        # smoke test) can take 10–20s on a loaded system; the previous
-                        # 16s retry window would race and falsely report system
-                        # degraded on every /update run. 15 iterations × 2s = 30s
-                        # ceiling provides realistic headroom while keeping a 2s
-                        # poll cadence for responsiveness when the worker comes up
-                        # quickly. See issue #1098.
-                        for _ in range(15):
-                            _time.sleep(2)
-                            if service.is_worker_running():
-                                worker_pid = service.get_worker_pid()
-                                try:
-                                    if (
-                                        heartbeat_file.exists()
-                                        and heartbeat_file.stat().st_mtime > install_ts
-                                    ):
-                                        log(
-                                            f"Worker running after kickstart (PID: {worker_pid})",
-                                            v,
-                                            always=True,
-                                        )
-                                        worker_healthy = True
-                                        break
-                                except OSError:
-                                    pass
-                        if not worker_healthy:
+                            if (
+                                heartbeat_file.exists()
+                                and heartbeat_file.stat().st_mtime > install_ts
+                            ):
+                                log(f"Worker running (PID: {worker_pid})", v)
+                                worker_healthy = True
+                                break
+                        except OSError:
+                            pass
+                    if not worker_healthy:
+                        # Process present but heartbeat not yet written — warn but not an error
+                        worker_pid = service.get_worker_pid()
+                        if worker_pid:
                             log(
-                                "ERROR: Worker not running after 30s kickstart retry window — "
-                                "system degraded",
+                                f"Worker running (PID: {worker_pid}) — heartbeat pending",
                                 v,
                                 always=True,
                             )
                             result.warnings.append(
-                                "Worker not running after install and kickstart retry (30s window)"
+                                "Worker started but heartbeat pending — "
+                                "dashboard may show stale status briefly"
                             )
-                            result.success = False
+                        else:
+                            # Kickstart fallback: force-start the service if launchd
+                            # didn't auto-start after bootout+bootstrap.
+                            import subprocess
+
+                            uid = os.getuid()
+                            try:
+                                subprocess.run(
+                                    ["launchctl", "kickstart", "-k", f"gui/{uid}/com.valor.worker"],
+                                    capture_output=True,
+                                )
+                            except Exception as e:
+                                log(f"launchctl kickstart failed: {e}", v, always=True)
+                            # Re-poll up to 30s for worker heartbeat after kickstart.
+                            # Worker startup (module imports, Redis connect, Popoto index
+                            # rebuild, session recovery, orphan cleanup, claude binary
+                            # smoke test) can take 10–20s on a loaded system; the previous
+                            # 16s retry window would race and falsely report system
+                            # degraded on every /update run. 15 iterations × 2s = 30s
+                            # ceiling provides realistic headroom while keeping a 2s
+                            # poll cadence for responsiveness when the worker comes up
+                            # quickly. See issue #1098.
+                            for _ in range(15):
+                                _time.sleep(2)
+                                if service.is_worker_running():
+                                    worker_pid = service.get_worker_pid()
+                                    try:
+                                        if (
+                                            heartbeat_file.exists()
+                                            and heartbeat_file.stat().st_mtime > install_ts
+                                        ):
+                                            log(
+                                                f"Worker running after kickstart"
+                                                f" (PID: {worker_pid})",
+                                                v,
+                                                always=True,
+                                            )
+                                            worker_healthy = True
+                                            break
+                                    except OSError:
+                                        pass
+                            if not worker_healthy:
+                                log(
+                                    "ERROR: Worker not running after 30s kickstart retry window — "
+                                    "system degraded",
+                                    v,
+                                    always=True,
+                                )
+                                result.warnings.append(
+                                    "Worker not running after install and"
+                                    " kickstart retry (30s window)"
+                                )
+                                result.success = False
             else:
                 result.warnings.append("Worker plist install failed")
 
