@@ -130,9 +130,12 @@ valor-email threads
 | `./scripts/start_bridge.sh` | Start Telegram bridge |
 | `./scripts/valor-service.sh status` | Check bridge status |
 | `./scripts/valor-service.sh restart` | Restart bridge, watchdog, and worker after code changes |
-| `./scripts/valor-service.sh worker-start` | Start standalone worker service |
+| `./scripts/valor-service.sh worker-start` | Start standalone worker service (also re-enables launchd auto-respawn) |
+| `./scripts/valor-service.sh worker-stop` | Transient stop — `bootout` only; launchd's `KeepAlive=true` may relaunch |
 | `./scripts/valor-service.sh worker-restart` | Restart standalone worker |
 | `./scripts/valor-service.sh worker-status` | Check worker service status |
+| `./scripts/valor-service.sh worker-disable` | Stop the worker **and** disable launchd auto-respawn (stays down until `worker-enable`/`worker-start`) |
+| `./scripts/valor-service.sh worker-enable` | Re-enable launchd auto-respawn (does NOT start the worker; pair with `worker-start`) |
 | `./scripts/valor-service.sh email-start` | Start the email bridge (IMAP polling) |
 | `./scripts/valor-service.sh email-stop` | Stop the email bridge |
 | `./scripts/valor-service.sh email-restart` | Restart the email bridge |

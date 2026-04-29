@@ -76,11 +76,13 @@ usage() {
     echo "  health      Check if bridge is healthy and responding"
     echo ""
     echo "Worker commands:"
-    echo "  worker-start    Start the standalone worker"
-    echo "  worker-stop     Stop the standalone worker"
+    echo "  worker-start    Start the standalone worker (also re-enables launchd)"
+    echo "  worker-stop     Stop the standalone worker (transient: launchd may respawn)"
     echo "  worker-restart  Restart the standalone worker"
     echo "  worker-status   Check worker status"
     echo "  worker-logs     Tail the worker logs"
+    echo "  worker-disable  Stop the worker AND disable launchd auto-respawn (stays down)"
+    echo "  worker-enable   Re-enable launchd auto-respawn (does NOT start the worker)"
     echo ""
     echo "Email bridge commands:"
     echo "  email-start     Start the email bridge (IMAP polling)"
@@ -684,6 +686,10 @@ start_worker() {
 
     mkdir -p "$LOG_DIR/worker"
 
+    # Always re-enable in case worker-disable was called previously (#1208).
+    # `launchctl enable` is idempotent — safe to call when already enabled.
+    launchctl enable "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
+
     if [ -f "$WORKER_PLIST_PATH" ]; then
         if ! is_worker_launchd_loaded; then
             launchctl load "$WORKER_PLIST_PATH"
@@ -740,6 +746,43 @@ stop_worker() {
     echo "Force killing worker..."
     kill -9 "$pid" 2>/dev/null || true
     echo "Worker stopped (forced)"
+}
+
+disable_worker() {
+    # Operator runbook for #1208: stop the worker and prevent launchd from
+    # respawning it. `bootout` alone does NOT stick because the LaunchAgent
+    # has KeepAlive=true; pairing it with `launchctl disable` makes the
+    # disabled state survive the respawn timer until `worker-enable` or
+    # `worker-start` re-enables it.
+    echo "Disabling worker (launchd will not respawn)..."
+    launchctl disable "gui/$(id -u)/$WORKER_PLIST_NAME"
+    launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
+    sleep 2
+
+    if is_worker_running; then
+        # bootout failed or the manual fallback path is running — fall back
+        # to PID kill so the operator's intent is honored.
+        local pid=$(get_worker_pid)
+        echo "Worker still running after bootout; killing PID $pid..."
+        kill "$pid" 2>/dev/null || true
+        for i in {1..10}; do
+            if ! is_worker_running; then break; fi
+            sleep 1
+        done
+        if is_worker_running; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    fi
+    echo "Worker stopped and launchd auto-respawn disabled. Run worker-start or worker-enable to re-enable."
+}
+
+enable_worker() {
+    # Operator runbook for #1208: re-enable launchd auto-respawn without
+    # starting the worker. Pairs with a follow-up `worker-start` if you want
+    # the worker actually running. Idempotent.
+    echo "Re-enabling launchd auto-respawn for worker..."
+    launchctl enable "gui/$(id -u)/$WORKER_PLIST_NAME"
+    echo "Worker launchd entry enabled. Run worker-start to actually start the worker."
 }
 
 restart_worker() {
@@ -971,6 +1014,12 @@ case "${1:-}" in
         ;;
     worker-logs)
         tail_worker_logs
+        ;;
+    worker-disable)
+        disable_worker
+        ;;
+    worker-enable)
+        enable_worker
         ;;
     email-start)
         start_email
