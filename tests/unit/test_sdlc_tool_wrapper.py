@@ -22,8 +22,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = REPO_ROOT / "scripts" / "sdlc-tool"
 
@@ -74,17 +72,13 @@ class TestWrapperShellSemantics:
         assert "stage-query" in result.stderr  # subcommand list visible
 
     def test_wrapper_unknown_subcommand_exits_2(self):
-        result = subprocess.run(
-            [str(WRAPPER), "make-coffee"], capture_output=True, text=True
-        )
+        result = subprocess.run([str(WRAPPER), "make-coffee"], capture_output=True, text=True)
         assert result.returncode == 2
         assert "unknown subcommand" in result.stderr
         assert "make-coffee" in result.stderr
 
     def test_wrapper_help_flag_exits_0(self):
-        result = subprocess.run(
-            [str(WRAPPER), "--help"], capture_output=True, text=True
-        )
+        result = subprocess.run([str(WRAPPER), "--help"], capture_output=True, text=True)
         assert result.returncode == 0
 
     def test_wrapper_missing_ai_repo_root_exits_2(self, tmp_path):
@@ -141,8 +135,7 @@ class TestWrapperDispatch:
             timeout=60,
         )
         assert result.returncode == 0, (
-            f"wrapper failed from foreign cwd: stderr={result.stderr!r} "
-            f"stdout={result.stdout!r}"
+            f"wrapper failed from foreign cwd: stderr={result.stderr!r} stdout={result.stdout!r}"
         )
         # stage-query always emits parseable JSON
         payload = json.loads(result.stdout.strip())
@@ -236,21 +229,14 @@ class TestVerdictAndDispatchLoudExit:
         assert "redis down" in result.stderr or "RuntimeError" in result.stderr
 
     def test_stage_marker_stays_silent_on_failure(self):
-        """Best-effort tools (stage-marker) keep exit 0 on failure."""
-        harness = (
-            "import sys; "
-            "from tools import sdlc_stage_marker; "
-            "def boom(*a, **kw): raise RuntimeError('boom'); "
-            "sdlc_stage_marker.main = boom; "
-            "try: sdlc_stage_marker.main()\n"
-            "except Exception: pass"
-        )
-        # Stage marker hasn't been changed — still meant to be silent.
-        # We only assert that the file does NOT contain a sys.exit(1)
-        # in its exception handler (which would imply somebody made
-        # it loud by accident).
+        """Best-effort tools (stage-marker) keep exit 0 on failure.
+
+        Stage marker hasn't been changed — still meant to be silent.
+        We assert the file does NOT contain a ``sys.exit(1)`` in its
+        exception handler, which would imply somebody made it loud
+        by accident.
+        """
         src = (REPO_ROOT / "tools" / "sdlc_stage_marker.py").read_text()
-        # Confirm the silent-on-failure semantic survives.
         assert "sys.exit(1)" not in src or "best-effort" in src.lower(), (
             "tools/sdlc_stage_marker.py looks loud — verify it's still best-effort."
         )
@@ -263,9 +249,7 @@ class TestSkillMarkdownParity:
         offenders: list[tuple[str, int, str]] = []
         pattern = re.compile(r"python\s+-m\s+tools\.sdlc_")
         for path in _iter_include_paths():
-            for lineno, line in enumerate(
-                path.read_text().splitlines(), start=1
-            ):
+            for lineno, line in enumerate(path.read_text().splitlines(), start=1):
                 if pattern.search(line):
                     offenders.append(
                         (path.relative_to(REPO_ROOT).as_posix(), lineno, line.rstrip())
@@ -283,17 +267,14 @@ class TestSkillMarkdownParity:
         load_bearing = re.compile(r"sdlc-tool\s+(verdict|dispatch)\b[^\n]*")
         silencing = re.compile(r"(2>/dev/null|\|\|\s*true)")
         for path in _iter_include_paths():
-            for lineno, line in enumerate(
-                path.read_text().splitlines(), start=1
-            ):
+            for lineno, line in enumerate(path.read_text().splitlines(), start=1):
                 if load_bearing.search(line) and silencing.search(line):
                     offenders.append(
                         (path.relative_to(REPO_ROOT).as_posix(), lineno, line.rstrip())
                     )
         assert not offenders, (
             "Verdict/dispatch invocations must NOT silence failures — drop "
-            "2>/dev/null and || true:\n"
-            + "\n".join(f"  {p}:{n}: {ln}" for p, n, ln in offenders)
+            "2>/dev/null and || true:\n" + "\n".join(f"  {p}:{n}: {ln}" for p, n, ln in offenders)
         )
 
     def test_pm_bash_allowlist_includes_sdlc_tool(self):

@@ -146,9 +146,7 @@ def sync_user_scripts(project_dir: Path) -> HardlinkSyncResult:
         rel_dst = str(dst).replace(str(Path.home()), "~")
 
         if not src.is_file():
-            result.actions.append(
-                LinkAction(rel_src, rel_dst, "error", f"Source missing: {src}")
-            )
+            result.actions.append(LinkAction(rel_src, rel_dst, "error", f"Source missing: {src}"))
             result.errors += 1
             continue
 

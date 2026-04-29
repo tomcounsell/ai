@@ -97,7 +97,7 @@ def test_sync_claude_dirs_includes_user_scripts(fake_project, fake_home):
     # are tolerated (sync_user_hooks early-returns), and the failure modes
     # for missing skills/commands dirs are also tolerated. The piece we care
     # about is that scripts/sdlc-tool gets hardlinked.
-    result = hardlinks.sync_claude_dirs(fake_project)
+    hardlinks.sync_claude_dirs(fake_project)
 
     dst = fake_home / ".local" / "bin" / "sdlc-tool"
     assert dst.exists()
