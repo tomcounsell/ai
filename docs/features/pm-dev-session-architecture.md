@@ -394,6 +394,26 @@ When a PM session invokes a Skill directly (e.g., `Skill(skill="do-build")`), th
 | `get_definition()` | `agent/agent_definitions.py` | Returns actionable error for stale callers requesting `"dev-session"` Agent tool dispatch |
 | `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, decides attach-vs-create: worker-spawned subprocesses attach the sidecar to the worker's existing AgentSession via `AGENT_SESSION_ID` / `VALOR_SESSION_ID` env vars (no new record, issue #1157); direct-CLI subprocesses fall through to `create_local()` gated by `SESSION_TYPE` / `VALOR_PARENT_SESSION_ID` |
 
+### PM/Dev Session Environment Variables
+
+`agent/sdk_client.py:_extract_sdlc_env_vars` (called from `_build_env`)
+injects a fixed set of env vars into every spawned `claude -p` subprocess.
+Bash invocations from inside the agent inherit these:
+
+| Env Var | Source | Consumers |
+|---------|--------|-----------|
+| `AGENT_SESSION_ID` | `AgentSession.id` | hooks, `valor-session steer/create --parent` |
+| `VALOR_SESSION_ID` | session linkage | `user_prompt_submit.py` attach-vs-create |
+| `SESSION_TYPE` | `AgentSession.session_type` | hooks (PM allowlist gating) |
+| `TELEGRAM_CHAT_ID` | `session.telegram_chat_id` | `tools/send_telegram.py`, `tools/send_message.py`, `tools/react_with_emoji.py`, `tools/valor_telegram.py:cmd_send` |
+| `TELEGRAM_REPLY_TO` | `session.telegram_message_id` (the user's triggering message) | `tools/send_telegram.py:80`, `tools/send_message.py:74`, `tools/react_with_emoji.py:53`, `tools/valor_telegram.py:cmd_send` (issue #1191) |
+| `VALOR_PARENT_SESSION_ID` | parent linkage | `user_prompt_submit.py` |
+
+`TELEGRAM_REPLY_TO` is consumed by every outbound Telegram path (Path A
+in `agent/output_handler.py:TelegramRelayOutputHandler.send` and the CLI
+path in `tools/valor_telegram.py:cmd_send`) so all outbound messages in
+a single agent turn thread off the same root in the Telegram UI.
+
 ### Outcome Classification
 
 After the worker's harness completes, `_handle_dev_session_completion()` passes the result text to `PipelineStateMachine.classify_outcome()`. Classification uses three tiers: Tier 0 parses structured `<!-- OUTCOME {...} -->` contracts emitted by skills, Tier 1 checks SDK stop_reason, and Tier 2 falls back to text pattern matching. The outcome determines whether the stage is marked completed or failed on the parent session:

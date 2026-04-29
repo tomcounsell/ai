@@ -152,9 +152,13 @@ class TestCmdSend:
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
-    def test_successful_queue_push(self, mock_redis_fn, mock_resolve, capsys):
+    def test_successful_queue_push(self, mock_redis_fn, mock_resolve, capsys, monkeypatch):
         """Successful send queues payload to Redis and prints confirmation."""
         from tools.valor_telegram import cmd_send
+
+        # Env-isolation hygiene: ensure CI/dev env doesn't leak TELEGRAM_REPLY_TO
+        # into this test (issue #1191 added env-var fallback in cmd_send).
+        monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
 
         mock_redis = MagicMock()
         mock_redis_fn.return_value = mock_redis
@@ -238,9 +242,13 @@ class TestCmdSend:
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
-    def test_reply_to_included_in_payload(self, mock_redis_fn, mock_resolve):
+    def test_reply_to_included_in_payload(self, mock_redis_fn, mock_resolve, monkeypatch):
         """reply_to is included in payload when --reply-to is provided."""
         from tools.valor_telegram import cmd_send
+
+        # Env-isolation hygiene: ensure CI/dev env doesn't leak TELEGRAM_REPLY_TO
+        # into this test (issue #1191 added env-var fallback in cmd_send).
+        monkeypatch.delenv("TELEGRAM_REPLY_TO", raising=False)
 
         mock_redis = MagicMock()
         mock_redis_fn.return_value = mock_redis
@@ -251,6 +259,81 @@ class TestCmdSend:
         assert result == 0
         payload = json.loads(mock_redis.rpush.call_args[0][1])
         assert payload["reply_to"] == 999
+
+    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
+    @patch("tools.valor_telegram._get_redis_connection")
+    def test_env_var_used_as_default_reply_to(self, mock_redis_fn, mock_resolve, monkeypatch):
+        """When invoked from inside an AgentSession, cmd_send defaults reply_to
+        to the TELEGRAM_REPLY_TO env var (set by agent/sdk_client.py from
+        session.telegram_message_id). Issue #1191."""
+        from tools.valor_telegram import cmd_send
+
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "12345")
+
+        mock_redis = MagicMock()
+        mock_redis_fn.return_value = mock_redis
+
+        args = self._make_args(chat="-100123456", message="hello")
+        result = cmd_send(args)
+
+        assert result == 0
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["reply_to"] == 12345
+
+    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
+    @patch("tools.valor_telegram._get_redis_connection")
+    def test_explicit_reply_to_overrides_env_var(self, mock_redis_fn, mock_resolve, monkeypatch):
+        """Explicit --reply-to wins over TELEGRAM_REPLY_TO env var (issue #1191)."""
+        from tools.valor_telegram import cmd_send
+
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "12345")
+
+        mock_redis = MagicMock()
+        mock_redis_fn.return_value = mock_redis
+
+        args = self._make_args(chat="-100123456", message="hello", reply_to=999)
+        result = cmd_send(args)
+
+        assert result == 0
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["reply_to"] == 999
+
+    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
+    @patch("tools.valor_telegram._get_redis_connection")
+    def test_invalid_env_var_falls_back_to_none(self, mock_redis_fn, mock_resolve, monkeypatch):
+        """Invalid TELEGRAM_REPLY_TO (non-numeric) silently falls back to None
+        rather than crashing (issue #1191)."""
+        from tools.valor_telegram import cmd_send
+
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "not-a-number")
+
+        mock_redis = MagicMock()
+        mock_redis_fn.return_value = mock_redis
+
+        args = self._make_args(chat="-100123456", message="hello")
+        result = cmd_send(args)
+
+        assert result == 0
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["reply_to"] is None
+
+    @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
+    @patch("tools.valor_telegram._get_redis_connection")
+    def test_empty_env_var_falls_back_to_none(self, mock_redis_fn, mock_resolve, monkeypatch):
+        """Empty TELEGRAM_REPLY_TO ('') is treated as not set (issue #1191)."""
+        from tools.valor_telegram import cmd_send
+
+        monkeypatch.setenv("TELEGRAM_REPLY_TO", "")
+
+        mock_redis = MagicMock()
+        mock_redis_fn.return_value = mock_redis
+
+        args = self._make_args(chat="-100123456", message="hello")
+        result = cmd_send(args)
+
+        assert result == 0
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["reply_to"] is None
 
     @patch("tools.valor_telegram.resolve_chat", return_value="-100123456")
     @patch("tools.valor_telegram._get_redis_connection")
