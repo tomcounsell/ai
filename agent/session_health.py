@@ -713,7 +713,10 @@ async def _agent_session_health_check() -> None:
                 # of recovering to pending (prevents duplicate delivery, #918)
                 if getattr(entry, "response_delivered_at", None) is not None:
                     try:
-                        from models.session_lifecycle import finalize_session
+                        from models.session_lifecycle import (
+                            StatusConflictError,
+                            finalize_session,
+                        )
 
                         logger.info(
                             "[session-health] Session %s already delivered response at %s, "
@@ -727,6 +730,15 @@ async def _agent_session_health_check() -> None:
                             reason="health check: already delivered",
                         )
                         recovered += 1
+                    except StatusConflictError as e:
+                        # Session already terminal (likely killed) — kill-is-terminal
+                        # invariant. Skip silently at INFO; expected outcome (#1208).
+                        logger.info(
+                            "[session-health] Skipping finalize for already-delivered "
+                            "session %s: %s",
+                            entry.agent_session_id,
+                            e,
+                        )
                     except Exception as e:
                         logger.error(
                             "[session-health] Failed to finalize already-delivered session %s: %s",
@@ -961,8 +973,15 @@ async def _agent_session_health_check() -> None:
                         if event is not None:
                             event.set()
                 except StatusConflictError as _sc_err:
-                    logger.warning(
-                        "[session-health] StatusConflictError during recovery of %s: %s",
+                    # Expected outcome of the kill-is-terminal guard (#1208):
+                    # the session was already terminal (commonly killed) when
+                    # recovery tried to mark it abandoned/failed. Log at INFO
+                    # so we can distinguish this from genuine concurrency
+                    # anomalies (which would still log at WARNING/ERROR via
+                    # other paths). No further action — the session is in a
+                    # terminal state by definition.
+                    logger.info(
+                        "[session-health] Skipping recovery finalize for %s: %s",
                         entry.agent_session_id,
                         _sc_err,
                     )
@@ -1006,14 +1025,29 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                         pending_seconds,
                     )
-                    from models.session_lifecycle import finalize_session
-
-                    finalize_session(
-                        entry,
-                        "abandoned",
-                        reason=f"health check: orphaned local pending session (chat={worker_key})",
-                        skip_auto_tag=True,
+                    from models.session_lifecycle import (
+                        StatusConflictError,
+                        finalize_session,
                     )
+
+                    try:
+                        finalize_session(
+                            entry,
+                            "abandoned",
+                            reason=(
+                                f"health check: orphaned local pending session (chat={worker_key})"
+                            ),
+                            skip_auto_tag=True,
+                        )
+                    except StatusConflictError as _sc_err:
+                        # Session is already terminal (kill-is-terminal #1208).
+                        # Skip silently at INFO; nothing more to do.
+                        logger.info(
+                            "[session-health] Skipping abandon for orphaned local "
+                            "pending session %s: %s",
+                            entry.agent_session_id,
+                            _sc_err,
+                        )
                 else:
                     logger.info(
                         "[session-health] Starting worker for orphaned pending "

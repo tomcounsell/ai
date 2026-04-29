@@ -1661,13 +1661,29 @@ async def main():
                     elif intent == "acknowledgment":
                         # Only acknowledge dormant sessions with expectations
                         if target_session.status == "dormant" and target_session.expectations:
-                            from models.session_lifecycle import finalize_session
-
-                            finalize_session(
-                                target_session,
-                                "completed",
-                                reason=f"Acknowledged by {sender_name}: {clean_text[:80]}",
+                            from models.session_lifecycle import (
+                                StatusConflictError,
+                                finalize_session,
                             )
+
+                            try:
+                                finalize_session(
+                                    target_session,
+                                    "completed",
+                                    reason=(f"Acknowledged by {sender_name}: {clean_text[:80]}"),
+                                )
+                            except StatusConflictError as conflict:
+                                # TOCTOU: session was killed between the dormant
+                                # check above and the finalize call (kill-is-terminal
+                                # #1208). The kill is authoritative; we don't
+                                # acknowledge a killed session as "completed".
+                                logger.info(
+                                    f"[{project_name}] Intake classifier: "
+                                    f"skipping acknowledgment for "
+                                    f"{target_session.session_id}: {conflict}"
+                                )
+                                await record_telegram_message_handled(event.chat_id, message.id)
+                                return
                             await set_reaction(
                                 client,
                                 event.chat_id,

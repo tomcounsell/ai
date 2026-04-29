@@ -641,6 +641,9 @@ def cancel_agent_session(agent_session_id: str) -> bool:
 
     from models.session_lifecycle import finalize_session
 
+    # Pre-condition above guarantees session.status == "pending" (non-terminal),
+    # so the kill-is-terminal guard in finalize_session() cannot fire here. No
+    # try/except needed.
     finalize_session(session, "cancelled", reason=f"PM cancelled session {agent_session_id}")
     logger.info(f"[pm-controls] Cancelled session {agent_session_id}")
     return True

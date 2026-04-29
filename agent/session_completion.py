@@ -749,11 +749,29 @@ async def _deliver_pipeline_completion(
             # outcome so the PM session reaches a terminal state. Previously
             # this lived inside the main try-block and silently got skipped
             # when an earlier exception escaped.
+            #
+            # StatusConflictError handling (#1208): The kill-is-terminal guard
+            # in finalize_session() rejects terminal->different-terminal flips
+            # by default. If the parent was killed mid-pipeline (operator kill
+            # racing the runner) the runner-entry guard at the top of this
+            # function should already have bailed; if we reach here and STILL
+            # see a conflict, log at INFO — this is the expected "guard fired"
+            # outcome, not an alarm. Genuine concurrency anomalies fall through
+            # to the generic Exception branch and log at ERROR.
             try:
-                from models.session_lifecycle import finalize_session  # noqa: PLC0415
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
 
                 finalize_session(
                     parent, "completed", reason="pipeline complete: final summary delivered"
+                )
+            except StatusConflictError as finalize_conflict:
+                logger.info(
+                    "[completion-runner] Skipping finalize for %s: %s",
+                    parent_id,
+                    finalize_conflict,
                 )
             except Exception as finalize_err:
                 logger.error(

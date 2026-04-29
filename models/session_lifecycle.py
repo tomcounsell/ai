@@ -700,6 +700,14 @@ def _transition_parent(parent, new_status: str) -> None:
     Uses finalize_session() for terminal statuses and transition_status()
     for non-terminal statuses, ensuring consistent lifecycle handling.
 
+    Catches StatusConflictError at INFO level: post-#1208 the kill-is-terminal
+    guard in finalize_session() rejects terminal->different-terminal flips by
+    default. When a parent has been killed by an operator while children were
+    still progressing, the natural "all children terminal -> finalize parent
+    as completed" path tries to overwrite the kill — that is exactly the race
+    the guard exists to defend against, and skipping the transition silently
+    is the correct response.
+
     Args:
         parent: AgentSession instance of the parent.
         new_status: The new status to set.
@@ -707,12 +715,16 @@ def _transition_parent(parent, new_status: str) -> None:
     if new_status in TERMINAL_STATUSES:
         # Use finalize_session for terminal transitions, but skip parent
         # finalization to avoid infinite recursion (this IS the parent finalization)
-        finalize_session(
-            parent,
-            new_status,
-            reason="all children terminal",
-            skip_parent=True,
-        )
+        try:
+            finalize_session(
+                parent,
+                new_status,
+                reason="all children terminal",
+                skip_parent=True,
+            )
+        except StatusConflictError as e:
+            logger.info("[session-hierarchy] Skipping parent transition: %s", e)
+            return
     else:
         transition_status(parent, new_status, reason="child session state change")
 
