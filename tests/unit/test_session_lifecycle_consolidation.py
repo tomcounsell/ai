@@ -136,11 +136,24 @@ class TestFinalizeSessionIdempotency:
         mock_session.save.assert_not_called()
         mock_session.log_lifecycle_transition.assert_not_called()
 
-    def test_different_terminal_state_proceeds(self, mock_session):
-        """If session is in a different terminal state, finalize proceeds."""
+    def test_different_terminal_state_blocked_by_default(self, mock_session):
+        """Different terminal state raises StatusConflictError (kill-is-terminal, #1208)."""
         mock_session.status = "failed"
         with patch("agent.agent_session_queue.checkpoint_branch_state"):
-            finalize_session(mock_session, "completed", "override")
+            with pytest.raises(StatusConflictError) as exc_info:
+                finalize_session(mock_session, "completed", "override")
+
+        # Status must not have been overwritten.
+        assert mock_session.status == "failed"
+        mock_session.save.assert_not_called()
+        # Error message guides the operator toward the opt-out.
+        assert "reject_from_terminal=False" in str(exc_info.value)
+
+    def test_different_terminal_state_proceeds_with_opt_out(self, mock_session):
+        """Explicit reject_from_terminal=False allows terminal->terminal escalation."""
+        mock_session.status = "failed"
+        with patch("agent.agent_session_queue.checkpoint_branch_state"):
+            finalize_session(mock_session, "completed", "override", reject_from_terminal=False)
 
         assert mock_session.status == "completed"
         mock_session.save.assert_called_once()

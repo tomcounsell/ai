@@ -222,6 +222,7 @@ def finalize_session(
     skip_auto_tag: bool = False,
     skip_checkpoint: bool = False,
     skip_parent: bool = False,
+    reject_from_terminal: bool = True,
 ) -> None:
     """Finalize a session with a terminal status.
 
@@ -235,6 +236,15 @@ def finalize_session(
 
     Idempotent: if the session is already in the target terminal state,
     logs and returns without re-executing side effects.
+
+    Terminal-state guard (kill-is-terminal invariant): When the session is
+    already in a terminal state and the caller wants to transition it to a
+    *different* terminal state (e.g., killed -> completed), raises
+    StatusConflictError by default. This mirrors the symmetric guard on
+    transition_status() and enforces the rule that "once terminal, always
+    terminal -- unless the caller has explicitly documented why they need to
+    re-classify." Callers with a legitimate re-classification need (rare)
+    must pass reject_from_terminal=False.
 
     CAS behavior: Re-reads the session from Redis and compares the on-disk
     status against the caller's in-memory status. If they differ, raises
@@ -253,10 +263,16 @@ def finalize_session(
         skip_auto_tag: Skip auto-tagging (e.g., hooks subprocess context).
         skip_checkpoint: Skip branch checkpointing (e.g., hooks subprocess context).
         skip_parent: Skip parent finalization.
+        reject_from_terminal: If True (default), raise StatusConflictError when the
+            session is already terminal and the caller is trying to transition it to
+            a different terminal status. Pass False for intentional terminal->terminal
+            re-classification (e.g., escalating abandoned->failed on timeout).
 
     Raises:
         ValueError: If session is None or status is not terminal.
-        StatusConflictError: If CAS detects a concurrent status change.
+        StatusConflictError: If CAS detects a concurrent status change, or if
+            reject_from_terminal is True and the session is already in a
+            different terminal state.
     """
     if session is None:
         raise ValueError("session must not be None")
@@ -276,6 +292,20 @@ def finalize_session(
             f"already in terminal state {status!r}, skipping finalize"
         )
         return
+
+    # Terminal-state guard: refuse to re-classify a terminal session unless explicitly opted out.
+    # Mirrors transition_status(reject_from_terminal=True). See docs/features/session-lifecycle.md
+    # ("kill-is-terminal invariant") and issue #1208 for rationale.
+    if reject_from_terminal and current_status in TERMINAL_STATUSES:
+        raise StatusConflictError(
+            session_id=getattr(session, "session_id", "?") or "?",
+            expected_status=current_status,
+            actual_status=status,
+            reason=(
+                f"finalize_session({status!r}) blocked: session already terminal "
+                f"({current_status!r}). Pass reject_from_terminal=False if intentional."
+            ),
+        )
 
     # CAS: re-read from Redis and compare on-disk status against caller's snapshot.
     # The re-read is ONLY for the status comparison -- the caller's object is used
