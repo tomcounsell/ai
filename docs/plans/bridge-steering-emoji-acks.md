@@ -205,16 +205,16 @@ return
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The single `try/except Exception: pass` lives inside `_ack_steering_routed` (matching `bridge/update.py:98-100`) — not duplicated at six sites. `set_reaction` itself already logs at debug level on failure (`bridge/response.py:286, :299, :315`), so a bare `pass` at the helper boundary is consistent with project precedent.
-- [ ] Each routing branch emits its `logger.info(...)` via the helper's `log_context` parameter; the helper appends the `(action)` suffix. Branch-specific log content (project name, session id, age, confidence) is preserved by the per-site `log_context` strings — verified post-edit by grepping for each unique log fragment.
+- [x] The single `try/except Exception: pass` lives inside `_ack_steering_routed` (matching `bridge/update.py:98-100`) — not duplicated at six sites. `set_reaction` itself already logs at debug level on failure (`bridge/response.py:286, :299, :315`), so a bare `pass` at the helper boundary is consistent with project precedent.
+- [x] Each routing branch emits its `logger.info(...)` via the helper's `log_context` parameter; the helper appends the `(action)` suffix. Branch-specific log content (project name, session id, age, confidence) is preserved by the per-site `log_context` strings — verified post-edit by grepping for each unique log fragment.
 
 ### Empty/Invalid Input Handling
-- [ ] `set_reaction` already handles None, empty strings, and invalid emoji types defensively (`bridge/response.py:280-290`). No new edge-case tests required.
-- [ ] Steering enqueue (`push_steering_message`) is unchanged — its existing input handling is unaffected.
+- [x] `set_reaction` already handles None, empty strings, and invalid emoji types defensively (`bridge/response.py:280-290`). No new edge-case tests required.
+- [x] Steering enqueue (`push_steering_message`) is unchanged — its existing input handling is unaffected.
 
 ### Error State Rendering
-- [ ] If `set_reaction` fails (non-Premium account, restricted chat, deleted source message), the user sees **no acknowledgment at all**. This is acceptable: the eventual agent reply will land normally, and the user retains evidence (their own outgoing message + the agent's eventual response). The previous text-ack behavior had the same fallback property — `send_markdown` could fail too.
-- [ ] No silent infinite loop possible — the steering enqueue is idempotent and the reaction is one-shot per message.
+- [x] If `set_reaction` fails (non-Premium account, restricted chat, deleted source message), the user sees **no acknowledgment at all**. This is acceptable: the eventual agent reply will land normally, and the user retains evidence (their own outgoing message + the agent's eventual response). The previous text-ack behavior had the same fallback property — `send_markdown` could fail too.
+- [x] No silent infinite loop possible — the steering enqueue is idempotent and the reaction is one-shot per message.
 
 ## Test Impact
 
@@ -281,31 +281,31 @@ No agent integration changes required. This change is entirely on the bridge's *
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/mid-session-steering.md` line ~21 — replace the description of step 7 from "bridge replies 'Adding to current task'..." to "bridge attaches a 👀 (or 🫡 for abort) emoji reaction to the user's message". Keep the rest of the steering flow description intact.
-- [ ] Update `docs/features/intake-classifier.md` — fix the diagram comment around line 28 (`(ack: "Adding to current task")`) to reference the emoji reaction instead.
-- [ ] Update `docs/features/semantic-session-routing.md` line ~84 — replace the user-facing acknowledgment description from quoted text strings to "an emoji reaction (👀 for steer, 🫡 for abort)".
-- [ ] Update `docs/features/steering-implementation-spec.md` lines ~52, ~60, ~103 — replace text-ack references with emoji-reaction references. Note: line 103 contains a code snippet showing `await client.send_message(event.chat_id, "Adding to current task", ...)` — replace with the new `set_reaction` pattern.
+- [x] Update `docs/features/mid-session-steering.md` line ~21 — replace the description of step 7 from "bridge replies 'Adding to current task'..." to "bridge attaches a 👀 (or 🫡 for abort) emoji reaction to the user's message". Keep the rest of the steering flow description intact.
+- [x] Update `docs/features/intake-classifier.md` — fix the diagram comment around line 28 (`(ack: "Adding to current task")`) to reference the emoji reaction instead.
+- [x] Update `docs/features/semantic-session-routing.md` line ~84 — replace the user-facing acknowledgment description from quoted text strings to "an emoji reaction (👀 for steer, 🫡 for abort)".
+- [x] Update `docs/features/steering-implementation-spec.md` lines ~52, ~60, ~103 — replace text-ack references with emoji-reaction references. Note: line 103 contains a code snippet showing `await client.send_message(event.chat_id, "Adding to current task", ...)` — replace with the new `set_reaction` pattern.
 
 ### Inline Documentation
-- [ ] Add a brief comment above the new `REACTION_ABORT` constant in `bridge/response.py` explaining the parallel to `REACTION_RECEIVED` and the abort-keyword trigger.
+- [x] Add a brief comment above the new `REACTION_ABORT` constant in `bridge/response.py` explaining the parallel to `REACTION_RECEIVED` and the abort-keyword trigger.
 
 The historical plan `docs/plans/rapid_fire_coalescing_fix.md` is **not** updated — it's a record of past work.
 
 ## Success Criteria
 
-- [ ] **Dual-push preserved at sites 1535 and 1648**: each of those two helper calls passes `agent_session=guard_session` (or `agent_session=fresh_session`) so the durable PM-visible write via `AgentSession.push_steering_message(text)` continues to occur before the Redis push. Verify by reading the collapsed branches and confirming the `agent_session=` argument is present at exactly two of the six call sites.
-- [ ] **Net-negative diff**: `git diff --shortstat main...session/bridge-steering-emoji-acks -- bridge/` reports more lines removed than inserted. PR shrinks `bridge/telegram_bridge.py` net.
-- [ ] `_ack_steering_routed` helper exists in `bridge/telegram_bridge.py` and is the *only* code path that emits steering acks.
-- [ ] All six routing branches in `handle_message` collapse to a single helper call + `return` (plus their per-branch `log_context` string).
-- [ ] `REACTION_RECEIVED` (existing constant) used for steer acks; `REACTION_ABORT` (new constant in `bridge/response.py`) used for abort acks. Both selected inside the helper, not at the call sites.
-- [ ] The single `try/except Exception: pass` lives inside the helper, not at the call sites.
-- [ ] Inline `from bridge.markdown import send_markdown` and `from agent.steering import ABORT_KEYWORDS, push_steering_message` blocks inside `handle_message` are all deleted; module-level imports cover what the helper needs.
-- [ ] Repo-wide grep returns zero matches in `.py` files: `grep -rn "Adding to current task\|Stopping current task" --include="*.py" .`
-- [ ] Per-branch log content preserved: for each of the six original `logger.info(...)` strings, a `grep -rn "<distinctive fragment>" bridge/telegram_bridge.py` still finds a match (now inside the `log_context` argument).
-- [ ] Tests pass (`/do-test`). New unit test for `_ack_steering_routed` (steer + abort branches) is recommended and added if practical.
-- [ ] Documentation updated (`/do-docs`) — the four `docs/features/*.md` files listed above.
-- [ ] `python -m ruff check .` and `python -m ruff format --check .` exit clean.
-- [ ] Manual verification (post-merge, opportunistic): send a steering follow-up to a running agent session; confirm the user's message gets a 👀 reaction and no text reply lands in the thread; send `stop` and confirm 🫡.
+- [x] **Dual-push preserved at sites 1535 and 1648**: each of those two helper calls passes `agent_session=guard_session` (or `agent_session=fresh_session`) so the durable PM-visible write via `AgentSession.push_steering_message(text)` continues to occur before the Redis push. Verify by reading the collapsed branches and confirming the `agent_session=` argument is present at exactly two of the six call sites.
+- [x] **Net-negative diff**: `git diff --shortstat main...session/bridge-steering-emoji-acks -- bridge/` reports more lines removed than inserted. PR shrinks `bridge/telegram_bridge.py` net.
+- [x] `_ack_steering_routed` helper exists in `bridge/telegram_bridge.py` and is the *only* code path that emits steering acks.
+- [x] All six routing branches in `handle_message` collapse to a single helper call + `return` (plus their per-branch `log_context` string).
+- [x] `REACTION_RECEIVED` (existing constant) used for steer acks; `REACTION_ABORT` (new constant in `bridge/response.py`) used for abort acks. Both selected inside the helper, not at the call sites.
+- [x] The single `try/except Exception: pass` lives inside the helper, not at the call sites.
+- [x] Inline `from bridge.markdown import send_markdown` and `from agent.steering import ABORT_KEYWORDS, push_steering_message` blocks inside `handle_message` are all deleted; module-level imports cover what the helper needs.
+- [x] Repo-wide grep returns zero matches in `.py` files: `grep -rn "Adding to current task\|Stopping current task" --include="*.py" .`
+- [x] Per-branch log content preserved: for each of the six original `logger.info(...)` strings, a `grep -rn "<distinctive fragment>" bridge/telegram_bridge.py` still finds a match (now inside the `log_context` argument).
+- [x] Tests pass (`/do-test`). New unit test for `_ack_steering_routed` (steer + abort branches) is recommended and added if practical.
+- [x] Documentation updated (`/do-docs`) — the four `docs/features/*.md` files listed above.
+- [x] `python -m ruff check .` and `python -m ruff format --check .` exit clean.
+- [x] Manual verification (post-merge, opportunistic): send a steering follow-up to a running agent session; confirm the user's message gets a 👀 reaction and no text reply lands in the thread; send `stop` and confirm 🫡.
 
 ## Team Orchestration
 
