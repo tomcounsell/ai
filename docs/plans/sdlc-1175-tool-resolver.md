@@ -175,33 +175,33 @@ Local /sdlc invocation in target repo cwd → skill markdown calls `sdlc-tool ve
 
 ### Exception Handling Coverage
 
-- [ ] No new `except Exception: pass` blocks introduced. The wrapper uses `set -euo pipefail`; any unhandled error becomes a non-zero exit with the underlying message on stderr.
-- [ ] `tools/sdlc_verdict.py` and `tools/sdlc_dispatch.py` `main()` are updated: the existing try/except still catches internal exceptions and prints `{}` to stdout, but on caught exception they additionally log to stderr and `sys.exit(1)` (was `sys.exit(0)`). Tested via subprocess assertion.
-- [ ] `tools/sdlc_stage_marker.py`, `tools/sdlc_stage_query.py`, `tools/sdlc_session_ensure.py` keep `sys.exit(0)` unconditionally. Best-effort semantics preserved.
-- [ ] Skill markdown for verdict-record and dispatch-record sites: confirm by code review (and the parity sweep) that no `|| true` snuck back in.
+- [x] No new `except Exception: pass` blocks introduced. The wrapper uses `set -euo pipefail`; any unhandled error becomes a non-zero exit with the underlying message on stderr.
+- [x] `tools/sdlc_verdict.py` and `tools/sdlc_dispatch.py` `main()` are updated: the existing try/except still catches internal exceptions and prints `{}` to stdout, but on caught exception they additionally log to stderr and `sys.exit(1)` (was `sys.exit(0)`). Tested via subprocess assertion.
+- [x] `tools/sdlc_stage_marker.py`, `tools/sdlc_stage_query.py`, `tools/sdlc_session_ensure.py` keep `sys.exit(0)` unconditionally. Best-effort semantics preserved.
+- [x] Skill markdown for verdict-record and dispatch-record sites: confirm by code review (and the parity sweep) that no `|| true` snuck back in.
 
 ### Empty/Invalid Input Handling
 
-- [ ] Wrapper invoked with no subcommand: exits 2 with usage message.
-- [ ] Wrapper invoked with unknown subcommand: exits 2 listing valid subcommands.
-- [ ] Wrapper invoked with `AI_REPO_ROOT` set to a non-existent path: exits 2 naming the resolved path.
-- [ ] Wrapper invoked with `AI_REPO_ROOT` set to a path that exists but lacks `tools/`: exits 2 with a clear message ("does not contain a tools/ directory").
+- [x] Wrapper invoked with no subcommand: exits 2 with usage message.
+- [x] Wrapper invoked with unknown subcommand: exits 2 listing valid subcommands.
+- [x] Wrapper invoked with `AI_REPO_ROOT` set to a non-existent path: exits 2 naming the resolved path.
+- [x] Wrapper invoked with `AI_REPO_ROOT` set to a path that exists but lacks `tools/`: exits 2 with a clear message ("does not contain a tools/ directory").
 
 ### Error State Rendering
 
-- [ ] When `sdlc-tool verdict record` fails (e.g., Redis unreachable), the failure must reach the operator's session log. Confirmed by removing `2>/dev/null || true` from the skill-markdown sites and asserting via the parity test.
-- [ ] When `sdlc-tool stage-query` returns `unavailable`, the existing fallback path in `.claude/skills/sdlc/SKILL.md` continues to drive dispatch from history. Confirmed by an integration test that simulates an unreachable Redis.
+- [x] When `sdlc-tool verdict record` fails (e.g., Redis unreachable), the failure must reach the operator's session log. Confirmed by removing `2>/dev/null || true` from the skill-markdown sites and asserting via the parity test.
+- [x] When `sdlc-tool stage-query` returns `unavailable`, the existing fallback path in `.claude/skills/sdlc/SKILL.md` continues to drive dispatch from history. Confirmed by an integration test that simulates an unreachable Redis.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE: add a sweep that asserts every `python -m tools.sdlc_*` reference in the include set (skills/**, post_compact.py, project-manager.md) has been replaced with `sdlc-tool ...`. The exclude set (`scripts/sdlc-tool`, `tools/**`, `tests/**`, `docs/plans/**`, `docs/features/**`, `CLAUDE.md`) is hard-coded and must NOT be scanned. Existing parity assertions (SDLC.md ↔ Python router) stay.
-- [ ] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: existing tests at lines 152, 162, 177 invoke `[sys.executable, "-m", "tools.sdlc_stage_marker"]` directly — those continue to work and remain (we are not removing the underlying Python module, only how skills invoke it). Add one new test that exercises the wrapper end-to-end via subprocess from a tmp cwd containing a fake `tools/`.
-- [ ] `tests/unit/test_sdlc_verdict.py` — UPDATE: add (a) wrapper-mediated invocation tests parallel to the existing module-direct tests, and (b) an exit-code test: simulate `_record_verdict` raising and assert `python -m tools.sdlc_verdict record ...` exits 1 (was 0). Same for `tests/unit/test_sdlc_dispatch.py` (or add equivalent file if missing — verify at build time).
-- [ ] `tests/unit/test_pm_session_permissions.py:454` — UPDATE: the literal `"python -m tools.sdlc_stage_query"` matcher in `_make_bash_input(...)` should be augmented (or replaced) with the `sdlc-tool stage-query` form so PM session permission rules accept the new wrapper.
-- [ ] `tests/unit/test_architectural_constraints.py` — UPDATE/EXTEND: add an assertion that the wrapper does not introduce new Python imports between `tools/` and `agent/`. The existing cycle guards stay.
-- [ ] `tests/unit/test_update_hardlinks.py` — CREATE: file does not currently exist. New unit test verifying `scripts/update/hardlinks.py` correctly hardlinks `scripts/sdlc-tool` into `~/.local/bin/sdlc-tool` and that the stale-cleanup logic preserves valid links. Mock the filesystem; do not touch the real `~/.local/bin/`.
-- [ ] `tests/unit/test_pipeline_state_machine.py` — NO CHANGE. The classify_outcome → record_verdict in-process path is unchanged (the wrapper only matters for shell-out, not in-process).
-- [ ] No DELETE dispositions. No REPLACE dispositions. One CREATE (`test_update_hardlinks.py`); the rest are additive UPDATE coverage.
+- [x] `tests/unit/test_sdlc_skill_md_parity.py` — UPDATE: add a sweep that asserts every `python -m tools.sdlc_*` reference in the include set (skills/**, post_compact.py, project-manager.md) has been replaced with `sdlc-tool ...`. The exclude set (`scripts/sdlc-tool`, `tools/**`, `tests/**`, `docs/plans/**`, `docs/features/**`, `CLAUDE.md`) is hard-coded and must NOT be scanned. Existing parity assertions (SDLC.md ↔ Python router) stay.
+- [x] `tests/unit/test_sdlc_stage_marker.py` — UPDATE: existing tests at lines 152, 162, 177 invoke `[sys.executable, "-m", "tools.sdlc_stage_marker"]` directly — those continue to work and remain (we are not removing the underlying Python module, only how skills invoke it). Add one new test that exercises the wrapper end-to-end via subprocess from a tmp cwd containing a fake `tools/`.
+- [x] `tests/unit/test_sdlc_verdict.py` — UPDATE: add (a) wrapper-mediated invocation tests parallel to the existing module-direct tests, and (b) an exit-code test: simulate `_record_verdict` raising and assert `python -m tools.sdlc_verdict record ...` exits 1 (was 0). Same for `tests/unit/test_sdlc_dispatch.py` (or add equivalent file if missing — verify at build time).
+- [x] `tests/unit/test_pm_session_permissions.py:454` — UPDATE: the literal `"python -m tools.sdlc_stage_query"` matcher in `_make_bash_input(...)` should be augmented (or replaced) with the `sdlc-tool stage-query` form so PM session permission rules accept the new wrapper.
+- [x] `tests/unit/test_architectural_constraints.py` — UPDATE/EXTEND: add an assertion that the wrapper does not introduce new Python imports between `tools/` and `agent/`. The existing cycle guards stay.
+- [x] `tests/unit/test_update_hardlinks.py` — CREATE: file does not currently exist. New unit test verifying `scripts/update/hardlinks.py` correctly hardlinks `scripts/sdlc-tool` into `~/.local/bin/sdlc-tool` and that the stale-cleanup logic preserves valid links. Mock the filesystem; do not touch the real `~/.local/bin/`.
+- [x] `tests/unit/test_pipeline_state_machine.py` — NO CHANGE. The classify_outcome → record_verdict in-process path is unchanged (the wrapper only matters for shell-out, not in-process).
+- [x] No DELETE dispositions. No REPLACE dispositions. One CREATE (`test_update_hardlinks.py`); the rest are additive UPDATE coverage.
 
 ## Rabbit Holes
 
@@ -276,8 +276,8 @@ Existing installations get the wrapper on the next `/update` run. No manual migr
 
 ### Feature Documentation
 
-- [ ] Create `docs/features/sdlc-tool-resolver.md` describing: why the wrapper exists (cwd-shadowing failure mode), how `AI_REPO_ROOT` is resolved, the loud-vs-silent exit policy per subcommand, and how to add a new subcommand.
-- [ ] Add an entry to `docs/features/README.md` under the SDLC section, cross-linking to `sdlc-tool-resolver.md` and to the existing `sdlc-router-oscillation-guard.md`.
+- [x] Create `docs/features/sdlc-tool-resolver.md` describing: why the wrapper exists (cwd-shadowing failure mode), how `AI_REPO_ROOT` is resolved, the loud-vs-silent exit policy per subcommand, and how to add a new subcommand.
+- [x] Add an entry to `docs/features/README.md` under the SDLC section, cross-linking to `sdlc-tool-resolver.md` and to the existing `sdlc-router-oscillation-guard.md`.
 
 ### External Documentation Site
 
@@ -285,23 +285,23 @@ Existing installations get the wrapper on the next `/update` run. No manual migr
 
 ### Inline Documentation
 
-- [ ] `scripts/sdlc-tool` opens with a 5-line header: purpose, why bash, where AI_REPO_ROOT comes from, where to add a new subcommand. Per repo policy on minimal comments — only enough WHY context for the next reader.
-- [ ] Update `CLAUDE.md` "Quick Commands" table to list `sdlc-tool` as the canonical entry point for SDLC tooling, with one example each for stage-query and verdict.
-- [ ] Update `.claude/skills/sdlc/SKILL.md` "Cross-Repo Resolution" section to document the third resolution mechanism (`AI_REPO_ROOT` for tool dispatch, alongside `SDLC_TARGET_REPO` and `GH_REPO`).
+- [x] `scripts/sdlc-tool` opens with a 5-line header: purpose, why bash, where AI_REPO_ROOT comes from, where to add a new subcommand. Per repo policy on minimal comments — only enough WHY context for the next reader.
+- [x] Update `CLAUDE.md` "Quick Commands" table to list `sdlc-tool` as the canonical entry point for SDLC tooling, with one example each for stage-query and verdict.
+- [x] Update `.claude/skills/sdlc/SKILL.md` "Cross-Repo Resolution" section to document the third resolution mechanism (`AI_REPO_ROOT` for tool dispatch, alongside `SDLC_TARGET_REPO` and `GH_REPO`).
 
 ## Success Criteria
 
-- [ ] Running `/sdlc {issue}` from a target-repo cwd (e.g. `~/src/cuttlefish`) successfully records a critique verdict that `sdlc-tool stage-query` reads back. (From issue acceptance.)
-- [ ] After `/do-plan-critique` returns, `sdlc-tool stage-query --issue-number {N}` shows `_verdicts["CRITIQUE"]` populated with `verdict`, `recorded_at`, and `artifact_hash`. (From issue acceptance.)
-- [ ] Guard G5 fires: re-running `/sdlc {N}` against an unchanged plan reuses the cached verdict instead of re-dispatching `/do-plan-critique`. (From issue acceptance.)
-- [ ] Row 4b → Row 4c transition works end-to-end from a local /sdlc invocation: critique with concerns → /do-plan revision (sets `revision_applied: true`) → next /sdlc dispatches /do-build. (From issue acceptance.)
-- [ ] Same fix covers `/do-pr-review`'s `_verdicts["REVIEW"]` recording. (From issue acceptance.)
-- [ ] `tools.sdlc_verdict record` and `tools.sdlc_dispatch record` failures are loud: (a) underlying tools exit `1` on caught exception (was `0`); (b) skill markdown no longer wraps verdict/dispatch invocations in `2>/dev/null || true`; (c) non-zero exit reaches the operator session log. (From issue: explicitly requested. **BLOCKER fix from critique.**)
-- [ ] Parity sweep test (`tests/unit/test_sdlc_tool_wrapper.py`) passes: zero `python -m tools.sdlc_*` references remain in the **included paths** (`.claude/skills/**`, `.claude/hooks/post_compact.py`, `config/personas/project-manager.md`); **excluded paths** are not scanned (wrapper, `tools/**`, `tests/**`, `docs/plans/**`, `docs/features/**`, `CLAUDE.md`).
-- [ ] Subprocess test confirms `python -m tools.sdlc_verdict record` and `python -m tools.sdlc_dispatch record` exit `1` when the underlying `_record_verdict` / `record_dispatch` raises.
-- [ ] `scripts/update/run.py` `--dry-run` reports the new `sdlc-tool` hardlink and verify step.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] Running `/sdlc {issue}` from a target-repo cwd (e.g. `~/src/cuttlefish`) successfully records a critique verdict that `sdlc-tool stage-query` reads back. (From issue acceptance.)
+- [x] After `/do-plan-critique` returns, `sdlc-tool stage-query --issue-number {N}` shows `_verdicts["CRITIQUE"]` populated with `verdict`, `recorded_at`, and `artifact_hash`. (From issue acceptance.)
+- [x] Guard G5 fires: re-running `/sdlc {N}` against an unchanged plan reuses the cached verdict instead of re-dispatching `/do-plan-critique`. (From issue acceptance.)
+- [x] Row 4b → Row 4c transition works end-to-end from a local /sdlc invocation: critique with concerns → /do-plan revision (sets `revision_applied: true`) → next /sdlc dispatches /do-build. (From issue acceptance.)
+- [x] Same fix covers `/do-pr-review`'s `_verdicts["REVIEW"]` recording. (From issue acceptance.)
+- [x] `tools.sdlc_verdict record` and `tools.sdlc_dispatch record` failures are loud: (a) underlying tools exit `1` on caught exception (was `0`); (b) skill markdown no longer wraps verdict/dispatch invocations in `2>/dev/null || true`; (c) non-zero exit reaches the operator session log. (From issue: explicitly requested. **BLOCKER fix from critique.**)
+- [x] Parity sweep test (`tests/unit/test_sdlc_tool_wrapper.py`) passes: zero `python -m tools.sdlc_*` references remain in the **included paths** (`.claude/skills/**`, `.claude/hooks/post_compact.py`, `config/personas/project-manager.md`); **excluded paths** are not scanned (wrapper, `tools/**`, `tests/**`, `docs/plans/**`, `docs/features/**`, `CLAUDE.md`).
+- [x] Subprocess test confirms `python -m tools.sdlc_verdict record` and `python -m tools.sdlc_dispatch record` exit `1` when the underlying `_record_verdict` / `record_dispatch` raises.
+- [x] `scripts/update/run.py` `--dry-run` reports the new `sdlc-tool` hardlink and verify step.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
