@@ -235,9 +235,14 @@ class TestFinalizeSessionValidation:
 
 
 class TestFinalizeSessionRejectFromTerminal:
-    """Tests for the kill-is-terminal invariant on finalize_session()."""
+    """Tests for the kill-is-terminal invariant on finalize_session().
 
-    def test_finalize_session_rejects_terminal_to_terminal_by_default(self):
+    These test names embed ``reject_from_terminal`` so the verification command
+    ``pytest -k reject_from_terminal`` (from the plan's Verification table)
+    selects the full suite by parameter name.
+    """
+
+    def test_finalize_session_reject_from_terminal_blocks_by_default(self):
         """A killed session cannot be flipped to completed by default."""
         session = _make_session(status="killed")
 
@@ -254,7 +259,7 @@ class TestFinalizeSessionRejectFromTerminal:
         session.save.assert_not_called()
         assert session.status == "killed"
 
-    def test_finalize_session_allows_terminal_to_terminal_with_opt_out(self):
+    def test_finalize_session_reject_from_terminal_opt_out_succeeds(self):
         """Passing reject_from_terminal=False permits terminal->terminal escalation."""
         session = _make_session(status="abandoned")
         mock_auto_tag_module, mock_profile_module = _build_mock_modules()
@@ -279,7 +284,7 @@ class TestFinalizeSessionRejectFromTerminal:
         assert session.status == "failed"
         session.save.assert_called()
 
-    def test_finalize_session_idempotent_on_same_terminal_state(self):
+    def test_finalize_session_reject_from_terminal_idempotent_same_state(self):
         """Re-finalizing with the same terminal status is a no-op (regression)."""
         session = _make_session(status="killed")
 
@@ -289,7 +294,7 @@ class TestFinalizeSessionRejectFromTerminal:
         session.save.assert_not_called()
         assert session.status == "killed"
 
-    def test_finalize_session_rejects_completed_to_killed(self):
+    def test_finalize_session_reject_from_terminal_completed_to_killed(self):
         """The guard fires for any terminal-to-different-terminal pair, not just killed->X."""
         session = _make_session(status="completed")
 
