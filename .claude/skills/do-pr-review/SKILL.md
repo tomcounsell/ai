@@ -77,13 +77,13 @@ that mechanically cannot merge.
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage REVIEW --status in_progress --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
 After posting the review (Step 6), on approval (no blockers):
 
 ```bash
-python -m tools.sdlc_stage_marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 Note: If blockers found, leave as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes.
@@ -514,26 +514,26 @@ After emitting the OUTCOME block, record the review verdict on the PM session so
 
 ```bash
 # For APPROVED reviews (OUTCOME status=success):
-python -m tools.sdlc_verdict record --stage REVIEW \
+sdlc-tool verdict record --stage REVIEW \
   --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number $ISSUE_NUMBER
 
 # For reviews with findings (OUTCOME status=partial or fail):
-python -m tools.sdlc_verdict record --stage REVIEW \
+sdlc-tool verdict record --stage REVIEW \
   --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
   --issue-number $ISSUE_NUMBER
 
 # For preflight short-circuit (branch cannot merge):
-python -m tools.sdlc_verdict record --stage REVIEW \
+sdlc-tool verdict record --stage REVIEW \
   --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 \
   --issue-number $ISSUE_NUMBER
 
 # For preflight short-circuit (PR not open):
-python -m tools.sdlc_verdict record --stage REVIEW \
+sdlc-tool verdict record --stage REVIEW \
   --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 \
   --issue-number $ISSUE_NUMBER
 ```
 
-The recorder prints `{}` on failure and never raises — it MUST NOT block the review from finishing. If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag and the recorder will resolve via `VALOR_SESSION_ID` / `AGENT_SESSION_ID`.
+The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag and the recorder will resolve via `VALOR_SESSION_ID` / `AGENT_SESSION_ID`.
 
 ## Hard Rules
 

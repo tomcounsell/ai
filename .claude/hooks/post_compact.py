@@ -128,7 +128,7 @@ def _build_regrounding_nudge(plan_url, issue_url, stage_states_json, cwd):
         if issue_number:
             lines.append(
                 f"{item_num}. Check SDLC stage progress: "
-                f"`python -m tools.sdlc_stage_query --issue-number {issue_number}`"
+                f"`sdlc-tool stage-query --issue-number {issue_number}`"
             )
         else:
             lines.append(

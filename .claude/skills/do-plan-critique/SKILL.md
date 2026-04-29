@@ -12,14 +12,14 @@ context: fork
 At the very start of this skill, write an in_progress marker:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage CRITIQUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
 ```
 
 After posting the verdict (Step 5), write the completion marker if READY TO BUILD, leave in_progress otherwise:
 
 ```bash
 # On READY TO BUILD verdict:
-python -m tools.sdlc_stage_marker --stage CRITIQUE --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 
@@ -243,13 +243,13 @@ Output the final report in this format:
 After printing the verdict, record it on the PM session so the SDLC router's Legal Dispatch Guards (G1, G5) can consume it:
 
 ```bash
-python -m tools.sdlc_verdict record --stage CRITIQUE \
+sdlc-tool verdict record --stage CRITIQUE \
   --verdict "$VERDICT_STRING" --issue-number $ISSUE_NUMBER
 ```
 
 Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag — the recorder falls back to `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env vars and the artifact_hash will be None.
 
-The recorder prints `{}` on failure and never raises — it MUST NOT block the critique from finishing.
+The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state.
 
 ## Outcome Contract
 

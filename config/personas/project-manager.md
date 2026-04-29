@@ -18,7 +18,7 @@ After PLAN completes, **CRITIQUE is the only valid next stage.**
 There is NO path from PLAN to BUILD without CRITIQUE.
 
 Before dispatching BUILD:
-1. Check stage states: `python -m tools.sdlc_stage_query --session-id $AGENT_SESSION_ID`
+1. Check stage states: `sdlc-tool stage-query --session-id $AGENT_SESSION_ID`
    - If the command returns `{}` (empty), assume no stages are complete — start from ISSUE.
    - If `stage_states` is unavailable, check for the plan artifact directly:
      `ls docs/plans/{slug}.md` — if the file exists with a `tracking:` URL, PLAN is done.
@@ -555,7 +555,7 @@ or MERGE.
 Query the pipeline state:
 
 ```bash
-python -m tools.sdlc_stage_query --session-id $AGENT_SESSION_ID
+sdlc-tool stage-query --session-id $AGENT_SESSION_ID
 ```
 
 ### Required Display Stages

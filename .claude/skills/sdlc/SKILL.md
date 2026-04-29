@@ -44,7 +44,7 @@ After resolving the issue number, ensure a local SDLC session exists in Redis so
 
 ```bash
 SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
-python -m tools.sdlc_session_ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
+sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
 ```
 
 This is idempotent -- running it multiple times for the same issue reuses the same session. Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call is a true no-op — it returns the already-active session without creating a new record. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
@@ -60,7 +60,7 @@ Query the PM session's `stage_states` for authoritative stage completion data. T
 Run the stage query tool directly and read its output from the tool result -- no shell substitution, no pipes, no environment-variable capture. The tool resolves the active session from `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, or `--issue-number` internally.
 
 ```bash
-python -m tools.sdlc_stage_query --issue-number {issue_number}
+sdlc-tool stage-query --issue-number {issue_number}
 ```
 
 Interpret the JSON output from the tool result:
@@ -129,7 +129,7 @@ grep -rl "#{issue_number}" docs/plans/
 cat docs/plans/{plan-filename}.md
 ```
 
-For the DOCS stage completion check, re-read the `python -m tools.sdlc_stage_query` output from Step 2.0. Do not pipe JSON through a shell here.
+For the DOCS stage completion check, re-read the `sdlc-tool stage-query` output from Step 2.0. Do not pipe JSON through a shell here.
 
 **Decision logic for docs**:
 - If the plan has a `## Documentation` section with unchecked tasks → docs NOT done
@@ -156,20 +156,20 @@ The canonical Python implementation is `agent.sdlc_router.decide_next_dispatch()
 
 **G5 applies to CRITIQUE only**, not REVIEW. Review verdicts legitimately change on unchanged diffs (CI flips, new comments, linked issues). G4 handles REVIEW non-determinism instead.
 
-After evaluating guards, record the dispatch decision via `python -m tools.sdlc_dispatch record` BEFORE invoking the sub-skill. This preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
+After evaluating guards, record the dispatch decision via `sdlc-tool dispatch record` BEFORE invoking the sub-skill. This preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
 
 ```bash
 # Record a dispatch event (call BEFORE invoking the sub-skill)
-python -m tools.sdlc_dispatch record --skill /do-build --issue-number {issue_number}
+sdlc-tool dispatch record --skill /do-build --issue-number {issue_number}
 
 # Record with PR context (for review/patch/merge stages)
-python -m tools.sdlc_dispatch record --skill /do-pr-review --issue-number {issue_number} --pr-number {pr_number}
+sdlc-tool dispatch record --skill /do-pr-review --issue-number {issue_number} --pr-number {pr_number}
 
 # Inspect the dispatch history (debug G4 state)
-python -m tools.sdlc_dispatch get --issue-number {issue_number}
+sdlc-tool dispatch get --issue-number {issue_number}
 ```
 
-The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_helpers.update_stage_states()` — it is the correct runtime entry point. Never call `record_dispatch()` directly from a shell or skill script; always use `python -m tools.sdlc_dispatch record`.
+The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_helpers.update_stage_states()` — it is the correct runtime entry point. Never call `record_dispatch()` directly from a shell or skill script; always use `sdlc-tool dispatch record`.
 
 ## Step 4: Dispatch ONE Sub-Skill
 
