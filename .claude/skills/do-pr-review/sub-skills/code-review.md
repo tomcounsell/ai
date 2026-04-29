@@ -204,6 +204,8 @@ For each requirement/acceptance criterion in the plan:
 
 If a plan acceptance criterion is not addressed in the diff but matches a verified disclosure from Step 2.5, classify that criterion as `acknowledged` rather than as a blocker. Record it in the `Acknowledged Deferrals (verified)` section.
 
+If a criterion is BOTH covered by a verified disclosure AND demonstrably satisfied by the diff, classify as `pass` — the disclosure is informational only. The plan-file write reflects the `pass` (tick `[x]`). This prevents the oscillation pathway where `/do-patch` ticks a previously-deferred criterion (because the patch satisfies it) but a later review unticks it again merely because the disclosure is still in the PR body.
+
 #### 4b. Plan Checkbox Validation
 
 Walk each unchecked `- [ ]` item in the following plan sections:
@@ -254,7 +256,7 @@ Emit the completed checklist as a bulleted list in the review comment. Format: `
 ```markdown
 ## Pre-Verdict Checklist
 
-- **1. All plan acceptance criteria checked against diff** — PASS/FAIL/N/A — *notes*
+- **1. All plan acceptance/success criteria validated against diff** — PASS/FAIL/N/A — *notes*
 - **2. No-Gos from plan — none violated** — PASS/FAIL/N/A — *notes*
 - **3. New `except Exception` blocks — each has logger/raise/swallow-ok** — PASS/FAIL/N/A — *notes*
 - **4. New integration tests — exercise serialization boundary (not in-memory only)** — PASS/FAIL/N/A — *notes*

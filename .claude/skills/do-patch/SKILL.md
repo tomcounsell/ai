@@ -139,6 +139,29 @@ If a fix would contradict the plan's no-gos or architectural decisions, report t
 - Add an inline code comment at the relevant location: `# NOTE: [finding summary] -- left as-is because [rationale]`
 - This creates a paper trail so the next reviewer does not re-flag the same issue.
 - The finding is then 'addressed' (annotated), not 'skipped'.
+
+**Criterion mapping (REQUIRED in your completion report):** If your fix
+addresses a specific criterion from the plan's criteria section
+(`## Acceptance Criteria` or `## Success Criteria`), identify which criterion
+by exact text. Report this in your completion summary as
+`criterion_addressed: <text>` (or `criterion_addressed: null` if no clear
+match). The patch skill writes the corresponding tick `[x]` to the plan file
+in the SAME commit as your code change — atomic single commit, no separate
+'tick off' commit.
+
+You MUST report `criterion_addressed: null` when your fix only changes any of
+the following (cosmetic-only fixes never tick a criterion):
+1. lint or formatting-only edits (whitespace, import order, ruff fixes)
+2. test-file-only edits where the test exercises pre-existing behavior
+3. comment-only or docstring-only edits
+4. typo fixes
+5. edits that touch only `__pycache__/`, `.gitignore`, `.gitkeep`, or
+   generated artifacts
+
+Edits outside this list MAY tick a criterion if the criterion's text references
+the runtime behavior the edit changes. When uncertain, prefer
+`criterion_addressed: null` — the next `/do-pr-review` round will tick it
+properly if the fix actually satisfies a criterion.
 "
 })
 ```
@@ -163,6 +186,58 @@ Parse the results:
 - **pytest exit code 5**: No tests collected — treat as pass (no tests to break)
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
+
+### Step 3.5: Sync Plan Checkbox (Atomic Commit)
+
+After the test-pass verification in Step 3 succeeds and BEFORE Report
+Completion, sync the plan-file checkbox so it lives in the same commit as the
+code fix. A separate "tick off completed plan items" commit is exactly the
+oscillation symptom this skill avoids — it would invalidate the prior PR
+approval (review-comment freshness gate) and force a re-review.
+
+**Procedure:**
+
+```bash
+# Read the builder agent's reported `criterion_addressed` from Step 2's output.
+SLUG=$(echo "$BRANCH" | sed 's|^session/||')
+PLAN_PATH="docs/plans/${SLUG}.md"
+TICK_SUFFIX=""
+
+if [ -n "$CRITERION_ADDRESSED" ] && [ "$CRITERION_ADDRESSED" != "null" ]; then
+  if python -m tools.plan_checkbox_writer tick "$PLAN_PATH" --criterion "$CRITERION_ADDRESSED"; then
+    TICK_SUFFIX=" — addresses \"$CRITERION_ADDRESSED\""
+  else
+    # Helper failure (MATCH_AMBIGUOUS / MATCH_NOT_FOUND / others) is NON-FATAL.
+    # The commit STILL happens (with the code change only); the failure is
+    # logged but does NOT abort the patch flow. The next /do-pr-review round
+    # will reconcile via tick/untick.
+    echo "WARN: plan_checkbox_writer failed for criterion: $CRITERION_ADDRESSED" >&2
+  fi
+fi
+
+# Atomic commit: `git add -A` captures BOTH the builder's code edits AND the
+# helper's plan-file edit (if any). The plan write and the code fix go into
+# the SAME commit. Do NOT use `git commit --amend` — every patch is a fresh
+# commit per the existing convention at SKILL.md "Commit and Push Rules".
+git add -A
+git commit -m "fix(#${SDLC_ISSUE_NUMBER}): ${SUMMARY}${TICK_SUFFIX}"
+git push origin "HEAD:${BRANCH}"
+```
+
+**Why same-commit (and not amend, not separate):** The single-commit invariant
+is what makes the merge-gate review-comment freshness check pass on the next
+attempt — the latest commit's `committer.date` advances together with the
+code change. A separate tick-off commit pushed AFTER the review would force
+re-review.
+
+**Builder authorship invariant:** The builder agent does NOT commit (per
+SKILL.md "Commit and Push Rules"); the patch skill is the commit author.
+Step 3.5 preserves that — the helper invocation and the commit happen at the
+patch-skill level, not at the builder-agent level.
+
+**Test ordering invariant:** The test-pass check in Step 3 happens BEFORE the
+commit in Step 3.5, so a failing fix never produces a commit. An ambiguous
+criterion in Step 3.5 is non-fatal; a failed test in Step 3 aborts the flow.
 
 ### Step 4: Report Completion
 
@@ -211,13 +286,13 @@ Lint and formatting are handled automatically -- agents should never waste itera
 
 ## Commit and Push Rules
 
-After tests pass, always commit and push the fix:
+The commit and push are part of Step 3.5 ("Sync Plan Checkbox") — see that step
+for the atomic-commit procedure that bundles the code fix with the plan-file
+checkbox tick into a single commit. Do NOT commit elsewhere; the single-commit
+invariant is what keeps the merge-gate review-comment freshness check passing.
 
-```bash
-git add -A && git commit -m "Fix: [one-line summary of what was fixed]" && git push
-```
-
-This skill owns its full lifecycle — no parent skill handles commits on its behalf.
+This skill owns its full lifecycle — no parent skill handles commits on its
+behalf.
 
 ## Critical Rules
 

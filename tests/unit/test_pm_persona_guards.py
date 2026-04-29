@@ -148,9 +148,13 @@ class TestGateRecoveryBehavior:
     """Item 5 of sdlc-1155: PM persona documents gate-recovery behavior.
 
     The section must list blocker categories (including PARTIAL_PIPELINE_STATE),
-    cross-link ``docs/sdlc/merge-troubleshooting.md``, reference the G4
-    convergence rule, and forbid setting ``allow_unchecked: true`` as
-    self-resolution.
+    cross-link ``docs/sdlc/merge-troubleshooting.md``, and reference the G4
+    convergence rule.
+
+    Note (#1207): The Plan Completion Gate has been deleted; ``COMPLETION_GATE``
+    is no longer a recognized blocker category, and the ``allow_unchecked: true``
+    plan-frontmatter override no longer exists in any consumer. Tests for those
+    have been removed accordingly.
     """
 
     def test_gate_recovery_section_exists(self, pm_persona_text):
@@ -172,7 +176,6 @@ class TestGateRecoveryBehavior:
             "PIPELINE_STATE",
             "PARTIAL_PIPELINE_STATE",
             "REVIEW_COMMENT",
-            "COMPLETION_GATE",
             "LOCKFILE",
             "FULL_SUITE",
             "MERGE_CONFLICT",
@@ -182,15 +185,15 @@ class TestGateRecoveryBehavior:
     def test_g4_convergence_rule_referenced(self, pm_persona_text):
         assert "G4" in pm_persona_text or "oscillation" in pm_persona_text.lower()
 
-    def test_allow_unchecked_prohibited(self, pm_persona_text):
-        # The section must explicitly state the human-only nature of this flag.
-        lower = pm_persona_text.lower()
-        assert "allow_unchecked" in lower
-        assert "never" in lower or "human" in lower
-
 
 class TestMergeTroubleshootingDoc:
-    """Item 6 of sdlc-1155: the troubleshooting playbook exists with seven sections."""
+    """Item 6 of sdlc-1155: the troubleshooting playbook exists with the
+    expected sections.
+
+    Note (#1207): originally seven sections; the unchecked-plan-checkboxes
+    section was removed when the gate was deleted. The remaining six
+    sections stay.
+    """
 
     def _playbook_text(self):
         from pathlib import Path
@@ -203,11 +206,10 @@ class TestMergeTroubleshootingDoc:
 
         assert Path("docs/sdlc/merge-troubleshooting.md").exists()
 
-    def test_seven_sections_present(self):
+    def test_expected_sections_present(self):
         text = self._playbook_text()
         for heading in (
             "Merge Conflict",
-            "Unchecked Plan Checkboxes",
             "G4 Oscillation",
             "Stale Review",
             "Lockfile Drift",

@@ -131,7 +131,6 @@ recoverable gate blockers.
 | PIPELINE_STATE | `No pipeline state found ... derived from durable signals` | Re-dispatch `/do-merge {pr}` — durable fallback handles it. |
 | PARTIAL_PIPELINE_STATE | Some stages `pending`, some `completed` | Re-dispatch `/do-merge {pr}` — durable fallback fills gaps. |
 | REVIEW_COMMENT | `REVIEW_COMMENT: FAIL` (no current Approved) | Dispatch `/do-pr-review` on the session branch, then re-dispatch `/do-merge`. |
-| COMPLETION_GATE | `COMPLETION GATE FAILED: N unchecked plan item(s)` | Dispatch PATCH/BUILD/DOCS to complete the item, or revise the plan via `/do-plan`. Never set `allow_unchecked: true`. |
 | LOCKFILE | `LOCKFILE: FAIL -- uv.lock is out of sync` | `uv lock && git add uv.lock && commit && push` on the session branch, then re-dispatch. |
 | FULL_SUITE | `FULL_SUITE: FAIL -- new regression(s) not in baseline` | Dispatch `/do-test` to reproduce, then `/do-patch` to fix, then re-dispatch. |
 | MERGE_CONFLICT | `mergeable: CONFLICTING` | Rebase session branch onto `origin/main` and re-push, then re-dispatch. |
@@ -153,11 +152,6 @@ recurs 3 times in a row, escalate to the human with the specific blocker text
 from the gate output. Do not loop further. G4 is load-bearing and must not be
 bypassed — it is the only backstop between a recoverable gate failure and an
 infinite remediation loop.
-
-**Never set `allow_unchecked: true` on a plan frontmatter as part of
-self-resolution.** That flag is a human-only escape hatch for unusual merges
-(emergency hotfixes, long-tail work items). Autonomous PM sessions treat it
-as unavailable.
 
 ---
 

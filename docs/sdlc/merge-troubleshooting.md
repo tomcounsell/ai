@@ -47,36 +47,6 @@ Then re-dispatch `/do-merge {pr}`.
 
 ---
 
-## Unchecked Plan Checkboxes
-
-**Symptom.** The Plan Completion Gate prints `COMPLETION GATE FAILED: N
-unchecked plan item(s)` and lists the offending items.
-
-**Diagnose.**
-
-```bash
-BRANCH=$(gh pr view {pr} --json headRefName -q .headRefName)
-SLUG=$(echo "$BRANCH" | sed 's|^session/||')
-git show "origin/$BRANCH:docs/plans/${SLUG}.md" | grep -n '^\s*- \[ \]'
-```
-
-**Remediate.** Either complete the outstanding work (preferred) or tick the
-boxes in a commit that actually delivers the referenced functionality. The
-plan doc is the contract; do not tick unfinished items. Never set
-`allow_unchecked: true` on the plan frontmatter — that flag is a human
-escape hatch and is out of bounds for autonomous PM self-resolution.
-
-**Verify.**
-
-```bash
-git show "origin/$BRANCH:docs/plans/${SLUG}.md" | grep -c '^\s*- \[ \]'
-# Expected: 0 (or only items in Open Questions / Critique Results sections)
-```
-
-Re-dispatch `/do-merge {pr}`.
-
----
-
 ## G4 Oscillation (Same Skill Dispatched 3x)
 
 **Symptom.** The SDLC router's G4 guard refuses to dispatch the same skill
@@ -239,7 +209,6 @@ for TEST pending).
 | PIPELINE_STATE | Re-dispatch `/do-merge` (trusts durable fallback) | `/do-merge {pr}` |
 | PARTIAL_PIPELINE_STATE | Same as PIPELINE_STATE | `/do-merge {pr}` |
 | REVIEW_COMMENT | Dispatch `/do-pr-review` on session branch | See Stale Review |
-| COMPLETION_GATE | Finish work; tick plan checkboxes | See Unchecked Plan Checkboxes |
 | LOCKFILE | `uv lock && git add uv.lock && commit && push` | See Lockfile Drift |
 | FULL_SUITE | Investigate new blocking regression | `pytest tests/{node_id}` |
 | MERGE_CONFLICT | Rebase onto `origin/main` | See Merge Conflict |

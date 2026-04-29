@@ -2,7 +2,7 @@
 
 **Issue:** [#1155](https://github.com/tomcounsell/ai/issues/1155)
 **Status:** Shipped
-**Related features:** [Plan Completion Gate](plan-completion-gate.md) ·
+**Related features:** [Plan Checkbox Writers](plan-checkbox-writers.md) ·
 [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) ·
 [Merge-Gate Baseline](merge-gate-baseline.md) ·
 [Pipeline State Machine](pipeline-state-machine.md)
@@ -100,24 +100,22 @@ pass path.
 section after Rule 5 (Rule 5 itself is unchanged). The section:
 
 - Enumerates blocker categories (`PIPELINE_STATE`,
-  `PARTIAL_PIPELINE_STATE`, `REVIEW_COMMENT`, `COMPLETION_GATE`,
+  `PARTIAL_PIPELINE_STATE`, `REVIEW_COMMENT`,
   `LOCKFILE`, `FULL_SUITE`, `MERGE_CONFLICT`).
 - Maps each category to a remediation (e.g.
   `REVIEW_COMMENT → /do-pr-review`, `LOCKFILE → uv lock && commit`).
 - States the re-dispatch rule: after any remediation, re-dispatch
   `/do-merge {pr}`.
 - Invokes G4 convergence (3-dispatch cap) as the escalation boundary.
-- Explicitly forbids setting `allow_unchecked: true` as part of
-  self-resolution (human-only escape hatch).
 
 ### 6. Merge-troubleshooting playbook
 
 `docs/sdlc/merge-troubleshooting.md` is the command-first reference the
-PM consults for each blocker category. Seven sections: Merge Conflict,
-Unchecked Plan Checkboxes, G4 Oscillation, Stale Review, Lockfile
-Drift, Flake False Regression, **Partial Pipeline State**. Each
-section: Symptom → Diagnose → Remediate → Verify → cross-link to the
-relevant `.claude/commands/do-merge.md` section.
+PM consults for each blocker category. Six sections: Merge Conflict,
+G4 Oscillation, Stale Review, Lockfile Drift, Flake False Regression,
+**Partial Pipeline State**. Each section: Symptom → Diagnose →
+Remediate → Verify → cross-link to the relevant
+`.claude/commands/do-merge.md` section.
 
 ### 7. Merge-guard tokeniser
 

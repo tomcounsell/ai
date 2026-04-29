@@ -86,7 +86,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Personas](personas.md) | Configurable persona system: structured identity config + composable segments + overlays for developer, PM, and teammate roles | Shipped |
 | [Pipeline Graph](pipeline-graph.md) | Canonical directed graph for SDLC stage routing with cycle support for test-failure and review-feedback loops | Shipped |
 | [Pipeline State Machine](pipeline-state-machine.md) | Programmatic stage tracking replacing inference-based detection with direct state recording at transition points | Shipped |
-| [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
+| [Plan Checkbox Writers](plan-checkbox-writers.md) | `/do-pr-review` and `/do-patch` tick/untick acceptance criteria via `tools.plan_checkbox_writer`; replaces the deleted Plan Completion Gate | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
 | [PM Final Delivery](pm-final-delivery.md) | Marker-free PM terminal-turn protocol: predicate detects pipeline completion, dedicated runner composes and delivers final summary via harness `--resume`, CancelledError handler preserves user-visible interrupt line during shutdown | Shipped |
