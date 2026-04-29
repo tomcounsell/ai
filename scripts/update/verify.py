@@ -1045,6 +1045,98 @@ def check_projects_json(project_dir: Path) -> ToolCheck:
     )
 
 
+def check_sdlc_tool(project_dir: Path) -> ToolCheck:
+    """Verify `sdlc-tool` is installed and dispatches into the repo's tools.
+
+    Acts as a green-light gate for the bridge restart, mirroring
+    ``check_projects_json``. If the wrapper is missing or its dispatch
+    fails, the bridge keeps running on the previous (working) build and
+    the operator is told what to fix.
+
+    Three failure modes:
+    - wrapper not on PATH (hardlink step failed or PATH is wrong)
+    - wrapper resolves but dispatch raises (typically a venv / uv mismatch)
+    - wrapper hardlink shares a different inode from ``scripts/sdlc-tool``
+      (means an old copy is still live; ran an /update that didn't sync)
+    """
+    wrapper_path = shutil.which("sdlc-tool")
+    if not wrapper_path:
+        return ToolCheck(
+            name="sdlc-tool",
+            available=False,
+            error=(
+                "sdlc-tool not on PATH. Re-run `/update` to hardlink it into "
+                "~/.local/bin, and ensure ~/.local/bin is on PATH."
+            ),
+        )
+
+    # Confirm the on-PATH wrapper points at the repo copy (same inode).
+    src_path = project_dir / "scripts" / "sdlc-tool"
+    if src_path.exists():
+        try:
+            if os.stat(wrapper_path).st_ino != os.stat(src_path).st_ino:
+                return ToolCheck(
+                    name="sdlc-tool",
+                    available=False,
+                    error=(
+                        f"sdlc-tool at {wrapper_path} is not hardlinked to "
+                        f"{src_path}. Re-run `/update` to refresh the link."
+                    ),
+                )
+        except OSError as e:
+            return ToolCheck(
+                name="sdlc-tool",
+                available=False,
+                error=f"Could not stat sdlc-tool source/dest: {e}",
+            )
+
+    # Smoke test: dispatch into stage-query against a non-existent issue.
+    # `stage-query` returns a graceful "no session" payload on miss, so a
+    # zero exit + parseable JSON proves the dispatch works end-to-end.
+    try:
+        result = run_cmd(
+            [wrapper_path, "stage-query", "--issue-number", "0"],
+            cwd=Path("/tmp"),  # foreign cwd to exercise the resolver
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return ToolCheck(
+            name="sdlc-tool",
+            available=False,
+            error="sdlc-tool stage-query --issue-number 0 timed out (>30s)",
+        )
+    except Exception as e:
+        return ToolCheck(name="sdlc-tool", available=False, error=str(e))
+
+    if result.returncode != 0:
+        return ToolCheck(
+            name="sdlc-tool",
+            available=False,
+            error=(
+                f"sdlc-tool stage-query --issue-number 0 exited "
+                f"{result.returncode}: {result.stderr.strip() or result.stdout.strip()}"
+            ),
+        )
+
+    # Confirm stdout is parseable JSON.
+    import json as _json
+
+    try:
+        _json.loads(result.stdout.strip() or "{}")
+    except _json.JSONDecodeError as e:
+        return ToolCheck(
+            name="sdlc-tool",
+            available=False,
+            error=f"sdlc-tool stage-query stdout is not valid JSON: {e}",
+        )
+
+    return ToolCheck(
+        name="sdlc-tool",
+        available=True,
+        version=f"resolved at {wrapper_path}",
+    )
+
+
 def check_machine_identity(project_dir: Path) -> dict:
     """Verify this machine's identity against projects.json config.
 
