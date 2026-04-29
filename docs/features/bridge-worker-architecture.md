@@ -508,7 +508,24 @@ python -m tools.valor_session kill --id <ID>                # Kill a session
 ./scripts/valor-service.sh restart         # Restart bridge, watchdog, and worker
 ./scripts/valor-service.sh worker-restart  # Restart worker only
 ./scripts/valor-service.sh worker-status   # Worker-specific status
+
+# Worker stop semantics — choose deliberately:
+./scripts/valor-service.sh worker-stop     # Transient stop (bootout only). launchd's
+                                           # KeepAlive=true MAY respawn the worker. Use
+                                           # for quick restart, debugging, etc.
+./scripts/valor-service.sh worker-start    # Start the worker. Calls `launchctl enable`
+                                           # idempotently first, so it correctly
+                                           # recovers from a prior worker-disable.
+./scripts/valor-service.sh worker-disable  # Stop the worker AND disable launchd
+                                           # auto-respawn. Stays down until
+                                           # worker-enable or worker-start. Use this
+                                           # when you've killed all sessions and you
+                                           # do NOT want the worker to come back.
+./scripts/valor-service.sh worker-enable   # Re-enable launchd auto-respawn (does NOT
+                                           # start the worker; pair with worker-start).
 ```
+
+**`worker-stop` vs `worker-disable`**: `worker-stop` is intentionally transient — it does NOT touch launchd's enabled/disabled state, so the LaunchAgent's `KeepAlive=true` may auto-respawn the worker. This preserves backward compatibility for existing scripts and human muscle memory that relies on `worker-stop` being a one-shot stop. `worker-disable` is the explicit "stay down until I say otherwise" command, introduced in #1208 to fix the live-debug scenario where stopping the worker alone was insufficient because launchd kept respawning it.
 
 ## Update Orchestrator: Worker Start Verification
 
