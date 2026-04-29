@@ -82,15 +82,16 @@ def test_drafter_calls_omit_system_prompt_via_ast():
     )
 
 
-@pytest.mark.parametrize("call_lineno_anchor", [564, 626])
+@pytest.mark.parametrize("call_lineno_anchor", [582, 644])
 def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     """Sanity: the documented drafter call lines still resolve to a harness call.
 
-    The plan cites session_completion.py:564 (Pass 1) and :626 (Pass 2). The
+    The plan cites session_completion.py:582 (Pass 1) and :644 (Pass 2). The
     original anchors at 525/587 shifted by ~39 lines in #1195 when the
     continuation-PM spawn site grew an extended docstring, a parent
     ``session_id`` guard, and switched from raw ``_AgentSession.create`` to
-    the typed ``create_pm`` factory.
+    the typed ``create_pm`` factory; they shifted again by 18 lines in #1208
+    when the kill-is-terminal runner-entry guard was added before the CAS lock.
 
     A future refactor that moves these calls is fine as long as the AST
     guard above stays green, but this test pins the documented anchors so

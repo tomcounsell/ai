@@ -24,6 +24,7 @@ from pathlib import Path
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
 from models.agent_session import AgentSession, SessionType
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
+from models.session_lifecycle import get_authoritative_session
 
 logger = logging.getLogger(__name__)
 
@@ -1047,6 +1048,17 @@ async def _agent_session_hierarchy_health_check() -> None:
        Action: clear the parent_agent_session_id field (child completes normally).
     2. Stuck parents: status is waiting_for_children but all children are terminal.
        Action: finalize the parent (transition to completed/failed).
+
+    Stale-index defense (kill-is-terminal, #1208): Before acting on any parent
+    matched by ``query.filter(status="waiting_for_children")``, this function
+    re-reads the parent's authoritative hash status. If the hash says terminal
+    (killed/completed/failed/abandoned/cancelled), the index entry is stale and
+    the parent is skipped. Without this guard, a killed parent whose
+    ``waiting_for_children`` index entry was not srem'd at kill time will be
+    picked up here, drive ``schedule_pipeline_completion``, and ship a final
+    summary to Telegram even though the operator has already killed the session.
+    See ``docs/features/session-lifecycle.md`` for the kill-is-terminal invariant
+    and ``docs/features/bridge-self-healing.md`` for the broader defense pattern.
     """
     orphans_fixed = 0
     stuck_fixed = 0
@@ -1095,6 +1107,21 @@ async def _agent_session_hierarchy_health_check() -> None:
     try:
         waiting_parents = list(AgentSession.query.filter(status="waiting_for_children"))
         for parent in waiting_parents:
+            # Re-read the hash status: index entries can be stale (kill-is-terminal, #1208).
+            # The waiting_for_children index entry may not have been srem'd when the parent
+            # was killed; without this guard the killed parent would still be picked up,
+            # ship a Telegram summary, and clobber the killed status. Re-reading the
+            # authoritative hash is defense-in-depth analogous to the running-index fix
+            # in #1006.
+            fresh = get_authoritative_session(getattr(parent, "session_id", None))
+            if fresh is not None and getattr(fresh, "status", None) in _TERMINAL_STATUSES:
+                logger.info(
+                    "[session-health] Skipping terminal parent %s (status=%s) — index entry stale",
+                    getattr(parent, "agent_session_id", "?"),
+                    fresh.status,
+                )
+                continue
+
             children = parent.get_children()
             if not children:
                 # No children but waiting — auto-complete
