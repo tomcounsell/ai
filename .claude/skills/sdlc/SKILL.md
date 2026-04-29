@@ -12,12 +12,13 @@ You MUST NOT write code, run tests, or create plans directly -- delegate everyth
 
 ## Cross-Repo Resolution
 
-For cross-project SDLC work, two environment variables are automatically set by `sdk_client.py`:
+For cross-project SDLC work, three resolution mechanisms cover the three different operations the pipeline runs:
 
-- `GH_REPO` (e.g., `tomcounsell/popoto`) — The `gh` CLI natively respects this, so all `gh` commands automatically target the correct repository.
-- `SDLC_TARGET_REPO` (e.g., `~/src/popoto`) — The absolute path to the target project's repo root. Use this for all local filesystem and git operations instead of assuming cwd is the target repo.
+- `GH_REPO` (e.g., `tomcounsell/popoto`) — The `gh` CLI natively respects this, so all `gh` commands automatically target the correct repository. Set by `sdk_client.py`.
+- `SDLC_TARGET_REPO` (e.g., `~/src/popoto`) — The absolute path to the target project's repo root. Use this for all local filesystem and git operations instead of assuming cwd is the target repo. Set by `sdk_client.py`.
+- `AI_REPO_ROOT` (default `~/src/ai`) — Used by the `sdlc-tool` wrapper to resolve where the SDLC tooling Python modules live, independent of cwd. The wrapper dispatches into `tools.sdlc_*` from the ai/ repo even when the orchestrator's cwd is a target project. See [`docs/features/sdlc-tool-resolver.md`](../../../docs/features/sdlc-tool-resolver.md).
 
-**When `SDLC_TARGET_REPO` is set, you MUST use it** for plan lookups, branch listings, and any git commands. The orchestrator's cwd is the ai/ repo, NOT the target project.
+**When `SDLC_TARGET_REPO` is set, you MUST use it** for plan lookups, branch listings, and any git commands. The orchestrator's cwd is the ai/ repo, NOT the target project. **For SDLC tooling (`sdlc-tool stage-query`, `sdlc-tool verdict record`, etc.), no env var is needed** — the wrapper resolves `AI_REPO_ROOT` itself with a `~/src/ai` default.
 
 ## Step 1: Resolve the Issue or PR
 
