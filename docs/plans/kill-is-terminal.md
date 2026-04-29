@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor
 created: 2026-04-29
 tracking: https://github.com/tomcounsell/ai/issues/1208
-last_comment_id:
+last_comment_id: IC_kwDOEYGa088AAAABAtu_KQ
 revision_applied: true
 ---
 
@@ -109,7 +109,7 @@ Medium because the **fix surface is three-layered** (runner-entry guard, lifecyc
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Worker stopped during testing | `pgrep -af 'python.*-m worker' \| grep -v grep \| wc -l` returns 0 | Avoid live-spam during integration test of kill behavior |
+| Worker stopped during testing | `bash -c "pgrep -f 'python.*-m worker' \| wc -l"` returns 0 | Avoid live-spam during integration test of kill behavior |
 | Redis available locally | `redis-cli ping` returns `PONG` | Popoto-backed AgentSession tests need Redis |
 | `tests/unit/test_session_lifecycle.py` runs green at HEAD | `pytest tests/unit/test_session_lifecycle.py -q` exit 0 | Baseline for regression detection |
 
