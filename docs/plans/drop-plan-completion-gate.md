@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Medium
 owner: Tom Counsell
@@ -364,20 +364,20 @@ These are unit-test-style integration tests (they exercise the prompt-output con
 ## Documentation
 
 ### Feature Documentation
-- [ ] Delete `docs/features/plan-completion-gate.md`.
-- [ ] Remove the row at `docs/features/README.md:89` that links to plan-completion-gate.md.
-- [ ] Create `docs/features/plan-checkbox-writers.md` describing the new tick/untick behavior in `/do-pr-review` and `/do-patch`, including the criterion-mapping approach (LLM-judge with manual-review fallback) and the helper module.
-- [ ] Add the new feature doc to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/self-healing-merge-gate.md` to remove the `[Plan Completion Gate]` cross-link, remove `COMPLETION_GATE` from the blocker-category list, and delete the `allow_unchecked` paragraph.
+- [x] Delete `docs/features/plan-completion-gate.md`.
+- [x] Remove the row at `docs/features/README.md:89` that links to plan-completion-gate.md.
+- [x] Create `docs/features/plan-checkbox-writers.md` describing the new tick/untick behavior in `/do-pr-review` and `/do-patch`, including the criterion-mapping approach (LLM-judge with manual-review fallback) and the helper module.
+- [x] Add the new feature doc to the `docs/features/README.md` index table.
+- [x] Update `docs/features/self-healing-merge-gate.md` to remove the `[Plan Completion Gate]` cross-link, remove `COMPLETION_GATE` from the blocker-category list, and delete the `allow_unchecked` paragraph.
 
 ### SDLC Documentation
-- [ ] Update `docs/sdlc/merge-troubleshooting.md`: delete the "Unchecked Plan Checkboxes" section (lines 50-76) and the COMPLETION_GATE row in the troubleshooting table (line 242).
-- [ ] Migrate `docs/plans/plan_completion_gate.md` to `docs/plans/completed/plan_completion_gate.md` (catching up the spec-drift the issue noted).
+- [x] Update `docs/sdlc/merge-troubleshooting.md`: delete the "Unchecked Plan Checkboxes" section (lines 50-76) and the COMPLETION_GATE row in the troubleshooting table (line 242).
+- [x] Migrate `docs/plans/plan_completion_gate.md` to `docs/plans/completed/plan_completion_gate.md` (catching up the spec-drift the issue noted).
 
 ### Inline Documentation
-- [ ] `tools/plan_checkbox_writer.py` — module docstring explaining purpose, CLI usage, and the failure-path semantics.
-- [ ] `.claude/skills/do-pr-review/sub-skills/code-review.md` — comment block above the new tick/untick step explaining when it fires and when it falls back to manual review.
-- [ ] `.claude/skills/do-patch/SKILL.md` — comment block above the builder prompt extension explaining the `criterion_addressed` reporting contract.
+- [x] `tools/plan_checkbox_writer.py` — module docstring explaining purpose, CLI usage, and the failure-path semantics.
+- [x] `.claude/skills/do-pr-review/sub-skills/code-review.md` — comment block above the new tick/untick step explaining when it fires and when it falls back to manual review.
+- [x] `.claude/skills/do-patch/SKILL.md` — comment block above the builder prompt extension explaining the `criterion_addressed` reporting contract.
 
 ### Issue Cross-Link
 - [ ] After this PR merges, post a comment on issue #1186 noting that Finding 2 is superseded by this work. Findings 1 (TEST guard) and 3 (ruff baseline) remain in scope for #1186.
