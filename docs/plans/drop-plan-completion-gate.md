@@ -6,6 +6,7 @@ owner: Tom Counsell
 created: 2026-04-29
 tracking: https://github.com/tomcounsell/ai/issues/1207
 last_comment_id:
+revision_applied: true
 ---
 
 # Drop Plan-Completion Gate; Shift Checkbox Responsibility to /do-pr-review and /do-patch
@@ -139,16 +140,24 @@ No prerequisites — this work has no external dependencies. All edits are insid
   - The same module is used by both `/do-pr-review` and `/do-patch`, ensuring identical semantics.
   This is NOT a new gate; it's a write-side helper. No validation logic.
 
+### spike-4: Which heading do real plans use for the criteria list?
+- **Assumption**: "The repo uses a single canonical heading (`## Acceptance Criteria`) for the criteria list."
+- **Method**: code-read (grep over `docs/plans/*.md`)
+- **Finding**: **Refuted.** `grep -l "^## Success Criteria" docs/plans/*.md | wc -l` returns 138 plans; `grep -l "^## Acceptance Criteria" docs/plans/*.md | wc -l` returns 1 plan (`docs/plans/sdlc-1065.md`). The plan-under-edit itself uses `## Success Criteria` at line 305. `/do-pr-review`'s step 4b at `code-review.md:209-210` already names BOTH headings as the targets of plan-checkbox validation. If the helper only matches `## Acceptance Criteria`, it will `MATCH_NOT_FOUND` on virtually every real plan and the new tick/untick behavior will never fire.
+- **Confidence**: high
+- **Impact on plan**: The helper MUST accept BOTH `## Acceptance Criteria` AND `## Success Criteria` as criterion section headings (case-insensitive, whitespace-tolerant). All references to "the section the helper reads" (Edits B, C, D, the test names, the Verification table, Step-by-Step Tasks, No-Gos) are reworded to say "criteria section (Acceptance Criteria or Success Criteria)" rather than "Acceptance Criteria" alone. This keeps the helper symmetric with the validator that produces the verdict (`code-review.md` step 4b).
+
 ## Solution
 
 ### Key Elements
 
 - **Edit A (deletion)**: Remove the Plan Completion Gate from `.claude/commands/do-merge.md` (lines 179-249, plus the line below at 251). Remove every downstream reference to it (PM persona, merge-troubleshooting playbook, feature docs, tests).
-- **Edit B (do-pr-review tick/untick)**: When `/do-pr-review` emits Approved, walk the plan's `## Acceptance Criteria` section and for each criterion, write `[x]` if the rubric/step-4b judgment confirmed it satisfied, write `[ ]` if it confirmed not-satisfied or acknowledged-deferred. Commit to the PR branch.
-- **Edit C (do-patch tick on fix)**: When `/do-patch` fixes a review blocker, the builder identifies which acceptance criterion (if any) the fix addresses. The patch skill writes `[x]` to that criterion in the same commit as the fix.
-- **Edit D (helper module)**: New `tools/plan_checkbox_writer.py` — a small Python module + CLI that performs the read-modify-write of plan checkboxes safely. Used by both Edit B and Edit C.
-- **Edit E (docs cleanup)**: Delete `docs/features/plan-completion-gate.md`, remove its index entry, migrate the obsolete `docs/plans/plan_completion_gate.md` to `docs/plans/completed/`, prune `docs/sdlc/merge-troubleshooting.md`, update `docs/features/self-healing-merge-gate.md` cross-links.
-- **Edit F (PM persona + tests)**: Remove the COMPLETION_GATE row from the PM persona's blocker→remediation table and the `allow_unchecked` prohibition; delete the `test_allow_unchecked_prohibited` test and the `COMPLETION_GATE` assertion from `test_pm_persona_guards.py`.
+- **Edit B (do-pr-review tick/untick)**: When `/do-pr-review` emits Approved, walk the plan's criteria section (whichever of `## Acceptance Criteria` or `## Success Criteria` is present) and for each criterion, write `[x]` if the rubric/step-4b judgment confirmed it satisfied, write `[ ]` if it confirmed not-satisfied or acknowledged-deferred. Commit and push to the PR branch BEFORE posting the review (see B3 ordering rule in Technical Approach).
+- **Edit B-1 (terminology cleanup)**: Rename Pre-Verdict Checklist item 1 from "All plan acceptance criteria checked against diff" to "All plan acceptance/success criteria validated against diff" in `.claude/skills/do-pr-review/sub-skills/code-review.md:257`. The word "checked" was previously colloquial ("examined") but now collides with the new technical meaning ("ticked with `[x]`"); "validated" is unambiguous. Sweep `code-review.md` and `post-review.md` for any echoes of the old string.
+- **Edit C (do-patch tick on fix)**: When `/do-patch` fixes a review blocker, the builder identifies which criterion (if any) the fix addresses. The patch skill writes `[x]` to that criterion in the same commit as the fix. The builder is explicitly forbidden from claiming a `criterion_addressed` mapping for cosmetic-only fixes (lint, formatting, comments, typos, `__pycache__` / `.gitignore` / `.gitkeep`).
+- **Edit D (helper module)**: New `tools/plan_checkbox_writer.py` — a small Python module + CLI that performs the read-modify-write of plan checkboxes safely. Accepts BOTH `## Acceptance Criteria` and `## Success Criteria` headings. Used by both Edit B and Edit C.
+- **Edit E (docs cleanup)**: Delete `docs/features/plan-completion-gate.md`, remove its index entry, migrate the obsolete `docs/plans/plan_completion_gate.md` to `docs/plans/completed/`, prune `docs/sdlc/merge-troubleshooting.md` (delete the "Unchecked Plan Checkboxes" section), update `docs/features/self-healing-merge-gate.md` cross-links.
+- **Edit F (PM persona + tests)**: Remove the COMPLETION_GATE row from the PM persona's blocker→remediation table and the `allow_unchecked` prohibition; delete the `test_allow_unchecked_prohibited` test, remove `"COMPLETION_GATE"` from `test_blocker_categories_enumerated`, and update `test_seven_sections_present` to drop `"Unchecked Plan Checkboxes"` from its asserted-headings tuple.
 
 ### Flow
 
@@ -164,64 +173,133 @@ Initial review → blockers found → `/do-patch` fixes (and ticks the relevant 
 ### Technical Approach
 
 - **Edit A — Pure deletion in `do-merge.md`.** Delete lines 179-251 (the `### Plan Completion Gate` heading, the bash+Python script, and the failure-handling line below). Verify the surrounding gates (review-comment gate at lines 100-178, lockfile gate at line 253+) remain intact and correctly sequenced. The merge gate ladder remaining: review-comment, lockfile, docs (per `docs/sdlc/do-merge.md`), CI checks. No new gate added.
-- **Edit B — Tick/untick writes in `/do-pr-review`.** The existing skill flow: Step 4 (Plan Validation) → Step 4b (Plan Checkbox Validation) → Step 5 (Verification Checks) → Pre-Verdict Checklist → Rubric → Verdict derivation. The tick/untick step is added between "Verdict derivation" and "Post review" (final commit/comment). It only fires for `APPROVED` verdicts. For each criterion in `## Acceptance Criteria`:
-  - If Rubric item 1 marked it `pass` (or item-level pass for that criterion): write `- [x]`.
-  - If Rubric item 1 marked it `fail` and there is no acknowledged-deferral verified for it: write `- [ ]` (untick prior dishonest tick).
-  - If marked `acknowledged` (verified disclosure): write `- [ ]` (acknowledged-deferred is not "satisfied").
-  - If the LLM cannot map a criterion to a verdict (low signal — e.g., the criterion's text is ambiguous or the diff is too large to assess), leave the existing checkbox state alone AND emit a comment line in the review body: `> Could not auto-tick "{criterion text}" — please review manually.`
-  This commits to the PR branch as `docs(#{N}): sync plan checkboxes with review verdict`. If there is already a review comment commit in this round, fold the plan write into that commit (no separate commit).
-- **Edit C — Tick on fix in `/do-patch`.** The builder agent (Step 2 prompt) is extended: "If your fix addresses a specific acceptance criterion from the plan's `## Acceptance Criteria`, identify which criterion (by exact text or first-line summary). Report this in your completion summary as `criterion_addressed: <text>` (or `criterion_addressed: null` if no clear match)." After the builder reports, the patch skill (Step 4 onward) reads the builder's `criterion_addressed` value:
-  - If non-null and the criterion is currently `[ ]`: invoke the helper to write `[x]`. The plan-file edit is included in the same `git add -A && git commit` as the code fix. Commit message: `fix(#{N}): {one-line summary} — addresses "{criterion text}"`.
-  - If null: no plan write. Commit message: `fix(#{N}): {one-line summary}`.
-  - If the builder reports `criterion_addressed` but the criterion text doesn't match any item in the plan (string mismatch): treat as null, log a warning, no plan write.
+- **Edit B — Tick/untick writes in `/do-pr-review`.** The existing skill flow: Step 4 (Plan Validation) → Step 4b (Plan Checkbox Validation) → Step 5 (Verification Checks) → Pre-Verdict Checklist → Rubric → Verdict derivation → Post the Review (the `gh pr review --approve` / `gh pr comment` call). The tick/untick step is added in `.claude/skills/do-pr-review/sub-skills/post-review.md` BETWEEN Step 2 ("Format Review Body") and Step 3 ("Post the Review"). It only fires for `APPROVED` verdicts.
+
+  **Per-criterion mapping (rubric → plan write):** Rubric item 1 produces a per-criterion verdict drawn from the four-value set `pass | fail | acknowledged | n/a`. The mapping to plan-file writes is:
+  - `pass` → `tick [x]` (criterion satisfied by diff)
+  - `fail` → `untick [ ]` (criterion not satisfied — closes the dishonest-tick loophole)
+  - `acknowledged` → `untick [ ]` (verified deferral disclosure exists, but criterion is still unmet — see Resolved Decision 2)
+  - `n/a` → no plan write (existing checkbox state preserved)
+
+  If the rubric is silent for a criterion (no value emitted), the helper is NOT invoked for that criterion. The plan never invents a "confidence" gradient — the four rubric values are the contract. (See C4 in Critique Results.)
+
+  **Special-case override (per C6):** If a criterion is BOTH covered by a verified disclosure AND demonstrably satisfied by the diff, the rubric MUST emit `pass`, not `acknowledged`. The disclosure is informational only. The plan-file write reflects the `pass` (tick `[x]`). The reviewer prompt at `.claude/skills/do-pr-review/sub-skills/code-review.md:205` is updated to make this explicit so a follow-up `/do-patch` round that satisfies a deferred criterion is not unticked again on the next review.
+
+  **Helper invocation and ambiguity handling:** For each criterion the rubric judged, the skill invokes `python -m tools.plan_checkbox_writer tick|untick {plan_path} --criterion "<exact text>"`. On `MATCH_AMBIGUOUS` or `MATCH_NOT_FOUND`, the existing checkbox state is preserved AND a comment line is appended to the review body: `> Could not auto-tick "{criterion text}" — please review manually.` (For `MATCH_NOT_FOUND` when the rubric judged `pass` or `fail`, emit the stronger warning: `> Rubric judged criterion "{text}" {verdict} but no matching item in plan — investigate.`)
+
+  **Commit-then-post-review ordering (BLOCKER B3 mitigation):** This invariant is non-negotiable and must be encoded verbatim in the skill prompt: **EVERY git operation that produces a tick MUST complete (with `git push origin HEAD:{branch}` succeeded) BEFORE the `gh pr review --approve` / `gh pr comment` call.** The exact sequence in `post-review.md` Step 2.5 (new step inserted between Step 2 and Step 3):
+  1. Iterate the rubric's per-criterion verdicts; invoke the helper for each `pass` / `fail` / `acknowledged`.
+  2. If any helper invocation actually mutated the plan file: `git add docs/plans/{slug}.md && git commit -m "docs(#{N}): sync plan checkboxes with review verdict" && git push origin HEAD:{branch}`. If the push fails (network, branch protection, conflict), the skill MUST abort posting the review, log the failure, and emit a `next_skill: /do-patch` outcome — NEVER silently approve without ticks.
+  3. Only after the push succeeds does Step 3 fire (the `gh pr review --approve` / `gh pr comment` call). The review's `created_at` is then strictly after the latest commit's `committer.date`, so do-merge.md's review-comment freshness filter (`.claude/commands/do-merge.md:149-158`) passes on the next merge attempt.
+
+  **Step does NOT fire when** the verdict is any of: `CHANGES_REQUESTED`, `BLOCKED_ON_CONFLICT`, `PR_CLOSED`, or any non-APPROVED state. The `Tier 2 (Tech Debt)` and `BLOCKER` paths produce no commits; this step is silent on those paths. If the rubric produced zero `pass`/`fail`/`acknowledged` values (all `n/a`), the helper is never invoked, no commit is made, and the original ordering is unaffected.
+
+  **Note:** The earlier draft phrase "fold into the review-comment commit" was incorrect — `/do-pr-review`'s post-review step calls the GitHub API (`gh pr review` / `gh pr comment`), which produces no git commit. There is no commit to fold into. The tick commit is its own separate commit, pushed to the PR branch BEFORE the API call. The phrase has been removed.
+- **Edit C — Tick on fix in `/do-patch`.** The builder agent (Step 2 prompt) is extended with both an instruction and a closed exclusion list:
+
+  > "If your fix addresses a specific criterion from the plan's criteria section (`## Acceptance Criteria` or `## Success Criteria`), identify which criterion (by exact text). Report this in your completion summary as `criterion_addressed: <text>` (or `criterion_addressed: null` if no clear match).
+  >
+  > **You MUST report `criterion_addressed: null` when** your fix only changes any of the following (cosmetic-only fixes never tick a criterion):
+  > 1. lint or formatting-only edits (whitespace, import order, ruff fixes)
+  > 2. test-file-only edits where the test exercises pre-existing behavior
+  > 3. comment-only or docstring-only edits
+  > 4. typo fixes
+  > 5. edits that touch only `__pycache__/`, `.gitignore`, `.gitkeep`, or generated artifacts
+  >
+  > Edits outside this list MAY tick a criterion if the criterion's text references the runtime behavior the edit changes. When uncertain, prefer `criterion_addressed: null`."
+
+  **Patch flow with new Step 3.5 ("Sync Plan Checkbox"):** The patch skill currently has Steps 1 (Parse Failure), 2 (Builder Agent), 3 (Verify Tests Pass), 4 (Report Completion). A new Step 3.5 is inserted between Step 3 and Step 4 — AFTER the test-pass verification but BEFORE Report Completion. Insertion point: between current `do-patch/SKILL.md:166` (end of Step 3) and the Step 4 heading.
+
+  **Step 3.5 logic (commit-the-fix-with-the-tick):**
+  1. Read the builder's reported `criterion_addressed` from Step 2's output.
+  2. If `criterion_addressed` is non-null and non-empty: run `python -m tools.plan_checkbox_writer tick {plan_path} --criterion "$VAL"`.
+  3. Stage everything: `git add -A`. This is critical — the same `git add -A` captures BOTH the builder's code edits AND the helper's plan-file edit (if any). The plan write and the code fix go into the SAME commit.
+  4. Commit: `git commit -m "fix(#{ISSUE_N}): {summary}"` if `criterion_addressed` was null OR the helper exited non-zero, OR `git commit -m "fix(#{ISSUE_N}): {summary} — addresses \"$VAL\""` if the helper succeeded.
+  5. Push: `git push origin HEAD:{branch}`.
+
+  **Helper-failure handling:** If the helper exits non-zero (`MATCH_AMBIGUOUS` / `MATCH_NOT_FOUND`), the commit STILL happens (with the code change only), the failure is logged to the patch skill's output, and the patch flow does NOT abort. The next `/do-pr-review` round will untick or re-tick as needed; over-claims are caught by the review's tick/untick contract (Edit B). This matches the test-then-commit invariant: a failed test in Step 3 aborts the flow before Step 3.5; an ambiguous criterion in Step 3.5 is non-fatal.
+
+  **Why same-commit (and not amend, not separate):** A separate "tick off" commit is exactly the symptom this plan deletes — it would invalidate the prior approval (review-comment freshness gate) and force re-review. `git commit --amend` is forbidden in `/do-patch` (every fix is a fresh commit, per do-patch's existing convention at `do-patch/SKILL.md:131` "Do NOT commit — the caller will handle commits"). The clean answer is one new commit per fix that contains both the code change and the criterion tick atomically.
+
+  **Builder authorship invariant:** `do-patch/SKILL.md:131` instructs the builder agent NOT to commit; the patch skill is the commit author. Step 3.5 preserves that — the helper invocation and the commit happen at the patch-skill level, not at the builder-agent level.
 - **Edit D — Helper module `tools/plan_checkbox_writer.py`.** Single-purpose CLI:
   ```
   python -m tools.plan_checkbox_writer tick   <plan_path> --criterion "<exact text>"
   python -m tools.plan_checkbox_writer untick <plan_path> --criterion "<exact text>"
-  python -m tools.plan_checkbox_writer status <plan_path>  # JSON: list of criteria + current tick state
+  python -m tools.plan_checkbox_writer status <plan_path>  # JSON: list of criteria + current tick state + matched heading
   ```
-  Behavior:
-  - `tick` / `untick` find the matching `- [ ] {text}` or `- [x] {text}` line in `## Acceptance Criteria` (case-insensitive match on the text portion, fuzzy whitespace tolerance) and rewrite it.
-  - Returns exit 0 if the line was found and updated (or already in target state).
-  - Returns exit 2 with a `MATCH_AMBIGUOUS` or `MATCH_NOT_FOUND` message if the criterion can't be uniquely identified — the caller skips the write and emits the manual-review comment.
-  - `status` outputs JSON `[{"criterion": "...", "checked": true|false}, ...]` for the LLM to consume in `/do-pr-review`.
-  The module is pure Python (no Markdown library), uses regex on the `## Acceptance Criteria` section block. No side effects beyond the file write. Easily unit-testable.
+
+  **Section discovery (B1 mitigation):** The helper finds the criteria section using the regex `r'^##\s+(Acceptance Criteria|Success Criteria)\s*$'` (case-sensitive on the canonical capitalization, whitespace-tolerant on the surrounding spacing). The section ends at the next `^##\s` heading or end-of-file. If BOTH headings appear in the same plan (rare but legal), the helper exits with `MATCH_AMBIGUOUS_SECTION` and stderr names both line numbers — caller must disambiguate manually. If neither heading appears, exits with `NO_CRITERIA_SECTION` (clearer than `MATCH_NOT_FOUND` for this distinct failure).
+
+  **Match algorithm (C3 mitigation — eliminates silent-corruption risk on near-duplicate criteria):**
+  1. Extract every line in the criteria section that matches `^[ \t]*- \[[ x]\] (.+)$`.
+  2. Normalize each criterion line's text portion: `re.sub(r'\s+', ' ', text.strip())`. Normalize the input `--criterion` value the same way. (Whitespace-only normalization — collapse runs of spaces, strip leading/trailing whitespace. Case-sensitive. NO word-level fuzziness, NO punctuation-stripping, NO substring matching.)
+  3. Compare normalized strings for exact equality.
+  4. If exactly one line matches: rewrite that line's checkbox. Exit 0.
+  5. If zero lines match: exit 2 with `MATCH_NOT_FOUND` and the input criterion echoed to stderr.
+  6. If 2+ lines match: exit 2 with `MATCH_AMBIGUOUS` and ALL matching line numbers echoed to stderr.
+
+  **Why exact-match-after-normalization, not fuzzy:** Plans frequently contain near-duplicates differing by punctuation or a single character (e.g., "Tests pass" vs "Tests pass.", or "`pytest tests/` passes" vs "`pytest tests/unit/` passes"). Word-level fuzziness would silently rewrite the wrong line and the LLM caller would never know (helper exits 0). Exact-match-after-whitespace-normalization is the strictest safe contract: catches innocuous indentation differences without admitting semantic-shifting matches.
+
+  **Other behavior:**
+  - Returns exit 0 if the line was found and updated (or already in target state — idempotent).
+  - Returns exit 2 with a clear stderr message on any failure mode (`MATCH_AMBIGUOUS`, `MATCH_NOT_FOUND`, `MATCH_AMBIGUOUS_SECTION`, `NO_CRITERIA_SECTION`, `MISSING_FILE`, `EMPTY_CRITERION`, `MALFORMED_PLAN`) — the caller skips the write and emits the appropriate manual-review comment.
+  - `status` outputs JSON `{"matched_heading": "Acceptance Criteria"|"Success Criteria", "criteria": [{"criterion": "...", "checked": true|false, "line": N}, ...]}`. The `matched_heading` field surfaces which heading was found so the LLM caller can disambiguate.
+
+  The module is pure Python (no Markdown library), uses regex on the criteria section block. No side effects beyond the file write. Easily unit-testable.
+- **Edit B-1 — Pre-Verdict Checklist terminology cleanup.** Rename Pre-Verdict Checklist item 1 to remove the collision between the colloquial "checked" (meaning "examined") and the new technical "checked" (meaning "ticked with `[x]`").
+  - In `.claude/skills/do-pr-review/sub-skills/code-review.md:257`: change `- **1. All plan acceptance criteria checked against diff** — PASS/FAIL/N/A — *notes*` to `- **1. All plan acceptance/success criteria validated against diff** — PASS/FAIL/N/A — *notes*`.
+  - Sweep `code-review.md` and `post-review.md` for any echoes of the old string (`grep -rn "All plan acceptance criteria checked"`); replace each with the new wording. The sweep is a build-time check, not a separate task.
+  - This rename is purely cosmetic but eliminates a real ambiguity introduced by Edit B's tick/untick semantics.
+
 - **Edit E — Docs cleanup.** Mechanical:
   - Delete `docs/features/plan-completion-gate.md`.
   - Remove the row from `docs/features/README.md:89`.
   - `git mv docs/plans/plan_completion_gate.md docs/plans/completed/plan_completion_gate.md` (catching up the spec drift the issue noted).
   - In `docs/sdlc/merge-troubleshooting.md`: delete the "Unchecked Plan Checkboxes" section (lines 50-76) and the COMPLETION_GATE row (line 242).
   - In `docs/features/self-healing-merge-gate.md`: remove the `[Plan Completion Gate]` cross-link (line 5), remove `COMPLETION_GATE` from the blocker-category enumeration (line 103), delete the `allow_unchecked` paragraph (lines 109-111).
+- **Edit B-2 — Acknowledged-deferral override (C6 mitigation).** In `.claude/skills/do-pr-review/sub-skills/code-review.md:205`, append to the Acknowledged Deferrals classification rule: "If a criterion is BOTH covered by a verified disclosure AND demonstrably satisfied by the diff, classify as `pass` — the disclosure is informational only. The plan-file write reflects the `pass` (tick `[x]`)." This prevents the oscillation pathway where `/do-patch` ticks a previously-deferred criterion (because the patch satisfies it) but the next `/do-pr-review` round unticks it again merely because the disclosure is still in the PR body. Add a unit test in `test_do_pr_review_tick_writes.py` covering this case.
+
 - **Edit F — PM persona + tests.**
   - In `config/personas/project-manager.md`: delete the COMPLETION_GATE row from the table at line 134 and the standalone `Never set allow_unchecked: true` paragraph at lines 157-160.
-  - In `tests/unit/test_pm_persona_guards.py`: remove `"COMPLETION_GATE"` from the `test_blocker_categories_enumerated` assertion list (line 175) and delete the `test_allow_unchecked_prohibited` method entirely (lines 185-189).
+  - In `tests/unit/test_pm_persona_guards.py`:
+    - `TestGateRecoveryBehavior::test_blocker_categories_enumerated` (line 175): remove `"COMPLETION_GATE"` from the assertion list. Other categories (PIPELINE_STATE, REVIEW_COMMENT, LOCKFILE, FULL_SUITE, MERGE_CONFLICT, PARTIAL_PIPELINE_STATE) remain.
+    - `TestGateRecoveryBehavior::test_allow_unchecked_prohibited` (lines 185-189): delete the method entirely.
+    - `TestMergeTroubleshootingDoc::test_seven_sections_present` (lines 206-217): remove `"Unchecked Plan Checkboxes"` from the asserted-headings tuple. The remaining six headings (`Merge Conflict`, `G4 Oscillation`, `Stale Review`, `Lockfile Drift`, `Flake False Regression`, `Partial Pipeline State`) stay. Update the method docstring and any "seven sections" comment to reflect the new count of six. (BLOCKER B2 mitigation.)
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/plan_checkbox_writer.py` — if the plan file is missing, malformed (no `## Acceptance Criteria` section), or unreadable, the CLI must exit non-zero with a clear error message (NOT silently no-op). Test: `test_plan_checkbox_writer_missing_file` and `test_plan_checkbox_writer_no_acceptance_section`.
-- [ ] `/do-pr-review` tick/untick step — if the helper exits with `MATCH_AMBIGUOUS` or `MATCH_NOT_FOUND`, the skill must emit the manual-review comment and continue (do NOT fail the review). The skill prompt must explicitly state this fallback.
+- [ ] `tools/plan_checkbox_writer.py` — if the plan file is missing, malformed, or unreadable, the CLI must exit non-zero with a clear error message (NOT silently no-op). Tests: `test_plan_checkbox_writer_missing_file`, `test_plan_checkbox_writer_no_criteria_section` (covers both heading variants absent), `test_plan_checkbox_writer_both_headings_present` (returns `MATCH_AMBIGUOUS_SECTION`).
+- [ ] `/do-pr-review` tick/untick step — if the helper exits with `MATCH_AMBIGUOUS`, `MATCH_NOT_FOUND`, `MATCH_AMBIGUOUS_SECTION`, or `NO_CRITERIA_SECTION`, the skill must emit the manual-review comment and continue (do NOT fail the review). The skill prompt must explicitly state this fallback for each error code.
+- [ ] `/do-pr-review` post-review push step — if `git push origin HEAD:{branch}` fails after the tick commit, the skill must abort posting the review and emit `next_skill: /do-patch`, NEVER silently approve without ticks. (B3 invariant.)
+- [ ] `/do-patch` Step 3.5 — if the helper exits non-zero, the patch flow continues with a code-only commit; the helper failure is logged but does NOT abort the patch.
 - [ ] No new `except Exception: pass` blocks in any touched file.
 
 ### Empty/Invalid Input Handling
-- [ ] `tools/plan_checkbox_writer.py tick --criterion ""` — must reject empty criterion text with non-zero exit.
-- [ ] If the plan file has zero `- [ ]` items in `## Acceptance Criteria` (already all ticked, or the section is empty), tick/untick is a no-op and exits 0.
-- [ ] If the rubric verdict is `APPROVED` but there are zero criteria in the plan, the skill skips the tick/untick step entirely without error.
+- [ ] `tools/plan_checkbox_writer.py tick --criterion ""` — must reject empty criterion text with non-zero exit `EMPTY_CRITERION`.
+- [ ] If the plan file's criteria section has zero `- [ ]` / `- [x]` items (empty section), tick/untick is a no-op and exits 0 with a stderr note.
+- [ ] If the rubric verdict is `APPROVED` but there are zero criteria in the plan, the skill skips the tick/untick step entirely without error and skips the tick commit.
+- [ ] Helper accepts BOTH `## Acceptance Criteria` and `## Success Criteria` headings. Test: `test_plan_checkbox_writer_finds_acceptance_heading`, `test_plan_checkbox_writer_finds_success_heading`. (B1 mitigation.)
+- [ ] Helper rejects ambiguous near-duplicate criteria (e.g., "Tests pass" vs "Tests pass.") with `MATCH_AMBIGUOUS` rather than silently picking one. Test: `test_plan_checkbox_writer_near_duplicate_criteria_ambiguous`. (C3 mitigation.)
 
 ### Error State Rendering
 - [ ] When the helper returns `MATCH_AMBIGUOUS`, the review comment includes the literal text `> Could not auto-tick "{criterion}" — please review manually.` (visible to humans on GitHub, not swallowed).
-- [ ] When the helper returns `MATCH_NOT_FOUND` for a criterion the rubric judged satisfied, that's a real bug (the criterion was on the rubric but isn't in the plan file). The skill emits a stronger warning: `> Rubric judged criterion satisfied but no matching item in plan — investigate.`
+- [ ] When the helper returns `MATCH_NOT_FOUND` for a criterion the rubric judged satisfied, the skill emits a stronger warning: `> Rubric judged criterion "{text}" {verdict} but no matching item in plan — investigate.`
+- [ ] When the helper returns `MATCH_AMBIGUOUS_SECTION` (both headings present), the review comment names both line numbers and asks the human to remove one heading.
+- [ ] When the helper returns `NO_CRITERIA_SECTION` for a plan that should have one, the skill logs a warning but does not block — some plans (small-appetite chores) may legitimately omit the section.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_pm_persona_guards.py::TestGateRecoveryBehavior::test_blocker_categories_enumerated` — UPDATE: remove `"COMPLETION_GATE"` from the assertion list. Other categories (PIPELINE_STATE, REVIEW_COMMENT, LOCKFILE, FULL_SUITE, MERGE_CONFLICT, PARTIAL_PIPELINE_STATE) remain.
 - [ ] `tests/unit/test_pm_persona_guards.py::TestGateRecoveryBehavior::test_allow_unchecked_prohibited` — DELETE: this test enforces that the PM persona explicitly forbids `allow_unchecked: true`. With the flag removed everywhere, the test has nothing to assert.
+- [ ] `tests/unit/test_pm_persona_guards.py::TestMergeTroubleshootingDoc::test_seven_sections_present` (lines 206-217) — UPDATE: remove `"Unchecked Plan Checkboxes"` from the asserted-headings tuple. The remaining six headings stay. Update the docstring/comments referring to "seven sections" to say "six". (B2 mitigation — without this the build breaks CI for everyone.)
 - [ ] `tests/unit/test_do_merge_baseline.py` — REVIEW: scan for any test asserting the existence of the Plan Completion Gate section in `do-merge.md` or the `allow_unchecked` keyword. If found, DELETE those assertions; if absent, no change. (Initial inspection suggests the file tests other gates — confirm at build time.)
 - [ ] `tests/unit/test_do_merge_review_filter.py:18,97` — NO CHANGE: these `GATES_FAILED` references are about the review-comment gate, not the plan-completion gate.
 - [ ] `tests/unit/test_validate_merge_guard.py` — REVIEW: `validate_merge_guard.py` is the merge-guard tokeniser referenced in `self-healing-merge-gate.md`. Confirm at build time whether it tokenises COMPLETION_GATE strings; if so, prune that token. Disposition: UPDATE if it does, no change if it doesn't.
-- [ ] `tests/unit/test_plan_checkbox_writer.py` — CREATE (new): unit tests for `tools/plan_checkbox_writer.py` covering tick / untick / status / missing-file / malformed / ambiguous / not-found / empty-criterion / no-op-when-already-ticked / case-insensitive-match / whitespace-tolerance.
-- [ ] `tests/unit/test_do_pr_review_tick_writes.py` — CREATE (new): test that when `/do-pr-review` emits APPROVED with a rubric verdict that judged a criterion satisfied, the helper is invoked with `tick` and the plan file ends up with `[x]` for that criterion. Critically, also test the **dishonest-tick unticking case**: a plan starts with `[x]` for an unsatisfied criterion, the rubric judges it FAIL, and the resulting plan-file mutation has `[ ]` for that criterion. (This is the issue's explicit verification requirement.)
-- [ ] `tests/unit/test_do_patch_ticks.py` — CREATE (new): simulate a patch run where the builder reports `criterion_addressed: "X"` after fixing a blocker. Assert the resulting commit has BOTH the code change AND the plan-file checkbox flip in the same commit (no separate "tick off" commit). Also test the null-criterion path: builder reports `criterion_addressed: null`, no plan write happens, commit contains only the code change.
+- [ ] `tests/unit/test_plan_checkbox_writer.py` — CREATE (new): unit tests for `tools/plan_checkbox_writer.py` covering tick / untick / status / missing-file / malformed / `MATCH_AMBIGUOUS` / `MATCH_NOT_FOUND` / `MATCH_AMBIGUOUS_SECTION` (both headings present) / `NO_CRITERIA_SECTION` / `EMPTY_CRITERION` / no-op-when-already-ticked / dual-heading recognition (`## Acceptance Criteria` and `## Success Criteria`) / whitespace-normalization (leading/trailing whitespace collapsed) / near-duplicate criteria rejected as ambiguous / case-sensitive exact match (NOT case-insensitive — see C3).
+- [ ] `tests/unit/test_do_pr_review_tick_writes.py` — CREATE (new): test that when `/do-pr-review` emits APPROVED with a rubric verdict that judged a criterion satisfied, the helper is invoked with `tick` and the plan file ends up with `[x]` for that criterion. Critically, also test the **dishonest-tick unticking case**: a plan starts with `[x]` for an unsatisfied criterion, the rubric judges it FAIL, and the resulting plan-file mutation has `[ ]` for that criterion. (Issue's explicit verification requirement.) Plus: test the **commit-then-post-review ordering invariant** — assert the tick commit is pushed BEFORE the `gh pr review --approve` call. Plus: test the **C6 disclosure-vs-pass override** — criterion has a verified disclosure but the diff satisfies it; rubric returns `pass`, helper writes `[x]`, no untick. Plus: test the `n/a` rubric value produces no plan write.
+- [ ] `tests/unit/test_do_patch_ticks.py` — CREATE (new): simulate a patch run where the builder reports `criterion_addressed: "X"` after fixing a blocker. Assert the resulting commit has BOTH the code change AND the plan-file checkbox flip in the same commit (no separate "tick off" commit). Also test the null-criterion path: builder reports `criterion_addressed: null`, no plan write happens, commit contains only the code change. Plus: test the **cosmetic-only exclusion** (C5) — builder fixes a typo, reports `criterion_addressed: null`, no plan write. Plus: test the **helper-failure-non-fatal path** — builder reports a criterion, helper exits with `MATCH_NOT_FOUND`, the patch commit STILL happens with the code change only.
 - [ ] `tests/unit/test_sdlc_skill_md_parity.py` — REVIEW: this asserts SKILL.md and Python router stay in sync. Confirm at build time it doesn't reference COMPLETION_GATE; prune if it does.
 
 ## Rabbit Holes
@@ -250,13 +328,15 @@ Initial review → blockers found → `/do-patch` fixes (and ticks the relevant 
 **Impact:** A test in `tests/` that we didn't audit asserts the presence of the COMPLETION_GATE string or the `allow_unchecked` flag. Build fails on CI.
 **Mitigation:** Test Impact section enumerates all known assertion sites. The build's test step (full pytest run) catches any missed sites. If a missed site is found at build time, add a test-impact entry and update the test in the same PR.
 
-### Risk 5: `/do-pr-review` writes a dishonest-tick untick when the criterion was correctly ticked by `/do-patch` mid-cycle
-**Impact:** `/do-patch` fixes a blocker, ticks criterion X. Re-review runs, the rubric is uncertain about X (because X depends on a sibling criterion not yet addressed), unticks X. Now criterion X looks unfinished even though it's done.
-**Mitigation:** The unticking only fires when the rubric judgment is **confident-fail or confident-acknowledged** — not when uncertain. Uncertain criteria preserve existing state. Plus: the next round's review will re-tick if the criterion is genuinely satisfied. No oscillation amplifier — at worst, one extra tick/untick cycle, which is bounded by the number of review rounds (typically ≤2).
+### Risk 5: `/do-pr-review` writes an incorrect untick when the criterion was correctly ticked by `/do-patch` mid-cycle
+**Impact:** `/do-patch` fixes a blocker, ticks criterion X. Re-review runs, the rubric returns `fail` or `acknowledged` for X (despite the patch satisfying it), unticks X. Now criterion X looks unfinished even though it's done.
+**Mitigation:** The four-value rubric contract is explicit (Edit B): `pass` ticks, `fail` unticks, `acknowledged` unticks, `n/a` does nothing. There is no "confidence" state — if the LLM cannot judge a criterion, the rubric forces a value, and `n/a` (no plan write) is the safe default. Plus: the disclosure-vs-pass override (Edit B-2 / C6 mitigation) ensures that a satisfied criterion with a stale disclosure is classified `pass`, not `acknowledged`. Plus: the next round's review will re-tick if the criterion is genuinely satisfied. Bounded oscillation: at worst, one extra tick/untick cycle, capped by `MAX_REVIEW_ROUNDS` in the SDLC pipeline.
 
 ## Race Conditions
 
-No race conditions identified — all operations are synchronous and single-threaded. The helper module performs read-modify-write on a single file; both `/do-pr-review` and `/do-patch` invoke it serially from the agent's command sequence. The PR branch is a serialized single-author timeline (the agent is the only writer); there is no concurrent commit risk inside a single SDLC pipeline run.
+No concurrency races — all operations are synchronous and single-threaded. The helper module performs read-modify-write on a single file; both `/do-pr-review` and `/do-patch` invoke it serially from the agent's command sequence. The PR branch is a serialized single-author timeline (the agent is the only writer); there is no concurrent commit risk inside a single SDLC pipeline run.
+
+**Crash-recovery caveat (N2):** A worker crash between the helper's file-write and the subsequent `git add && git commit` leaves the plan file in a dirty working-tree state. Mitigation: the next session's `/do-build` lifecycle commit-step or a manual `git restore docs/plans/{slug}.md` recovers; this matches the existing crash-recovery story for any other plan-touching skill (e.g., `/do-build` writing spike results). No new mitigation needed.
 
 ## No-Gos (Out of Scope)
 
@@ -312,11 +392,14 @@ These are unit-test-style integration tests (they exercise the prompt-output con
 - [ ] `docs/sdlc/merge-troubleshooting.md` is reviewed and any reference to the plan-completion gate is removed or rewritten. (One reference confirmed by grep.)
 - [ ] After the change, no "tick off completed plan items" / "check off completed deliverables" docs-only commit appears in any new PR's merge history. Verified by inspecting `git log` of the next 3 PRs after this one merges.
 - [ ] Issue #1186 receives a comment from this PR's merge linking back here and noting that #1186 Finding 2 is superseded by this work.
-- [ ] `tools/plan_checkbox_writer.py` exists with `tick`, `untick`, and `status` subcommands and is unit-tested.
-- [ ] `tests/unit/test_pm_persona_guards.py` no longer asserts COMPLETION_GATE or `allow_unchecked` (one assertion updated, one test deleted).
+- [ ] `tools/plan_checkbox_writer.py` exists with `tick`, `untick`, and `status` subcommands, accepts BOTH `## Acceptance Criteria` and `## Success Criteria` headings, and is unit-tested.
+- [ ] `tests/unit/test_pm_persona_guards.py` no longer asserts COMPLETION_GATE or `allow_unchecked`, and `test_seven_sections_present` no longer asserts `Unchecked Plan Checkboxes` (one assertion updated for blocker categories, one test deleted, one assertion updated for sections).
 - [ ] PM persona at `config/personas/project-manager.md` no longer references COMPLETION_GATE in its blocker→remediation mapping or contains the `allow_unchecked` paragraph.
+- [ ] `.claude/skills/do-pr-review/sub-skills/code-review.md` Pre-Verdict Checklist item 1 reads "validated against diff", not "checked against diff" (B-1).
+- [ ] `.claude/skills/do-pr-review/sub-skills/post-review.md` has a new Step 2.5 enforcing the commit-then-post-review ordering invariant.
+- [ ] `.claude/skills/do-patch/SKILL.md` has a new Step 3.5 placing the criterion-tick in the same commit as the code fix.
 - [ ] `python -m ruff check .` and `python -m ruff format --check .` exit 0.
-- [ ] `pytest tests/` passes with the updated test file and new test files.
+- [ ] `pytest tests/` passes with the updated test files and new test files.
 
 ## Team Orchestration
 
@@ -350,14 +433,16 @@ builder, validator (default Tier 1).
 - **Task ID**: build-helper
 - **Depends On**: none
 - **Validates**: tests/unit/test_plan_checkbox_writer.py (create)
-- **Informed By**: spike-3 (helper API decided)
+- **Informed By**: spike-3, spike-4 (helper API + dual-heading requirement)
 - **Assigned To**: helper-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Implement `tools/plan_checkbox_writer.py` with `tick` / `untick` / `status` subcommands.
-- Use regex to parse the `## Acceptance Criteria` section block.
-- Return non-zero on `MATCH_AMBIGUOUS` / `MATCH_NOT_FOUND` / missing file / malformed / empty criterion.
-- Write `tests/unit/test_plan_checkbox_writer.py` covering the failure-path test strategy items above.
+- Use regex `r'^##\s+(Acceptance Criteria|Success Criteria)\s*$'` to find the criteria section start; section ends at next `^##\s` heading. Accept BOTH headings (B1 mitigation).
+- Match algorithm: extract `- [ ]`/`- [x]` lines, normalize whitespace (`re.sub(r'\s+', ' ', text.strip())`), require exact case-sensitive equality after normalization. Multiple matches → `MATCH_AMBIGUOUS`. Zero matches → `MATCH_NOT_FOUND`. Both headings present in plan → `MATCH_AMBIGUOUS_SECTION`. No heading present → `NO_CRITERIA_SECTION`. (C3 mitigation.)
+- Return non-zero on every failure mode: `MATCH_AMBIGUOUS`, `MATCH_NOT_FOUND`, `MATCH_AMBIGUOUS_SECTION`, `NO_CRITERIA_SECTION`, `MISSING_FILE`, `EMPTY_CRITERION`, `MALFORMED_PLAN`. Stderr message names the failure mode and the offending input.
+- `status` subcommand outputs `{"matched_heading": "...", "criteria": [{"criterion": "...", "checked": bool, "line": N}, ...]}`.
+- Write `tests/unit/test_plan_checkbox_writer.py` covering the failure-path test strategy items above (dual heading, near-duplicate ambiguity, exact-match-after-normalization, etc.).
 
 ### 2. Edit `/do-merge` (delete gate)
 - **Task ID**: build-edit-merge
@@ -374,40 +459,52 @@ builder, validator (default Tier 1).
 - **Task ID**: build-edit-pr-review
 - **Depends On**: build-helper
 - **Validates**: tests/unit/test_do_pr_review_tick_writes.py (create)
-- **Informed By**: spike-1 (per-criterion verdict already happens in step 4b)
+- **Informed By**: spike-1 (per-criterion verdict already happens in step 4b), spike-4 (dual-heading requirement), Critique B3/C2/C4/C6
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add a "Plan Checkbox Sync" step in `.claude/skills/do-pr-review/sub-skills/code-review.md` between the rubric and the post-review steps, fired only on `APPROVED` verdicts.
-- For each criterion in `## Acceptance Criteria`, invoke `python -m tools.plan_checkbox_writer tick` or `untick` based on the rubric verdict.
-- On `MATCH_AMBIGUOUS` / `MATCH_NOT_FOUND`, emit the manual-review comment in the review body and skip the write.
-- Commit the plan changes to the PR branch (fold into the review-comment commit if one exists).
-- Write the dishonest-tick-unticking test case (key verification per acceptance criteria).
+- Insert a new Step 2.5 ("Plan Checkbox Sync") in `.claude/skills/do-pr-review/sub-skills/post-review.md` BETWEEN Step 2 ("Format Review Body") and Step 3 ("Post the Review"). Fires only on `APPROVED` verdicts.
+- For each criterion the rubric judged (`pass` / `fail` / `acknowledged` / `n/a`), invoke `python -m tools.plan_checkbox_writer tick` (for `pass`), `untick` (for `fail` and `acknowledged`), or skip (for `n/a`). The four-value mapping is the contract — no "confidence" gradient. (C4 mitigation.)
+- Search the plan for either `## Acceptance Criteria` or `## Success Criteria` — the helper handles both.
+- On `MATCH_AMBIGUOUS` / `MATCH_NOT_FOUND` / `MATCH_AMBIGUOUS_SECTION` / `NO_CRITERIA_SECTION`, emit the appropriate manual-review comment in the review body and skip the write for that criterion. Do NOT abort the review.
+- **Commit-then-post-review ordering (B3 invariant — non-negotiable):**
+  1. After all helper invocations complete, if any plan file was mutated: `git add docs/plans/{slug}.md && git commit -m "docs(#{N}): sync plan checkboxes with review verdict" && git push origin HEAD:{branch}`.
+  2. If push fails (network / branch protection / conflict), abort the review post and emit `next_skill: /do-patch`. Do NOT call `gh pr review --approve` without ticks pushed.
+  3. Only on push success does Step 3 fire (the `gh pr review --approve` / `gh pr comment` call).
+- Edit B-1 (in `code-review.md:257`): rename Pre-Verdict Checklist item 1 to `**1. All plan acceptance/success criteria validated against diff** — PASS/FAIL/N/A — *notes*`. Sweep `code-review.md` and `post-review.md` for `grep -rn "All plan acceptance criteria checked"` and replace each. (C2 mitigation.)
+- Edit B-2 (in `code-review.md:205`): append the disclosure-vs-pass override sentence so a satisfied-but-disclosed criterion is classified `pass`, not `acknowledged`. (C6 mitigation.)
+- Write `tests/unit/test_do_pr_review_tick_writes.py`: dishonest-tick unticking, `n/a` no-write, commit-then-post-review ordering, disclosure-vs-pass override, `MATCH_AMBIGUOUS_SECTION` graceful skip, push-failure aborts review.
 
 ### 4. Edit `/do-patch` (tick on fix)
 - **Task ID**: build-edit-patch
 - **Depends On**: build-helper
 - **Validates**: tests/unit/test_do_patch_ticks.py (create)
-- **Informed By**: spike-2 (builder has full plan + review comments)
+- **Informed By**: spike-2 (builder has full plan + review comments), Critique C1/C5
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Extend the Step 2 builder prompt in `.claude/skills/do-patch/SKILL.md` to instruct the builder to report `criterion_addressed: <text>` or `criterion_addressed: null` after the fix.
-- Add a Step 3.5 ("Sync Plan Checkbox") that reads the builder's report and invokes the helper if non-null.
-- Ensure the plan-file edit is staged and committed in the SAME commit as the code change (no separate tick-off commit).
-- Write the test verifying single-commit behavior.
+- Embed the closed cosmetic-only exclusion list in the builder prompt (C5 mitigation): builder MUST report `criterion_addressed: null` for (1) lint/formatting-only edits, (2) test-file-only edits where the test exercises pre-existing behavior, (3) comment/docstring-only edits, (4) typo fixes, (5) edits touching only `__pycache__` / `.gitignore` / `.gitkeep` / generated artifacts.
+- Insert a new Step 3.5 ("Sync Plan Checkbox") in `.claude/skills/do-patch/SKILL.md` BETWEEN Step 3 (test-pass verification) and Step 4 (Report Completion). Insertion point: between current `do-patch/SKILL.md:166` and the Step 4 heading. (C1 mitigation — explicit insertion point.)
+- Step 3.5 logic: read builder's `criterion_addressed`; if non-null and non-empty, run `python -m tools.plan_checkbox_writer tick {plan_path} --criterion "$VAL"`. Then `git add -A && git commit -m "fix(#{N}): {summary}{ — addresses \"$VAL\"}" && git push origin HEAD:{branch}`. The plan file edit is captured by the same `git add -A` as the code change → atomic single commit. (No `--amend`, no separate "tick off" commit.)
+- Helper failure (`MATCH_AMBIGUOUS` / `MATCH_NOT_FOUND` / others): commit STILL happens with the code change only; failure logged but non-fatal. The next `/do-pr-review` round will reconcile via tick/untick.
+- Test ordering: the test-pass check in Step 3 happens BEFORE the commit in Step 3.5, so a failing fix never produces a commit.
+- Write `tests/unit/test_do_patch_ticks.py`: single-commit invariant (code + plan in one commit), null-criterion path (no plan write), cosmetic-only exclusion (typo fix → null → no plan write), helper-failure-non-fatal path.
 
 ### 5. PM persona + tests cleanup
 - **Task ID**: build-edit-pm-tests
-- **Depends On**: none
-- **Validates**: tests/unit/test_pm_persona_guards.py passes after edits; grep returns zero matches in `config/personas/project-manager.md` for "COMPLETION_GATE" and "allow_unchecked"
-- **Informed By**: freshness check (locations enumerated)
+- **Depends On**: build-docs-cleanup (because `test_seven_sections_present` must be updated AFTER `merge-troubleshooting.md` is edited; otherwise the test temporarily fails on a half-state)
+- **Validates**: `pytest tests/unit/test_pm_persona_guards.py` passes after edits; grep returns zero matches in `config/personas/project-manager.md` for "COMPLETION_GATE" and "allow_unchecked"
+- **Informed By**: freshness check (locations enumerated), Critique B2
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false
 - Remove the COMPLETION_GATE row from the table at `config/personas/project-manager.md:134`.
 - Remove the `Never set allow_unchecked: true` paragraph at lines 157-160.
-- In `tests/unit/test_pm_persona_guards.py`: remove `"COMPLETION_GATE"` from the `test_blocker_categories_enumerated` assertion list; delete the `test_allow_unchecked_prohibited` method.
+- In `tests/unit/test_pm_persona_guards.py`:
+  - `TestGateRecoveryBehavior::test_blocker_categories_enumerated` (line 175): remove `"COMPLETION_GATE"` from the assertion list.
+  - `TestGateRecoveryBehavior::test_allow_unchecked_prohibited` (lines 185-189): delete the method entirely.
+  - `TestMergeTroubleshootingDoc::test_seven_sections_present` (lines 206-217): remove `"Unchecked Plan Checkboxes"` from the asserted-headings tuple. The remaining six headings stay. Update the docstring/comments referring to "seven sections" to say "six". (B2 mitigation.)
 
 ### 6. Docs cleanup
 - **Task ID**: build-docs-cleanup
@@ -447,14 +544,165 @@ builder, validator (default Tier 1).
 | COMPLETION_GATE removed from PM persona | `grep -c "COMPLETION_GATE" config/personas/project-manager.md` | output 0 |
 | plan-completion-gate.md deleted | `test ! -f docs/features/plan-completion-gate.md` | exit code 0 |
 | plan_completion_gate.md migrated | `test -f docs/plans/completed/plan_completion_gate.md` | exit code 0 |
-| Helper module exists | `python -m tools.plan_checkbox_writer status docs/plans/drop-plan-completion-gate.md` | exit code 0 |
+| Helper module exists (Acceptance heading) | `python -m tools.plan_checkbox_writer status docs/plans/sdlc-1065.md` | exit code 0 (plan uses `## Acceptance Criteria`) |
+| Helper module exists (Success heading) | `python -m tools.plan_checkbox_writer status docs/plans/drop-plan-completion-gate.md` | exit code 0 (plan uses `## Success Criteria`) |
+| Pre-Verdict Checklist renamed | `grep -c "All plan acceptance criteria checked" .claude/skills/do-pr-review/sub-skills/code-review.md .claude/skills/do-pr-review/sub-skills/post-review.md` | output 0 (B-1 sweep) |
+| Seven-section test updated | `grep -c "Unchecked Plan Checkboxes" tests/unit/test_pm_persona_guards.py` | output 0 (B2 mitigation) |
 | Helper tests exist | `test -f tests/unit/test_plan_checkbox_writer.py` | exit code 0 |
 | Review tick/untick test exists | `test -f tests/unit/test_do_pr_review_tick_writes.py` | exit code 0 |
 | Patch tick test exists | `test -f tests/unit/test_do_patch_ticks.py` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: docs/plans/drop-plan-completion-gate.md
+**Plan commit**: d74db08f
+**Artifact hash (sha256 of plan)**: b8815ef044c7a5e52c5c405e90452cc40678c4546228eb5bc758b388fd8f2433
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor + structural checks
+**Findings**: 11 total (3 blockers, 6 concerns, 2 nits)
+
+### Blockers
+
+#### B1. Helper module targets `## Acceptance Criteria` but the repo overwhelmingly uses `## Success Criteria` (138 plans vs 1)
+- **Severity**: BLOCKER
+- **Critics**: Consistency Auditor, Skeptic, Operator
+- **Location**: Solution → Edits B/C/D (lines 147, 167, 173, 184, 188), Spike-3 (line 136), Failure Path Test Strategy (lines 202, 207-208), No-Gos (line 267), Step-by-Step Tasks (lines 358, 382), Verification (line 450)
+- **Finding**: The plan exclusively names `## Acceptance Criteria` as the section the helper module reads/writes, yet `grep -l "^## Success Criteria" docs/plans/*.md | wc -l` returns 138 plans using "Success Criteria" against only 1 plan using "Acceptance Criteria" (`docs/plans/sdlc-1065.md`). The plan-under-edit itself uses `## Success Criteria` at line 305. The helper would `MATCH_NOT_FOUND` on virtually every real plan, silently skipping every tick/untick and emitting a manual-review comment for every criterion — net effect: the new behavior never actually fires.
+- **Suggestion**: Specify that the helper accepts BOTH `## Acceptance Criteria` and `## Success Criteria` headings (case-insensitive, whitespace-tolerant). Update Edits B, C, D, the spike-3 finding, the Step-by-Step Tasks, the Verification table, and the test names to reflect "criteria" sections by either heading. Add an explicit unit test that asserts the helper finds criteria under either heading. Note: `code-review.md:209-210` already names BOTH headings as the targets of Step 4b, so the new helper must do the same to stay symmetric with the validator that produced the verdict.
+- **Implementation Note**: Use a regex like `r'^##\s+(Acceptance Criteria|Success Criteria)\s*$'` to anchor the section start; section ends at the next `^## ` heading. The helper's `status` subcommand should also surface which heading it matched so the LLM caller can disambiguate when both happen to be present (rare but legal — fail loudly with `MATCH_AMBIGUOUS` and a stderr message naming both sections).
+
+#### B2. Plan deletes `## Unchecked Plan Checkboxes` from `merge-troubleshooting.md` but does NOT update the test that asserts that heading exists
+- **Severity**: BLOCKER
+- **Critics**: Adversary, Operator, Skeptic
+- **Location**: Edit E (line 193), Documentation section (line 294), Test Impact section (lines 217-225)
+- **Finding**: `tests/unit/test_pm_persona_guards.py:206-217` (`TestMergeTroubleshootingDoc::test_seven_sections_present`) asserts that exactly seven `## ` headings — including `Unchecked Plan Checkboxes` — exist in `docs/sdlc/merge-troubleshooting.md`. The plan removes that section in Edit E but the Test Impact section enumerates only `test_blocker_categories_enumerated` and `test_allow_unchecked_prohibited` from that file. `test_seven_sections_present` will fail at build time, breaking CI for everyone, and the plan's structural test-coverage claim is incomplete.
+- **Suggestion**: Add an explicit Test Impact entry: `tests/unit/test_pm_persona_guards.py::TestMergeTroubleshootingDoc::test_seven_sections_present` — UPDATE: remove `"Unchecked Plan Checkboxes"` from the asserted-headings tuple, leaving the other six. Verify the assertion list count adjusts to six. This is a separate test class (`TestMergeTroubleshootingDoc`) from the gate-recovery class — easy to miss in a textual scan. Test Impact must enumerate ALL three classes that read this file: `TestGateRecoveryBehavior`, `TestMergeTroubleshootingDoc`, and any other test that reads `docs/sdlc/merge-troubleshooting.md`.
+- **Implementation Note**: The exact code to change is the tuple at `tests/unit/test_pm_persona_guards.py:208-217` — drop the `"Unchecked Plan Checkboxes",` line. Do NOT delete the whole `test_seven_sections_present` method; the other six headings (`Merge Conflict`, `G4 Oscillation`, `Stale Review`, `Lockfile Drift`, `Flake False Regression`, `Partial Pipeline State`) remain valid. The test docstring "seven sections" comment becomes wrong — change to "six sections" or just delete the count.
+
+#### B3. Tick-commit ordering is unspecified and "fold into the review-comment commit" is incoherent — risks re-introducing the very oscillation this plan claims to remove
+- **Severity**: BLOCKER
+- **Critics**: Adversary, Operator, Archaeologist
+- **Location**: Edit B technical approach (lines 167-172, especially line 172: "If there is already a review comment commit in this round, fold the plan write into that commit (no separate commit).")
+- **Finding**: (1) Edit B never specifies whether the tick commit must be pushed BEFORE the `gh pr review --approve` / `gh pr comment` call. The do-merge.md review-comment gate filters reviews where `created_at < LATEST_COMMIT_DATE` (`.claude/commands/do-merge.md:149-158`) — if the review is posted first, then tick commit pushed, the review immediately becomes stale, and the next `/do-merge` invocation sees no valid Approved review, forcing re-review. This is exactly the "tick-off oscillation" symptom the plan claims to delete. (2) The phrase "fold into the review-comment commit if one exists" is semantically confused: `/do-pr-review`'s post-review step (sub-skill `post-review.md`) does not produce a git commit — it calls `gh pr review` / `gh pr comment` (a GitHub API operation, not a git operation). There is no "review-comment commit" to fold into. The current Tier 2 ("Changes Requested — Tech Debt") path also produces no commit; commits come only from `/do-patch`. (3) For the BLOCKER-found path (`Tier 1`), the tick step never fires anyway because the plan only fires on APPROVED — but the plan should say so explicitly under "when does the tick step NOT fire."
+- **Suggestion**: Rewrite Edit B's commit-ordering paragraph to: (a) For APPROVED verdicts on a non-self-authored PR, the order is: write tick edits to the plan file → `git add docs/plans/{slug}.md && git commit -m "docs(#{N}): sync plan checkboxes with review verdict" && git push origin {branch}` → THEN call `gh pr review --approve --body "$REVIEW_BODY"`. The review's `created_at` is then strictly after the latest commit's `committer.date`, so the review-comment gate's freshness filter passes. (b) For self-authored PRs (which use `gh pr comment` rather than `gh pr review`), the same order applies and the same invariant holds. (c) Delete the "fold into the review-comment commit" sentence — it is incoherent. (d) Add an explicit "this step does NOT fire when verdict is `CHANGES_REQUESTED`, `BLOCKED_ON_CONFLICT`, or `PR_CLOSED`" line for clarity.
+- **Implementation Note**: The invariant to enforce in the skill prompt: "EVERY git operation that produces a tick MUST complete (with `git push origin HEAD:{branch}` succeeded) BEFORE the `gh pr review --approve` / `gh pr comment` call." A natural place to anchor this is `post-review.md` Step 3 (line 217-238) — the tick logic should run between Step 2 ("Format Review Body") and Step 3 ("Post the Review"). If the push fails (network, branch protection), the skill must abort posting the review and emit a `next_skill: /do-patch` outcome, not silently approve without ticks.
+
+### Concerns
+
+#### C1. Edit C's same-commit-as-fix invariant conflicts with /do-patch's actual commit flow
+- **Severity**: CONCERN
+- **Critics**: Adversary, Skeptic
+- **Location**: Edit C (lines 173-176), Step-by-Step Tasks step 4 (lines 393-398)
+- **Finding**: The plan's Edit C requires the plan-file edit to be in the SAME commit as the code change (line 174: "The plan-file edit is included in the same `git add -A && git commit` as the code fix"). However, `do-patch/SKILL.md:131` instructs the builder agent: "Do NOT commit — the caller will handle commits." That means the patch skill (not the builder) is the commit author. There is no current concrete commit step in `do-patch/SKILL.md` Step 4 ("Report Completion") — Step 4 just reports success and does not commit. To honor "same commit" the patch skill must (a) introduce or expose the commit step explicitly, (b) stage `tools/plan_checkbox_writer.py`'s output alongside the builder's edits, and (c) commit them atomically. The plan does not specify where this commit happens or who owns it.
+- **Suggestion**: Add a new Step 3.5 in `do-patch/SKILL.md` that runs AFTER the test-pass verification but BEFORE Step 4 ("Report Completion"): (1) read builder's reported `criterion_addressed`, (2) if non-null and non-empty, run `python -m tools.plan_checkbox_writer tick {plan_path} --criterion "$VAL"`, (3) `git add -A && git commit -m "fix(#{N}): {one-line summary}{ — addresses \"$VAL\"}" && git push`. If the helper exits non-zero (`MATCH_AMBIGUOUS` / `MATCH_NOT_FOUND`), the commit still happens (with the code change only) and the failure is logged but does not abort the patch flow. Be explicit: the test-run in Step 3 happens BEFORE the commit so a failed fix never produces a commit; the commit only happens once tests pass.
+- **Implementation Note**: The exact location to add Step 3.5 is between current `do-patch/SKILL.md:166` (end of Step 3) and `do-patch/SKILL.md:167` (Step 4). The commit message format should be `fix(#{ISSUE_N}): {summary}` plus an optional ` — addresses "$CRITERION"` suffix when the helper succeeded. Use `--allow-empty` only if the builder reported no edits (rare; should not happen because Step 3 would have caught no-op fixes). Do NOT use `git commit --amend` — every fix is a fresh commit.
+
+#### C2. Pre-Verdict Checklist item 1 wording becomes ambiguous after Edit B
+- **Severity**: CONCERN
+- **Critics**: Consistency Auditor, User
+- **Location**: Pre-Verdict Checklist item 1 (in `code-review.md:257`, not in the plan body but referenced by Edit B at line 167)
+- **Finding**: The Pre-Verdict Checklist item 1 reads "**1. All plan acceptance criteria checked against diff** — PASS/FAIL/N/A — *notes*". The word "checked" was previously colloquial ("examined"). After Edit B, the same word collides with the new technical meaning ("ticked with `[x]`"). A reviewer could read this either way and there is no specification in the plan for which meaning is now intended. Worse: if a reviewer reads "checked" as "ticked", item 1 becomes circular — the rubric verdict drives the tick, and item 1 then asks whether the tick happened, which is a side-effect of item 1 itself.
+- **Suggestion**: In Edit B, add a sub-bullet: "Edit B-1 (terminology cleanup): rename Pre-Verdict Checklist item 1 from `All plan acceptance criteria checked against diff` to `All plan acceptance/success criteria validated against diff`." The word "validated" carries the original colloquial meaning unambiguously and avoids collision with the new tick semantics. Update `code-review.md:257` and `post-review.md:42-43` accordingly.
+- **Implementation Note**: The exact strings to replace are in `.claude/skills/do-pr-review/sub-skills/code-review.md:257` and any echo of the same string in `post-review.md`. Use a `grep -rn "All plan acceptance criteria checked"` sweep before committing to catch any duplicates.
+
+#### C3. Edit B's "fuzzy whitespace tolerance" + "case-insensitive match" creates a silent-corruption risk on near-duplicate criteria
+- **Severity**: CONCERN
+- **Critics**: Adversary
+- **Location**: Edit D (line 184: "case-insensitive match on the text portion, fuzzy whitespace tolerance"), Failure Path Test Strategy
+- **Finding**: If a plan contains two near-duplicate criteria (e.g., "Tests pass" and "Tests pass." — one with a trailing period), the helper's case-insensitive + fuzzy-whitespace match could match the wrong line on rewrite. Plans frequently have similar-but-not-identical criteria (e.g., "`pytest tests/` passes" and "`pytest tests/unit/` passes"). A wrong rewrite would silently tick the wrong criterion and is invisible to the LLM caller (helper exits 0).
+- **Suggestion**: Tighten the match contract: helper requires EXACT text match by default; "fuzzy whitespace" tolerance is limited to leading/trailing whitespace and run-of-spaces collapse, never word-level fuzziness. If multiple lines case-insensitively match the same criterion text, return `MATCH_AMBIGUOUS` with both line numbers in the stderr message. Add a unit test for this exact case (two criteria differing only by trailing punctuation or a single character).
+- **Implementation Note**: Match algorithm: (1) Normalize the section block: `re.sub(r'\s+', ' ', line.strip())`. (2) Normalize the input criterion the same way. (3) If exactly one line matches, rewrite it. (4) If zero match, exit `MATCH_NOT_FOUND`. (5) If 2+ match, exit `MATCH_AMBIGUOUS` with line numbers.
+
+#### C4. Risk 5 mitigation handwaves "confident-fail" without specifying how confidence is computed
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Risks → Risk 5 (lines 253-255)
+- **Finding**: Risk 5 says "the unticking only fires when the rubric judgment is **confident-fail or confident-acknowledged** — not when uncertain." But the rubric values are `pass`/`fail`/`acknowledged`/`n/a` — there is no "confidence" gradient. Either the criterion is `fail` (untick) or it isn't. The plan invents a confidence threshold the rubric doesn't expose, leaving the actual mitigation undefined.
+- **Suggestion**: Either (a) drop the word "confident" — if the rubric says `fail`, the helper unticks; if the rubric is silent or n/a, the existing state is preserved. Or (b) add a fifth rubric value like `uncertain` that explicitly maps to "no plan write" — but this is an over-engineering risk. Pick (a). Update Risk 5's mitigation to read: "The unticking fires when the rubric value for that criterion is `fail` or `acknowledged`. Rubric values of `pass` or `n/a` produce no plan write. The rubric does not expose 'uncertainty' as a distinct state — if the LLM cannot judge, the rubric forces a value (typically `n/a`), and `n/a` means no plan write."
+- **Implementation Note**: The mapping is: `pass` → `tick [x]`; `fail` → `untick [ ]`; `acknowledged` → `untick [ ]` (per Resolved Decision 2); `n/a` → no plan write. This four-value mapping is the contract — codify it in the skill prompt and in Edit B's bullet list.
+
+#### C5. Edit C lets the builder over-fit by reporting `criterion_addressed` even on cosmetic fixes
+- **Severity**: CONCERN
+- **Critics**: User, Skeptic
+- **Location**: Edit C (lines 173-176), Risk 2 (lines 241-243)
+- **Finding**: A builder that fixes a typo, a lint warning, or a `__pycache__` cleanup blocker has no business ticking an acceptance criterion. Risk 2's mitigation depends on the next `/do-pr-review` round catching the over-claim by unticking — but that round only re-runs because the patch creates a new commit, and the plan's whole point is to reduce review oscillation. The over-claim → tick → re-review-untick cycle is one full review round of waste per over-claim.
+- **Suggestion**: Strengthen the builder prompt to require that `criterion_addressed` is non-null ONLY when the fix changes runtime behavior referenced by the criterion. Cosmetic changes (typo, formatting, comment) → `criterion_addressed: null`. Add an explicit instruction: "If your fix only changes whitespace, comments, formatting, or test-only lines, `criterion_addressed: null`." Codify this in the Step 2 builder prompt extension as a closed list of exclusions.
+- **Implementation Note**: The exclusion list to embed in the prompt: "(1) lint/formatting-only edits, (2) test-file-only edits where the test is checking pre-existing behavior, (3) comment-only edits, (4) typo fixes, (5) edits that touch only `__pycache__` / `.gitignore` / `.gitkeep`." Anything else may legitimately tick a criterion if the criterion text references that behavior.
+
+#### C6. Acknowledged-deferred unticking creates a new oscillation pathway
+- **Severity**: CONCERN
+- **Critics**: Adversary, Archaeologist
+- **Location**: Edit B's third bullet (line 170), Resolved Decision 2 (line 467)
+- **Finding**: Per Resolved Decision 2, an acknowledged-deferred criterion gets `[ ]` after Approval. But on the NEXT review round, the same rubric value (`acknowledged`) produces the same untick — which is a no-op (it's already unticked). However, if `/do-patch` later ticks that criterion (because a follow-up fix actually resolved the deferred work), the next `/do-pr-review` round must NOT untick it again merely because the disclosure is still in the PR body. The plan doesn't specify how the rubric distinguishes "still-deferred" from "now-resolved" once the patch happens.
+- **Suggestion**: Add to Edit B: "If a criterion has a verified disclosure AND the diff now appears to satisfy it, the rubric value is `pass`, not `acknowledged` — the disclosure becomes stale. The reviewer prompt must be explicit that satisfied criteria override their own disclosures." Add a unit test: criterion with disclosure + diff now satisfies it → rubric returns `pass`, helper writes `[x]`, no untick.
+- **Implementation Note**: Update `code-review.md:205` (the Acknowledged Deferrals classification rule) to add: "If a criterion is BOTH covered by a verified disclosure AND demonstrably satisfied by the diff, classify as `pass` — the disclosure is informational only. The plan-file write reflects the `pass` (tick `[x]`)."
+
+### Nits
+
+#### N1. Critique Results section header existed but with no findings — operator confusion risk
+- **Severity**: NIT
+- **Critics**: Operator
+- **Location**: Critique Results section (lines 455-457 before this rewrite)
+- **Finding**: The plan ships with a `## Critique Results` section that contains only an HTML comment placeholder. This is the second critique pass; the first one had verdict NEEDS REVISION but the findings were not persisted. A future operator inspecting just the plan file (not the SDLC verdict store) cannot tell that prior critique happened, what it found, and whether revisions occurred.
+- **Suggestion**: Whenever a re-critique runs, append a dated entry rather than overwriting silently. (This critique pass has done so — the timestamp and commit are in the header above.)
+
+#### N2. "No race conditions identified" oversells the analysis
+- **Severity**: NIT
+- **Critics**: Adversary
+- **Location**: Race Conditions section (line 259)
+- **Finding**: The race-condition analysis claims "all operations are synchronous and single-threaded" — but `/do-pr-review` and `/do-patch` are skill flows that execute under an Agent that can be steered, killed, or restarted mid-flow. A worker crash between "write `[x]` to plan file" and "git commit" leaves a dirty working tree the next session will inherit. This is not a race in the traditional sense, but the section's blanket dismissal is too strong.
+- **Suggestion**: Reword: "No concurrency races; however, mid-flow worker crashes between the helper's file-write and the subsequent git commit can leave a dirty working tree. Mitigation: the next session's `/do-build` lifecycle commit-step or a manual `git restore docs/plans/{slug}.md` recovers; this matches the existing crash-recovery story for any other plan-touching skill."
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All four required sections present and non-empty (Documentation, Update System, Agent Integration, Test Impact). |
+| Task numbering | PASS | Tasks 1-7 numbered consecutively, no gaps. |
+| Dependencies valid | PASS | All `Depends On` references resolve to a valid task ID or `none`. |
+| File paths exist | PARTIAL | All currently-referenced files exist; `tools/plan_checkbox_writer.py`, `tests/unit/test_plan_checkbox_writer.py`, `tests/unit/test_do_pr_review_tick_writes.py`, `tests/unit/test_do_patch_ticks.py`, `docs/features/plan-checkbox-writers.md`, `docs/plans/completed/plan_completion_gate.md` are NEW (intentional creates). |
+| Prerequisites met | PASS | Plan declares no prerequisites; consistent with the chore type. |
+| Cross-references | PARTIAL | Solution → Edits B/C/D say `## Acceptance Criteria`; Success Criteria heading at line 305 says `## Success Criteria`; the inconsistency is the substance of B1. |
+
+### Verdict
+
+**NEEDS REVISION** — 3 blockers must be resolved before build:
+
+- **B1**: Helper must accept both `## Acceptance Criteria` AND `## Success Criteria` headings, or no real plan ever gets a tick.
+- **B2**: Test Impact must enumerate `test_seven_sections_present` so the build doesn't break CI.
+- **B3**: Edit B must specify the tick-commit-then-post-review ordering and delete the incoherent "fold into the review-comment commit" sentence.
+
+The 6 concerns and 2 nits are recorded for the revision pass. Once B1-B3 are addressed in the plan body, the next `/do-plan-critique` run is expected to return `READY TO BUILD (with concerns)` if the concerns remain unaddressed, or `READY TO BUILD (no concerns)` if the concerns are also folded into the plan during the revision pass.
+
+---
+
+*Critique recorded 2026-04-29 against plan commit `d74db08f`, plan sha256 `b8815ef044c7a5e52c5c405e90452cc40678c4546228eb5bc758b388fd8f2433`. Prior critique on this plan (verdict NEEDS REVISION) failed to persist findings; this pass replaces it.*
+
+---
+
+### Revision Notes (applied 2026-04-29)
+
+This revision pass addresses ALL three blockers and ALL six concerns from the critique above. Frontmatter `revision_applied: true` set so the SDLC router (Row 4c) routes the next dispatch to `/do-build`.
+
+**Blockers resolved:**
+- **B1 (dual heading):** spike-4 added documenting the 138-vs-1 heading mismatch. Edits B, C, D, Step-by-Step Tasks, Verification table, and Test Impact updated to require the helper accept both `## Acceptance Criteria` and `## Success Criteria`. Helper returns `MATCH_AMBIGUOUS_SECTION` if both appear and `NO_CRITERIA_SECTION` if neither.
+- **B2 (test_seven_sections_present):** Test Impact and Edit F (Step 5) now enumerate the `TestMergeTroubleshootingDoc::test_seven_sections_present` update — drop `"Unchecked Plan Checkboxes"` from the asserted-headings tuple, leaving six headings.
+- **B3 (commit-then-post-review ordering):** Edit B's technical approach rewritten with an explicit non-negotiable invariant: every tick commit MUST `git push origin HEAD:{branch}` succeed BEFORE the `gh pr review --approve` / `gh pr comment` call. The earlier "fold into the review-comment commit" sentence has been removed. Push failure aborts the review post and emits `next_skill: /do-patch`.
+
+**Concerns resolved:**
+- **C1 (do-patch commit flow):** Edit C and Step 4 (Step-by-Step Tasks) now specify the exact insertion point for the new Step 3.5 in `do-patch/SKILL.md` (between Step 3 and Step 4) and the precise commit sequence (`git add -A && git commit && git push`). Builder authorship invariant preserved (helper invocation and commit happen at the patch-skill level).
+- **C2 (Pre-Verdict Checklist terminology):** New Edit B-1 added — rename `code-review.md:257` from "checked" to "validated". Sweep `code-review.md` and `post-review.md` for echoes.
+- **C3 (helper match contract):** Edit D's match algorithm tightened to exact case-sensitive equality after whitespace normalization. Near-duplicate criteria differing by punctuation or case now return `MATCH_AMBIGUOUS` (not silent corruption). Test added: `test_plan_checkbox_writer_near_duplicate_criteria_ambiguous`.
+- **C4 (Risk 5 confidence wording):** Risk 5 mitigation rewritten to use the four-value rubric contract (`pass | fail | acknowledged | n/a`) explicitly. The word "confidence" is removed; `n/a` is the silent-default that produces no plan write.
+- **C5 (cosmetic-only over-claims):** Edit C and Step 4 now embed a closed exclusion list in the builder prompt (lint, test-only, comments, typos, generated artifacts). Test added: `test_do_patch_ticks` covers the typo-fix → null path.
+- **C6 (acknowledged-deferred oscillation):** New Edit B-2 added — append the disclosure-vs-pass override to `code-review.md:205` so a satisfied-but-disclosed criterion classifies as `pass`, not `acknowledged`. Test added: `test_do_pr_review_tick_writes` covers the override.
+
+**Nits resolved:**
+- **N1:** Revision Notes (this block) preserves the audit trail. Future re-critiques are instructed to append dated entries.
+- **N2:** Race Conditions section now includes a crash-recovery caveat covering the dirty-working-tree window between helper write and git commit.
+
+**Net structural impact on the plan:** New spike-4 added; Edits B-1 and B-2 introduced; Step 5's task dependencies updated (now depends on `build-docs-cleanup` to avoid breaking `test_seven_sections_present` mid-build); Test Impact gained 4 new entries; Verification table gained 4 new rows; Failure Path Test Strategy expanded to cover the new error codes.
+
+The next `/do-plan-critique` run is expected to return `READY TO BUILD` (no concerns or with-concerns disposition acceptable).
 
 ---
 
