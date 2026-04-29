@@ -15,6 +15,18 @@ Claude Code CLI Session
         |                               v
         |                         Bloom dedup --> Memory.safe_save(importance=6.0)
         |
+        |   (then, same hook)
+        |
+        +-- UserPromptSubmit hook --> memory_bridge.prefetch()
+        |                               |
+        |                               v
+        |                         Strip PM boilerplate, gates (length, trivial)
+        |                               |
+        |                               v
+        |                         _recall_with_query(prompt) --> <thought> blocks
+        |                                                        via hookSpecificOutput
+        |                                                        (additionalContext)
+        |
         +-- PostToolUse hook --> memory_bridge.recall()
         |                           |
         |                           v
@@ -57,6 +69,33 @@ The `user_prompt_submit.py` hook fires on every user prompt in Claude Code. It p
 4. Saves qualifying prompts as Memory records with importance 6.0 (same as Telegram human messages)
 
 Registered in `.claude/settings.json` with a 15-second timeout, running after the calendar prompt hook.
+
+### First-turn Prefetch (UserPromptSubmit Hook)
+
+After `ingest()`, the same `user_prompt_submit.py` hook calls `memory_bridge.prefetch(session_id, prompt, cwd)` (added in issue [#1180](https://github.com/tomcounsell/ai/issues/1180)). Unlike `recall()` -- which buffers tool calls and queries every `WINDOW_SIZE=3` -- prefetch runs immediately so the agent receives memory thoughts on the very first turn, before any tool fires.
+
+The hook emits the result as a `hookSpecificOutput` JSON object on stdout:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "<thought>...</thought>"}}
+```
+
+Claude Code prepends `additionalContext` to the agent's first system message.
+
+**Behavior:**
+
+1. Strips `FROM:`/`SCOPE:`/`MESSAGE:` boilerplate from worker-spawned PM/Teammate prompts so BM25 ranks against the user payload, not the routing template.
+2. Applies the same `MIN_PROMPT_LENGTH` and `TRIVIAL_PATTERNS` gates as `ingest()`.
+3. Runs a single `_recall_with_query(prompt, project_key, exclude_ids)` call -- no clustering, since the prompt is already a coherent query.
+4. Suppresses the deja vu fallback (`bloom_check_emit_dejavu=False`) -- novel-territory thoughts on the user-visible first turn are pure noise (issue [#627](https://github.com/tomcounsell/ai/issues/627)).
+5. Times the call; logs a warning when elapsed exceeds `PREFETCH_LATENCY_WARN_MS = 200` (in `config/memory_defaults.py`).
+6. Appends surfaced memory IDs to the shared sidecar `injected[]` list, preserving the `count` and `buffer` fields owned by `recall()`.
+
+**De-dup contract:** subsequent PostToolUse `recall()` cycles read the same sidecar and skip any memory ID already in `injected[]`. The SDK-side `agent/memory_hook.check_and_inject()` (which fires inside worker-spawned subprocesses) accepts an optional `claude_uuid` parameter and reads the same sidecar via `_load_hooks_sidecar_injected_ids()`. The watchdog hook in `agent/health_check.py` passes Claude Code's `input_data["session_id"]` as `claude_uuid` so SDK-side recall never re-surfaces a prefetched memory.
+
+**`claude_uuid="unknown"` guard:** when `input_data["session_id"]` is absent, Claude Code defaults `claude_uuid` to the literal `"unknown"`. The SDK-side loader skips sidecar reads when `claude_uuid` is empty or equals `"unknown"`, preventing every malformed-payload session from sharing `data/sessions/unknown/memory_buffer.json`.
+
+**Failure mode:** silent. `prefetch()` returns `None` on any error; the hook prints nothing and prompt submission continues unaffected.
 
 ### Recall (PostToolUse Hook)
 
@@ -169,6 +208,7 @@ All four public functions in `memory_bridge.py` accept a `cwd` parameter:
 |---------------|-------------|------------|
 | `recall(session_id, tool_name, tool_input, cwd)` | `post_tool_use.py` | `hook_input["cwd"]` |
 | `ingest(content, cwd)` | `user_prompt_submit.py` | `hook_input["cwd"]` |
+| `prefetch(session_id, prompt, cwd)` | `user_prompt_submit.py` | `hook_input["cwd"]` |
 | `extract(session_id, transcript_path, cwd)` | `stop.py` | `hook_input["cwd"]` (read once, passed to both calls) |
 | `post_merge_extract(pr_number, cwd)` | `stop.py` | same `cwd` read above |
 

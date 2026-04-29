@@ -5,9 +5,15 @@ Reads the user's prompt from stdin hook input, applies quality filtering
 (minimum length, trivial pattern detection), and saves qualifying prompts
 as Memory records via memory_bridge.ingest().
 
+After ingest, runs memory_bridge.prefetch() to surface up to 3 relevant
+<thought> blocks against the user's prompt before any tool fires. The
+result is emitted as a hookSpecificOutput JSON object on stdout, which
+Claude Code prepends to the agent's first system message.
+
 All operations fail silently -- memory errors never block prompt submission.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -34,6 +40,7 @@ def main():
         return
 
     cwd = hook_input.get("cwd", "")
+    session_id = hook_input.get("session_id", "")
 
     # Ingest into memory (quality filter and dedup handled inside)
     try:
@@ -43,9 +50,30 @@ def main():
     except Exception:
         pass  # Silent failure -- never block prompt submission
 
+    # Prefetch memories matching the prompt and emit as additionalContext.
+    # This runs before any tool call so the agent has memory context on
+    # the very first turn. Gates short / trivial prompts and strips PM
+    # boilerplate internally; returns None when no thoughts to surface.
+    if session_id:
+        try:
+            from hook_utils.memory_bridge import prefetch
+
+            prefetch_result = prefetch(session_id, prompt, cwd=cwd)
+            if prefetch_result:
+                # Use the explicit hookSpecificOutput shape (matches the
+                # form used in agent/health_check.py for PostToolUse).
+                payload = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": prefetch_result,
+                    }
+                }
+                print(json.dumps(payload))
+        except Exception:
+            pass  # Silent failure -- never block prompt submission
+
     # Create AgentSession for local CLI session (one per session, idempotent)
     try:
-        session_id = hook_input.get("session_id", "")
         if session_id:
             from hook_utils.memory_bridge import (
                 load_agent_session_sidecar,

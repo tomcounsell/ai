@@ -59,6 +59,14 @@ MAX_THOUGHTS_PER_INJECTION = 3
 INJECTION_WINDOW_SIZE = 3  # tool calls per window
 INJECTION_BUFFER_SIZE = 9  # total tool calls in rolling buffer
 
+# Latency budget for the user-facing prefetch path
+# (.claude/hooks/hook_utils/memory_bridge.py::prefetch).
+# Warn-level log is emitted when a single prefetch query exceeds this.
+# The PostToolUse multi-cluster path uses a 15ms budget; prefetch is a
+# single-call user-facing query that runs once per UserPromptSubmit, so
+# a more generous budget is appropriate.
+PREFETCH_LATENCY_WARN_MS = 200
+
 # Deja vu thresholds -- control when vague recognition messages fire
 # Shared between memory_bridge.py (hooks path) and agent/memory_hook.py (SDK path)
 DEJA_VU_BLOOM_HIT_THRESHOLD = 3  # min bloom hits for "seen something related" thought

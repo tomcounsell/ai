@@ -507,3 +507,176 @@ class TestPhantomTwinPrevention:
         mock_create.assert_not_called()
         # Sidecar was not re-written (the re-activation branch didn't find anything)
         mock_save_sidecar.assert_not_called()
+
+
+class TestPrefetchWiring:
+    """Tests for the UserPromptSubmit -> prefetch wiring (issue #1180)."""
+
+    def test_main_invokes_prefetch_after_ingest(self, monkeypatch):
+        """main() calls memory_bridge.prefetch with session_id, prompt, cwd."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "investigate the auth flow that broke after PR 800 deployment",
+            "session_id": "claude-uuid-pf-1",
+            "cwd": "/tmp",
+        }
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest") as mock_ingest,
+            patch("hook_utils.memory_bridge.prefetch", return_value=None) as mock_prefetch,
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value={}),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+        ):
+            hook.main()
+
+        # Both ingest and prefetch fire on a fresh prompt
+        mock_ingest.assert_called_once()
+        mock_prefetch.assert_called_once()
+        call_args, call_kwargs = mock_prefetch.call_args
+        assert call_args[0] == "claude-uuid-pf-1"
+        assert call_args[1] == "investigate the auth flow that broke after PR 800 deployment"
+        assert call_kwargs.get("cwd") == "/tmp"
+
+    def test_main_emits_hookspecific_output_when_prefetch_returns_string(self, monkeypatch, capsys):
+        """When prefetch returns thoughts, main() prints hookSpecificOutput JSON."""
+        import json as _json
+
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "investigate the auth flow that broke after PR 800 deployment",
+            "session_id": "claude-uuid-pf-2",
+            "cwd": "/tmp",
+        }
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch(
+                "hook_utils.memory_bridge.prefetch",
+                return_value="<thought>auth notes</thought>",
+            ),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value={}),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+        ):
+            hook.main()
+
+        captured = capsys.readouterr()
+        # Locate a JSON line in stdout that has the hookSpecificOutput shape
+        parsed = None
+        for line in captured.out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and "hookSpecificOutput" in parsed:
+                break
+            parsed = None
+
+        assert parsed is not None, f"No hookSpecificOutput JSON in stdout: {captured.out!r}"
+        hso = parsed["hookSpecificOutput"]
+        assert hso.get("hookEventName") == "UserPromptSubmit"
+        assert hso.get("additionalContext") == "<thought>auth notes</thought>"
+
+    def test_main_no_output_when_prefetch_returns_none(self, monkeypatch, capsys):
+        """When prefetch returns None, main() does not print any JSON payload."""
+        import json as _json
+
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "investigate the auth flow that broke after PR 800 deployment",
+            "session_id": "claude-uuid-pf-3",
+            "cwd": "/tmp",
+        }
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.prefetch", return_value=None),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value={}),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+        ):
+            hook.main()
+
+        captured = capsys.readouterr()
+        for line in captured.out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            assert "hookSpecificOutput" not in parsed, (
+                f"Unexpected hookSpecificOutput on stdout: {captured.out!r}"
+            )
+
+    def test_main_swallows_prefetch_exception(self, monkeypatch):
+        """A raised exception in prefetch is swallowed -- main() still completes."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "investigate the auth flow that broke after PR 800 deployment",
+            "session_id": "claude-uuid-pf-4",
+            "cwd": "/tmp",
+        }
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch(
+                "hook_utils.memory_bridge.prefetch",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value={}),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+        ):
+            # Must not raise
+            hook.main()
+
+    def test_main_skips_prefetch_when_session_id_missing(self, monkeypatch):
+        """Without session_id, prefetch is not invoked (no sidecar to write)."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "investigate the auth flow that broke after PR 800 deployment",
+            # no session_id
+            "cwd": "/tmp",
+        }
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.prefetch") as mock_prefetch,
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value={}),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+        ):
+            hook.main()
+
+        mock_prefetch.assert_not_called()

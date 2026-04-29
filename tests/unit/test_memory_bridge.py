@@ -666,3 +666,653 @@ class TestIngestPassesCwd:
         assert captured_cwd == ["/home/user/myproject"], (
             f"Expected _get_project_key called with '/home/user/myproject', got {captured_cwd}"
         )
+
+
+class TestStripPmBoilerplate:
+    """Test _strip_pm_boilerplate() helper."""
+
+    def test_strips_full_boilerplate(self):
+        from hook_utils.memory_bridge import _strip_pm_boilerplate
+
+        prompt = (
+            "FROM: valor-session (dev)\n"
+            "SCOPE: This session is scoped to the message below from this sender.\n"
+            "MESSAGE: investigate auth bug from PR 800"
+        )
+        result = _strip_pm_boilerplate(prompt)
+        assert result == "investigate auth bug from PR 800"
+
+    def test_strips_multiline_scope(self):
+        from hook_utils.memory_bridge import _strip_pm_boilerplate
+
+        prompt = (
+            "FROM: valor-session (pm)\n"
+            "SCOPE: line one\n"
+            "of multi-line scope\n"
+            "MESSAGE: actual user message"
+        )
+        result = _strip_pm_boilerplate(prompt)
+        assert result == "actual user message"
+
+    def test_returns_unchanged_when_no_boilerplate(self):
+        from hook_utils.memory_bridge import _strip_pm_boilerplate
+
+        prompt = "Just a regular user prompt without any boilerplate"
+        result = _strip_pm_boilerplate(prompt)
+        assert result == prompt
+
+    def test_handles_empty_string(self):
+        from hook_utils.memory_bridge import _strip_pm_boilerplate
+
+        assert _strip_pm_boilerplate("") == ""
+
+    def test_handles_non_string(self):
+        from hook_utils.memory_bridge import _strip_pm_boilerplate
+
+        assert _strip_pm_boilerplate(None) is None
+
+
+class TestFormatThoughtBlocks:
+    """Test _format_thought_blocks() helper."""
+
+    def test_empty_records(self):
+        from hook_utils.memory_bridge import _format_thought_blocks
+
+        thoughts, entries = _format_thought_blocks([])
+        assert thoughts == []
+        assert entries == []
+
+    def test_formats_records(self):
+        from hook_utils.memory_bridge import _format_thought_blocks
+
+        r1 = MagicMock()
+        r1.memory_id = "m1"
+        r1.content = "first"
+        r2 = MagicMock()
+        r2.memory_id = "m2"
+        r2.content = "second"
+
+        thoughts, entries = _format_thought_blocks([r1, r2])
+        assert thoughts == ["<thought>first</thought>", "<thought>second</thought>"]
+        assert entries == [
+            {"memory_id": "m1", "content": "first"},
+            {"memory_id": "m2", "content": "second"},
+        ]
+
+    def test_excludes_ids(self):
+        from hook_utils.memory_bridge import _format_thought_blocks
+
+        r1 = MagicMock()
+        r1.memory_id = "m1"
+        r1.content = "first"
+        r2 = MagicMock()
+        r2.memory_id = "m2"
+        r2.content = "second"
+
+        thoughts, entries = _format_thought_blocks([r1, r2], exclude_ids={"m1"})
+        assert thoughts == ["<thought>second</thought>"]
+        assert entries == [{"memory_id": "m2", "content": "second"}]
+
+    def test_max_results_caps_output(self):
+        from hook_utils.memory_bridge import _format_thought_blocks
+
+        records = []
+        for i in range(5):
+            r = MagicMock()
+            r.memory_id = f"m{i}"
+            r.content = f"thought_{i}"
+            records.append(r)
+
+        thoughts, entries = _format_thought_blocks(records, max_results=2)
+        assert len(thoughts) == 2
+        assert len(entries) == 2
+
+    def test_skips_empty_content(self):
+        from hook_utils.memory_bridge import _format_thought_blocks
+
+        r1 = MagicMock()
+        r1.memory_id = "m1"
+        r1.content = ""
+        r2 = MagicMock()
+        r2.memory_id = "m2"
+        r2.content = "valid"
+
+        thoughts, entries = _format_thought_blocks([r1, r2])
+        assert thoughts == ["<thought>valid</thought>"]
+
+
+class TestRecallWithQuery:
+    """Test the pure-retrieval _recall_with_query() helper."""
+
+    def test_empty_query_returns_empty(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        result = _recall_with_query("", project_key="test")
+        assert result == []
+
+    def test_non_string_query_returns_empty(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        result = _recall_with_query(None, project_key="test")
+        assert result == []
+
+    def test_returns_records_with_bloom_hits(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        record = MagicMock()
+        record.memory_id = "rec-1"
+        record.content = "stored memory"
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch("utils.keyword_extraction._apply_category_weights", wraps=lambda r: r),
+        ):
+            result = _recall_with_query("auth deployment migration", project_key="test")
+        assert isinstance(result, list)
+        assert result == [record]
+
+    def test_zero_bloom_hits_returns_empty_when_dejavu_disabled(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with patch("models.memory.Memory", mock_memory_cls):
+            result = _recall_with_query(
+                "novel words alpha beta gamma delta epsilon zeta eta theta",
+                project_key="test",
+                bloom_check_emit_dejavu=False,
+            )
+        assert result == []
+
+    def test_zero_bloom_hits_emits_dejavu_when_enabled(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with patch("models.memory.Memory", mock_memory_cls):
+            result = _recall_with_query(
+                "novel alpha beta gamma delta epsilon zeta eta theta iota kappa",
+                project_key="test",
+                bloom_check_emit_dejavu=True,
+            )
+        assert isinstance(result, str)
+        assert "new territory" in result
+
+    def test_exclude_ids_filtered_from_results(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        r1 = MagicMock()
+        r1.memory_id = "skip-me"
+        r1.content = "should be excluded"
+        r2 = MagicMock()
+        r2.memory_id = "keep-me"
+        r2.content = "should be kept"
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[r1, r2]),
+            patch("utils.keyword_extraction._apply_category_weights", wraps=lambda r: r),
+        ):
+            result = _recall_with_query(
+                "auth deployment migration",
+                project_key="test",
+                exclude_ids={"skip-me"},
+            )
+        assert result == [r2]
+
+    def test_retrieve_memories_exception_returns_empty(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch(
+                "agent.memory_retrieval.retrieve_memories",
+                side_effect=RuntimeError("redis down"),
+            ),
+        ):
+            result = _recall_with_query("auth deployment", project_key="test")
+        assert result == []
+
+    def test_bloom_check_disabled_skips_filter(self):
+        from hook_utils.memory_bridge import _recall_with_query
+
+        record = MagicMock()
+        record.memory_id = "rec-1"
+        record.content = "content"
+
+        # When bloom_check=False, Memory is still imported but the bloom
+        # field is not consulted. retrieve_memories is called directly.
+        mock_memory_cls = MagicMock()
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[record]),
+            patch("utils.keyword_extraction._apply_category_weights", wraps=lambda r: r),
+        ):
+            result = _recall_with_query("auth", project_key="test", bloom_check=False)
+        assert result == [record]
+        # Bloom field was never consulted
+        mock_memory_cls._meta.fields.get.assert_not_called()
+
+
+class TestPrefetch:
+    """Test the prefetch() function (UserPromptSubmit path)."""
+
+    def test_prefetch_empty_prompt(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        assert prefetch("sess", "") is None
+        assert prefetch("sess", None) is None
+
+    def test_prefetch_short_prompt(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        # Below MIN_PROMPT_LENGTH=50
+        assert prefetch("sess", "too short") is None
+
+    def test_prefetch_trivial_prompt(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        # Trivial pattern (after lowercase + strip), padded with spaces to meet length
+        assert prefetch("sess", "yes" + " " * 60) is None
+
+    def test_prefetch_no_window_gate(self, tmp_path, monkeypatch):
+        """Prefetch fires immediately -- no WINDOW_SIZE gating."""
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        called = []
+
+        def mock_recall_with_query(query, project_key, **kwargs):
+            called.append(query)
+            return []
+
+        with (
+            patch(
+                "hook_utils.memory_bridge._recall_with_query",
+                side_effect=mock_recall_with_query,
+            ),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            # First call should hit retrieval, no buffering
+            prefetch("sess", "x" * 80)
+            assert len(called) == 1
+
+    def test_prefetch_no_bloom_hits_returns_none(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        with (
+            patch("hook_utils.memory_bridge._recall_with_query", return_value=[]),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            result = prefetch("sess", "this is a substantive prompt about auth flow")
+        assert result is None
+
+    def test_prefetch_never_emits_dejavu(self, tmp_path, monkeypatch):
+        """Prefetch passes bloom_check_emit_dejavu=False to _recall_with_query."""
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        captured_kwargs = {}
+
+        def mock_recall(*, query, project_key, exclude_ids=None, **kwargs):
+            captured_kwargs.update(kwargs)
+            return []
+
+        with (
+            patch(
+                "hook_utils.memory_bridge._recall_with_query",
+                side_effect=mock_recall,
+            ),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            prefetch("sess", "a long enough prompt about authentication flow refactor")
+
+        assert captured_kwargs.get("bloom_check_emit_dejavu") is False
+
+    def test_prefetch_no_retrieval_results(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        with (
+            patch("hook_utils.memory_bridge._recall_with_query", return_value=[]),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            result = prefetch("sess", "a substantive prompt with enough words to pass length")
+        assert result is None
+
+    def test_prefetch_returns_thoughts(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        record = MagicMock()
+        record.memory_id = "m1"
+        record.content = "auth flow notes from PR 800"
+
+        with (
+            patch("hook_utils.memory_bridge._recall_with_query", return_value=[record]),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            result = prefetch(
+                "sess",
+                "investigate auth bug that broke after PR 800 deployment",
+            )
+        assert result is not None
+        assert "<thought>auth flow notes from PR 800</thought>" in result
+
+    def test_prefetch_strips_pm_boilerplate(self, tmp_path, monkeypatch):
+        """Prefetch strips FROM:/SCOPE:/MESSAGE: prefix before querying."""
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        captured_query = []
+
+        def mock_recall(*, query, project_key, **kwargs):
+            captured_query.append(query)
+            return []
+
+        with (
+            patch(
+                "hook_utils.memory_bridge._recall_with_query",
+                side_effect=mock_recall,
+            ),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            prompt = (
+                "FROM: valor-session (dev)\n"
+                "SCOPE: This session is scoped to the message below from this sender.\n"
+                "MESSAGE: investigate auth bug that broke after PR 800 deployment cycle"
+            )
+            prefetch("sess", prompt)
+
+        assert len(captured_query) == 1
+        assert captured_query[0] == (
+            "investigate auth bug that broke after PR 800 deployment cycle"
+        )
+
+    def test_prefetch_writes_sidecar_preserving_count_and_buffer(self, tmp_path, monkeypatch):
+        """Prefetch must not clobber count or buffer set by recall()."""
+        from hook_utils.memory_bridge import _load_sidecar, _save_sidecar, prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        # Simulate prior recall() state
+        _save_sidecar(
+            "sess",
+            {
+                "count": 7,
+                "buffer": [{"tool_name": "Read", "tool_input": {"file_path": "x"}}],
+                "injected": [{"memory_id": "old-1", "content": "old thought"}],
+            },
+        )
+
+        record = MagicMock()
+        record.memory_id = "new-1"
+        record.content = "fresh thought"
+
+        with (
+            patch("hook_utils.memory_bridge._recall_with_query", return_value=[record]),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            prefetch("sess", "investigate auth bug that broke after PR 800 deployment")
+
+        state = _load_sidecar("sess")
+        assert state["count"] == 7
+        assert state["buffer"] == [{"tool_name": "Read", "tool_input": {"file_path": "x"}}]
+        # injected[] now contains both the old and new entries
+        injected_ids = [item["memory_id"] for item in state["injected"]]
+        assert "old-1" in injected_ids
+        assert "new-1" in injected_ids
+
+    def test_prefetch_excludes_already_injected_ids(self, tmp_path, monkeypatch):
+        """Prefetch passes existing sidecar injected[] memory_ids as exclude_ids."""
+        from hook_utils.memory_bridge import _save_sidecar, prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        _save_sidecar(
+            "sess",
+            {
+                "count": 0,
+                "buffer": [],
+                "injected": [{"memory_id": "already-shown", "content": "old"}],
+            },
+        )
+
+        captured_exclude = []
+
+        def mock_recall(*, query, project_key, exclude_ids=None, **kwargs):
+            captured_exclude.append(exclude_ids)
+            return []
+
+        with (
+            patch(
+                "hook_utils.memory_bridge._recall_with_query",
+                side_effect=mock_recall,
+            ),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            prefetch("sess", "this is a substantive prompt about auth flow refactor")
+
+        assert captured_exclude == [{"already-shown"}]
+
+    def test_prefetch_returns_string_when_sidecar_write_fails(self, tmp_path, monkeypatch):
+        """Prefetch still returns thoughts when sidecar save fails."""
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        record = MagicMock()
+        record.memory_id = "m1"
+        record.content = "valid thought"
+
+        # Make the second _save_sidecar call (the one inside prefetch)
+        # raise; the prefetch should still return the formatted thought.
+        with (
+            patch("hook_utils.memory_bridge._recall_with_query", return_value=[record]),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+            patch(
+                "hook_utils.memory_bridge._save_sidecar",
+                side_effect=OSError("disk full"),
+            ),
+        ):
+            result = prefetch(
+                "sess",
+                "investigate auth bug that broke after PR 800 deployment",
+            )
+        assert result is not None
+        assert "<thought>valid thought</thought>" in result
+
+    def test_prefetch_logs_warning_when_slow(self, tmp_path, monkeypatch, caplog):
+        """When elapsed exceeds PREFETCH_LATENCY_WARN_MS, a warning is logged."""
+        import logging
+
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        # Force time.monotonic() to advance by 500ms between start and end
+        # of the _recall_with_query call inside prefetch().
+        timestamps = iter([0.0, 0.5])  # 500ms elapsed
+
+        def fake_monotonic():
+            try:
+                return next(timestamps)
+            except StopIteration:
+                return 0.5
+
+        with (
+            patch("hook_utils.memory_bridge.time.monotonic", side_effect=fake_monotonic),
+            patch("hook_utils.memory_bridge._recall_with_query", return_value=[]),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+            caplog.at_level(logging.WARNING, logger="hook_utils.memory_bridge"),
+        ):
+            prefetch("sess", "a long enough prompt about authentication flow refactor")
+
+        # Look for the latency warning in caplog
+        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("prefetch took" in m for m in warning_messages)
+
+    def test_prefetch_returns_none_on_recall_with_query_string(self, tmp_path, monkeypatch):
+        """If _recall_with_query returns a string (deja vu), prefetch returns None."""
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        with (
+            patch(
+                "hook_utils.memory_bridge._recall_with_query",
+                return_value="<thought>some deja vu</thought>",
+            ),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            result = prefetch(
+                "sess",
+                "investigate auth bug that broke after PR 800 deployment",
+            )
+        assert result is None
+
+    def test_prefetch_returns_none_on_exception(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        with patch(
+            "hook_utils.memory_bridge._recall_with_query",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = prefetch(
+                "sess",
+                "investigate auth bug that broke after PR 800 deployment",
+            )
+        assert result is None
+
+
+class TestRecallSidecarExclude:
+    """Test that recall() honors sidecar injected[] for de-dup."""
+
+    def test_recall_excludes_already_injected_ids(self, tmp_path, monkeypatch):
+        """When the sidecar has injected[] entries, recall skips those memory_ids."""
+        from hook_utils.memory_bridge import WINDOW_SIZE, _save_sidecar, recall
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        # Pre-seed sidecar with already-injected memory_id
+        _save_sidecar(
+            "sess",
+            {
+                "count": 0,
+                "buffer": [],
+                "injected": [{"memory_id": "skip-me", "content": "prefetched"}],
+            },
+        )
+
+        keywords = ["memory", "recall", "weights", "category", "test"]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        skip_me = MagicMock()
+        skip_me.memory_id = "skip-me"
+        skip_me.content = "should be excluded"
+        keep_me = MagicMock()
+        keep_me.memory_id = "keep-me"
+        keep_me.content = "should be kept"
+
+        with (
+            patch("utils.keyword_extraction.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[skip_me, keep_me]),
+            patch("utils.keyword_extraction._apply_category_weights", wraps=lambda r: r),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            for i in range(WINDOW_SIZE - 1):
+                recall("sess", "Read", {"file_path": f"f{i}.py"})
+            result = recall("sess", "Read", {"file_path": "final.py"})
+
+        assert result is not None
+        # The prefetched (skip-me) record must NOT appear; only keep-me
+        assert "should be kept" in result
+        assert "should be excluded" not in result
