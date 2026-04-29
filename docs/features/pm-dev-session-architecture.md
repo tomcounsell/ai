@@ -402,7 +402,7 @@ Bash invocations from inside the agent inherit these:
 
 | Env Var | Source | Consumers |
 |---------|--------|-----------|
-| `AGENT_SESSION_ID` | `AgentSession.id` | hooks, `valor-session steer/create --parent`, `tools/valor_telegram.py` (session_id stamping) |
+| `AGENT_SESSION_ID` | `AgentSession.id` | hooks, `valor-session steer/create --parent` |
 | `VALOR_SESSION_ID` | session linkage | `user_prompt_submit.py` attach-vs-create |
 | `SESSION_TYPE` | `AgentSession.session_type` | hooks (PM allowlist gating) |
 | `TELEGRAM_CHAT_ID` | `session.telegram_chat_id` | `tools/send_telegram.py`, `tools/send_message.py`, `tools/react_with_emoji.py`, `tools/valor_telegram.py:cmd_send` |
