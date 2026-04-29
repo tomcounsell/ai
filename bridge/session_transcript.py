@@ -287,7 +287,11 @@ def complete_transcript(
     # finalize_session() handles: lifecycle log, auto-tag, branch checkpoint,
     # parent finalization, status + completed_at + save.
     try:
-        from models.session_lifecycle import TERMINAL_STATUSES, finalize_session
+        from models.session_lifecycle import (
+            TERMINAL_STATUSES,
+            StatusConflictError,
+            finalize_session,
+        )
 
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
@@ -309,7 +313,17 @@ def complete_transcript(
                 )
                 return
             if status in TERMINAL_STATUSES:
-                finalize_session(s, status, reason=f"transcript completed: {status}")
+                try:
+                    finalize_session(s, status, reason=f"transcript completed: {status}")
+                except StatusConflictError as conflict:
+                    # Session already terminal (kill-is-terminal #1208). The
+                    # SESSION_END marker is the load-bearing artifact; status
+                    # already reflects reality. Log at INFO and move on.
+                    logger.info(
+                        "[transcript] Skipping finalize for %s: %s",
+                        s.session_id,
+                        conflict,
+                    )
             else:
                 # Non-terminal status like "dormant" — use transition_status
                 from models.session_lifecycle import transition_status

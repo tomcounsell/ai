@@ -31,7 +31,7 @@ How sessions transition between states via the consolidated lifecycle module (`m
 
 All session status mutations go through `models/session_lifecycle.py`. Direct `.status =` mutations outside this module are prohibited.
 
-### `finalize_session(session, status, reason, *, skip_auto_tag=False, skip_checkpoint=False, skip_parent=False)`
+### `finalize_session(session, status, reason, *, skip_auto_tag=False, skip_checkpoint=False, skip_parent=False, reject_from_terminal=True)`
 
 For terminal transitions. Executes all completion side effects in order:
 
@@ -42,6 +42,8 @@ For terminal transitions. Executes all completion side effects in order:
 5. **Status + timestamp + save** -- sets `session.status`, `session.completed_at`, calls `session.save()`
 
 **Idempotent**: if the session is already in the target terminal state, logs and returns without re-executing side effects.
+
+**Kill-is-terminal guard** (`reject_from_terminal`, default `True`): When the session is already in a terminal state and the caller is trying to transition it to a *different* terminal status (e.g., `killed -> completed`), raises `StatusConflictError` instead of overwriting. This mirrors the symmetric guard on `transition_status()` and enforces the rule that **once terminal, always terminal — unless the caller has explicitly documented why they need to re-classify**. Callers with legitimate re-classification needs (rare; e.g., escalating `abandoned -> failed` on timeout) must pass `reject_from_terminal=False` explicitly. See the *Kill-is-Terminal Invariant* section below for the full rationale and the audit of catch-and-log call sites.
 
 **Lazy-load safety**: Before saving, `finalize_session()` backfills `session._saved_field_values["status"]` with the current status. Popoto's `_create_lazy_model()` only seeds `_saved_field_values` with KeyFields, so lazy-loaded sessions have no `"status"` entry. Without this backfill, `IndexedFieldMixin.on_save()` skips `srem()` and the session accumulates in both the old and new status index sets simultaneously (ghost sessions).
 
@@ -64,6 +66,35 @@ For non-terminal transitions. Logs the lifecycle transition and updates the stat
 - `user_prompt_submit.py` hook: `completed->running` (user reactivates local session)
 
 See [Session Recovery Mechanisms](session-recovery-mechanisms.md) for the full audit of all recovery paths.
+
+## Kill-is-Terminal Invariant
+
+`valor-session kill` is a hard guarantee. Once a session is killed (or in any terminal state), no routine pipeline-progression code path may transition it to a different terminal status. This invariant is enforced symmetrically by both lifecycle entry points:
+
+- `transition_status(reject_from_terminal=True)` — blocks `terminal -> non-terminal` (e.g., `killed -> running`). Raises `ValueError`.
+- `finalize_session(reject_from_terminal=True)` — blocks `terminal -> different-terminal` (e.g., `killed -> completed`). Raises `StatusConflictError`.
+
+**Layered defense** (introduced in #1208):
+
+1. **Lifecycle layer** — `finalize_session()` raises `StatusConflictError` on the `terminal -> different-terminal` flip. This is the load-bearing check.
+2. **Hierarchy health-check layer** — `_agent_session_hierarchy_health_check()` in `agent/session_health.py` re-reads each parent's authoritative hash status before acting. If the hash says terminal, the parent is skipped at INFO and the loop continues. This handles the case where a `waiting_for_children` index entry is stale (the index was not srem'd at kill time).
+3. **Runner-entry layer** — `_deliver_pipeline_completion()` and `schedule_pipeline_completion()` in `agent/session_completion.py` short-circuit before any drafting, locking, or send-callback invocation when the parent is terminal-and-not-`completed`. `completed` is explicitly allowed through so the success-path runner can deliver its summary.
+
+**Catch-and-log call sites** — the guard's `StatusConflictError` is the *expected, correct, defense-in-depth outcome* of a kill racing routine pipeline progression, not an alarm condition. The following call sites wrap `finalize_session()` in `try/except StatusConflictError: logger.info(...)` so this expected event stays at INFO and does not pollute WARNING/ERROR signal:
+
+- `agent/session_completion.py` — always-finalize at runner exit
+- `agent/session_executor.py` — executor-guard `missing_working_dir -> failed`
+- `agent/session_health.py` — already-delivered → completed; recovery dispatch (downgraded from existing WARNING handler); orphan local pending → abandoned
+- `bridge/session_transcript.py` — transcript end → terminal status
+- `bridge/telegram_bridge.py` — intake-classifier acknowledgment → completed
+- `models/session_lifecycle.py` — `_transition_parent` helper itself, so every caller of `_transition_parent` gets the catch for free
+
+The `agent/agent_session_queue.py:cancel_agent_session` site does **not** need a wrapper — its pre-condition (`session.status != "pending"` early-return) guarantees a non-terminal status, and there is no race window before the `finalize_session()` call.
+
+**Operator semantics**:
+
+- `valor-session kill <id>` — writes `status=killed` via `finalize_session(reject_from_terminal=True)` (its own pre-condition guarantees no terminal-flip).
+- `./scripts/valor-service.sh worker-disable` — pairs `launchctl disable` with `bootout`. Use this when killing all sessions and you do **not** want the worker to come back via launchd's `KeepAlive=true` respawn. Re-enable with `worker-enable` (or `worker-start`, which calls `launchctl enable` idempotently before `bootstrap`). See `./scripts/valor-service.sh` help and CLAUDE.md "Quick Commands" for the full table.
 
 ## Completion Flow
 

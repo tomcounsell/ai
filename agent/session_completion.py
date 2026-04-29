@@ -489,6 +489,23 @@ async def _deliver_pipeline_completion(
         logger.warning("[completion-runner] Missing parent_id; skipping")
         return
 
+    # Terminal-status guard (kill-is-terminal, #1208). Runs BEFORE the CAS lock
+    # below so (a) a killed parent never blocks lock acquisition for healthy
+    # work on an unrelated session, and (b) no pipeline_complete_pending:{id}
+    # Redis key is ever written for a dead session, leaving the lock keyspace
+    # clean. ``completed`` parents are explicitly allowed through — the
+    # idempotency path at finalize_session handles re-finalize.
+    from models.session_lifecycle import TERMINAL_STATUSES  # noqa: PLC0415
+
+    parent_status = getattr(parent, "status", None)
+    if parent_status in TERMINAL_STATUSES and parent_status != "completed":
+        logger.info(
+            "[completion-runner] Skipping pipeline completion for %s — parent terminal (status=%s)",
+            parent_id,
+            parent_status,
+        )
+        return
+
     # CAS lock — Race 1 (runner vs. _finalize_parent_sync) and Race 2
     # (concurrent invocations via _handle_dev_session_completion +
     # _agent_session_hierarchy_health_check). Pattern mirrors the
@@ -732,11 +749,29 @@ async def _deliver_pipeline_completion(
             # outcome so the PM session reaches a terminal state. Previously
             # this lived inside the main try-block and silently got skipped
             # when an earlier exception escaped.
+            #
+            # StatusConflictError handling (#1208): The kill-is-terminal guard
+            # in finalize_session() rejects terminal->different-terminal flips
+            # by default. If the parent was killed mid-pipeline (operator kill
+            # racing the runner) the runner-entry guard at the top of this
+            # function should already have bailed; if we reach here and STILL
+            # see a conflict, log at INFO — this is the expected "guard fired"
+            # outcome, not an alarm. Genuine concurrency anomalies fall through
+            # to the generic Exception branch and log at ERROR.
             try:
-                from models.session_lifecycle import finalize_session  # noqa: PLC0415
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
 
                 finalize_session(
                     parent, "completed", reason="pipeline complete: final summary delivered"
+                )
+            except StatusConflictError as finalize_conflict:
+                logger.info(
+                    "[completion-runner] Skipping finalize for %s: %s",
+                    parent_id,
+                    finalize_conflict,
                 )
             except Exception as finalize_err:
                 logger.error(
@@ -821,6 +856,23 @@ def schedule_pipeline_completion(
     parent_id = getattr(parent, "agent_session_id", None) or getattr(parent, "id", None)
     if not parent_id:
         return None
+
+    # Terminal-status guard (kill-is-terminal, #1208). Mirrors the guard in
+    # _deliver_pipeline_completion; bailing here prevents creating an asyncio
+    # task and registering an entry in _pending_completion_tasks for a parent
+    # that's already terminal (most commonly: killed). The runner's guard is
+    # the load-bearing check; this is purely an early-out optimization.
+    from models.session_lifecycle import TERMINAL_STATUSES  # noqa: PLC0415
+
+    parent_status = getattr(parent, "status", None)
+    if parent_status in TERMINAL_STATUSES and parent_status != "completed":
+        logger.info(
+            "[completion-runner] Skipping schedule for %s — parent terminal (status=%s)",
+            parent_id,
+            parent_status,
+        )
+        return None
+
     existing = _pending_completion_tasks.get(parent_id)
     if existing is not None and not existing.done():
         logger.info(

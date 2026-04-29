@@ -653,12 +653,25 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"working_dir={session.working_dir!r} session_id={session.session_id!r}"
             )
             try:
-                from models.session_lifecycle import finalize_session  # noqa: PLC0415
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
 
                 finalize_session(
                     session,
                     "failed",
                     reason=f"missing_working_dir_or_session_id: {offending_field} is None",
+                )
+            except StatusConflictError as finalize_conflict:
+                # Session is already terminal (kill-is-terminal #1208): don't
+                # alarm-log, just record at INFO and let the existing terminal
+                # status stand. No fallback save needed — the session is already
+                # in a terminal state by definition.
+                logger.info(
+                    "[executor-guard] Skipping finalize for %s: %s",
+                    getattr(session, "agent_session_id", "?"),
+                    finalize_conflict,
                 )
             except Exception as finalize_err:
                 logger.error(

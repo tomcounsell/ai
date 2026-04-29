@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor
@@ -315,17 +315,19 @@ No agent integration changes required — `valor-session` CLI is unchanged from 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/session-lifecycle.md` — document the new `reject_from_terminal` parameter and the "killed is strictly terminal" invariant.
-- [ ] Update `docs/features/bridge-self-healing.md` — note that the hierarchy health check skips terminal parents.
-- [ ] Update `docs/features/bridge-worker-architecture.md` — note the new operator-stop semantics (`worker-stop` disables launchd auto-respawn).
+- [x] Update `docs/features/session-lifecycle.md` — document the new `reject_from_terminal` parameter and the "killed is strictly terminal" invariant.
+- [x] Update `docs/features/bridge-self-healing.md` — note that the hierarchy health check skips terminal parents.
+- [x] Update `docs/features/bridge-worker-architecture.md` — note the new operator-stop semantics (`worker-stop` vs `worker-disable` distinction).
+- [x] Update `docs/features/pm-final-delivery.md` — runner-entry terminal-status guard is documented as step 1 of `_deliver_pipeline_completion()`.
+- [x] Update `docs/features/README.md` — index entry for Session Lifecycle now mentions the kill-is-terminal invariant (#1208).
 
 ### External Documentation Site
 - N/A (no Sphinx/MkDocs site for this repo).
 
 ### Inline Documentation
-- [ ] Update `models/session_lifecycle.py` `finalize_session()` docstring with the new parameter, plus a note explaining why `transition_status()` and `finalize_session()` now have symmetric guards.
-- [ ] Update `agent/session_health.py:1043` `_agent_session_hierarchy_health_check()` docstring to reflect the new skip-terminal-parents behavior.
-- [ ] Update CLAUDE.md "Quick Commands" entry for `worker-stop` to mention launchd disable behavior.
+- [x] Update `models/session_lifecycle.py` `finalize_session()` docstring with the new parameter, plus a note explaining why `transition_status()` and `finalize_session()` now have symmetric guards.
+- [x] Update `agent/session_health.py` `_agent_session_hierarchy_health_check()` docstring to reflect the new skip-terminal-parents behavior.
+- [x] Update CLAUDE.md "Quick Commands" entry for `worker-stop`/`worker-disable`/`worker-enable` semantics.
 
 ## Success Criteria
 

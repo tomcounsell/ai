@@ -605,6 +605,22 @@ rm data/auto-revert-enabled
 ./scripts/auto-revert.sh
 ```
 
+## Hierarchy Health Check — Terminal Parent Skip (#1208)
+
+The periodic `_agent_session_hierarchy_health_check()` in `agent/session_health.py` walks parents matched by `AgentSession.query.filter(status="waiting_for_children")` and finalizes any whose children are all terminal (delivering a Telegram summary on the success path via `schedule_pipeline_completion`).
+
+**Stale-index defense**: index entries can lag behind the authoritative hash status. If a parent was killed but its `waiting_for_children` index entry was not srem'd at kill time, the parent will still appear in the candidate list. Without a guard, the check would draft and ship a final summary to the operator's chat for an already-killed session — the exact failure mode tracked in #1208.
+
+The fix re-reads the parent's hash status (`get_authoritative_session(session_id)`) **at the top of every loop iteration**. If the hash status is in `TERMINAL_STATUSES`, the loop logs at INFO and `continue`s. This is defense-in-depth analogous to the running-index fix in #1006 — the underlying index corruption is a separate Popoto-layer concern, but the operational symptom (Telegram-spam after kill) is masked by the re-read.
+
+```text
+[session-health] Skipping terminal parent <agent_session_id> (status=killed) — index entry stale
+```
+
+If you see this line repeatedly for the same parent, the underlying index entry is stuck and warrants investigation. The plan tracks this as a follow-up to #1208.
+
+The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_completion` and `schedule_pipeline_completion`) is the second layer of the same defense — even if a stale-index call slips past the health-check guard, the runner short-circuits on the same terminal-status check before drafting or queuing any message. See [Session Lifecycle: Kill-is-Terminal Invariant](session-lifecycle.md#kill-is-terminal-invariant) for the full layered-defense write-up.
+
 ## Files
 
 | File | Purpose |

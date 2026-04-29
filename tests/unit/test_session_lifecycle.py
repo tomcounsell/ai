@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from models.session_lifecycle import (
+    StatusConflictError,
     finalize_session,
 )
 
@@ -226,3 +227,78 @@ class TestFinalizeSessionValidation:
         """finalize_session raises ValueError when session is None."""
         with pytest.raises(ValueError, match="session must not be None"):
             finalize_session(None, "completed")
+
+
+# ===================================================================
+# finalize_session — reject_from_terminal guard (kill-is-terminal, #1208)
+# ===================================================================
+
+
+class TestFinalizeSessionRejectFromTerminal:
+    """Tests for the kill-is-terminal invariant on finalize_session().
+
+    These test names embed ``reject_from_terminal`` so the verification command
+    ``pytest -k reject_from_terminal`` (from the plan's Verification table)
+    selects the full suite by parameter name.
+    """
+
+    def test_finalize_session_reject_from_terminal_blocks_by_default(self):
+        """A killed session cannot be flipped to completed by default."""
+        session = _make_session(status="killed")
+
+        with pytest.raises(StatusConflictError) as exc_info:
+            finalize_session(session, "completed")
+
+        # The error must surface the opt-out instruction so the operator can
+        # see how to override if the call was legitimate.
+        assert "reject_from_terminal=False" in str(exc_info.value)
+        assert exc_info.value.expected_status == "killed"
+        assert exc_info.value.actual_status == "completed"
+
+        # No mutation should have happened.
+        session.save.assert_not_called()
+        assert session.status == "killed"
+
+    def test_finalize_session_reject_from_terminal_opt_out_succeeds(self):
+        """Passing reject_from_terminal=False permits terminal->terminal escalation."""
+        session = _make_session(status="abandoned")
+        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(
+                sys.modules,
+                {
+                    "tools.session_tags": mock_auto_tag_module,
+                    "models.task_type_profile": mock_profile_module,
+                },
+            ),
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "abandoned"
+            mock_cas.return_value = mock_fresh
+
+            # Must not raise — explicit opt-out grants the escalation.
+            finalize_session(session, "failed", reject_from_terminal=False)
+
+        assert session.status == "failed"
+        session.save.assert_called()
+
+    def test_finalize_session_reject_from_terminal_idempotent_same_state(self):
+        """Re-finalizing with the same terminal status is a no-op (regression)."""
+        session = _make_session(status="killed")
+
+        finalize_session(session, "killed")
+
+        # Idempotent path runs before the reject_from_terminal guard, so save() is skipped.
+        session.save.assert_not_called()
+        assert session.status == "killed"
+
+    def test_finalize_session_reject_from_terminal_completed_to_killed(self):
+        """The guard fires for any terminal-to-different-terminal pair, not just killed->X."""
+        session = _make_session(status="completed")
+
+        with pytest.raises(StatusConflictError):
+            finalize_session(session, "killed")
+
+        session.save.assert_not_called()
