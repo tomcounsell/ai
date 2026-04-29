@@ -156,6 +156,88 @@ _Idempotent: prior review on HEAD {head_sha:0:7} / body hash {body_hash:0:7} is 
 <!-- REVIEW_CONTEXT head_sha=<HEAD_SHA> pr_body_hash=<PR_BODY_HASH> -->
 ```
 
+### 2.5. Plan Checkbox Sync (APPROVED verdicts only)
+
+When the verdict is `APPROVED` (zero findings), sync the plan-file's criteria
+checkboxes to match the rubric's per-criterion verdicts BEFORE posting the
+review. The four-value rubric contract maps to plan-file writes as:
+
+| Rubric value | Plan-file action |
+|--------------|------------------|
+| `pass`         | `tick [x]` (criterion satisfied by diff) |
+| `fail`         | `untick [ ]` (closes the dishonest-tick loophole) |
+| `acknowledged` | `untick [ ]` (verified deferral exists, but criterion is still unmet) |
+| `n/a`          | no plan write (existing checkbox state preserved) |
+
+**Special case (disclosure-vs-pass override, see code-review.md Step 4):** If a
+criterion is BOTH covered by a verified disclosure AND demonstrably satisfied
+by the diff, the rubric MUST emit `pass`, not `acknowledged`. The disclosure is
+informational only — the plan write reflects the `pass`.
+
+**This step does NOT fire when** the verdict is any of:
+`CHANGES_REQUESTED`, `BLOCKED_ON_CONFLICT`, `PR_CLOSED`, or any other
+non-APPROVED state. The `Tier 2 (Tech Debt)` and `BLOCKER` paths produce no
+plan-file writes; this step is silent on those paths.
+
+**Procedure (commit-then-post-review ordering — non-negotiable):**
+
+```bash
+SLUG=$(echo "$BRANCH" | sed 's|^session/||')
+PLAN_PATH="docs/plans/${SLUG}.md"
+PLAN_MUTATED=false
+
+# For each criterion the rubric judged in Pre-Verdict item 1:
+#   - rubric=pass    => python -m tools.plan_checkbox_writer tick   "$PLAN_PATH" --criterion "$TEXT"
+#   - rubric=fail    => python -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
+#   - rubric=ack.    => python -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
+#   - rubric=n/a     => skip
+#
+# On exit 0 with a real mutation, set PLAN_MUTATED=true.
+# On exit 2 (MATCH_AMBIGUOUS / MATCH_NOT_FOUND / MATCH_AMBIGUOUS_SECTION /
+# NO_CRITERIA_SECTION), preserve the existing checkbox state AND append a
+# manual-review comment to the review body:
+#   - MATCH_AMBIGUOUS / MATCH_AMBIGUOUS_SECTION:
+#       > Could not auto-tick "{criterion}" — please review manually.
+#   - MATCH_NOT_FOUND when rubric judged pass/fail:
+#       > Rubric judged criterion "{text}" {verdict} but no matching item in
+#       > plan — investigate.
+#   - NO_CRITERIA_SECTION:
+#       Log a one-line warning and skip; some chore plans legitimately omit the
+#       section.
+
+if [ "$PLAN_MUTATED" = "true" ]; then
+  git add "$PLAN_PATH"
+  git commit -m "docs(#${SDLC_ISSUE_NUMBER}): sync plan checkboxes with review verdict"
+  if ! git push origin "HEAD:${BRANCH}"; then
+    # Push failure (network / branch protection / conflict).
+    # Abort posting the review — never approve without ticks pushed.
+    echo "ERROR: failed to push tick commit; aborting review post" >&2
+    cat <<'OUTCOME'
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","verdict":"PUSH_FAILED","artifacts":{},"notes":"tick commit failed to push; review not posted","next_skill":"/do-patch"} -->
+OUTCOME
+    exit 1
+  fi
+fi
+```
+
+**Why commit-then-post-review (non-negotiable invariant):** `/do-merge`'s
+review-comment freshness check (see `.claude/commands/do-merge.md` review-comment
+gate) filters out reviews whose `created_at` is older than the latest commit's
+`committer.date`. If the tick commit is pushed AFTER the review is posted, the
+review immediately becomes stale and the next merge attempt forces a re-review
+— which is exactly the oscillation symptom this work removes. Pushing the tick
+commit FIRST guarantees the review's `created_at` is strictly newer than every
+commit on the branch.
+
+**Why the helper failure is non-fatal:** A `MATCH_AMBIGUOUS` or `MATCH_NOT_FOUND`
+on a single criterion is a soft signal. The review still gets posted with the
+manual-review comment surfaced to the human reviewer; the existing plan-file
+checkbox state is preserved. A push failure (after a successful tick commit)
+IS fatal because we already created a commit that lives only in the local
+repo — proceeding to post the approval would publish a review against a SHA
+that doesn't exist on the remote, and the next merge attempt would either
+deadlock or accept a review that points at the wrong commit.
+
 ### 2b. Preflight Short-Circuit: BLOCKED_ON_CONFLICT
 
 When the mergeability preflight (`checkout.md` → "Mergeability Preflight")
