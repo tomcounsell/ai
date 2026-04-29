@@ -19,7 +19,7 @@ Immediately after every compaction event, `.claude/hooks/post_compact.py` emits 
 The nudge is directive, not descriptive. Each item is conditionally included only when its data is available:
 
 1. **Plan doc** (if `AgentSession.plan_url` is set): "Re-read the plan: `<plan_url>`"
-2. **SDLC stage progress** (if `AgentSession.stage_states` is set): "Check SDLC stage progress: `python -m tools.sdlc_stage_query --issue-number <N>`" — issue number is extracted from `AgentSession.issue_url`
+2. **SDLC stage progress** (if `AgentSession.stage_states` is set): "Check SDLC stage progress: `sdlc-tool stage-query --issue-number <N>`" — issue number is extracted from `AgentSession.issue_url`. The hook emits the wrapper form (see `.claude/hooks/post_compact.py`) so the nudge works from any cwd, including target-repo cwds.
 3. **PROGRESS.md scratchpad** (if `PROGRESS.md` exists in the session's `cwd`): "Re-read `PROGRESS.md` for working state."
 4. **TodoWrite task list** (always): "Re-read your current TodoWrite task list."
 

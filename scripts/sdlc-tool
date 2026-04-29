@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# sdlc-tool — cwd-independent dispatcher for tools.sdlc_* CLIs.
+#
+# Why this exists: skills and hooks shell out to `python -m tools.sdlc_*`, which
+# resolves `tools/` against the current working directory. When /sdlc runs in a
+# target-repo cwd that ships its own `tools/` package (cuttlefish, popoto, etc.),
+# Python's module resolution finds the wrong tools/ first and the SDLC dispatch
+# silently fails. See docs/features/sdlc-tool-resolver.md for the full story.
+#
+# AI_REPO_ROOT: explicit env override > $HOME/src/ai default. We do not probe
+# multiple locations — predictability beats heroics. The directory must contain
+# tools/ or we exit 2.
+#
+# Adding a new subcommand: append the kebab-case name to ALLOWED_SUBCOMMANDS.
+# It maps to tools.sdlc_<snake_case>; underscore-friendly via tr.
+
+set -euo pipefail
+
+ALLOWED_SUBCOMMANDS=(verdict dispatch stage-marker stage-query session-ensure)
+
+usage() {
+    cat <<EOF >&2
+Usage: sdlc-tool <subcommand> [args...]
+
+Subcommands:
+  verdict          Record/get SDLC critique or review verdicts (load-bearing)
+  dispatch         Record/get SDLC sub-skill dispatch history (load-bearing)
+  stage-marker     Mark current SDLC stage (best-effort)
+  stage-query      Query current SDLC pipeline state (best-effort)
+  session-ensure   Ensure an AgentSession exists for the issue (best-effort)
+
+Environment:
+  AI_REPO_ROOT     Path to the ai/ repo (default: \$HOME/src/ai).
+                   Must contain a tools/ directory.
+
+Exit codes:
+  0    success (subcommand exit code passed through if 0)
+  1    underlying subcommand failed loudly
+  2    wrapper-level usage / configuration error
+EOF
+}
+
+is_allowed() {
+    local sub="$1"
+    for allowed in "${ALLOWED_SUBCOMMANDS[@]}"; do
+        if [[ "$allowed" == "$sub" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [[ $# -lt 1 ]]; then
+    usage
+    exit 2
+fi
+
+SUBCOMMAND="$1"
+shift
+
+if [[ "$SUBCOMMAND" == "-h" || "$SUBCOMMAND" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+if ! is_allowed "$SUBCOMMAND"; then
+    echo "sdlc-tool: unknown subcommand '$SUBCOMMAND'" >&2
+    usage
+    exit 2
+fi
+
+AI_REPO_ROOT="${AI_REPO_ROOT:-$HOME/src/ai}"
+
+if [[ ! -d "$AI_REPO_ROOT" ]]; then
+    echo "sdlc-tool: AI_REPO_ROOT does not exist: $AI_REPO_ROOT" >&2
+    exit 2
+fi
+
+if [[ ! -d "$AI_REPO_ROOT/tools" ]]; then
+    echo "sdlc-tool: AI_REPO_ROOT does not contain a tools/ directory: $AI_REPO_ROOT" >&2
+    exit 2
+fi
+
+# Map kebab-case subcommand to underscore module suffix.
+MODULE_SUFFIX="$(echo "$SUBCOMMAND" | tr '-' '_')"
+
+# Pass the underlying tool's exit code through unchanged. The wrapper itself
+# adds <50ms; the slow part is `uv run --directory` + Python startup, which
+# was already paid by `python -m tools.X` invocations.
+exec uv run --directory "$AI_REPO_ROOT" python -m "tools.sdlc_${MODULE_SUFFIX}" "$@"

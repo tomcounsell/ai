@@ -269,14 +269,20 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    failed = False
     try:
         result = args.func(args)
     except Exception as e:
+        # Load-bearing tool: failures must be loud so /sdlc operators see them.
+        # Stdout still emits `{}` so existing callers parsing JSON don't break;
+        # the non-zero exit is the loud signal.
         logger.debug(f"sdlc_verdict: CLI {args.command} failed: {e}")
+        print(f"sdlc_verdict: CLI {args.command} failed: {e}", file=sys.stderr)
         result = {}
+        failed = True
 
     print(json.dumps(result))
-    sys.exit(0)
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

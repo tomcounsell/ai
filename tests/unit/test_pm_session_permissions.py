@@ -456,6 +456,46 @@ class TestPMBashRestriction:
         )
         assert result.get("decision") != "block"
 
+    def test_pm_allowed_sdlc_tool_stage_query(self, mock_context, monkeypatch):
+        """The wrapper `sdlc-tool stage-query` is the new canonical entry point."""
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input("sdlc-tool stage-query --issue-number 1175"),
+                "tu-bash",
+                mock_context,
+            )
+        )
+        assert result.get("decision") != "block"
+
+    def test_pm_allowed_sdlc_tool_verdict_record(self, mock_context, monkeypatch):
+        """PM session needs to record verdicts via the wrapper."""
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input(
+                    "sdlc-tool verdict record --stage CRITIQUE --verdict 'NEEDS REVISION' "
+                    "--issue-number 1175"
+                ),
+                "tu-bash",
+                mock_context,
+            )
+        )
+        assert result.get("decision") != "block"
+
+    def test_pm_allowed_sdlc_tool_dispatch_record(self, mock_context, monkeypatch):
+        monkeypatch.setenv("SESSION_TYPE", "pm")
+        result = asyncio.run(
+            pre_tool_use_hook(
+                self._make_bash_input(
+                    "sdlc-tool dispatch record --skill /do-build --issue-number 1175"
+                ),
+                "tu-bash",
+                mock_context,
+            )
+        )
+        assert result.get("decision") != "block"
+
     def test_pm_allowed_check_plan_freshness(self, mock_context, monkeypatch):
         monkeypatch.setenv("SESSION_TYPE", "pm")
         result = asyncio.run(

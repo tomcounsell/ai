@@ -314,48 +314,52 @@ python -m tools.valor_session status --id <SESSION_ID> --json
 
 See `docs/features/session-steering.md` for full documentation.
 
-### SDLC Stage Marker (`tools.sdlc_stage_marker`)
+### SDLC Stage Marker (`sdlc-tool stage-marker`)
 
-Write stage progress markers (in_progress/completed) to the PM session's `stage_states` in Redis. Called by each SDLC sub-skill at start and completion.
+Write stage progress markers (in_progress/completed) to the PM session's `stage_states` in Redis. Called by each SDLC sub-skill at start and completion. The `sdlc-tool` wrapper resolves the `ai/` repo via `AI_REPO_ROOT` so the call works from any cwd.
 
 ```bash
 # With issue number (local Claude Code sessions)
-python -m tools.sdlc_stage_marker --stage PLAN --status in_progress --issue-number 941
-python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number 941
+sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number 941
+sdlc-tool stage-marker --stage PLAN --status completed --issue-number 941
 
 # With explicit session ID
-python -m tools.sdlc_stage_marker --stage BUILD --status completed --session-id <ID>
+sdlc-tool stage-marker --stage BUILD --status completed --session-id <ID>
 
 # Env var fallback (bridge sessions)
-python -m tools.sdlc_stage_marker --stage DOCS --status completed
+sdlc-tool stage-marker --stage DOCS --status completed
 ```
 
 Session resolution order: `--session-id` > `VALOR_SESSION_ID` > `AGENT_SESSION_ID` > `--issue-number`. Always exits 0 and returns `{}` on error.
 
-### SDLC Session Ensure (`tools.sdlc_session_ensure`)
+The underlying module is `tools.sdlc_stage_marker`; runtime callers should always use the `sdlc-tool stage-marker` wrapper rather than `python -m tools.sdlc_stage_marker` directly. See `docs/features/sdlc-tool-resolver.md`.
+
+### SDLC Session Ensure (`sdlc-tool session-ensure`)
 
 Create or find a local SDLC session for tracking pipeline state in local Claude Code runs. Creates an `AgentSession` keyed by `sdlc-local-{issue_number}`. Idempotent -- running it again returns the existing session.
 
 ```bash
-python -m tools.sdlc_session_ensure --issue-number 941 --issue-url "https://github.com/tomcounsell/ai/issues/941"
+sdlc-tool session-ensure --issue-number 941 --issue-url "https://github.com/tomcounsell/ai/issues/941"
 ```
 
 Returns JSON: `{"session_id": "sdlc-local-941", "created": true}` (or `"created": false` if reused).
 
-### SDLC Stage Query (`tools.sdlc_stage_query`)
+### SDLC Stage Query (`sdlc-tool stage-query`)
 
 Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.
 
 ```bash
 # Query by session ID
-python -m tools.sdlc_stage_query --session-id tg_project_123_456
+sdlc-tool stage-query --session-id tg_project_123_456
 
 # Query by GitHub issue number (finds the PM session tracking that issue)
-python -m tools.sdlc_stage_query --issue-number 704
+sdlc-tool stage-query --issue-number 704
 
 # No args — falls back to VALOR_SESSION_ID / AGENT_SESSION_ID env vars
-python -m tools.sdlc_stage_query
+sdlc-tool stage-query
 ```
+
+For Python callers (writing tests, embedding the query in another tool), import the underlying module directly:
 
 ```python
 from tools.sdlc_stage_query import query_stage_states

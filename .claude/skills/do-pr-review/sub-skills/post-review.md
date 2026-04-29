@@ -264,7 +264,7 @@ fi
 
 ```bash
 # On approval (no blockers):
-python -m tools.sdlc_stage_marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
 ```
 
 ## Completion

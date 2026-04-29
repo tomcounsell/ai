@@ -118,6 +118,7 @@ class UpdateResult:
     service_status: service.ServiceStatus | None = None
     caffeinate_status: service.CaffeinateStatus | None = None
     projects_json_check: verify.ToolCheck | None = None
+    sdlc_tool_check: verify.ToolCheck | None = None
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
     env_sync_result: env_sync.EnvSyncResult | None = None
     reflections_sync_result: env_sync.ReflectionsSyncResult | None = None
@@ -832,6 +833,28 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             )
             # Suppress restart for the rest of this run. The existing bridge
             # process keeps running on the previously validated config.
+            config = replace(config, do_service_restart=False)
+
+    # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.
+    # The wrapper resolves SDLC tool dispatch from any cwd; if it's missing or
+    # broken, the bridge-spawned PM session can't record verdicts and the SDLC
+    # router will oscillate. Same gate pattern as projects.json: skip restart,
+    # leave the running bridge on the previously validated build.
+    if config.do_service_restart:
+        log("Validating sdlc-tool wrapper...", v)
+        result.sdlc_tool_check = verify.check_sdlc_tool(project_dir)
+        if result.sdlc_tool_check.available:
+            log(f"  sdlc-tool: {result.sdlc_tool_check.version}", v)
+        else:
+            log(
+                f"FAIL: sdlc-tool validation failed — skipping service restart\n"
+                f"  {result.sdlc_tool_check.error}",
+                v,
+                always=True,
+            )
+            result.warnings.append(
+                f"sdlc-tool invalid; bridge restart skipped: {result.sdlc_tool_check.error}"
+            )
             config = replace(config, do_service_restart=False)
 
     # Step 5: Service management

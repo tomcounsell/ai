@@ -190,6 +190,15 @@ PM_BASH_ALLOWED_PREFIXES: tuple[str, ...] = (
     "python -m tools.memory_search search",
     "python -m tools.memory_search inspect",
     "python -m tools.sdlc_stage_query",
+    # SDLC tooling via the cwd-independent wrapper. The wrapper resolves
+    # AI_REPO_ROOT and dispatches into tools.sdlc_*; from the PM session's
+    # standpoint these are still read-mostly state queries (record-level
+    # subcommands also need to be PM-callable so guard recording works).
+    "sdlc-tool stage-query",
+    "sdlc-tool dispatch",
+    "sdlc-tool verdict",
+    "sdlc-tool stage-marker",
+    "sdlc-tool session-ensure",
     "python -m tools.code_impact_finder",
     # scripts (read-only checks invoked by the SDLC skills)
     "python scripts/check_plan_freshness.py",

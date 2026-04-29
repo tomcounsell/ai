@@ -40,6 +40,13 @@ PROJECT_ONLY_SKILLS: set[str] = {
     "google-workspace",
 }
 
+# Standalone executable scripts hardlinked into ~/.local/bin so they're available
+# anywhere on PATH (not just from the repo). Each tuple is (src_relpath, dst_name).
+# Adding an entry here propagates to every machine on the next /update run.
+USER_BIN_SCRIPTS: list[tuple[str, str]] = [
+    ("scripts/sdlc-tool", "sdlc-tool"),
+]
+
 
 @dataclass
 class LinkAction:
@@ -107,8 +114,46 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     result.removed += hook_result.removed
     result.errors += hook_result.errors
 
+    # Sync standalone scripts to ~/.local/bin (e.g. sdlc-tool)
+    script_result = sync_user_scripts(project_dir)
+    result.actions.extend(script_result.actions)
+    result.created += script_result.created
+    result.skipped += script_result.skipped
+    result.removed += script_result.removed
+    result.errors += script_result.errors
+
     if result.errors > 0:
         result.success = False
+
+    return result
+
+
+def sync_user_scripts(project_dir: Path) -> HardlinkSyncResult:
+    """Hardlink standalone scripts from scripts/ to ~/.local/bin.
+
+    Each entry in USER_BIN_SCRIPTS is hardlinked so the file in the repo and
+    the one on PATH share an inode — editing either updates both. Missing
+    sources are logged as errors so the operator notices a deleted source.
+    """
+    result = HardlinkSyncResult()
+    user_bin = Path.home() / ".local" / "bin"
+    user_bin.mkdir(parents=True, exist_ok=True)
+
+    for src_relpath, dst_name in USER_BIN_SCRIPTS:
+        src = project_dir / src_relpath
+        dst = user_bin / dst_name
+        rel_src = str(src).replace(str(Path.home()), "~")
+        rel_dst = str(dst).replace(str(Path.home()), "~")
+
+        if not src.is_file():
+            result.actions.append(LinkAction(rel_src, rel_dst, "error", f"Source missing: {src}"))
+            result.errors += 1
+            continue
+
+        # Reuse the same hardlink helper as skills/commands. The wrapper is
+        # an executable shell script — the file mode is preserved by hardlinking
+        # (both inodes share permissions), so no chmod is needed after linking.
+        _ensure_hardlink(src, dst, user_bin, result)
 
     return result
 
