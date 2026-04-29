@@ -249,6 +249,102 @@ class TelegramRelayOutputHandler:
                 await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
             return
 
+        # ── Read-the-Room pre-send pass (issue #1193) ──
+        # Lightweight Haiku call inspects the chat snapshot + the drafted
+        # message and returns one of {send, trim, suppress}. RTR is a
+        # *guard*, not a blocker: every error path returns send and the
+        # delivery proceeds with the original delivery_text. RTR is gated
+        # by the READ_THE_ROOM_ENABLED env var (default off) and short-
+        # circuits for SDLC sessions, short outputs, empty drafts, missing
+        # chat_ids, and empty snapshots.
+        try:
+            from bridge.read_the_room import (
+                RTR_SUPPRESS_EMOJI,
+                TRIM_TOO_SHORT_THRESHOLD,
+                read_the_room,
+            )
+
+            verdict = await read_the_room(delivery_text, chat_id, session)
+
+            if verdict.action == "trim" and verdict.revised_text:
+                if len(verdict.revised_text) < TRIM_TOO_SHORT_THRESHOLD:
+                    # F4: too-short trim coerces to suppress -- a single emoji
+                    # landing in a personal exchange is the exact failure mode
+                    # this feature exists to prevent.
+                    self._rtr_emit_event(
+                        session,
+                        "rtr.suppressed",
+                        chat_id=chat_id,
+                        draft_text=delivery_text,
+                        revised_text=verdict.revised_text,
+                        reason="trim_too_short",
+                    )
+                    if reply_to_msg_id is not None:
+                        self._rtr_queue_reaction(
+                            chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
+                        )
+                        if self._file_handler is not None:
+                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                        return
+                    # No anchor: fall through to send original.
+                    # F4: silent suppression breaks the I-heard-you contract --
+                    # fall-through preserves the audit signal
+                    self._rtr_emit_event(
+                        session,
+                        "rtr.suppress_fallthrough",
+                        chat_id=chat_id,
+                        draft_text=delivery_text,
+                        reason="no_reply_anchor",
+                    )
+                else:
+                    # Long-form trim: substitute the revised text.
+                    self._rtr_emit_event(
+                        session,
+                        "rtr.trimmed",
+                        chat_id=chat_id,
+                        draft_text=delivery_text,
+                        revised_text=verdict.revised_text,
+                        reason=verdict.reason or "trim",
+                    )
+                    delivery_text = verdict.revised_text
+            elif verdict.action == "suppress":
+                self._rtr_emit_event(
+                    session,
+                    "rtr.suppressed",
+                    chat_id=chat_id,
+                    draft_text=delivery_text,
+                    reason=verdict.reason or "suppress",
+                )
+                if reply_to_msg_id is not None:
+                    self._rtr_queue_reaction(
+                        chat_id, reply_to_msg_id, RTR_SUPPRESS_EMOJI, session_id
+                    )
+                    if self._file_handler is not None:
+                        await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
+                    return
+                # No anchor for the 👀 reaction. F4: silent suppression breaks
+                # the I-heard-you contract -- fall-through preserves the audit
+                # signal by sending the original draft text and logging.
+                self._rtr_emit_event(
+                    session,
+                    "rtr.suppress_fallthrough",
+                    chat_id=chat_id,
+                    draft_text=delivery_text,
+                    reason="no_reply_anchor",
+                )
+            # else: send (or trim with no revised_text) -- fall through to
+            # the existing outbox write path with delivery_text unchanged.
+        except Exception as rtr_err:
+            # Fail-open: RTR errors NEVER block delivery. read_the_room()
+            # already catches its own errors and returns send; this outer
+            # guard catches anything that escapes (import error, helper
+            # crash, etc.).
+            logger.warning(
+                "RTR call failed in TelegramRelayOutputHandler.send (%s); "
+                "falling back to original delivery_text",
+                rtr_err,
+            )
+
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "reply_to": reply_to,
@@ -394,6 +490,104 @@ class TelegramRelayOutputHandler:
                 persist_err,
             )
 
+    # === Read-the-Room helpers (issue #1193) ===
+
+    def _rtr_emit_event(
+        self,
+        session: Any,
+        event_type: str,
+        *,
+        chat_id: str,
+        draft_text: str,
+        revised_text: str | None = None,
+        reason: str = "",
+    ) -> None:
+        """Append an ``rtr.*`` entry to ``session.session_events``.
+
+        Best-effort -- exceptions are swallowed. The codebase's existing
+        session_events append posture is read-modify-write with no lock;
+        we match it here. Race 3 (concurrent appends) is documented and
+        accepted -- the surrounding event log is best-effort.
+        """
+        if session is None:
+            return
+        try:
+            event: dict[str, Any] = {
+                "type": event_type,
+                "ts": time.time(),
+                "chat_id": str(chat_id),
+                "reason": reason,
+                "draft_preview": draft_text[:200],
+            }
+            if revised_text is not None:
+                event["revised_preview"] = revised_text[:200]
+            events = list(getattr(session, "session_events", None) or [])
+            events.append(event)
+            session.session_events = events
+            if hasattr(session, "save"):
+                session.save()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("RTR event append failed (non-fatal): %s", e)
+
+    def _rtr_queue_reaction(
+        self,
+        chat_id: str,
+        reply_to_msg_id: int,
+        emoji: str,
+        session_id: str,
+    ) -> None:
+        """Queue a 👀 reaction directly to ``telegram:outbox:{session_id}``.
+
+        Built via :meth:`_build_reaction_payload` so the schema matches
+        :meth:`react` byte-for-byte. We do NOT call ``self.react()`` here:
+        ``react()`` derives ``session_id = chat_id`` (line 411), which would
+        orphan the reaction in a different queue when ``session.session_id
+        != chat_id`` (the normal case). See Implementation Note F7.
+        """
+        payload = self._build_reaction_payload(chat_id, reply_to_msg_id, emoji, session_id)
+        queue_key = f"telegram:outbox:{session_id}"
+        try:
+            r = self._get_redis()
+            r.rpush(queue_key, json.dumps(payload))
+            r.expire(queue_key, self.OUTBOX_TTL)
+            logger.info("Queued RTR suppress reaction to %s (emoji=%s)", queue_key, emoji)
+        except Exception as e:
+            logger.error("Failed to write RTR reaction to Redis outbox %s: %s", queue_key, e)
+
+    @staticmethod
+    def _build_reaction_payload(
+        chat_id: str,
+        reply_to_msg_id: int | None,
+        emoji: str | None,
+        session_id: str,
+        *,
+        timestamp: float | None = None,
+    ) -> dict[str, Any]:
+        """Build a reaction payload dict for the Redis outbox.
+
+        Single source of truth for the reaction payload schema. Used by both
+        ``react()`` and the RTR suppress branch in ``send()`` so the two
+        outbox writers can never drift apart (Implementation Note AD1).
+
+        Args:
+            chat_id: Target Telegram chat identifier.
+            reply_to_msg_id: Message ID to react to. May be ``None``.
+            emoji: Emoji string to set, or ``None`` to clear.
+            session_id: Outbox queue key suffix; messages and reactions for
+                the same session must use the same session_id so the relay
+                serves them from one queue.
+            timestamp: Override timestamp (for tests). Defaults to
+                ``time.time()`` when None.
+        """
+        return {
+            "type": "reaction",
+            "chat_id": chat_id,
+            "reply_to": int(reply_to_msg_id) if reply_to_msg_id else None,
+            "emoji": str(emoji) if emoji is not None else None,
+            "session_id": session_id,
+            "timestamp": timestamp if timestamp is not None else time.time(),
+        }
+
     async def react(
         self,
         chat_id: str,
@@ -407,21 +601,13 @@ class TelegramRelayOutputHandler:
             msg_id: Message ID to react to.
             emoji: Emoji string to set, or None to clear.
         """
-        # Derive a session_id -- best effort, use chat_id as fallback
+        # Derive a session_id -- best effort, use chat_id as fallback.
+        # NOTE: when called with a session context, callers should prefer
+        # writing the reaction directly to ``telegram:outbox:{session.session_id}``
+        # via _build_reaction_payload (see RTR suppress branch in send()).
         session_id = chat_id
-        reply_to = int(msg_id) if msg_id else None
 
-        # Normalize EmojiResult to str for JSON serialization
-        emoji_str = str(emoji) if emoji is not None else None
-
-        payload = {
-            "type": "reaction",
-            "chat_id": chat_id,
-            "reply_to": reply_to,
-            "emoji": emoji_str,
-            "session_id": session_id,
-            "timestamp": time.time(),
-        }
+        payload = self._build_reaction_payload(chat_id, msg_id, emoji, session_id)
 
         queue_key = f"telegram:outbox:{session_id}"
         try:

@@ -8,7 +8,7 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent.output_handler import (
     FileOutputHandler,
@@ -696,3 +696,323 @@ class TestDrafterFailureRecovery:
 
         # Delivery still happened.
         handler._redis.rpush.assert_called_once()
+
+
+class TestReadTheRoomWiring:
+    """Tests for the RTR wiring in TelegramRelayOutputHandler.send (issue #1193).
+
+    These exercise the *handler-level* verdict application (trim coercion, the
+    suppress reaction queue alignment, the suppress-fallthrough). Verdict
+    selection itself is tested in test_read_the_room.py.
+    """
+
+    def _make_handler(self, mock_redis):
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler._redis = mock_redis
+        return handler
+
+    def _mock_redis(self):
+        r = MagicMock()
+        r.rpush = MagicMock()
+        r.expire = MagicMock()
+        return r
+
+    def _bypass_drafter(self, _input, *, session=None, medium="telegram"):
+        """Pass-through ``draft_message`` so ``delivery_text == text``."""
+        from bridge.message_drafter import MessageDraft
+
+        return MessageDraft(text=_input, was_drafted=False)
+
+    def _make_session(self, **kwargs):
+        s = MagicMock()
+        s.session_id = kwargs.get("session_id", "abc")
+        s.session_type = kwargs.get("session_type", "teammate")
+        s.sdlc_stage = None
+        s.sdlc_slug = kwargs.get("sdlc_slug", None)
+        s.has_pm_messages = MagicMock(return_value=False)
+        s.get_parent_session = MagicMock(return_value=None)
+        s.is_sdlc = False
+        s.session_events = None
+        return s
+
+    def test_send_verdict_writes_text_payload(self):
+        """RTR verdict 'send' leaves delivery_text untouched."""
+        from bridge.read_the_room import RoomVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(return_value=RoomVerdict(action="send", reason="clean")),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,  # > SHORT_OUTPUT_THRESHOLD
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        mock_r.rpush.assert_called_once()
+        key = mock_r.rpush.call_args[0][0]
+        assert key == "telegram:outbox:abc"
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["text"] == "x" * 250
+        assert payload.get("type") != "reaction"
+
+    def test_trim_long_verdict_swaps_delivery_text(self):
+        """RTR verdict 'trim' (long) replaces delivery_text and emits rtr.trimmed."""
+        from bridge.read_the_room import RoomVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session()
+
+        revised = "Quick pointer: see dashboard for details."
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(
+                    return_value=RoomVerdict(action="trim", revised_text=revised, reason="partial")
+                ),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["text"] == revised
+
+        # rtr.trimmed event captured on the session
+        events = session.session_events or []
+        types_ = [e["type"] for e in events]
+        assert "rtr.trimmed" in types_
+
+    def test_trim_too_short_coerces_to_suppress_with_reaction(self):
+        """trim with len < TRIM_TOO_SHORT_THRESHOLD coerces to suppress + 👀."""
+        from bridge.read_the_room import RTR_SUPPRESS_EMOJI, RoomVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(
+                    return_value=RoomVerdict(action="trim", revised_text="ok!", reason="redundant")
+                ),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        # Exactly one rpush -- the reaction, not a text payload.
+        assert mock_r.rpush.call_count == 1
+        key = mock_r.rpush.call_args[0][0]
+        # Queue MUST align with session.session_id, NOT chat_id.
+        assert key == "telegram:outbox:abc"
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["emoji"] == RTR_SUPPRESS_EMOJI
+        assert payload["reply_to"] == 42
+        assert "text" not in payload
+
+        events = session.session_events or []
+        types_ = [e["type"] for e in events]
+        assert "rtr.suppressed" in types_
+        assert (
+            next(e for e in events if e["type"] == "rtr.suppressed")["reason"] == "trim_too_short"
+        )
+
+    def test_suppress_with_anchor_writes_reaction_to_session_queue(self):
+        """suppress + reply_to writes 👀 to telegram:outbox:{session_id}."""
+        from bridge.read_the_room import RTR_SUPPRESS_EMOJI, RoomVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        # IMPORTANT: session_id != chat_id so we can verify queue alignment.
+        session = self._make_session(session_id="sess-xyz")
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(return_value=RoomVerdict(action="suppress", reason="redundant")),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,
+                    reply_to_msg_id=42,
+                    session=session,
+                )
+            )
+
+        # Exactly one rpush -- the reaction. No text payload.
+        assert mock_r.rpush.call_count == 1
+        key = mock_r.rpush.call_args[0][0]
+        assert key == "telegram:outbox:sess-xyz"  # NOT telegram:outbox:-100123
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["emoji"] == RTR_SUPPRESS_EMOJI
+        assert payload["session_id"] == "sess-xyz"
+        # Critically: text payload was NOT written
+        assert "text" not in payload
+
+    def test_suppress_payload_matches_react_byte_for_byte(self):
+        """The RTR suppress reaction payload must equal what react() produces
+        for the same args (Implementation Note AD1 / snapshot-equality test).
+        """
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        handler = TelegramRelayOutputHandler.__new__(TelegramRelayOutputHandler)
+
+        # Both writers go through _build_reaction_payload, so for matching
+        # session_id derivation the payloads are identical.
+        from_send = handler._build_reaction_payload(
+            "-100123", 42, "👀", "sess-xyz", timestamp=1000.0
+        )
+        from_react = handler._build_reaction_payload(
+            "-100123", 42, "👀", "sess-xyz", timestamp=1000.0
+        )
+        assert from_send == from_react
+
+    def test_suppress_with_no_anchor_falls_through_to_send(self):
+        """suppress + reply_to_msg_id is None falls through to send the
+        original text and emits rtr.suppress_fallthrough (Implementation Note SI1).
+        """
+        from bridge.read_the_room import RoomVerdict
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session()
+
+        with (
+            patch(
+                "bridge.message_drafter.draft_message", AsyncMock(side_effect=self._bypass_drafter)
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(return_value=RoomVerdict(action="suppress", reason="redundant")),
+            ),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="-100123",
+                    text="x" * 250,
+                    reply_to_msg_id=None,  # No anchor for the 👀 reaction.
+                    session=session,
+                )
+            )
+
+        # Original text DID land on the outbox -- fall-through preserves
+        # the audit signal (F4).
+        mock_r.rpush.assert_called_once()
+        payload = json.loads(mock_r.rpush.call_args[0][1])
+        assert payload["text"] == "x" * 250
+
+        # And we logged the fallthrough event with reason no_reply_anchor.
+        events = session.session_events or []
+        types_ = [e["type"] for e in events]
+        assert "rtr.suppress_fallthrough" in types_
+        ev = next(e for e in events if e["type"] == "rtr.suppress_fallthrough")
+        assert ev["reason"] == "no_reply_anchor"
+
+    def test_steering_deferred_path_skips_rtr(self):
+        """RTR must not run when delivery is deferred to self-draft steering
+        (the steering_deferred return at line 250 happens before RTR).
+        """
+        from bridge.message_drafter import MessageDraft
+
+        mock_r = self._mock_redis()
+        handler = self._make_handler(mock_r)
+        session = self._make_session()
+
+        # Drafter signals self-draft fallback by returning needs_self_draft=True.
+        deferred = MessageDraft(
+            text="x" * 250,
+            was_drafted=True,
+            needs_self_draft=True,
+        )
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=deferred)),
+            patch.object(
+                handler,
+                "_inject_self_draft_steering",
+                MagicMock(return_value=True),
+            ),
+            patch(
+                "bridge.read_the_room.read_the_room",
+                AsyncMock(side_effect=AssertionError("RTR must not be called")),
+            ),
+        ):
+            asyncio.run(handler.send("-100123", "x" * 250, 42, session=session))
+
+        # No outbox write because steering deferred.
+        mock_r.rpush.assert_not_called()
+
+    def test_rtr_disabled_makes_no_redis_writes_beyond_normal(self):
+        """With READ_THE_ROOM_ENABLED=false, the RTR call returns send and
+        delivery proceeds exactly as if RTR didn't exist."""
+        import os
+
+        # Note: read_the_room reads the env var at call time. With the flag
+        # off, it short-circuits without calling Haiku and without emitting
+        # a session_events entry.
+        old = os.environ.get("READ_THE_ROOM_ENABLED")
+        os.environ["READ_THE_ROOM_ENABLED"] = "false"
+        try:
+            mock_r = self._mock_redis()
+            handler = self._make_handler(mock_r)
+            session = self._make_session()
+
+            with patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=self._bypass_drafter),
+            ):
+                asyncio.run(handler.send("-100123", "x" * 250, 42, session=session))
+
+            mock_r.rpush.assert_called_once()
+            payload = json.loads(mock_r.rpush.call_args[0][1])
+            assert payload.get("type") != "reaction"
+            assert payload["text"] == "x" * 250
+            # No RTR events because the short-circuit path emits nothing.
+            assert not (session.session_events or [])
+        finally:
+            if old is None:
+                os.environ.pop("READ_THE_ROOM_ENABLED", None)
+            else:
+                os.environ["READ_THE_ROOM_ENABLED"] = old
