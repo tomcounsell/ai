@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from models.agent_session import AgentSession
-from models.session_lifecycle import StatusConflictError, finalize_session
 
 
 @pytest.fixture
@@ -67,6 +66,10 @@ class TestFinalizeSessionRejectFromTerminal:
 
     def test_killed_to_completed_raises_status_conflict(self, killed_parent):
         """The kill-is-terminal guard fires against a real Redis-backed session."""
+        # Import locally to avoid class-identity drift from module-level
+        # patches in sibling test files (e.g., test_kill_cascades_to_children).
+        from models.session_lifecycle import StatusConflictError, finalize_session
+
         with pytest.raises(StatusConflictError) as exc_info:
             finalize_session(killed_parent, "completed", reason="should be blocked")
 
@@ -78,6 +81,8 @@ class TestFinalizeSessionRejectFromTerminal:
 
     def test_killed_to_completed_with_opt_out_succeeds(self, killed_parent):
         """Explicit opt-out lets a legitimate re-classification through."""
+        from models.session_lifecycle import finalize_session
+
         finalize_session(
             killed_parent,
             "completed",
