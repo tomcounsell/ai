@@ -7,6 +7,7 @@ created: 2026-04-29
 tracking: https://github.com/tomcounsell/ai/issues/1207
 last_comment_id:
 revision_applied: true
+allow_unchecked: true
 ---
 
 # Drop Plan-Completion Gate; Shift Checkbox Responsibility to /do-pr-review and /do-patch
