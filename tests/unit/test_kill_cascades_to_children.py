@@ -224,3 +224,104 @@ class TestCmdKillCascadeCount:
         assert output["status"] == "killed"
         assert len(output["sessions"]) == 1
         assert len(output["sessions"][0].get("cascaded_children", [])) == 1
+
+
+class TestKillIsTerminal:
+    """Regression tests for #1208 — kill is terminal across hierarchy.
+
+    Companion suite to TestKillCascadesToChildren: covers the *opposite*
+    direction (child completion firing AFTER the parent has been killed).
+    Without the kill-is-terminal guard, a routine
+    _finalize_parent_sync -> _transition_parent path silently overwrites the
+    parent's killed status with completed, ships a Telegram summary, and
+    breaks the operator's expectation that kill is a hard stop.
+    """
+
+    def test_killed_parent_survives_child_completion(self):
+        """After PM is killed, a child completion does NOT clobber the parent's status.
+
+        Drives the lifecycle's _transition_parent helper directly with a killed
+        parent and asserts:
+          * finalize_session() raises StatusConflictError (kill-is-terminal guard)
+          * _transition_parent catches it at INFO and returns
+          * parent.save() is NOT called — status remains 'killed'
+        """
+        from unittest.mock import MagicMock
+
+        from models.session_lifecycle import _transition_parent
+
+        parent = MagicMock()
+        parent.status = "killed"
+        parent.session_id = "test-killed-parent"
+        parent.agent_session_id = "agt_test_killed_parent"
+        parent._saved_field_values = {}
+
+        # _transition_parent will call finalize_session(parent, "completed", ...)
+        # which should raise StatusConflictError due to the kill-is-terminal guard.
+        # The wrapper inside _transition_parent must catch and skip.
+        _transition_parent(parent, "completed")
+
+        # The parent's status MUST remain killed — no save() call should have
+        # written 'completed' over it.
+        parent.save.assert_not_called()
+        assert parent.status == "killed"
+
+    def test_runner_entry_guard_short_circuits_killed_parent(self):
+        """schedule_pipeline_completion bails on a killed parent before any drafting."""
+        from unittest.mock import MagicMock
+
+        from agent.session_completion import schedule_pipeline_completion
+
+        killed_parent = MagicMock()
+        killed_parent.status = "killed"
+        killed_parent.agent_session_id = "agt_runner_guard_test"
+        killed_parent.session_id = "test-runner-guard"
+        killed_parent.id = "test-runner-guard"
+
+        send_cb = MagicMock()
+
+        result = schedule_pipeline_completion(
+            killed_parent,
+            "fake summary",
+            send_cb,
+            chat_id="-1001234567",
+            telegram_message_id=42,
+        )
+
+        # The scheduler must return None (no task created) and never invoke send_cb.
+        assert result is None
+        send_cb.assert_not_called()
+
+    def test_runner_entry_guard_lets_completed_parent_through(self):
+        """A 'completed' parent is NOT short-circuited (Risk 3 mitigation).
+
+        The guard's exception list MUST include 'completed' so a legitimate
+        success-path runner can deliver its final summary. Idempotency at
+        finalize_session handles re-finalize of an already-completed parent.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from agent.session_completion import schedule_pipeline_completion
+
+        completed_parent = MagicMock()
+        completed_parent.status = "completed"
+        completed_parent.agent_session_id = "agt_completed_passthrough"
+        completed_parent.session_id = "test-completed-passthrough"
+        completed_parent.id = "test-completed-passthrough"
+
+        send_cb = MagicMock()
+
+        # Patch out asyncio.create_task because we're not inside a running loop.
+        with patch("agent.session_completion.asyncio.create_task") as mock_create:
+            mock_create.return_value = MagicMock(done=lambda: False)
+            result = schedule_pipeline_completion(
+                completed_parent,
+                "fake summary",
+                send_cb,
+                chat_id="-1001234567",
+                telegram_message_id=42,
+            )
+
+        # The scheduler should have created a task (the guard MUST NOT block 'completed').
+        mock_create.assert_called_once()
+        assert result is not None
