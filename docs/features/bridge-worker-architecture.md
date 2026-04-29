@@ -39,7 +39,8 @@ Agent calls tools/send_message.py or tools/react_with_emoji.py
     ↓ invokes OutputHandler.send() / OutputHandler.react()
 TelegramRelayOutputHandler.send() (agent/output_handler.py)
     ↓ runs bridge.message_drafter.draft_message (per-medium formatting, length guard)
-    ↓ writes JSON payload to Redis
+    ↓ runs bridge.read_the_room.read_the_room (issue #1193 — verdict: send|trim|suppress; opt-in via READ_THE_ROOM_ENABLED)
+    ↓ writes JSON payload to Redis (or queues a 👀 reaction on suppress)
     ↓ also writes to FileOutputHandler (dual-write for audit/fallback)
 Redis key: telegram:outbox:{session_id}
     ↓ polled by bridge relay
