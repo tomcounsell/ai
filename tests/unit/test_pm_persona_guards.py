@@ -190,9 +190,9 @@ class TestMergeTroubleshootingDoc:
     """Item 6 of sdlc-1155: the troubleshooting playbook exists with the
     expected sections.
 
-    Note (#1207): originally seven sections; the ``Unchecked Plan Checkboxes``
-    section was removed when the Plan Completion Gate was deleted. The
-    remaining six sections stay.
+    Note (#1207): originally seven sections; the unchecked-plan-checkboxes
+    section was removed when the gate was deleted. The remaining six
+    sections stay.
     """
 
     def _playbook_text(self):
