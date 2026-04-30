@@ -11,6 +11,8 @@ revision_applied: true
 
 # Telegram Attachment Steering Fix + Auto-Ingest
 
+> Tracking issue: #1215
+
 ## Problem
 
 File attachments sent over Telegram are silently dropped when the receiving session is already running, active, or pending. The agent receives the literal sentinel `"--file attachment only--"` instead of the actual file content. The user thinks they shared a `.txt`, screenshot, or document; the agent sees a four-word string and proceeds without it.
