@@ -112,15 +112,85 @@ class TestEmptyInputAndKillSwitch:
         assert v.action == "allow"
 
     def test_kill_switch_default_on_when_empty(self, monkeypatch):
+        """``PROMISE_GATE_ENABLED=`` (empty string) → gate enabled (default-on).
+
+        Per plan §Failure Path Test Strategy → Kill Switch Coverage:
+        empty string, unset, and any value not in the allow-set MUST be
+        treated as default-on. A stray ``PROMISE_GATE_ENABLED=`` in an
+        env file must NOT silently disable the gate.
+
+        Asserted by mocking the LLM and observing that it IS called
+        (which only happens when the gate is enabled — the kill-switch
+        branch returns ALLOW with ``reason="gate_disabled"`` *before*
+        any LLM call).
+        """
         monkeypatch.setenv("PROMISE_GATE_ENABLED", "")
-        with _patch_llm("allow"):
+        async_mock = MagicMock()
+
+        async def _fake(_text):
+            async_mock(_text)
+            return PromiseVerdict(action="allow", reason="ok", class_=None)
+
+        with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_fake):
             v = evaluate_promise("hello world", transport="telegram")
-        # Empty value → not in {"1","true","yes","on"} → enabled=False per the
-        # contract, BUT the default "true" applies only when the var is fully
-        # unset. So empty string disables the gate. This matches the cycle-2
-        # documented contract.
-        # Test asserts the documented behaviour: empty string is NOT enabled.
-        assert v.action == "allow"  # gate returns ALLOW either way
+
+        assert v.action == "allow"
+        # Gate WAS enabled — LLM was consulted, reason is the LLM's
+        # reason, not the kill-switch sentinel.
+        assert v.reason != "gate_disabled"
+        async_mock.assert_called_once()
+
+    def test_kill_switch_default_on_when_whitespace(self, monkeypatch):
+        """Whitespace-only env var → treated as empty → default-on.
+
+        No operator would intend whitespace as a disable signal. The
+        gate normalizes whitespace-only values to the default before
+        the allow-set check.
+        """
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "   ")
+        async_mock = MagicMock()
+
+        async def _fake(_text):
+            async_mock(_text)
+            return PromiseVerdict(action="allow", reason="ok", class_=None)
+
+        with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_fake):
+            v = evaluate_promise("hello world", transport="telegram")
+
+        assert v.action == "allow"
+        assert v.reason != "gate_disabled"
+        async_mock.assert_called_once()
+
+    def test_kill_switch_disabled_when_explicit_false(self, monkeypatch):
+        """Explicit ``PROMISE_GATE_ENABLED=false`` → gate disabled, LLM NOT called.
+
+        Companion to the empty-string test: confirms the only way to
+        disable the gate is an explicit non-empty value not in the
+        allow-set. ``"false"`` is the canonical disable value.
+        """
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "false")
+        async_mock = MagicMock()
+        with patch("bridge.promise_gate._evaluate_promise_async", async_mock):
+            v = evaluate_promise(
+                "I'll come back with thoughts later",
+                transport="telegram",
+            )
+        assert v.action == "allow"
+        assert v.reason == "gate_disabled"
+        async_mock.assert_not_called()
+
+    def test_kill_switch_disabled_when_explicit_zero(self, monkeypatch):
+        """``PROMISE_GATE_ENABLED=0`` → gate disabled (not in allow-set)."""
+        monkeypatch.setenv("PROMISE_GATE_ENABLED", "0")
+        async_mock = MagicMock()
+        with patch("bridge.promise_gate._evaluate_promise_async", async_mock):
+            v = evaluate_promise(
+                "I'll come back with thoughts later",
+                transport="telegram",
+            )
+        assert v.action == "allow"
+        assert v.reason == "gate_disabled"
+        async_mock.assert_not_called()
 
     def test_classifier_verdict_status_with_nudge_blocks(self):
         """Drafter delegation: STATUS_UPDATE + nudge_feedback → BLOCK, no LLM call."""

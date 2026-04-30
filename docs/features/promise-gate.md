@@ -128,6 +128,28 @@ solely for incident response (e.g. a regression rolling out a 100%
 block rate). Adding a per-message bypass was rejected on review — see
 "Why the template never names the kill switch" above.
 
+### Env-var contract
+
+Default is **on** (gate enabled). The disable signal must be
+explicit:
+
+| `PROMISE_GATE_ENABLED` value | Gate state | Notes |
+|------------------------------|------------|-------|
+| unset | enabled | default |
+| `""` (empty string) | enabled | treated as the default; a stray `PROMISE_GATE_ENABLED=` line in an env file does NOT silently disable the gate |
+| whitespace-only (e.g. `"   "`) | enabled | normalized to empty → default |
+| `"1"`, `"true"`, `"yes"`, `"on"` (case-insensitive) | enabled | explicit-on |
+| `"0"`, `"false"`, `"no"`, `"off"`, or any other non-empty value | disabled | explicit disable signal |
+
+This contract is intentionally stricter than the structurally-similar
+`bridge/read_the_room.py:_read_enabled` — RTR's default is `"false"`,
+so an empty-string env var matches its default-off state invisibly.
+The promise gate's default is `"true"` (default-on safety control),
+so empty-string is treated as the default rather than as a disable
+signal. Otherwise a stray `PROMISE_GATE_ENABLED=` would silently
+disable the gate while telemetry shows `source="promise_gate_disabled"`
+on every send.
+
 ## Telemetry — two channels with documented asymmetry
 
 ### Audit JSONL (universal)
