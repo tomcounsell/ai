@@ -544,6 +544,199 @@ class TestRetrieveMemories:
         assert "projA" in hydrated_keys[0]
 
 
+class TestRelevanceThreshold:
+    """Test the post-fusion min_rrf_score relevance gate.
+
+    The gate drops fused (key, score) tuples below the configured
+    threshold BEFORE Memory hydration. CLI defaults to None (off);
+    recall paths pass config.memory_defaults.RRF_MIN_SCORE explicitly.
+    """
+
+    def _make_record(self, mid: str = "rec-1") -> MagicMock:
+        rec = MagicMock()
+        rec.memory_id = mid
+        rec.superseded_by = ""  # active
+        return rec
+
+    def test_threshold_none_preserves_back_compat(self):
+        """min_rrf_score=None must behave exactly like today (no filter)."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        # Single signal at rank 50: score = 1/(60+50) ≈ 0.00909, very low
+        # but should still pass when threshold is None.
+        key = "Memory:test:proj:rec-1"
+        bm25_results = [(key, 0.1)] + [(f"Memory:test:proj:noise-{i}", 0.05) for i in range(49)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("query", "proj", limit=50, min_rrf_score=None)
+
+        assert len(result) >= 1
+
+    def test_threshold_drops_below_floor(self):
+        """A record present in only one signal at low rank should be dropped."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        # Only in one signal -- max score is 1/(60+1) ≈ 0.01639. With
+        # threshold = 0.02, this single-signal record should be dropped.
+        bm25_results = [(key, 5.0)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=0.02)
+
+        assert result == []
+
+    def test_threshold_keeps_strong_results(self):
+        """Records present in multiple signals should survive the threshold."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        # Same record at rank 1 in 4 signals: score = 4/61 ≈ 0.0656,
+        # well above any reasonable threshold.
+        bm25_results = [(key, 5.0)]
+        relevance_results = [(key, 1000.0)]
+        confidence_results = [(key, 0.8)]
+        embedding_results = [(key, 0.95)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=0.02)
+
+        assert len(result) == 1
+        assert result[0] is rec
+
+    def test_threshold_zero_equivalent_to_none(self):
+        """min_rrf_score=0 must behave like None (always pass)."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        bm25_results = [(key, 5.0)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=0)
+
+        # threshold=0 must NOT drop the record -- it equals "always pass".
+        assert len(result) == 1
+
+    def test_threshold_inf_returns_empty(self):
+        """min_rrf_score=inf must drop everything."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+        bm25_results = [(key, 5.0)]
+        relevance_results = [(key, 1000.0)]
+        confidence_results = [(key, 0.8)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = rec
+
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score=float("inf"))
+
+        assert result == []
+
+    def test_threshold_malformed_falls_through(self):
+        """Non-numeric threshold must not crash; treated as no-op."""
+        from agent.memory_retrieval import retrieve_memories
+
+        rec = self._make_record()
+        key = "Memory:test:proj:rec-1"
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = [(key, 5.0)]
+            mock_memory_cls.query.get.return_value = rec
+
+            # malformed threshold -- function must return results, not crash
+            result = retrieve_memories("q", "proj", limit=10, min_rrf_score="bogus")
+
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_threshold_does_not_hydrate_dropped_keys(self):
+        """Filtered keys must not trigger Memory.query.get -- saves Redis I/O."""
+        from agent.memory_retrieval import retrieve_memories
+
+        survivor = self._make_record("survivor")
+        key_keep = "Memory:test:proj:survivor"
+        key_drop = "Memory:test:proj:dropped"
+
+        # Keep key: present in 4 signals (high score).
+        # Drop key: present in 1 signal at rank 50 (low score).
+        bm25_results = [(key_keep, 5.0), (key_drop, 0.05)]
+        relevance_results = [(key_keep, 1000.0)]
+        confidence_results = [(key_keep, 0.8)]
+        embedding_results = [(key_keep, 0.9)]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=embedding_results),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = survivor
+
+            retrieve_memories("q", "proj", limit=10, min_rrf_score=0.02)
+
+        # Only the surviving key should be hydrated -- the dropped key
+        # must not appear in any Memory.query.get call.
+        hydrated = [c.args[0] for c in mock_memory_cls.query.get.call_args_list]
+        assert key_drop not in hydrated
+
+
 class TestSupersededFilter:
     """Test that superseded records are excluded from retrieve_memories() results."""
 

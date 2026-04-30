@@ -206,6 +206,243 @@ class TestRecall:
         assert "new territory" in result
 
 
+class TestRecallBloomGate:
+    """Test recall()'s pre-cluster bloom gate with BLOOM_MIN_HITS threshold.
+
+    The gate has three branches:
+    - bloom_hits == 0 with sufficient unique keywords → emits deja-vu
+      (regression guard for novel-territory signal).
+    - 1 <= bloom_hits < BLOOM_MIN_HITS → returns None, no deja-vu.
+    - bloom_hits >= BLOOM_MIN_HITS → proceeds to _recall_with_query.
+    """
+
+    def test_zero_hits_with_many_keywords_emits_dejavu(self, tmp_path, monkeypatch):
+        """bloom_hits == 0 with NOVEL_TERRITORY_KEYWORD_THRESHOLD keywords
+        still emits the deja-vu thought (preserved behavior)."""
+        from hook_utils.memory_bridge import (
+            NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+            WINDOW_SIZE,
+            recall,
+        )
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        keywords = [f"kw_{i}" for i in range(NOVEL_TERRITORY_KEYWORD_THRESHOLD + 1)]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with (
+            patch("utils.keyword_extraction.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+        ):
+            for i in range(WINDOW_SIZE - 1):
+                recall("sess", "Read", {"file_path": f"f{i}.py"})
+            result = recall("sess", "Read", {"file_path": "x.py"})
+
+        assert isinstance(result, str)
+        assert "new territory" in result
+
+    def test_single_hit_returns_none_without_dejavu(self, tmp_path, monkeypatch):
+        """bloom_hits == 1 (below BLOOM_MIN_HITS=2) returns None and emits
+        no deja-vu thought -- the new gate's primary purpose."""
+        from hook_utils.memory_bridge import WINDOW_SIZE, recall
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        keywords = ["only_one_hits"] + [f"miss_{i}" for i in range(8)]
+
+        # bloom returns True for the FIRST keyword only -> 1 hit
+        mock_bloom = MagicMock()
+        first_calls = {"n": 0}
+
+        def selective_might_exist(model, kw):
+            first_calls["n"] += 1
+            return first_calls["n"] == 1
+
+        mock_bloom.might_exist = MagicMock(side_effect=selective_might_exist)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with (
+            patch("utils.keyword_extraction.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+        ):
+            for i in range(WINDOW_SIZE - 1):
+                recall("sess-single", "Read", {"file_path": f"f{i}.py"})
+            result = recall("sess-single", "Read", {"file_path": "x.py"})
+
+        assert result is None
+
+    def test_two_hits_proceeds_to_recall_with_query(self, tmp_path, monkeypatch):
+        """bloom_hits == BLOOM_MIN_HITS proceeds past the gate and into
+        _recall_with_query (verified via call-count)."""
+        from hook_utils.memory_bridge import WINDOW_SIZE, recall
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        keywords = ["alpha", "beta", "gamma"]
+
+        # All three keywords return True -> 3 hits >= BLOOM_MIN_HITS
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with (
+            patch("utils.keyword_extraction.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("hook_utils.memory_bridge._recall_with_query", return_value=[]) as mrwq,
+        ):
+            for i in range(WINDOW_SIZE - 1):
+                recall("sess-pass", "Read", {"file_path": f"f{i}.py"})
+            recall("sess-pass", "Read", {"file_path": "x.py"})
+
+        # _recall_with_query was invoked at least once
+        assert mrwq.call_count >= 1
+
+
+class TestRecallPassesMinScore:
+    """Confirm recall() passes RRF_MIN_SCORE through to _recall_with_query."""
+
+    def test_recall_passes_min_rrf_score(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import RRF_MIN_SCORE, WINDOW_SIZE, recall
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        captured = {}
+
+        def fake_rwq(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with (
+            patch(
+                "utils.keyword_extraction.extract_topic_keywords",
+                return_value=["alpha", "beta", "gamma", "delta"],
+            ),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("hook_utils.memory_bridge._recall_with_query", side_effect=fake_rwq),
+        ):
+            for i in range(WINDOW_SIZE - 1):
+                recall("sess-mscore", "Read", {"file_path": f"f{i}.py"})
+            recall("sess-mscore", "Read", {"file_path": "x.py"})
+
+        assert captured.get("min_rrf_score") == RRF_MIN_SCORE
+
+
+class TestPrefetchPassesMinScore:
+    """Confirm prefetch() passes RRF_MIN_SCORE through to _recall_with_query."""
+
+    def test_prefetch_passes_min_rrf_score(self, tmp_path, monkeypatch):
+        from hook_utils.memory_bridge import RRF_MIN_SCORE, prefetch
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        captured = {}
+
+        def fake_rwq(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with patch("hook_utils.memory_bridge._recall_with_query", side_effect=fake_rwq):
+            # 50+ char prompt avoids the trivial-prompt gate
+            prefetch(
+                "sess-prefetch",
+                "Looking into the deployment migration auth flow today",
+            )
+
+        assert captured.get("min_rrf_score") == RRF_MIN_SCORE
+
+
+class TestRecallWithQueryBloomThreshold:
+    """Test _recall_with_query's internal bloom_hits < BLOOM_MIN_HITS gate."""
+
+    def test_single_hit_returns_empty(self):
+        """Tightened gate: 1 < BLOOM_MIN_HITS=2 returns []."""
+        from hook_utils.memory_bridge import _recall_with_query
+
+        # Three tokens; bloom returns True for the FIRST only -> 1 hit
+        mock_bloom = MagicMock()
+        calls = {"n": 0}
+
+        def selective(model, tok):
+            calls["n"] += 1
+            return calls["n"] == 1
+
+        mock_bloom.might_exist = MagicMock(side_effect=selective)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with patch("models.memory.Memory", mock_memory_cls):
+            result = _recall_with_query(
+                "alpha beta gamma", project_key="test", bloom_check_emit_dejavu=False
+            )
+        assert result == []
+
+    def test_two_hits_proceeds(self):
+        """bloom_hits == BLOOM_MIN_HITS proceeds to retrieve_memories."""
+        from hook_utils.memory_bridge import _recall_with_query
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        rec = MagicMock()
+        rec.memory_id = "rec-1"
+        rec.content = "x"
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[rec]),
+            patch("utils.keyword_extraction._apply_category_weights", wraps=lambda r: r),
+        ):
+            result = _recall_with_query("alpha beta", project_key="test")
+        assert result == [rec]
+
+    def test_min_rrf_score_threaded_to_retrieve_memories(self):
+        """_recall_with_query passes min_rrf_score through to retrieve_memories."""
+        from hook_utils.memory_bridge import _recall_with_query
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        captured = {}
+
+        def fake_rm(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", side_effect=fake_rm),
+        ):
+            _recall_with_query("alpha beta gamma", project_key="test", min_rrf_score=0.0123)
+        assert captured.get("min_rrf_score") == 0.0123
+
+
 class TestRecallCategoryReranking:
     """Test that recall() applies category re-ranking via _apply_category_weights."""
 

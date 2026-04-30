@@ -290,6 +290,170 @@ class TestDejaVuSignals:
         _tool_buffers.pop(session, None)
 
 
+class TestCheckAndInjectBloomGate:
+    """Test check_and_inject's pre-cluster bloom gate at three branches:
+
+    - bloom_hits == 0 with sufficient keywords -> deja-vu (preserved).
+    - 1 <= bloom_hits < BLOOM_MIN_HITS -> None, no deja-vu (new gate).
+    - bloom_hits >= BLOOM_MIN_HITS -> proceeds to retrieve_memories.
+    """
+
+    def test_zero_hits_with_many_keywords_emits_dejavu(self):
+        """bloom_hits == 0 with novel-territory threshold of keywords emits
+        the deja-vu thought (regression guard)."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import (
+            INJECTION_WINDOW_SIZE,
+            NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+        )
+
+        session = "bloom-gate-zero"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = [f"kw_{i}" for i in range(NOVEL_TERRITORY_KEYWORD_THRESHOLD + 1)]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(session, "Read", {"file_path": "x.py"})
+
+        assert result is not None
+        assert "new territory" in result
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_single_hit_returns_none_without_dejavu(self):
+        """bloom_hits == 1 (below BLOOM_MIN_HITS=2) returns None, no
+        deja-vu, no retrieve_memories call."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "bloom-gate-single"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        # 4 keywords, only the FIRST returns True from bloom -> 1 hit
+        keywords = ["only_one", "miss_a", "miss_b", "miss_c"]
+
+        mock_bloom = MagicMock()
+        first_calls = {"n": 0}
+
+        def selective(model, kw):
+            first_calls["n"] += 1
+            return first_calls["n"] == 1
+
+        mock_bloom.might_exist = MagicMock(side_effect=selective)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        rm_mock = MagicMock(return_value=[])
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", rm_mock),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(session, "Read", {"file_path": "x.py"})
+
+        assert result is None
+        # retrieve_memories must NOT be called -- gate short-circuits
+        assert rm_mock.call_count == 0
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_two_hits_proceeds_to_retrieve_memories(self):
+        """bloom_hits >= BLOOM_MIN_HITS proceeds to retrieve_memories."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "bloom-gate-pass"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = ["alpha", "beta", "gamma"]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        rm_mock = MagicMock(return_value=[])
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", rm_mock),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            check_and_inject(session, "Read", {"file_path": "x.py"})
+
+        assert rm_mock.call_count >= 1
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+
+class TestCheckAndInjectPassesMinScore:
+    """Confirm check_and_inject passes RRF_MIN_SCORE through to retrieve_memories."""
+
+    def test_check_and_inject_passes_min_rrf_score(self):
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE, RRF_MIN_SCORE
+
+        session = "min-score-pass"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = ["alpha", "beta", "gamma"]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        captured = {}
+
+        def fake_rm(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", side_effect=fake_rm),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            check_and_inject(session, "Read", {"file_path": "x.py"})
+
+        assert captured.get("min_rrf_score") == RRF_MIN_SCORE
+
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+
 class TestApplyCategoryWeights:
     """Test utils/keyword_extraction.py _apply_category_weights()."""
 
