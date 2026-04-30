@@ -226,6 +226,36 @@ After RRF fusion returns scored results, `_apply_category_weights()` re-ranks th
 
 Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `utils.keyword_extraction` (keyword utilities were extracted to break the import chain -- see [Memory Hook Performance](memory-hook-performance.md)).
 
+## Relevance Threshold
+
+Recall paths apply a two-layer relevance gate so queries with no real overlap with the corpus return zero records instead of recency-ranked filler. Without this gate, RRF will surface the top-N records for any query — including nonsense queries with zero semantic or keyword overlap — because temporal, confidence, and embedding signals always rank over the full corpus.
+
+**Layer 1: Tightened bloom pre-check (`BLOOM_MIN_HITS = 2`).** Recall tokenizes the query, drops noise words, and probes the `ExistenceFilter` bloom for each remaining token. The gate now requires at least `BLOOM_MIN_HITS` distinct token hits before BM25 + RRF runs (was: any single hit). The `bloom_hits == 0` deja-vu / novel-territory branch is preserved unchanged at all sites that have it -- the new gate kicks in only for `1 <= bloom_hits < BLOOM_MIN_HITS`, returning empty without emitting a deja-vu thought.
+
+The bloom gate runs at four sites:
+
+1. `tools/memory_search/__init__.py` — CLI `search()` wrapper
+2. `_recall_with_query()` in `.claude/hooks/hook_utils/memory_bridge.py` — internal bloom check
+3. `recall()` in `memory_bridge.py` — pre-cluster multi-keyword gate
+4. `check_and_inject()` in `agent/memory_hook.py` — SDK PostToolUse pre-cluster gate
+
+**Layer 2: Post-fusion RRF score floor (`RRF_MIN_SCORE`).** After `rrf_fuse()` returns `(key, score)` tuples, entries below the floor are dropped before Memory record hydration (saves Redis I/O on filtered keys). The default `RRF_MIN_SCORE = 1 / (RRF_K + 50)` (≈ 0.00909 with `RRF_K=60`) requires a record to rank in the top-50 of at least one signal:
+
+- A record at rank 1 in 1 signal scores `1/(60+1)` ≈ 0.01639 (passes)
+- A record at rank 50 in 1 signal scores `1/(60+50)` ≈ 0.00909 (boundary)
+- A record at rank 51+ in only one signal scores below the floor (filtered)
+
+**Default-OFF for CLI / Default-ON for recall hooks.** This divergence is intentional: CLI debugging sessions can see what the gate would drop (default `None`, opt-in via `--min-score FLOAT`), while the agent's prompt injection path stays clean (recall hooks pass `RRF_MIN_SCORE` explicitly). Reversibility: set `RRF_MIN_SCORE = None` in `config/memory_defaults.py` to disable the gate globally.
+
+**Live verification.**
+
+```bash
+$ python -m tools.memory_search search "PHRASE_THAT_DEFINITELY_DOES_NOT_APPEAR_ANYWHERE_QQQQ" --min-score 0.009
+No memories found matching '...QQQQ'.
+```
+
+End-to-end coverage lives at `tests/integration/test_memory_recall_threshold.py` (real Memory store, real Redis): nonsense query with threshold returns `[]`, nonsense query without threshold returns ≥ 1 record, relevant query with threshold still surfaces the seeded record. See also #1213 for the original bug report and design rationale.
+
 ## Structured Metadata
 
 Memory records carry an optional `metadata` DictField with structured data from extraction and outcome tracking. Old records without metadata return `{}` (no migration needed).
@@ -454,6 +484,8 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `MEMORY_ACTED_SIGNAL` | 0.85 | Confidence boost when agent acts on a memory |
 | `MEMORY_CONTRADICTED_SIGNAL` | 0.15 | Confidence penalty when agent contradicts a memory |
 | `RRF_K` | 60 | Reciprocal Rank Fusion constant: higher = more uniform blending across signal lists |
+| `RRF_MIN_SCORE` | `1 / (RRF_K + 50)` ≈ 0.00909 | Post-fusion relevance floor. Records below this fused RRF score are dropped before hydration. Default-ON in recall hooks; CLI defaults to `None` (opt-in via `--min-score FLOAT`). Set to `None` to disable globally. See [Relevance Threshold](#relevance-threshold). |
+| `BLOOM_MIN_HITS` | 2 | Minimum distinct query-token hits in the bloom filter before BM25 + RRF runs. The `bloom_hits == 0` deja-vu / novel-territory branch is preserved unchanged. See [Relevance Threshold](#relevance-threshold). |
 | `MAX_THOUGHTS_PER_INJECTION` | 3 | Maximum thought blocks per injection event |
 | `INJECTION_WINDOW_SIZE` | 3 | Tool calls per sliding window |
 | `INJECTION_BUFFER_SIZE` | 9 | Total tool calls in rolling buffer |

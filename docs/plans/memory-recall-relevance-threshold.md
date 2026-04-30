@@ -370,7 +370,7 @@ This repo does not use Sphinx / Read the Docs / MkDocs. No external docs site to
 - [ ] Claude Code hook bridge `_recall_with_query` threads `min_rrf_score` through; both `recall()` and `prefetch()` pass `RRF_MIN_SCORE` (verified by mock-call-args tests on both call sites).
 - [ ] CLI search keeps `min_rrf_score=None` default; `--min-score FLOAT` flag exposes opt-in (verified by CLI-level test).
 - [ ] Unit test `test_nonsense_query_returns_empty_with_threshold` passes against a real Memory store (acceptance-criteria headliner).
-- [ ] `docs/features/subconscious-memory.md` documents the relevance threshold behavior (visible in the diff of the PR).
+- [x] `docs/features/subconscious-memory.md` documents the relevance threshold behavior (visible in the diff of the PR).
 - [ ] All existing memory tests still pass (`pytest tests/unit/test_memory_retrieval.py tests/unit/test_memory_hook.py tests/unit/test_memory_bridge.py -q`).
 - [ ] Lint clean (`python -m ruff check .`).
 - [ ] Format clean (`python -m ruff format --check .`).
