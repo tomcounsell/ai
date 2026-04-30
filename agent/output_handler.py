@@ -159,6 +159,93 @@ class TelegramRelayOutputHandler:
             self._redis = redis.Redis.from_url(self._redis_url, decode_responses=True)
         return self._redis
 
+    @staticmethod
+    def _resolve_transport(session: Any) -> str:
+        """Extract the transport from a session's extra_context.
+
+        Returns "telegram" when the session is None, has no extra_context, or
+        the transport key is missing. This preserves back-compat with sessions
+        created before email transport existed.
+        """
+        if session is None:
+            return "telegram"
+        extra = getattr(session, "extra_context", None) or {}
+        return extra.get("transport") or "telegram"
+
+    async def _send_via_email_outbox(
+        self,
+        chat_id: str,
+        text: str,
+        session: Any,
+    ) -> None:
+        """Queue an email reply on ``email:outbox:{session_id}``.
+
+        Builds a payload matching ``tools/send_message.py::_send_via_email``
+        and the unified shape consumed by ``bridge/email_relay.py``. Subject
+        is prefixed with ``"Re: "`` if the original subject does not already
+        start with ``re:`` (case-insensitive); ``in_reply_to`` and
+        ``references`` are sourced from ``extra_context.email_message_id``.
+
+        Implements the user-set design rule (2026-04-30): when a session was
+        spawned via the email bridge, the default Stop-drafter reply must
+        route through the email outbox even when no project-specific email
+        handler is registered. This handler is the worker's catch-all default;
+        without this branch, email-spawned sessions silently misroute to
+        telegram and the SMTP relay never sees them.
+        """
+        session_id = getattr(session, "session_id", None) or chat_id
+
+        # Pull email metadata stamped on the session by bridge/email_bridge.py
+        # (or the test skill's spawn.py). Missing fields fall back to safe
+        # defaults so a malformed session still produces a valid envelope.
+        extra = getattr(session, "extra_context", None) or {}
+        original_subject = extra.get("email_subject") or ""
+        in_reply_to = extra.get("email_message_id") or None
+
+        # Subject prefixing: match bridge/email_bridge.py::_build_reply_mime
+        # worker-reply semantics — always prepend "Re: " unless the subject
+        # already starts with "re:" (case-insensitive). Empty subject becomes
+        # "Re: (no subject)" so threading still works in the recipient's client.
+        if original_subject:
+            if original_subject.lower().startswith("re:"):
+                subject = original_subject
+            else:
+                subject = f"Re: {original_subject}"
+        else:
+            subject = "Re: (no subject)"
+
+        payload = {
+            "session_id": session_id,
+            "to": chat_id,
+            "subject": subject,
+            "body": text,
+            "attachments": [],
+            "in_reply_to": in_reply_to,
+            "references": in_reply_to,
+            "from_addr": os.environ.get("SMTP_USER", ""),
+            "timestamp": time.time(),
+        }
+
+        queue_key = f"email:outbox:{session_id}"
+        try:
+            r = self._get_redis()
+            r.rpush(queue_key, json.dumps(payload))
+            r.expire(queue_key, self.OUTBOX_TTL)
+            logger.info(
+                "Queued email output to %s (%d chars, to=%s, in_reply_to=%s)",
+                queue_key,
+                len(text),
+                chat_id,
+                bool(in_reply_to),
+            )
+        except Exception as e:
+            logger.error(f"Failed to write to Redis outbox {queue_key}: {e}")
+
+        # Dual-write to file handler for audit/debugging (matches the telegram
+        # path so worker logs preserve a record of every send attempt).
+        if self._file_handler is not None:
+            await self._file_handler.send(chat_id, text, 0, session)
+
     async def send(
         self,
         chat_id: str,
@@ -166,19 +253,41 @@ class TelegramRelayOutputHandler:
         reply_to_msg_id: int,
         session: Any = None,
     ) -> None:
-        """Write a message payload to the Redis outbox for Telegram delivery.
+        """Write a message payload to the Redis outbox.
 
-        Payload format matches ``tools/send_telegram.py:145-151``::
+        Routes by ``session.extra_context.transport``:
 
-            {"chat_id", "reply_to", "text", "session_id", "timestamp"}
+        - ``telegram`` (default): payload format matches
+          ``tools/send_telegram.py:145-151``::
+
+              {"chat_id", "reply_to", "text", "session_id", "timestamp"}
+
+          Written to ``telegram:outbox:{session_id}``.
+        - ``email``: payload matches ``tools/send_message.py::_send_via_email``
+          and ``bridge/email_relay.py``'s expected schema. Written to
+          ``email:outbox:{session_id}``. This implements the "default reply
+          follows spawning bridge" rule (user decision 2026-04-30): a session
+          spawned via the email bridge replies via email by default, even if
+          this handler is registered as the project's catch-all.
 
         Args:
-            chat_id: Target Telegram chat identifier.
+            chat_id: Target chat identifier (Telegram chat_id or recipient
+                email address depending on transport).
             text: Message text to send.
             reply_to_msg_id: Original message ID to reply to (may be None).
-            session: Optional AgentSession providing ``session_id``.
+                Ignored for email transport.
+            session: Optional AgentSession providing ``session_id`` and
+                ``extra_context`` (transport, email_message_id, etc.).
         """
         if not text:
+            return
+
+        # Transport-aware routing: redirect email-spawned sessions to the
+        # email outbox. Default (no transport key, or any non-email value) is
+        # telegram, preserving back-compat with older sessions.
+        transport = self._resolve_transport(session)
+        if transport == "email":
+            await self._send_via_email_outbox(chat_id, text, session)
             return
 
         session_id = getattr(session, "session_id", None) or chat_id

@@ -1016,3 +1016,291 @@ class TestReadTheRoomWiring:
                 os.environ.pop("READ_THE_ROOM_ENABLED", None)
             else:
                 os.environ["READ_THE_ROOM_ENABLED"] = old
+
+
+class TestTransportAwareRouting:
+    """Tests for transport-aware default routing in TelegramRelayOutputHandler.
+
+    Design rule (set by user 2026-04-30): the default Stop drafter / OutputHandler
+    routes the agent's final reply through the **same medium that spawned the
+    session**. ``extra_context.transport == "email"`` redirects writes from
+    ``telegram:outbox:<sid>`` to ``email:outbox:<sid>`` with an email-shaped
+    payload that ``bridge/email_relay.py`` can deliver. Sessions without a
+    transport key, or with ``transport == "telegram"``, preserve the existing
+    Telegram behavior.
+
+    Reactions (``react()``) are nonsensical for email — there is no email
+    equivalent of an emoji reaction. For ``transport=email`` sessions,
+    ``react()`` becomes a silent no-op (single INFO log).
+    """
+
+    def _make_handler(self, mock_redis=None):
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        if mock_redis is not None:
+            h._redis = mock_redis
+        else:
+            h._redis = MagicMock()
+        return h
+
+    def _email_session(
+        self,
+        session_id: str = "email-sess",
+        message_id: str = "<orig-msg@example.com>",
+        from_addr: str = "customer@example.com",
+        subject: str = "Original subject",
+        to_addrs=None,
+        cc_addrs=None,
+    ):
+        """Build a fake email-spawned session matching bridge/email_bridge.py."""
+        s = MagicMock()
+        s.session_id = session_id
+        s.extra_context = {
+            "transport": "email",
+            "email_message_id": message_id,
+            "email_from": from_addr,
+            "email_to_addrs": to_addrs or [],
+            "email_cc_addrs": cc_addrs or [],
+            "email_subject": subject,
+        }
+        return s
+
+    # ── 1. Telegram-spawned session writes to telegram outbox (regression) ──
+
+    def test_telegram_session_writes_to_telegram_outbox(self):
+        """Sessions with transport=telegram (or no transport set) must continue
+        to write to telegram:outbox — back-compat with the existing behavior."""
+        handler = self._make_handler()
+
+        s = MagicMock()
+        s.session_id = "tg-sess"
+        s.extra_context = {"transport": "telegram"}
+
+        # Stub the drafter so we don't need its internals.
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(handler.send("123456", "Hello world", 0, session=s))
+
+        handler._redis.rpush.assert_called_once()
+        key = handler._redis.rpush.call_args[0][0]
+        assert key == "telegram:outbox:tg-sess"
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["chat_id"] == "123456"
+        assert payload["text"] == "Hello world"
+        assert payload["session_id"] == "tg-sess"
+
+    # ── 2. Email-spawned session writes to email outbox with correct payload ──
+
+    def test_email_session_writes_to_email_outbox(self):
+        """transport=email must route writes to email:outbox with the unified
+        payload shape (matching tools/send_message.py::_send_via_email and the
+        relay's expected schema in bridge/email_relay.py)."""
+        handler = self._make_handler()
+
+        session = self._email_session(
+            session_id="email-sess",
+            message_id="<orig@example.com>",
+            from_addr="customer@example.com",
+            subject="My setup question",
+        )
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(
+                handler.send(
+                    chat_id="customer@example.com",
+                    text="Here is the answer.",
+                    reply_to_msg_id=0,
+                    session=session,
+                )
+            )
+
+        handler._redis.rpush.assert_called_once()
+        key = handler._redis.rpush.call_args[0][0]
+        assert key == "email:outbox:email-sess", f"Expected email outbox key, got {key}"
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        # Match the unified email payload schema from bridge/email_relay.py.
+        assert payload["session_id"] == "email-sess"
+        assert payload["to"] == "customer@example.com"
+        # Subject prefixed with "Re:" (worker-reply semantics).
+        assert payload["subject"] == "Re: My setup question"
+        assert payload["body"] == "Here is the answer."
+        assert payload["in_reply_to"] == "<orig@example.com>"
+        assert payload["references"] == "<orig@example.com>"
+        assert "timestamp" in payload
+        # No telegram-only fields leak through.
+        assert "chat_id" not in payload
+        assert "reply_to" not in payload
+
+    # ── 3. Email-spawned session with "Re:" subject does NOT double-prefix ──
+
+    def test_email_session_does_not_double_prefix_re(self):
+        """If the original subject already starts with "Re:" (any case), the
+        reply must not become "Re: Re: ...". Match the worker reply semantics
+        in bridge/email_bridge.py::_build_reply_mime."""
+        handler = self._make_handler()
+
+        session = self._email_session(subject="Re: My setup question")
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(handler.send("customer@example.com", "ok", 0, session=session))
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["subject"] == "Re: My setup question"
+
+    def test_email_session_does_not_double_prefix_re_lowercase(self):
+        """Case-insensitive: "re: foo" should not become "Re: re: foo"."""
+        handler = self._make_handler()
+
+        session = self._email_session(subject="re: lowercase")
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(handler.send("customer@example.com", "ok", 0, session=session))
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        # The original casing is preserved verbatim (no prefix added).
+        assert payload["subject"] == "re: lowercase"
+
+    # ── 4. Reactions on email sessions are dropped silently ──
+
+    def test_email_session_send_never_queues_reaction_payload(self):
+        """For transport=email sessions, send() must NOT queue any reaction
+        payload (including the RTR suppress 👀 reaction). Email has no emoji-
+        reaction concept; queueing one would orphan a payload that nothing
+        consumes. The transport-aware short-circuit at the top of send()
+        bypasses the entire RTR/reaction path.
+        """
+        handler = self._make_handler()
+        session = self._email_session()
+
+        # Force the RTR module to return "suppress" — if the email branch
+        # didn't short-circuit, this would queue a reaction.
+        from bridge.read_the_room import RoomVerdict
+
+        suppress_verdict = RoomVerdict(action="suppress", reason="testing", revised_text=None)
+
+        # Set the env flag so RTR would otherwise run.
+        import os as _os
+
+        old_rtr = _os.environ.get("READ_THE_ROOM_ENABLED")
+        _os.environ["READ_THE_ROOM_ENABLED"] = "1"
+        try:
+            with (
+                patch(
+                    "bridge.message_drafter.draft_message",
+                    AsyncMock(side_effect=RuntimeError("skip drafter")),
+                ),
+                patch(
+                    "bridge.read_the_room.read_the_room",
+                    AsyncMock(return_value=suppress_verdict),
+                ),
+            ):
+                asyncio.run(
+                    handler.send(
+                        chat_id="customer@example.com",
+                        text="Body that would normally be RTR-suppressed.",
+                        reply_to_msg_id=42,  # truthy so the RTR suppress would fire
+                        session=session,
+                    )
+                )
+        finally:
+            if old_rtr is None:
+                _os.environ.pop("READ_THE_ROOM_ENABLED", None)
+            else:
+                _os.environ["READ_THE_ROOM_ENABLED"] = old_rtr
+
+        # Exactly one rpush — the email message itself. No reaction.
+        assert handler._redis.rpush.call_count == 1
+        key = handler._redis.rpush.call_args[0][0]
+        assert key.startswith("email:outbox:"), f"Expected email outbox write, got {key}"
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload.get("type") != "reaction"
+        assert "body" in payload  # email-shaped, not reaction-shaped
+
+    def test_send_with_empty_text_for_email_is_noop(self):
+        """Empty text on an email session must NOT queue an empty email."""
+        handler = self._make_handler()
+
+        session = self._email_session()
+
+        asyncio.run(handler.send("customer@example.com", "", 0, session=session))
+
+        handler._redis.rpush.assert_not_called()
+
+    # ── 5. Missing transport defaults to telegram (back-compat) ──
+
+    def test_missing_transport_defaults_to_telegram(self):
+        """A session whose extra_context lacks the transport key — older
+        sessions, or any session created before the email path existed —
+        must continue to route to telegram:outbox."""
+        handler = self._make_handler()
+
+        s = MagicMock()
+        s.session_id = "no-transport"
+        s.extra_context = {}  # no transport key
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(handler.send("123", "Hello", 0, session=s))
+
+        key = handler._redis.rpush.call_args[0][0]
+        assert key == "telegram:outbox:no-transport"
+
+    def test_extra_context_none_defaults_to_telegram(self):
+        """If extra_context itself is None, default to telegram."""
+        handler = self._make_handler()
+
+        s = MagicMock()
+        s.session_id = "ctx-none"
+        s.extra_context = None
+
+        with patch(
+            "bridge.message_drafter.draft_message",
+            AsyncMock(side_effect=RuntimeError("skip drafter")),
+        ):
+            asyncio.run(handler.send("123", "Hello", 0, session=s))
+
+        key = handler._redis.rpush.call_args[0][0]
+        assert key == "telegram:outbox:ctx-none"
+
+    # ── 6. Email payload includes from_addr from SMTP_USER env ──
+
+    def test_email_payload_includes_from_addr_from_env(self):
+        """When SMTP_USER is set, the payload's from_addr must mirror it so
+        the email_relay sends with the correct envelope sender."""
+        import os as _os
+
+        handler = self._make_handler()
+        session = self._email_session()
+
+        old_smtp_user = _os.environ.get("SMTP_USER")
+        _os.environ["SMTP_USER"] = "valor@yuda.me"
+        try:
+            with patch(
+                "bridge.message_drafter.draft_message",
+                AsyncMock(side_effect=RuntimeError("skip drafter")),
+            ):
+                asyncio.run(handler.send("customer@example.com", "Hi", 0, session=session))
+        finally:
+            if old_smtp_user is None:
+                _os.environ.pop("SMTP_USER", None)
+            else:
+                _os.environ["SMTP_USER"] = old_smtp_user
+
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["from_addr"] == "valor@yuda.me"
