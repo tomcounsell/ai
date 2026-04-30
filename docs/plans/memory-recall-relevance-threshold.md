@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-30
 tracking: https://github.com/tomcounsell/ai/issues/1213
 last_comment_id:
+revision_applied: true
 ---
 
 # Memory Recall Relevance Threshold
@@ -54,6 +55,15 @@ The query string appears in zero records. The CLI returns 5 unrelated records an
 
 **Notes:** The Recon Summary's correction stands: there are THREE paths into `retrieve_memories` (CLI, SDK multi-query, hook bridge). The hook bridge's `_recall_with_query` is shared by `recall()` and `prefetch()`, so threading the threshold through `_recall_with_query` covers both call sites in one change.
 
+**Revision-pass correction (2026-04-30):** The original Solution/Technical Approach assumed ONLY two bloom-check sites needed tightening. Re-reading the code shows there are actually **FOUR** bloom-check sites — the SDK and hook caller paths both have their own multi-keyword bloom gate that runs BEFORE invoking `_recall_with_query` with `bloom_check=False` (line 493 of `memory_bridge.py`). All four sites must be tightened atomically to avoid leaving a leak:
+
+1. `tools/memory_search/__init__.py:89-108` — CLI search, single query.
+2. `_recall_with_query` in `memory_bridge.py:317-346` — used by `prefetch()` (and historically by `recall()` when `bloom_check=True`, but `recall()` now passes `bloom_check=False`).
+3. `recall()` in `memory_bridge.py:449-467` — multi-keyword bloom gate that runs BEFORE `_recall_with_query` is called (with `bloom_check=False`). This was MISSED in the original plan.
+4. `check_and_inject()` in `agent/memory_hook.py:168-188` — multi-keyword bloom gate. Also MISSED in the original plan.
+
+This correction is folded into the Solution, Technical Approach, Step 2, and Test Impact sections below.
+
 ## Prior Art
 
 - **PR #604** (merged 2026-03-31): "Add BM25+RRF fusion retrieval, replace ContextAssembler" — the original recall pipeline. PR body confirms relevance-driven design intent. Did NOT add a min-score gate — that gap is what this plan addresses.
@@ -97,7 +107,7 @@ These findings informed two technical decisions: (1) layer the threshold post-fu
 - **Method**: code-read of `tools/memory_search/__init__.py:89-108` and `_recall_with_query` in `memory_bridge.py:317-346`. The bloom check tokenizes the query, drops noise words, and tests each remaining token. Current behavior breaks on the FIRST hit; proposed behavior counts all hits and requires ≥ 2.
 - **Finding**: Single-keyword agent queries are rare in practice — both the SDK multi-query path (`agent/memory_hook.py:200`) and the hook recall path (`memory_bridge.py:482`) build cluster queries by joining 5 keywords. The CLI search path could pass a single keyword, but searching for one word is an anti-pattern (low precision regardless of threshold). Prefetch (`memory_bridge.py:608`) uses the full user prompt — typically dozens of tokens. Risk of regression is low.
 - **Confidence**: high
-- **Impact on plan**: Bloom check upgrades from "any hit passes" to "≥ 2 hits passes" in BOTH `tools/memory_search/__init__.py` and `_recall_with_query` (which both `recall()` and `prefetch()` use). The constant `BLOOM_MIN_HITS = 2` lives in `config/memory_defaults.py` for tunability. Single-keyword queries (rare) may produce no results — acceptable, since the relevance gate would likely have filtered them anyway.
+- **Impact on plan**: Bloom check upgrades from "any hit passes" to "≥ 2 hits passes" in **FOUR** sites — `tools/memory_search/__init__.py`, `_recall_with_query`, `recall()`'s pre-cluster gate, and `check_and_inject()`'s pre-cluster gate. (Revision-pass correction — the original spike write-up listed only the first two; re-reading the bridge revealed `recall()` calls `_recall_with_query` with `bloom_check=False` because it has its own multi-keyword bloom gate, and `check_and_inject()` mirrors that pattern.) The constant `BLOOM_MIN_HITS = 2` lives in `config/memory_defaults.py` for tunability. Single-keyword queries (rare) may produce no results — acceptable, since the relevance gate would likely have filtered them anyway.
 
 ### spike-3: Confirm the threshold default-OFF/default-ON behavior is API-clean
 
@@ -173,7 +183,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/memory-recall-
 ### Key Elements
 
 - **Post-fusion relevance gate**: a numeric RRF-score floor applied AFTER `rrf_fuse` returns and BEFORE Memory record hydration. Configured globally in `config/memory_defaults.py` as `RRF_MIN_SCORE`.
-- **Tightened bloom pre-check**: require `BLOOM_MIN_HITS = 2` unique-token hits (up from any hit) before BM25 + RRF runs. Applied in both `tools/memory_search/__init__.py` (CLI search) and `_recall_with_query` (hook recall + prefetch).
+- **Tightened bloom pre-check**: require `BLOOM_MIN_HITS = 2` unique-token hits (up from any hit) before BM25 + RRF runs. Applied in **FOUR** sites: (1) `tools/memory_search/__init__.py` (CLI search), (2) `_recall_with_query` (hook prefetch path), (3) `recall()`'s pre-cluster bloom gate in `memory_bridge.py`, and (4) `check_and_inject()`'s pre-cluster bloom gate in `agent/memory_hook.py`. The `bloom_hits == 0` branch (deja-vu / novel-territory fallback) is PRESERVED unchanged in sites 2/3/4 — the new gate only kicks in for `1 <= bloom_hits < BLOOM_MIN_HITS`, returning empty without emitting the deja-vu thought.
 - **Default-ON for recall paths, default-OFF for CLI**: the gate is enabled by default in the SDK PostToolUse hook (`agent/memory_hook.py`) and in the Claude Code hook bridge (`recall()` + `prefetch()`). The CLI `tools.memory_search.search()` defaults the gate OFF for back-compat with existing scripts but exposes a `--min-score` flag for debugging.
 - **Calibrated threshold**: `RRF_MIN_SCORE = 1 / (RRF_K + 50)` (≈ 0.00909 with `RRF_K=60`). This requires a record to rank in the top-50 of at least one signal — a conservative gate that filters obvious noise while preserving legitimate single-strong-signal hits.
 - **Documentation update**: `docs/features/subconscious-memory.md` gets a new "Relevance Threshold" subsection describing the gate, the default, and the opt-out path.
@@ -196,9 +206,11 @@ Recall in Claude Code hooks (gate ON):
 ### Technical Approach
 
 - **Add `min_rrf_score` parameter to `retrieve_memories()`** with default `None`. When `None`, behave exactly as today (back-compat). When numeric, filter fused tuples after `rrf_fuse` returns and before hydration. Filtering before hydration saves Redis `query.get` calls on records that would be dropped anyway.
-- **Tighten bloom check from `>= 1` to `>= BLOOM_MIN_HITS` (=2)** in TWO places:
-  1. `tools/memory_search/__init__.py:89-108` — replace the `break`-on-first-hit loop with a counter.
-  2. `.claude/hooks/hook_utils/memory_bridge.py:317-346` — `_recall_with_query` already has a counter (`bloom_hits`); change the gate from `if bloom_hits == 0` to `if bloom_hits < BLOOM_MIN_HITS`. The deja-vu fallback (`NOVEL_TERRITORY_KEYWORD_THRESHOLD`) still fires only when `bloom_hits == 0`, preserving today's "novel territory" semantics.
+- **Tighten bloom check from `>= 1` to `>= BLOOM_MIN_HITS` (=2)** in FOUR places (revision-pass correction — original plan listed only two):
+  1. `tools/memory_search/__init__.py:89-108` — replace the `break`-on-first-hit loop with a counter; gate on `bloom_hits >= BLOOM_MIN_HITS`. No deja-vu branch in this path.
+  2. `.claude/hooks/hook_utils/memory_bridge.py:317-346` (`_recall_with_query`) — already has a `bloom_hits` counter. Split the gate into two branches: keep `if bloom_hits == 0:` (deja-vu fallback path, preserved as-is); add `elif bloom_hits < BLOOM_MIN_HITS:` returning `[]` (no deja-vu emission). This preserves today's "novel territory" semantics while filtering single-hit noise.
+  3. `.claude/hooks/hook_utils/memory_bridge.py:449-467` (`recall()`'s pre-cluster bloom gate) — same pattern as (2). Keep `if bloom_hits == 0:` deja-vu fallback unchanged; add `elif bloom_hits < BLOOM_MIN_HITS:` returning `None` (recall returns Optional[str]) and saving sidecar state.
+  4. `agent/memory_hook.py:168-188` (`check_and_inject()`'s pre-cluster bloom gate) — same pattern as (3). Keep `if bloom_hits == 0:` deja-vu fallback unchanged; add `elif bloom_hits < BLOOM_MIN_HITS:` returning `None`.
 - **Add config constants** to `config/memory_defaults.py`:
   - `RRF_MIN_SCORE: float | None = 1 / (RRF_K + 50)` (set to a numeric default, not None — recall paths will pass it explicitly; CLI defaults to None).
   - `BLOOM_MIN_HITS: int = 2`.
@@ -251,7 +263,9 @@ Recall in Claude Code hooks (gate ON):
 - [ ] `tests/unit/test_memory_hook.py` — UPDATE: any existing test that mocks `retrieve_memories` and asserts the call args — extend to verify `min_rrf_score=RRF_MIN_SCORE` is passed.
 - [ ] `tests/unit/test_memory_bridge.py` — UPDATE: any test mocking `_recall_with_query` or `retrieve_memories` — extend to assert the threshold is passed through from `recall()` AND `prefetch()`.
 - [ ] `tests/unit/test_memory_search.py` (if it exists; if not, create) — ADD `test_search_min_score_default_none_for_back_compat` and `test_search_min_score_flag_filters_results`.
-- [ ] `tests/unit/test_memory_bridge.py::TestBloomCheck` (or equivalent) — UPDATE: any test asserting "any single bloom hit passes" — change to "two hits pass, one hit does not."
+- [ ] `tests/unit/test_memory_bridge.py::TestBloomCheck` (or equivalent) — UPDATE: any test asserting "any single bloom hit passes" — change to "two hits pass, one hit does not." Verify BOTH `_recall_with_query` and `recall()` (the pre-cluster gate) honor `BLOOM_MIN_HITS`.
+- [ ] `tests/unit/test_memory_bridge.py::TestRecallBloomGate` — ADD: cover `recall()`'s pre-cluster bloom gate with three states: (a) `bloom_hits == 0` returns the deja-vu thought when `len(unique_keywords) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD` (regression guard), (b) `bloom_hits == 1` returns `None` and emits NO deja-vu (new gate), (c) `bloom_hits >= 2` proceeds to `_recall_with_query`.
+- [ ] `tests/unit/test_memory_hook.py::TestCheckAndInjectBloomGate` — ADD: cover `check_and_inject()`'s pre-cluster bloom gate with the same three states as above. Confirm the deja-vu fallback at `bloom_hits == 0` still fires unchanged.
 
 ## Rabbit Holes
 
@@ -350,7 +364,8 @@ This repo does not use Sphinx / Read the Docs / MkDocs. No external docs site to
 
 - [ ] Recall returns 0 results for queries with no semantic or keyword overlap (verified by `tests/integration/test_memory_recall_threshold.py` against a real Memory store).
 - [ ] `retrieve_memories` exposes `min_rrf_score: float | None = None` parameter; passing `None` preserves today's behavior exactly.
-- [ ] Bloom pre-check requires `BLOOM_MIN_HITS = 2` (constant in `config/memory_defaults.py`); passing the gate with one hit fails the new test.
+- [ ] Bloom pre-check requires `BLOOM_MIN_HITS = 2` at all FOUR sites (`tools/memory_search/__init__.py`, `_recall_with_query`, `recall()`, `check_and_inject()`); passing the gate with one hit fails the new tests at each site.
+- [ ] Deja-vu / novel-territory branch (`bloom_hits == 0` AND `len(unique_keywords) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD`) still emits the deja-vu thought at all three sites that have it (`_recall_with_query`, `recall()`, `check_and_inject()`); regression test asserts this for each.
 - [ ] PostToolUse hook (`agent/memory_hook.py::check_and_inject`) calls `retrieve_memories` with `min_rrf_score=RRF_MIN_SCORE` (verified by mock-call-args test).
 - [ ] Claude Code hook bridge `_recall_with_query` threads `min_rrf_score` through; both `recall()` and `prefetch()` pass `RRF_MIN_SCORE` (verified by mock-call-args tests on both call sites).
 - [ ] CLI search keeps `min_rrf_score=None` default; `--min-score FLOAT` flag exposes opt-in (verified by CLI-level test).
@@ -417,17 +432,19 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - Update `agent.memory_hook.check_and_inject` to pass `min_rrf_score=RRF_MIN_SCORE` to `retrieve_memories`.
 - Update `_recall_with_query` in `.claude/hooks/hook_utils/memory_bridge.py` to accept `min_rrf_score: float | None = None` and thread it to `retrieve_memories`. Both `recall()` and `prefetch()` pass `RRF_MIN_SCORE`.
 
-### 2. Tighten bloom pre-check
+### 2. Tighten bloom pre-check (FOUR sites)
 
 - **Task ID**: build-bloom-tighten
 - **Depends On**: none
-- **Validates**: `tests/unit/test_memory_bridge.py` and `tests/unit/test_memory_search.py` (create if missing). Bloom regression tests in both.
-- **Informed By**: spike-2 (single-keyword regression risk is low; multi-cluster paths build queries from 5+ keywords).
+- **Validates**: `tests/unit/test_memory_bridge.py`, `tests/unit/test_memory_hook.py`, and `tests/unit/test_memory_search.py` (create if missing). Bloom regression tests in all three.
+- **Informed By**: spike-2 (single-keyword regression risk is low; multi-cluster paths build queries from 5+ keywords). Revision-pass code re-read identified two ADDITIONAL bloom-gate sites missed in the original plan.
 - **Assigned To**: bloom-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Replace the `break`-on-first-hit loop in `tools/memory_search/__init__.py:89-108` with a counter; gate on `bloom_hits >= BLOOM_MIN_HITS`.
-- Update the gate in `_recall_with_query` (`memory_bridge.py:317-346`) from `if bloom_hits == 0` to `if bloom_hits < BLOOM_MIN_HITS`. PRESERVE the deja-vu fallback path that checks `bloom_hits == 0` AND `len(unique_tokens) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD` — that path stays in place; the new gate kicks in for `1 <= bloom_hits < 2`.
+- **Site 1**: Replace the `break`-on-first-hit loop in `tools/memory_search/__init__.py:89-108` with a counter; gate on `bloom_hits >= BLOOM_MIN_HITS`. No deja-vu branch in this path.
+- **Site 2**: In `_recall_with_query` (`memory_bridge.py:317-346`), keep `if bloom_hits == 0:` deja-vu branch unchanged. Insert `elif bloom_hits < BLOOM_MIN_HITS:` that returns `[]` (no deja-vu emission). The new branch kicks in for `1 <= bloom_hits < BLOOM_MIN_HITS`.
+- **Site 3**: In `recall()` (`memory_bridge.py:449-467`), keep `if bloom_hits == 0:` deja-vu branch unchanged. Insert `elif bloom_hits < BLOOM_MIN_HITS:` that saves sidecar state and returns `None` (no `<thought>` injection). PRESERVE the existing `bloom_hits == 0` branch including the `len(unique_keywords) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD` deja-vu emission.
+- **Site 4**: In `check_and_inject()` (`agent/memory_hook.py:168-188`), keep `if bloom_hits == 0:` deja-vu branch unchanged. Insert `elif bloom_hits < BLOOM_MIN_HITS:` that returns `None`. PRESERVE the existing `bloom_hits == 0` branch and the deja-vu emission.
 
 ### 3. Expose CLI `--min-score` flag
 
@@ -450,6 +467,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: false
 - Add `TestRelevanceThreshold` class to `tests/unit/test_memory_retrieval.py` covering: nonsense query empty-with-threshold, nonsense query non-empty-without-threshold, threshold=0 equivalent to None, threshold=inf returns empty, high-relevance record survives threshold.
 - Add `TestBloomTightening` class to `tests/unit/test_memory_search.py` (create if missing) covering: one bloom hit returns empty, two bloom hits proceed to retrieval, zero bloom hits returns empty (existing behavior).
+- Add `TestRecallBloomGate` class to `tests/unit/test_memory_bridge.py` covering `recall()`'s pre-cluster bloom gate: `bloom_hits == 0` with sufficient keywords returns deja-vu thought (regression guard); `bloom_hits == 1` returns `None` and emits NO deja-vu (new gate); `bloom_hits >= 2` proceeds.
+- Add `TestCheckAndInjectBloomGate` class to `tests/unit/test_memory_hook.py` covering `check_and_inject()`'s pre-cluster bloom gate with the same three states.
 - Add call-args verification tests in `tests/unit/test_memory_hook.py` and `tests/unit/test_memory_bridge.py` confirming `min_rrf_score=RRF_MIN_SCORE` is passed in both `check_and_inject` and `_recall_with_query` (latter from BOTH `recall()` and `prefetch()`).
 
 ### 5. Write integration acceptance test
@@ -516,14 +535,16 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Threshold constant present | `grep -n "RRF_MIN_SCORE" config/memory_defaults.py` | output contains `RRF_MIN_SCORE` |
 | Bloom-min-hits constant present | `grep -n "BLOOM_MIN_HITS" config/memory_defaults.py` | output contains `BLOOM_MIN_HITS` |
 | Recall path passes threshold | `grep -n "min_rrf_score=RRF_MIN_SCORE" agent/memory_hook.py .claude/hooks/hook_utils/memory_bridge.py` | output > 1 |
+| Bloom gate tightened at all four sites | `grep -n "BLOOM_MIN_HITS" tools/memory_search/__init__.py agent/memory_hook.py .claude/hooks/hook_utils/memory_bridge.py` | at least 4 hits across the three files (note: memory_bridge has 2 sites — `_recall_with_query` and `recall()`) |
 | Live nonsense query empty | `python -m tools.memory_search search "PHRASE_THAT_DEFINITELY_DOES_NOT_APPEAR_ANYWHERE_QQQQ" --min-score 0.009` | output contains `Found 0 memories` or `No memories matched` |
 | Docs section present | `grep -n "Relevance Threshold" docs/features/subconscious-memory.md` | output contains `Relevance Threshold` |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Revision-pass code re-read | Plan listed only 2 bloom-gate sites; there are actually 4. `recall()` (memory_bridge.py:449-467) and `check_and_inject()` (memory_hook.py:168-188) each run their own multi-keyword bloom gate BEFORE calling `_recall_with_query` with `bloom_check=False`. Tightening only `_recall_with_query` would leave both call paths gated at the old threshold. | Solution / Technical Approach / Step 2 / Test Impact | Apply BLOOM_MIN_HITS gating at all four sites. Preserve the `bloom_hits == 0` deja-vu branch unchanged; insert a NEW `elif bloom_hits < BLOOM_MIN_HITS:` branch that returns empty/None without emitting deja-vu. Site-by-site enumeration added to Step 2. |
+| CONCERN | Revision-pass code re-read | The Acceptance Criterion "PostToolUse hook calls recall with the threshold enabled" must NOT cause regressions in deja-vu / novel-territory thought emission, which `recall()` and `check_and_inject()` both rely on for the "new territory" signal. | Solution / Step 2 | The `bloom_hits == 0` deja-vu branch is explicitly preserved verbatim at all three sites that have it. The new `< BLOOM_MIN_HITS` gate only catches the `1 <= bloom_hits < 2` middle ground. Test Impact adds a regression guard asserting deja-vu still fires at `bloom_hits == 0`. |
 
 ---
 
