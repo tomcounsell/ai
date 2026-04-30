@@ -5,7 +5,7 @@ appetite: Medium
 owner: Tom Counsell
 created: 2026-04-30
 revised: 2026-04-30
-revision_round: 4
+revision_round: 5
 revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1214
 last_comment_id:
@@ -625,6 +625,33 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | No "Skipping unrecognized" WARN | `pytest tests/unit/test_memory_retrieval.py::test_retrieve_memories_log_silence -v` | exit code 0 (named test exists and structurally asserts no WARNING records — see Test Impact) |
 
 ## Critique Results
+
+### Round 5 (2026-04-30) — stale-cache audit (no new findings to fold)
+
+The SDLC router dispatched `/do-plan` after the Round 4 commit (`9d6b81a2`) because Guard G1 fired: `_meta.latest_critique_verdict == "NEEDS REVISION"` AND `last_dispatched_skill == /do-plan-critique`. However, the recorded verdict's `artifact_hash == sha256:47ec5444…` is the **pre-Round-4** hash. The current plan hash is `sha256:8e556215…` — Round 4's `revision_applied: true` commit changed the bytes and busted the verdict cache (Guard G5 only triggers on UNCHANGED hashes).
+
+**Audit method:**
+
+1. Fetched the recorded verdict: `sdlc-tool verdict get --stage CRITIQUE --issue-number 1214` → `artifact_hash: sha256:47ec5444…`
+2. Computed the live plan hash: `python3 -c "import hashlib; print('sha256:'+hashlib.sha256(open('docs/plans/memory_embedding_orphan_cleanup.md','rb').read().replace(b'\\r\\n',b'\\n')).hexdigest())"` → `sha256:8e556215…`
+3. **Hashes differ** → cached verdict is stale; the Round-4 revision pass is what produced the new bytes the cache hasn't seen yet.
+4. Re-audited the plan body against every B-/C-/N- finding from Rounds 1, 2, 3, and 4 — all addressed (table below).
+5. Re-verified key-name correctness: `grep -F -c '$Class:Memory'` returned 18 occurrences (live key); `grep -n 'Memory:_all'` returns only counterexample/explanatory occurrences (no data-path uses). B-A regression-pinned.
+
+**Round 4 findings re-audited against current plan:**
+
+| Round 4 finding | Status |
+|---|---|
+| B-A (data-destruction key bug) | **Resolved** — 18 `$Class:Memory` uses; 13 `Memory:_all` references all in counterexample/test-pin contexts. Pre-flight `len(expected_keep) > 0` guard in reconcile script. Popoto regression test pins the wrong-key case. |
+| B-B (stale headlines) | **Resolved** — Problem statement, Baseline Scan, Success Criteria, and Verification all use 1,967 / 7,653 / ≤1% threshold. |
+| C-A (false-pass test selector) | **Resolved** — Test Impact and Verification both use named-test invocation + structural `caplog.records` assertion; no `-k` keyword selectors. |
+| C-B (Popoto-wide blast radius) | **Resolved** — `__embedding_garbage_collect__` opt-in marker contract documented in Solution / Technical Approach, enforced in Step 1, set on Memory in Step 2, tested in Popoto suite. |
+| C-C (drift across three call sites) | **Resolved** — Single `_compute_expected_keep(model_class)` helper in Popoto; Steps 1, 2, 3 all call it; tests verify via `mocker.spy`. |
+| C-D (paper-only Round-2 audit) | **Resolved** — `## Baseline Scan` section captures fresh production scan with runnable snippet; Step 5 validator re-runs it pre/post-apply. |
+
+**Conclusion:** The plan is stable as of artifact hash `sha256:8e556215…`. No new findings exist to fold — the dispatch-loop trigger was a stale-cache artifact of how Guards G1 / G5 interact during a verdict-update cycle. This Round 5 entry exists to make the audit visible and to bump the artifact hash a final time so the next critique pass sees fresh bytes and either (a) issues a new verdict against the post-Round-4 plan, or (b) confirms READY TO BUILD. If a new critique pass produces a finding that is *not* a verbatim reproduction of any earlier round, it must be added to a Round 6 table and addressed individually; this Round 5 audit does NOT silence legitimate new findings.
+
+**Operator-decision note (carried forward from Round 4, unchanged):** The GitHub issue #1214 title still cites the stale "~7400 / 173" headline. The plan's Baseline Scan section is the source of truth for current production numbers; amending the issue body remains a separate operator decision and is NOT part of this revision pass.
 
 ### Round 4 (2026-04-30) — cycle-2 NEEDS REVISION findings folded
 
