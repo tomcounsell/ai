@@ -54,6 +54,24 @@ class TestRegistryLoading:
         for entry in entries:
             assert entry.enabled, f"Disabled entry '{entry.name}' should not be returned"
 
+    def test_load_registry_parses_pm_audio_briefing(self):
+        """The pm-audio-briefing entry (issue #1197) parses with the expected fields."""
+        import yaml
+
+        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        with open(registry_path) as f:
+            data = yaml.safe_load(f)
+        entries = {r["name"]: r for r in data["reflections"]}
+        # The vault may have not yet picked up the entry on every machine, so
+        # this test is opt-in: it asserts shape ONLY when the entry exists.
+        if "pm-audio-briefing" not in entries:
+            pytest.skip("pm-audio-briefing entry not present in this machine's vault")
+        entry = entries["pm-audio-briefing"]
+        assert entry["interval"] == 300
+        assert entry["timeout"] == 1500
+        assert entry["execution_type"] == "function"
+        assert entry["callable"] == "reflections.pm_audio_briefing.run"
+
     def test_load_registry_validates_entries(self):
         """Invalid entries are skipped with warnings."""
         tmp = Path("/tmp/test_reflections_invalid.yaml")
