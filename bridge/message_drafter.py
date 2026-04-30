@@ -578,6 +578,22 @@ The only exception is scheduling/queuing a session that will execute later AND r
 via Telegram (e.g., "I've queued a build session — you'll get a message when it completes"). \
 Otherwise the only honest responses are: "I did X (proof)" or "I didn't do X (why)."
 
+There are TWO classes of empty promises:
+
+1. BEHAVIORAL-CHANGE promises: "got it / will do / going forward / won't happen again" \
+without evidence of a durable change.
+2. FORWARD-DEFERRAL promises: "I'll come back with X / will follow up / stay tuned / \
+more soon / I'll report back" — these create explicit dated user expectations and are \
+forbidden UNLESS the agent references a verifiable autonomous-delivery mechanism \
+(queued session ID, scheduled cron, scheduled agent — surfaced as a session_id, \
+schedule_id, or PR URL).
+
+Even when the deferral is combined with substantive content (file paths, commit hashes, \
+descriptions of work done), the deferral itself is the violation and must be classified \
+as STATUS_UPDATE. The exception is when the deferral itself names a verifiable \
+autonomous-delivery reference matching the form `(?:scheduled|queued)\\s+session\\s+[a-f0-9]{6,}` \
+or equivalent (schedule_id, PR URL).
+
 Input: "Will do. I'll update the config next time."
 Output: {"type": "status", "confidence": 0.95, \
 "reason": "Empty promise — agent says 'will do' but session is ending, there is no next time", \
@@ -593,6 +609,29 @@ Output: {"type": "status", "confidence": 0.95, \
 'going forward' unless you made a durable change right now. What did you actually change? \
 Show a commit hash, file path, or memory entry — or admit no change was made.", \
 "has_workarounds": false}
+
+Input: "Reading the docs now, will come back with thoughts."
+Output: {"type": "status", "confidence": 0.95, \
+"reason": "Forward-deferral without evidence or scheduled-delivery reference", \
+"nudge_feedback": "You said 'will come back with thoughts' but your session is about to end — \
+there is no future 'coming back'. Either deliver the thoughts NOW (paste them in this reply) \
+or honestly say you didn't form an opinion. Forward-deferrals like this create dated user \
+expectations that no future execution can fulfill.", \
+"has_workarounds": false}
+
+Input: "Found three issues in `bridge/foo.py`. I'll come back with fixes once tests run."
+Output: {"type": "status", "confidence": 0.93, \
+"reason": "Forward-deferral combined with substantive content but no scheduled-delivery \
+reference — the deferral itself is the violation", \
+"nudge_feedback": "Substantive content (file path, issue description) does not redeem a \
+forward-deferral. Either commit the fixes NOW with a commit hash, or say 'I found three \
+issues but didn't fix them yet'. Do not say 'I'll come back'.", \
+"has_workarounds": false}
+
+Input: "I queued session abc1234ef. You'll get a Telegram message when it completes."
+Output: {"type": "completion", "confidence": 0.94, \
+"reason": "Forward-deferral with verifiable scheduled-delivery reference (queued session ID)", \
+"nudge_feedback": null, "has_workarounds": false}
 
 Input: "Updated bridge/message_drafter.py to reject empty promises. Committed abc1234."
 Output: {"type": "completion", "confidence": 0.90, \
@@ -627,44 +666,23 @@ def _detect_workarounds(text_lower: str) -> bool:
 def _detect_empty_promise(text_lower: str) -> bool:
     """Detect if the agent acknowledged feedback without concrete evidence.
 
-    An empty promise is an acknowledgment of behavioral feedback (e.g. "Got it",
-    "Understood", "Noted") combined with a commitment to change behavior, but
-    WITHOUT any evidence of a durable change (commit hash, file path, memory
-    entry, config edit).
+    Backward-compat shim — the actual heuristic logic now lives in
+    :mod:`bridge.promise_gate`. This wrapper preserves the old contract
+    (returns True when the text looks like an empty promise) so existing
+    call sites (``_classify_with_heuristics``) continue to work without
+    structural changes.
 
-    Returns True if the text looks like an empty promise — acknowledged feedback
-    with no proof of concrete action.
+    The new heuristic in ``bridge.promise_gate`` covers BOTH the legacy
+    behavioral-change class ("got it / will do / going forward") AND the
+    new forward-deferral class ("I'll come back with X / will follow up /
+    stay tuned / more soon / I'll report back"). Patterns fire only
+    inside the heuristic-fallback branch (no API key / SDK exception /
+    parse failure) — the LLM-first architecture is enforced upstream in
+    ``classify_output()``.
     """
-    # Acknowledgment patterns — agent is agreeing to feedback
-    acknowledgment_patterns = [
-        r"\b(?:got it|understood|noted|will do|roger|acknowledged|fair point)\b",
-        r"\b(?:you're right|good point|makes sense|point taken)\b",
-        r"\b(?:i'll update|i'll change|i'll fix|i'll adjust|i'll modify)\b",
-        r"\b(?:won't happen again|will remember|going forward)\b",
-        r"\byou'll see the difference\b",
-    ]
+    from bridge.promise_gate import _detect_empty_promise as _impl
 
-    has_acknowledgment = any(re.search(p, text_lower) for p in acknowledgment_patterns)
-    if not has_acknowledgment:
-        return False
-
-    # Evidence patterns — concrete proof that a change was made
-    evidence_patterns = [
-        r"\b[0-9a-f]{7,40}\b",  # commit hash
-        r"\bcommit(?:ted)?\b.*\b[0-9a-f]{7}\b",  # "committed abc1234"
-        # file paths (saved/wrote/created/updated to some/file.ext)
-        r"(?:saved|wrote|created|updated|edited|modified)\s+(?:to\s+)?[`'\"]?[\w/]+\.\w+",
-        r"\bmemory\b.*\b(?:saved|written|created|updated)\b",  # memory writes
-        r"\b(?:saved|written|created)\b.*\bmemory\b",
-        r"https?://github\.com/.+/commit/",  # GitHub commit URLs
-        r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
-        r"\b(?:scheduled|queued)\b.*\bsession[_-]?[a-f0-9]{6,}\b",  # session ID
-    ]
-
-    has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)
-
-    # Empty promise = acknowledgment WITHOUT evidence
-    return not has_evidence
+    return _impl(text_lower)
 
 
 def _classify_with_heuristics(text: str) -> ClassificationResult:
@@ -870,6 +888,12 @@ async def classify_output(text: str) -> ClassificationResult:
     CLASSIFICATION_CONFIDENCE_THRESHOLD, defaults to QUESTION to
     conservatively pause for human review.
 
+    The promise gate (``bridge.promise_gate.evaluate_promise``) is
+    invoked at the end of this function with ``classifier_verdict`` set
+    to the classification result, so the gate's drafter-path delegation
+    can derive its verdict without paying a second Haiku call. This
+    preserves the "no double-charge" invariant from Concern C5.
+
     Args:
         text: The agent output text to classify.
 
@@ -893,6 +917,7 @@ async def classify_output(text: str) -> ClassificationResult:
             result = _classify_with_heuristics(text)
             result = _apply_heuristic_confidence_gate(result)
             _write_classification_audit(text, result, source="heuristic")
+            _delegate_to_promise_gate(text, result)
             return result
 
         # Truncate very long text to save tokens — classification
@@ -926,6 +951,7 @@ async def classify_output(text: str) -> ClassificationResult:
                     reason=f"Low confidence ({result.confidence:.2f}): {result.reason}",
                 )
             _write_classification_audit(text, result, source="llm")
+            _delegate_to_promise_gate(text, result)
             return result
 
         # LLM returned unparseable response — fall through to heuristics
@@ -939,7 +965,43 @@ async def classify_output(text: str) -> ClassificationResult:
     result = _classify_with_heuristics(text)
     result = _apply_heuristic_confidence_gate(result)
     _write_classification_audit(text, result, source="heuristic")
+    _delegate_to_promise_gate(text, result)
     return result
+
+
+def _delegate_to_promise_gate(text: str, result: "ClassificationResult") -> None:
+    """Invoke the promise gate with the existing classification verdict.
+
+    Drafter-path delegation (Concern C5): the drafter has already paid
+    one Haiku call for ``classify_output``. Pass that result into the
+    gate so it can derive its verdict without a second Haiku call. The
+    gate writes its own audit JSONL entry with
+    ``source="promise_gate_drafter_delegation"`` and best-effort
+    ``promise_gate.blocked`` session_event when the gate decides BLOCK.
+
+    The gate's verdict is not used to mutate ``result`` — the drafter's
+    own classification (STATUS_UPDATE with nudge_feedback for empty
+    promises) already handles the auto-continue / nudge-loop behaviour.
+    The gate's role on the drafter path is **observability** — its audit
+    entry adds the promise-class telemetry next to the classify_output
+    audit entry.
+
+    Failures in the gate are silently swallowed so the drafter never
+    breaks on gate infrastructure issues.
+    """
+    try:
+        from bridge.promise_gate import evaluate_promise
+
+        # ``transport="drafter"`` discriminator differentiates drafter
+        # audit entries from CLI ones in the JSONL log.
+        evaluate_promise(
+            text,
+            transport="drafter",
+            session_id=os.environ.get("VALOR_SESSION_ID"),
+            classifier_verdict=result,
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"promise_gate delegation from classify_output failed: {e!r}")
 
 
 def _parse_classification_response(raw: str) -> ClassificationResult | None:

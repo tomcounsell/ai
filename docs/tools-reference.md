@@ -146,6 +146,40 @@ python tools/send_telegram.py --emoji "sad"
 
 Requires `TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID`. Queues a `custom_emoji_message` payload to the Redis outbox. The relay renders it using `MessageEntityCustomEmoji` for Premium custom emoji, falling back to plain text if the send fails.
 
+### Outbound Message Sends — Promise Gate
+
+Every agent-facing CLI that writes to a Redis outbox (`telegram:outbox:*` or `email:outbox:*`) routes through the **promise gate** (`bridge/promise_gate.py::cli_check_or_exit`) immediately before the `rpush`. The gate blocks empty forward-deferral promises ("I'll come back with X", "will follow up", "stay tuned", "more soon", "I'll report back") and behavioral-change acknowledgments without evidence ("got it / will do / going forward").
+
+| CLI | Module | Gate call site |
+|-----|--------|----------------|
+| `valor-telegram send` | `tools/valor_telegram.py` | pre-`rpush` |
+| `valor-email send` | `tools/valor_email.py::cmd_send` | pre-`rpush` |
+| `tools/send_telegram.py` | `tools/send_telegram.py` | pre-`rpush` |
+| `tools/send_message.py` (telegram or email) | `tools/send_message.py` | pre-`rpush` |
+
+When the gate blocks, the CLI prints a recovery template to stderr and exits non-zero. The agent's loop reads the template and re-emits one of two contractually-acceptable shapes:
+
+1. **"I did X"** with concrete evidence (file path, commit hash, queued session ID, memory write, service restart).
+2. **"I didn't do X because Y"** with explicit reason.
+
+Forward-deferrals are allowed only when they reference a verifiable autonomous-delivery mechanism — a queued session ID, a scheduled cron, or a PR URL.
+
+There is **no per-call bypass**. The only escape hatch is the process-wide kill switch `PROMISE_GATE_ENABLED=false` (set in `~/Desktop/Valor/.env`), reserved for incident response. The recovery template intentionally does not name the kill switch.
+
+```bash
+# Honest send — gate allows
+valor-telegram send --chat "Dev: Valor" "Updated bridge/foo.py to handle the edge case. Committed abc1234."
+
+# Forward-deferral with autonomous-delivery reference — gate allows
+valor-telegram send --chat "Dev: Valor" "Queued session abc1234ef. You'll get a Telegram message when it completes."
+
+# Empty forward-deferral — gate blocks, exits non-zero
+valor-telegram send --chat "Dev: Valor" "Reading the docs now, will come back with thoughts."
+# stderr: "Empty forward-deferral promise blocked by bridge/promise_gate. ..."
+```
+
+See `docs/features/promise-gate.md` for the full architecture (LLM-first with regex fail-closed-only fallback, two-channel telemetry, mixed `session_id` provenance per CLI, latency budget, failure modes).
+
 ### TTS (`tools.tts`)
 
 Dual-backend text-to-speech producing OGG/Opus audio. Kokoro ONNX is the

@@ -13,6 +13,15 @@ import pytest
 import redis
 
 
+@pytest.fixture(autouse=True)
+def _bypass_promise_gate(monkeypatch):
+    """Default-mock the promise gate so existing tests do not call the LLM."""
+    monkeypatch.setattr(
+        "bridge.promise_gate.cli_check_or_exit",
+        lambda text, transport, session_id: None,
+    )
+
+
 @pytest.fixture
 def r(monkeypatch, redis_test_url):
     monkeypatch.setenv("REDIS_URL", redis_test_url)
@@ -126,3 +135,24 @@ class TestSendViaEmail:
         assert payload["subject"] == "(no subject)"
         assert payload["in_reply_to"] is None
         assert payload["references"] is None
+
+
+class TestSendMessagePromiseGate:
+    """Promise gate integration (cycle-2 B-NEW-2: no --no-promise-gate flag)."""
+
+    def test_help_does_not_mention_no_promise_gate(self):
+        """Cycle-2 B-NEW-2: --help output must NOT advertise --no-promise-gate."""
+        from io import StringIO
+        from unittest.mock import patch
+
+        with patch("sys.argv", ["send_message.py", "--help"]):
+            from tools.send_message import main
+
+            buf = StringIO()
+            with patch("sys.stdout", buf), pytest.raises(SystemExit):
+                main()
+            help_output = buf.getvalue()
+
+        assert "--no-promise-gate" not in help_output
+        assert "VALOR_OPERATOR_MODE" not in help_output
+        assert "PROMISE_GATE_ENABLED" not in help_output
