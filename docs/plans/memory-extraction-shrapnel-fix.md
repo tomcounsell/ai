@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Tom Counsell
@@ -295,9 +295,9 @@ The bridge does not need to import the new code. The worker already calls `extra
 - [x] No new entry in `docs/features/README.md` — this is a hardening of an existing feature, not a new one.
 
 ### Inline Documentation
-- [ ] Docstring on `_extract_json_payload` explaining the strip-fences, slice-to-outermost-brackets pattern.
-- [ ] Module-level comment near `_REFUSAL_PATTERNS` explaining each pattern's origin (cite the Memory IDs from issue #1212).
-- [ ] Docstring on `cleanup_memory_extraction_junk.py` matching the format of `scripts/memory_consolidation.py` (rationale, safety rails, manual invocation).
+- [x] Docstring on `_extract_json_payload` explaining the strip-fences, slice-to-outermost-brackets pattern.
+- [x] Module-level comment near `_REFUSAL_PATTERNS` explaining each pattern's origin (cite the Memory IDs from issue #1212).
+- [x] Docstring on `cleanup_memory_extraction_junk.py` matching the format of `scripts/memory_consolidation.py` (rationale, safety rails, manual invocation).
 
 ## Success Criteria
 
@@ -309,7 +309,7 @@ The bridge does not need to import the new code. The worker already calls `extra
 - [ ] Unit tests cover code-fenced JSON, JSON with prose preamble, empty input, refusal-style output, JSON-shrapnel input that should NOT be saved (acceptance criterion 6 from issue).
 - [x] `docs/features/subconscious-memory.md` updated with parser hardening and refusal filter description (acceptance criterion 7 from issue).
 - [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] Documentation updated (`/do-docs`).
 - [ ] `python scripts/cleanup_memory_extraction_junk.py --dry-run` runs successfully and prints a candidate count.
 
 ## Team Orchestration
