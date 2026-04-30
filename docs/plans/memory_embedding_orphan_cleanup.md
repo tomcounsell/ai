@@ -5,6 +5,7 @@ appetite: Medium
 owner: Tom Counsell
 created: 2026-04-30
 revised: 2026-04-30
+revision_round: 2
 revision_applied: true
 tracking: https://github.com/tomcounsell/ai/issues/1214
 last_comment_id:
@@ -569,6 +570,26 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | No "Skipping unrecognized" WARN | `pytest tests/unit/test_memory_retrieval.py -k log_silence -q` | exit code 0 |
 
 ## Critique Results
+
+### Round 2 audit (2026-04-30)
+
+The second critique pass returned `NEEDS REVISION` against the same artifact hash that the Round 1 revision produced. The findings text re-issued the identical Round 1 list (B1-B3, C1-C5, N1-N3) — no new findings were surfaced. Each Round 1 finding has been re-audited against the live plan content as part of this second-pass acknowledgment:
+
+| Finding | Round 1 fix location | Round 2 re-audit |
+|---|---|---|
+| B1 (SHA-256 not hex) | Solution / Filename Scheme; Step 1; Test 4 | Verified: plan states "SHA-256 hashes of the Redis key, not hex-encoded keys" and "SHA-256 is one-way — you cannot decode a filename back to a Redis key". No hex-decode paths remain. |
+| B2 (test file paths) | Test Impact rewritten | Verified: `tests/unit/test_memory_search_cli.py`, `tests/unit/test_popoto_cleanup_reflection.py`, `tests/unit/test_memory_retrieval.py` all exist on disk; `tests/integration/test_memory_lifecycle.py` and `tests/unit/test_embedding_orphan_reconcile.py` are correctly marked NEW. |
+| B3 (`disk_orphan_count` parallel naming) | Solution Key Elements; Test Impact; Verification; Step 2 | Verified: `disk_orphan_count` used consistently; existing `orphan_index_count` preserved verbatim. |
+| C1 (5-minute mtime guard) | Technical Approach; Race Conditions; Risk 1 | Verified: 300s mtime guard cited 4 times; honest statement that "mtime guard is the ONLY real race protection". |
+| C2 (reflection YAML schema) | Solution / Reflection Registry Entry | Verified: full YAML block with all six required fields plus `enabled: true`. |
+| C3 (prereq #3 import fix) | Prerequisites table | Verified: check command imports `Memory` first to trigger `apply_defaults()`. |
+| C4 (Popoto staged release) | Update System; Risk 4; Solution Technical Approach | Verified: 1.6.0 release ships first; runtime stub-detection guard via docstring inspection. |
+| C5 (positive-assertion safety check) | Solution Key Elements; Risk 3; Step 3 | Verified: `assert (expected_keep & to_delete) == set()` with explicit refusal-to-apply. |
+| N1-N3 | Filename Scheme; Metrics Emission; Desired outcome | All verified addressed. |
+
+**Conclusion of second-pass audit:** The Round 2 findings were verbatim reproductions of Round 1; all are confirmed addressed by the Round 1 revision pass. No new edits to the plan body are required by the Round 2 critique. This audit entry itself is the only Round 2 deliverable. The plan remains `Ready` with `revision_applied: true`.
+
+### Round 1 critique findings
 
 Round 1 critique (NEEDS REVISION — 3 blockers, 5 concerns, 3 nits) addressed by this revision pass:
 
