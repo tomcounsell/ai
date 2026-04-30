@@ -362,7 +362,7 @@ This repo does not use Sphinx / Read the Docs / MkDocs. No external docs site to
 
 ## Success Criteria
 
-- [ ] Recall returns 0 results for queries with no semantic or keyword overlap (verified by `tests/integration/test_memory_recall_threshold.py` against a real Memory store).
+- [x] Recall returns 0 results for queries with no semantic or keyword overlap (verified by `tests/integration/test_memory_recall_threshold.py` against a real Memory store).
 - [ ] `retrieve_memories` exposes `min_rrf_score: float | None = None` parameter; passing `None` preserves today's behavior exactly.
 - [ ] Bloom pre-check requires `BLOOM_MIN_HITS = 2` at all FOUR sites (`tools/memory_search/__init__.py`, `_recall_with_query`, `recall()`, `check_and_inject()`); passing the gate with one hit fails the new tests at each site.
 - [ ] Deja-vu / novel-territory branch (`bloom_hits == 0` AND `len(unique_keywords) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD`) still emits the deja-vu thought at all three sites that have it (`_recall_with_query`, `recall()`, `check_and_inject()`); regression test asserts this for each.
