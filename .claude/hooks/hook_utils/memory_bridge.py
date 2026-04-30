@@ -612,9 +612,13 @@ def prefetch(
         if not prompt or not isinstance(prompt, str):
             return None
 
+        # sdlc-1179: strip <private> regions before BM25 query so wrapped
+        # content does not seed the lookup vector against past memories.
+        from agent.private_tag import strip_private
+
         # Strip PM boilerplate first so length / triviality checks apply
         # to the actual user payload, not the routing template.
-        stripped = _strip_pm_boilerplate(prompt).strip()
+        stripped = _strip_pm_boilerplate(strip_private(prompt)).strip()
 
         if len(stripped) < MIN_PROMPT_LENGTH:
             return None
@@ -709,6 +713,13 @@ def ingest(content: str, cwd: str | None = None) -> bool:
     try:
         if not content or not isinstance(content, str):
             return False
+
+        # sdlc-1179: strip <private> regions before any persistence so wrapped
+        # content never lands in Memory.content. Idempotent and safe on no-tag
+        # input (returns the original string bit-identically).
+        from agent.private_tag import strip_private
+
+        content = strip_private(content)
 
         # Quality filter: minimum length
         stripped = content.strip()
