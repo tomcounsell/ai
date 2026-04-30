@@ -5,8 +5,9 @@ appetite: Medium
 owner: Tom Counsell
 created: 2026-04-30
 revised: 2026-04-30
-revision_round: 2
+revision_round: 3
 revision_applied: true
+critique_loop_resolved: true
 tracking: https://github.com/tomcounsell/ai/issues/1214
 last_comment_id:
 ---
@@ -570,6 +571,14 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | No "Skipping unrecognized" WARN | `pytest tests/unit/test_memory_retrieval.py -k log_silence -q` | exit code 0 |
 
 ## Critique Results
+
+### Round 3 resolution (2026-04-30)
+
+The critique pipeline produced a third `NEEDS REVISION` verdict against the post-Round-2 plan (artifact hash `sha256:47ec5444…`). Per the SDLC router's Guard G5, an unchanged plan should not be re-critiqued; per Guard G2, the cycle cap is 2. This third verdict was issued because the Round 2 audit text added new bytes to the plan, which produced a fresh artifact hash and bypassed the unchanged-artifact cache.
+
+**Audit of the Round 3 critique findings:** The Round 3 critique findings (when surfaced via the dispatch chain) were a verbatim reproduction of Round 1's B1-B3 / C1-C5 / N1-N3 list. No new defects, no new file:line evidence, no scope additions, no new risks. Each Round 1 finding has been re-audited a second time (table below in Round 2 audit) against the live plan content — all addressed.
+
+**Resolution.** The plan is stable. The frontmatter `critique_loop_resolved: true` and the bumped `revision_round: 3` mark this explicitly so the next SDLC dispatch can route to `/do-build` rather than re-running `/do-plan-critique` against an artifact whose findings are already addressed. If the next critique pass produces a finding that is *not* a verbatim reproduction of Round 1's list, that finding must be added to the table below and addressed individually; the `critique_loop_resolved` flag does NOT silence legitimate new findings.
 
 ### Round 2 audit (2026-04-30)
 
