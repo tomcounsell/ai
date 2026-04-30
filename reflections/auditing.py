@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -176,8 +177,129 @@ def _format_audit_issue_body(
     return "\n".join(lines)
 
 
+def _collect_sentry_counts(project: dict) -> str | None:
+    """Best-effort Sentry unresolved-issues count for a single project.
+
+    Returns a one-line summary string when the project has ``SENTRY_DSN``
+    configured AND ``sentry-cli`` is on PATH AND the call succeeds within
+    10 seconds. Returns ``None`` on any error condition (missing CLI,
+    missing DSN, subprocess failure, timeout, JSON decode error, etc.).
+    Sentry data is purely additive — never raises.
+    """
+    if shutil.which("sentry-cli") is None:
+        return None
+
+    project_dir = Path(project.get("working_directory", ""))
+    if not project_dir.is_dir():
+        return None
+
+    # Cheap inline DSN probe: read the project's .env if present. We do not
+    # rely on the parent worker's process env because the reflection runs
+    # cross-project and each project has its own DSN.
+    env_file = project_dir / ".env"
+    sentry_dsn = ""
+    if env_file.is_file():
+        try:
+            for raw_line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw_line.strip()
+                if line.startswith("SENTRY_DSN="):
+                    sentry_dsn = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+        except Exception:
+            return None
+    if not sentry_dsn:
+        return None
+
+    try:
+        proc_env = {**os.environ, "SENTRY_DSN": sentry_dsn}
+        result = subprocess.run(
+            ["sentry-cli", "issues", "list", "--status", "unresolved", "--json"],
+            cwd=str(project_dir),
+            env=proc_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        issues = json.loads(result.stdout) if result.stdout else []
+        count = len(issues) if isinstance(issues, list) else 0
+        if count == 0:
+            return None
+        return f"[{project.get('slug', '?')}] Sentry: {count} unresolved issue(s)"
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        return None
+    except json.JSONDecodeError:
+        return None
+    except Exception as e:
+        logger.warning(f"[log-review] sentry-cli unexpected error for {project.get('slug')}: {e}")
+        return None
+
+
+def _send_log_review_telegram(summary_line: str, findings: list[str]) -> None:
+    """Send the daily log-review summary to the 'Dev: Valor' Telegram chat.
+
+    Mirrors the swallow-and-warn precedent from
+    ``scripts/memory_consolidation.py:327`` — every subprocess failure path
+    logs via ``logger.warning`` and returns; the reflection still returns
+    its findings dict normally to the scheduler.
+
+    Format:
+      Daily Log Review — YYYY-MM-DD
+      <summary line: counts>
+      <up to 12 findings>
+      (N more findings — see worker.log)   [only when len(findings) > 12]
+
+    On empty findings, sends a one-line heartbeat instead (resolves
+    Open Question 1 in plan sdlc-1188): the daily-log-review reflection is
+    itself the canary for log-scanning health, so silence is ambiguous.
+    """
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    header = f"Daily Log Review — {today}"
+
+    if not findings:
+        message = f"{header}\n{summary_line}"
+    else:
+        display_max = 12
+        shown = findings[:display_max]
+        body_lines = [header, summary_line, *shown]
+        if len(findings) > display_max:
+            body_lines.append(f"({len(findings) - display_max} more findings — see worker.log)")
+        message = "\n".join(body_lines)
+
+    # Swallow every subprocess failure: bridge-down, missing CLI, timeout,
+    # non-zero exit. The reflection MUST return its findings dict regardless.
+    try:
+        subprocess.run(
+            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
+            timeout=10,
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        logger.warning(
+            "[log-review] valor-telegram not on PATH; "
+            "summary not delivered. Findings remain in worker.log."
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "[log-review] valor-telegram send timed out after 10s; "
+            "summary not delivered. Findings remain in worker.log."
+        )
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            f"[log-review] valor-telegram send failed: {e}. Findings remain in worker.log."
+        )
+    except Exception as e:
+        logger.warning(
+            f"[log-review] valor-telegram send unexpected error: {e}. "
+            f"Findings remain in worker.log."
+        )
+
+
 def run_log_review() -> dict:
-    """Review previous day's logs per project.
+    """Review previous day's logs per project and send summary to Telegram.
 
     Hotfix (sibling of PR #1056): this used to be ``async def`` but did
     synchronous file I/O (``open(...).read()``) on potentially unbounded
@@ -187,6 +309,34 @@ def run_log_review() -> dict:
     ``loop.run_in_executor(None, func)``. All reads go through
     :func:`_read_log_text_bounded` / :func:`_read_log_tail_lines` which
     tail-read when a file exceeds 50 MB.
+
+    Side effects (added 2026-04-30, plan sdlc-1188):
+
+    - **Telegram delivery**: sends a 5-15 line summary to the
+      ``Dev: Valor`` Telegram chat after each scan, with subject line
+      ``Daily Log Review — YYYY-MM-DD``. Failures (bridge down,
+      ``valor-telegram`` missing, subprocess timeout, non-zero exit) are
+      swallowed and logged via ``logger.warning`` — the function still
+      returns its findings dict normally.
+    - **Sentry enrichment**: per-project, if ``SENTRY_DSN`` is set in the
+      project's ``.env`` AND ``sentry-cli`` is on PATH, runs
+      ``sentry-cli issues list --status unresolved --json`` (10s timeout)
+      and appends a one-line count to the findings. Skipped silently
+      otherwise.
+
+    Liveness signal:
+
+        ``daily-log-review`` is itself the canary for the log-scanning
+        pipeline. To resolve the silence-vs-health ambiguity, an empty
+        findings day sends a one-line heartbeat
+        (``... 0 findings across N projects``). The heartbeat detects
+        scheduler-dead and ``run_log_review``-crash modes, but does NOT
+        detect the case where ``valor-telegram`` itself is broken (binary
+        missing, bridge down with Redis backlog full, etc.). For that
+        residual mode, the detection signal is a ``logger.warning`` line
+        in ``logs/worker.log`` — operators should
+        ``grep -E 'log-review|valor-telegram' logs/worker.log`` if no
+        Telegram message arrives for >24h.
     """
     from bridge.utc import utc_now
 
@@ -279,8 +429,25 @@ def run_log_review() -> dict:
 
         total_files_analyzed += len(log_files)
 
-    summary = f"Log review: analyzed {total_files_analyzed} files, {len(findings)} finding(s)"
+        # Optional Sentry enrichment (additive; never blocking).
+        sentry_line = _collect_sentry_counts(project)
+        if sentry_line:
+            findings.append(sentry_line)
+
+    project_count = len(projects)
+    if findings:
+        summary = f"Log review: analyzed {total_files_analyzed} files, {len(findings)} finding(s)"
+    else:
+        # Heartbeat summary line — used inside Telegram message and worker.log.
+        summary = (
+            f"Daily Log Review — {datetime.now(UTC).strftime('%Y-%m-%d')}: "
+            f"0 findings across {project_count} project(s)"
+        )
     logger.info(summary)
+
+    # Notify Telegram (best-effort; subprocess failures swallowed and logged).
+    _send_log_review_telegram(summary, findings)
+
     return {"status": "ok", "findings": findings, "summary": summary}
 
 

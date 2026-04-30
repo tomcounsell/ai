@@ -90,7 +90,7 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `daily-log-review` | `reflections.auditing.run_log_review` | Review previous day's logs per project |
+| `daily-log-review` | `reflections.auditing.run_log_review` | Review previous day's logs per project; sends summary to `Dev: Valor` Telegram (with optional Sentry counts) |
 | `documentation-audit` | `reflections.auditing.run_documentation_audit` | LLM-powered docs accuracy audit (see [Documentation Audit](documentation-audit.md)) |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
 | `hooks-audit` | `reflections.auditing.run_hooks_audit` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
