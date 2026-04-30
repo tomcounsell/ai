@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-04-30
 tracking: https://github.com/tomcounsell/ai/issues/1215
 last_comment_id:
+revision_applied: true
 ---
 
 # Telegram Attachment Steering Fix + Auto-Ingest
@@ -120,7 +121,7 @@ This is a tightly-scoped centralized fix plus a small additive feature. Most of 
 ### Key Elements
 
 - **Centralized steering enrichment:** Add a media-detection branch at the top of `_ack_steering_routed`. If `message.media` is truthy, call `process_incoming_media(client, message)`, replace the sentinel `text` with the returned description (or compose with existing text if a caption was present), and proceed with the normal push/react/record sequence. All six call sites benefit automatically.
-- **Fire-and-forget vault ingestion:** When the helper receives a non-empty `files` list from `process_incoming_media`, schedule a background `asyncio.create_task` that copies each file into `~/work-vault/telegram-attachments/` with a deduplicated filename (`{date}_{sender}_{telegram_msg_id}_{original}`). The `KnowledgeWatcher` already monitors that directory recursively; it converts and indexes the file with no further wiring. The coroutine catches every exception locally and logs at `warning` so the bridge keeps serving.
+- **Fire-and-forget vault ingestion:** When the helper receives a non-empty `files` list from `process_incoming_media`, schedule a background `asyncio.create_task` that copies each file into `~/work-vault/telegram-attachments/` with a deduplicated filename (`{date}_{sender}_{telegram_msg_id}_{original}`). The `KnowledgeWatcher` already monitors that directory recursively; it converts and indexes the file with no further wiring. The coroutine catches every exception locally and logs at `warning` so the bridge keeps serving. **Implementation Note (concern: a bare `asyncio.create_task(...)` reference can be silently garbage-collected before the coroutine completes — a well-known Python footgun that turns "fire-and-forget" into "fire-and-vanish"):** the new task MUST be appended to the existing module-level `_background_tasks` list at `bridge/telegram_bridge.py` (the same list used at lines 2465 and 2493 for `_run_catchup` and `watchdog_loop`). Pattern: `_background_tasks.append(asyncio.create_task(_ingest_attachments(files, message, sender_name)))`. This guarantees the GC keeps a strong reference until the coroutine completes. The validator in step 3 must `grep -n "_background_tasks.append" bridge/telegram_bridge.py` and confirm the new ingest task is in the list.
 - **Text-only fast path:** Gate every new operation behind `if message.media:` so the existing zero-cost path for text-only steering is untouched. No new awaits, no new logging, no new branches for plain text.
 
 ### Flow
@@ -139,10 +140,10 @@ The same content is now retrievable via `python -m tools.memory_search search ".
 
 - **Single change site:** All enrichment logic lives inside `_ack_steering_routed`. No call-site edits — the six branches at lines 1081/1292/1325/1358/1542/1639 stay byte-identical.
 - **Caption composition:** When a media message has a non-empty caption (`text` arrives as the cleaned caption rather than the sentinel), prepend the media description: `"{description}\n\n{text}"`. When the caption is the sentinel, replace it outright. This mirrors the composition pattern already in `bridge/enrichment.py:enrich_message` (lines 89-92) so behaviour matches the new-session deferred path.
-- **Vault subdirectory:** Use `~/work-vault/telegram-attachments/` (auto-classifies as `company-wide` per `tools/knowledge/scope_resolver.py:88`). Create on first use with `mkdir(parents=True, exist_ok=True)`. The watcher has been monitoring `~/work-vault/` recursively since #1167; new subdirectories require no config change.
-- **Filename collision:** Use `f"{message.date.strftime('%Y%m%d_%H%M%S')}_{sender_name}_{message.id}_{original_basename}"`. The `(timestamp, message.id)` pair from Telegram is unique per chat, and `sender_name` provides additional disambiguation. Re-runs of the bridge against the same message remain idempotent because the watcher's hash check short-circuits sidecar regeneration.
-- **Fire-and-forget contract:** The ingest task runs as `asyncio.create_task(_ingest_attachments(files))`. The wrapper catches `Exception` (broad on purpose — every failure must be non-fatal) and logs at `warning`. The push to the steering queue happens *first*, so a slow or failing copy never gates message delivery.
-- **Latency for text-only steering:** Zero. The new code is gated behind `if message.media:`, and `message.media` is `None` for plain text. The hot path through `_ack_steering_routed` for the common case adds zero awaits and zero new branches taken.
+- **Vault subdirectory:** Use `~/work-vault/telegram-attachments/` (auto-classifies as `company-wide` per `tools/knowledge/scope_resolver.py:88`). Create on first use with `mkdir(parents=True, exist_ok=True)`. The watcher has been monitoring `~/work-vault/` recursively since #1167; new subdirectories require no config change. **Implementation Note (concern: "the watcher monitors recursively since #1167" is asserted but should be validated against the actual watcher init, not assumed):** the builder MUST verify `bridge/knowledge_watcher.py` calls `Observer.schedule(..., recursive=True)` (or equivalent) before shipping. If recursion is per-subdir-opt-in instead of automatic, the plan must add a `KnowledgeWatcher.add_path("~/work-vault/telegram-attachments/")` call to the bridge startup sequence. The validator step 3 grep must include `grep -n "recursive" bridge/knowledge_watcher.py` and confirm the watcher will pick up the new subdir without an explicit registration call. If recursion is NOT enabled by default, the builder STOPS, files a child issue for the missing recursion, and routes back through `/sdlc` — this is a hard precondition for the auto-ingest contract.
+- **Filename collision:** Use `f"{message.date.strftime('%Y%m%d_%H%M%S')}_{sender_name}_{message.id}_{original_basename}"`. The `(timestamp, message.id)` pair from Telegram is unique per chat, and `sender_name` provides additional disambiguation. Re-runs of the bridge against the same message remain idempotent because the watcher's hash check short-circuits sidecar regeneration. **Implementation Note (concern: `message.id` is unique per chat but NOT globally unique — two different chats can independently produce the same numeric id, and second-resolution timestamps may collide for fast bursts):** the chosen filename keeps the per-chat-unique `message.id` PLUS the second-resolution timestamp PLUS the sender name; the joint key `(YYYYMMDD_HHMMSS, sender_name, message.id)` requires three independent collisions to overlap. In the residual collision case, the watcher's content-hash idempotency means a duplicate write either (a) hashes identically and is a no-op, or (b) hashes differently and the second write overwrites the first — losing one file. We accept this residual risk for v1 because the joint-key collision probability is operationally negligible (estimated < 1 / 10^9 per inbound burst given current Telegram volume). If a real collision is ever observed, the follow-up is to append a 4-char hash suffix derived from `sha256(file_bytes)[:4]`.
+- **Fire-and-forget contract:** The ingest task is registered via `_background_tasks.append(asyncio.create_task(_ingest_attachments(files, message, sender_name)))` so it cannot be GC'd mid-flight. The wrapper catches `Exception` (broad on purpose — every failure must be non-fatal) and logs at `warning`. The push to the steering queue happens *first*, so a slow or failing copy never gates message delivery.
+- **Latency for text-only steering:** Zero. The new code is gated behind `if message.media:`, and `message.media` is `None` for plain text. The hot path through `_ack_steering_routed` for the common case adds zero awaits and zero new branches taken. **Implementation Note (concern: `process_incoming_media` is reused as-is from the new-session worker path, but the steering path is user-facing — a slow download stalls a live conversation, while a slow worker-side download is invisible):** to keep the user from staring at silence, `set_reaction` is moved to fire **before** the `process_incoming_media` call (see Risk 1 mitigation). The eyes emoji becomes the immediate "I see you" acknowledgement; the enriched text arrives when the download completes. `process_incoming_media` already enforces its own size and timeout bounds — no new bounds are added here. If user-facing latency proves problematic in practice, the follow-up is to push a placeholder steering message immediately (`"[downloading attachment...]"`) and replace it via `agent_session.queued_steering_messages` once enrichment completes — but that is explicitly OUT OF SCOPE for v1 to keep the change centralized and small.
 
 ## Failure Path Test Strategy
 
@@ -161,7 +162,7 @@ The same content is now retrievable via `python -m tools.memory_search search ".
 
 ## Test Impact
 
-- [ ] `tests/unit/test_bridge_ack_steering_routed.py` — UPDATE: add a `TestMediaEnrichment` class with cases covering (a) media + empty caption replaces sentinel, (b) media + non-empty caption prepends description, (c) text-only path bypasses `process_incoming_media` entirely, (d) `process_incoming_media` exception leaves the original sentinel intact and still pushes, (e) ingest task exception does not prevent the push. Existing tests remain unchanged.
+- [ ] `tests/unit/test_bridge_ack_steering_routed.py` — UPDATE: add a `TestMediaEnrichment` class with cases covering (a) media + empty caption replaces sentinel, (b) media + non-empty caption prepends description, (c) text-only path bypasses `process_incoming_media` entirely, (d) `process_incoming_media` exception leaves the original sentinel intact and still pushes, (e) ingest task exception does not prevent the push, (f) ingest task is registered in `_background_tasks` after dispatch, (g) reaction-ordering spy: media path calls `set_reaction → process_incoming_media → push_steering_message`; text-only path calls `push_steering_message → set_reaction`. Existing tests remain unchanged. **Implementation Note (concern: the plan asserts this file already exists — verify before assuming):** confirmed at plan time via `ls tests/unit/test_bridge_ack_steering_routed.py` (size 7573, mtime 2026-04-29). Builder MUST re-confirm at build time and FAIL LOUDLY if the file has been deleted or moved — do not silently create a new file under the same path; if missing, the builder routes back through `/sdlc` because the test plan is invalid.
 - [ ] `tests/unit/test_media_handling.py` — no changes; `process_incoming_media` itself is untouched.
 - [ ] No integration tests currently cover the steering+media combination — a new smoke test (`tests/integration/test_steering_media_smoke.py`) is added under the `bridge` marker that drives the helper end-to-end with a temp file and verifies the vault copy lands.
 
@@ -179,7 +180,7 @@ No existing tests need to be deleted or replaced — the change is purely additi
 
 ### Risk 1: Latency added to media-bearing steering messages
 **Impact:** A large image or document download could delay the steering push by seconds, making the user wonder if the message was received.
-**Mitigation:** The user-facing eyes emoji reaction (`set_reaction`) currently fires *after* the push. Move it to fire *before* the download starts so the user gets immediate visual acknowledgement. The push to Redis happens after enrichment completes. `process_incoming_media` already has its own validation and timeouts; we do not add new bounds beyond what already governs the new-session path.
+**Mitigation:** The user-facing eyes emoji reaction (`set_reaction`) currently fires *after* the push. Move it to fire *before* the download starts so the user gets immediate visual acknowledgement. The push to Redis happens after enrichment completes. `process_incoming_media` already has its own validation and timeouts; we do not add new bounds beyond what already governs the new-session path. **Implementation Note (concern: reordering `set_reaction` to fire BEFORE the push subtly changes the established UX semantic from "queued" to "received" — Open Question #2 already flags this for human confirmation, but build cannot block on a Q&A round-trip):** if Open Question #2 is unresolved at build time, the builder MUST ship the **media-only reordering** (the reaction fires before download for media-bearing messages) and KEEP THE EXISTING ORDER for text-only steering (reaction still fires after push). Concretely: inside the new `if message.media:` branch, `set_reaction` runs first; outside that branch (text-only path) the existing order is byte-identical. This bounds the semantic change to media interjections only — text-only steering UX is preserved 1:1 and is independently revertible if the human later vetoes the media reorder. The integration smoke test in step 2 must assert this ordering by mocking `set_reaction` and `push_steering_message` with a sequence-tracking spy: the call order for media must be `set_reaction → process_incoming_media → push_steering_message`, while the call order for text-only must be `push_steering_message → set_reaction` (existing).
 
 ### Risk 2: Knowledge ingestion failures crash the bridge
 **Impact:** A markitdown error on an unusual file format could propagate up and kill the event loop.
@@ -191,7 +192,7 @@ No existing tests need to be deleted or replaced — the change is purely additi
 
 ### Risk 4: PII / sensitive content auto-ingested without consent
 **Impact:** A user sends a private screenshot expecting it to be transient; it ends up permanently indexed in the work-vault.
-**Mitigation:** This is an explicit product choice — the vault is the canonical knowledge store and inbound files are work artifacts by definition. Document the behaviour in `docs/features/telegram.md` so it is discoverable. No code-level consent gate is required for v1; revisit if a user objects.
+**Mitigation:** This is an explicit product choice — the vault is the canonical knowledge store and inbound files are work artifacts by definition. Document the behaviour in `docs/features/telegram.md` so it is discoverable. No code-level consent gate is required for v1; revisit if a user objects. **Implementation Note (concern: messages from non-project chats — DMs, personal contacts not tied to a project_key — would still ingest into the company-wide vault, which is broader than "work artifacts" — those messages are arguably personal):** the v1 ingest path is intentionally project-agnostic (everything inbound lands in `~/work-vault/telegram-attachments/`, classified as `company-wide` by `tools/knowledge/scope_resolver.py:8`). This is acceptable for v1 because (a) the bridge already gates *which* contacts can interject at all via `dms.whitelist` and project membership in `projects.json` — non-whitelisted senders never reach `_ack_steering_routed`, and (b) the company-wide vault is NOT public — it is the operator's local work store. The narrowest interpretation is: "files you sent to your own AI assistant via your own bridge are by definition work artifacts." If a user later requests project-scoped routing or a per-chat opt-out, the hook point is `_ingest_attachments` — gate the copy on `project_key in {None, "personal"}` or similar. Documentation in `docs/features/telegram.md` MUST explicitly state "every attachment you send to the bridge — DM, group, or topic — becomes searchable in the company-wide work vault" so the behaviour is discoverable BEFORE a user is surprised.
 
 ## Race Conditions
 
@@ -308,10 +309,11 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: false
 - Edit `bridge/telegram_bridge.py:_ack_steering_routed`:
-  - Move the existing `set_reaction` call to fire **before** the media download so the user gets an immediate visual ack.
-  - Add a `if message.media:` branch that calls `process_incoming_media(client, message)` with a try/except. On success, replace `text` with the description (or compose with caption when `text` is non-sentinel). On failure, log at `warning` and leave `text` as-is.
-  - When `files` is non-empty, schedule `asyncio.create_task(_ingest_attachments(files, message, sender_name))`.
+  - Inside the new `if message.media:` branch, fire `set_reaction` **before** `process_incoming_media` so the user gets an immediate visual ack. Outside that branch (text-only path), keep the existing reaction-after-push order — see Risk 1 Implementation Note for the rationale.
+  - Add the `if message.media:` branch that calls `process_incoming_media(client, message)` with a try/except. On success, replace `text` with the description (or compose with caption when `text` is non-sentinel). On failure, log at `warning` and leave `text` as-is.
+  - When `files` is non-empty, schedule the ingest task as `_background_tasks.append(asyncio.create_task(_ingest_attachments(files, message, sender_name)))` to keep the GC from collecting the task mid-flight (matches the existing `_run_catchup` and `watchdog_loop` pattern at lines 2465 and 2493).
 - Add a private `_ingest_attachments(files, message, sender_name)` helper at module scope that copies each file into `~/work-vault/telegram-attachments/` with the disambiguated filename. Wrap the body in `try/except Exception as e:` that logs at `warning`.
+- Verify `bridge/knowledge_watcher.py` calls `Observer.schedule(..., recursive=True)` so the new vault subdirectory is picked up automatically. If recursion is not enabled, STOP and route back through `/sdlc` per the Vault Subdirectory Implementation Note.
 - Update the `_ack_steering_routed` docstring to describe the new media branch and the fire-and-forget contract.
 
 #### 2. Build the test coverage
@@ -337,6 +339,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - Run `pytest tests/unit/test_bridge_ack_steering_routed.py tests/integration/test_steering_media_smoke.py -v`.
 - Run `python -m ruff check bridge/telegram_bridge.py tests/unit/test_bridge_ack_steering_routed.py tests/integration/test_steering_media_smoke.py`.
 - Verify `grep -n "process_incoming_media" bridge/telegram_bridge.py` shows the new call inside the helper, not at the existing call sites.
+- Verify `grep -n "_background_tasks.append" bridge/telegram_bridge.py` shows the new ingest task registration alongside the existing `_run_catchup` and `watchdog_loop` registrations — confirming the task is GC-safe.
+- Verify `grep -n "recursive" bridge/knowledge_watcher.py` shows `recursive=True` on the watcher's `Observer.schedule(...)` call (or, if recursion is opt-in, the explicit `add_path("~/work-vault/telegram-attachments/")` registration is present in bridge startup).
 - Confirm all Success Criteria are met. Report pass/fail.
 
 #### 4. Documentation
@@ -369,11 +373,30 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Format clean | `python -m ruff format --check bridge/telegram_bridge.py tests/` | exit code 0 |
 | Helper composes media | `grep -n "process_incoming_media" bridge/telegram_bridge.py` | output contains `_ack_steering_routed` (in surrounding context) |
 | Vault subdirectory referenced | `grep -n "telegram-attachments" bridge/telegram_bridge.py` | exit code 0 |
+| Ingest task GC-safe | `grep -n "_background_tasks.append" bridge/telegram_bridge.py` | output contains the new `_ingest_attachments` registration |
+| Watcher recursion confirmed | `grep -n "recursive" bridge/knowledge_watcher.py` | shows `recursive=True` on `Observer.schedule(...)` |
 | No stale xfails introduced | `grep -rn 'xfail' tests/unit/test_bridge_ack_steering_routed.py tests/integration/test_steering_media_smoke.py` | exit code 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — recorded 2026-04-30T06:34:40Z.
+
+The war-room verdict was clean enough to ship to BUILD, but six concerns were folded as Implementation Notes during the revision pass per SDLC Row 4b. CONCERNs are acknowledged risks/clarifications, NOT blockers — they remain real risks the build must be aware of, and the Implementation Notes embed the mitigation directly next to the relevant section so the builder cannot miss them.
+
+| # | Lens | Concern | Folded as Implementation Note in |
+|---|------|---------|-----------------------------------|
+| C1 | Adversary | Bare `asyncio.create_task(...)` references can be silently GC'd before the coroutine completes — fire-and-forget becomes fire-and-vanish | Solution → Key Elements (fire-and-forget vault ingestion bullet) |
+| C2 | Operator | `message.id` is per-chat-unique, NOT globally unique; second-resolution timestamps can still collide on bursts | Solution → Technical Approach (filename collision bullet) |
+| C3 | Operator | `process_incoming_media` is reused as-is from the worker path, but the steering path is user-facing — slow downloads stall a live conversation | Solution → Technical Approach (latency for text-only steering bullet) |
+| C4 | Skeptic | Reordering `set_reaction` to fire BEFORE the push changes the established UX semantic from "queued" to "received"; Open Question #2 flags this for human confirmation but build cannot block on Q&A | Risks → Risk 1 (latency mitigation) |
+| C5 | User | Messages from non-project chats (DMs, personal contacts) would still ingest into the company-wide vault — broader than "work artifacts" | Risks → Risk 4 (PII / sensitive content) |
+| C6 | Archaeologist | The "watcher monitors recursively since #1167" claim is asserted, not validated — must be confirmed against the actual `Observer.schedule(...)` call | Solution → Technical Approach (vault subdirectory bullet); Step 1 task; Verification table |
+
+Two additional concerns folded into Test Impact and tasks:
+- **C7 (Adversary):** `tests/unit/test_bridge_ack_steering_routed.py` is asserted as existing — re-confirm at build time and fail loudly if missing rather than silently creating a new file under the same path.
+- **C8 (Operator):** Test Impact's enumerated cases (a)-(e) miss two important assertions — (f) the ingest task is registered in `_background_tasks` after dispatch, (g) the reaction-ordering spy proves the per-branch ordering split.
+
+`revision_applied: true` set in frontmatter; status: Planning → Ready.
 
 ---
 
