@@ -94,7 +94,7 @@ The helper `strip_private(text)` in `agent/private_tag.py` is invoked at every p
   - `Memory.safe_save(content=safe_text[:500], ...)` (subconscious memory)
   - `logger.info(... safe_text[:50] ...)` (bridge.log)
   - `clean_message(safe_text, project)` → `safe_clean_text` → fed into `AgentSession.message_text` via `enqueued_message_text` and the directive splice
-  - Both reply-chain hydration paths (completed-resume at line ~1416, fresh-message prehydration at line ~1922) call `strip_private(reply_chain_context)` immediately after `format_reply_chain` returns, closing the leak channel where a legacy chain might still carry `<private>` markers from messages persisted before this feature shipped (B1).
+  - Both reply-chain hydration paths (completed-resume at line ~1416, fresh-message prehydration at line ~1922) call `strip_private(reply_chain_context)` immediately after `format_reply_chain` returns, closing the leak channel where a stored chain could still carry `<private>` markers from messages persisted before this feature shipped (B1).
 
 - `.claude/hooks/hook_utils/memory_bridge.py`:
   - `ingest()` — applied at the top before the length filter, so wrapped content never reaches `Memory.safe_save`.
