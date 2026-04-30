@@ -289,10 +289,10 @@ The bridge does not need to import the new code. The worker already calls `extra
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/subconscious-memory.md`:
+- [x] Update `docs/features/subconscious-memory.md`:
   - Add a paragraph in the "Flow 3: Post-Session Extraction" section describing the tolerant JSON parsing (code fence stripping, payload slicing) and the refusal-pattern filter (pre-LLM guard + post-parse filter).
   - Document the `cleanup_memory_extraction_junk.py` script: when to run it, what it does, why `superseded_by` is used instead of deletion. Cross-reference `memory-dedup` for the same convention.
-- [ ] No new entry in `docs/features/README.md` — this is a hardening of an existing feature, not a new one.
+- [x] No new entry in `docs/features/README.md` — this is a hardening of an existing feature, not a new one.
 
 ### Inline Documentation
 - [ ] Docstring on `_extract_json_payload` explaining the strip-fences, slice-to-outermost-brackets pattern.
@@ -307,7 +307,7 @@ The bridge does not need to import the new code. The worker already calls `extra
 - [ ] Refusal-pattern lines are rejected post-parse so the line fallback never persists them (acceptance criterion 4 from issue).
 - [ ] Cleanup script runs in dry-run, prints candidate count and sample IDs; runs in apply, supersedes records; PR description documents the count removed (acceptance criterion 5 from issue).
 - [ ] Unit tests cover code-fenced JSON, JSON with prose preamble, empty input, refusal-style output, JSON-shrapnel input that should NOT be saved (acceptance criterion 6 from issue).
-- [ ] `docs/features/subconscious-memory.md` updated with parser hardening and refusal filter description (acceptance criterion 7 from issue).
+- [x] `docs/features/subconscious-memory.md` updated with parser hardening and refusal filter description (acceptance criterion 7 from issue).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 - [ ] `python scripts/cleanup_memory_extraction_junk.py --dry-run` runs successfully and prints a candidate count.

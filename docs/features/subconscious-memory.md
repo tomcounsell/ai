@@ -82,6 +82,21 @@ After a session completes, extraction is scheduled from `agent/session_executor.
 2. Inside the task wrapper, `run_post_session_extraction()` runs extract_observations → detect_outcomes → cleanup in sequence.
 3. Haiku extracts novel observations as structured JSON (category, observation text, file_paths, tags), with a line-based fallback parser for robustness
 4. Each observation is saved as Memory with categorized importance (corrections/decisions at 4.0, patterns/surprises at 1.0) and structured metadata attached via `DictField`
+
+#### Tolerant JSON parsing and refusal-pattern filter (issue #1212)
+
+Haiku occasionally wraps its JSON in markdown code fences (` ```json ... ``` `), prefixes it with prose ("Here is the JSON: [...]"), or — when the input is empty / placeholder / a session header that passes the 50-char guard but isn't a real response — refuses entirely with prose like "There is no agent session response to analyze..." or "**Rationale:** The response contains no novel observations...". Before the issue #1212 hardening, the strict `json.loads` path failed on fenced/preamble-wrapped JSON and the line-based fallback split refusal prose line-by-line and saved each fragment (and each `"key": "value",` JSON shrapnel line) as its own Memory record.
+
+Two coordinated parser changes in `agent/memory_extraction.py` close the gap:
+
+- **Tolerant JSON extraction** (`_extract_json_payload`): strips ` ```json ... ``` ` (or bare ` ``` ... ``` `) fences and slices to the outermost `[...]` or `{...}` substring before `json.loads`. When the JSON path yields ≥1 valid `{observation, category, ...}` item, the function returns immediately — the line-based fallback is short-circuited. The line fallback only runs when no JSON-shaped substring exists in the response.
+- **Refusal-pattern filter** (`_REFUSAL_PATTERNS` + `_looks_like_refusal`): a module-scope tuple of canonical refusal substrings (each commented with the originating Memory ID from issue #1212, e.g. `"there is no agent session"  # 5be7da58 / 76dbd772 / 796e1429`) plus a `_JSON_SHRAPNEL_RE` regex matching single-line `"key": "value",` JSON syntax. Applied at three points: (a) **post-LLM** — before parsing, if the raw response is refusal-shaped, return `[]` immediately (PRIMARY defense; load-bearing for refusal-prose handling); (b) **per-line** inside the line-based fallback — drop refusal/shrapnel lines so the fallback never persists them; (c) **pre-LLM** — after the existing 50-char check, additionally reject input matching refusal patterns or dominated by whitespace (non-whitespace ratio < `_MIN_NON_WHITESPACE_RATIO = 0.3`). The 50-char check is unchanged — empirical data showed it was already firing correctly; the new guards are additive supporting layers.
+
+Per the comment-fold revisions on issue #1212, the post-LLM filter is the primary defense (option c) because the failure mode that produced the original junk was input that **passed** the 50-char check yet still elicited refusal prose from the LLM. The pre-LLM guards save Haiku calls but cannot catch every refusal — only the post-LLM filter does. The dual-layer design is deliberate: refusal can emerge from inputs the pre-check missed (above 50 chars, above 30% non-whitespace, no refusal substring), so the post-parse filter is the load-bearing one.
+
+**Failure mode:** silent rejection of refusal-shaped text. Legitimate text containing refusal-pattern *substrings* (e.g., a real observation that mentions "there was no agent session ID for the test fixture") is preserved by `_looks_like_refusal` — it requires the pattern to dominate the line, not merely appear in it. A regression test (`test_legitimate_text_with_session_substring`) locks this in.
+
+**Maintenance contract:** when a new refusal phrasing appears in the wild (Haiku rephrases its refusals over time), the response is to add a pattern to the `_REFUSAL_PATTERNS` tuple — not to re-architect. The on-demand cleanup script (below) and the recurring `memory-dedup` reflection are the safety net for any pattern that slips through.
 5. Outcome detection uses LLM judgment (Haiku) to classify each injected thought using a three-tier outcome model (popoto v1.5.0):
    - `"acted"` — response was meaningfully influenced by this memory (positive signal)
    - `"used"` — agent consumed the memory (read + reasoned about it) but it did not drive the response (neutral signal, popoto v1.5.0)
@@ -387,6 +402,39 @@ To disable consolidation: remove the `memory-dedup` entry from `config/reflectio
 
 Pruning of superseded records is delegated to the future `memory-decay-prune` reflection slot from issue #748.
 
+### One-shot cleanup: `cleanup_memory_extraction_junk.py`
+
+`scripts/cleanup_memory_extraction_junk.py` is a one-shot operator script that reuses the consolidation conventions to remove **already-saved** junk records produced by pre-fix extraction (issue #1212). It is **not** a recurring reflection — once the parser fix lands, no new junk should be created, so a recurring guard is unnecessary. If post-merge metrics ever show new junk creeping in, the script can be promoted to a `memory-dedup`-style nightly reflection in a follow-up.
+
+**When to run:** after merging the issue #1212 parser fix, run once with `--dry-run` to inspect the candidate count, then once with `--apply` to mark them superseded.
+
+**What it does:** iterates `Memory.query.filter(...)` for records where `agent_id` starts with `extraction-` (the prefix written by `extract_observations_async` — narrow blast radius, never touches human-saved or post-merge Memory records) AND content matches `_looks_like_refusal()` — the same predicate the parser uses, so detection logic stays in lockstep with the prevention logic. Default `--dry-run` mode prints the IDs and content samples it would supersede; `--apply` mode sets `superseded_by="cleanup-junk-extraction"` and `superseded_by_rationale="auto-cleanup: refusal/json-shrapnel from issue #1212"`.
+
+**Why `superseded_by` instead of deletion:** matches the `memory-dedup` reflection's convention (see "Memory Consolidation" above) — records are marked superseded but never deleted, so the cleanup is fully reversible by clearing the `superseded_by` field. The recall pipeline already filters superseded records via the one-line filter in `retrieve_memories()`, so the records disappear from agent context without any other code changes.
+
+**Safety rails:**
+
+| Rail | Value |
+|------|-------|
+| Default mode | `--dry-run` (no writes); `--apply` is opt-in |
+| Blast-radius limit | Only `agent_id.startswith("extraction-")` records are considered |
+| Idempotency | Records with `superseded_by != ""` are skipped on re-runs |
+| Per-record isolation | Each save wrapped in try/except — one failure doesn't abort the run |
+| Popoto-only | No raw Redis (verified by `grep -E '\bredis\.|r\.delete|r\.hget|r\.scan_iter'` returning no matches in the script) |
+| Reuses parser predicate | `_looks_like_refusal` from `agent.memory_extraction` — detection cannot drift from prevention |
+
+**Manual invocation:**
+
+```bash
+# Inspect what would be marked superseded (safe, no writes)
+python scripts/cleanup_memory_extraction_junk.py --dry-run
+
+# Apply the supersede mark (after dry-run review)
+python scripts/cleanup_memory_extraction_junk.py --apply
+```
+
+The script prints a three-count summary per run: total candidates considered, records superseded, records blocked (already superseded or save-failed).
+
 ## Key Files
 
 | File | Purpose |
@@ -397,7 +445,8 @@ Pruning of superseded records is delegated to the future `memory-decay-prune` re
 | `agent/memory_retrieval.py` | 4-signal RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, `get_embedding_ranked()`, ranked signal accessors. Includes superseded-by filter to exclude archived records from recall. |
 | `agent/embedding_provider.py` | `OllamaEmbeddingProvider` adapter for local Ollama embedding, plus `configure_embedding_provider()` for global provider setup. |
 | `scripts/memory_consolidation.py` | Nightly `memory-dedup` reflection callable: `run_consolidation(project_key=None, dry_run=True, max_merges=10)`. Haiku-based semantic dedup with dry-run/apply modes, rate cap, importance exemption, and contradiction flagging. |
-| `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
+| `scripts/cleanup_memory_extraction_junk.py` | One-shot operator script (issue #1212): marks pre-fix extraction junk records (refusal prose, JSON shrapnel) as `superseded_by="cleanup-junk-extraction"`. Default `--dry-run`, `--apply` opt-in; `agent_id.startswith("extraction-")` blast-radius limit; reuses `_looks_like_refusal` from `agent.memory_extraction`. |
+| `agent/memory_extraction.py` | Post-session JSON extraction with tolerant JSON parsing (`_extract_json_payload` strips fences and slices to brackets) and refusal-pattern filter (`_REFUSAL_PATTERNS` + `_looks_like_refusal` applied pre-LLM, post-LLM, and per-line in the line-based fallback — issue #1212). LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/session_executor.py` | Integration point: `_schedule_post_session_extraction()` fires `run_post_session_extraction()` as a background task AFTER `complete_transcript()` (hotfix #1055); `drain_pending_extractions()` drains pending tasks on worker shutdown |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |
