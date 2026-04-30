@@ -106,6 +106,11 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     confidence = ConfidenceField(initial_confidence=0.5)
     bm25 = BM25Field(source="content")
     embedding = EmbeddingField(source="content")
+
+    # Opt-in marker for EmbeddingField.garbage_collect (Popoto >= 1.6.0).
+    # Without this attribute, garbage_collect is a no-op for safety —
+    # see #1214 and the orphan-cleanup plan for the rationale.
+    __embedding_garbage_collect__ = True
     bloom = ExistenceFilter(
         error_rate=0.01,
         capacity=100_000,

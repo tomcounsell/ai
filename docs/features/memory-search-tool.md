@@ -10,7 +10,7 @@ The memory system previously had no direct interface -- memories accumulated sil
 
 ### `status(project_key=None, deep=False)`
 
-Return a health summary of the memory system. Fast path (<1s): Redis ping, total count, category breakdown, superseded count, avg confidence, last-write timestamp, EmbeddingField detection. Deep path (behind `deep=True`): orphan index count and per-category confidence averages.
+Return a health summary of the memory system. Fast path (<1s): Redis ping, total count, category breakdown, superseded count, avg confidence, last-write timestamp, EmbeddingField detection. Deep path (behind `deep=True`): Redis-side `orphan_index_count`, disk-side `disk_orphan_count` (`.npy` embedding files without a live record), and per-category confidence averages.
 
 ```python
 from tools.memory_search import status
@@ -21,7 +21,8 @@ result = status(project_key="default")
 #  "embedding_field": "not_configured"}
 
 result = status(deep=True)
-# adds: "orphan_index_count": 0, "by_category_confidence": {"correction": {"count": 5, "avg_confidence": 0.80}}
+# adds: "orphan_index_count": 0, "disk_orphan_count": 0,
+#       "by_category_confidence": {"correction": {"count": 5, "avg_confidence": 0.80}}
 ```
 
 Returns `{"healthy": False, "error": "Redis unreachable: ..."}` when Redis is down.

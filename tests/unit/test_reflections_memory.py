@@ -12,6 +12,24 @@ import asyncio
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+def _popoto_has_sweep_stale_tempfiles() -> bool:
+    """Probe whether popoto>=1.6.0 EmbeddingField is installed."""
+    try:
+        from popoto.fields.embedding_field import EmbeddingField
+
+        return hasattr(EmbeddingField, "sweep_stale_tempfiles")
+    except ImportError:
+        return False
+
+
+_REQUIRES_POPOTO_1_6 = pytest.mark.skipif(
+    not _popoto_has_sweep_stale_tempfiles(),
+    reason="popoto<1.6.0 — EmbeddingField.sweep_stale_tempfiles not yet available",
+)
+
 
 def run_async(coro):
     """Run a coroutine synchronously."""
@@ -360,3 +378,110 @@ class TestKnowledgeReindex:
             result = run_async(run_knowledge_reindex())
 
         assert_valid_result(result)
+
+
+# ============================================================
+# run_embedding_orphan_sweep (#1214)
+# ============================================================
+
+
+class TestEmbeddingOrphanSweep:
+    """Tests for the new ``run_embedding_orphan_sweep`` reflection."""
+
+    def test_stub_short_circuit_when_popoto_old(self):
+        """If the installed Popoto lacks ``sweep_stale_tempfiles`` (the 1.5.x
+        stub), the sweep must short-circuit with a clear "skipped" status.
+
+        The capability probe ``hasattr(EmbeddingField, "sweep_stale_tempfiles")``
+        is a deterministic across-version signal: 1.6.0 adds the method, 1.5.x
+        does not. We use ``spec=[]`` to construct a fake EmbeddingField that
+        explicitly does not expose that attribute (mirroring the 1.5.x API
+        surface)."""
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        # spec=[] — empty allowlist of attributes; hasattr() returns False
+        # for sweep_stale_tempfiles, mimicking the popoto 1.5.x stub surface.
+        fake_field = MagicMock(spec=[])
+        with patch(
+            "popoto.fields.embedding_field.EmbeddingField",
+            fake_field,
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert any("popoto<1.6" in f for f in result["findings"]), (
+            f"expected popoto<1.6 marker in findings, got {result['findings']}"
+        )
+        assert "skipped" in result["summary"].lower()
+
+    @_REQUIRES_POPOTO_1_6
+    def test_dry_run_default(self):
+        """Default mode is dry-run — does not call garbage_collect/sweep."""
+        # Real (non-stub) popoto installed, so the capability probe passes.
+        # Dry-run path: must NOT invoke garbage_collect or sweep_stale_tempfiles.
+        from popoto.fields.embedding_field import EmbeddingField
+
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        with (
+            patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "false"}),
+            patch.object(EmbeddingField, "garbage_collect") as gc_spy,
+            patch.object(EmbeddingField, "sweep_stale_tempfiles") as sweep_spy,
+            patch(
+                "scripts.popoto_index_cleanup._count_disk_orphans",
+                return_value=42,
+            ),
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert gc_spy.call_count == 0, "dry-run must not call garbage_collect"
+        assert sweep_spy.call_count == 0, "dry-run must not call sweep_stale_tempfiles"
+        assert any("DRY RUN" in f for f in result["findings"])
+
+    @_REQUIRES_POPOTO_1_6
+    def test_apply_mode_calls_both_sweeps(self):
+        """Apply mode invokes garbage_collect AND sweep_stale_tempfiles."""
+        from popoto.fields.embedding_field import EmbeddingField
+
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        with (
+            patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "true"}),
+            patch.object(EmbeddingField, "garbage_collect", return_value=7) as gc_spy,
+            patch.object(EmbeddingField, "sweep_stale_tempfiles", return_value=3) as sweep_spy,
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert gc_spy.call_count == 1
+        assert sweep_spy.call_count == 1
+        assert any("Removed 7 orphan" in f for f in result["findings"])
+        assert any("3 stale tmp" in f for f in result["findings"])
+
+    @_REQUIRES_POPOTO_1_6
+    def test_handles_garbage_collect_exception(self):
+        """A failure inside garbage_collect must NOT crash the reflection."""
+        from popoto.fields.embedding_field import EmbeddingField
+
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        with (
+            patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "true"}),
+            patch.object(
+                EmbeddingField,
+                "garbage_collect",
+                side_effect=RuntimeError("synthetic failure"),
+            ),
+            patch.object(EmbeddingField, "sweep_stale_tempfiles", return_value=0),
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        # Reflection wrapper should not crash; status should be "ok"
+        # with the error noted in findings.
+        assert result["status"] == "ok"
+        assert any("garbage_collect error" in f for f in result["findings"])

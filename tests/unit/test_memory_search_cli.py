@@ -111,7 +111,11 @@ class TestStatusFunction:
         assert result["superseded"] == 2
 
     def test_deep_adds_orphan_count(self):
-        """status(deep=True) includes orphan_index_count in result."""
+        """status(deep=True) includes orphan_index_count AND disk_orphan_count.
+
+        Both fields are emitted side-by-side so dashboards can chart Redis-side
+        and disk-side orphan counts independently — see #1214.
+        """
         import sys
         import types
 
@@ -123,6 +127,7 @@ class TestStatusFunction:
         # real sys.path.insert + import inside status() finds it.
         fake_cleanup = types.ModuleType("popoto_index_cleanup")
         fake_cleanup._count_orphans = lambda model: 5
+        fake_cleanup._count_disk_orphans = lambda model: 17
 
         with (
             patch("tools.memory_search._fetch_all_records", return_value=records),
@@ -132,7 +137,12 @@ class TestStatusFunction:
             mock_redis.ping.return_value = True
             result = status(project_key="test-project", deep=True)
 
+        # Existing key preserved verbatim (B3 — do not rename)
         assert "orphan_index_count" in result
+        assert result["orphan_index_count"] == 5
+        # New parallel field
+        assert "disk_orphan_count" in result
+        assert result["disk_orphan_count"] == 17
         assert "by_category_confidence" in result
 
     def test_deep_per_category_confidence(self):
@@ -150,6 +160,7 @@ class TestStatusFunction:
 
         fake_cleanup = types.ModuleType("popoto_index_cleanup")
         fake_cleanup._count_orphans = lambda model: 0
+        fake_cleanup._count_disk_orphans = lambda model: 0
 
         with (
             patch("tools.memory_search._fetch_all_records", return_value=records),
@@ -311,6 +322,7 @@ class TestCmdStatus:
             "last_write": None,
             "embedding_field": "not_configured",
             "orphan_index_count": 0,
+            "disk_orphan_count": 0,
             "by_category_confidence": {},
         }
 
