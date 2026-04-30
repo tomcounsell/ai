@@ -92,7 +92,14 @@ def _should_register_email_handler(project_cfg: dict) -> bool:
     return bool(email_cfg.get("contacts") or email_cfg.get("domains"))
 ```
 
-This matches the inbound routing logic in `bridge/routing.py`, which builds both a contact address map (`EMAIL_TO_PROJECT`) and a domain map (`EMAIL_DOMAIN_TO_PROJECT`). A project must have `EmailOutputHandler` registered for either routing strategy to produce outbound SMTP replies — without it, the worker falls back to `FileOutputHandler` and silently discards the reply to a log file.
+This matches the inbound routing logic in `bridge/routing.py`, which builds both a contact address map (`EMAIL_TO_PROJECT`) and a domain map (`EMAIL_DOMAIN_TO_PROJECT`).
+
+**Two paths to outbound SMTP**, depending on whether the project has registered a transport-specific handler:
+
+- **Registered path** (`EmailOutputHandler` registered for `(project_key, "email")`): the worker resolves it directly and `EmailOutputHandler.send()` builds and sends the MIME message from the worker process itself, bypassing the outbox. This is the path real production projects (with `email.contacts` or `email.domains` configured) take.
+- **Default path** (no per-project email handler): the worker falls through to the default `TelegramRelayOutputHandler`, which is itself transport-aware. When `extra_context.transport == "email"` it writes the unified outbox payload to `email:outbox:{session_id}`, and `bridge/email_relay.py` drains it via SMTP. This path covers test scenarios (e.g. the `test-cuttlefish-*` skills inject `transport=email` into an in-memory project dict without touching `projects.json`) and projects whose email routing is partially configured. See [Bridge/Worker Architecture](bridge-worker-architecture.md) "Output Handler Chain" for the transport-branching contract.
+
+Without **either** path, a session with `transport=email` would still write to `telegram:outbox:*` (the pre-#1223 behavior). That bug — replies queued where the SMTP relay never looks — is fixed.
 
 ## Configuration
 
