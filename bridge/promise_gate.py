@@ -354,15 +354,35 @@ def _detect_empty_promise(text_lower: str) -> bool:
 def _gate_enabled() -> bool:
     """Read ``PROMISE_GATE_ENABLED`` env var fresh on each call.
 
-    Default is ``"true"`` (gate enabled). Mirrors
-    ``bridge/read_the_room.py:_read_enabled``.
+    Default is ``"true"`` (gate enabled). Per the plan's documented
+    contract (§Failure Path Test Strategy → Kill Switch Coverage):
+
+      ``PROMISE_GATE_ENABLED=`` (empty), ``PROMISE_GATE_ENABLED``
+      (unset), or any value not in {``"1"``, ``"true"``, ``"yes"``,
+      ``"on"``} → gate is enabled (default-on).
+
+    The structural shape mirrors ``bridge/read_the_room.py:_read_enabled``,
+    but RTR's default is ``"false"`` (opt-in feature) so an empty-string
+    env var matches RTR's default-off state invisibly. Here the default
+    is ``"true"`` (default-on safety control), so empty-string MUST be
+    treated as the default rather than as a disable signal — otherwise
+    a stray ``PROMISE_GATE_ENABLED=`` in an env file silently disables
+    the gate while telemetry shows ``source="promise_gate_disabled"``
+    on every send.
+
+    Only an explicit non-empty value that is not in the allow-set
+    disables the gate. Whitespace-only values are treated as empty
+    (no operator would intend whitespace as a disable signal).
     """
-    return os.environ.get("PROMISE_GATE_ENABLED", "true").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    raw = os.environ.get("PROMISE_GATE_ENABLED", "true")
+    normalized = raw.strip().lower()
+    # Empty / whitespace-only → treat as the default ("true") per the
+    # documented contract. Without this branch the default would only
+    # fire on a missing key, leaving a stray ``PROMISE_GATE_ENABLED=``
+    # silently disabling the gate.
+    if not normalized:
+        normalized = "true"
+    return normalized in ("1", "true", "yes", "on")
 
 
 # === Telemetry: forked audit helper + best-effort session_event emission ===
