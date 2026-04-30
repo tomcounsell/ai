@@ -100,3 +100,4 @@ If a steering message arrives just as the agent finishes, `pop_all_steering_mess
 - [Steering Queue: Historical Spec](steering-implementation-spec.md) -- Original implementation plan and design decisions
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Auto-continue and output classification that interacts with session status
 - [Agent Session Model](agent-session-model.md) -- Session lifecycle and status transitions
+- [Telegram Integration → Inbound attachments](telegram.md#inbound-attachments--steering-enrichment--auto-ingest) -- Files (documents, photos, voice notes) sent as reply-to interjections are enriched and auto-ingested before reaching the steering queue (issue #1215)
