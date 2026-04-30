@@ -25,6 +25,7 @@ from agent.sdk_client import (
     PERSONAS_BASE_DIR,
     PERSONAS_OVERLAY_DIR,
     PERSONAS_SEGMENTS_DIR,
+    _load_persona_overlay_with_log,
     _resolve_overlay_path,
     _resolve_persona,
     load_identity,
@@ -446,4 +447,113 @@ class TestPMWorkflowAnnouncementWarning:
         assert "Unless you directly instruct me to skip" in content, (
             "In-repo PM template is missing the workflow-announcement clause "
             "(issue #1189). The loader will emit a WARN at session startup."
+        )
+
+
+class TestPersonaOverlayLogging:
+    """Tests for _load_persona_overlay_with_log() — the canonical persona-load
+    log line.
+
+    Background: the test-cuttlefish-setup-podcast skill could not confirm
+    from logs whether the customer-service persona had loaded for an email
+    session. Existing logs (`Resolved persona:` and the harness
+    `Appending N-char system prompt`) did not appear in worker.log for the
+    test session. The test cannot answer its headline question without a
+    canonical log line.
+
+    Contract: every persona load emits exactly one line matching
+    "Persona overlay loaded:" (or "Persona overlay missing:" on fallback)
+    that includes the request_id, persona name, prompt_chars, and session_id.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mock_overlay_dir(self, tmp_path, monkeypatch):
+        """Provide minimal overlay files for the persona loader."""
+        import agent.sdk_client as sdk_mod
+
+        overlay_dir = tmp_path / "personas"
+        overlay_dir.mkdir()
+        (overlay_dir / "customer-service.md").write_text(
+            "# Customer Service Persona\n\nHelpful, action-oriented voice."
+        )
+        (overlay_dir / "teammate.md").write_text(
+            "# Teammate Persona\n\n## Communication Style\n\nKeep it casual."
+        )
+        monkeypatch.setattr(sdk_mod, "PERSONAS_OVERLAY_DIR", overlay_dir)
+
+    def test_logs_canonical_line_on_successful_load(self, caplog):
+        """Successful load emits 'Persona overlay loaded:' at INFO with all fields."""
+        with caplog.at_level(logging.INFO, logger="agent.sdk_client"):
+            prompt = _load_persona_overlay_with_log(
+                "customer-service",
+                request_id="req-abc",
+                session_id="email_test_123",
+            )
+
+        assert prompt is not None
+        assert len(prompt) > 0
+
+        loaded_lines = [r for r in caplog.records if "Persona overlay loaded:" in r.getMessage()]
+        assert len(loaded_lines) == 1, (
+            f"Expected exactly one 'Persona overlay loaded:' line, got {len(loaded_lines)}: "
+            f"{[r.getMessage() for r in loaded_lines]}"
+        )
+        msg = loaded_lines[0].getMessage()
+        assert "[req-abc]" in msg
+        assert "name=customer-service" in msg
+        assert "prompt_chars=" in msg
+        assert "session_id=email_test_123" in msg
+        # prompt_chars must be a positive integer
+        import re
+
+        m = re.search(r"prompt_chars=(\d+)", msg)
+        assert m is not None and int(m.group(1)) > 0
+
+    def test_logs_missing_with_fallback_when_overlay_absent(self, caplog, monkeypatch):
+        """When the requested overlay is missing but the fallback succeeds,
+        emit a single WARNING with requested= and fell_back_to= fields."""
+        import agent.sdk_client as sdk_mod
+
+        # Point overlay dir at one with only teammate available.
+        # customer-service.md is missing; load_persona_prompt will raise.
+        # _load_persona_overlay_with_log should fall back to teammate.
+        empty_dir = sdk_mod.PERSONAS_OVERLAY_DIR
+        # Remove customer-service overlay to simulate missing
+        (empty_dir / "customer-service.md").unlink()
+
+        with caplog.at_level(logging.WARNING, logger="agent.sdk_client"):
+            prompt = _load_persona_overlay_with_log(
+                "customer-service",
+                request_id="req-xyz",
+                session_id="email_test_456",
+                fallback="teammate",
+            )
+
+        # Fallback succeeded
+        assert prompt is not None
+        missing_lines = [r for r in caplog.records if "Persona overlay missing:" in r.getMessage()]
+        assert len(missing_lines) == 1, (
+            f"Expected one 'Persona overlay missing:' line, got {len(missing_lines)}"
+        )
+        msg = missing_lines[0].getMessage()
+        assert "[req-xyz]" in msg
+        assert "requested=customer-service" in msg
+        assert "fell_back_to=teammate" in msg
+        assert "session_id=email_test_456" in msg
+
+    def test_canonical_line_grep_pattern_returns_one_per_session(self, caplog):
+        """A grep for 'Persona overlay' filtered by session_id must return
+        exactly one line per session — the property the cuttlefish brief asks
+        for ('grep "Persona overlay" worker.log | grep session_id=<sid>')."""
+        sid = "session-grep-test"
+        with caplog.at_level(logging.INFO, logger="agent.sdk_client"):
+            _load_persona_overlay_with_log("customer-service", request_id="r1", session_id=sid)
+
+        matched = [
+            r
+            for r in caplog.records
+            if "Persona overlay" in r.getMessage() and f"session_id={sid}" in r.getMessage()
+        ]
+        assert len(matched) == 1, (
+            f"grep recipe must return exactly one line per session, got {len(matched)}"
         )
