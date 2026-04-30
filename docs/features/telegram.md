@@ -192,11 +192,12 @@ discoverable via:
 python -m tools.memory_search search "..."
 ```
 
-The copy runs as a fire-and-forget `asyncio.create_task` appended to the
-module-level `_background_tasks` list — every failure is caught locally
-and logged at WARNING. The steering push happens **first**, so a slow
-or failing copy never blocks message delivery. See
-[Markitdown Ingestion](markitdown-ingestion.md) for the watcher pipeline.
+The vault copy is scheduled as a fire-and-forget `asyncio.create_task`
+appended to the module-level `_background_tasks` list, so its work never
+runs on the bridge's hot path; the steering push proceeds without waiting
+on it. Every failure inside the task is caught locally and logged at
+WARNING. See [Markitdown Ingestion](markitdown-ingestion.md) for the
+watcher pipeline.
 
 ### Privacy note
 
