@@ -245,16 +245,16 @@ No new agent integration required. Existing surfaces continue to work:
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/telegram.md` with a new subsection: "Inbound attachments — steering enrichment + auto-ingest" describing the centralized helper change, the vault subdirectory, and the fire-and-forget contract.
-- [ ] Add a one-line entry to `docs/features/README.md` index pointing at the new subsection (or refresh the existing telegram entry's blurb).
-- [ ] Update `docs/features/markitdown-ingestion.md` to mention the new auto-ingest source (Telegram steering path), so future readers see the full set of vault writers.
+- [x] Update `docs/features/telegram.md` with a new subsection: "Inbound attachments — steering enrichment + auto-ingest" describing the centralized helper change, the vault subdirectory, and the fire-and-forget contract.
+- [x] Add a one-line entry to `docs/features/README.md` index pointing at the new subsection (or refresh the existing telegram entry's blurb).
+- [x] Update `docs/features/markitdown-ingestion.md` to mention the new auto-ingest source (Telegram steering path), so future readers see the full set of vault writers.
 
 ### External Documentation Site
 This repo has no Sphinx/Read the Docs site; nothing else to update.
 
 ### Inline Documentation
-- [ ] Update the docstring of `_ack_steering_routed` to describe the new media branch and the fire-and-forget ingest task.
-- [ ] Add a brief comment at the top of the new `_ingest_attachments` helper documenting the never-block contract.
+- [x] Update the docstring of `_ack_steering_routed` to describe the new media branch and the fire-and-forget ingest task.
+- [x] Add a brief comment at the top of the new `_ingest_attachments` helper documenting the never-block contract.
 
 ## Success Criteria
 
