@@ -785,6 +785,26 @@ enable_worker() {
     echo "Worker launchd entry enabled. Run worker-start to actually start the worker."
 }
 
+restart_webui() {
+    echo "Restarting web UI..."
+    local venv_python="$VENV/bin/python"
+    local pid
+    pid=$(lsof -ti :8500 2>/dev/null | head -1)
+    if [ -n "$pid" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 1
+    fi
+    nohup "$venv_python" -m ui.app >"$PROJECT_DIR/logs/webui.log" 2>&1 &
+    disown
+    sleep 2
+    pid=$(lsof -ti :8500 2>/dev/null | head -1)
+    if [ -n "$pid" ]; then
+        echo "Web UI restarted (PID: $pid)"
+    else
+        echo "Web UI restart failed. Check logs: $PROJECT_DIR/logs/webui.log"
+    fi
+}
+
 restart_worker() {
     echo "Restarting worker..."
 
@@ -984,6 +1004,7 @@ case "${1:-}" in
     restart)
         restart_bridge
         restart_worker
+        restart_webui
         ;;
     status)
         status_bridge

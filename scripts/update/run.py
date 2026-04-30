@@ -906,15 +906,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("Bridge: skipped (no projects assigned to this machine)", v)
             result.caffeinate_status = service.get_caffeinate_status()
 
-        # Ensure web UI is running. Force-restart only when new commits were
-        # pulled (so it picks up code changes); otherwise leave the running
-        # process alone so /update is idempotent across repeated runs.
-        force_webui = bool(result.git_result and result.git_result.commit_count > 0)
+        # Ensure web UI is running. Force-restart on any full/cron run so a
+        # stale process (wrong Python, old code) is always replaced. Skip only
+        # in verify-only mode where we want zero side-effects.
+        force_webui = bool(
+            config.force_dep_sync or (result.git_result and result.git_result.commit_count > 0)
+        )
         if service.restart_webui(project_dir, force=force_webui):
-            if force_webui:
-                log("Web UI restarted (port 8500)", v)
-            else:
-                log("Web UI running (port 8500)", v)
+            log("Web UI restarted (port 8500)" if force_webui else "Web UI running (port 8500)", v)
         else:
             log("WARN: Web UI failed to start", v, always=True)
             result.warnings.append("Web UI failed to start")
