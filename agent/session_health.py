@@ -167,6 +167,31 @@ _MEMORY_CACHE: tuple[float, bool] | None = None
 _MEMORY_CACHE_TTL_SEC: float = 5.0
 
 
+# Orphan-subprocess SIGKILL escalation set (issue #1218).
+#
+# Populated by the orphan-reap pass at the end of ``_agent_session_health_check``
+# when a SIGTERM is sent to a subprocess whose owning ``AgentSession`` row is
+# already terminal. Drained at the START of the next health tick: each PID is
+# attempted as a SIGKILL, then unconditionally discarded — even if SIGKILL hit
+# ``ProcessLookupError`` (already dead), ``PermissionError``, or any other
+# exception. macOS recycles PIDs within ~5 minutes, so retaining a PID across
+# more than one tick risks SIGKILLing an unrelated new process. One-shot drain,
+# no retry, no accumulation.
+#
+# Grace window during reap (60s): a session that just transitioned to terminal
+# is in its natural teardown path; we do not SIGTERM it. The
+# ``_execute_agent_session`` ``finally`` block normally pops the handle from
+# ``_active_sessions`` before the next health tick fires, so the grace window
+# is purely defensive.
+_pending_sigkill: set[int] = set()
+
+# Grace window between a session's terminal transition and the orphan-reap pass.
+# Sessions whose ``updated_at`` is within this window are skipped: the natural
+# teardown in ``_execute_agent_session`` is given time to complete before the
+# defensive reap fires. 60s is 10x the normal subprocess teardown duration.
+ORPHAN_REAP_GRACE_SECONDS = 60
+
+
 def _is_memory_tight() -> bool:
     """Return True if available system memory is below the OOM-backoff threshold.
 
@@ -606,11 +631,46 @@ async def _agent_session_health_check() -> None:
     Recovery resets status to 'pending' via direct mutation and save.
     Status is an IndexedField, so no delete-and-recreate is needed.
     Only sessions whose worker is confirmed dead are touched.
+
+    **Orphan subprocess reap (#1218):** The two forward scans (RUNNING / PENDING)
+    look at AgentSession rows and ask "is the worker still alive?". The orphan
+    reap pass runs at the END of this function and asks the inverse question:
+    for each subprocess in ``_active_sessions``, is the owning AgentSession row
+    in ``_TERMINAL_STATUSES``? If yes (and outside the grace window), SIGTERM
+    the PID, push it onto ``_pending_sigkill`` for next-tick SIGKILL escalation,
+    and pop the handle. Drains ``_pending_sigkill`` first (single-shot clear)
+    so PIDs never persist across more than one tick.
     """
     now = time.time()
     checked = 0
     recovered = 0
     workers_started = 0
+
+    # === SIGKILL escalation drain (issue #1218) ===
+    # Snapshot-then-clear: PIDs added to _pending_sigkill on the previous tick
+    # are escalated to SIGKILL exactly once, then unconditionally discarded.
+    # macOS recycles PIDs in ~5 minutes; persisting entries across multiple
+    # ticks risks SIGKILLing an unrelated new process.
+    _pending_sigkill_snapshot = list(_pending_sigkill)
+    _pending_sigkill.clear()
+    for _pid in _pending_sigkill_snapshot:
+        try:
+            os.kill(_pid, signal.SIGKILL)
+            logger.warning(
+                "[session-health] SIGKILL escalation for orphan subprocess pid=%s",
+                _pid,
+            )
+        except ProcessLookupError:
+            # Already dead between SIGTERM and this drain — expected, silent.
+            pass
+        except PermissionError as _perm_err:
+            logger.warning(
+                "[session-health] SIGKILL permission denied for pid=%s: %s",
+                _pid,
+                _perm_err,
+            )
+        except Exception as _kill_err:
+            logger.debug("[session-health] SIGKILL failed for pid=%s: %s", _pid, _kill_err)
 
     # === Check RUNNING sessions_list ===
     # Phantom guard: drop records whose fields are still Popoto Field descriptors
@@ -1073,6 +1133,131 @@ async def _agent_session_health_check() -> None:
             recovered,
             workers_started,
         )
+
+    # === Orphan subprocess reap pass (issue #1218) ===
+    # Inverse-direction scan: iterate _active_sessions and reap any handle
+    # whose corresponding AgentSession row is terminal. Snapshot via list()
+    # to avoid mutation-during-iteration if another coroutine pops a handle.
+    #
+    # An optional kill-switch is available via the env flag DISABLE_ORPHAN_REAP=1
+    # (parity with DISABLE_PROGRESS_KILL); enabled by default.
+    if os.environ.get("DISABLE_ORPHAN_REAP") == "1":
+        return
+
+    for _session_id, _handle in list(_active_sessions.items()):
+        try:
+            # Use AgentSession.get_by_id (the canonical pattern in
+            # agent_session_queue.py:591/626/664). Do NOT use
+            # query.filter(agent_session_id=...) — agent_session_id is a
+            # @property alias for id, not an indexed queryable field; the
+            # filter would silently return nothing.
+            entry = AgentSession.get_by_id(_session_id)
+        except Exception as _lookup_err:
+            logger.warning(
+                "[session-health] Orphan reap: lookup failed for %s: %s",
+                _session_id,
+                _lookup_err,
+            )
+            continue
+
+        if entry is None:
+            # No DB row — handle is stale (record deleted). Pop the handle;
+            # nothing else to do. No counter increment (no project_key to key on).
+            _active_sessions.pop(_session_id, None)
+            logger.debug(
+                "[session-health] Orphan reap: popped handle for missing session %s",
+                _session_id,
+            )
+            continue
+
+        # Phantom guard: getattr on a phantom returns a Field descriptor,
+        # which cannot be in _TERMINAL_STATUSES, so we won't act on it.
+        actual_status = getattr(entry, "status", None)
+        if actual_status not in _TERMINAL_STATUSES:
+            # Healthy / running session — leave alone.
+            continue
+
+        # Grace window: skip if the session JUST transitioned (subprocess
+        # may still be in natural teardown). A malformed/missing updated_at
+        # is treated as "no grace" — proceed to reap.
+        updated_ts = _ts(getattr(entry, "updated_at", None))
+        if updated_ts is not None and (now - updated_ts) < ORPHAN_REAP_GRACE_SECONDS:
+            logger.debug(
+                "[session-health] Orphan reap: skipping %s within grace window "
+                "(status=%s, age=%ss)",
+                _session_id,
+                actual_status,
+                int(now - updated_ts),
+            )
+            continue
+
+        pid = getattr(_handle, "pid", None)
+        if pid is None:
+            # Subprocess never started (on_sdk_started callback didn't fire)
+            # OR handle was registered before the subprocess spawned. Pop the
+            # handle — the task can never make progress on a terminal session.
+            _active_sessions.pop(_session_id, None)
+            logger.debug(
+                "[session-health] Orphan reap: popped handle for %s (no pid, status=%s)",
+                _session_id,
+                actual_status,
+            )
+            continue
+
+        # SIGTERM the orphan subprocess. ProcessLookupError = already dead
+        # (pop handle, no counter); PermissionError = log WARN and pop anyway
+        # (don't leave a stale entry); other exceptions = log DEBUG.
+        sigterm_sent = False
+        try:
+            os.kill(pid, signal.SIGTERM)
+            sigterm_sent = True
+        except ProcessLookupError:
+            # Subprocess already exited; handle pop below is sufficient.
+            pass
+        except PermissionError as _perm_err:
+            logger.warning(
+                "[session-health] Orphan reap: SIGTERM permission denied for session=%s pid=%s: %s",
+                _session_id,
+                pid,
+                _perm_err,
+            )
+        except Exception as _kill_err:
+            logger.debug(
+                "[session-health] Orphan reap: SIGTERM failed for session=%s pid=%s: %s",
+                _session_id,
+                pid,
+                _kill_err,
+            )
+
+        # Always pop the handle. The session row is terminal; the asyncio
+        # task will never produce more progress regardless of whether SIGTERM
+        # found a live PID.
+        _active_sessions.pop(_session_id, None)
+
+        if sigterm_sent:
+            # Stage SIGKILL escalation for the next tick.
+            _pending_sigkill.add(pid)
+
+            # Observability counter — established prefix order
+            # ``{project_key}:session-health:{metric}`` so dashboards
+            # scanning ``{project_key}:session-health:*`` can see it.
+            project_key = getattr(entry, "project_key", None) or "unknown"
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+                _R.incr(f"{project_key}:session-health:orphan_subprocess_reaped")
+            except Exception as _counter_err:
+                logger.debug(
+                    "[session-health] orphan_subprocess_reaped counter failed (non-fatal): %s",
+                    _counter_err,
+                )
+
+            logger.info(
+                "[session-health] Orphan subprocess reaped: session=%s pid=%s status=%s",
+                _session_id,
+                pid,
+                actual_status,
+            )
 
 
 async def _agent_session_hierarchy_health_check() -> None:
