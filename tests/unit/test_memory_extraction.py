@@ -500,8 +500,12 @@ class TestParseCategorizedObservations:
         raw = (
             "```json\n"
             "[\n"
-            '  {"category": "correction", "observation": "Redis SCAN is preferred over KEYS in production", "file_paths": [], "tags": []},\n'
-            '  {"category": "decision", "observation": "chose blue-green over rolling updates for zero-downtime", "file_paths": [], "tags": []}\n'
+            '  {"category": "correction", '
+            '"observation": "Redis SCAN is preferred over KEYS in production", '
+            '"file_paths": [], "tags": []},\n'
+            '  {"category": "decision", '
+            '"observation": "chose blue-green over rolling updates for zero-downtime", '
+            '"file_paths": [], "tags": []}\n'
             "]\n"
             "```"
         )
