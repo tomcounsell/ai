@@ -226,6 +226,17 @@ def ensure_email_routing_loaded() -> bool:
     if EMAIL_TO_PROJECT or EMAIL_DOMAIN_TO_PROJECT:
         return True
     try:
+        # Out-of-process callers (e.g. tools/valor_email.py) don't import
+        # telegram_bridge, so ACTIVE_PROJECTS may still be empty. Populate it
+        # from the hostname so build_email_to_project_map filters correctly.
+        # Note: importing telegram_bridge has a side effect of rebinding
+        # _routing_module.ACTIVE_PROJECTS, so re-read after the import.
+        if not ACTIVE_PROJECTS:
+            from bridge import routing as _r
+            from bridge.telegram_bridge import _get_active_projects
+
+            if not _r.ACTIVE_PROJECTS:
+                _r.ACTIVE_PROJECTS = _get_active_projects()
         config = load_config()
         addr_map, domain_map = build_email_to_project_map(config)
         EMAIL_TO_PROJECT.update(addr_map)

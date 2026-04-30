@@ -465,6 +465,11 @@ def cmd_threads(args: argparse.Namespace) -> int:
 
 def main() -> int:
     """CLI entry point."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
+
     parser = argparse.ArgumentParser(
         prog="valor-email",
         description="Read, send, and browse email threads via the valor email bridge.",

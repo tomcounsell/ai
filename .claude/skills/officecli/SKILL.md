@@ -254,9 +254,9 @@ officecli add <file> <parent> --from <path>                               # clon
 
 | Format | Types |
 |--------|-------|
-| **pptx** | slide (incl. hidden), shape (textbox), picture (image/img — SVG, brightness/contrast/glow/shadow), chart, table, row (tr), connector (connection/line), group, video (audio/media, trim), equation (formula/math), notes, comment (full CRUD via /slide[N]/comment[M]), paragraph (para), run, zoom (slidezoom), ole (oleobject/object/embed), placeholder (phType=title/body/subtitle/footer/...) |
-| **docx** | paragraph (para), run, table, row (tr), cell (td), image (picture/img — SVG supported), header, footer, section, bookmark, comment, footnote, endnote, formfield (text/checkbox/dropdown), sdt (contentcontrol), chart, equation, field (28 types incl. mergefield/ref/seq/styleref/docproperty/if), hyperlink, style, toc, watermark, break (pagebreak/columnbreak), ole, **num / abstractNum / lvl** (numbering/list system), **tab** (paragraph or paragraph/table style tab stops). Document protection: `set / --prop protection=forms\|readOnly\|comments\|trackedChanges\|none` |
-| **xlsx** | sheet (visible/hidden/veryHidden, print margins, cascade-aware rename), row, cell (type=richtext+runs, merge=range), chart (incl. pareto), image (picture — SVG), comment, table (listobject), namedrange (definedname, volatile, `[@name=X]` selector), pivottable (pivot, calculatedField), sparkline, validation (datavalidation), autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). Workbook-level: password (legacy hash). `value="=SUM(...)"` auto-detects as formula. Formulas auto-evaluated on write. Chart/picture/shape/slicer accept `anchor=A1:E10`. |
+| **pptx** | slide (incl. hidden), shape (textbox — font.latin/ea/cs, direction=rtl), picture (SVG, brightness/contrast/glow/shadow), chart, table (cell direction=rtl), row (tr), connector (connection/line), group, video (audio/media, trim), equation (formula/math), notes, comment (full CRUD via /slide[N]/comment[M]), paragraph (para), run, zoom (slidezoom), ole (oleobject/object/embed), placeholder (phType=title/body/subtitle/footer/...) |
+| **docx** | paragraph (para — direction/font.latin/ea/cs, bold.cs/italic.cs/size.cs for RTL/CJK; wordWrap toggle), run, table, row (tr), cell (td), image (picture/img — SVG supported), header, footer, section (pageNumFmt full ECMA-376 enum incl. Hindi/Arabic/Thai/CJK numerals; direction=rtl), bookmark, comment, footnote, endnote, formfield (text/checkbox/dropdown), sdt (contentcontrol), chart, equation, field (28 types incl. mergefield/ref/seq/styleref/docproperty/if), hyperlink, style, toc, watermark, break (pagebreak/columnbreak), ole, **num / abstractNum / lvl** (numbering/list system), **tab** (paragraph or paragraph/table style tab stops). Document protection: `set / --prop protection=forms\|readOnly\|comments\|trackedChanges\|none` |
+| **xlsx** | sheet (visible/hidden/veryHidden, print margins, cascade-aware rename), row, cell (type=richtext+runs, merge=range/sweep, direction=rtl), chart (incl. pareto), image (picture — SVG), comment, table (listobject), namedrange (definedname, volatile, `[@name=X]` selector), pivottable (pivot, calculatedField), sparkline, validation (datavalidation), autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). Query supports `merge`/`mergedrange` aliases for `mergeCell`. Workbook: password. `value="=SUM(...)"` auto-detects as formula. Chart/picture/shape/slicer accept `anchor=A1:E10`. |
 
 ### Pivot tables (xlsx)
 
@@ -364,19 +364,31 @@ officecli add-part <file> <parent>                   # create new document part 
 
 ## Specialized Skills
 
-For complex scenarios, load the dedicated skill from `skills/<skill-name>/SKILL.md`:
+Load the dedicated skill from `skills/<skill-name>/SKILL.md`. Skills are organized as **base layer + scene layer**: scene-layer skills inherit every rule from their base — pick the most specific one that fits the user's ask; if none fits, fall back to the base.
 
-| Skill | Scope |
-|-------|-------|
-| `officecli-docx` | Word documents — reports, letters, memos |
-| `officecli-academic-paper` | Academic papers with TOC, equations, footnotes, bibliography |
-| `officecli-pptx` | Presentations — general slide decks |
-| `officecli-pitch-deck` | Investor/product/sales decks with charts and callouts |
-| `morph-ppt` | Morph-animated cinematic presentations |
-| `morph-ppt-3d` | 3D Morph effects (camera, depth) |
-| `officecli-xlsx` | Excel — workbooks, formulas, pivots |
-| `officecli-financial-model` | Financial models, scenarios, projections |
-| `officecli-data-dashboard` | CSV/tabular data → Excel dashboards with charts, sparklines |
+### Word (.docx)
+
+| Skill | When to use | Layer |
+|-------|-------------|-------|
+| `officecli-docx` | Reports, letters, memos, proposals, generic documents | **base** |
+| `officecli-academic-paper` | Journal / conference / thesis: APA / Chicago / IEEE / MLA citations, equations, SEQ + PAGEREF cross-refs, multi-column journal layout, bibliography | scene (inherits docx) |
+
+### PowerPoint (.pptx)
+
+| Skill | When to use | Layer |
+|-------|-------------|-------|
+| `officecli-pptx` | Generic decks: board reviews, sales decks, all-hands, product launches | **base** |
+| `officecli-pitch-deck` | **Fundraising only** — seed / Series A-C / SAFE / convertible / strategic raise. NOT for sales / product / board decks (route those to `officecli-pptx`) | scene (inherits pptx) |
+| `morph-ppt` | Cinematic Morph-animated presentations | scene (inherits pptx) |
+| `morph-ppt-3d` | 3D Morph: GLB models, camera moves, depth (extends `morph-ppt`) | scene (extends morph-ppt) |
+
+### Excel (.xlsx)
+
+| Skill | When to use | Layer |
+|-------|-------------|-------|
+| `officecli-xlsx` | Generic workbooks, formulas, pivots, trackers | **base** |
+| `officecli-financial-model` | Financial models, scenarios, projections | scene (inherits xlsx) |
+| `officecli-data-dashboard` | CSV/tabular data → KPI / analytics / executive dashboards with charts and sparklines | scene (inherits xlsx) |
 
 ---
 
