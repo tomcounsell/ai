@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Tom Counsell
 created: 2026-04-30
 tracking: https://github.com/tomcounsell/ai/issues/1212
 last_comment_id:
+revision_applied: true
 ---
 
 # Memory Extraction — JSON Shrapnel & Refusal Prose Fix
@@ -131,7 +132,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/memory-extract
 ### Key Elements
 
 - **Tolerant JSON extractor (`_extract_json_payload`)**: A new helper that strips markdown code fences and slices `raw_text` to the outermost `[...]` or `{...}` before passing to `json.loads`. Returns the cleaned string or `None` if no JSON-shaped substring exists. Pure function, easily unit-tested.
-- **Refusal-pattern filter (`_REFUSAL_PATTERNS` constant + `_looks_like_refusal` predicate)**: A short list of case-insensitive substring patterns ("there is no agent session", "no agent session response", "please provide the session", "**rationale:**", "no novel observations", "no agent session was provided", "session was initialized with empty input") plus a single-line JSON-syntax regex (`^"[a-z_]+"\s*:\s*.*,?\s*$`). Used both pre-LLM (skip Haiku call) and post-parse (drop matching lines from line-based fallback).
+- **Refusal-pattern filter (`_REFUSAL_PATTERNS` constant + `_looks_like_refusal` predicate)**: A short list of case-insensitive substring patterns ("there is no agent session", "no agent session response", "please provide the session", "**rationale:**", "no novel observations", "no agent session was provided", "session was initialized with empty input") plus a single-line JSON-syntax regex (`^"[a-z_]+"\s*:\s*.*,?\s*$`). Used both pre-LLM (skip Haiku call) and post-parse (drop matching lines from line-based fallback). **Implementation Note (concern: hard-coded substrings will drift as Haiku rephrases its refusals over time):** the patterns must live as a module-scope tuple constant (not buried in a function body) so they are trivial to extend, and each entry must carry an inline comment citing the originating Memory ID from issue #1212 (e.g., `"there is no agent session",  # 5be7da58 / 76dbd772 / 796e1429`). When a new refusal shape appears in the wild, the response is to add a pattern to the constant — not to re-architect. This is acceptable maintenance because (a) the failure mode is silent rejection of refusal text, never silent acceptance of legitimate text, and (b) the recurring `memory-dedup` reflection plus the on-demand cleanup script give us a follow-up safety net.
 - **Pre-LLM substantive-content guard**: In `extract_observations_async`, after the existing 50-char check, also reject input that matches refusal patterns OR is dominated by whitespace/punctuation. Returns `[]` and skips the LLM call.
 - **JSON-path short-circuit hardening**: Re-confirm the existing `if results: return results` behavior at line 318 is preserved AFTER the tolerant extractor runs. Once the extractor pulls clean JSON out of fences, the JSON path will succeed and never fall through.
 - **One-shot cleanup script (`scripts/cleanup_memory_extraction_junk.py`)**: Modeled on `scripts/memory_consolidation.py`. Iterates `Memory.query.filter(...)` for records where `agent_id` starts with `extraction-` AND content matches a refusal pattern OR JSON-line regex. Default `--dry-run` mode prints the IDs and content samples it would supersede. `--apply` mode sets `superseded_by="cleanup-junk-extraction"` and `superseded_by_rationale="auto-cleanup: refusal/json-shrapnel from issue #1212"`. Uses Popoto ORM only (per CLAUDE.md "never use raw Redis on Popoto-managed keys").
@@ -157,6 +158,7 @@ Worker finishes session → `extract_observations_async(session_id, response_tex
 - **`extract_observations_async` modifications**:
   1. After the existing `len(response_text.strip()) < 50` guard, add: if `_looks_like_refusal(response_text)` OR `len(re.sub(r'\s+', '', response_text)) / len(response_text) < 0.3` (whitespace-dominant), `return []`.
   2. After the LLM call (after line 217, before parse), add: if `_looks_like_refusal(raw_text)`, log debug `"refusal text from extractor — skipping save"`, return `[]`.
+  - **Implementation Note (concern: the `0.3` whitespace-dominance threshold is a magic constant with no test calibration):** define the threshold as a named module-scope constant `_MIN_NON_WHITESPACE_RATIO = 0.3` rather than inlining `0.3` at the call site. This (a) makes the guard testable against boundary inputs, (b) lets us tune the threshold from a single edit if production data later shows false positives, and (c) flags to future readers that the value is empirical rather than load-bearing. The unit test at `test_whitespace_dominant_input_skips_llm_call` MUST exercise both sides of the boundary: an input with exactly 25% non-whitespace (rejected) and 35% non-whitespace (accepted), so the constant is locked in by the test. The post-LLM refusal check is intentionally redundant with the pre-LLM check — refusal can emerge from inputs the pre-check missed (above 50 chars, above 30% non-whitespace, no refusal substring), so dual-filter is by design, not over-engineering.
 - **Cleanup script structure** (`scripts/cleanup_memory_extraction_junk.py`):
   ```python
   # Iterate via Memory.query — never raw Redis (CLAUDE.md rule).
@@ -167,13 +169,20 @@ Worker finishes session → `extract_observations_async(session_id, response_tex
   if dry_run:
       for m in candidates: print(f"would supersede {m.memory_id}: {m.content[:80]}")
   else:
+      blocked = 0
       for m in candidates:
           m.superseded_by = "cleanup-junk-extraction"
-          m.superseded_by_rationale = f"auto-cleanup: refusal/json-shrapnel from issue #1212"
-          m.save()
+          m.superseded_by_rationale = "auto-cleanup: refusal/json-shrapnel from issue #1212"
+          result = m.save()
+          if result is False:
+              blocked += 1
+              logger.warning(f"[cleanup] WriteFilter blocked superseded_by write for {m.memory_id}")
+      print(f"WriteFilter blocked {blocked} records (already-superseded race or filter veto)")
   print(f"Total: {len(candidates)} records {'would be' if dry_run else 'were'} superseded")
   ```
   CLI: `python scripts/cleanup_memory_extraction_junk.py [--dry-run|--apply]`. Default is `--dry-run`. Argparse-based.
+
+  **Implementation Note (concern: `Memory.save()` is governed by `WriteFilterMixin` and can return `False` silently — verified at `scripts/memory_consolidation.py:298-301`):** `record.save()` may return `False` when the WriteFilter vetoes the write (e.g., a concurrent write already touched the record, or the filter's idempotency check decides the change is a no-op). The script MUST capture the return value, count blocked writes, log a warning per blocked record (matching the `memory-dedup` pattern), and report the blocked count alongside the success count in the final summary. The PR description's "count documented" acceptance criterion must report **superseded count** AND **blocked count** AND **total candidate count** — three numbers, not one. This makes the operator-facing result honest about partial success and prevents a "we superseded N records" claim that's actually `N - blocked`.
 
 ## Failure Path Test Strategy
 
@@ -228,6 +237,7 @@ Worker finishes session → `extract_observations_async(session_id, response_tex
 ### Risk 1: False positives in refusal-pattern detection
 **Impact:** A legitimate observation containing the substring "no agent session" (e.g., a memory about debugging session shutdowns) is incorrectly dropped.
 **Mitigation:** Patterns are deliberately narrow (full phrases like "there is no agent session", not just "no agent session"). Unit tests include positive cases that use "session" in legitimate contexts. The pattern list lives at module scope as a constant — easy to adjust if a false positive is reported.
+**Implementation Note (concern: the unit-test list must explicitly include adversarial near-miss inputs to prove narrowness, not just typical legitimate inputs):** beyond the existing `test_fallback_uncategorized` regression check, add a dedicated `test_legitimate_text_with_session_substring` test in `TestParseCategorizedObservations` whose input is a real-shaped observation that contains the bare substring `"session"` and the bare substring `"no novel"` separately (e.g., `"The dev session ended cleanly with no novel observations to flag — verified at session_executor.py:805"`). This must NOT be rejected. The test locks in the narrowness property and prevents future pattern additions from accidentally widening to bare-keyword matches. If this test ever fails after a pattern edit, the editor knows their addition was too broad.
 
 ### Risk 2: Cleanup script supersedes a record that's actually valuable
 **Impact:** A real observation that happens to look like a JSON line (e.g., someone literally pasted JSON into a corrected memory) gets superseded by mistake.
@@ -338,10 +348,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: true
 - Add `_extract_json_payload(raw_text: str) -> str | None` helper at module scope.
 - Add `_REFUSAL_PATTERNS` tuple constant and `_JSON_SHRAPNEL_RE` regex constant.
+- Add `_MIN_NON_WHITESPACE_RATIO = 0.3` named constant for the whitespace-dominance threshold.
 - Add `_looks_like_refusal(text: str) -> bool` predicate.
 - Modify `_parse_categorized_observations`: call `_extract_json_payload` before `json.loads`; filter line-based fallback through `not _looks_like_refusal`.
 - Modify `extract_observations_async`: add refusal-pattern + whitespace-dominance pre-LLM guard; add post-LLM refusal check before parse.
 - Run `python -m ruff format agent/memory_extraction.py` (per user global rule: black formatting only, no linting).
+- **Implementation Note (concern: do not weaken the existing 50-char check while adding the new guards — Tom's comment on issue #1212 confirmed the 50-char check IS firing correctly for true empties):** the new pre-LLM guard is **additive**, not a replacement. Order of checks at the top of `extract_observations_async`: (1) existing `len(response_text.strip()) < 50` → return `[]`, (2) NEW `_looks_like_refusal(response_text)` → return `[]`, (3) NEW whitespace-dominance ratio check → return `[]`, (4) only then call Haiku. The 50-char check stays first because it is the cheapest filter and was empirically verified by Tom to work. Removing or relaxing it would re-introduce a regression on truly empty inputs.
 
 ### 2. Build cleanup script
 - **Task ID**: build-cleanup
@@ -386,9 +398,10 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Assigned To**: parser-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `python scripts/cleanup_memory_extraction_junk.py --apply`. Capture output (count of records superseded).
-- Document the count in the PR description per acceptance criterion 5.
-- Run `python -m tools.memory_search status` — verify `Total records` decreased (or equivalently, `Superseded` count increased).
+- Run `python scripts/cleanup_memory_extraction_junk.py --apply`. Capture output (count of records superseded, count of WriteFilter-blocked writes, total candidates).
+- Document **all three counts** in the PR description per acceptance criterion 5 (superseded / blocked / total).
+- Run `python -m tools.memory_search status` — verify `Superseded` count increased by the superseded count from the apply run (NOT just "decreased totals" — these are reversible records that still exist, just filtered).
+- **Implementation Note (concern: apply mode has no per-batch checkpoint or sample-spot-check before fully running — once it touches a few hundred records, an unnoticed false-positive class becomes hard to triage):** before invoking `--apply`, the validator MUST first capture the dry-run candidate list to a file (`/tmp/cleanup_candidates_1212.txt`) by running the dry-run mode and saving its output. Spot-check **5 random IDs** from that file using `python -m tools.memory_search inspect --id <ID>` and confirm each is genuinely junk (refusal text or single-line JSON shrapnel). Only after the spot-check passes does the validator invoke `--apply`. If any spot-checked record is legitimate, abort, report the false positive, and route back to a parser-builder pass. `superseded_by` is reversible by clearing the field, so even a bad apply is recoverable — but the spot-check makes the recovery unnecessary.
 
 ### 6. Update documentation
 - **Task ID**: document-feature
@@ -425,9 +438,16 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
+<!-- Single critique pass returned READY TO BUILD (with concerns); concerns folded below as Implementation Notes per SDLC dispatch table Row 4b. revision_applied: true set in frontmatter. CONCERNs remain acknowledged risks/clarifications, NOT defects. -->
+
+| Severity | Critic | Concern | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | `_REFUSAL_PATTERNS` is a hard-coded substring list — Haiku will rephrase its refusals over time and the patterns will drift. What's the maintenance plan? | Solution → Key Elements (refusal-pattern filter description) | Module-scope tuple constant required; each entry carries an inline comment citing originating Memory ID from #1212; failure mode is silent rejection of refusal text only (never silent acceptance of legitimate text); `memory-dedup` reflection is the recurring safety net. |
+| CONCERN | Operator | The `0.3` whitespace-dominance threshold is a magic constant with no test calibration — risk of false positives on terse but real responses. | Solution → Technical Approach (`extract_observations_async` modifications) | Define as named module-scope `_MIN_NON_WHITESPACE_RATIO = 0.3`; unit test must exercise both sides of the boundary (25% rejected, 35% accepted); dual filter (pre-LLM + post-LLM) is by design — refusal can emerge from inputs that pass the pre-check, so redundancy is intentional. |
+| CONCERN | Adversary | Unit tests don't include adversarial near-miss inputs that contain bare refusal substrings in legitimate context (e.g., a memory about debugging session shutdowns). Without these, future pattern additions could silently widen to bare-keyword matches. | Risks → Risk 1 | Added dedicated `test_legitimate_text_with_session_substring` test that asserts an observation containing both `"session"` and `"no novel"` substrings (in legitimate context) is NOT rejected. Locks in narrowness as a regression boundary. |
+| CONCERN | Archaeologist | Cleanup script doesn't handle `Memory.save()` returning `False` due to `WriteFilterMixin` — pattern verified at `scripts/memory_consolidation.py:298-301`. Without capturing the return value, the "count superseded" claim in the PR description is dishonest about partial success. | Solution → Cleanup script structure | Capture `result = m.save()`, count `blocked` writes per `memory-dedup` precedent, log warning per blocked record, report **three counts** in PR description: superseded / blocked / total candidates. |
+| CONCERN | Archaeologist | Tom's comment on issue #1212 confirmed the existing 50-char check IS working correctly for true empties — the bug is for inputs ≥ 50 chars that aren't real session output. Builder must not weaken the 50-char check while adding the new guards. | Step by Step Tasks → Step 1 (build-parser) | New pre-LLM guard is **additive**, not a replacement. Explicit check ordering documented: (1) 50-char check, (2) refusal patterns, (3) whitespace dominance, (4) Haiku call. |
+| CONCERN | User | Apply mode has no per-batch checkpoint or sample-spot-check — once it touches hundreds of records, an unnoticed false-positive class becomes hard to triage. | Step by Step Tasks → Step 5 (apply-cleanup) | Validator MUST capture dry-run candidate list to a file before `--apply`, spot-check 5 random IDs via `tools.memory_search inspect`, abort on any false positive. Reversibility (clearing `superseded_by`) is a backstop, not the primary safety. |
 
 ---
 
