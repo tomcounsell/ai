@@ -115,6 +115,7 @@ from bridge.media import (  # noqa: E402
     download_media,  # noqa: F401
     extract_document_text,  # noqa: F401
     get_media_type,
+    process_incoming_media,
     transcribe_voice,  # noqa: F401
     validate_media_file,  # noqa: F401
 )
@@ -687,6 +688,66 @@ def _build_completed_resume_text(
     return f"{summary_block}\n\n{follow_up_text}"
 
 
+# Sentinel substituted upstream (bridge/telegram_bridge.py:1027) when a
+# media-only message arrives with no caption. The steering helper treats
+# this as "no real caption" and replaces it with the media description
+# rather than composing the two strings together.
+_FILE_ATTACHMENT_SENTINEL = "--file attachment only--"
+
+# Vault subdirectory for auto-ingested Telegram attachments. Created on
+# first use by _ingest_attachments. The KnowledgeWatcher monitors
+# ~/work-vault/ recursively (bridge/knowledge_watcher.py:201,
+# Observer.schedule(..., recursive=True)) so this subdir is picked up
+# automatically with no further wiring.
+_TELEGRAM_VAULT_SUBDIR = Path.home() / "work-vault" / "telegram-attachments"
+
+
+async def _ingest_attachments(files: list[Path], message, sender_name: str) -> None:
+    """Fire-and-forget copy of inbound Telegram attachments into the work-vault.
+
+    Never blocks message delivery and never crashes the bridge. Every
+    failure is caught and logged at warning level — the steering push
+    upstream has already succeeded by the time this task runs.
+
+    Filenames are disambiguated using the joint key
+    ``(YYYYMMDD_HHMMSS, sender_name, message.id)`` to bound collision
+    probability. The watcher's content-hash idempotency means a duplicate
+    write either no-ops (identical content) or overwrites the prior
+    sidecar — accepted as residual risk per plan Risk 3.
+    """
+    try:
+        import shutil
+
+        _TELEGRAM_VAULT_SUBDIR.mkdir(parents=True, exist_ok=True)
+        msg_date = getattr(message, "date", None) or datetime.now(UTC)
+        date_part = msg_date.strftime("%Y%m%d_%H%M%S")
+        # sender_name may contain characters that are awkward in filenames;
+        # collapse whitespace and strip path-traversal hazards.
+        safe_sender = "".join(
+            c if (c.isalnum() or c in ("-", "_")) else "_" for c in (sender_name or "unknown")
+        ).strip("_") or "unknown"
+        msg_id = getattr(message, "id", "0")
+        for src in files:
+            try:
+                if not src or not src.exists():
+                    continue
+                target_name = f"{date_part}_{safe_sender}_{msg_id}_{src.name}"
+                target = _TELEGRAM_VAULT_SUBDIR / target_name
+                shutil.copy2(src, target)
+                logger.info(
+                    f"[steering-ingest] Copied {src.name} -> {target} "
+                    f"(watcher will index)"
+                )
+            except Exception as inner_e:
+                # One bad file must not abort the rest of the batch.
+                logger.warning(
+                    f"[steering-ingest] Failed to copy {src} to vault: {inner_e}"
+                )
+    except Exception as e:
+        # Top-level safety net — fire-and-forget contract: never crash.
+        logger.warning(f"[steering-ingest] Vault ingest task failed: {e}")
+
+
 async def _ack_steering_routed(
     client: TelegramClient,
     event,
@@ -708,7 +769,64 @@ async def _ack_steering_routed(
     Caller is responsible for ``return`` after this call. ``log_context``
     must NOT include the trailing ``(steer|abort)`` suffix — the helper
     appends it from the resolved abort detection.
+
+    Media branch (issue #1215): when ``message.media`` is present, the
+    helper fires the user-facing reaction *before* downloading so the
+    user sees the eyes emoji immediately, then awaits
+    ``process_incoming_media`` and replaces the sentinel ``text`` with
+    the extracted description (or composes ``description + caption``
+    when a real caption was provided). The downloaded files are
+    additionally scheduled for fire-and-forget ingest into the work
+    vault via ``_ingest_attachments``; that task is appended to
+    ``_background_tasks`` to keep the GC from collecting it mid-flight.
+    Text-only steering (the common case) bypasses every new operation —
+    the existing reaction-after-push order is preserved byte-identical.
     """
+    if message.media:
+        # User-facing reaction fires FIRST on the media branch so the
+        # user gets immediate "I see you" feedback during the download
+        # window. Abort detection runs later against the enriched text.
+        try:
+            await set_reaction(
+                client,
+                event.chat_id,
+                message.id,
+                REACTION_RECEIVED,
+            )
+        except Exception:
+            pass
+
+        try:
+            description, files = await process_incoming_media(client, message)
+        except Exception as e:
+            logger.warning(
+                f"[steering] process_incoming_media failed; falling back to "
+                f"sentinel text: {e}"
+            )
+            description, files = "", []
+
+        if description:
+            stripped = (text or "").strip()
+            if stripped and stripped != _FILE_ATTACHMENT_SENTINEL:
+                # Real caption present — compose description + caption.
+                text = f"{description}\n\n{text}"
+            else:
+                # Sentinel or empty — replace outright.
+                text = description
+        # If process_incoming_media returned nothing, leave `text` as-is
+        # (typically the sentinel) — that is the defensive fallback.
+
+        if files:
+            try:
+                _background_tasks.append(
+                    asyncio.create_task(
+                        _ingest_attachments(files, message, sender_name)
+                    )
+                )
+            except Exception as e:
+                # Even task creation failure must not gate steering.
+                logger.warning(f"[steering-ingest] Failed to schedule task: {e}")
+
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     if agent_session is not None:
         # Dual-push: the durable PM-visible write goes to the Popoto model's
@@ -716,15 +834,31 @@ async def _ack_steering_routed(
         # session sees it even before the worker drains the queue.
         agent_session.push_steering_message(text)
     push_steering_message(session_id, text, sender_name, is_abort=is_abort)
-    try:
-        await set_reaction(
-            client,
-            event.chat_id,
-            message.id,
-            REACTION_ABORT if is_abort else REACTION_RECEIVED,
-        )
-    except Exception:
-        pass
+
+    if not message.media:
+        # Text-only path: existing reaction-after-push order preserved.
+        try:
+            await set_reaction(
+                client,
+                event.chat_id,
+                message.id,
+                REACTION_ABORT if is_abort else REACTION_RECEIVED,
+            )
+        except Exception:
+            pass
+    elif is_abort:
+        # Media branch already reacted with REACTION_RECEIVED above; if
+        # the enriched text turns out to be an abort keyword, overwrite
+        # the reaction so the user sees the salute.
+        try:
+            await set_reaction(
+                client,
+                event.chat_id,
+                message.id,
+                REACTION_ABORT,
+            )
+        except Exception:
+            pass
     action = "abort" if is_abort else "steer"
     logger.info(f"{log_context} ({action})")
     await record_telegram_message_handled(event.chat_id, message.id)
