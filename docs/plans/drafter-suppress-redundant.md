@@ -6,6 +6,9 @@ owner: Valor
 created: 2026-04-29
 tracking: https://github.com/tomcounsell/ai/issues/1205
 last_comment_id:
+revision_applied: true
+revision_round: 1
+revision_at: 2026-04-30
 ---
 
 # Drafter — Suppress Redundant Status Updates
@@ -57,11 +60,11 @@ On 2026-04-29, the PM session in the "PM: Valor" chat was waiting on five child 
 - `agent/output_handler.py:162-374` — `TelegramRelayOutputHandler.send` is the single Path A funnel; calls `draft_message()` then optionally invokes RTR before queueing.
 - `agent/output_router.py:154-155` — Routing forces `deliver` (not `nudge`) for `waiting_for_children`. Every PM resume in this state ends in a deliver action.
 - `agent/session_completion.py:1275-1289` — Each child completion re-enqueues the parent PM; with N serial completions, PM resumes N times → drafts N times → sends N times.
-- `bridge/read_the_room.py:400-410` — RTR explicitly bypasses SDLC sessions (`session.sdlc_slug` set → return `send`, emit `rtr.bypassed`). Cannot cover this case.
+- `bridge/read_the_room.py:400-410` — RTR's intended SDLC bypass uses `getattr(session, "sdlc_slug", None)`. **This guard never actually fires** — `sdlc_slug` is not a real `AgentSession` field, so `getattr` always returns `None` and the bypass is a no-op. RTR therefore *can* run on SDLC sessions today; it simply hasn't been triggered in production because `READ_THE_ROOM_ENABLED` is opt-in and not set on the affected machine. **Implication for this plan:** we cannot rely on the cited bypass to scope our new layer; we must read SDLC-ness directly via the real `AgentSession.is_sdlc` property (defined at `models/agent_session.py:1612`). Fixing RTR's broken bypass is out of scope here — tracked as a follow-up after this plan ships.
 - `bridge/read_the_room.py:64` — `RTR_SUPPRESS_EMOJI = "👀"` already defined; `_rtr_queue_reaction` (`agent/output_handler.py:532-555`) and `_build_reaction_payload` (`agent/output_handler.py:557-589`) are the established template for emoji-instead-of-text fallback.
 - `agent/memory_extraction.py:589-597` — `_extract_bigrams(text) -> set[tuple[str, ...]]` already exists. Unigram + bigram extractor with a 4-char minimum word length. Re-usable.
 - `models/agent_session.py:207, 1428-1446` — `pm_sent_message_ids` `ListField` and `record_pm_message(msg_id)` exist for PM-authored Telegram message IDs but DO NOT track drafted text. We need a new field to track recent drafted text.
-- `bridge/message_drafter.py::extract_artifacts` — already extracts commit hashes, PR/issue refs, URLs into a dict. Reusable for "new artifact" detection.
+- `bridge/message_drafter.py::extract_artifacts` (lines 390-435) — extracts artifacts as `dict[str, list[str]]` with the *actual* keys: `commits`, `urls`, `files_changed`, `test_results`, `errors`. **There are no separate `pull_requests` or `issue_refs` keys** — PR and issue links live inside `urls` (e.g., `https://github.com/.../pull/N`, `https://github.com/.../issues/N`). Reusable for "new artifact" detection by diffing the union of all values across all keys.
 
 **Revised (from the issue's proposal):**
 - The fix MUST live in `agent/output_handler.py` (the Path A funnel), not `agent/output_router.py`. The router does not see the drafted text — it only chooses an action (`deliver` vs. `nudge`). The suppression decision needs the text body and session-scoped history.
@@ -147,10 +150,10 @@ PM session re-enqueued by child completion → PM resumes → drafter produces d
 
 - **Similarity metric:** Bigram Jaccard. `J = |bigrams(A) ∩ bigrams(B)| / |bigrams(A) ∪ bigrams(B)|`. Default threshold `J ≥ 0.65`. Tunable via `DRAFTER_REDUNDANCY_THRESHOLD` env var.
 - **Comparison set:** All entries in `recent_sent_drafts`. If *any* prior draft has `J ≥ threshold` and there is no new artifact relative to it, suppress.
-- **Artifact set:** `extract_artifacts(draft_text)` produces a dict of `{commit_hashes: [...], pull_requests: [...], urls: [...], issue_refs: [...]}`. We define "new artifact" as: the union of all artifact values in the *new* draft is not a subset of the union in *every* prior draft within the window.
+- **Artifact set:** `extract_artifacts(draft_text)` produces a dict of `{commits: [...], urls: [...], files_changed: [...], test_results: [...], errors: [...]}` (all keys optional — only present when at least one match is found). PR and issue links land in `urls` (e.g., `https://github.com/.../pull/N`). We define "new artifact" as: the *flattened set of all values across all keys* in the new draft is not a subset of the flattened set across the prior draft. Concretely: `new_artifacts = set().union(*new_dict.values())` and we suppress only when `new_artifacts.issubset(prior_artifacts)` for the matched prior draft.
 - **Recent drafts cap:** Default `DRAFTER_RECENT_DRAFTS_N = 3`. Old entries dropped FIFO when over cap.
 - **Window:** Default `DRAFTER_REDUNDANCY_WINDOW_SECONDS = 600`. Entries older than the window are still kept in the list (they don't churn) but the decision uses the time stamp to skip stale baselines.
-- **SDLC scoping:** Filter applies only when `session.sdlc_slug` is set (mirrors RTR's bypass condition, but in reverse). Non-SDLC sessions defer to RTR + the existing path — this preserves existing behavior for Teammate/PM-conversational chats.
+- **SDLC scoping:** Filter applies only when `session.is_sdlc` is True (the real `AgentSession` property at `models/agent_session.py:1612`). Non-SDLC sessions skip the filter and defer to RTR + the existing path — this preserves existing behavior for Teammate/PM-conversational chats. **Do not** read `session.sdlc_slug` — that field does not exist on the model and `getattr` will silently always return `None`.
 - **Failure mode:** All exceptions in the filter return `SuppressionVerdict("send", reason="filter_error")`. Filter never blocks delivery.
 - **Observability:** `drafter.suppressed_redundant` and `drafter.suppress_fallthrough` `session_events` mirror RTR's schema (`{type, ts, chat_id, reason, draft_preview, matched_prior_preview, jaccard}`).
 - **Voice / DRAFTER_SYSTEM_PROMPT:** Untouched. Per the issue's instruction, the policy change is suppression — not voice.
@@ -160,7 +163,8 @@ PM session re-enqueued by child completion → PM resumes → drafter produces d
 ### Exception Handling Coverage
 - [ ] `bridge/redundancy_filter.py::should_suppress` — assert that any exception inside the function path returns `SuppressionVerdict(action="send", reason="filter_error")`. Test by patching `_extract_bigrams` to raise.
 - [ ] `TelegramRelayOutputHandler.send` — assert that an exception raised inside the redundancy-filter branch is caught and falls through to the existing RTR + outbox path. Test by patching the filter module to raise.
-- [ ] `AgentSession.recent_sent_drafts` append after outbox write — assert that a failed `session.save()` does not block the outbox `rpush` (logger.warning, no raise).
+- [ ] `AgentSession.record_recent_sent_draft` — assert that the helper calls `save(update_fields=["recent_sent_drafts", "updated_at"])` (not unscoped `save()`), so concurrent writes to `context_summary` / `expectations` / `session_events` from the same `send()` flow are not clobbered. Use a mock that captures `update_fields=` kwargs.
+- [ ] `AgentSession.recent_sent_drafts` append after outbox write — assert that a failed `session.save(update_fields=[...])` does not block the outbox `rpush` (logger.warning, no raise).
 
 ### Empty/Invalid Input Handling
 - [ ] `should_suppress("", artifacts, session)` returns `send, reason="empty_draft"` (defensive: never suppress empty text).
@@ -223,8 +227,8 @@ No existing tests are deleted. All changes are additive or surgical updates to a
 **Location:** `agent/output_handler.py::TelegramRelayOutputHandler.send` reading `session.recent_sent_drafts` and appending after the outbox write.
 **Trigger:** Two PM-resume turns produce drafts concurrently (rare but possible during executor handoff).
 **Data prerequisite:** `session.recent_sent_drafts` reflects the last successful send.
-**State prerequisite:** `session.save()` after appending must not lose a concurrent append.
-**Mitigation:** Match the existing `session_events` posture: read-modify-write with no lock, accepted as best-effort. The worst case is a single missed deduplication attempt — the *next* send dedupes against whichever entry won the race. We will document this in the module docstring; the cost of locking outweighs the cost of one missed dedup.
+**State prerequisite:** `session.save(update_fields=["recent_sent_drafts", "updated_at"])` after appending must not clobber concurrent writes to *other* session fields (`context_summary`, `expectations`, `session_events`) issued by the same `send()` flow.
+**Mitigation:** Use field-scoped `save(update_fields=[...])` as documented in Step 2. This guarantees that a write to `recent_sent_drafts` does not overwrite a concurrent write to `context_summary` (line 479) or to `session_events` from `_rtr_emit_event` (line 527-ish). For *append* races on the `recent_sent_drafts` list itself (read-modify-write with no lock), match the existing `session_events` posture: best-effort. The worst case is a single missed deduplication attempt — the *next* send dedupes against whichever entry won the race. Document the read-modify-write append posture in the module docstring; the cost of locking outweighs the cost of one missed dedup.
 
 ### Race 2: `recent_sent_drafts` populated before outbox `rpush` actually succeeds
 **Location:** `agent/output_handler.py::TelegramRelayOutputHandler.send` between `r.rpush(queue_key, ...)` and the AgentSession save.
@@ -346,7 +350,7 @@ No agent integration required — this is a bridge-internal change. Specifically
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `recent_sent_drafts = ListField(null=True)` to `models/agent_session.py` near `pm_sent_message_ids`.
-- Add helper `record_recent_sent_draft(self, text: str, artifacts: dict, *, max_n: int = 3, preview_chars: int = 500) -> None` that appends `{ts: time.time(), text: text[:preview_chars], artifacts: artifacts}` and slices the list to the last `max_n` entries before `self.save()`.
+- Add helper `record_recent_sent_draft(self, text: str, artifacts: dict, *, max_n: int = 3, preview_chars: int = 500) -> None` that appends `{ts: time.time(), text: text[:preview_chars], artifacts: artifacts}`, slices the list to the last `max_n` entries, then persists via **`self.save(update_fields=["recent_sent_drafts", "updated_at"])`** — never an unscoped `self.save()`. The `send()` flow (`agent/output_handler.py:479, 528`) already calls `session.save()` for `context_summary`, `expectations`, and `session_events` writes; an unscoped save here would clobber concurrent writes from those paths. The `update_fields=` pattern is the project precedent (see `agent/agent_session_queue.py:457` and `:608`). Wrap the save in a `try/except Exception` that logs `logger.warning("record_recent_sent_draft save failed for session %s: %s", ...)` and **does not raise** — matches the posture of `record_pm_message` (`models/agent_session.py:1435-1441`).
 - Inline comment block documenting the cap, the per-entry preview length, and the FIFO policy.
 - Verify the `_AGENT_SESSION_FIELDS` list in `agent/agent_session_queue.py` (line 181 area) is updated if the existing pattern preserves explicit field lists across the session-job boundary.
 
@@ -358,7 +362,7 @@ No agent integration required — this is a bridge-internal change. Specifically
 - **Agent Type**: builder
 - **Parallel**: false
 - After `draft_message()` returns and *before* the existing RTR call:
-  - If `not SUPPRESSION_ENABLED` or `not session` or `not getattr(session, "sdlc_slug", None)`, skip the filter and proceed to the RTR call (unchanged path).
+  - If `not SUPPRESSION_ENABLED` or `not session` or `not getattr(session, "is_sdlc", False)`, skip the filter and proceed to the RTR call (unchanged path). Use `getattr` with default `False` so `is_sdlc`'s `@property` access is safe even on minimal/test session objects that don't expose it.
   - Else call `should_suppress(draft.text or text, draft.artifacts or {}, session.recent_sent_drafts or [], draft.expectations, session.status)`.
   - On `suppress`: queue a `👀` reaction via `_build_reaction_payload` + `r.rpush` to `telegram:outbox:{session_id}` (mirroring `_rtr_queue_reaction`); emit `drafter.suppressed_redundant` event with `{type, ts, chat_id, reason, draft_preview, matched_prior_preview, jaccard}`; return without writing the text. Fall through to send the original text if `reply_to_msg_id is None` (mirroring RTR's no-anchor contract); emit `drafter.suppress_fallthrough` with `reason="no_reply_anchor"`.
   - On `send`: fall through to the existing RTR + outbox path unchanged.
@@ -426,16 +430,37 @@ No agent integration required — this is a bridge-internal change. Specifically
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Round 1 verdict:** NEEDS REVISION (3 blockers, 6 concerns, 2 nits)
+**Recorded:** 2026-04-30T07:50:28Z via `sdlc-tool verdict set`
+**Critique session:** `0_1777531971456` (transcript: `logs/worker/0_1777531971456.log`)
+
+> Note: the war-room session captured the high-level summary in its worker output but did not write the full per-critic findings into this plan file. The three blockers below are reconstructed from the worker output and verified directly against the codebase as part of this revision pass. The 6 concerns and 2 nits could not be recovered from the session logs and are therefore deferred to the next critique cycle (Round 2 will re-run war-room critics on the revised plan and capture findings inline).
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Archaeologist | `session.sdlc_slug` does not exist on `AgentSession`. The only related fields are `slug`, `work_item_slug`, and the `is_sdlc` `@property` (`models/agent_session.py:1612`). As written, the filter's SDLC scoping guard would never fire — every SDLC session would be skipped because `getattr(session, "sdlc_slug", None)` always returns `None`. This silently disables the entire feature. | Recon (line 60), Technical Approach SDLC scoping bullet, Step 3 wiring guard | Replace every `sdlc_slug` reference with `is_sdlc`. Use `getattr(session, "is_sdlc", False)` in the wiring guard so test sessions that don't expose the property still default to "skip filter". Note that RTR (`bridge/read_the_room.py:400`) has the same latent bug — its bypass never fires either. Fixing RTR is **out of scope** for this plan (tracked as a separate follow-up); we just must not inherit the broken pattern. |
+| BLOCKER | Archaeologist | `extract_artifacts` returns `{commits, urls, files_changed, test_results, errors}` (lines 390-435 of `bridge/message_drafter.py`), not `{commit_hashes, pull_requests, urls, issue_refs}` as the plan claimed. The "new artifact" detection logic in Technical Approach is keyed off non-existent dict keys and would never find a PR or issue ref. This breaks Success Criterion 2 (new PR URL artifact suppresses correctly). | Recon (line 64), Technical Approach Artifact-set bullet | Use the real keys. PR and issue links land in `urls` already (e.g., `https://github.com/.../pull/N`). Define "new artifact" as the union of *all* values across *all* keys: `set().union(*new_dict.values())`. Suppress only when the new union is a subset of the prior union. |
+| BLOCKER | Operator | `record_recent_sent_draft` plan calls `self.save()` unscoped. The `send()` flow already issues two `session.save()` calls (lines 479 and 528 of `agent/output_handler.py`) for `context_summary` / `expectations` and for `session_events`. An unscoped save in the new helper races those writers and can clobber concurrent field writes. The project precedent is `update_fields=[...]` (`agent/agent_session_queue.py:457` and `:608`). | Step 2 helper signature, Failure Path Test Strategy | Call `self.save(update_fields=["recent_sent_drafts", "updated_at"])` and wrap in `try/except` matching `record_pm_message`'s posture (warn-and-continue, no raise). Add a unit test asserting the helper passes `update_fields=` to `save()`. |
+| CONCERN | (deferred — see note above) | 6 concerns from war-room critics (Skeptic / Adversary / Simplifier / User / Operator) were not recovered from the session log. | Round 2 critique | Re-run `/do-plan-critique` on the revised plan; capture all findings inline this time. |
+| NIT | (deferred — see note above) | 2 nits not recovered from the session log. | Round 2 critique | Re-run `/do-plan-critique`; capture inline. |
+
+## Revision Notes
+
+**Round 1 (2026-04-30):** Three structural blockers identified by the Archaeologist + Operator critics. All three were factual code-vs-plan mismatches that would have caused silent failures or write races at build time. Each was verified directly against the cited source files before applying the fix:
+
+- **B1 — `sdlc_slug` field does not exist**: Verified by `grep -n "sdlc_slug\|is_sdlc" models/agent_session.py` (no `sdlc_slug` matches; `is_sdlc` exists at line 1612 as a `@property`). Updated 4 plan locations: Recon "Confirmed" entry (line 60), Recon "Confirmed" entry for `extract_artifacts` (line 64), Technical Approach SDLC-scoping bullet (line 153), Step 3 wiring guard (line 361).
+- **B2 — Wrong artifact dict keys**: Verified by reading `extract_artifacts` (`bridge/message_drafter.py:390-435`). Real keys: `commits`, `urls`, `files_changed`, `test_results`, `errors`. Updated 2 plan locations: Recon entry (line 64) and Technical Approach Artifact-set bullet (line 150).
+- **B3 — Unscoped `self.save()` race**: Verified by `grep -n "session.save\|self.save" agent/output_handler.py` (two unscoped saves at lines 479 and 528 within the same `send()` flow that the new helper will be called from). Verified the project's `update_fields=` precedent at `agent/agent_session_queue.py:457`. Updated Step 2 helper signature (line 349) and Failure Path Test Strategy (line 163) to require `update_fields=["recent_sent_drafts", "updated_at"]` and a test assertion that the helper passes `update_fields=` to `save()`.
+
+The 6 concerns and 2 nits could not be recovered from the critique session's transcript (only the high-level summary survived in `logs/worker/0_1777531971456.log`). Round 2 will re-run `/do-plan-critique` on this revised plan and capture every finding inline in the Critique Results table.
+
+**`revision_applied: true`** is set in the frontmatter so the SDLC router's Row 4c rule will route the next dispatch directly to `/do-build` once Round 2 returns READY TO BUILD.
 
 ---
 
 ## Open Questions
 
-1. **Suppression scope.** Should the filter apply only to SDLC sessions (`session.sdlc_slug` set) as proposed, or to ALL PM sessions including conversational/Teammate ones? The risk of expanding beyond SDLC is intersection with RTR (which already covers non-SDLC) — RTR is opt-in, so there is currently a gap for non-SDLC chats with `READ_THE_ROOM_ENABLED=false`. Default proposal: SDLC only; expand later if observability shows the gap matters.
+1. **Suppression scope.** Should the filter apply only to SDLC sessions (`session.is_sdlc` True) as proposed, or to ALL PM sessions including conversational/Teammate ones? The risk of expanding beyond SDLC is intersection with RTR (which already covers non-SDLC) — RTR is opt-in, so there is currently a gap for non-SDLC chats with `READ_THE_ROOM_ENABLED=false`. Default proposal: SDLC only; expand later if observability shows the gap matters.
 2. **Threshold default.** Bigram Jaccard `J ≥ 0.65` is a reasonable starting point but untuned. Should we ship with a stricter default (`0.70`) to bias toward false negatives, or looser (`0.60`) to bias toward false positives? My recommendation: ship at `0.65`, watch the `drafter.suppressed_redundant` event log on the dev machine for a week, tune from there.
 3. **Window size.** Default `DRAFTER_REDUNDANCY_WINDOW_SECONDS = 600` (10 minutes). Does that match the observed cadence (the issue showed ~5-minute resume cycles, so 600s catches ~2 prior turns)? Going to 1800s (30 min) catches longer waits but increases the chance of suppressing a genuinely material follow-up an hour later.
 4. **Reaction emoji.** I chose `👀` (matches RTR's `RTR_SUPPRESS_EMOJI` and the `feedback_emoji_over_acks.md` precedent). Should we use a *different* emoji to distinguish "redundancy-filter suppressed" from "RTR suppressed" in the UI? My take: same emoji is fine — both mean "still working, nothing new" from the user's perspective; they only differ in the implementation layer, which the user doesn't care about.
