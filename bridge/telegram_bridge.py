@@ -723,9 +723,12 @@ async def _ingest_attachments(files: list[Path], message, sender_name: str) -> N
         date_part = msg_date.strftime("%Y%m%d_%H%M%S")
         # sender_name may contain characters that are awkward in filenames;
         # collapse whitespace and strip path-traversal hazards.
-        safe_sender = "".join(
-            c if (c.isalnum() or c in ("-", "_")) else "_" for c in (sender_name or "unknown")
-        ).strip("_") or "unknown"
+        safe_sender = (
+            "".join(
+                c if (c.isalnum() or c in ("-", "_")) else "_" for c in (sender_name or "unknown")
+            ).strip("_")
+            or "unknown"
+        )
         msg_id = getattr(message, "id", "0")
         for src in files:
             try:
@@ -734,15 +737,10 @@ async def _ingest_attachments(files: list[Path], message, sender_name: str) -> N
                 target_name = f"{date_part}_{safe_sender}_{msg_id}_{src.name}"
                 target = _TELEGRAM_VAULT_SUBDIR / target_name
                 shutil.copy2(src, target)
-                logger.info(
-                    f"[steering-ingest] Copied {src.name} -> {target} "
-                    f"(watcher will index)"
-                )
+                logger.info(f"[steering-ingest] Copied {src.name} -> {target} (watcher will index)")
             except Exception as inner_e:
                 # One bad file must not abort the rest of the batch.
-                logger.warning(
-                    f"[steering-ingest] Failed to copy {src} to vault: {inner_e}"
-                )
+                logger.warning(f"[steering-ingest] Failed to copy {src} to vault: {inner_e}")
     except Exception as e:
         # Top-level safety net — fire-and-forget contract: never crash.
         logger.warning(f"[steering-ingest] Vault ingest task failed: {e}")
@@ -800,8 +798,7 @@ async def _ack_steering_routed(
             description, files = await process_incoming_media(client, message)
         except Exception as e:
             logger.warning(
-                f"[steering] process_incoming_media failed; falling back to "
-                f"sentinel text: {e}"
+                f"[steering] process_incoming_media failed; falling back to sentinel text: {e}"
             )
             description, files = "", []
 
@@ -819,9 +816,7 @@ async def _ack_steering_routed(
         if files:
             try:
                 _background_tasks.append(
-                    asyncio.create_task(
-                        _ingest_attachments(files, message, sender_name)
-                    )
+                    asyncio.create_task(_ingest_attachments(files, message, sender_name))
                 )
             except Exception as e:
                 # Even task creation failure must not gate steering.
