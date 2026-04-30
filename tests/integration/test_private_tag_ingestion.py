@@ -26,15 +26,11 @@ from agent.private_tag import strip_private
 from bridge.response import clean_message
 from bridge.telegram_bridge import _build_completed_resume_text
 
-
 SECRET = "sk-int-test-secret-redacted"
 OLDSECRET = "OLDSECRETFROMLEGACYCHAIN"
 PRIVATE_WRAPPED = f"<private>{SECRET}</private>"
 
-USER_TEXT = (
-    f"Refactor the auth handler. The current key is {PRIVATE_WRAPPED}. "
-    "Should we rotate?"
-)
+USER_TEXT = f"Refactor the auth handler. The current key is {PRIVATE_WRAPPED}. Should we rotate?"
 
 
 def _bridge_compute_safe_pair(text: str, project: dict | None = None) -> tuple[str, str, str, str]:

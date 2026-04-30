@@ -90,8 +90,10 @@ def strip_private(text: str) -> str:
     Returns:
         The input with all ``<private>...</private>`` regions removed.
     """
-    if not text or not isinstance(text, str):
-        return text or ""
+    if not isinstance(text, str):
+        return ""
+    if not text:
+        return text
     stripped, n = _PRIVATE_TAG_RE.subn("", text)
     if n == 0:
         # No tags matched -- return input unchanged (no whitespace collapse).
