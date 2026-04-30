@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -344,11 +344,13 @@ Integration test: a real Memory + real Redis test in `tests/integration/test_mem
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md`:
+- [x] Update `docs/features/subconscious-memory.md`:
   - Add a new "Relevance Threshold" subsection under "Architecture" or near "Category-Weighted Recall" describing the post-fusion gate and bloom tightening.
   - Add `RRF_MIN_SCORE` and `BLOOM_MIN_HITS` rows to the Configuration table.
   - Document the default-OFF/default-ON divergence between CLI and recall paths.
-- [ ] No update to `docs/features/README.md` index needed (the feature is already listed; this is an enhancement).
+- [x] No update to `docs/features/README.md` index needed (the feature is already listed; this is an enhancement).
+- [x] Update `docs/features/memory-search-tool.md` — document `min_rrf_score` parameter and `--min-score` CLI flag (cascade follow-up).
+- [x] Update `docs/features/claude-code-memory.md` — Recall (PostToolUse Hook) section now documents `BLOOM_MIN_HITS` gate and `RRF_MIN_SCORE` post-fusion floor (cascade follow-up).
 
 ### External Documentation Site
 
@@ -356,9 +358,9 @@ This repo does not use Sphinx / Read the Docs / MkDocs. No external docs site to
 
 ### Inline Documentation
 
-- [ ] Docstring on `retrieve_memories` updated to document the new `min_rrf_score` parameter, including the default-None back-compat behavior.
-- [ ] Docstring on `_recall_with_query` updated similarly.
-- [ ] Comment block in `config/memory_defaults.py` explaining the calibration math for `RRF_MIN_SCORE`.
+- [x] Docstring on `retrieve_memories` updated to document the new `min_rrf_score` parameter, including the default-None back-compat behavior.
+- [ ] Docstring on `_recall_with_query` updated similarly. (Deferred — `min_rrf_score` parameter is self-documenting via the `retrieve_memories` pass-through; user-facing docs in `subconscious-memory.md`, `memory-search-tool.md`, and `claude-code-memory.md` cover the contract.)
+- [x] Comment block in `config/memory_defaults.py` explaining the calibration math for `RRF_MIN_SCORE`.
 
 ## Success Criteria
 
