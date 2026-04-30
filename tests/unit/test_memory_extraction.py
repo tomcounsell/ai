@@ -155,6 +155,123 @@ class TestRunPostSessionExtraction:
         # Should not raise even with bad session
         await run_post_session_extraction("nonexistent", "some text")
 
+    # --- Issue #1212: pre-LLM and post-LLM refusal/whitespace guards ---
+
+    @pytest.mark.asyncio
+    async def test_refusal_input_skips_llm_call(self):
+        """Pre-LLM refusal-pattern guard: refusal-shaped input never calls Haiku."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        # 50+ chars so the length guard does not catch it; the refusal pattern
+        # guard must catch it instead.
+        refusal_input = (
+            "There is no agent session response to analyze. "
+            "Please provide the session output for me to extract observations."
+        )
+        assert len(refusal_input) >= 50
+
+        mock_llm = AsyncMock(side_effect=AssertionError("_llm_call MUST NOT be invoked"))
+        with patch("agent.memory_extraction._llm_call", mock_llm):
+            result = await extract_observations_async("sess-refusal-pre", refusal_input)
+        assert result == []
+        mock_llm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_dominant_input_skips_llm_call(self):
+        """Whitespace-dominance guard rejects <30% non-whitespace inputs.
+
+        Locks in the _MIN_NON_WHITESPACE_RATIO=0.3 threshold by exercising
+        BOTH sides of the boundary: ~25% non-whitespace must be rejected,
+        ~35% non-whitespace must be accepted (would call Haiku).
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        # 25% non-whitespace: content interleaved with whitespace so the
+        # 50-char strip-based guard passes (the .strip() at the callsite
+        # only trims edges; interior whitespace stays). 100 chars total,
+        # 25 letters + 75 whitespace.
+        rejected = ("a   " * 25)[:100]  # "a   a   a   ..." — interior-padded
+        assert len(rejected) == 100
+        non_ws = len(rejected) - rejected.count(" ")
+        assert non_ws == 25, f"expected 25 non-ws chars, got {non_ws}"
+        # Strip-length must exceed 50 so the 50-char guard does NOT catch it
+        # — we want the whitespace-dominance guard to catch it instead.
+        assert len(rejected.strip()) >= 50
+
+        mock_llm_reject = AsyncMock(
+            side_effect=AssertionError("rejected input MUST NOT call Haiku")
+        )
+        with patch("agent.memory_extraction._llm_call", mock_llm_reject):
+            result = await extract_observations_async("sess-ws-low", rejected)
+        assert result == []
+        mock_llm_reject.assert_not_called()
+
+        # 35% non-whitespace, similarly interleaved. Above threshold —
+        # _llm_call MUST be invoked. We make it return "NONE" so extraction
+        # completes without saving.
+        # Pattern "abc      " (3 letters + 6 spaces, 9 chars block, 3/9 = 33.3%)
+        # tweaked to land exactly 35%: use "abcd      " (4/10 = 40%) and
+        # truncate. Easier: 35 letters + 65 spaces interleaved as 7 letters
+        # per 20-char block (7/20 = 35%).
+        block = "abcdefg" + (" " * 13)  # 7 + 13 = 20 chars, 35% non-ws
+        accepted = (block * 5)[:100]
+        assert len(accepted) == 100
+        non_ws_accepted = len(accepted) - accepted.count(" ")
+        assert non_ws_accepted == 35, f"expected 35 non-ws chars, got {non_ws_accepted}"
+        assert len(accepted.strip()) >= 50
+
+        mock_llm_accept = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm_accept),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async("sess-ws-ok", accepted)
+        assert result == []  # NONE response means no observations
+        mock_llm_accept.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_refusal_output_not_saved(self):
+        """Post-LLM refusal-pattern filter: refusal output never reaches Memory.safe_save."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        # Real-looking input passes all pre-LLM guards (length, refusal
+        # patterns, whitespace ratio).
+        real_input = (
+            "Worker finished session sess-real-1234 in 12.4s. "
+            "Migrated three tables and deployed the new API server. "
+            "All tests pass on green."
+        )
+        assert len(real_input) >= 50
+
+        # But the LLM mistakenly returns refusal text — this is the bug case
+        # Tom flagged in issue #1212 comment IC_kwDOEYGa088AAAABAwQnJw where
+        # 'low-content but above-threshold' input still produces refusal.
+        refusal_output = "There is no agent session response to analyze."
+
+        mock_llm = AsyncMock(return_value=refusal_output)
+        mock_memory = MagicMock()
+        mock_memory.safe_save = MagicMock(
+            side_effect=AssertionError("Memory.safe_save MUST NOT be called on refusal output")
+        )
+
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("models.memory.Memory", mock_memory),
+            patch("models.memory.SOURCE_AGENT", "agent"),
+        ):
+            result = await extract_observations_async("sess-post-refusal", real_input)
+
+        assert result == []
+        mock_llm.assert_called_once()  # the LLM WAS invoked
+        mock_memory.safe_save.assert_not_called()  # but no save occurred
+
 
 class TestParseCategorizedObservations:
     """Test agent/memory_extraction.py _parse_categorized_observations()."""
@@ -321,6 +438,195 @@ class TestParseCategorizedObservations:
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         assert len(result[0]) == 3
+
+    # --- Issue #1212: tolerant JSON extraction + refusal-pattern filter ---
+
+    def test_extracts_json_from_code_fence(self):
+        """Code-fenced JSON (```json [...] ```) is extracted, not exploded."""
+        from agent.memory_extraction import (
+            CATEGORY_IMPORTANCE,
+            _parse_categorized_observations,
+        )
+
+        raw = (
+            "```json\n"
+            '[{"category": "correction", '
+            '"observation": "Redis SCAN is preferred over KEYS in production for large keyspaces", '
+            '"file_paths": ["bridge/x.py"], "tags": ["redis"]}]\n'
+            "```"
+        )
+        result = _parse_categorized_observations(raw)
+        # Pre-fix bug: this used to produce 4-5 shrapnel rows from the line
+        # fallback. The fix short-circuits to a single 3-tuple.
+        assert len(result) == 1, f"Expected 1 observation, got {len(result)}: {result}"
+        content, importance, metadata = result[0]
+        assert "Redis SCAN" in content
+        assert importance == CATEGORY_IMPORTANCE["correction"]
+        assert metadata["category"] == "correction"
+        assert metadata["tags"] == ["redis"]
+
+    def test_extracts_json_from_prose_preamble(self):
+        """JSON with a prose preamble is sliced and parsed."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = (
+            "Here are the observations:\n"
+            '[{"category": "decision", '
+            '"observation": "chose blue-green deployment over rolling updates for zero-downtime", '
+            '"file_paths": [], "tags": ["deployment"]}]'
+        )
+        result = _parse_categorized_observations(raw)
+        assert len(result) == 1
+        assert result[0][2]["category"] == "decision"
+
+    def test_refusal_text_returns_empty(self):
+        """Refusal prose returns [] without explosion to line fallback."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = "There is no agent session response to analyze."
+        assert _parse_categorized_observations(raw) == []
+
+    def test_json_shrapnel_line_rejected(self):
+        """Single-line JSON-syntax fragments are rejected by the predicate."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = '"tags": ["session-management", "context-handling"]'
+        assert _parse_categorized_observations(raw) == []
+
+    def test_json_path_short_circuits_after_extract(self):
+        """Code-fenced JSON with 2 items returns exactly 2 tuples (no ghost rows)."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = (
+            "```json\n"
+            "[\n"
+            '  {"category": "correction", "observation": "Redis SCAN is preferred over KEYS in production", "file_paths": [], "tags": []},\n'
+            '  {"category": "decision", "observation": "chose blue-green over rolling updates for zero-downtime", "file_paths": [], "tags": []}\n'
+            "]\n"
+            "```"
+        )
+        result = _parse_categorized_observations(raw)
+        assert len(result) == 2, (
+            f"Expected exactly 2 observations (no fallback ghosts), got {len(result)}"
+        )
+
+    def test_legitimate_text_with_session_substring(self):
+        """Narrowness regression — observations with 'session' / 'no novel' are kept.
+
+        Locks in Risk 1 from the plan: future pattern additions must not
+        widen to bare keywords. If this test fails after a pattern edit,
+        the editor's addition was too broad.
+        """
+        from agent.memory_extraction import _looks_like_refusal
+
+        legit = (
+            "The dev session ended cleanly with no novel observations to flag — "
+            "verified at session_executor.py:805"
+        )
+        assert _looks_like_refusal(legit) is False, (
+            "Legitimate observation that mentions 'session' and 'no novel' must NOT be rejected. "
+            "A pattern edit has accidentally widened to bare keywords."
+        )
+
+
+class TestExtractJsonPayload:
+    """Test agent/memory_extraction.py _extract_json_payload() (issue #1212)."""
+
+    def test_empty_returns_none(self):
+        from agent.memory_extraction import _extract_json_payload
+
+        assert _extract_json_payload("") is None
+
+    def test_whitespace_returns_none(self):
+        from agent.memory_extraction import _extract_json_payload
+
+        assert _extract_json_payload("   \n\t  ") is None
+
+    def test_garbage_returns_none(self):
+        from agent.memory_extraction import _extract_json_payload
+
+        assert _extract_json_payload("not json at all, just prose") is None
+
+    def test_extracts_array_from_fence(self):
+        from agent.memory_extraction import _extract_json_payload
+
+        raw = '```json\n[{"a": 1}]\n```'
+        assert _extract_json_payload(raw) == '[{"a": 1}]'
+
+    def test_extracts_array_from_unlabeled_fence(self):
+        from agent.memory_extraction import _extract_json_payload
+
+        raw = '```\n[{"a": 1}]\n```'
+        assert _extract_json_payload(raw) == '[{"a": 1}]'
+
+    def test_extracts_array_with_preamble(self):
+        from agent.memory_extraction import _extract_json_payload
+
+        raw = 'Here is the result:\n[{"a": 1}]'
+        assert _extract_json_payload(raw) == '[{"a": 1}]'
+
+    def test_extracts_bare_object(self):
+        from agent.memory_extraction import _extract_json_payload
+
+        raw = '{"a": 1}'
+        assert _extract_json_payload(raw) == '{"a": 1}'
+
+    def test_pure_function_no_exceptions(self):
+        """_extract_json_payload is a pure function — never raises."""
+        from agent.memory_extraction import _extract_json_payload
+
+        # Various corner cases that should all return None, not raise.
+        for bad in ["[", "}", "[{", "{[", "```", "```json"]:
+            try:
+                result = _extract_json_payload(bad)
+            except Exception as e:
+                raise AssertionError(f"_extract_json_payload({bad!r}) raised: {e}") from e
+            assert result is None or isinstance(result, str)
+
+
+class TestLooksLikeRefusal:
+    """Test agent/memory_extraction.py _looks_like_refusal() (issue #1212)."""
+
+    def test_empty_returns_false(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert _looks_like_refusal("") is False
+
+    def test_whitespace_returns_false(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert _looks_like_refusal("   \n  ") is False
+
+    def test_canonical_refusal_returns_true(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert _looks_like_refusal("There is no agent session response to analyze.") is True
+
+    def test_rationale_preamble_returns_true(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        raw = "**Rationale:** The response contains no novel observations to extract."
+        assert _looks_like_refusal(raw) is True
+
+    def test_json_shrapnel_returns_true(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert _looks_like_refusal('"tags": ["session-management", "context-handling"]') is True
+        assert _looks_like_refusal('"category": "correction"') is True
+
+    def test_legitimate_observation_returns_false(self):
+        """Real-shaped observation must not trigger any pattern."""
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert (
+            _looks_like_refusal("The deployment uses blue-green strategy for zero downtime")
+            is False
+        )
+
+    def test_case_insensitive(self):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert _looks_like_refusal("THERE IS NO AGENT SESSION available") is True
 
 
 class TestExtractPostMergeLearning:
