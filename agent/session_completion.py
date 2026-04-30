@@ -434,7 +434,11 @@ def _create_continuation_pm(
         )
 
     except Exception as e:
-        logger.error(f"[harness] _create_continuation_pm failed: {e}", exc_info=True)
+        logger.error(
+            f"[harness] _create_continuation_pm failed for "
+            f"parent_id={getattr(parent, 'session_id', '?')}: {e}",
+            exc_info=True,
+        )
 
 
 def _pipeline_complete_lock_key(parent_id: str) -> str:
