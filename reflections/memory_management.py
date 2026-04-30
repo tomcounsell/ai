@@ -321,6 +321,12 @@ async def run_embedding_orphan_sweep() -> dict:
     findings: list[str] = []
 
     # --- Stub-detection guard (Popoto < 1.6.0) ------------------------------
+    # Capability probe: Popoto 1.6.0 introduces EmbeddingField.sweep_stale_tempfiles
+    # alongside the real garbage_collect implementation. The 1.5.x stub has only
+    # garbage_collect (returning 0 unconditionally) and lacks sweep_stale_tempfiles.
+    # Probing for the new method is a deterministic across-version signal — the
+    # earlier docstring-marker check failed because the "Future enhancement" phrase
+    # lived in the method body comment, not the docstring (verified live on 1.5.0).
     try:
         from popoto.fields.embedding_field import EmbeddingField
     except Exception as e:
@@ -330,7 +336,7 @@ async def run_embedding_orphan_sweep() -> dict:
             "summary": "embedding-orphan-sweep error: popoto not importable",
         }
 
-    if "Future enhancement" in (EmbeddingField.garbage_collect.__doc__ or ""):
+    if not hasattr(EmbeddingField, "sweep_stale_tempfiles"):
         logger.warning(
             "embedding-orphan-sweep: popoto-embedding-gc-stub-detected — install popoto>=1.6.0"
         )

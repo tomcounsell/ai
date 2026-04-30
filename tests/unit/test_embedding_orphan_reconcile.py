@@ -20,6 +20,23 @@ from unittest import mock
 
 import pytest
 
+# All tests in this module patch ``popoto.fields.embedding_field._compute_expected_keep``,
+# which only exists in popoto>=1.6.0. On older popoto, ``mock.patch`` raises
+# ``AttributeError`` before any assertion runs. Skip the whole module rather
+# than pollute CI with N identical failures during the staged Popoto 1.6.0
+# PyPI release lag. The skip clears automatically once 1.6.0 lands.
+pytest.importorskip(
+    "popoto.fields.embedding_field",
+    reason="popoto<1.6.0 — _compute_expected_keep helper not yet available",
+)
+try:
+    from popoto.fields.embedding_field import _compute_expected_keep  # noqa: F401
+except ImportError:
+    pytest.skip(
+        "popoto<1.6.0 lacks _compute_expected_keep — skipping orphan-reconcile tests",
+        allow_module_level=True,
+    )
+
 # Add scripts/ to path so we can import the script as a module
 SCRIPT_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),

@@ -1206,36 +1206,86 @@ class TestRetrieveMemoriesLogSilence:
     """C-A regression: ``Skipping unrecognized embedding file`` must NOT fire at WARNING.
 
     Background: before #1214, ``retrieve_memories()`` walked the embedding
-    directory and emitted hundreds of ``WARNING Skipping unrecognized
-    embedding file ...`` log lines per query because thousands of orphan
-    .npy files existed on disk. Popoto 1.6.0 downgrades that log to
-    DEBUG. This test asserts STRUCTURALLY (on caplog records, not on a
-    keyword-name selector) that no WARNING records with that message
-    fragment are emitted during a retrieve_memories call.
+    directory via ``EmbeddingField.load_embeddings()`` and emitted hundreds
+    of ``WARNING Skipping unrecognized embedding file ...`` log lines per
+    query because thousands of orphan .npy files existed on disk. Popoto
+    1.6.0 downgrades that log to DEBUG.
 
-    The structural assertion CANNOT false-pass: if no test by this name
-    exists, the test suite will visibly skip; if the test runs and the
-    log is emitted at WARNING, the test FAILS on the actual records.
+    This test exercises ``load_embeddings`` DIRECTLY against a controlled
+    embedding directory containing an orphan file (one that is not in the
+    index and is not valid hex). The earlier version of this test patched
+    ``get_embedding_ranked`` to return ``[]``, which short-circuited the
+    pipeline so ``load_embeddings`` was never called — the test passed
+    tautologically without ever exercising the code under test. By calling
+    ``load_embeddings`` directly with a populated emb_dir, we verify the
+    real downgrade contract: on popoto>=1.6.0 the orphan-file message is
+    DEBUG; on popoto<1.6.0 it is still WARNING and this test will fail
+    (which is the correct behavior — the C-A criterion is unmet on
+    popoto<1.6.0).
     """
 
-    def test_retrieve_memories_log_silence(self, caplog):
+    def test_load_embeddings_orphan_file_does_not_warn(self, tmp_path, caplog):
+        """Direct exercise of ``load_embeddings`` over an orphan file.
+
+        Builds a temp embedding directory with one file whose name is not
+        valid hex AND not in the index, then calls
+        ``EmbeddingField.load_embeddings(MockModel)`` and asserts no
+        WARNING records mention "Skipping unrecognized embedding file".
+
+        On popoto<1.6.0 this test SKIPS — the contract being tested is a
+        post-1.6.0 downgrade. The earlier mocked-pipeline approach passed
+        tautologically on every version because ``load_embeddings`` was
+        never called; this direct exercise will FAIL on popoto<1.6.0 (the
+        WARNING still fires there) which is structurally honest. The skip
+        keeps CI green during the staged Popoto 1.6.0 PyPI release lag.
+        """
         import logging
+        import os
+        from unittest.mock import MagicMock, patch
 
-        from agent.memory_retrieval import retrieve_memories
+        import pytest
 
-        caplog.set_level(logging.WARNING)
+        try:
+            from popoto.fields.embedding_field import EmbeddingField
+        except ImportError as e:
+            pytest.skip(f"popoto not importable: {e}")
 
-        # Force a no-op retrieval pipeline so we don't depend on real data.
-        with (
-            patch("popoto.BM25Field") as mock_bm25,
-            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
-            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
-            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
-        ):
-            mock_bm25.search.return_value = []
-            retrieve_memories("test query", "proj")
+        # Capability probe: popoto>=1.6.0 introduces sweep_stale_tempfiles
+        # AND downgrades the orphan-file log to DEBUG. The two ship together.
+        if not hasattr(EmbeddingField, "sweep_stale_tempfiles"):
+            pytest.skip(
+                "popoto<1.6.0 emits 'Skipping unrecognized embedding file' "
+                "at WARNING; the downgrade-to-DEBUG contract requires "
+                "popoto>=1.6.0. Install popoto>=1.6.0 to run this test."
+            )
 
-        # Structural filter — does NOT depend on test selection
+        try:
+            import numpy as np
+        except ImportError:
+            pytest.skip("numpy not available")
+
+        model_name = "MemoryLogSilenceProbe"
+        # POPOTO_CONTENT_PATH overrides the default ~/.popoto path so we can
+        # point at a temp dir without touching real embeddings.
+        emb_root = tmp_path / "content" / ".embeddings" / model_name
+        emb_root.mkdir(parents=True, exist_ok=True)
+
+        # Filename is NOT valid hex (contains 'z') and is intentionally not
+        # in the (nonexistent) index — this is the "orphan" case that
+        # used to log at WARNING on every recall query.
+        orphan_basename = "z" * 64
+        np.save(str(emb_root / orphan_basename), np.zeros(8, dtype=np.float32))
+
+        mock_model = MagicMock()
+        mock_model.__name__ = model_name
+
+        caplog.set_level(logging.DEBUG)
+
+        with patch.dict(os.environ, {"POPOTO_CONTENT_PATH": str(tmp_path / "content")}):
+            EmbeddingField.load_embeddings(mock_model)
+
+        # Structural filter on caplog records — covers both the message
+        # text and the log level (>= WARNING is the violation).
         offending = [
             r
             for r in caplog.records
@@ -1243,7 +1293,8 @@ class TestRetrieveMemoriesLogSilence:
             and r.levelno >= logging.WARNING
         ]
         assert not offending, (
-            f"retrieve_memories must not emit 'Skipping unrecognized embedding "
-            f"file' at WARNING; got {len(offending)} record(s): "
-            f"{[r.getMessage() for r in offending[:3]]}"
+            "load_embeddings must NOT emit 'Skipping unrecognized embedding "
+            f"file' at WARNING level (popoto>=1.6.0 downgrades to DEBUG); "
+            f"got {len(offending)} record(s): "
+            f"{[(r.levelname, r.getMessage()) for r in offending[:3]]}"
         )

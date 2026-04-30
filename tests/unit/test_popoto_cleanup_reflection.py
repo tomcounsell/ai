@@ -4,11 +4,31 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from scripts.popoto_index_cleanup import (
     _count_disk_orphans,
     _count_orphans,
     _get_all_models,
     run_cleanup,
+)
+
+
+def _popoto_has_compute_expected_keep() -> bool:
+    """Probe whether popoto>=1.6.0 internals are importable."""
+    try:
+        from popoto.fields.embedding_field import (  # noqa: F401
+            _compute_expected_keep,
+        )
+
+        return True
+    except ImportError:
+        return False
+
+
+_REQUIRES_POPOTO_1_6 = pytest.mark.skipif(
+    not _popoto_has_compute_expected_keep(),
+    reason="popoto<1.6.0 — _compute_expected_keep helper not yet available",
 )
 
 
@@ -187,8 +207,14 @@ class TestCountOrphansUsesCanonicalKey:
         )
 
 
+@_REQUIRES_POPOTO_1_6
 class TestCountDiskOrphans:
-    """Tests for the new disk-side orphan counter (parallel to _count_orphans)."""
+    """Tests for the new disk-side orphan counter (parallel to _count_orphans).
+
+    Patches ``popoto.fields.embedding_field._compute_expected_keep`` which only
+    exists in popoto>=1.6.0. Skips cleanly on older versions during the staged
+    PyPI release lag.
+    """
 
     def test_returns_zero_for_missing_directory(self):
         """Fresh-install case: no embedding directory exists."""

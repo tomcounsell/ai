@@ -108,15 +108,29 @@ def _count_disk_orphans(model_class) -> int:
     :meth:`popoto.fields.embedding_field.EmbeddingField.garbage_collect`
     to actually remove the orphans.
     """
-    try:
-        import os
+    import os
 
+    # ImportError must surface visibly: on popoto<1.6.0 these helpers do not
+    # exist, and silently returning 0 here would mask a real configuration
+    # problem (the dry-run path would report "Would remove ~0 disk orphans"
+    # without explaining why). Log at WARNING and short-circuit with 0 so
+    # the caller can still display a sensible summary.
+    try:
         from popoto.fields.embedding_field import (
             _TMP_NPY_RE,
             _compute_expected_keep,
             _get_embeddings_dir,
         )
+    except ImportError as e:
+        logger.warning(
+            "[popoto-cleanup] disk-orphan count unavailable: popoto<1.6.0 "
+            "(missing _compute_expected_keep / _get_embeddings_dir / "
+            "_TMP_NPY_RE) — install popoto>=1.6.0 to enable. Detail: %s",
+            e,
+        )
+        return 0
 
+    try:
         model_name = model_class.__name__
         emb_dir = os.path.join(_get_embeddings_dir(), model_name)
         if not os.path.isdir(emb_dir):
@@ -141,6 +155,8 @@ def _count_disk_orphans(model_class) -> int:
 
         return orphan_count
     except Exception as e:
+        # Narrow non-ImportError failures (Redis, filesystem race) — keep at
+        # DEBUG since these are expected during normal operation.
         logger.debug(
             f"[popoto-cleanup] Failed to count disk orphans for {model_class.__name__}: {e}"
         )
