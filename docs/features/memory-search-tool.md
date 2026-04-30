@@ -26,15 +26,21 @@ result = status(deep=True)
 
 Returns `{"healthy": False, "error": "Redis unreachable: ..."}` when Redis is down.
 
-### `search(query, project_key=None, limit=10, ..., assess_quality=False)`
+### `search(query, project_key=None, limit=10, ..., min_rrf_score=None, assess_quality=False)`
 
 Search memories using BM25 + RRF fusion with bloom pre-check. Optionally run a `RetrievalQuality` probe after retrieval.
+
+The bloom pre-check requires at least `BLOOM_MIN_HITS = 2` distinct token hits before BM25 + RRF runs. The `min_rrf_score` parameter defaults to `None` (back-compat) — pass a float to enable the post-fusion relevance floor that drops records ranked below the threshold. The recall hooks (PostToolUse / UserPromptSubmit) default this gate ON via `config.memory_defaults.RRF_MIN_SCORE`; the CLI default is OFF so debugging sessions can see what the gate would drop.
 
 ```python
 from tools.memory_search import search
 
 result = search("deploy patterns", project_key="dm", limit=5)
 # {"results": [{"content": "...", "score": 0.8, "confidence": 0.5, ...}], "error": None}
+
+# With relevance threshold (returns 0 records for nonsense queries):
+result = search("PHRASE_THAT_DEFINITELY_DOES_NOT_APPEAR_QQQQ", min_rrf_score=0.009)
+# {"results": [], "error": None}
 
 # With quality probe (popoto v1.5.0):
 result = search("deploy patterns", assess_quality=True)
@@ -44,6 +50,8 @@ result = search("deploy patterns", assess_quality=True)
 Returns a dict with `results` list and `error` key. Each result contains: content, score, confidence, source, access_count, memory_id.
 
 When `assess_quality=True`, a `"quality"` key is added with `avg_confidence`, `score_spread`, `fok_score`, and `staleness_ratio` from `ContextAssembler.assess()`. The probe makes one additional Redis read and is non-fatal — on error the result is returned without `"quality"`. Default is `False` (backward-compatible).
+
+See [Subconscious Memory: Relevance Threshold](subconscious-memory.md#relevance-threshold) for the calibration math behind `min_rrf_score` and `BLOOM_MIN_HITS`.
 
 ### `save(content, importance=None, project_key=None, source="human")`
 
@@ -97,6 +105,7 @@ python -m tools.memory_search status --project dm
 # Search
 python -m tools.memory_search search "deploy patterns"
 python -m tools.memory_search search "deploy patterns" --project dm --limit 5 --json
+python -m tools.memory_search search "nonsense query" --min-score 0.009  # apply post-fusion relevance gate
 
 # Save
 python -m tools.memory_search save "API X requires auth header Y"

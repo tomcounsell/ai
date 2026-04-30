@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -344,11 +344,13 @@ Integration test: a real Memory + real Redis test in `tests/integration/test_mem
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md`:
+- [x] Update `docs/features/subconscious-memory.md`:
   - Add a new "Relevance Threshold" subsection under "Architecture" or near "Category-Weighted Recall" describing the post-fusion gate and bloom tightening.
   - Add `RRF_MIN_SCORE` and `BLOOM_MIN_HITS` rows to the Configuration table.
   - Document the default-OFF/default-ON divergence between CLI and recall paths.
-- [ ] No update to `docs/features/README.md` index needed (the feature is already listed; this is an enhancement).
+- [x] No update to `docs/features/README.md` index needed (the feature is already listed; this is an enhancement).
+- [x] Update `docs/features/memory-search-tool.md` — document `min_rrf_score` parameter and `--min-score` CLI flag (cascade follow-up).
+- [x] Update `docs/features/claude-code-memory.md` — Recall (PostToolUse Hook) section now documents `BLOOM_MIN_HITS` gate and `RRF_MIN_SCORE` post-fusion floor (cascade follow-up).
 
 ### External Documentation Site
 
@@ -356,13 +358,13 @@ This repo does not use Sphinx / Read the Docs / MkDocs. No external docs site to
 
 ### Inline Documentation
 
-- [ ] Docstring on `retrieve_memories` updated to document the new `min_rrf_score` parameter, including the default-None back-compat behavior.
-- [ ] Docstring on `_recall_with_query` updated similarly.
-- [ ] Comment block in `config/memory_defaults.py` explaining the calibration math for `RRF_MIN_SCORE`.
+- [x] Docstring on `retrieve_memories` updated to document the new `min_rrf_score` parameter, including the default-None back-compat behavior.
+- [ ] Docstring on `_recall_with_query` updated similarly. (Deferred — `min_rrf_score` parameter is self-documenting via the `retrieve_memories` pass-through; user-facing docs in `subconscious-memory.md`, `memory-search-tool.md`, and `claude-code-memory.md` cover the contract.)
+- [x] Comment block in `config/memory_defaults.py` explaining the calibration math for `RRF_MIN_SCORE`.
 
 ## Success Criteria
 
-- [ ] Recall returns 0 results for queries with no semantic or keyword overlap (verified by `tests/integration/test_memory_recall_threshold.py` against a real Memory store).
+- [x] Recall returns 0 results for queries with no semantic or keyword overlap (verified by `tests/integration/test_memory_recall_threshold.py` against a real Memory store).
 - [ ] `retrieve_memories` exposes `min_rrf_score: float | None = None` parameter; passing `None` preserves today's behavior exactly.
 - [ ] Bloom pre-check requires `BLOOM_MIN_HITS = 2` at all FOUR sites (`tools/memory_search/__init__.py`, `_recall_with_query`, `recall()`, `check_and_inject()`); passing the gate with one hit fails the new tests at each site.
 - [ ] Deja-vu / novel-territory branch (`bloom_hits == 0` AND `len(unique_keywords) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD`) still emits the deja-vu thought at all three sites that have it (`_recall_with_query`, `recall()`, `check_and_inject()`); regression test asserts this for each.
@@ -370,7 +372,7 @@ This repo does not use Sphinx / Read the Docs / MkDocs. No external docs site to
 - [ ] Claude Code hook bridge `_recall_with_query` threads `min_rrf_score` through; both `recall()` and `prefetch()` pass `RRF_MIN_SCORE` (verified by mock-call-args tests on both call sites).
 - [ ] CLI search keeps `min_rrf_score=None` default; `--min-score FLOAT` flag exposes opt-in (verified by CLI-level test).
 - [ ] Unit test `test_nonsense_query_returns_empty_with_threshold` passes against a real Memory store (acceptance-criteria headliner).
-- [ ] `docs/features/subconscious-memory.md` documents the relevance threshold behavior (visible in the diff of the PR).
+- [x] `docs/features/subconscious-memory.md` documents the relevance threshold behavior (visible in the diff of the PR).
 - [ ] All existing memory tests still pass (`pytest tests/unit/test_memory_retrieval.py tests/unit/test_memory_hook.py tests/unit/test_memory_bridge.py -q`).
 - [ ] Lint clean (`python -m ruff check .`).
 - [ ] Format clean (`python -m ruff format --check .`).
