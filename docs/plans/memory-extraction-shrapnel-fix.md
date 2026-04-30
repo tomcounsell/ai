@@ -5,7 +5,7 @@ appetite: Small
 owner: Tom Counsell
 created: 2026-04-30
 tracking: https://github.com/tomcounsell/ai/issues/1212
-last_comment_id:
+last_comment_id: IC_kwDOEYGa088AAAABAwQnJw
 revision_applied: true
 ---
 
@@ -56,6 +56,13 @@ Both symptoms are reproducible on the local machine — see Recon Summary in [#1
 **Active plans in `docs/plans/` overlapping this area:** None. Searched `grep -r "memory_extraction\|memory-extraction" docs/plans/` — no live plans touching this module.
 
 **Notes:** The issue's claims and file:line references are all accurate. No drift.
+
+**Comment-driven update (`IC_kwDOEYGa088AAAABAwQnJw`, 2026-04-29 by tomcounsell):**
+- **Live reproduction confirmed**: a single Haiku call on a real-shaped session response produced **10 separate Memory rows** of literal JSON lines. JSON-shrapnel symptom is reliably reproducible end-to-end on the live LLM path.
+- **50-char pre-LLM check IS firing correctly**: empty-string input returns 0 observations as expected. The existing junk records (`5be7da58…`, etc.) came from sessions with **low-content but above-threshold** input where the LLM produced refusal prose despite passing the length check. The fix must NOT weaken the 50-char check.
+- **Corpus state**: 11 test-pollution records were deleted during verification (6 by memory_id prefix + 5 by `agent_id="extraction-test-real-session*"`). Corpus is back to 173 records — same figure cited in the issue body.
+- **Tom's recommendation on refusal handling**: of three options — (a) raise the length threshold, (b) add a substantive-content heuristic, (c) post-LLM refusal-pattern filtering — **option (c) is the strongest** and should be the primary defense. (a) and (b) are supporting layers, not primary.
+- **Sibling issues filed during verification**: #1213 (recall has no relevance threshold), #1214 (embedding directory leaks orphan `.npy` files). Both out of scope for this plan; tracked for future work.
 
 ## Prior Art
 
@@ -131,15 +138,20 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/memory-extract
 
 ### Key Elements
 
-- **Tolerant JSON extractor (`_extract_json_payload`)**: A new helper that strips markdown code fences and slices `raw_text` to the outermost `[...]` or `{...}` before passing to `json.loads`. Returns the cleaned string or `None` if no JSON-shaped substring exists. Pure function, easily unit-tested.
-- **Refusal-pattern filter (`_REFUSAL_PATTERNS` constant + `_looks_like_refusal` predicate)**: A short list of case-insensitive substring patterns ("there is no agent session", "no agent session response", "please provide the session", "**rationale:**", "no novel observations", "no agent session was provided", "session was initialized with empty input") plus a single-line JSON-syntax regex (`^"[a-z_]+"\s*:\s*.*,?\s*$`). Used both pre-LLM (skip Haiku call) and post-parse (drop matching lines from line-based fallback). **Implementation Note (concern: hard-coded substrings will drift as Haiku rephrases its refusals over time):** the patterns must live as a module-scope tuple constant (not buried in a function body) so they are trivial to extend, and each entry must carry an inline comment citing the originating Memory ID from issue #1212 (e.g., `"there is no agent session",  # 5be7da58 / 76dbd772 / 796e1429`). When a new refusal shape appears in the wild, the response is to add a pattern to the constant — not to re-architect. This is acceptable maintenance because (a) the failure mode is silent rejection of refusal text, never silent acceptance of legitimate text, and (b) the recurring `memory-dedup` reflection plus the on-demand cleanup script give us a follow-up safety net.
-- **Pre-LLM substantive-content guard**: In `extract_observations_async`, after the existing 50-char check, also reject input that matches refusal patterns OR is dominated by whitespace/punctuation. Returns `[]` and skips the LLM call.
+**Per the comment on issue #1212 (`IC_kwDOEYGa088AAAABAwQnJw`), the primary defense for refusal-prose handling is post-LLM refusal-pattern filtering (option c). Pre-LLM substantive-content guards (option b) and threshold tuning (option a) are supporting layers, not the primary fix.** The 50-char check is empirically working and must remain unchanged.
+
+- **Tolerant JSON extractor (`_extract_json_payload`)**: A new helper that strips markdown code fences and slices `raw_text` to the outermost `[...]` or `{...}` before passing to `json.loads`. Returns the cleaned string or `None` if no JSON-shaped substring exists. Pure function, easily unit-tested. **This is the primary fix for JSON-shrapnel.**
+- **Post-LLM refusal-pattern filter (PRIMARY for refusal-prose, option c)**: After the Haiku call returns, before parsing, check `_looks_like_refusal(raw_text)`. If true, return `[]` immediately — no parse, no save. Also applied per-line inside the line-based fallback as a second-tier filter. This is the strongest defense because it catches refusal prose regardless of what the input looked like — including the "low-content but above-threshold" case Tom identified in the comment, where input passed the 50-char check but the LLM still returned refusal text.
+- **Refusal-pattern constants (`_REFUSAL_PATTERNS` + `_looks_like_refusal` predicate)**: A short list of case-insensitive substring patterns ("there is no agent session", "no agent session response", "please provide the session", "**rationale:**", "no novel observations", "no agent session was provided", "session was initialized with empty input") plus a single-line JSON-syntax regex (`^"[a-z_]+"\s*:\s*.*,?\s*$`). **Implementation Note (concern: hard-coded substrings will drift as Haiku rephrases its refusals over time):** the patterns must live as a module-scope tuple constant (not buried in a function body) so they are trivial to extend, and each entry must carry an inline comment citing the originating Memory ID from issue #1212 (e.g., `"there is no agent session",  # 5be7da58 / 76dbd772 / 796e1429`). When a new refusal shape appears in the wild, the response is to add a pattern to the constant — not to re-architect. This is acceptable maintenance because (a) the failure mode is silent rejection of refusal text, never silent acceptance of legitimate text, and (b) the recurring `memory-dedup` reflection plus the on-demand cleanup script give us a follow-up safety net.
+- **Pre-LLM substantive-content guard (SUPPORTING, options a+b)**: In `extract_observations_async`, after the existing 50-char check, also reject input that matches refusal patterns OR is dominated by whitespace/punctuation. Returns `[]` and skips the LLM call. This saves a Haiku call but is NOT the primary defense — the LLM can still return refusal prose for inputs that pass this guard, which is exactly why post-LLM filtering (above) is required.
 - **JSON-path short-circuit hardening**: Re-confirm the existing `if results: return results` behavior at line 318 is preserved AFTER the tolerant extractor runs. Once the extractor pulls clean JSON out of fences, the JSON path will succeed and never fall through.
 - **One-shot cleanup script (`scripts/cleanup_memory_extraction_junk.py`)**: Modeled on `scripts/memory_consolidation.py`. Iterates `Memory.query.filter(...)` for records where `agent_id` starts with `extraction-` AND content matches a refusal pattern OR JSON-line regex. Default `--dry-run` mode prints the IDs and content samples it would supersede. `--apply` mode sets `superseded_by="cleanup-junk-extraction"` and `superseded_by_rationale="auto-cleanup: refusal/json-shrapnel from issue #1212"`. Uses Popoto ORM only (per CLAUDE.md "never use raw Redis on Popoto-managed keys").
 
 ### Flow
 
-Worker finishes session → `extract_observations_async(session_id, response_text)` → check len ≥ 50 → check substantive (no refusal patterns, not whitespace-dominant) → Haiku call → check raw_text not refusal-shaped → `_extract_json_payload(raw_text)` strips fences/slices to JSON → `json.loads` → returns 3-tuples → `Memory.safe_save` → done. Line-based fallback runs only if `_extract_json_payload` returned `None` (no JSON-shaped substring) AND the raw text is not refusal — and even then, it filters out lines matching refusal/JSON-shrapnel patterns.
+Worker finishes session → `extract_observations_async(session_id, response_text)` → check len ≥ 50 (UNCHANGED, empirically working) → [supporting] check substantive content (no refusal patterns, not whitespace-dominant) → Haiku call → **[PRIMARY] check raw_text not refusal-shaped — if refusal, return `[]` immediately** → `_extract_json_payload(raw_text)` strips fences/slices to JSON → `json.loads` → returns 3-tuples → `Memory.safe_save` → done. Line-based fallback runs only if `_extract_json_payload` returned `None` (no JSON-shaped substring) AND the raw text is not refusal — and even then, it filters out lines matching refusal/JSON-shrapnel patterns.
+
+The post-LLM refusal check is the **load-bearing** filter for the refusal-prose symptom. The pre-LLM check is a cost optimization (skip Haiku when input is obviously bad), not the primary defense.
 
 ### Technical Approach
 
@@ -438,7 +450,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Single critique pass returned READY TO BUILD (with concerns); concerns folded below as Implementation Notes per SDLC dispatch table Row 4b. revision_applied: true set in frontmatter. CONCERNs remain acknowledged risks/clarifications, NOT defects. -->
+<!-- Single critique pass returned READY TO BUILD (with concerns); concerns folded below as Implementation Notes per SDLC dispatch table Row 4b. Comment IC_kwDOEYGa088AAAABAwQnJw (2026-04-29 by tomcounsell) folded as final row. revision_applied: true set in frontmatter. CONCERNs remain acknowledged risks/clarifications, NOT defects. -->
 
 | Severity | Critic | Concern | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
@@ -448,14 +460,15 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | CONCERN | Archaeologist | Cleanup script doesn't handle `Memory.save()` returning `False` due to `WriteFilterMixin` — pattern verified at `scripts/memory_consolidation.py:298-301`. Without capturing the return value, the "count superseded" claim in the PR description is dishonest about partial success. | Solution → Cleanup script structure | Capture `result = m.save()`, count `blocked` writes per `memory-dedup` precedent, log warning per blocked record, report **three counts** in PR description: superseded / blocked / total candidates. |
 | CONCERN | Archaeologist | Tom's comment on issue #1212 confirmed the existing 50-char check IS working correctly for true empties — the bug is for inputs ≥ 50 chars that aren't real session output. Builder must not weaken the 50-char check while adding the new guards. | Step by Step Tasks → Step 1 (build-parser) | New pre-LLM guard is **additive**, not a replacement. Explicit check ordering documented: (1) 50-char check, (2) refusal patterns, (3) whitespace dominance, (4) Haiku call. |
 | CONCERN | User | Apply mode has no per-batch checkpoint or sample-spot-check — once it touches hundreds of records, an unnoticed false-positive class becomes hard to triage. | Step by Step Tasks → Step 5 (apply-cleanup) | Validator MUST capture dry-run candidate list to a file before `--apply`, spot-check 5 random IDs via `tools.memory_search inspect`, abort on any false positive. Reversibility (clearing `superseded_by`) is a backstop, not the primary safety. |
+| COMMENT-FOLD | tomcounsell (`IC_kwDOEYGa088AAAABAwQnJw`) | Of three options for refusal-prose handling — (a) raise length threshold, (b) substantive-content heuristic, (c) post-LLM refusal-pattern filtering — option (c) is the strongest. Live repro confirmed JSON-shrapnel symptom (1 LLM call → 10 Memory rows). 50-char check confirmed working; existing junk records came from "low-content but above-threshold" inputs. | Solution → Key Elements; Solution → Flow; Open Questions Q1 | Plan reframed: post-LLM refusal-pattern filter is now the load-bearing defense (PRIMARY); pre-LLM guard is a cost optimization (SUPPORTING). 50-char check explicitly preserved unchanged. |
 
 ---
 
 ## Open Questions
 
-The two open questions in the issue body have been resolved by the Recon Summary:
+The two open questions in the issue body have been resolved by the Recon Summary and the comment on issue #1212:
 
-1. **Q1 (is the short-response check firing?):** Yes — for inputs < 50 chars. The bug is for inputs ≥ 50 chars that aren't real session output. Fix is the new pre-LLM refusal-pattern + whitespace-dominance guard.
+1. **Q1 (is the short-response check firing?):** Confirmed YES by Tom in `IC_kwDOEYGa088AAAABAwQnJw` — empty-string input returns 0 observations as expected. The bug is for inputs ≥ 50 chars that aren't real session output (refusal prose from "low-content but above-threshold" sessions). The 50-char check stays UNCHANGED. Fix elevates **post-LLM refusal-pattern filtering** (option c) as the primary defense, with pre-LLM substantive-content guard as a supporting layer.
 2. **Q2 (one-shot vs recurring cleanup?):** One-shot script, modeled on `scripts/memory_consolidation.py`. Recurring is unnecessary because the parser fix prevents re-pollution.
 
 No further open questions for the supervisor at this time.
