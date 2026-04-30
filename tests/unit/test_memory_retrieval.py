@@ -1200,3 +1200,50 @@ class TestSearchAssessQuality:
         assert "quality" not in result, (
             "quality key must be absent when ContextAssembler.assess() raises"
         )
+
+
+class TestRetrieveMemoriesLogSilence:
+    """C-A regression: ``Skipping unrecognized embedding file`` must NOT fire at WARNING.
+
+    Background: before #1214, ``retrieve_memories()`` walked the embedding
+    directory and emitted hundreds of ``WARNING Skipping unrecognized
+    embedding file ...`` log lines per query because thousands of orphan
+    .npy files existed on disk. Popoto 1.6.0 downgrades that log to
+    DEBUG. This test asserts STRUCTURALLY (on caplog records, not on a
+    keyword-name selector) that no WARNING records with that message
+    fragment are emitted during a retrieve_memories call.
+
+    The structural assertion CANNOT false-pass: if no test by this name
+    exists, the test suite will visibly skip; if the test runs and the
+    log is emitted at WARNING, the test FAILS on the actual records.
+    """
+
+    def test_retrieve_memories_log_silence(self, caplog):
+        import logging
+
+        from agent.memory_retrieval import retrieve_memories
+
+        caplog.set_level(logging.WARNING)
+
+        # Force a no-op retrieval pipeline so we don't depend on real data.
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_embedding_ranked", return_value=[]),
+        ):
+            mock_bm25.search.return_value = []
+            retrieve_memories("test query", "proj")
+
+        # Structural filter — does NOT depend on test selection
+        offending = [
+            r
+            for r in caplog.records
+            if "Skipping unrecognized embedding file" in r.getMessage()
+            and r.levelno >= logging.WARNING
+        ]
+        assert not offending, (
+            f"retrieve_memories must not emit 'Skipping unrecognized embedding "
+            f"file' at WARNING; got {len(offending)} record(s): "
+            f"{[r.getMessage() for r in offending[:3]]}"
+        )

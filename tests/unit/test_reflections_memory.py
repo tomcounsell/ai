@@ -360,3 +360,100 @@ class TestKnowledgeReindex:
             result = run_async(run_knowledge_reindex())
 
         assert_valid_result(result)
+
+
+# ============================================================
+# run_embedding_orphan_sweep (#1214)
+# ============================================================
+
+
+class TestEmbeddingOrphanSweep:
+    """Tests for the new ``run_embedding_orphan_sweep`` reflection."""
+
+    def test_stub_short_circuit_when_popoto_old(self):
+        """If Popoto's garbage_collect docstring contains the stub marker,
+        the sweep must short-circuit with a clear "skipped" status."""
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        fake_field = MagicMock()
+        fake_field.garbage_collect.__doc__ = "Future enhancement — placeholder body."
+        with patch(
+            "popoto.fields.embedding_field.EmbeddingField",
+            fake_field,
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert any("popoto<1.6" in f for f in result["findings"]), (
+            f"expected popoto<1.6 marker in findings, got {result['findings']}"
+        )
+        assert "skipped" in result["summary"].lower()
+
+    def test_dry_run_default(self):
+        """Default mode is dry-run — does not call garbage_collect/sweep."""
+        # Real (non-stub) popoto installed, so docstring marker is absent.
+        # Dry-run path: must NOT invoke garbage_collect or sweep_stale_tempfiles.
+        from popoto.fields.embedding_field import EmbeddingField
+
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        with (
+            patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "false"}),
+            patch.object(EmbeddingField, "garbage_collect") as gc_spy,
+            patch.object(EmbeddingField, "sweep_stale_tempfiles") as sweep_spy,
+            patch(
+                "scripts.popoto_index_cleanup._count_disk_orphans",
+                return_value=42,
+            ),
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert gc_spy.call_count == 0, "dry-run must not call garbage_collect"
+        assert sweep_spy.call_count == 0, "dry-run must not call sweep_stale_tempfiles"
+        assert any("DRY RUN" in f for f in result["findings"])
+
+    def test_apply_mode_calls_both_sweeps(self):
+        """Apply mode invokes garbage_collect AND sweep_stale_tempfiles."""
+        from popoto.fields.embedding_field import EmbeddingField
+
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        with (
+            patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "true"}),
+            patch.object(EmbeddingField, "garbage_collect", return_value=7) as gc_spy,
+            patch.object(EmbeddingField, "sweep_stale_tempfiles", return_value=3) as sweep_spy,
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        assert result["status"] == "ok"
+        assert gc_spy.call_count == 1
+        assert sweep_spy.call_count == 1
+        assert any("Removed 7 orphan" in f for f in result["findings"])
+        assert any("3 stale tmp" in f for f in result["findings"])
+
+    def test_handles_garbage_collect_exception(self):
+        """A failure inside garbage_collect must NOT crash the reflection."""
+        from popoto.fields.embedding_field import EmbeddingField
+
+        from reflections.memory_management import run_embedding_orphan_sweep
+
+        with (
+            patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "true"}),
+            patch.object(
+                EmbeddingField,
+                "garbage_collect",
+                side_effect=RuntimeError("synthetic failure"),
+            ),
+            patch.object(EmbeddingField, "sweep_stale_tempfiles", return_value=0),
+        ):
+            result = run_async(run_embedding_orphan_sweep())
+
+        assert_valid_result(result)
+        # Reflection wrapper should not crash; status should be "ok"
+        # with the error noted in findings.
+        assert result["status"] == "ok"
+        assert any("garbage_collect error" in f for f in result["findings"])

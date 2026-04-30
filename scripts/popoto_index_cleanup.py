@@ -65,12 +65,17 @@ def _count_orphans(model_class) -> int:
 
     Checks each entry in the model's class set against actual hash existence.
     Returns the count of index entries pointing to non-existent hashes.
+
+    Uses the canonical Popoto class-set key
+    ``model_class._meta.db_class_set_key.redis_key`` (= ``$Class:{Name}``).
+    The legacy ``{Name}:_all`` key is empty in production — reading from
+    it would always return zero orphans regardless of true state, which
+    is the bug this function was originally written to detect (#1214).
     """
     try:
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        model_name = model_class.__name__
-        class_set_key = f"{model_name}:_all"
+        class_set_key = model_class._meta.db_class_set_key.redis_key
 
         # Get all members of the class set (index of all instances)
         members = POPOTO_REDIS_DB.smembers(class_set_key)
@@ -86,6 +91,59 @@ def _count_orphans(model_class) -> int:
         return orphan_count
     except Exception as e:
         logger.debug(f"[popoto-cleanup] Failed to count orphans for {model_class.__name__}: {e}")
+        return 0
+
+
+def _count_disk_orphans(model_class) -> int:
+    """Count on-disk .npy files for ``model_class`` that have no live record.
+
+    Walks ``~/.popoto/content/.embeddings/{ModelName}/`` and counts files
+    that are NOT in the expected-to-survive set (computed via the shared
+    Popoto helper :func:`popoto.fields.embedding_field._compute_expected_keep`)
+    AND are not atomic-write tempfiles (``tmp*.npy``, swept separately).
+
+    Returns 0 if the embedding directory does not exist (fresh install).
+
+    Read-only — never deletes. Use
+    :meth:`popoto.fields.embedding_field.EmbeddingField.garbage_collect`
+    to actually remove the orphans.
+    """
+    try:
+        import os
+
+        from popoto.fields.embedding_field import (
+            _TMP_NPY_RE,
+            _compute_expected_keep,
+            _get_embeddings_dir,
+        )
+
+        model_name = model_class.__name__
+        emb_dir = os.path.join(_get_embeddings_dir(), model_name)
+        if not os.path.isdir(emb_dir):
+            return 0
+
+        expected_keep = _compute_expected_keep(model_class)
+
+        try:
+            disk_files = os.listdir(emb_dir)
+        except OSError:
+            return 0
+
+        orphan_count = 0
+        for filename in disk_files:
+            if not filename.endswith(".npy"):
+                continue
+            if _TMP_NPY_RE.match(filename):
+                continue
+            if filename in expected_keep:
+                continue
+            orphan_count += 1
+
+        return orphan_count
+    except Exception as e:
+        logger.debug(
+            f"[popoto-cleanup] Failed to count disk orphans for {model_class.__name__}: {e}"
+        )
         return 0
 
 

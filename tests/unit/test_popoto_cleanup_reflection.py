@@ -1,8 +1,15 @@
 """Tests for Popoto index cleanup reflection."""
 
+import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
-from scripts.popoto_index_cleanup import _count_orphans, _get_all_models, run_cleanup
+from scripts.popoto_index_cleanup import (
+    _count_disk_orphans,
+    _count_orphans,
+    _get_all_models,
+    run_cleanup,
+)
 
 
 class TestGetAllModels:
@@ -121,3 +128,121 @@ class TestRunCleanup:
             result = run_cleanup()
             assert result["total_orphans_found"] == 3
             assert result["per_model"]["ModelWithOrphans"]["orphans_found"] == 3
+
+
+class TestCountOrphansUsesCanonicalKey:
+    """B1 regression pin: _count_orphans must use the canonical class set key.
+
+    The bug being fixed: ``_count_orphans`` previously read the legacy
+    ``{Name}:_all`` key, which is empty in production. Reading the wrong
+    key caused ``status --deep`` to silently report ``orphan_index_count: 0``
+    regardless of true state (#1214).
+
+    The canonical key is ``model_class._meta.db_class_set_key.redis_key``
+    which yields ``$Class:{Name}``. This test asserts the function reads
+    that key, NOT ``{Name}:_all``.
+    """
+
+    def test_uses_canonical_db_class_set_key(self):
+        # Build a mock model whose canonical key is "$Class:Foo" but whose
+        # legacy "Foo:_all" key would yield different content.
+        mock_model = MagicMock()
+        mock_model.__name__ = "Foo"
+        mock_model._meta.db_class_set_key.redis_key = "$Class:Foo"
+
+        canonical_members = {b"k1", b"k2"}
+        legacy_members = set()  # legacy key is empty in production
+
+        def smembers(key):
+            if key == "$Class:Foo":
+                return canonical_members
+            if key == "Foo:_all":
+                return legacy_members
+            return set()
+
+        mock_db = MagicMock()
+        mock_db.smembers.side_effect = smembers
+        # All keys "exist" — orphan_count == 0 here, but we're checking
+        # which key was queried, not the count.
+        mock_db.exists.return_value = 1
+
+        import popoto.redis_db
+
+        original = popoto.redis_db.POPOTO_REDIS_DB
+        try:
+            popoto.redis_db.POPOTO_REDIS_DB = mock_db
+            _count_orphans(mock_model)
+        finally:
+            popoto.redis_db.POPOTO_REDIS_DB = original
+
+        # Assert smembers was called with the canonical key — never the
+        # legacy one.
+        called_keys = [c.args[0] for c in mock_db.smembers.call_args_list]
+        assert "$Class:Foo" in called_keys, (
+            f"_count_orphans must read $Class:Foo (canonical), got calls: {called_keys}"
+        )
+        assert "Foo:_all" not in called_keys, (
+            f"_count_orphans must NOT read Foo:_all (legacy/empty), "
+            f"got calls: {called_keys} — this is the data-bug from #1214"
+        )
+
+
+class TestCountDiskOrphans:
+    """Tests for the new disk-side orphan counter (parallel to _count_orphans)."""
+
+    def test_returns_zero_for_missing_directory(self):
+        """Fresh-install case: no embedding directory exists."""
+        # Point POPOTO_CONTENT_PATH to a nonexistent path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ghost = os.path.join(tmpdir, "does_not_exist")
+            with patch.dict(os.environ, {"POPOTO_CONTENT_PATH": ghost}):
+                mock_model = MagicMock()
+                mock_model.__name__ = "Ghost"
+                # Even if the helper somehow reaches Redis, force empty
+                with patch(
+                    "popoto.fields.embedding_field._compute_expected_keep",
+                    return_value=set(),
+                ):
+                    assert _count_disk_orphans(mock_model) == 0
+
+    def test_counts_orphans_excluding_tmp_and_live(self):
+        """Walks the directory and counts orphan .npy files only."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            emb_dir = os.path.join(tmpdir, ".embeddings", "MyMem")
+            os.makedirs(emb_dir, exist_ok=True)
+
+            live_filename = "a" * 64 + ".npy"
+            orphan_filename1 = "b" * 64 + ".npy"
+            orphan_filename2 = "c" * 64 + ".npy"
+            tmp_filename = "tmpXYZ.npy"
+
+            for fname in (live_filename, orphan_filename1, orphan_filename2, tmp_filename):
+                open(os.path.join(emb_dir, fname), "w").close()
+
+            with patch.dict(os.environ, {"POPOTO_CONTENT_PATH": tmpdir}):
+                with patch(
+                    "popoto.fields.embedding_field._compute_expected_keep",
+                    return_value={live_filename},
+                ):
+                    mock_model = MagicMock()
+                    mock_model.__name__ = "MyMem"
+                    # 2 orphans (tmp excluded, live excluded)
+                    assert _count_disk_orphans(mock_model) == 2
+
+    def test_uses_shared_compute_expected_keep_helper(self):
+        """C-C: must call the shared helper, never inline SHA-256/key logic."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            emb_dir = os.path.join(tmpdir, ".embeddings", "Spy")
+            os.makedirs(emb_dir, exist_ok=True)
+            with patch.dict(os.environ, {"POPOTO_CONTENT_PATH": tmpdir}):
+                with patch(
+                    "popoto.fields.embedding_field._compute_expected_keep",
+                    return_value=set(),
+                ) as spy:
+                    mock_model = MagicMock()
+                    mock_model.__name__ = "Spy"
+                    _count_disk_orphans(mock_model)
+                    assert spy.call_count >= 1, (
+                        "_count_disk_orphans must call the shared "
+                        "_compute_expected_keep helper (C-C single source of truth)"
+                    )

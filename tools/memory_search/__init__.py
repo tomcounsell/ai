@@ -477,6 +477,7 @@ def status(
         if deep:
             # Orphan detection — import from scripts/
             orphan_count: int | str = "unavailable"
+            disk_orphan_count: int | str = "unavailable"
             try:
                 import sys
                 from pathlib import Path
@@ -484,12 +485,14 @@ def status(
                 scripts_dir = str(Path(__file__).parents[2] / "scripts")
                 if scripts_dir not in sys.path:
                     sys.path.insert(0, scripts_dir)
-                from popoto_index_cleanup import _count_orphans
+                from popoto_index_cleanup import _count_disk_orphans, _count_orphans
 
                 orphan_count = _count_orphans(Memory)
+                disk_orphan_count = _count_disk_orphans(Memory)
             except Exception as e:
                 logger.warning(f"[memory_search] orphan count failed: {e}")
                 orphan_count = f"error: {e}"
+                disk_orphan_count = f"error: {e}"
 
             # Per-category confidence averages
             cat_confidence: dict[str, dict[str, Any]] = {}
@@ -507,6 +510,7 @@ def status(
                 }
 
             result["orphan_index_count"] = orphan_count
+            result["disk_orphan_count"] = disk_orphan_count
             result["by_category_confidence"] = cat_confidence
 
         return result
