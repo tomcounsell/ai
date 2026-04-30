@@ -56,6 +56,7 @@ def search(
     tag: str | None = None,
     min_act_rate: float | None = None,
     assess_quality: bool = False,
+    min_rrf_score: float | None = None,
 ) -> dict[str, Any]:
     """Search memories by query string using BM25 + RRF fusion.
 
@@ -70,6 +71,10 @@ def search(
             after retrieval and attach the result as a "quality" key in the return dict.
             This makes one additional Redis read (composite_score). Failure is non-fatal:
             on error the result dict is returned without the "quality" key.
+        min_rrf_score: Optional post-fusion relevance threshold passed through to
+            `retrieve_memories`. CLI defaults to None for back-compat (no filtering);
+            the recall hooks pass `config.memory_defaults.RRF_MIN_SCORE` to enable
+            the gate. See docs/features/subconscious-memory.md.
 
     Returns:
         Dict with "results" list and "error" key (None if no error).
@@ -83,28 +88,36 @@ def search(
 
         project_key = _resolve_project_key(project_key)
 
-        # Bloom pre-check: if ExistenceFilter says "definitely not present", skip
+        # Bloom pre-check: ExistenceFilter probe per query token. Per
+        # config.memory_defaults.BLOOM_MIN_HITS the gate requires at least
+        # that many distinct token hits before BM25 + RRF runs. Single-token
+        # queries with one bloom hit no longer pass -- they were a low-precision
+        # anti-pattern. On bloom error, fall through and let BM25 run.
+        from config.memory_defaults import BLOOM_MIN_HITS
         from models.memory import Memory
 
         bloom_field = Memory._meta.fields.get("bloom")
         if bloom_field:
-            has_relevant = False
             # Extract simple words from query for bloom check
             import re
 
             words = re.findall(r"[a-zA-Z]{3,}", query)
+            bloom_hits = 0
+            bloom_error = False
             for word in words:
                 try:
                     if bloom_field.might_exist(Memory, word):
-                        has_relevant = True
-                        break
+                        bloom_hits += 1
                 except Exception:
-                    # On bloom error, proceed with full query
-                    has_relevant = True
+                    # On bloom error, proceed with full query (treat as pass)
+                    bloom_error = True
                     break
             if not words:
-                has_relevant = True
-            if not has_relevant:
+                # No words to probe -- proceed (e.g. single-character or numeric query)
+                pass
+            elif bloom_error:
+                pass  # let BM25 handle it
+            elif bloom_hits < BLOOM_MIN_HITS:
                 return {"results": [], "error": None}
 
         # Retrieve via BM25 + RRF fusion
@@ -114,6 +127,7 @@ def search(
             query_text=query,
             project_key=project_key,
             limit=limit,
+            min_rrf_score=min_rrf_score,
         )
 
         if not all_records:
