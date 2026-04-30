@@ -10,7 +10,7 @@ tracking: https://github.com/tomcounsell/ai/issues/1214
 last_comment_id:
 ---
 
-# Memory Embedding Orphan Cleanup
+# Memory Embedding Orphan Cleanup (#1214)
 
 ## Problem
 
