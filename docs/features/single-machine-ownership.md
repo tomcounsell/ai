@@ -69,6 +69,20 @@ A bad config never reaches a bridge restart, so the rule cannot be violated at r
 - **No drift on multi-machine deployments.** Adding/moving/retiring a machine is a one-field edit on each affected project. There is no per-contact deny-list to maintain.
 - **No outage from a bad push.** The gate prevents a malformed `projects.json` from rolling out.
 
+## Memory persistence inherits the same boundary
+
+The single-machine-ownership rule applies to memory persistence as well as response routing. Following PR #1173 (the bridge `dm`-namespace writer leak), the Telegram bridge now treats an incoming message in three layers:
+
+1. **Conversation history** (`store_message`, `register_chat`): always recorded, even when the chat doesn't resolve to any declared project. Pass `project_key=None` — both functions accept it. This is what `valor-telegram read` reads from.
+2. **Canonical Memory partition write** (`Memory.safe_save`): gated on a resolved project. If no project resolves (sender not whitelisted, group title not declared on this machine), the canonical memory write is skipped entirely. Unowned messages no longer pollute any partition.
+3. **Session creation**: hard early-return if no project resolves. The `:1003` guard in `bridge/telegram_bridge.py` makes this explicit and prevents the latent NameError class problem from the previous `else "dm"` fallback.
+
+A bridge startup invariant enforces that `set(DM_WHITELIST) == set(DM_USER_TO_PROJECT.keys())` — every `dms.whitelist[]` entry must reference an active project on the current machine. If the sets ever decouple (for example, a `dms.whitelist[]` entry referencing a project that this machine doesn't own), the bridge raises `RuntimeError` at startup rather than letting a whitelisted sender_id pass routing checks while having no project mapping.
+
+The retired `"dm"` literal has been removed from `bridge/telegram_bridge.py`. `Memory.safe_save` includes a `_warn_if_legacy_namespace` regression detector that logs a WARNING with stack trace if any caller still attempts a `"dm"` write, and a DEBUG-level audit on `"default"` writes (the latter is still legitimate during single-machine bootstrap and test fixtures).
+
+See [Subconscious Memory — Project Key Partitioning](subconscious-memory.md#project-key-partitioning) for the writer matrix and [#1232](https://github.com/tomcounsell/ai/issues/1232) for the follow-up to consolidate every Memory writer onto a single `project_key` resolver.
+
 ## Adding a new machine
 
 1. On the new machine, set `ComputerName` (System Settings → Sharing) to a name like `Valor the {Animal}`.
