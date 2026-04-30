@@ -54,6 +54,18 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
+
+# Worktree-friendly sys.path setup. When this script is invoked via
+# ``python scripts/cleanup_memory_extraction_junk.py`` from a worktree,
+# the editable install at ``/Users/tomcounsell/src/ai`` would otherwise
+# shadow the worktree's local ``agent/`` package and we'd import the
+# pre-fix module from the main repo. Force the script's grandparent
+# (worktree root) to the front of sys.path so ``agent.memory_extraction``
+# resolves to the local copy.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 logger = logging.getLogger(__name__)
 
