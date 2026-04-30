@@ -198,7 +198,7 @@ valor-email threads
 | `python -m tools.memory_search forget --id <ID> --confirm` | Delete a memory |
 | `python -m tools.memory_search status` | Check memory system health (Redis, counts, superseded ratio) |
 | `python -m tools.memory_search status --json` | Memory health as machine-readable JSON |
-| `python -m tools.memory_search status --deep` | Memory health with orphan index count and per-category confidence |
+| `python -m tools.memory_search status --deep` | Memory health with Redis-side `orphan_index_count`, disk-side `disk_orphan_count`, and per-category confidence |
 | `python -m tools.doctor` | Run all environment and health checks |
 | `python -m tools.doctor --quick` | Skip slow checks (Telegram session, model verification) |
 | `python -m tools.doctor --quality` | Include code quality checks (ruff, pytest) |

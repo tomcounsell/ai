@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Tom Counsell
@@ -432,8 +432,8 @@ The one-shot `scripts/embedding_orphan_reconcile.py` is an operator tool, NOT an
 
 ### Feature Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md` — add a new "Embedding-File Lifecycle" subsection under "Vector embeddings via Ollama". Document: write path (atomic tmp+rename), delete path (on_delete hook), sweep path (reflection + one-shot), tempfile cleanup behavior. Reference the new file paths.
-- [ ] Update `docs/features/README.md` index entry for subconscious-memory if the description mentions lifecycle gaps.
+- [x] Update `docs/features/subconscious-memory.md` — add a new "Embedding-File Lifecycle" subsection under "Vector embeddings via Ollama". Document: write path (atomic tmp+rename), delete path (on_delete hook), sweep path (reflection + one-shot), tempfile cleanup behavior. Reference the new file paths.
+- [x] Update `docs/features/README.md` index entry for subconscious-memory if the description mentions lifecycle gaps.
 
 ### External Documentation Site
 
@@ -441,10 +441,10 @@ The one-shot `scripts/embedding_orphan_reconcile.py` is an operator tool, NOT an
 
 ### Inline Documentation
 
-- [ ] Docstring on `EmbeddingField.garbage_collect` in Popoto (replace the "Future enhancement" comment with a real description of behavior, mtime guard, return value).
-- [ ] Docstring on `EmbeddingField.sweep_stale_tempfiles` in Popoto.
-- [ ] Module-level docstring update in `reflections/memory_management.py` to mention `run_embedding_orphan_sweep` alongside the existing reflections.
-- [ ] CLI `--help` text for `scripts/embedding_orphan_reconcile.py`.
+- [x] Docstring on `EmbeddingField.garbage_collect` in Popoto (replace the "Future enhancement" comment with a real description of behavior, mtime guard, return value).
+- [x] Docstring on `EmbeddingField.sweep_stale_tempfiles` in Popoto.
+- [x] Module-level docstring update in `reflections/memory_management.py` to mention `run_embedding_orphan_sweep` alongside the existing reflections.
+- [x] CLI `--help` text for `scripts/embedding_orphan_reconcile.py`.
 
 ## Success Criteria
 

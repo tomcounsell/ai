@@ -119,6 +119,7 @@ each update run. This ensures the scheduler always reads the vault version.
 | `memory-decay-prune` | `reflections.memory_management.run_memory_decay_prune` | Delete below-threshold memories with zero access (dry-run default) |
 | `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | Flag memories with quality issues (zero-access, chronically low confidence) |
 | `knowledge-reindex` | `reflections.memory_management.run_knowledge_reindex` | Re-index ~/src/work-vault/ docs into KnowledgeDocument records |
+| `embedding-orphan-sweep` | `reflections.memory_management.run_embedding_orphan_sweep` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
 
 ### State Model (`models/reflection.py`)
 
@@ -432,6 +433,17 @@ Flags memories with quality issues for human review:
 ### `knowledge-reindex`
 
 Re-indexes `~/src/work-vault/` documents into `KnowledgeDocument` Redis records. Gracefully stubs if `tools.knowledge.indexer` is unavailable or the vault directory doesn't exist.
+
+### `embedding-orphan-sweep`
+
+Reconciles the on-disk Memory embedding store (`~/.popoto/content/.embeddings/Memory/`) against live Memory records (issue #1214). Calls Popoto's `EmbeddingField.garbage_collect(Memory)` to remove `.npy` files whose SHA-256-hashed names are no longer in `$Class:Memory`, plus `EmbeddingField.sweep_stale_tempfiles(Memory)` to remove leaked `tmp*.npy` atomic-write tempfiles older than 1 hour.
+
+- **Dry-run default**: set `EMBEDDING_ORPHAN_SWEEP_APPLY=true` to enable actual deletion (matches the `MEMORY_DECAY_PRUNE_APPLY` pattern).
+- **Popoto-stub guard**: a runtime capability probe (`hasattr(EmbeddingField, "sweep_stale_tempfiles")`) detects pre-1.6.0 installs and short-circuits with status `"skipped"` and finding `"popoto<1.6 — gc not implemented yet"` rather than silently appearing to succeed.
+- **Marker requirement**: `Memory.__embedding_garbage_collect__ = True` opts the model into garbage_collect; without it Popoto's helper is a no-op.
+- **Metrics emitted**: `memory.embedding_orphans_swept` and `memory.embedding_tempfiles_swept` counters.
+
+For one-shot reconciliation against an existing backlog, the operator script `scripts/embedding_orphan_reconcile.py` (dry-run default, `--apply` to act) wraps the same Popoto helpers with two additional safety gates: a positive-assertion check (refuses to apply if to-delete intersects expected-keep) and a pre-flight regression guard (refuses to apply if `$Class:Memory` is empty).
 
 ## Operations
 
