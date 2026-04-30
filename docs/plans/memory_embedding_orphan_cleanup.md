@@ -19,15 +19,14 @@ The Memory model's on-disk embedding store at `~/.popoto/content/.embeddings/Mem
 - Every `retrieve_memories()` call walks the entire embedding directory and logs hundreds of `WARNING Skipping unrecognized embedding file ...` and `WARNING Failed to load embedding ... No data left in file` lines.
 - Semantic-similarity ranking degrades silently — failed loads return empty arrays so the RRF fusion falls back to the other three signals (BM25, relevance, confidence) without telling anyone.
 - Disk usage and index file size grow unbounded.
-- `python -m tools.memory_search status --deep` reports `Orphan index keys: 0`, contradicting the actual disk state. The check only walks the Redis class set, never the disk.
+- `python -m tools.memory_search status --deep` reports `Orphan index keys: 0` (human label) / `orphan_index_count: 0` (JSON key, set in `tools/memory_search/__init__.py:495`), contradicting the actual disk state. The check only walks the Redis class set, never the disk.
 
 **Desired outcome:**
 
 - Memory deletions remove the `.npy` and the `_index.json` entry in one transaction.
-- Worker startup sweeps stale `tmp*.npy` files older than 1 hour.
-- A scheduled reflection performs disk-vs-Redis reconciliation periodically.
-- `status --deep` reports both Redis-side and disk-side orphans.
-- A one-shot reconciliation reduces the existing 7,000+ orphan files to zero.
+- The daily `embedding-orphan-sweep` reflection sweeps stale `tmp*.npy` files older than 1 hour AND reconciles disk against Redis. (Worker-startup hook is **out of scope** — see N3 resolution; the reflection is the single sweep surface.)
+- `status --deep` reports both Redis-side (`orphan_index_count`, existing) and disk-side (`disk_orphan_count`, new) orphans as parallel JSON fields.
+- A one-shot reconciliation reduces the existing 7,000+ orphan files to ≤10.
 - Recall queries produce zero per-file warnings on a clean corpus.
 - The full embedding-file lifecycle is documented.
 
@@ -49,7 +48,7 @@ The Memory model's on-disk embedding store at `~/.popoto/content/.embeddings/Mem
 
 **Cited sibling issues/PRs re-checked:**
 
-- #1212 — open, related (extraction-side parser bugs producing JSON shrapnel as memories) — distinct fix, out of scope for this plan
+- issue 1212 — open, related (extraction-side parser bugs producing JSON shrapnel as memories) — distinct fix, out of scope for this plan
 - #964, #970 — merged, introduced `memory_search status --deep` subcommand — this plan extends the orphan check rather than replacing it
 
 **Commits on main since issue was filed (touching referenced files):**
@@ -159,14 +158,25 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/memory_embeddi
 
 ## Solution
 
+### Filename Scheme (CRITICAL — read first)
+
+Embedding filenames are **SHA-256 hashes of the Redis key**, not hex-encoded keys. From `popoto/fields/embedding_field.py:189`:
+
+```python
+hash_key = hashlib.sha256(redis_key.encode("utf-8")).hexdigest()
+# {hash_key}.npy
+```
+
+SHA-256 is one-way — you **cannot** decode a filename back to a Redis key. Reconciliation must therefore work in the forward direction: enumerate live keys, compute their expected hashed filenames, treat anything else as orphan. A `_legacy_embedding_path` (line 193) exists from a pre-SHA-256 hex era and is migrated on save; some of the 7,400+ orphans on disk may be unmigrated legacy hex files (see N1).
+
 ### Key Elements
 
-- **`EmbeddingField.garbage_collect(Memory)`** in Popoto: real implementation that reconciles disk against Redis and `_index.json`, returns count removed. Replaces the existing stub.
+- **`EmbeddingField.garbage_collect(Memory)`** in Popoto: real implementation. Computes `expected_keep = {sha256(k).hexdigest() + ".npy" for k in POPOTO_REDIS_DB.smembers("Memory:_all")}`, walks `~/.popoto/content/.embeddings/Memory/`, deletes any file (a) not in `expected_keep`, (b) not a current `tmp*.npy` (handled by separate sweep), and (c) older than the mtime guard. Returns count removed.
 - **`EmbeddingField.sweep_stale_tempfiles(Memory, max_age_seconds=3600)`** in Popoto: removes `tmp*.npy` files older than the cutoff. Returns count removed.
-- **`reflections/memory_management.py::run_embedding_orphan_sweep`** in this repo: thin wrapper that calls both Popoto methods, with dry-run gating via `EMBEDDING_ORPHAN_SWEEP_APPLY` env var. Registered in `config/reflections.yaml` as `embedding-orphan-sweep` (daily).
-- **`scripts/popoto_index_cleanup.py::_count_disk_orphans(Memory)`** in this repo: walks the embedding directory and counts files whose redis_key is not in `Memory:_all`. Pure read-only.
-- **`tools/memory_search/__init__.py::status(deep=True)`**: extended to call `_count_disk_orphans()` and report `disk_orphans` alongside the existing `orphan_index_keys`.
-- **`scripts/embedding_orphan_reconcile.py`** in this repo: one-shot CLI for the existing 7,000+ files. Dry-run by default; `--apply` actually deletes. Logs the count to stdout for the PR description.
+- **`reflections/memory_management.py::run_embedding_orphan_sweep`** in this repo: thin wrapper that calls both Popoto methods, with dry-run gating via `EMBEDDING_ORPHAN_SWEEP_APPLY` env var. Registered in `config/reflections.yaml` as `embedding-orphan-sweep` (daily). Includes a runtime guard that detects the Popoto stub via docstring inspection and skips the sweep with a "popoto<1.6 — gc not implemented" warning if encountered (C4).
+- **`scripts/popoto_index_cleanup.py::_count_disk_orphans(Memory)`** in this repo: walks the embedding directory, computes `expected_keep` from `Memory:_all`, returns `len(disk_files - expected_keep - tmp_files)`. Pure read-only.
+- **`tools/memory_search/__init__.py::status(deep=True)`**: extended to call `_count_disk_orphans()` and report **`disk_orphan_count`** (and optionally `disk_orphan_paths` capped at 5 examples) alongside the existing **`orphan_index_count`**. Field name parallel to existing convention; existing `orphan_index_count` is preserved verbatim (B3).
+- **`scripts/embedding_orphan_reconcile.py`** in this repo: one-shot CLI for the existing 7,000+ files. Dry-run by default; `--apply` actually deletes. Includes a positive-assertion safety check: before any deletion, asserts that the to-delete set has empty intersection with `expected_keep` (live-record filenames). Refuses to apply if any live file appears in the to-delete set (C5). Logs counts to stdout for the PR description.
 - **Log noise reduction**: lower `Skipping unrecognized embedding file` from WARNING to DEBUG in Popoto's `load_embeddings`. After reconciliation it should never fire on a clean corpus, but defense-in-depth.
 
 ### Flow
@@ -180,13 +190,15 @@ Memory created → on_save writes .npy + index entry → Memory deleted → on_d
 ### Technical Approach
 
 - **Popoto changes are minimal and additive.** `garbage_collect` has the right signature already; we just write the body. `sweep_stale_tempfiles` is a new classmethod, also small. Both go in `popoto/fields/embedding_field.py` next to the existing `on_delete`.
-- **Source of truth for "live" is the Redis class set `<ModelName>:_all`**, not the `_index.json`. The index is a derived cache that is also being reconciled. Walking against the Redis set means we tolerate index corruption.
+- **Source of truth for "live" is the Redis class set `<ModelName>:_all`**, not `_index.json`. The index is a derived cache. We compute `expected_keep` directly from the Redis set via SHA-256 hashing — see Filename Scheme above. `_index.json` is reconciled separately by removing entries whose filename is not in `expected_keep`, but it is never trusted as a source of truth.
 - **Reading Redis from inside Popoto**: `EmbeddingField.garbage_collect` already takes `model_class`; we use `POPOTO_REDIS_DB.smembers(f"{model_class.__name__}:_all")` which is the same access pattern used by `_count_orphans` in this repo.
 - **Concurrency safety**: a parallel write that creates a new `.npy` while the sweep is running is safe — the sweep snapshots the directory listing at the start, and any new file appearing after that snapshot is not visited. The only hazard is deleting a file just as another process re-creates it; `os.unlink` with `FileNotFoundError` swallow handles the inverse race.
+- **Mtime guard is 5 minutes (300 seconds), not 60 seconds.** The save path order in `embedding_field.py::on_save` is: atomic `os.rename` of the `.npy` (line 291) → `_read_index → mutate → _write_index` (line 300-302) → Redis `hset` of dimension count (line 327-331). Between rename and the Redis class-set update, the file exists on disk but is in NEITHER `_index.json` (briefly) NOR `Memory:_all`. Each save also calls Ollama (network round-trip; typically <5s but pathologically up to ~30s on retry). 60s is too tight for retried saves; 5 minutes covers timeout/retry pathologies. The mtime guard is the **only** real race protection; checking BOTH `_index.json` AND `Memory:_all` reduces false positives but cannot eliminate the rename-first race window (C1).
 - **Dry-run is the default for the reflection.** `EMBEDDING_ORPHAN_SWEEP_APPLY=true` env var (matching the existing `MEMORY_DECAY_PRUNE_APPLY` pattern in `memory_management.py`) gates actual deletion. This matches the established prevention-over-cleanup pattern in this codebase.
 - **One-shot script also defaults to dry-run.** This is the operator's deliberate first run; `--apply` only after dry-run output is reviewed.
 - **Tempfile sweep cutoff is 1 hour.** Atomic writes complete in milliseconds. A 1-hour cutoff is conservative — anything older is unambiguously a leak.
 - **The `_has_embedding_field()` skip in `popoto_index_cleanup._get_all_models()` stays.** That skip exists because `rebuild_indexes()` would re-trigger Ollama embed calls. Our new sweep does NOT call `rebuild_indexes`; it only deletes orphans. So we add Memory back via a dedicated path, not by removing the skip.
+- **Popoto version coordination (C4).** This repo pins `popoto>=1.5.0` (`pyproject.toml:17`) and the live install is from PyPI (`/Users/tomcounsell/src/ai/.venv/lib/python3.14/site-packages/popoto/`), NOT an editable install of `~/src/popoto`. The new `garbage_collect` body must therefore (a) be cut into a Popoto release (bump to 1.6.0), (b) bump this repo's pin to `popoto>=1.6.0`, and (c) the new reflection must defensively detect the stub via `"Future enhancement" in (EmbeddingField.garbage_collect.__doc__ or "")` and short-circuit with a clear warning. This guard means staged rollout (Popoto release first, ai/ pin bump second) doesn't crash machines that haven't pulled yet.
 
 ## Failure Path Test Strategy
 
@@ -202,7 +214,7 @@ Memory created → on_save writes .npy + index entry → Memory deleted → on_d
 - [ ] Empty embedding directory: `garbage_collect` returns 0, no exceptions
 - [ ] Empty `_index.json`: same
 - [ ] No live Memory records: `garbage_collect` removes ALL files. Test asserts behavior is correct (nothing in Redis means nothing to keep).
-- [ ] Missing `_index.json` (legacy install): `garbage_collect` falls back to hex-decoding filenames, same as `load_embeddings` does today. Test exercises this path.
+- [ ] Missing `_index.json` (fresh install): `garbage_collect` ignores the index entirely and reconciles disk against `expected_keep` derived from Redis. Test exercises this path. (Note: filenames are SHA-256 hashes of Redis keys — no hex-decoding fallback exists. Pre-migration legacy hex files on disk are treated as orphans and removed.)
 
 ### Error State Rendering
 

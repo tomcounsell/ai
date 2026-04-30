@@ -41,7 +41,7 @@ The query string appears in zero records. The CLI returns 5 unrelated records an
 - `.claude/hooks/hook_utils/memory_bridge.py:352` — recall path. NOTE: the hook bridge has been refactored since the issue was filed. The actual `retrieve_memories()` call now lives in `_recall_with_query()` at line 352, which is invoked from BOTH `recall()` (line 489) and `prefetch()` (line 608). Both paths must opt into the threshold.
 
 **Cited sibling issues/PRs re-checked:**
-- #1212 (corpus pollution from extraction parser bugs) — still OPEN, not blocking. The two fixes are independent and complementary as the issue states.
+- issue 1212 (corpus pollution from extraction parser bugs) — still OPEN, not blocking. The two fixes are independent and complementary as the issue states.
 - PR #604 (original BM25+RRF fusion) — merged 2026-03-31. PR body explicitly states the design intent: "where a precisely relevant older memory can now outrank a tangentially related but recently accessed one." This resolves the Open Question — design intent is **only-relevant**, not "always surface something."
 - PR #1013 (added embedding as 4th signal) — merged 2026-04-16. Already drops negative embedding similarities (`s > 0` at line 227), but this only helps when embedding signal is present and only filters that one signal's negatives — not the fused result.
 
@@ -50,7 +50,7 @@ The query string appears in zero records. The CLI returns 5 unrelated records an
 
 **Active plans in `docs/plans/` overlapping this area:**
 - `memory_embedding_orphan_cleanup.md` — touches embedding orphans, NOT recall ranking. No overlap.
-- `memory-extraction-shrapnel-fix.md` — corpus cleanup (#1212), distinct from threshold gating. No overlap.
+- `memory-extraction-shrapnel-fix.md` — corpus cleanup (issue 1212), distinct from threshold gating. No overlap.
 
 **Notes:** The Recon Summary's correction stands: there are THREE paths into `retrieve_memories` (CLI, SDK multi-query, hook bridge). The hook bridge's `_recall_with_query` is shared by `recall()` and `prefetch()`, so threading the threshold through `_recall_with_query` covers both call sites in one change.
 
@@ -59,7 +59,7 @@ The query string appears in zero records. The CLI returns 5 unrelated records an
 - **PR #604** (merged 2026-03-31): "Add BM25+RRF fusion retrieval, replace ContextAssembler" — the original recall pipeline. PR body confirms relevance-driven design intent. Did NOT add a min-score gate — that gap is what this plan addresses.
 - **PR #1013** (merged 2026-04-16): "feat(#965): add vector-similarity as fourth RRF signal on Memory" — added the embedding signal with `s > 0` filter at retrieval time. Sets precedent for filtering low-quality results inside the retrieval pipeline.
 - **Issue #586** (closed 2026-03-30): "Update memory agent integration: metadata-aware recall, retrieval recipes" — added category-weighted re-ranking. Established the pattern of post-fusion adjustments to RRF results.
-- **Issue #1212** (open): "Memory extraction stores JSON shrapnel and refusal prose as observations" — corpus pollution. Complementary fix; this plan is independent.
+- **Issue issue 1212** (open): "Memory extraction stores JSON shrapnel and refusal prose as observations" — corpus pollution. Complementary fix; this plan is independent.
 
 No prior issues or PRs attempted to add a relevance threshold to RRF. This is greenfield work on top of an existing pipeline.
 
@@ -257,7 +257,7 @@ Recall in Claude Code hooks (gate ON):
 
 - **Implementing autocut score-gap detection**: tempting because it adapts to corpus shape, but harder to calibrate and reason about. Defer to a v2 if the fixed threshold proves too rigid.
 - **Re-architecting the four-signal RRF design itself**: explicitly out of scope per the issue. Don't touch the signals or fusion math beyond the threshold.
-- **Bulk-pruning the existing junk corpus**: that's #1212. Stay focused — threshold filtering and corpus cleanup are complementary; this plan only does the former.
+- **Bulk-pruning the existing junk corpus**: that's issue 1212. Stay focused — threshold filtering and corpus cleanup are complementary; this plan only does the former.
 - **Adding per-signal min-score gates** (e.g., "BM25 must score above X, embedding must score above Y"): more configuration surface, harder to tune, easy to get wrong. The fused-score gate is sufficient for the issue's acceptance criteria.
 - **Auto-tuning the threshold based on corpus size**: tempting because `1/(k+N/2)` scales with N, but reading the corpus size on every recall adds Redis round-trips. The fixed `1/(k+50)` floor is good enough for the corpus sizes this system sees (50-1000 records).
 - **Calibrating against a held-out evaluation set**: would be ideal but requires hand-labeling relevance, which is a separate effort. Use the spike-1 math + the live nonsense-query repro as the empirical anchor.
@@ -303,7 +303,7 @@ No race conditions identified — all operations are synchronous reads from Redi
 ## No-Gos (Out of Scope)
 
 - Changing the four-signal RRF design itself (separate effort, would need its own plan).
-- Pruning the existing junk corpus — that's #1212 and is independent.
+- Pruning the existing junk corpus — that's issue 1212 and is independent.
 - Adding per-signal score thresholds (BM25-only floor, embedding-only floor, etc.) — the fused gate is sufficient.
 - Implementing autocut / dynamic gap detection — deferred to a v2 if the fixed threshold proves rigid.
 - Auto-tuning the threshold based on corpus size at runtime — fixed value is sufficient for current scale.
