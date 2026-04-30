@@ -14,6 +14,15 @@ from bridge.utc import utc_now
 from tools.valor_telegram import format_timestamp, parse_since, resolve_chat
 
 
+@pytest.fixture(autouse=True)
+def _bypass_promise_gate(monkeypatch):
+    """Default-mock the promise gate so existing tests do not call the LLM."""
+    monkeypatch.setattr(
+        "bridge.promise_gate.cli_check_or_exit",
+        lambda text, transport, session_id: None,
+    )
+
+
 class TestParseSince:
     """Test relative time parsing."""
 
@@ -1391,3 +1400,23 @@ class TestFormatRelativeAge:
         from tools.valor_telegram import _format_relative_age
 
         assert _format_relative_age("not a timestamp") == "never"
+
+
+class TestValorTelegramPromiseGate:
+    """Promise gate integration (cycle-2 B-NEW-2: no --no-promise-gate flag)."""
+
+    def test_send_help_does_not_mention_no_promise_gate(self):
+        """Cycle-2 B-NEW-2: ``valor-telegram send --help`` must not advertise the bypass."""
+        from io import StringIO
+
+        with patch("sys.argv", ["valor-telegram", "send", "--help"]):
+            from tools.valor_telegram import main
+
+            buf = StringIO()
+            with patch("sys.stdout", buf), pytest.raises(SystemExit):
+                main()
+            help_output = buf.getvalue()
+
+        assert "--no-promise-gate" not in help_output
+        assert "VALOR_OPERATOR_MODE" not in help_output
+        assert "PROMISE_GATE_ENABLED" not in help_output

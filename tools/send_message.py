@@ -116,6 +116,11 @@ def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
         except Exception:
             pass
 
+    # Promise gate — see docs/features/promise-gate.md (polymorphic transport).
+    from bridge.promise_gate import cli_check_or_exit
+
+    cli_check_or_exit(text, transport="polymorphic", session_id=session_id)
+
     payload = {
         "chat_id": chat_id,
         "reply_to": int(reply_to) if reply_to else None,
@@ -166,6 +171,11 @@ def _send_via_email(text: str) -> None:
 
     in_reply_to = os.environ.get("EMAIL_IN_REPLY_TO") or None
     subject = os.environ.get("EMAIL_SUBJECT") or "(no subject)"
+
+    # Promise gate — see docs/features/promise-gate.md
+    from bridge.promise_gate import cli_check_or_exit
+
+    cli_check_or_exit(text, transport="email", session_id=session_id)
 
     payload = {
         "session_id": session_id,

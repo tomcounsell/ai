@@ -20,6 +20,15 @@ import redis
 from tools.valor_email import _build_session_id, _normalize_msgid, cmd_read, cmd_send, cmd_threads
 
 
+@pytest.fixture(autouse=True)
+def _bypass_promise_gate(monkeypatch):
+    """Default-mock the promise gate so existing tests do not call the LLM."""
+    monkeypatch.setattr(
+        "bridge.promise_gate.cli_check_or_exit",
+        lambda text, transport, session_id: None,
+    )
+
+
 @pytest.fixture
 def r(monkeypatch, redis_test_url):
     monkeypatch.setenv("REDIS_URL", redis_test_url)
@@ -62,7 +71,10 @@ class TestBuildSessionId:
 class TestCmdSend:
     def _args(self, **overrides):
         defaults = {
-            "to": "alice@example.com",
+            # ``--to`` uses argparse ``action="append"``, so the runtime
+            # shape is ``list[str]`` (each entry may itself be a comma-
+            # separated string flattened by cmd_send).
+            "to": ["alice@example.com"],
             "subject": None,
             "message": "Hello",
             "file": None,
@@ -87,7 +99,7 @@ class TestCmdSend:
         assert len(keys) == 1
         raw = r.lpop(keys[0])
         payload = json.loads(raw)
-        assert payload["to"] == "alice@example.com"
+        assert payload["to"] == ["alice@example.com"]
         assert payload["subject"] == "Re: foo"
         assert payload["body"] == "Body!"
         assert payload["attachments"] == []
@@ -246,3 +258,25 @@ class TestCmdThreads:
         out = capsys.readouterr().out
         assert "Subject" in out
         assert " 3 " in out
+
+
+class TestValorEmailPromiseGate:
+    """Promise gate integration (cycle-2 B-NEW-2: no --no-promise-gate flag)."""
+
+    def test_send_help_does_not_mention_no_promise_gate(self):
+        """Cycle-2 B-NEW-2: ``valor-email send --help`` must not advertise the bypass."""
+        import sys as _sys
+        from io import StringIO
+        from unittest.mock import patch
+
+        with patch.object(_sys, "argv", ["valor-email", "send", "--help"]):
+            from tools.valor_email import main
+
+            buf = StringIO()
+            with patch.object(_sys, "stdout", buf), pytest.raises(SystemExit):
+                main()
+            help_output = buf.getvalue()
+
+        assert "--no-promise-gate" not in help_output
+        assert "VALOR_OPERATOR_MODE" not in help_output
+        assert "PROMISE_GATE_ENABLED" not in help_output

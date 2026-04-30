@@ -141,6 +141,11 @@ def send_message(text: str, file_paths: list[str] | None = None) -> None:
         if len(text) > TELEGRAM_MAX_LENGTH:
             text = text[: TELEGRAM_MAX_LENGTH - 3] + "..."
 
+    # Promise gate — see docs/features/promise-gate.md
+    from bridge.promise_gate import cli_check_or_exit
+
+    cli_check_or_exit(text, transport="telegram", session_id=session_id)
+
     # Build queue entry
     payload = {
         "chat_id": chat_id,

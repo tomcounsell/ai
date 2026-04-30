@@ -761,6 +761,13 @@ def cmd_send(args: argparse.Namespace) -> int:
     # Build relay-compatible payload
     # Use synthetic session_id with cli- prefix to avoid collision with bridge session IDs
     session_id = f"cli-{int(time.time())}"
+
+    # Promise gate — see docs/features/promise-gate.md
+    # Synthetic cli-{epoch} session_id; gate routes to audit JSONL only,
+    # session_events emission is silently skipped on synthetic IDs.
+    from bridge.promise_gate import cli_check_or_exit
+
+    cli_check_or_exit(text, transport="telegram", session_id=session_id)
     reply_to = getattr(args, "reply_to", None)
 
     # Issue #1191: When invoked from inside an AgentSession, default reply_to to

@@ -12,6 +12,20 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _bypass_promise_gate(monkeypatch):
+    """Default-mock the promise gate to a no-op for existing CLI tests.
+
+    Pre-existing tests do not exercise empty-promise inputs; the gate
+    would otherwise call the Haiku LLM. Tests that exercise the gate
+    explicitly (``TestSendTelegramPromiseGate``) override this fixture.
+    """
+    monkeypatch.setattr(
+        "bridge.promise_gate.cli_check_or_exit",
+        lambda text, transport, session_id: None,
+    )
+
+
 class TestSendTelegramValidation:
     """Test input validation and environment variable checks."""
 
@@ -703,3 +717,55 @@ class TestSendTelegramEmoji:
         payload = json.loads(mock_redis.rpush.call_args[0][1])
         assert payload["type"] == "custom_emoji_message"
         assert payload["emoji"] == "\U0001f525"
+
+
+class TestSendTelegramPromiseGate:
+    """Promise gate integration (cycle-2 B-NEW-2: no --no-promise-gate flag)."""
+
+    def test_empty_promise_input_blocks_and_exits(self):
+        """Empty-promise text → cli_check_or_exit blocks → tool exits with code 1."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "real-session-abc",
+        }
+        mock_redis = MagicMock()
+
+        # Disable autouse bypass for this test by patching cli_check_or_exit
+        # to a function that exits like the real implementation when the
+        # gate would block.
+        def _real_block(text, transport, session_id):
+            import sys as _sys
+
+            _sys.stderr.write("Empty forward-deferral promise blocked by bridge/promise_gate.\n")
+            _sys.exit(1)
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+            patch("bridge.promise_gate.cli_check_or_exit", side_effect=_real_block),
+        ):
+            from tools.send_telegram import send_message
+
+            with pytest.raises(SystemExit) as exc_info:
+                send_message("I'll come back with thoughts")
+            assert exc_info.value.code == 1
+
+        # Outbox write must NOT have been called.
+        mock_redis.rpush.assert_not_called()
+
+    def test_help_does_not_mention_no_promise_gate(self):
+        """Cycle-2 B-NEW-2: --help output must NOT advertise --no-promise-gate."""
+        with patch("sys.argv", ["send_telegram.py", "--help"]):
+            from io import StringIO
+
+            from tools.send_telegram import main
+
+            buf = StringIO()
+            with patch("sys.stdout", buf), pytest.raises(SystemExit):
+                main()
+            help_output = buf.getvalue()
+
+        assert "--no-promise-gate" not in help_output
+        assert "VALOR_OPERATOR_MODE" not in help_output
+        assert "PROMISE_GATE_ENABLED" not in help_output
