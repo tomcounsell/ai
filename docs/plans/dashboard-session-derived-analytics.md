@@ -4,6 +4,7 @@ type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-05-01
+revised: 2026-05-01
 tracking: https://github.com/tomcounsell/ai/issues/1245
 last_comment_id:
 ---
@@ -32,8 +33,12 @@ exclusively — the SDK emit site is unreachable in production.
 - Single source of truth: AgentSession fields (`total_cost_usd`, `turn_count`) are the only ledger
   for session-attributed sums
 - Dashboard derives cost/turn analytics by querying AgentSession over time windows
-- `turn_count` and `tool_call_count` on AgentSession advance after every harness call
-- Atomic increments eliminate the read-modify-write race on `total_cost_usd` and related fields
+- `turn_count` and `tool_call_count` on AgentSession are populated after every harness call —
+  `num_turns` arrives final (not delta) from the harness `result` event, so a one-shot field
+  assignment via Popoto suffices (no atomic increment helper required for these fields)
+- `total_cost_usd` and token totals continue to flow through the existing
+  `accumulate_session_tokens` helper (out of scope to rewrite — its read-modify-write race is a
+  separate concern, not a blocker for this fix)
 
 ## Freshness Check
 
@@ -56,6 +61,15 @@ exclusively — the SDK emit site is unreachable in production.
 - `models/agent_session.py:130` — turn_count / tool_call_count fields — **still at lines 175-176**
 - `models/agent_session.py:141` — `started_at` / `completed_at` are plain `DatetimeField` not
   `SortedField` — **confirmed at lines 152-154**
+- `models/agent_session.py:459-465, 710-711` — Popoto auto-converts float assignments to
+  `DatetimeField` into `datetime` objects via the `__init__` shim and `__setattr__` hook —
+  **confirmed; this means `session.completed_at = time.time()` already passes through Popoto's
+  conversion path**
+- `agent/sdk_client.py:2351-2548` — `_run_harness_subprocess` only handles `event_type ==
+  "result"` and `event_type == "stream_event"` today; **NO `assistant`-event handler exists**
+- `agent/health_check.py:288-298` — confirms the harness DOES emit top-level
+  `{"type": "assistant", "message": {"content": [{"type": "tool_use", ...}, ...]}}` events
+  (separate code path that already parses this shape from log lines)
 
 **Cited sibling issues/PRs re-checked:**
 
@@ -99,55 +113,145 @@ above commits; all claims still hold against the current main HEAD.
 ## Research
 
 No relevant external findings — all concerns are internal to this codebase. The technologies
-involved (Redis HINCRBYFLOAT, Popoto ORM, Python asyncio subprocess) are mature and well-understood.
+involved (Redis ZADD/ZRANGEBYSCORE, Popoto ORM, Python asyncio subprocess) are mature and
+well-understood.
 
 ## Spike Results
 
-No spikes needed. The issue's Recon Summary is thorough and all claims verified during the
-freshness check. The three planning decisions delegated by the issue are resolved below.
+A spike was run before plan finalization. The findings below are empirical — they REPLACE the
+earlier planning assumptions about a `message_stop` turn-counter subsystem and an atomic
+increment helper.
 
-**Planning decision 1: Indexing strategy for time-range queries on AgentSession**
+**Finding 1: `num_turns` IS in the harness `result` event**
 
-Recommendation from issue: **Option B** — maintain a Redis sorted set keyed by completion
-timestamp (`analytics:sessions:completed_at`), updated on the same write path that sets
-`completed_at` in `finalize_session()`.
+Sample shape from a real harness `result` event:
 
-Rationale: `completed_at` is a plain `DatetimeField(null=True)` and cannot become a `SortedField`
-without a sentinel default and a data migration. Option B is purely additive: a `ZADD` call in
-`finalize_session()` writes `{session.db_key.redis_key: completed_at_ts}`. The analytics query
-does a `ZRANGEBYSCORE(analytics:sessions:completed_at, start_ts, end_ts)` and resolves each key
-to its AgentSession for sum aggregation. This is the same pattern already used in
+```json
+{
+  "type": "result",
+  "subtype": "success",
+  "num_turns": 2,
+  "duration_ms": 4838,
+  "total_cost_usd": 0.128,
+  "stop_reason": "end_turn",
+  "modelUsage": { ... }
+}
+```
+
+Available fields: `num_turns`, `duration_ms`, `total_cost_usd`, `stop_reason`, `modelUsage`. The
+existing `result`-event handler at `agent/sdk_client.py:2472-2500` already extracts `result`,
+`session_id`, `usage`, `total_cost_usd` but stops short of these others. **Adding them is a
+one-line change per field. No `message_stop` accumulation, no fictional event subsystem.**
+
+**Finding 2: `assistant` events carry tool_use blocks; NO existing handler exists**
+
+Confirmed by reading `agent/health_check.py:288-298` (which parses logged stream lines): the
+real harness emits top-level `{"type": "assistant", "message": {"content": [{"type":
+"tool_use", "name": ...}, ...]}}` events. Each `content_blocks[].type == "tool_use"` entry is
+one tool invocation.
+
+**Important:** `_run_harness_subprocess` today handles ONLY `event_type == "result"` and
+`event_type == "stream_event"`. There is **no existing handler for `event_type ==
+"assistant"`** — the implementation must ADD a new branch, not extend an existing one.
+
+**Two valid counting paths exist:**
+
+- **Path A (chosen):** Count `tool_use` blocks in the top-level `assistant` event's
+  `message.content[]` array — fully assembled, no streaming reconstruction:
+  ```python
+  if event_type == "assistant":
+      message = data.get("message", {}) or {}
+      content_blocks = message.get("content", []) or []
+      _tool_call_count += sum(1 for b in content_blocks if b.get("type") == "tool_use")
+      continue
+  ```
+- **Path B (alternative):** Count `content_block_start` stream events where
+  `content_block.type == "tool_use"`. Also valid; same arithmetic outcome.
+
+Path A wins on simplicity (no streaming-state reconstruction; one accumulation site) and is
+adopted in the Step by Step Tasks below. Path B remains as a fallback if the `assistant` shape
+drifts.
+
+**Finding 3 (resolved): Indexing strategy for time-range queries on AgentSession**
+
+Confirmed: **Option B** — maintain a Redis sorted set keyed by completion timestamp
+(`analytics:sessions:completed_at`), updated on the same write path that sets `completed_at`
+in `finalize_session()`. `completed_at` is a plain `DatetimeField(null=True)` and cannot
+become a `SortedField` without a sentinel default and a data migration. Option B is purely
+additive: a `ZADD` call in `finalize_session()` writes
+`{session.db_key.redis_key: ts}`. The analytics query does a
+`ZRANGEBYSCORE(analytics:sessions:completed_at, start_ts, +inf)` and resolves each key to
+its AgentSession for sum aggregation. Same pattern already used in
 `tools/email_history/__init__.py`.
 
-**Planning decision 2: `tool_call_count` increment mechanism**
+**Finding 4 (resolved): `completed_at` field type and ZADD score semantics**
 
-The harness `stream_event` events include `content_block_start` items. When
-`event.get("type") == "content_block_start"` and the `content_block` has `type == "tool_use"`,
-that marks a new tool invocation. The harness subprocess loop in `_run_harness_subprocess` can
-count these and return `tool_call_count` as a 7th element in the return tuple. This is cheap
-(no extra subprocess spawning), accurate (fires once per tool call), and available from both
-the primary and fallback harness call sites.
+Popoto's AgentSession at `models/agent_session.py:459-465` and `:710-711` **auto-converts**
+float values assigned to `DatetimeField` into `datetime` objects. The existing line at
+`models/session_lifecycle.py:390` already does `session.completed_at = time.time()` (a
+float), and Popoto auto-converts it to datetime on write. **No model field change is
+needed.** The model field continues to hold a datetime when read back.
 
-Alternatively, we can use the `result` event's `num_turns` field (already extracted from the
-harness `result` event for the SDK-path `record_turn_count` call). The harness `result` event
-does NOT currently emit `num_turns` — the `num_turns` field exists only in the SDK's
-`ResultMessage` object. So turn count must be counted differently.
+What's NEW is an additive ZADD using a **locally-computed numeric `ts`** as the score. The
+ZADD score is the locally-computed float — **not** the model field value. The score and the
+model field are independent: the analytics query uses the sorted set (numeric score), it
+does NOT read `completed_at` from the AgentSession.
 
-**Simplest viable approach for both counters:**
-- Count tool invocations from `content_block_start` events with `type == "tool_use"` inside
-  `_run_harness_subprocess` — return as 7th element `tool_calls`
-- Count assistant-turn boundaries from `content_block_stop` events or, simpler, count the number
-  of `message_stop` events which correspond to one assistant turn each. Each `message_stop` in
-  the stream = one turn. Return as 8th element `num_turns` (same semantics as SDK `num_turns`).
-- Caller in `get_response_via_harness` uses these to increment `session.turn_count` and
-  `session.tool_call_count` via the same atomic helper used for token fields.
+**Original critique B1 fix:** the ZADD score must be a numeric float, not a `datetime` object.
+This is achieved by always passing the locally-computed `ts = time.time()` to ZADD; Popoto's
+auto-conversion of the model field is irrelevant to the index. The success criterion is NOT
+"isinstance(session.completed_at, float)" — that would fail because of Popoto auto-conversion.
 
-**Planning decision 3: Atomic increment helper API**
+**Finding 5 (resolved): Where does the AgentSession write happen?**
 
-Put it on the AgentSession class as a free function in `agent/sdk_client.py` (co-located with
-`accumulate_session_tokens`), named `atomic_increment_session_field`. This keeps the pattern
-consistent with the existing helper and avoids a new module. It uses `HINCRBYFLOAT` for float
-fields and `HINCRBY` for int fields, bypassing the Popoto read-modify-write cycle entirely.
+`session_id_from_harness` (returned from `_run_harness_subprocess`) is the **Claude Code
+transcript UUID**, NOT the AgentSession `session_id`. The AgentSession `session_id` is a
+Telegram-derived identifier (e.g., `tg_project_chatid_msgid`), stored as an `IndexedField`
+on the model. They are mapped via `_store_claude_session_uuid()` after each subprocess.
+Inside `_run_harness_subprocess`, only the Claude UUID is known.
+
+Filtering AgentSession by Claude UUID (`AgentSession.query.filter(session_id=
+session_id_from_harness).first()`) would silently return nothing because `session_id` holds
+the Telegram-derived ID, not the Claude UUID.
+
+**Decision:** persist `turn_count` and `tool_call_count` in `get_response_via_harness`
+(NOT in `_run_harness_subprocess`). `get_response_via_harness` already has the AgentSession
+`session_id` in scope as a function parameter — same identifier used for the existing
+`accumulate_session_tokens(session_id, ...)` call at line 2304. Place the new write block
+immediately after that call. This is symmetric with the tokens path: same scope, same
+identifier, same fail-quiet pattern.
+
+**Finding 6 (resolved): Return-shape change from `_run_harness_subprocess`**
+
+The earlier critique flagged a 6→8-tuple change as breaking call sites. Reality check shows
+there are exactly **three production call sites** (lines 2204, 2233, 2280 in
+`get_response_via_harness`, all in the same file) PLUS **at least 25 references across 5
+test files** that mock `_run_harness_subprocess` and unpack a 6-tuple — including
+`tests/unit/test_harness_token_capture.py::test_binary_not_found_returns_six_tuple` which
+literally asserts `len(out) == 6`. The original critique B3 ("zero existing tests reference
+the 6-tuple arity") was wrong — the tests DO pin the arity.
+
+**Decision:** swap the positional return tuple for a `HarnessResult` dataclass with named
+fields. This is a bounded refactor — three production call sites + 5 test files, all
+mechanical updates from `(...) = await ...` to `result = await ...; result.field`. The
+dataclass wins on readability for future fields (`duration_ms`, `stop_reason`,
+`model_usage`). **Fallback:** extend to 8-tuple if dataclass switch is too invasive — same
+set of files updated, mechanical change. Pick one and apply consistently.
+
+**Decision (post-spike): Drop the atomic-increment helper**
+
+Because `num_turns` and `tool_call_count` arrive as final values per harness call (not deltas
+accumulated over external events), a single Popoto field assignment via the existing write
+path is sufficient. There is no concurrent-writer scenario for these fields within a single
+session run, and no read-modify-write race that needs a Redis-level atomic. The
+`atomic_increment_session_field` helper proposed in earlier drafts is therefore **deleted**
+from this plan.
+
+**`accumulate_session_tokens` is left untouched** — its read-modify-write race on
+`total_cost_usd` and token totals is a real but separate issue, **out of scope** for this
+fix. A future plan can revisit it. The original critique B4 (atomic helper would violate the
+Popoto raw-Redis rule by writing `HINCRBYFLOAT`/`HINCRBY` directly against Popoto-managed
+hashes) is resolved by deletion.
 
 ## Data Flow
 
@@ -160,37 +264,50 @@ fields and `HINCRBY` for int fields, bypassing the Popoto read-modify-write cycl
 
 **Desired path after fix:**
 
-**Turn/tool counting:**
-1. Harness subprocess runs; `_run_harness_subprocess` counts `message_stop` events (turns) and
-   `content_block_start` with `type=="tool_use"` (tool calls)
-2. Returns 8-tuple: `(result_text, session_id, returncode, usage, cost_usd, stderr, num_turns, tool_calls)`
-3. `get_response_via_harness` calls `atomic_increment_session_field(session_id, "turn_count", num_turns)`
-   and `atomic_increment_session_field(session_id, "tool_call_count", tool_calls)`
+**Turn/tool counting (no atomic helper, persist in `get_response_via_harness`):**
+1. Harness subprocess runs. Inside the existing `result`-event handler at
+   `agent/sdk_client.py:2472-2500`, extract `num_turns`, `duration_ms`, `stop_reason`, and
+   `modelUsage` directly from the event payload alongside the already-extracted `result`,
+   `session_id`, `usage`, and `total_cost_usd`.
+2. Inside a NEW `assistant`-event handler branch (added parallel to the existing `result` and
+   `stream_event` branches), count tool_use blocks in `data["message"]["content"]` and
+   accumulate into a local `_tool_call_count`.
+3. After the subprocess loop exits, `_run_harness_subprocess` returns a `HarnessResult`
+   dataclass (or 8-tuple, fallback) carrying the new `num_turns` and `tool_call_count`
+   fields alongside the existing six.
+4. `get_response_via_harness` (which has the AgentSession `session_id` in scope) writes
+   final values to AgentSession via the standard Popoto field-assign + save path,
+   immediately after the existing `accumulate_session_tokens(session_id, ...)` call.
 
 **Analytics aggregation:**
-1. `finalize_session()` writes `ZADD analytics:sessions:completed_at {completed_at_ts: redis_key}`
-2. `get_analytics_summary()` calls `zrangebyscore` for the time window → set of Redis keys
-3. Loads each AgentSession from Redis → sums `total_cost_usd` and `turn_count`
+1. `finalize_session()` computes `ts = time.time()` (numeric float). The existing line
+   `session.completed_at = ts` is unchanged — Popoto auto-converts to datetime on write.
+   New: `ZADD analytics:sessions:completed_at {session.db_key.redis_key: ts}` using the
+   locally-computed numeric `ts` as the score.
+2. `get_analytics_summary()` calls `ZRANGEBYSCORE` for the time window → set of Redis keys
+3. Pipeline-fetches `total_cost_usd` and `turn_count` from each AgentSession hash and sums
 4. Returns correct non-zero values
 
-**Atomic increment path (replacing read-modify-write):**
-1. `accumulate_session_tokens` replaced by `atomic_increment_session_field` calls for each field
-2. Uses `HINCRBYFLOAT` for `total_cost_usd` / float fields; `HINCRBY` for int fields
-3. No round-trip read, no lost-update race
+**No atomic-increment work.** `accumulate_session_tokens` is untouched. `total_cost_usd` and
+token totals continue to flow through the existing helper. The proposed
+`atomic_increment_session_field` is deleted from this plan.
 
 ## Architectural Impact
 
 - **New dependencies**: None — uses existing `POPOTO_REDIS_DB` and Popoto patterns
-- **Interface changes**: `_run_harness_subprocess` return tuple grows from 6-tuple to 8-tuple;
-  all three call sites in `get_response_via_harness` must be updated. `accumulate_session_tokens`
-  gains integer-field variants or is replaced by the new helper.
-- **Coupling**: `finalize_session()` in `models/session_lifecycle.py` gains a Redis side-write.
-  `ui/data/analytics.py` gains a dependency on `models.agent_session.AgentSession` (currently
-  only depends on `analytics.query`).
+- **Interface changes**: `_run_harness_subprocess` return shape changes from 6-tuple to a
+  `HarnessResult` dataclass (or 8-tuple as fallback) carrying two new fields (`num_turns`,
+  `tool_call_count`). Three production call sites and 25+ test fixtures across 5 test files
+  update to the new shape. **`accumulate_session_tokens` is untouched.** No new atomic helper.
+- **Coupling**: `finalize_session()` in `models/session_lifecycle.py` gains a Redis side-write
+  (additive ZADD). `ui/data/analytics.py` gains a dependency on `models.agent_session.AgentSession`
+  (currently only depends on `analytics.query`). `get_response_via_harness` gains an import of
+  `AgentSession` and a new fail-quiet write block for `turn_count` / `tool_call_count`.
 - **Data ownership**: Session-attributed sums live exclusively on AgentSession. Analytics module
   retains ownership of counts (`session.started`, `session.completed`, `memory.*`).
 - **Reversibility**: Low-risk — the analytics query change is isolated. The sorted-set ZADD is
-  additive. Reverting means removing the ZADD and restoring the two `query_metric_total` calls.
+  additive. Reverting means removing the ZADD, restoring the two `query_metric_total` calls,
+  and reverting the dataclass to the 6-tuple.
 
 ## Appetite
 
@@ -199,7 +316,8 @@ fields and `HINCRBY` for int fields, bypassing the Popoto read-modify-write cycl
 **Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1 (confirm 8-tuple approach for `_run_harness_subprocess` is acceptable)
+- PM check-ins: 0 (spike resolved all open questions; dataclass return shape preferred,
+  8-tuple fallback acceptable)
 - Review rounds: 1
 
 ## Prerequisites
@@ -214,94 +332,207 @@ No prerequisites — this work has no external dependencies. Redis is already ru
 
 ### Key Elements
 
-- **Turn/tool event counter**: Count assistant turns (`message_stop` events) and tool invocations
-  (`content_block_start` with `type=="tool_use"`) inside `_run_harness_subprocess`
-- **8-tuple harness return**: Add `num_turns` and `tool_calls` as 7th and 8th elements of the
-  `_run_harness_subprocess` return tuple; update all three call sites
-- **Atomic increment helper**: `atomic_increment_session_field(session_id, field, delta)` — uses
-  `HINCRBYFLOAT` / `HINCRBY` directly on the AgentSession Redis hash. Replaces the read-modify-write
-  in `accumulate_session_tokens` and is used for `turn_count` / `tool_call_count` increments.
-- **`finalize_session` ZADD**: On `completed_at` write, also `ZADD analytics:sessions:completed_at`
-  so the analytics query has a time-indexed lookup surface
-- **Analytics re-aggregation**: `get_analytics_summary()` queries AgentSession via the sorted set
-  for the time window, sums `total_cost_usd` and `turn_count` directly from model fields
+- **`result`-event field extraction**: At `agent/sdk_client.py:2472-2500`, the existing handler
+  pulls `result`, `session_id`, `usage`, `total_cost_usd`. Add four more pulls: `num_turns`,
+  `duration_ms`, `stop_reason`, `modelUsage` from the same `data` dict.
+- **NEW `assistant`-event handler**: ADD a new `if event_type == "assistant":` branch (no such
+  handler exists today — only `result` and `stream_event` are handled). Accumulate
+  `len([b for b in data["message"]["content"] if b.get("type") == "tool_use"])` into a local
+  `_tool_call_count`. (Path A in Spike Results.)
+- **`HarnessResult` dataclass return**: Replace the 6-tuple positional return from
+  `_run_harness_subprocess` with a `HarnessResult` dataclass carrying the existing six fields
+  PLUS `num_turns` and `tool_call_count`. Three production call sites + 25+ test fixtures
+  update to attribute access. (8-tuple fallback if dataclass is too invasive.)
+- **AgentSession field write in `get_response_via_harness`**: Persist the new counters via
+  Popoto field-assign + save, immediately after the existing `accumulate_session_tokens`
+  call. Use the AgentSession `session_id` (already in scope as a parameter), NOT the Claude
+  UUID. **No atomic helper needed** — `num_turns` is final-not-delta, written once per call.
+- **`finalize_session` numeric ZADD**: Compute `ts = time.time()` (float). The existing line
+  `session.completed_at = time.time()` is unchanged (Popoto auto-converts to datetime). Add
+  an additive `ZADD analytics:sessions:completed_at {redis_key: ts}` using the locally-
+  computed numeric `ts` as the score (B1 fix — score is numeric float, not the model field).
+- **Analytics re-aggregation**: `get_analytics_summary()` queries AgentSession via the sorted
+  set for the time window, sums `total_cost_usd` and `turn_count` directly from model fields.
 - **Dead emit removal**: Delete `record_metric("session.cost_usd", ...)` and
-  `record_metric("session.turns", ...)` from `sdk_client.py`
+  `record_metric("session.turns", ...)` from `sdk_client.py` (`get_response_via_sdk` path).
 
 ### Flow
 
-Session runs → harness counts turns + tool calls → `get_response_via_harness` atomically
-increments `turn_count` and `tool_call_count` on AgentSession → session completes →
-`finalize_session` ZADDs completion ts → dashboard queries sorted set → sums AgentSession
-fields → returns correct non-zero analytics
+Session runs → harness `result` event yields `num_turns` directly → `_run_harness_subprocess`
+counts tool_use blocks from `assistant` events → returns `HarnessResult(...)` →
+`get_response_via_harness` writes final values to `session.turn_count` and
+`session.tool_call_count` via Popoto save → session completes → `finalize_session` writes
+`session.completed_at` (Popoto auto-converts to datetime) and ZADDs the numeric `ts` to the
+sorted set → dashboard queries sorted set → sums AgentSession fields → returns correct
+non-zero analytics.
 
 ### Technical Approach
 
-1. **`_run_harness_subprocess`**: Add two local counters in the event loop:
-   - `_turn_count = 0`: incremented on each `message_stop` stream event
-   - `_tool_call_count = 0`: incremented on each `content_block_start` where `content_block.type == "tool_use"`
-   Return tuple becomes 8-element. Update docstring.
-
-2. **All three `_run_harness_subprocess` call sites**: Change 6-tuple unpack to 8-tuple. The
-   `result_text`, `session_id_from_harness`, `returncode`, `usage`, `cost_usd`, `stderr_snippet`
-   positions are unchanged; `num_turns`, `tool_calls` are new positions 7 and 8.
-
-3. **`get_response_via_harness`** (post-subprocess block around line 2294):
-   After `accumulate_session_tokens`, add:
+1. **Define `HarnessResult` dataclass** at module scope in `agent/sdk_client.py`:
    ```python
-   if session_id and num_turns:
-       atomic_increment_session_field(session_id, "turn_count", num_turns)
-   if session_id and tool_calls:
-       atomic_increment_session_field(session_id, "tool_call_count", tool_calls)
+   from dataclasses import dataclass
+
+   @dataclass
+   class HarnessResult:
+       result_text: str | None
+       session_id_from_harness: str | None
+       returncode: int | None
+       usage: dict | None
+       cost_usd: float | None
+       stderr_snippet: str | None
+       num_turns: int = 0
+       tool_call_count: int = 0
    ```
+   (Fallback: extend the 6-tuple to an 8-tuple. Same set of files updated either way.)
 
-4. **`accumulate_session_tokens`**: Replace the read-modify-write `+=` pattern for all five fields
-   with `atomic_increment_session_field` calls. This fixes the race condition on `total_cost_usd`
-   and token totals — not just the new fields.
-
-5. **`atomic_increment_session_field(session_id, field, delta)`**: New function in `sdk_client.py`.
-   Looks up AgentSession by `session_id`, resolves the raw Redis hash key via `session.db_key`,
-   calls `HINCRBYFLOAT` or `HINCRBY` depending on whether the field is float or int. Fail-quiet.
-
-6. **`finalize_session` in `models/session_lifecycle.py`**: After `session.completed_at = time.time()`
-   at line 390, add best-effort ZADD:
+2. **Extend the `result`-event handler** at `agent/sdk_client.py:2472-2500`. The block already
+   pulls `result`, `session_id`, `usage`, `total_cost_usd` from `data`. Add:
    ```python
+   num_turns = int(data.get("num_turns") or 0)
+   duration_ms = int(data.get("duration_ms") or 0)
+   stop_reason = data.get("stop_reason")
+   model_usage = data.get("modelUsage")
+   ```
+   Initialize all four locals to safe defaults (`0`, `0`, `None`, `None`) at the top of
+   `_run_harness_subprocess` so they exist even on early exits.
+
+3. **ADD a new `assistant`-event handler branch** in `_run_harness_subprocess` (parallel to
+   the existing `result` and `stream_event` branches; place BEFORE `stream_event`):
+   ```python
+   if event_type == "assistant":
+       message = data.get("message", {}) or {}
+       content_blocks = message.get("content", []) or []
+       _tool_call_count += sum(1 for b in content_blocks if b.get("type") == "tool_use")
+       continue
+   ```
+   Initialize `_tool_call_count = 0` at the top of `_run_harness_subprocess`.
+   (Path A from Spike Results. Path B via `content_block_start` is a fallback.)
+
+4. **Update all three production return points** in `_run_harness_subprocess` (lines ~2540,
+   ~2546, ~2548) PLUS the binary-not-found path (~line 2419) to construct `HarnessResult(...)`
+   with the new fields. Update docstring to describe the new return type.
+
+5. **Update all three call sites in `get_response_via_harness`** (lines 2204, 2233, 2280) to
+   unpack via attribute access:
+   ```python
+   harness_result = await _run_harness_subprocess(...)
+   result_text = harness_result.result_text
+   session_id_from_harness = harness_result.session_id_from_harness
+   returncode = harness_result.returncode
+   usage = harness_result.usage
+   cost_usd = harness_result.cost_usd
+   stderr_snippet = harness_result.stderr_snippet
+   ```
+   (Or, with 8-tuple fallback: extend the 6-element unpack to 8.) Done at all three call sites.
+
+6. **AgentSession field write** in `get_response_via_harness`, immediately after the existing
+   `accumulate_session_tokens(session_id, ...)` call (around line 2304). Use the
+   AgentSession `session_id` parameter (Telegram-derived ID), **NOT** the Claude UUID:
+   ```python
+   if session_id and (harness_result.num_turns or harness_result.tool_call_count):
+       try:
+           from models.agent_session import AgentSession
+           session = AgentSession.query.filter(session_id=session_id).first()
+           if session is not None:
+               if harness_result.num_turns:
+                   session.turn_count = harness_result.num_turns
+               if harness_result.tool_call_count:
+                   session.tool_call_count = harness_result.tool_call_count
+               session.save()
+       except Exception as e:
+           logger.warning(
+               "Failed to persist turn_count/tool_call_count for session %s: %s",
+               session_id, e,
+           )
+   ```
+   This is a one-shot write per harness invocation; no read-modify-write race because
+   `num_turns` arrives final from the harness and is written once per session run.
+   `duration_ms`, `stop_reason`, `model_usage` are extracted but NOT persisted in this plan
+   (see Open Questions for follow-up).
+
+7. **`finalize_session` in `models/session_lifecycle.py:390`**: The existing line
+   `session.completed_at = time.time()` is **unchanged** (Popoto auto-converts the float to
+   datetime). Add an additive ZADD using a locally-computed numeric `ts`:
+   ```python
+   ts = time.time()
+   session.completed_at = ts          # Popoto auto-converts to datetime — unchanged behavior
+   session.save()                     # existing line
    try:
+       from popoto.redis_db import POPOTO_REDIS_DB
        POPOTO_REDIS_DB.zadd(
            "analytics:sessions:completed_at",
-           {session.db_key.redis_key: session.completed_at}
+           {session.db_key.redis_key: ts},      # numeric float as score (B1 fix)
        )
-   except Exception:
-       pass
+   except Exception as e:
+       logger.debug(
+           "[lifecycle] ZADD analytics:sessions:completed_at failed (non-fatal): %s", e
+       )
    ```
+   The ZADD score is the locally-computed `ts` — not the model field value. The score and
+   the model field need not stay equal across reads; the analytics query uses the sorted
+   set (numeric score), it does NOT read `completed_at` from the AgentSession. **No
+   field-type change is needed.**
 
-7. **`ui/data/analytics.py::get_analytics_summary()`**: Replace the two `query_metric_total` calls
-   with a new helper `_query_session_sums(days)` that:
-   - Calls `ZRANGEBYSCORE("analytics:sessions:completed_at", start_ts, "+inf")`
-   - Pipeline-fetches `total_cost_usd` and `turn_count` from each AgentSession hash
-   - Returns `(total_cost, total_turns)`
-   Session count metrics (`session.started`, `session.completed`) are unchanged — keep using
-   `query_metric_count`.
+8. **`ui/data/analytics.py::get_analytics_summary()`**: Replace the two `query_metric_total`
+   calls with a new helper `_query_session_sums(days)`:
+   ```python
+   def _query_session_sums(days: int) -> tuple[float, int]:
+       try:
+           from popoto.redis_db import POPOTO_REDIS_DB
+           if days <= 0:
+               return (0.0, 0)
+           start_ts = time.time() - days * 86400
+           member_keys = POPOTO_REDIS_DB.zrangebyscore(
+               "analytics:sessions:completed_at", start_ts, "+inf"
+           )
+           if not member_keys:
+               return (0.0, 0)
+           pipe = POPOTO_REDIS_DB.pipeline()
+           for k in member_keys:
+               pipe.hget(k, "total_cost_usd")
+               pipe.hget(k, "turn_count")
+           values = pipe.execute()
+           sum_cost = 0.0
+           sum_turns = 0
+           for i in range(0, len(values), 2):
+               cost_raw, turns_raw = values[i], values[i + 1]
+               try:
+                   if cost_raw is not None:
+                       sum_cost += float(cost_raw)
+                   if turns_raw is not None:
+                       sum_turns += int(turns_raw)
+               except (TypeError, ValueError):
+                   continue
+           return (sum_cost, sum_turns)
+       except Exception:
+           return (0.0, 0)
+   ```
+   Replace `query_metric_total("session.cost_usd", days=N)` and
+   `query_metric_total("session.turns", days=N)` calls with `_query_session_sums(N)` unpack.
+   Session count metrics (`session.started`, `session.completed`) are unchanged.
 
-8. **Remove dead emit sites**: Delete `record_metric("session.cost_usd", ...)` and
-   `record_metric("session.turns", ...)` from `get_response_via_sdk` in `sdk_client.py`.
+9. **Remove dead emit sites**: Delete `record_metric("session.cost_usd", ...)` and
+   `record_metric("session.turns", ...)` from `get_response_via_sdk` in `sdk_client.py`
+   (currently lines 1578-1580). Leave the surrounding `try/except` block intact if other
+   code uses it; otherwise remove the whole try block.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 
-- `atomic_increment_session_field`: wraps all Redis calls in `try/except` with `logger.warning` —
-  test that a Redis failure does NOT propagate to the caller (fail-quiet contract)
+- AgentSession field-write block (`session.turn_count = ...`, `session.tool_call_count = ...`,
+  `session.save()`): wrapped in `try/except` with `logger.warning` — test that a Popoto failure
+  does NOT propagate to the caller (fail-quiet contract — session output must still return)
 - `finalize_session` ZADD: best-effort block — test that a ZADD failure does NOT affect the
   terminal status write (status still saved)
 - `_query_session_sums`: test that a Redis failure returns `(0.0, 0)` rather than raising
-- `accumulate_session_tokens` atomic rewrite: existing fail-quiet contract must be preserved —
-  update existing tests to mock `HINCRBYFLOAT` raising and assert no exception propagates
 
 ### Empty/Invalid Input Handling
 
-- `atomic_increment_session_field(session_id=None, ...)` → no-op (same as `accumulate_session_tokens`)
-- `atomic_increment_session_field(..., delta=0)` → no-op (avoid unnecessary Redis round-trip)
+- `harness_result.num_turns == 0` and `harness_result.tool_call_count == 0` → field-write
+  block is skipped entirely (no Popoto round-trip)
+- `session_id` is None → field-write block is skipped
+- AgentSession lookup returns None → fail-quiet logging, no exception
 - `_query_session_sums(days=0)` → returns `(0.0, 0)` without querying Redis
 - Empty sorted set (`ZRANGEBYSCORE` returns `[]`) → `(0.0, 0)` without error
 
@@ -322,8 +553,53 @@ fields → returns correct non-zero analytics
   monkeypatches `_query_session_sums` to raise and asserts graceful zero fallback.
 - [ ] `tests/integration/test_analytics_dashboard.py::TestDashboardAnalytics::test_analytics_summary_returns_valid_structure`
   — UPDATE: still valid (schema test), no changes needed to assertion logic.
+- [ ] `tests/unit/test_harness_streaming.py:74-122` — DELETE/REPLACE: the fixture asserting a
+  top-level `event.type == "tool_use"` shape is fictitious (the spike confirmed the real
+  harness never emits that event shape). Replace with a fixture exercising the real
+  `assistant.message.content[]` path so the new tool_use accumulation has correct coverage.
 - [ ] Any test that asserts `record_metric("session.cost_usd", ...)` is called — DELETE: emit
   sites are being removed. Search: `grep -rn "session.cost_usd\|session.turns" tests/`
+- [ ] No tests reference an `atomic_increment_session_field` helper (none was ever shipped) —
+  zero impact from dropping that proposed helper.
+
+### Tests pinning the 6-tuple arity (must update for new return shape)
+
+There are at least **25 references across 5 test files** that mock `_run_harness_subprocess`
+and unpack its 6-tuple return. ALL must be updated to the new return shape (`HarnessResult`
+dataclass attributes OR 8-tuple positions, depending on the chosen approach). Inventory:
+
+- [ ] **`tests/unit/test_harness_token_capture.py::test_missing_usage_returns_none`** — UPDATE:
+  6-tuple unpack `_, _, _, usage_out, cost_out, _ = await _run_harness_subprocess(...)`.
+- [ ] **`tests/unit/test_harness_token_capture.py::test_binary_not_found_returns_six_tuple`** —
+  UPDATE/RENAME: explicitly asserts `len(out) == 6`. If dataclass-route, rename to
+  `test_binary_not_found_returns_harness_result` and assert `isinstance(out, HarnessResult)`.
+- [ ] **`tests/unit/test_harness_token_capture.py` (other cases)** — UPDATE per file inventory.
+- [ ] **`tests/unit/test_sdk_client.py`** — 10 mock sites. Each `fake_run` body returns a
+  tuple; update all to the new shape.
+- [ ] **`tests/unit/test_harness_thinking_block_sentinel.py`** — 5 mock sites.
+- [ ] **`tests/unit/test_sdk_client_image_sentinel.py`** — 5 mock sites.
+- [ ] **`tests/integration/test_harness_env_pm_injection.py`** — 3 mock sites.
+
+### New tests to add
+
+- [ ] **NEW**: `tests/unit/test_sdk_client_harness.py::test_turn_count_persisted` — assert that
+  after a fixtured harness run with `num_turns=2` in the result event, the AgentSession has
+  `turn_count == 2`.
+- [ ] **NEW**: `tests/unit/test_sdk_client_harness.py::test_tool_call_count_persisted` — assert
+  that after a fixtured harness run with N `assistant.message.content[].type == "tool_use"`
+  blocks, the AgentSession has `tool_call_count == N`.
+- [ ] **NEW**: `tests/unit/test_session_lifecycle.py::test_finalize_session_zadd` — assert that
+  `finalize_session()` writes `analytics:sessions:completed_at` with `session.db_key.redis_key`
+  as the member and a numeric float as the score.
+- [ ] **NEW**: `tests/unit/test_session_lifecycle.py::test_finalize_session_zadd_failure_is_quiet`
+  — assert that a ZADD failure does NOT prevent `session.status = "completed"` from being saved.
+- [ ] **NEW**: `tests/integration/test_analytics_dashboard.py::test_cost_today_from_agent_session`
+  — finalize a real test AgentSession with `total_cost_usd=1.23` and `turn_count=4`, then call
+  `get_analytics_summary()` and assert `cost_today_usd >= 1.23` and `turns_today >= 4`.
+- [ ] **NEW**: `tests/unit/test_analytics_query_session_sums.py::test_query_session_sums_empty`
+  — assert empty sorted set returns `(0.0, 0)` without raising.
+- [ ] **NEW**: `tests/unit/test_analytics_query_session_sums.py::test_query_session_sums_redis_failure`
+  — assert Redis failure returns `(0.0, 0)` without raising.
 
 ## Rabbit Holes
 
@@ -337,8 +613,8 @@ fields → returns correct non-zero analytics
   counts, not sums, and they work correctly.
 - **Real-time streaming analytics** (WebSocket, SSE): Not requested. Dashboard JSON poll is
   sufficient.
-- **Pipeline aggregation optimization** (Redis PIPELINE for bulk HGET): Premature. The sessions
-  count in typical windows is small enough that sequential reads are fine.
+- **Pipeline aggregation optimization** (Redis PIPELINE for bulk HGET): Already pipelined in
+  the `_query_session_sums` implementation above; no further optimization needed.
 
 ## Risks
 
@@ -348,54 +624,57 @@ in Redis, `ZRANGEBYSCORE` returns keys that can't be resolved to AgentSession ob
 **Mitigation:** Use `session.db_key.redis_key` (same key used by the defensive srem in
 `finalize_session` at line 403) — this is the canonical key string already used for index ops.
 
-### Risk 2: Harness event format variation
-**Impact:** If the harness's `stream_event` format differs across claude CLI versions (e.g.,
-`message_stop` event type renamed), `num_turns` and `tool_calls` counters stay at 0.
-**Mitigation:** Default to 0 when events aren't found — no regression from current behavior.
-Log a debug warning on unexpected event types during development.
+### Risk 2: Harness `result` event field absence
+**Impact:** If a future claude CLI version drops `num_turns` from the `result` event, the new
+`session.turn_count` write becomes a no-op and analytics regresses to 0 turns/day.
+**Mitigation:** `int(data.get("num_turns") or 0)` defaults to 0 — no exception. Document this
+as a known signal source dependency in the Verification table. The dashboard still renders;
+the value is just stale-zero. Log once at warning level if `num_turns` is missing on a
+`result` event in dev environments.
 
-### Risk 3: accumulate_session_tokens atomic rewrite
-**Impact:** If `HINCRBYFLOAT` on the AgentSession hash field keys is wrong (e.g., Popoto uses
-a different field key format inside the hash), token accounting breaks silently.
-**Mitigation:** Unit test that compares `HINCRBYFLOAT` key resolution against what Popoto reads
-back via `AgentSession.query.filter(session_id=...)`. Verify with a real session in integration.
+### Risk 3: `assistant`-event content-block shape drift
+**Impact:** If the `assistant` event's `message.content[]` shape changes (e.g., tool_use blocks
+move under a sub-key), `_tool_call_count` stays at 0.
+**Mitigation:** Same fail-soft default. Path B (`content_block_start`) remains as a fallback
+counting site if Path A drifts; spike confirmed both shapes appear in the real stream.
 
-### Risk 4: Three call sites for `_run_harness_subprocess`
-**Impact:** Missing one 6→8-tuple update causes an unpack error at runtime (test or production).
-**Mitigation:** The test suite exercises all three code paths; a missed unpack will fail tests.
-Use `grep -n "_run_harness_subprocess" agent/sdk_client.py` to enumerate all call sites before
-submitting.
+### Risk 4: Return-shape change reaches every call site
+**Impact:** Missing one return-shape update (production or test fixture) causes an unpack error
+at runtime or test failure.
+**Mitigation:** The Test Impact section enumerates every site (3 production + 25+ test fixtures
+across 5 files). The implementer should run `grep -rn "_run_harness_subprocess" agent/ tests/`
+to enumerate all sites before submitting and verify every one is updated. CI will fail loudly
+on any missed site (test failure or runtime ImportError).
 
 ## Race Conditions
 
-### Race 1: Concurrent `accumulate_session_tokens` calls
-**Location:** `agent/sdk_client.py:354-394`
-**Trigger:** Worker process and a Claude Code hook both call `accumulate_session_tokens` for the
-same session within a small window. Current read-modify-write does:
-`session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta` — reads stale value.
-**Data prerequisite:** AgentSession must exist in Redis before increment is called.
-**State prerequisite:** None.
-**Mitigation:** Atomic rewrite uses `HINCRBYFLOAT` which is atomic at the Redis level — no lost
-updates regardless of concurrent callers.
-
-### Race 2: ZADD in `finalize_session` vs. analytics query read
-**Location:** `models/session_lifecycle.py:390` (ZADD), `ui/data/analytics.py` (ZRANGEBYSCORE)
+### Race 1: ZADD in `finalize_session` vs. analytics query read
+**Location:** `models/session_lifecycle.py:~390` (ZADD), `ui/data/analytics.py` (ZRANGEBYSCORE)
 **Trigger:** Session finalizes just before a dashboard refresh; ZADD and ZRANGEBYSCORE are not
 transactional.
 **Data prerequisite:** ZADD must complete before ZRANGEBYSCORE reads the window.
 **State prerequisite:** None.
 **Mitigation:** Redis operations are serialized per connection; ZADD is atomic. Worst case: a
-session that completed in the same millisecond as the dashboard refresh doesn't appear until the
-next refresh cycle. This is acceptable — dashboard is a polling endpoint.
+session that completed in the same millisecond as the dashboard refresh doesn't appear until
+the next refresh cycle. This is acceptable — dashboard is a polling endpoint.
 
-### Race 3: `_run_harness_subprocess` turn/tool count vs. fallback paths
-**Location:** `agent/sdk_client.py` call sites 2 and 3 (image-dimension fallback, stale-UUID fallback)
-**Trigger:** A fallback path reruns `_run_harness_subprocess`; counters from the failed primary
-call should not be double-counted.
-**Data prerequisite:** Each fallback returns fresh counters from the new subprocess.
-**State prerequisite:** Counters are local to each `_run_harness_subprocess` invocation.
-**Mitigation:** Each call returns its own `num_turns`/`tool_calls` counters. Caller uses the
-final returned values (fallback overwrites primary). No double-counting.
+### Race 2: Fallback harness invocations and `turn_count` overwrite
+**Location:** `agent/sdk_client.py` — `_run_harness_subprocess` is called from primary plus
+fallback paths (image-dimension fallback, stale-UUID fallback)
+**Trigger:** A fallback path reruns `_run_harness_subprocess`. The new `session.turn_count =
+num_turns` write is an assignment (not an increment), so each invocation overwrites the prior
+value with its own final `num_turns`.
+**Data prerequisite:** Each invocation reads fresh `num_turns` from its own `result` event.
+**State prerequisite:** None — assignments are idempotent within a single harness call.
+**Mitigation:** Assignment semantics are exactly what we want: the final harness call's value
+wins. If a primary fails and a fallback succeeds, the fallback's `num_turns` is the truth. If
+both succeed (shouldn't happen), the later value wins. No double-counting.
+
+**Note (out of scope):** A separate read-modify-write race exists in
+`accumulate_session_tokens` (concurrent worker + hook calls for `total_cost_usd` and token
+totals). That race is real but **not addressed by this plan**. Critique blocker B4 (atomic
+helper vs. Popoto raw-Redis rule) is resolved by simply not introducing the helper. A future
+plan can revisit `accumulate_session_tokens` if the race becomes observable.
 
 ## No-Gos (Out of Scope)
 
@@ -406,6 +685,8 @@ final returned values (fallback overwrites primary). No double-counting.
 - Making `started_at` or `completed_at` a `SortedField` on AgentSession
 - Backend-swap abstraction or Agent Communication Protocol work
 - Parallel-run migration — cutover happens in one PR, no dual-write period
+- Atomic increment helper (`atomic_increment_session_field`) — `num_turns` is final-not-delta
+- Rewriting `accumulate_session_tokens` — its read-modify-write race is real but separate
 
 ## Update System
 
@@ -423,8 +704,8 @@ entry points, no bridge changes, no MCP servers affected.
 - [ ] Update `docs/features/dashboard.md` (if it exists) to note that cost/turn analytics are
   now derived from AgentSession fields, not the analytics ledger — add a note to the "analytics
   block" section explaining the data source change
-- [ ] Update inline docstrings on `accumulate_session_tokens` and `get_analytics_summary` to
-  reflect the new implementation
+- [ ] Update inline docstrings on `_run_harness_subprocess` (new return type) and
+  `get_analytics_summary` (new aggregation source) to reflect the new implementation
 - [ ] No new feature docs required — this is a bug fix, not a new capability
 
 ## Success Criteria
@@ -437,9 +718,12 @@ entry points, no bridge changes, no MCP servers affected.
   returns zero hits (worktrees excluded)
 - [ ] `grep -rn 'query_metric_total("session.cost_usd"\|query_metric_total("session.turns"' .`
   returns zero hits in production code (worktrees excluded)
-- [ ] No read-modify-write `+=` on `total_cost_usd`, `turn_count`, or any token total field in
-  `agent/` (replaced by atomic increment helper)
-- [ ] Atomic increment unit test: two concurrent calls produce the correct sum (no lost updates)
+- [ ] `grep -rn 'atomic_increment_session_field' .` returns zero hits — proposed helper was
+  deleted from this plan and must NOT appear in the final implementation
+- [ ] `_run_harness_subprocess` returns a `HarnessResult` dataclass (or extended 8-tuple) — all
+  three production call sites and 25+ test fixtures updated to match
+- [ ] ZADD score is a numeric float (verified by `ZRANGEBYSCORE analytics:sessions:completed_at
+  -inf +inf WITHSCORES` showing numeric scores)
 - [ ] `memory.recall_attempt`, `memory.extraction`, `session.started`, `session.completed`
   metrics continue to populate `dashboard.json.analytics` correctly
 - [ ] Tests pass: `pytest tests/ -x -q`
@@ -450,13 +734,13 @@ entry points, no bridge changes, no MCP servers affected.
 
 - **Builder (analytics-rewrite)**
   - Name: analytics-builder
-  - Role: Implement all code changes: harness counter, atomic helper, finalize ZADD, analytics query rewrite, dead emit removal
+  - Role: Implement all code changes: HarnessResult dataclass, harness counters, new assistant-event handler, AgentSession persist block, finalize ZADD, analytics query rewrite, dead emit removal, test-fixture updates
   - Agent Type: builder
   - Resume: true
 
 - **Validator (analytics-rewrite)**
   - Name: analytics-validator
-  - Role: Run tests, grep for dead emit sites, verify schema compatibility
+  - Role: Run tests, grep for dead emit sites, verify schema compatibility, run end-to-end smoke
   - Agent Type: validator
   - Resume: true
 
@@ -468,87 +752,176 @@ entry points, no bridge changes, no MCP servers affected.
 
 ## Step by Step Tasks
 
-### 1. Extend `_run_harness_subprocess` to count turns and tool calls
-- **Task ID**: build-harness-counters
+### 1. Define `HarnessResult` dataclass and extract counters from harness events
+- **Task ID**: build-harness-result
 - **Depends On**: none
-- **Validates**: `tests/unit/test_sdk_client_harness.py` (create or update)
+- **Validates**: `tests/unit/test_harness_streaming.py` (replace fictitious fixture with real shape), `tests/unit/test_harness_token_capture.py` (update for new return shape)
 - **Assigned To**: analytics-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `_turn_count = 0` and `_tool_call_count = 0` locals inside the event loop
-- Increment `_turn_count` on each `message_stop` stream event (`event_type == "stream_event"` and `event.get("type") == "message_stop"`)
-- Increment `_tool_call_count` on each `content_block_start` stream event where `event.get("content_block", {}).get("type") == "tool_use"`
-- Change return tuple from 6-element to 8-element: `(result_text, session_id_from_harness, returncode, usage, cost_usd, stderr_snippet, _turn_count, _tool_call_count)`
-- Update docstring to document positions 7 and 8
-- Update all three call sites in `get_response_via_harness` to unpack the 8-tuple
+- **Implementation Note (post-spike):** the `result` event already carries `num_turns`. No `message_stop` accumulation. The return shape changes — the original "no return-tuple growth" claim was based on a wrong assumption about where persistence would happen.
+- Define `HarnessResult` dataclass at module scope in `agent/sdk_client.py` (preferred), OR
+  extend `_run_harness_subprocess`'s return tuple to 8 positions (fallback). Pick one and use it
+  consistently.
+- In `_run_harness_subprocess`, initialize at the top alongside `usage` / `cost_usd`:
+  ```python
+  num_turns: int = 0
+  duration_ms: int = 0
+  stop_reason: str | None = None
+  model_usage: dict | None = None
+  _tool_call_count: int = 0
+  ```
+- Extend the existing `result`-event handler at `agent/sdk_client.py:2472-2500` to populate
+  `num_turns`, `duration_ms`, `stop_reason`, `model_usage` from `data.get(...)`.
+- **ADD a new** `assistant`-event handler branch (no such handler exists today):
+  ```python
+  if event_type == "assistant":
+      message = data.get("message", {}) or {}
+      content_blocks = message.get("content", []) or []
+      _tool_call_count += sum(1 for b in content_blocks if b.get("type") == "tool_use")
+      continue
+  ```
+  Place this branch BEFORE the `if event_type == "stream_event":` branch.
+- Update all three production return points (lines ~2540, ~2546, ~2548) plus the
+  binary-not-found path (~line 2419) to construct `HarnessResult(...)` (or the 8-tuple)
+  with the new fields.
+- Delete the fictitious `tests/unit/test_harness_streaming.py:74-122` fixture for top-level
+  `event.type == "tool_use"`; replace with a fixture exercising the real
+  `assistant.message.content[]` path.
 
-### 2. Add `atomic_increment_session_field` and wire into `get_response_via_harness`
-- **Task ID**: build-atomic-increment
-- **Depends On**: build-harness-counters
-- **Validates**: `tests/unit/test_accumulate_session_tokens.py` (update), new concurrent-increment unit test
+### 2. Update all three call sites in `get_response_via_harness` and add AgentSession persist
+- **Task ID**: build-harness-callers
+- **Depends On**: build-harness-result
+- **Validates**: `grep -nE '_run_harness_subprocess' agent/sdk_client.py` returns three production call sites all unpacking the new shape
 - **Assigned To**: analytics-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `atomic_increment_session_field(session_id, field, delta)` function in `agent/sdk_client.py`, using `HINCRBYFLOAT` for float fields and `HINCRBY` for int fields. No-op when `session_id` is None or delta is 0.
-- Replace read-modify-write `+=` in `accumulate_session_tokens` with `atomic_increment_session_field` calls for all five fields (`total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`, `total_cost_usd`)
-- Add `atomic_increment_session_field(session_id, "turn_count", num_turns)` and `atomic_increment_session_field(session_id, "tool_call_count", tool_calls)` in `get_response_via_harness` after the `accumulate_session_tokens` call block
+- Update unpacks at lines 2204, 2233, 2280 in `get_response_via_harness` to use the new
+  return shape (dataclass attributes or 8-tuple positions).
+- The existing `accumulate_session_tokens(session_id, ...)` call at line 2304 is **untouched**
+  — it continues to use `usage` and `cost_usd` (now accessed via dataclass / extended tuple).
+- Add the AgentSession turn/tool persist block immediately after the
+  `accumulate_session_tokens` call. Use the AgentSession `session_id` (already in scope as a
+  parameter to `get_response_via_harness`):
+  ```python
+  if session_id and (harness_result.num_turns or harness_result.tool_call_count):
+      try:
+          from models.agent_session import AgentSession
+          session = AgentSession.query.filter(session_id=session_id).first()
+          if session is not None:
+              if harness_result.num_turns:
+                  session.turn_count = harness_result.num_turns
+              if harness_result.tool_call_count:
+                  session.tool_call_count = harness_result.tool_call_count
+              session.save()
+      except Exception as e:
+          logger.warning(
+              "Failed to persist turn_count/tool_call_count for session %s: %s",
+              session_id, e,
+          )
+  ```
 
-### 3. Add `ZADD` to `finalize_session` for time-range lookup
+### 3. Update test fixtures across 5 test files
+- **Task ID**: build-test-harness-fixtures
+- **Depends On**: build-harness-result
+- **Validates**: `pytest tests/unit/test_sdk_client.py tests/unit/test_harness_token_capture.py tests/unit/test_harness_thinking_block_sentinel.py tests/unit/test_sdk_client_image_sentinel.py tests/integration/test_harness_env_pm_injection.py -x` — all pass
+- **Assigned To**: analytics-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Update each `fake_run`/`fake_subprocess` `AsyncMock(return_value=...)` to return the new
+  shape (dataclass or 8-tuple). See Test Impact section for the exact per-file inventory.
+- Update `test_binary_not_found_returns_six_tuple` to assert the new shape (rename to
+  `test_binary_not_found_returns_harness_result` if dataclass is chosen).
+- Update the 6-tuple unpack in `test_missing_usage_returns_none` to match.
+
+### 4. Add `ZADD` to `finalize_session` (additive — no model field change)
 - **Task ID**: build-finalize-zadd
 - **Depends On**: none
-- **Validates**: `tests/unit/test_session_lifecycle.py` (update)
+- **Validates**: `tests/unit/test_session_lifecycle.py::test_finalize_session_zadd` (new)
 - **Assigned To**: analytics-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `models/session_lifecycle.py`, after `session.completed_at = time.time()` (line ~390), add best-effort `ZADD analytics:sessions:completed_at {session.db_key.redis_key: session.completed_at}` wrapped in `try/except`
-- Use the existing `from popoto.redis_db import POPOTO_REDIS_DB` import (already present in the file)
+- **Implementation Note (B1 corrected):** The existing line `session.completed_at = time.time()`
+  already passes a numeric float; Popoto auto-converts to datetime. **No model field change.**
+  Add an additive ZADD using a locally-computed numeric `ts`. The ZADD score is the locally-
+  computed float, not the model field value.
+- In `models/session_lifecycle.py`, modify around line 390:
+  ```python
+  ts = time.time()
+  session.completed_at = ts          # Popoto auto-converts to datetime — unchanged
+  session.save()                     # existing line
+  try:
+      from popoto.redis_db import POPOTO_REDIS_DB
+      POPOTO_REDIS_DB.zadd(
+          "analytics:sessions:completed_at",
+          {session.db_key.redis_key: ts},      # numeric float as score
+      )
+  except Exception as e:
+      logger.debug(
+          "[lifecycle] ZADD analytics:sessions:completed_at failed (non-fatal): %s", e
+      )
+  ```
+- Add a unit test `test_finalize_session_zadd` that asserts the sorted-set entry exists with a
+  numeric float score after `finalize_session(session, "completed")` returns.
+- Add a unit test `test_finalize_session_zadd_failure_is_quiet` that monkeypatches
+  `POPOTO_REDIS_DB.zadd` to raise and asserts the session still saves with `status="completed"`.
 
-### 4. Rewrite `get_analytics_summary()` to query AgentSession
+### 5. Rewrite `get_analytics_summary()` to query AgentSession via the sorted set
 - **Task ID**: build-analytics-query
 - **Depends On**: build-finalize-zadd
-- **Validates**: `tests/integration/test_analytics_dashboard.py` (update), new unit test for `_query_session_sums`
+- **Validates**: `tests/integration/test_analytics_dashboard.py` (update), new unit tests for `_query_session_sums`
 - **Assigned To**: analytics-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_query_session_sums(days: int) -> tuple[float, int]` helper in `ui/data/analytics.py`:
-  - Computes `start_ts = time.time() - days * 86400`
-  - Calls `ZRANGEBYSCORE("analytics:sessions:completed_at", start_ts, "+inf")`
-  - For each key, fetches `total_cost_usd` and `turn_count` via pipeline HGET
-  - Returns `(sum_cost, sum_turns)`
-- Replace `query_metric_total("session.cost_usd", days=N)` and `query_metric_total("session.turns", days=N)` calls with `_query_session_sums(N)` unpack
-- Remove `from analytics.query import query_metric_count, query_metric_total` if `query_metric_total` is no longer imported (keep `query_metric_count`)
+- Add `_query_session_sums(days: int) -> tuple[float, int]` helper in `ui/data/analytics.py`
+  per the Technical Approach section above. Wrap in a try/except returning `(0.0, 0)` on any
+  Redis failure.
+- Replace `query_metric_total("session.cost_usd", days=N)` and
+  `query_metric_total("session.turns", days=N)` calls with `_query_session_sums(N)` unpack.
+- Remove `query_metric_total` from imports if no longer used (keep `query_metric_count`).
+- Add unit tests `test_query_session_sums_empty` and `test_query_session_sums_redis_failure`
+  per the Test Impact section.
 
-### 5. Remove dead emit sites from `get_response_via_sdk`
+### 6. Remove dead emit sites from `get_response_via_sdk`
 - **Task ID**: build-remove-dead-emits
 - **Depends On**: build-analytics-query
 - **Validates**: `grep -rn 'record_metric.*session\.cost_usd\|record_metric.*session\.turns' agent/ ui/` returns zero hits
 - **Assigned To**: analytics-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Delete `record_metric("session.cost_usd", cost, dims)` and `record_metric("session.turns", float(turns), dims)` calls in `agent/sdk_client.py` (currently lines 1578-1580)
-- Leave surrounding `try/except` block if other code uses it; otherwise remove the whole try block
+- Delete `record_metric("session.cost_usd", cost, dims)` and `record_metric("session.turns", float(turns), dims)` calls in `agent/sdk_client.py` (currently lines 1578-1580).
+- Leave the surrounding `try/except` block intact if other code uses it; otherwise remove the whole try block.
 
-### 6. Validate
+### 7. Validate
 - **Task ID**: validate-all
-- **Depends On**: build-atomic-increment, build-remove-dead-emits
+- **Depends On**: build-test-harness-fixtures, build-harness-callers, build-remove-dead-emits
 - **Assigned To**: analytics-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/ -x -q` — all tests pass
-- Run `grep -rn 'record_metric.*session\.cost_usd\|record_metric.*session\.turns' agent/ ui/` — zero hits
-- Run `grep -rn 'query_metric_total.*session\.cost_usd\|query_metric_total.*session\.turns' .` — zero hits in production code
-- Run `grep -rn '\+= .*cost_usd\|turn_count.*+=' agent/` — zero hits (no surviving read-modify-write)
-- Verify `python -c "from ui.data.analytics import get_analytics_summary; print(get_analytics_summary())"` runs without error
+- Run `pytest tests/ -x -q` — all tests pass.
+- Run `grep -rn 'record_metric.*session\.cost_usd\|record_metric.*session\.turns' agent/ ui/` — zero hits.
+- Run `grep -rn 'query_metric_total.*session\.cost_usd\|query_metric_total.*session\.turns' .` — zero hits in production code.
+- Run `grep -rn 'atomic_increment_session_field' .` — **zero hits** (proposed helper was deleted; verify no orphan references).
+- Verify `python -c "from ui.data.analytics import get_analytics_summary; print(get_analytics_summary())"` runs without error.
+- Run an end-to-end smoke: enqueue a tiny test AgentSession via
+  `python -m tools.valor_session create --role pm --message "echo test" --project-key ai`,
+  wait for completion, then
+  `curl -s localhost:8500/dashboard.json | jq '.analytics.turns_today, .sessions[].turn_count'`
+  shows non-zero values.
 
-### 7. Documentation
+### 8. Documentation
 - **Task ID**: document-analytics
 - **Depends On**: validate-all
 - **Assigned To**: analytics-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `accumulate_session_tokens` docstring to reflect atomic implementation
-- Update `get_analytics_summary` docstring to reflect AgentSession-derived aggregation
-- Update `docs/features/dashboard.md` if it exists: note that `analytics.cost_today_usd` and `analytics.turns_today` are derived from `AgentSession.total_cost_usd` and `AgentSession.turn_count` via a Redis sorted set, not from the analytics ledger
+- Update `_run_harness_subprocess` docstring to describe the new `HarnessResult` return type
+  (or 8-tuple shape) and the new `num_turns` / `tool_call_count` fields.
+- Update `get_analytics_summary` docstring to reflect AgentSession-derived aggregation via
+  the `analytics:sessions:completed_at` sorted set.
+- Update `docs/features/dashboard.md` if it exists: note that `analytics.cost_today_usd` and
+  `analytics.turns_today` are derived from `AgentSession.total_cost_usd` and
+  `AgentSession.turn_count` via the sorted set, not from the analytics ledger.
 
 ## Verification
 
@@ -560,18 +933,42 @@ entry points, no bridge changes, no MCP servers affected.
 | No dead emit sites (turns) | `grep -rn 'record_metric.*session\.turns' agent/ ui/` | exit code 1 |
 | No stale query_metric_total (cost) | `grep -rn 'query_metric_total.*session\.cost_usd' ui/` | exit code 1 |
 | No stale query_metric_total (turns) | `grep -rn 'query_metric_total.*session\.turns' ui/` | exit code 1 |
-| No read-modify-write on cost | `grep -rn 'total_cost_usd.*+=' agent/` | exit code 1 |
+| No orphan atomic helper refs | `grep -rn 'atomic_increment_session_field' .` | exit code 1 |
+| `_run_harness_subprocess` returns new shape | `grep -nE 'class HarnessResult\|-> HarnessResult\|-> tuple\[' agent/sdk_client.py` | matches HarnessResult definition + return annotation |
+| `num_turns` flows to AgentSession | run a real session, then `python -m tools.valor_session inspect --id <ID>` | `turn_count > 0` |
+| ZADD score is numeric | `redis-cli ZRANGEBYSCORE analytics:sessions:completed_at -inf +inf WITHSCORES` | scores are numeric (e.g. `1730000000.0`) |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| Blocker | B1 | `finalize_session` ZADD score was a `datetime` object, not numeric — would fail `ZADD` validation or store an unusable score | Step 4 (build-finalize-zadd) + Spike Finding 4 | Compute `ts = time.time()` once locally, use as ZADD score. Existing line `session.completed_at = ts` is unchanged (Popoto auto-converts to datetime). The ZADD score and the model field are independent — the analytics query reads only the sorted set. |
+| Blocker | B2 | Plan invented a turn-counter subsystem (`message_stop` accumulation, fictional event subsystem) when `num_turns` is already in the harness `result` event | Spike Finding 1 + Step 1 (build-harness-result) | One-line extraction at `agent/sdk_client.py:2472-2500` alongside existing `result`/`session_id`/`usage`/`total_cost_usd` pulls. No subsystem, no message_stop counting. |
+| Blocker | B3 | `_run_harness_subprocess` 6→8-tuple change would break call sites and test fixtures pinning the arity | Spike Finding 6 + Steps 1, 2, 3 | **Confirmed real**: 3 production call sites + 25+ test fixtures across 5 files. Plan now explicitly lists every site to update and prefers a `HarnessResult` dataclass for readability. **Critique was correct — the original plan's claim that "no tests reference 6-tuple arity" was wrong.** |
+| Blocker | B4 | `atomic_increment_session_field` helper would violate the Popoto raw-Redis rule (`HINCRBYFLOAT`/`HINCRBY` directly against Popoto-managed hashes) | Spike Decision — helper deleted | `num_turns` arrives final-not-delta; one Popoto field-assign + save is sufficient. `accumulate_session_tokens` race is real but **explicitly out of scope** for this plan. |
+| Blocker | B5 (new) | Persisting in `_run_harness_subprocess` via `AgentSession.query.filter(session_id=session_id_from_harness)` would silently fail — `session_id_from_harness` is the Claude UUID, NOT the AgentSession session_id | Spike Finding 5 + Step 2 | Persistence moves to `get_response_via_harness`, which has the AgentSession `session_id` parameter in scope (same identifier used for `accumulate_session_tokens(session_id, ...)`). |
+| Blocker | B6 (new) | Plan said "extend the assistant-event handler" but no such handler exists in `_run_harness_subprocess` today (only `result` and `stream_event` are handled) | Spike Finding 2 + Step 1 | Plan now says "ADD a new `assistant`-event handler branch" parallel to the existing branches. Task-level code shows the new `if event_type == "assistant":` block. |
+| Concern | Operator | Fictitious test fixture in `tests/unit/test_harness_streaming.py:74-122` for top-level `event.type == "tool_use"` — passes only because production handler ignores unknown events | Test Impact + Step 1 | Fixture is replaced with one exercising the real `assistant.message.content[]` shape. |
+| Concern | Skeptic | Two valid tool-use counting paths (`assistant.message.content[]` vs. `content_block_start`) — plan must commit to one | Spike Finding 2 — Path A chosen | Path A (assemble-from-`assistant`) wins on simplicity. Path B is documented as a fallback if the `assistant` event handler is awkwardly placed. |
+| Concern | Adversary | `completed_at` is a `DatetimeField` per the model — assigning a float may serialize oddly | Spike Finding 4 + Step 4 | Popoto auto-conversion is an existing, documented behavior at `models/agent_session.py:459-465, 710-711`. The model field's auto-conversion is irrelevant to the ZADD index because the index uses the locally-computed numeric `ts`, not the model field value. |
+| Concern | Archaeologist | `accumulate_session_tokens` race is a known issue but unfixed here | Race Conditions section + No-Gos | Explicitly out of scope. Risk acknowledged; future plan can revisit. |
 
 ---
 
 ## Open Questions
 
-No open questions — all three planning decisions from the issue are resolved above (indexing
-strategy → Option B ZADD; turn counter → `message_stop` events; atomic helper → free function
-in `sdk_client.py`). No human input needed before building.
+The post-spike + post-revision plan introduced one follow-up that need not block the build:
+
+- **Should we persist `duration_ms`, `stop_reason`, and `modelUsage` to AgentSession too?**
+  These fields are now extracted (essentially free) from the `result` event in Step 1 but are
+  not written to AgentSession by this plan. The dashboard could surface them with little
+  extra work. Deferred because the issue's acceptance criteria scope only `cost_today_usd` and
+  `turns_today`. **Recommendation:** ship this plan first; a follow-up issue can add new
+  AgentSession fields and dashboard surface area for the others.
+
+The three original planning decisions from the issue remain resolved:
+- Indexing strategy → Option B ZADD with numeric float score (B1 fix applied)
+- Turn counter → `result.num_turns` direct extraction (no `message_stop` accumulation)
+- Atomic helper → **deleted from plan** (num_turns is final-not-delta; helper was unneeded)
+
+No human input needed before re-critique.
