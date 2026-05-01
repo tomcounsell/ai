@@ -227,30 +227,34 @@ table](session-watchdog.md#configuration).
 
 ## Worker Key Routing (issues #831, #1085)
 
-Workers are keyed by `worker_key` — a computed property on `AgentSession` that reflects the session's actual isolation level, not its Telegram communication topology. This prevents PM sessions from different Telegram threads (different `chat_id`s) from racing each other when they share the same git working tree.
+Workers are keyed by `worker_key` — a computed property on `AgentSession` that reflects the session's actual isolation level, not its Telegram communication topology. This prevents sessions that share mutable state (the git working tree) from racing each other across Telegram threads.
 
 ### Decision Table
 
-| Session type | Slug? | `worker_key` | Behavior |
-|---|---|---|---|
-| `pm` | N/A | `project_key` | Serialized per project |
-| `dev` | yes (worktree) | `slug` | Parallel-safe across chats AND across slugs in the same chat |
-| `dev` | no (main repo) | `project_key` | Serialized per project |
-| `teammate` | N/A | `chat_id` | Always parallel-safe |
+| Session type | Slug? | Stage | `worker_key` | Behavior |
+|---|---|---|---|---|
+| `pm` | no | any | `project_key` | Serialized per project |
+| `pm` | yes | PLAN / ISSUE / CRITIQUE / MERGE | `project_key` | Serialized per project (shares main checkout) |
+| `pm` | yes | BUILD / TEST / PATCH / REVIEW / DOCS | `slug` | Parallel per slug (each PM in its own worktree) |
+| `dev` | yes | any (worktree) | `slug` | Parallel-safe across chats AND across slugs in the same chat |
+| `dev` | no | any (main repo) | `project_key` | Serialized per project |
+| `teammate` | N/A | N/A | `chat_id` | Always parallel-safe |
+
+**PM routing note:** Slugged PM sessions use an allowlist (`_PM_WORKTREE_STAGES = {"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"}`) to determine when slug-based routing is safe. Stages not in this allowlist — including PLAN, ISSUE, CRITIQUE, MERGE, unknown/future stages — fall back to `project_key` so they serialize on the main checkout. Unknown stages fail closed (serialize) rather than accidentally parallelizing on an unaudited stage. The lazy `_ensure_worker` call in `session_pickup.py`'s project-keyed pop handles the routing gap: when a PM session advances to a worktree stage and the project-keyed filter rejects it, the correct slug-keyed worker is started automatically.
 
 ### Why `chat_id` Is Not the Isolation Key
 
-`chat_id` is a communication topology concept — it tells you which Telegram thread a message came from. But isolation depends on whether sessions share mutable state (the git working tree). Two PM sessions from different threads both write to the same `main` branch; they must serialize regardless of their `chat_id`.
+`chat_id` is a communication topology concept — it tells you which Telegram thread a message came from. But isolation depends on whether sessions share mutable state (the git working tree). Two PM sessions from different threads both write to the same `main` branch at PLAN stage; they must serialize regardless of their `chat_id`.
 
 Similarly, `chat_id` is insufficient for dev sessions — two dev sessions for different work items in the same chat (e.g., two `valor_session create --role dev` calls defaulting to `chat_id=0`) would serialize even though they share no state. Slug is the correct routing key for worktree-isolated dev sessions: each slug has its own worktree and branch.
 
 ### Three Worker Loop Archetypes
 
-1. **Project-keyed worker** (`worker_key == project_key`): Handles PM sessions and dev sessions without a slug. These share the main repo working tree and must run one at a time per project. The `_pop_agent_session` function filters by `project_key` and only pops sessions whose `worker_key` matches.
+1. **Project-keyed worker** (`worker_key == project_key`): Handles slugless PM sessions, PM sessions at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE), and dev sessions without a slug. These share the main repo working tree and must run one at a time per project. The `_pop_agent_session` function filters by `project_key` and only pops sessions whose `worker_key` matches. When it encounters a PM session that has advanced to a worktree stage (`worker_key != project_key`), it starts the appropriate slug-keyed worker lazily.
 
 2. **Chat-keyed worker** (`worker_key == chat_id`): Handles teammate sessions. Teammate sessions are conversational and have no shared mutable state — different `chat_id`s run in parallel.
 
-3. **Slug-keyed worker** (`worker_key == slug`): Handles slugged dev sessions. Each slug has its own worktree (`.worktrees/{slug}/`) and branch (`session/{slug}`), so two slugged dev sessions with the same `chat_id` still route to distinct worker loops and run in parallel. `_pop_agent_session` attempts a `slug=worker_key` indexed lookup first for non-project-keyed workers, falling back to `chat_id=worker_key` for teammate sessions.
+3. **Slug-keyed worker** (`worker_key == slug`): Handles slugged dev sessions and slugged PM sessions at worktree stages. Each slug has its own worktree (`.worktrees/{slug}/`) and branch (`session/{slug}`), so two sibling sessions with distinct slugs route to distinct worker loops and run in parallel. `_pop_agent_session` attempts a `slug=worker_key` indexed lookup first for non-project-keyed workers, falling back to `chat_id=worker_key` for teammate sessions.
 
 ### `is_project_keyed` Discriminator
 

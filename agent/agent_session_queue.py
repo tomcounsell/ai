@@ -1135,9 +1135,13 @@ async def enqueue_agent_session(
 def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
     """Start a worker for this worker_key if one isn't already running.
 
-    Workers are keyed by worker_key — either project_key (for PM and
-    dev-without-slug sessions that share the main working tree) or chat_id
-    (for teammate and slugged-dev sessions with isolated worktrees).
+    Workers are keyed by worker_key — one of:
+    - project_key: for slugless PM sessions, PM sessions at main-checkout stages
+      (PLAN/ISSUE/CRITIQUE/MERGE), and dev sessions without a slug. These share
+      the main working tree and serialize per project.
+    - slug: for slugged dev sessions and PM sessions at worktree stages
+      (BUILD/TEST/PATCH/REVIEW/DOCS). Each slug has its own isolated worktree.
+    - chat_id: for teammate sessions. Conversational with no shared mutable state.
 
     Creates an asyncio.Event for the key if one doesn't exist. The event is
     used by _worker_loop to wait for new work notifications.
