@@ -370,8 +370,14 @@ class TelegramRelayOutputHandler:
         try:
             from bridge.redundancy_filter import (
                 RTR_SUPPRESS_EMOJI as _REDUND_EMOJI,
+            )
+            from bridge.redundancy_filter import (
                 SUPPRESSION_ENABLED as _SUPPRESSION_ENABLED,
+            )
+            from bridge.redundancy_filter import (
                 SuppressionVerdict as _SuppressionVerdict,
+            )
+            from bridge.redundancy_filter import (
                 should_suppress,
             )
 
@@ -381,16 +387,20 @@ class TelegramRelayOutputHandler:
                 or not getattr(session, "is_sdlc", False)
             )
             if not _skip_filter:
-                # Use the drafter's already-computed artifacts when available;
-                # fall back to extracting from delivery_text on drafter failure.
-                _draft_artifacts = getattr(draft, "artifacts", None) if "draft" in dir() else None
-                if _draft_artifacts is None:
-                    try:
-                        from bridge.message_drafter import extract_artifacts
+                # Use the drafter's already-computed artifacts when available.
+                # The 'or' fallback fires when draft.artifacts is empty ({}),
+                # meaning the drafter didn't find any artifacts in the text —
+                # in that case we re-run extraction on the final delivery_text
+                # so PR URLs embedded in the raw text are not missed.
+                # (draft.artifacts = {} means "no artifacts found", not "drafter failed".)
+                try:
+                    from bridge.message_drafter import extract_artifacts as _extract_arts
 
-                        _draft_artifacts = extract_artifacts(delivery_text)
-                    except Exception:
-                        _draft_artifacts = {}
+                    _draft_artifacts = getattr(draft, "artifacts", None) or _extract_arts(
+                        delivery_text
+                    )
+                except Exception:
+                    _draft_artifacts = {}
 
                 _redund_verdict: _SuppressionVerdict = should_suppress(
                     delivery_text,
@@ -413,9 +423,7 @@ class TelegramRelayOutputHandler:
                             chat_id, reply_to_msg_id, _REDUND_EMOJI, session_id
                         )
                         if self._file_handler is not None:
-                            await self._file_handler.send(
-                                chat_id, text, reply_to_msg_id, session
-                            )
+                            await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
                         return
                     # No anchor for the reaction — fall through and send.
                     # Mirrors RTR's no-anchor contract (lines 437-443 below).

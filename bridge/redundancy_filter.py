@@ -36,13 +36,9 @@ import time
 from dataclasses import dataclass, field
 
 # ── Module-level constants (tuneable via env vars) ──────────────────────────
-REDUNDANCY_THRESHOLD: float = float(
-    os.environ.get("DRAFTER_REDUNDANCY_THRESHOLD", "0.65")
-)
+REDUNDANCY_THRESHOLD: float = float(os.environ.get("DRAFTER_REDUNDANCY_THRESHOLD", "0.65"))
 RECENT_DRAFTS_N: int = int(os.environ.get("DRAFTER_RECENT_DRAFTS_N", "3"))
-REDUNDANCY_WINDOW_SECONDS: int = int(
-    os.environ.get("DRAFTER_REDUNDANCY_WINDOW_SECONDS", "600")
-)
+REDUNDANCY_WINDOW_SECONDS: int = int(os.environ.get("DRAFTER_REDUNDANCY_WINDOW_SECONDS", "600"))
 SUPPRESSION_ENABLED: bool = os.environ.get(
     "DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED", "true"
 ).lower() in ("1", "true", "yes", "on")
@@ -198,9 +194,7 @@ def _should_suppress_inner(
             elif values:
                 prior_artifact_values.add(str(values))
 
-        if new_artifact_values and not new_artifact_values.issubset(
-            prior_artifact_values
-        ):
+        if new_artifact_values and not new_artifact_values.issubset(prior_artifact_values):
             # There is at least one new artifact relative to this prior draft.
             # Even if Jaccard would otherwise suppress, the new artifact is
             # evidence of real progress — force send.
