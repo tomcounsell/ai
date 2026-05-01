@@ -5,6 +5,7 @@ appetite: Medium
 owner: Valor
 created: 2026-05-01
 tracking: https://github.com/tomcounsell/ai/issues/1187
+issue: "#1187"
 last_comment_id:
 revision_applied: true
 ---
