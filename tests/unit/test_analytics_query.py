@@ -28,7 +28,12 @@ def populated_db(tmp_path, monkeypatch):
     conn.execute("CREATE INDEX idx_metrics_name_ts ON metrics (name, timestamp)")
 
     now = time.time()
-    # Insert test data across several days
+    # Insert test data across several days.
+    # NOTE (#1245): the `session.cost_usd` rows below validate the generic
+    # `analytics.query` module itself — production analytics no longer reads
+    # this metric (it derives totals from Popoto AgentSession queries, see
+    # ui/data/analytics.py::_query_completed_sessions_in_window). The fixtures
+    # are kept so the query module's behavior remains tested.
     test_data = [
         (now - 3600, "session.started", 1.0, json.dumps({"session_type": "pm"})),
         (now - 7200, "session.started", 1.0, json.dumps({"session_type": "dev"})),

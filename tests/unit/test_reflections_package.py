@@ -268,97 +268,6 @@ class TestAuditingCallables:
             result = run_async(run_log_review())
         assert_valid_result(result)
 
-    def test_run_documentation_audit_returns_valid(self, tmp_path):
-        """run_documentation_audit() returns valid dict with per-project breakdown."""
-        from reflections.auditing import run_documentation_audit
-
-        # Project must have a docs/ directory to pass skip_if
-        (tmp_path / "docs").mkdir()
-
-        mock_summary = MagicMock()
-        mock_summary.skipped = False
-        mock_summary.skip_reason = ""
-        mock_summary.skip_type = ""
-        mock_summary.kept = ["doc.md"]
-        mock_summary.updated = []
-        mock_summary.deleted = []
-
-        with (
-            patch(
-                "reflections.utils.load_local_projects",
-                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
-            ),
-            patch("scripts.docs_auditor.DocsAuditor") as mock_da,
-        ):
-            mock_instance = MagicMock()
-            mock_instance.run.return_value = mock_summary
-            mock_instance._api_call_count = 5
-            mock_da.return_value = mock_instance
-            result = run_async(run_documentation_audit())
-        assert_valid_result(result)
-        assert "projects" in result
-
-    def test_run_documentation_audit_auth_skip_returns_disabled(self, tmp_path):
-        """When all projects skip due to auth, aggregate returns status='disabled'."""
-        from reflections.auditing import run_documentation_audit
-
-        (tmp_path / "docs").mkdir()
-
-        mock_summary = MagicMock()
-        mock_summary.skipped = True
-        mock_summary.skip_reason = "ANTHROPIC_API_KEY not set"
-        mock_summary.skip_type = "auth"
-        mock_summary.kept = []
-        mock_summary.updated = []
-        mock_summary.deleted = []
-
-        with (
-            patch(
-                "reflections.utils.load_local_projects",
-                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
-            ),
-            patch("scripts.docs_auditor.DocsAuditor") as mock_da,
-        ):
-            mock_instance = MagicMock()
-            mock_instance.run.return_value = mock_summary
-            mock_instance._api_call_count = 0
-            mock_da.return_value = mock_instance
-            result = run_async(run_documentation_audit())
-
-        assert_valid_result(result)
-        assert result["status"] == "disabled"
-        assert any("disabled" in f.lower() for f in result["findings"])
-
-    def test_run_documentation_audit_schedule_skip_returns_ok(self, tmp_path):
-        """When DocsAuditor skips due to frequency gate, wrapper returns status='ok'."""
-        from reflections.auditing import run_documentation_audit
-
-        (tmp_path / "docs").mkdir()
-
-        mock_summary = MagicMock()
-        mock_summary.skipped = True
-        mock_summary.skip_reason = "last run: 2026-04-12"
-        mock_summary.skip_type = "schedule"
-        mock_summary.kept = []
-        mock_summary.updated = []
-        mock_summary.deleted = []
-
-        with (
-            patch(
-                "reflections.utils.load_local_projects",
-                return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
-            ),
-            patch("scripts.docs_auditor.DocsAuditor") as mock_da,
-        ):
-            mock_instance = MagicMock()
-            mock_instance.run.return_value = mock_summary
-            mock_instance._api_call_count = 0
-            mock_da.return_value = mock_instance
-            result = run_async(run_documentation_audit())
-
-        assert_valid_result(result)
-        assert result["status"] == "ok"
-
     def test_run_skills_audit_no_script(self, tmp_path):
         """run_skills_audit() returns ok when script not found in any project."""
         from reflections.auditing import run_skills_audit
@@ -385,22 +294,10 @@ class TestAuditingCallables:
         assert_valid_result(result)
         assert result["projects"][0]["status"] == "skipped"
 
-    def test_run_feature_docs_audit_no_dir(self, tmp_path):
-        """run_feature_docs_audit() skips projects without docs/features dir."""
-        from reflections.auditing import run_feature_docs_audit
-
-        with patch(
-            "reflections.utils.load_local_projects",
-            return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
-        ):
-            result = run_async(run_feature_docs_audit())
-        assert_valid_result(result)
-        assert result["projects"][0]["status"] == "skipped"
-
     def test_event_loop_safe_callables_are_sync(self):
         """Regression canary (sibling of PR #1056).
 
-        These three callables did synchronous file I/O on unbounded log
+        These two callables did synchronous file I/O on unbounded log
         files while being declared ``async def``. That froze the reflection
         scheduler's event loop. They are now plain ``def`` so
         ``ReflectionScheduler.execute_function_reflection`` dispatches them
@@ -413,12 +310,11 @@ class TestAuditingCallables:
         import inspect
 
         from reflections.auditing import (
-            run_feature_docs_audit,
             run_hooks_audit,
             run_log_review,
         )
 
-        for fn in (run_log_review, run_hooks_audit, run_feature_docs_audit):
+        for fn in (run_log_review, run_hooks_audit):
             assert not inspect.iscoroutinefunction(fn), (
                 f"{fn.__name__} must stay sync `def` — it does blocking file I/O "
                 "that would freeze the reflection scheduler's event loop if "

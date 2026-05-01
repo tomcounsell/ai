@@ -328,7 +328,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -351,7 +351,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -381,7 +381,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -415,7 +415,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         oversize = "x" * 600_000
         caplog.set_level(logging.WARNING, logger="agent.sdk_client")
@@ -451,7 +451,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -489,7 +489,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -518,7 +518,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
             await get_response_via_harness(
@@ -551,7 +551,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None)
+            return ("done", None, 0, None, None, None, 0, 0)
 
         oversize = "x" * 600_000
         with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
@@ -597,7 +597,7 @@ async def test_pm_persona_overlay_present():
 
     async def fake_run(cmd, working_dir, proc_env, **_kw):
         captured["cmd"] = cmd
-        return ("done", None, 0, None, None, None)
+        return ("done", None, 0, None, None, None, 0, 0)
 
     with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
         await get_response_via_harness(
@@ -628,7 +628,7 @@ async def test_arg_max_guard_trips():
 
     async def fake_run(cmd, working_dir, proc_env, **_kw):
         captured["cmd"] = cmd
-        return ("done", None, 0, None, None, None)
+        return ("done", None, 0, None, None, None, 0, 0)
 
     oversize = "x" * 600_000
     with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):

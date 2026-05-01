@@ -43,38 +43,6 @@ def test_legacy_code_scan_aggregates_two_repos(tmp_path):
     assert any(f.startswith("[popoto] ") for f in result["findings"])
 
 
-def test_documentation_audit_aggregates_two_repos(tmp_path):
-    import asyncio
-
-    from reflections.auditing import run_documentation_audit
-
-    projects = _two_projects(tmp_path)
-    for p in projects:
-        (Path(p["working_directory"]) / "docs").mkdir()
-
-    mock_summary = MagicMock()
-    mock_summary.skipped = False
-    mock_summary.skip_reason = ""
-    mock_summary.skip_type = ""
-    mock_summary.kept = ["a.md", "b.md"]
-    mock_summary.updated = []
-    mock_summary.deleted = []
-
-    with (
-        patch("reflections.utils.load_local_projects", return_value=projects),
-        patch("scripts.docs_auditor.DocsAuditor") as mock_da,
-    ):
-        mock_instance = MagicMock()
-        mock_instance.run.return_value = mock_summary
-        mock_instance._api_call_count = 5
-        mock_da.return_value = mock_instance
-        result = asyncio.run(run_documentation_audit())
-
-    assert len(result["projects"]) == 2
-    slugs = {p["slug"] for p in result["projects"]}
-    assert slugs == {"ai", "popoto"}
-
-
 def test_skills_audit_aggregates_two_repos(tmp_path):
     from reflections.auditing import run_skills_audit
 
@@ -126,20 +94,3 @@ def run_hooks_audit_with_mock(projects):
 
     with patch("reflections.utils.load_local_projects", return_value=projects):
         return run_hooks_audit()
-
-
-def test_feature_docs_audit_aggregates_two_repos(tmp_path):
-    from reflections.auditing import run_feature_docs_audit
-
-    projects = _two_projects(tmp_path)
-    # Place docs/features/ in BOTH projects so neither is skipped.
-    for p in projects:
-        wd = Path(p["working_directory"])
-        (wd / "docs" / "features").mkdir(parents=True)
-
-    with patch("reflections.utils.load_local_projects", return_value=projects):
-        result = run_feature_docs_audit()
-
-    assert len(result["projects"]) == 2
-    slugs = {p["slug"] for p in result["projects"]}
-    assert slugs == {"ai", "popoto"}

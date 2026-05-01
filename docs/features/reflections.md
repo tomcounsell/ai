@@ -91,10 +91,10 @@ each update run. This ensures the scheduler always reads the vault version.
 | Name | Callable | Description |
 |------|----------|-------------|
 | `daily-log-review` | `reflections.auditing.run_log_review` | Review previous day's logs per project; sends summary to `Dev: Valor` Telegram (with optional Sentry counts) |
-| `documentation-audit` | `reflections.auditing.run_documentation_audit` | LLM-powered docs accuracy audit (see [Documentation Audit](documentation-audit.md)) |
+| `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
+| `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
 | `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
 | `hooks-audit` | `reflections.auditing.run_hooks_audit` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
-| `feature-docs-audit` | `reflections.auditing.run_feature_docs_audit` | Audit docs/features/ for stale terms, stub docs, dead code refs |
 | `pr-review-audit` | `reflections.auditing.run_pr_review_audit` | Scan merged PRs for unaddressed review findings; file GitHub issues **(disabled — calls gh CLI)** |
 
 **Task management:**
@@ -119,7 +119,6 @@ each update run. This ensures the scheduler always reads the vault version.
 |------|----------|-------------|
 | `memory-decay-prune` | `reflections.memory_management.run_memory_decay_prune` | Delete below-threshold memories with zero access (dry-run default) |
 | `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | Flag memories with quality issues (zero-access, chronically low confidence) |
-| `knowledge-reindex` | `reflections.memory_management.run_knowledge_reindex` | Re-index ~/src/work-vault/ docs into KnowledgeDocument records |
 | `embedding-orphan-sweep` | `reflections.memory_management.run_embedding_orphan_sweep` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
 
 ### State Model (`models/reflection.py`)
@@ -168,7 +167,7 @@ Every reflection execution includes resource monitoring:
 
 **Timeout enforcement**: Each reflection has a configurable timeout (via `timeout` field in YAML, or type-based defaults: 30 min for function, 60 min for agent). Function-type reflections are wrapped in `asyncio.wait_for()`. For async callables, this provides true cancellation. For sync callables running via `run_in_executor()`, the `TimeoutError` is raised but the thread cannot be cancelled (detection-only). Timeout errors are logged and the reflection is marked with error status.
 
-**API call cap (DocsAuditor)**: The `DocsAuditor` class (used by `documentation_audit`) accepts a `max_api_calls` parameter (default: 50). Each Anthropic API call increments a counter. When the cap is reached, processing stops gracefully -- remaining files are skipped, partial results are returned, and a WARNING is logged. This prevents unbounded API consumption.
+**Auth probe (docs auditor)**: The `docs-auditor` substrate runs a startup auth probe against the Anthropic API. On invalid keys it returns `status="disabled"` and skips the run; on transient network errors it logs a warning and proceeds. Optional embedding auth (`OPENAI_API_KEY`) is probed separately — when unavailable, the substrate degrades gracefully to lexical-only matching. See [Docs Auditor](docs-auditor.md).
 
 ### Log Rotation
 
@@ -256,15 +255,15 @@ Deduplication tracker for PR review audit findings. Prevents re-filing GitHub is
 
 **Cleanup**: Records older than 90 days are pruned via `cleanup_expired()` during Redis TTL cleanup.
 
-### docs_auditor State
+### docs-auditor State
 
-`scripts/docs_auditor.py` tracks the last audit date in Redis via a plain key:
+The unified `docs-auditor` substrate (`reflections/docs_auditor.py`, issue #1247) tracks per-file rotation state in a Redis hash:
 
 ```python
-redis.Redis.from_url(settings.REDIS_URL).get("docs_auditor:last_audit_date")
+redis.Redis.from_url(settings.REDIS_URL).hgetall("docs_audit:last_run")
 ```
 
-This replaced the former `ReflectionRun` dependency (see issue #748 for the migration history).
+Each field is a doc path; each value is the unix timestamp of its most recent audit. The hash form replaces both the prior `docs_auditor:last_audit_date` plain-key and avoids a per-file Redis key explosion. See [`docs/features/docs-auditor.md`](./docs-auditor.md) for the substrate design.
 
 ### Docs Auditor Authentication
 
@@ -273,19 +272,19 @@ The docs auditor uses the **Anthropic Python SDK directly** (not the OAuth subpr
 | Component | Credential Used |
 |-----------|----------------|
 | AgentSessions (Claude Code via `claude -p`) | `CLAUDE_CODE_OAUTH_TOKEN` |
-| DocsAuditor (`scripts/docs_auditor.py`) | `ANTHROPIC_API_KEY` |
+| `docs-auditor` substrate (`reflections/docs_auditor.py`) | `ANTHROPIC_API_KEY` |
 
 **Behavior when `ANTHROPIC_API_KEY` is absent or invalid:**
 
-The auditor performs a startup auth probe (`_check_auth()`) before iterating any docs. If the key is missing, a sentinel string (`"None"`, `"null"`, `"false"`, `"0"`), or invalid (rejected by the Anthropic API), the auditor logs a single `WARNING` and returns immediately:
+The substrate performs a startup auth probe before iterating any docs. If the key is missing, a sentinel string (`"None"`, `"null"`, `"false"`, `"0"`), or invalid (rejected by the Anthropic API), it logs a single `WARNING` and returns immediately:
 
 ```
-WARNING  docs_auditor: Docs auditor skipping: ANTHROPIC_API_KEY not set
+WARNING  docs_auditor: skipping: ANTHROPIC_API_KEY not set
 ```
 
-No `ERROR` lines are emitted, no docs are processed, and the worker heartbeat is unaffected. The reflection wrapper (`run_documentation_audit()` in `reflections/auditing.py`) returns `{"status": "disabled", ...}` — distinct from `{"status": "ok", ...}` for a schedule-based skip — so dashboards and monitoring can distinguish a permanently-disabled auditor from a temporarily-skipped one.
+No `ERROR` lines are emitted, no docs are processed, and the worker heartbeat is unaffected. The substrate returns `{"status": "disabled", ...}` — distinct from `{"status": "ok", ...}` for a schedule-based skip — so dashboards and monitoring can distinguish a permanently-disabled auditor from a temporarily-skipped one.
 
-**To enable docs auditing**, add `ANTHROPIC_API_KEY` to the worker's environment (e.g., in `~/Desktop/Valor/.env` or the worker's launchd plist). The auditor will automatically begin running on its weekly schedule once the key is present and valid.
+**To enable docs auditing**, add `ANTHROPIC_API_KEY` to the worker's environment (e.g., in `~/Desktop/Valor/.env` or the worker's launchd plist). The auditor will automatically begin running on its daily rotation schedule once the key is present and valid.
 
 **Non-auth API failures** (rate limits, transient network errors) are handled by a consecutive-error circuit break: if 3 or more consecutive doc-audit errors occur during a run, the loop exits early with a `WARNING`. This caps error cascade for transient failures without requiring a full circuit breaker integration.
 
@@ -394,7 +393,7 @@ Each project entry in `~/Desktop/Valor/projects.json`:
 
 ### Per-Project Audit Iteration
 
-Five audit reflections (`tech-debt-scan`, `documentation-audit`, `skills-audit`, `hooks-audit`, `feature-docs-audit`) run once per project on the current machine, aggregating findings into a single run record with a per-project breakdown. The shared helper `reflections.utils.run_per_project_audit(audit_one, *, skip_if=None, name)` handles the iteration:
+Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run once per project on the current machine, aggregating findings into a single run record with a per-project breakdown. (Documentation/feature-doc audits were consolidated into the `docs-auditor` substrate — see [Docs Auditor](docs-auditor.md).) The shared helper `reflections.utils.run_per_project_audit(audit_one, *, skip_if=None, name)` handles the iteration:
 
 1. Loads `load_local_projects()` (filtered to repos present on disk)
 2. For each project, evaluates `skip_if(repo_root)` first; silently skipped projects are recorded with `status="skipped"` and excluded from `findings`
@@ -407,26 +406,18 @@ Five audit reflections (`tech-debt-scan`, `documentation-audit`, `skills-audit`,
 | Audit | Skipped when |
 |-------|--------------|
 | `tech-debt-scan` | Never — always runs |
-| `documentation-audit` | `docs/` directory absent |
 | `skills-audit` | `.claude/skills/do-skills-audit/scripts/audit_skills.py` absent |
 | `hooks-audit` | Both `logs/hooks.log` and `.claude/settings.json` absent |
-| `feature-docs-audit` | `docs/features/` directory absent |
 
 **Timeout budgets** (per-project iteration linearly scales wall-clock; YAML overrides in `~/Desktop/Valor/reflections.yaml` sized for an N=20-project worst case):
 
 | Reflection | YAML `timeout:` |
 |------------|-----------------|
 | `tech-debt-scan` | 2700s (45 min) |
-| `documentation-audit` | 6300s (105 min) |
 | `skills-audit` | 600s (10 min) |
 | `hooks-audit` | 600s (10 min) |
-| `feature-docs-audit` | 900s (15 min) |
 
-**Cost controls (`documentation-audit`):** per-project `max_api_calls=50` cap on Anthropic spend, plus an aggregate global ceiling `DOCS_AUDIT_MAX_TOTAL_API_CALLS=500` per scheduled run. Once exhausted, remaining projects are recorded with `status="disabled"` and the loop exits cleanly. Steady-state spend at default daily cadence ≈ 500 calls/day = single-digit dollars/month at sonnet pricing, sub-dollar at haiku.
-
-**`DocsAuditor` repo-scoped state:** the 7-day frequency gate uses Redis key `docs_auditor:last_audit_date:{repo_name}` so the first project's write does not suppress every other project for a week. The old global `docs_auditor:last_audit_date` key is orphaned and let to expire naturally.
-
-**Async dispatch:** `run_per_project_audit` is sync. `run_documentation_audit` keeps an `async def` outer wrapper to preserve the scheduler's event loop, calling `await asyncio.to_thread(run_per_project_audit, _docs_audit_for_project, ...)`. The other four audits are sync end-to-end.
+**Async dispatch:** `run_per_project_audit` is sync; the audits above are sync end-to-end.
 
 ### Dashboard
 
@@ -494,10 +485,6 @@ Flags memories with quality issues for human review:
 - Zero-access memories older than 30 days
 - Memories with confidence consistently below 0.2
 
-### `knowledge-reindex`
-
-Re-indexes `~/src/work-vault/` documents into `KnowledgeDocument` Redis records. Gracefully stubs if `tools.knowledge.indexer` is unavailable or the vault directory doesn't exist.
-
 ### `embedding-orphan-sweep`
 
 Reconciles the on-disk Memory embedding store (`~/.popoto/content/.embeddings/Memory/`) against live Memory records (issue #1214). Calls Popoto's `EmbeddingField.garbage_collect(Memory)` to remove `.npy` files whose SHA-256-hashed names are no longer in `$Class:Memory`, plus `EmbeddingField.sweep_stale_tempfiles(Memory)` to remove leaked `tmp*.npy` atomic-write tempfiles older than 1 hour.
@@ -562,7 +549,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | Redis (Popoto ORM) | All reflections | Yes — state persistence |
 | PyYAML | Registry loader | Yes — reads `config/reflections.yaml` |
 | psutil | Memory instrumentation | Optional — memory snapshots degrade gracefully if missing |
-| `ANTHROPIC_API_KEY` | `documentation-audit`, `session-intelligence` | Conditional — LLM reflection and docs audit |
+| `ANTHROPIC_API_KEY` | `docs-auditor`, `session-intelligence` | Conditional — LLM reflection and docs auditor substrate |
 | `gh` CLI (authenticated) | `task-backlog-check`, `session-intelligence`, `daily-report-and-notify`, `merged-branch-cleanup`, `pr-review-audit` | Conditional |
 | `telethon` | `daily-report-and-notify` | Conditional — Telegram notifications |
 | `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
@@ -582,7 +569,7 @@ The reflection scheduler starts automatically as part of the standalone worker p
 
 ## See Also
 
-- [Documentation Audit](documentation-audit.md) — `documentation-audit` unit deep dive
+- [Docs Auditor](docs-auditor.md) — unified `docs-auditor` substrate (replaces the prior `documentation-audit`, `feature-docs-audit`, and `knowledge-reindex` reflections)
 - [Hooks Best Practices & Audit](hooks-best-practices.md) — `hooks-audit` unit deep dive
 - [Skills Audit](do-skills-audit.md) — `skills-audit` unit deep dive
 - [Subconscious Memory](subconscious-memory.md#memory-consolidation) — `memory-dedup` consolidation

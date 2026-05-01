@@ -4,7 +4,6 @@ reflections/memory_management.py — Memory management reflection callables.
 Reflection callables:
   - run_memory_decay_prune       — Delete below-threshold memories (dry_run default)
   - run_memory_quality_audit     — Flag zero-access + dismissed memories
-  - run_knowledge_reindex        — Re-index work-vault docs into KnowledgeDocument
   - run_embedding_orphan_sweep   — Reconcile on-disk Memory embeddings against
                                    the live Redis class set; sweep stale
                                    atomic-write tempfiles. Requires Popoto
@@ -20,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import time as _time
-from pathlib import Path
 
 logger = logging.getLogger("reflections.memory_management")
 
@@ -228,58 +226,6 @@ async def run_memory_quality_audit() -> dict:
     )
     logger.info(summary)
     return {"status": "ok", "findings": findings, "summary": summary}
-
-
-async def run_knowledge_reindex() -> dict:
-    """Re-index work-vault docs into KnowledgeDocument records.
-
-    Idempotent: existing records with matching hash are skipped.
-
-    If KnowledgeDocument is not available (issue #728 not yet merged),
-    returns a stub result with status "skipped".
-
-    If ~/src/work-vault/ does not exist (e.g., CI), returns gracefully.
-    """
-    # Check for work-vault directory
-    vault_path = Path.home() / "src" / "work-vault"
-    if not vault_path.exists():
-        logger.info("knowledge-reindex: ~/src/work-vault/ not found, skipping")
-        return {
-            "status": "ok",
-            "findings": [],
-            "summary": "knowledge-reindex skipped: ~/src/work-vault/ not found",
-        }
-
-    # Probe for KnowledgeDocument availability
-    try:
-        import tools.knowledge.indexer as _indexer  # noqa: F401
-    except (ImportError, ModuleNotFoundError):
-        logger.info("knowledge-reindex: tools.knowledge.indexer not available (issue #728 pending)")
-        return {
-            "status": "ok",
-            "findings": [],
-            "summary": "knowledge-reindex skipped: KnowledgeDocument not available (see #728)",
-        }
-
-    try:
-        from tools.knowledge.indexer import reindex_vault
-
-        result = reindex_vault(str(vault_path))
-        indexed = result.get("indexed", 0)
-        skipped = result.get("skipped", 0)
-        errors = result.get("errors", [])
-
-        findings = [f"Indexed {indexed} docs, skipped {skipped} unchanged"]
-        for error in errors[:5]:
-            findings.append(f"Error: {error}")
-
-        summary = f"knowledge-reindex: {indexed} indexed, {skipped} skipped, {len(errors)} errors"
-        logger.info(summary)
-        return {"status": "ok", "findings": findings, "summary": summary}
-
-    except Exception as e:
-        logger.warning(f"knowledge-reindex failed: {e}")
-        return {"status": "error", "findings": [], "summary": f"knowledge-reindex error: {e}"}
 
 
 # Mtime guard threshold for the orphan sweep — see plan Race Conditions section.

@@ -5,8 +5,12 @@ Covers the plan's "B3 fix" — the harness execution path must extract
 `accumulate_session_tokens` so harness-served sessions (production PM /
 Dev / Teammate) no longer report zero tokens.
 
+Updated for issue #1245: the return tuple was widened from 6 to 8
+elements to add `num_turns` and `tool_call_count`.
+
 What we validate:
-- `_run_harness_subprocess` returns a 5-tuple including usage + cost.
+- `_run_harness_subprocess` returns an 8-tuple including usage + cost
+  + num_turns + tool_call_count.
 - The `result` event's `usage` dict and `total_cost_usd` float are
   threaded through unchanged.
 - Missing / malformed usage payloads default to None — the helper handles
@@ -66,7 +70,7 @@ def _result_event(
 
 
 class TestRunHarnessSubprocessReturnTuple:
-    """Validate the 5-tuple return shape introduced by issue #1128."""
+    """Validate the 8-tuple return shape (issue #1128 + #1099 + #1245)."""
 
     @pytest.mark.asyncio
     async def test_extracts_usage_and_cost(self):
@@ -94,9 +98,18 @@ class TestRunHarnessSubprocessReturnTuple:
             )
 
         assert isinstance(result, tuple)
-        # Issue #1099 Mode 1 — return tuple widened to 6 elements (adds stderr_snippet).
-        assert len(result) == 6
-        result_text, session_id, returncode, out_usage, out_cost, stderr_snippet = result
+        # Issue #1245 — return tuple widened to 8 (adds num_turns + tool_call_count).
+        assert len(result) == 8
+        (
+            result_text,
+            session_id,
+            returncode,
+            out_usage,
+            out_cost,
+            stderr_snippet,
+            num_turns,
+            tool_call_count,
+        ) = result
         assert result_text == "ok"
         assert session_id == "sess_abc"
         assert returncode == 0
@@ -104,6 +117,10 @@ class TestRunHarnessSubprocessReturnTuple:
         assert out_cost == pytest.approx(0.99)
         # Healthy run (returncode == 0) → stderr_snippet is None.
         assert stderr_snippet is None
+        # No num_turns in the result event (helper logs warn-once) → 0.
+        assert num_turns == 0
+        # No assistant events in this fixture → 0.
+        assert tool_call_count == 0
 
     @pytest.mark.asyncio
     async def test_missing_usage_returns_none(self):
@@ -119,8 +136,17 @@ class TestRunHarnessSubprocessReturnTuple:
             mock_proc.returncode = 0
             mock_exec.return_value = mock_proc
 
-            # Issue #1099 Mode 1 — 6-tuple return (adds trailing stderr_snippet).
-            _, _, _, usage_out, cost_out, _ = await _run_harness_subprocess(
+            # Issue #1245 — 8-tuple return.
+            (
+                _,
+                _,
+                _,
+                usage_out,
+                cost_out,
+                _,
+                _,
+                _,
+            ) = await _run_harness_subprocess(
                 ["claude", "-p", "test"],
                 "/tmp",
                 {},
@@ -129,19 +155,22 @@ class TestRunHarnessSubprocessReturnTuple:
         assert cost_out is None
 
     @pytest.mark.asyncio
-    async def test_binary_not_found_returns_six_tuple(self):
-        """Issue #1099 Mode 1 — binary-not-found path still returns a 6-tuple."""
+    async def test_binary_not_found_returns_eight_tuple(self):
+        """Issue #1245 — binary-not-found path returns an 8-tuple."""
         from agent.sdk_client import _run_harness_subprocess
 
         with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("claude")):
             out = await _run_harness_subprocess(["claude"], "/tmp", {})
         assert isinstance(out, tuple)
-        assert len(out) == 6
-        # On binary-not-found: returncode, usage, cost, stderr_snippet all None.
+        assert len(out) == 8
+        # On binary-not-found: returncode, usage, cost, stderr_snippet all None;
+        # num_turns and tool_call_count are 0 (no subprocess ran).
         assert out[2] is None
         assert out[3] is None
         assert out[4] is None
         assert out[5] is None
+        assert out[6] == 0
+        assert out[7] == 0
 
 
 class TestGetResponseViaHarnessAccumulates:
