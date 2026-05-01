@@ -241,15 +241,15 @@ Deduplication tracker for PR review audit findings. Prevents re-filing GitHub is
 
 **Cleanup**: Records older than 90 days are pruned via `cleanup_expired()` during Redis TTL cleanup.
 
-### docs_auditor State
+### docs-auditor State
 
-`scripts/docs_auditor.py` tracks the last audit date in Redis via a plain key:
+The unified `docs-auditor` substrate (`reflections/docs_auditor.py`, issue #1247) tracks per-file rotation state in a Redis hash:
 
 ```python
-redis.Redis.from_url(settings.REDIS_URL).get("docs_auditor:last_audit_date")
+redis.Redis.from_url(settings.REDIS_URL).hgetall("docs_audit:last_run")
 ```
 
-This replaced the former `ReflectionRun` dependency (see issue #748 for the migration history).
+Each field is a doc path; each value is the unix timestamp of its most recent audit. The hash form replaces both the prior `docs_auditor:last_audit_date` plain-key and avoids a per-file Redis key explosion. See [`docs/features/docs-auditor.md`](./docs-auditor.md) for the substrate design.
 
 ### Docs Auditor Authentication
 
@@ -258,19 +258,19 @@ The docs auditor uses the **Anthropic Python SDK directly** (not the OAuth subpr
 | Component | Credential Used |
 |-----------|----------------|
 | AgentSessions (Claude Code via `claude -p`) | `CLAUDE_CODE_OAUTH_TOKEN` |
-| DocsAuditor (`scripts/docs_auditor.py`) | `ANTHROPIC_API_KEY` |
+| `docs-auditor` substrate (`reflections/docs_auditor.py`) | `ANTHROPIC_API_KEY` |
 
 **Behavior when `ANTHROPIC_API_KEY` is absent or invalid:**
 
-The auditor performs a startup auth probe (`_check_auth()`) before iterating any docs. If the key is missing, a sentinel string (`"None"`, `"null"`, `"false"`, `"0"`), or invalid (rejected by the Anthropic API), the auditor logs a single `WARNING` and returns immediately:
+The substrate performs a startup auth probe before iterating any docs. If the key is missing, a sentinel string (`"None"`, `"null"`, `"false"`, `"0"`), or invalid (rejected by the Anthropic API), it logs a single `WARNING` and returns immediately:
 
 ```
-WARNING  docs_auditor: Docs auditor skipping: ANTHROPIC_API_KEY not set
+WARNING  docs_auditor: skipping: ANTHROPIC_API_KEY not set
 ```
 
-No `ERROR` lines are emitted, no docs are processed, and the worker heartbeat is unaffected. The reflection wrapper (`run_documentation_audit()` in `reflections/auditing.py`) returns `{"status": "disabled", ...}` — distinct from `{"status": "ok", ...}` for a schedule-based skip — so dashboards and monitoring can distinguish a permanently-disabled auditor from a temporarily-skipped one.
+No `ERROR` lines are emitted, no docs are processed, and the worker heartbeat is unaffected. The substrate returns `{"status": "disabled", ...}` — distinct from `{"status": "ok", ...}` for a schedule-based skip — so dashboards and monitoring can distinguish a permanently-disabled auditor from a temporarily-skipped one.
 
-**To enable docs auditing**, add `ANTHROPIC_API_KEY` to the worker's environment (e.g., in `~/Desktop/Valor/.env` or the worker's launchd plist). The auditor will automatically begin running on its weekly schedule once the key is present and valid.
+**To enable docs auditing**, add `ANTHROPIC_API_KEY` to the worker's environment (e.g., in `~/Desktop/Valor/.env` or the worker's launchd plist). The auditor will automatically begin running on its daily rotation schedule once the key is present and valid.
 
 **Non-auth API failures** (rate limits, transient network errors) are handled by a consecutive-error circuit break: if 3 or more consecutive doc-audit errors occur during a run, the loop exits early with a `WARNING`. This caps error cascade for transient failures without requiring a full circuit breaker integration.
 

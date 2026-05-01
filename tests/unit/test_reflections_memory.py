@@ -3,7 +3,6 @@
 Tests cover:
 - run_memory_decay_prune: dry_run mode, cap enforcement, empty queryset
 - run_memory_quality_audit: empty queryset, low-confidence flagging
-- run_knowledge_reindex: missing vault dir, KnowledgeDocument unavailable
 """
 
 from __future__ import annotations
