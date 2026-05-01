@@ -22,11 +22,11 @@ Schema of each JSONL line:
         "cache_read_input_tokens": 0
     }
 
-The ``cache_read_input_tokens`` field is populated retroactively by
-``update_ttft_cache_tokens()`` when the ``result`` event's usage dict is
-available (after the full turn, not on first-stdout-byte).  A value of 0
-means "no cache hit"; a positive value confirms the server-side prompt cache
-was hit and is the most reliable indicator that Direction A is working.
+The ``cache_read_input_tokens`` field defaults to 0 ("no cache hit"); a
+positive value confirms the server-side prompt cache was hit and is the
+most reliable indicator that Direction A is working.  Populating it
+retroactively from the ``result`` event's usage dict is a follow-up
+enhancement; today the field is recorded as 0 at first-stdout-byte time.
 
 Usage::
 
@@ -85,9 +85,8 @@ def record_ttft(
             when the caller did not set an explicit model.
         cache_read_input_tokens: Tokens served from Anthropic's server-side
             prompt cache for this turn (from the ``result`` event's usage dict).
-            Defaults to 0; updated retroactively by ``update_ttft_cache_tokens``
-            when the full result is available.  A non-zero value confirms a cache
-            hit.
+            Defaults to 0; a non-zero value confirms a cache hit.  Retroactive
+            population from the ``result`` event is a follow-up enhancement.
     """
     try:
         entry = {
