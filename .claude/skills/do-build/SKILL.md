@@ -497,7 +497,7 @@ As the very last line of your final response, emit an OUTCOME contract so the pi
 - **Success** (PR created): `<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"<URL>"}} -->`
 - **Fail** (build failed, no PR): `<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{}} -->`
 
-This structured output is parsed by `classify_outcome()` in `bridge/pipeline_state.py` (Tier 0) before any text pattern matching.
+This structured output is parsed by `classify_outcome()` in `agent/pipeline_state.py` (Tier 0) before any text pattern matching.
 
 ## Agent Deployment Context
 

@@ -608,7 +608,7 @@ As the very last line of your final response, emit an OUTCOME contract so the pi
 - **Fail** (test failures found): `<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"passed":<N>,"failed":<N>}} -->`
 - **Partial** (tests passed but with flaky tests or warnings): `<!-- OUTCOME {"status":"partial","stage":"TEST","artifacts":{"passed":<N>,"failed":0,"flaky":<N>}} -->`
 
-This structured output is parsed by `classify_outcome()` in `bridge/pipeline_state.py` (Tier 0) before any text pattern matching.
+This structured output is parsed by `classify_outcome()` in `agent/pipeline_state.py` (Tier 0) before any text pattern matching.
 
 ## Notes
 

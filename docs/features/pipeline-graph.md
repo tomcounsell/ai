@@ -148,7 +148,7 @@ For PATCH failures that need deep context, PM resumes the original BUILD session
 
 | File | Role |
 |------|------|
-| `agent/pipeline_graph.py` | Canonical graph definition (moved from `bridge/` in Phase 3; `bridge/pipeline_graph.py` is now a shim) |
+| `agent/pipeline_graph.py` | Canonical graph definition (moved from `bridge/` in Phase 3; `agent/pipeline_graph.py` is now a shim) |
 | `agent/agent_session_queue.py` | `_handle_dev_session_completion()` calls `classify_outcome()` and routes to `complete_stage()`/`fail_stage()`; initializes `stage_states` for SDLC sessions |
-| `agent/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph (moved from `bridge/` in Phase 3; `bridge/pipeline_state.py` is now a shim) |
+| `agent/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph (moved from `bridge/` in Phase 3; `agent/pipeline_state.py` is now a shim) |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |

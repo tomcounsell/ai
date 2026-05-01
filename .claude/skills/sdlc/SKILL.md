@@ -219,8 +219,7 @@ Do NOT restart from scratch if prior stages are already complete.
 
 ## Pipeline Stages Reference
 
-The canonical pipeline graph is defined in `bridge/pipeline_graph.py`. All routing
-derives from that module. The table below is for human readability only.
+Pipeline state transitions are defined in `agent/pipeline_graph.py` (state-machine bookkeeping: which stage is next-ready when one completes). Dispatch logic is defined in `agent/sdlc_router.py` (`decide_next_dispatch`). Both are accessed at runtime via `sdlc-tool`. The table below is for human readability only.
 
 ```
 Happy path: ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE

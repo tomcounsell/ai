@@ -58,7 +58,7 @@ INFO [nudge] Decision: nudge (reason: stages remaining, no question detected)
 | `bridge/routing.py` | Classification result logging for all paths (fast-path slash commands, acknowledgments, issue refs, LLM classification) |
 | `bridge/telegram_bridge.py` | Session ID logging upgraded from DEBUG to INFO with `[routing]` prefix, semantic routing match/miss logging |
 | `bridge/enrichment.py` | Failed step tracking, single `[enrichment]` summary line at end with all step counts |
-| `bridge/pipeline_state.py` | State machine transition logging |
+| `agent/pipeline_state.py` | State machine transition logging |
 | `agent/sdk_client.py` | `[prompt-summary]` logging of message length, classification, workflow, task list, and context sections |
 
 ## Tracking

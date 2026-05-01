@@ -83,8 +83,8 @@ The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are w
 
 | Module | Change |
 |--------|--------|
-| `bridge/pipeline_graph.py` | CRITIQUE edges in PIPELINE_EDGES, STAGE_TO_SKILL, DISPLAY_STAGES |
-| `bridge/pipeline_state.py` | CRITIQUE in ALL_STAGES, classify_outcome patterns, critique_cycle_count |
+| `agent/pipeline_graph.py` | CRITIQUE edges in PIPELINE_EDGES, STAGE_TO_SKILL, DISPLAY_STAGES |
+| `agent/pipeline_state.py` | CRITIQUE in ALL_STAGES, classify_outcome patterns, critique_cycle_count |
 | `models/agent_session.py` | CRITIQUE in SDLC_STAGES |
 | `agent/build_pipeline.py` | "critique" in STAGES list |
 | `.claude/skills/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check |

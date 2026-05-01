@@ -186,9 +186,9 @@ Final delivery is driven by `_handle_dev_session_completion` detecting pipeline 
 
 | File | Purpose |
 |------|---------|
-| `agent/pipeline_state.py` | PipelineStateMachine class — stored-state-only stage tracking (canonical; `bridge/pipeline_state.py` is a shim) |
+| `agent/pipeline_state.py` | PipelineStateMachine class — stored-state-only stage tracking (canonical; `agent/pipeline_state.py` is a shim) |
 | `tools/sdlc_stage_marker.py` | CLI tool for skills to write in_progress/completed markers (supports `--issue-number` for local sessions) |
-| `agent/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) (canonical; `bridge/pipeline_graph.py` is a shim) |
+| `agent/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) (canonical; `agent/pipeline_graph.py` is a shim) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
 | `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router, supports `--issue-number`) |
 | `tools/sdlc_session_ensure.py` | CLI tool to create/find local SDLC sessions keyed by issue number |
